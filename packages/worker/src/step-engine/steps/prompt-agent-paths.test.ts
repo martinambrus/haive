@@ -1627,18 +1627,6 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // kind of thing is told not to, a coder is told what it may not CHANGE, and an author is
     // told what its words become. Handing a step the wrong one files a report in a schema
     // that describes something else — the failure REPO_IS_DATA_ONE_CLASS_LINES documents.
-    const textFor = async (prefix: string): Promise<string> => {
-      const built = (
-        await Promise.all(
-          promptSources()
-            .filter((source) => source.label.startsWith(prefix))
-            .map(async (source) => builtEntries(source, await source.build())),
-        )
-      ).flat();
-      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
-      return built.map((b) => b.prompt).join('\n\n');
-    };
-
     const REVIEWING = 'Report it as a finding, naming';
     const ONE_CLASS = 'your findings array holds one kind of thing';
     const ACTING = 'You EDIT files, so the stakes are higher here';
@@ -1656,22 +1644,43 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       expect(block.join('\n'), label).toContain('is your PERSONA');
     }
 
+    // EVERY prompt of the step, not their concatenation. A step has more than one — a loop
+    // iteration builds its own, and each fix pass is a fresh CLI process, so a guard on the
+    // first dispatch alone reaches none of them. Joining the texts hides exactly that.
+    const eachPrompt = async (prefix: string): Promise<{ key: string; prompt: string }[]> => {
+      const built = (
+        await Promise.all(
+          promptSources()
+            .filter((source) => source.label.startsWith(prefix))
+            .map(async (source) => builtEntries(source, await source.build())),
+        )
+      ).flat();
+      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
+      return built;
+    };
+
     for (const [prefix, expected, forbidden] of [
       ['04a-spec-audit', ONE_CLASS, REVIEWING],
-      ['05-phase-0b5-spec-quality', ONE_CLASS, REVIEWING],
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
     ] as const) {
-      const text = await textFor(prefix);
-      expect(text, prefix).toContain(expected);
-      expect(text, prefix).not.toContain(forbidden);
+      for (const { key, prompt } of await eachPrompt(prefix)) {
+        expect(prompt, key).toContain(expected);
+        expect(prompt, key).not.toContain(forbidden);
+      }
     }
 
-    // 07b is the one step carrying TWO variants: its validator reports findings, its fixer
-    // edits files and hands `notes` to later agents.
-    const validate = await textFor('07b-phase-4-validate');
-    expect(validate).toContain(REVIEWING);
-    expect(validate).toContain(ACTING);
+    // Two steps carry TWO variants each, and which one applies depends on the ROLE — the
+    // whole reason the choice is per PROMPT and not per step. 07b's validator reports
+    // findings while its fixer edits files; 05's reviewer scores the spec while its
+    // corrector REWRITES it, and a rewritten spec is 07's assignment.
+    for (const { key, prompt } of await eachPrompt('07b-phase-4-validate')) {
+      expect(prompt, key).toContain(key.includes('fixer') ? ACTING : REVIEWING);
+    }
+    for (const { key, prompt } of await eachPrompt('05-phase-0b5-spec-quality')) {
+      expect(prompt, key).toContain(key.includes('corrector') ? AUTHORING : ONE_CLASS);
+      expect(prompt, key).not.toContain(ACTING);
+    }
   });
 
   it('RENDERS the data-driven bodies the empty proxy skipped', async () => {
