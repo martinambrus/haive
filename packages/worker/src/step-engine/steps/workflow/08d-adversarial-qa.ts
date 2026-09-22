@@ -21,7 +21,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_LINES, fencedDebtBlock } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
@@ -862,7 +862,7 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     ...(d.appUrl
       ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
       : []),
-    d.debtBlock ? `\n${d.debtBlock}` : '',
+    d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
     'Do NOT edit code and do NOT run git.',
     ...SEARCH_LADDER,
     '',

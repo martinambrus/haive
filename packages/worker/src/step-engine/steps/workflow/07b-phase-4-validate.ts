@@ -11,6 +11,7 @@ import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { SCOPE_FENCE_DOC_REPORT_ONLY, SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
 import { INVARIANT_CITATION } from '../_invariant-citation.js';
+import { fencedDebtBlock } from '../_untrusted-repo.js';
 import {
   assertReviewableChange,
   changedFilesBlock,
@@ -703,7 +704,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           'Changed files (your validation scope)',
           NO_CHANGE_SET_FALLBACK,
         ),
-        d.debtBlock ? `\n${d.debtBlock}` : '',
+        d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',
         'Do NOT run git (it is unavailable in this environment — the orchestrator commits later)',
@@ -808,7 +809,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'The line notes above were recorded BEFORE the fix agent edited these files, so treat',
         'them as approximate now: they still show which part of each file this change is, but',
         'take exact line numbers from the file in front of you, not from the list.',
-        d.debtBlock ? `\n${d.debtBlock}` : '',
+        d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',
         'Re-validate from scratch — verify the fixes hold AND nothing else broke.',
