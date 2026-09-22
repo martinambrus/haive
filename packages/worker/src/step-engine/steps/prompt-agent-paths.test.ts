@@ -9,7 +9,7 @@ import {
   stripAgentGuidanceBlocks,
 } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
-import { buildRefutePrompt } from './workflow/08c-code-review.js';
+import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt } from './plan/01-plan-build.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
@@ -229,12 +229,53 @@ function builtEntries(source: PromptSource, built: string | BuiltPrompt[]): Buil
  * 08c's refuter is the one Codex named: read-only (`requiredCapabilities: ['tool_use']`), so the path
  * scan decides its isolation, and it was previously invisible here.
  */
+/** One concrete DAG issue and a real spec. All four dag builders gate their file-list, acceptance-
+ *  criteria and spec-section blocks on `length > 0`, and every one of those is 0 through a proxy — so
+ *  the change set a reviewer is told to read, the criteria it verifies against and the spec sections an
+ *  issue implements were all dark. `specLines` is shared by all four, so one fixture lights it
+ *  everywhere. */
+const DAG_ISSUE = {
+  issueKey: 'ISSUE-7',
+  title: 'Reject unauthenticated callers on the admin route',
+  filesModified: ['src/app/admin.ts', 'src/lib/auth.ts'],
+  acceptanceCriteria: ['An anonymous request to /admin answers 401.'],
+  specSections: ['## Admin route'],
+  dependsOn: ['ISSUE-3'],
+  innerIteration: 2,
+  reviewerVerdict: 'fix_required',
+  provides: 'An authenticated admin route.',
+  lastAdvisorAction: 'Re-scoped the issue to the middleware.',
+  errorMessage: 'The fix coder could not reach the route.',
+  concerns: '',
+};
+const DAG_SPEC = '## Admin route\nThe admin route must reject unauthenticated callers.';
+
 const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   {
     label: '08c-code-review buildRefutePrompt (wave 2)',
     exportKey: 'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
     build: () => buildRefutePrompt(permissive(), permissive(), permissive()),
   },
+  // The refuter's lens text, dark for the same reason 08d's verifier lenses were: `lens` is truthy
+  // through a proxy but `...lens.lines` spreads to nothing. A concrete finding also renders the
+  // `proposed fix` line.
+  ...[...REFUTE_LENSES, null].map((lens) => ({
+    label: `08c-code-review buildRefutePrompt (lens ${lens?.id ?? 'generic'})`,
+    exportKey: 'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
+    build: () =>
+      buildRefutePrompt(
+        permissive({ spec: DAG_SPEC }),
+        permissive({
+          reviewerId: 'peer-reviewer',
+          severity: 'high',
+          path: 'src/app/admin.ts',
+          lines: '42-48',
+          issue: 'The admin route accepts an anonymous caller.',
+          fix: 'Require the session middleware on the route.',
+        }),
+        lens,
+      ),
+  })),
   {
     label: '01-plan-build buildExpandPrompt (wave N)',
     exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
@@ -245,32 +286,68 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     exportKey: 'step-engine/steps/workflow/_agent-selector.ts#buildAgentSelectorPrompt',
     build: () => buildAgentSelectorPrompt(permissive()),
   },
-  {
-    label: '01-enrich buildEnrichPrompt',
+  // `hasRepo` is truthy through a proxy, so the NO-repository arm never rendered; and
+  // `detected.existing.length` is 0, so the existing-article block took `(none yet)` and the per-entry
+  // map never ran. Both arms, with one real entry.
+  ...(
+    [
+      { label: 'repo checked out', hasRepo: true },
+      { label: 'no repo', hasRepo: false },
+    ] as const
+  ).map((arm) => ({
+    label: `01-enrich buildEnrichPrompt (${arm.label})`,
     exportKey: 'step-engine/steps/kb-author/01-enrich.ts#buildEnrichPrompt',
-    build: () => buildEnrichPrompt(permissive()),
-  },
+    build: () =>
+      buildEnrichPrompt(
+        permissive({
+          hasRepo: arm.hasRepo,
+          title: 'Escape every interpolated label',
+          existing: [
+            {
+              id: 'kb-101',
+              title: 'Escaping rules',
+              category: 'standards',
+              excerpt: 'Interpolated   values   are escaped before rendering.',
+              facets: { framework: ['drupal'], frameworkMajor: ['11'] },
+            },
+          ],
+          authorFacets: { framework: ['drupal'], language: ['php'] },
+        }),
+      ),
+  })),
   // dag-executor dispatches these DIRECTLY through `resolveTaskDispatch` with `kind: 'prompt'` and
   // `tool_use` only — no registry step owns them, so nothing above would ever reach them.
   {
     label: 'dag reviewerPrompt',
     exportKey: 'step-engine/dag-executor.ts#reviewerPrompt',
-    build: () => reviewerPrompt(permissive(), permissive()),
+    build: () => reviewerPrompt(permissive(DAG_ISSUE), DAG_SPEC),
   },
   {
     label: 'dag advisorPrompt',
     exportKey: 'step-engine/dag-executor.ts#advisorPrompt',
-    build: () => advisorPrompt(permissive(), permissive()),
+    build: () => advisorPrompt(permissive(DAG_ISSUE), DAG_SPEC),
   },
   {
     label: 'dag replannerPrompt',
     exportKey: 'step-engine/dag-executor.ts#replannerPrompt',
-    build: () => replannerPrompt(permissive(), permissive(), permissive()),
+    // `all.length === 0` is TRUE through a proxy (its length is 0), so the whole dependency-map block
+    // took the empty arm. Two issues, one of them the failed one, render it.
+    build: () =>
+      replannerPrompt(
+        permissive({ levels: [['ISSUE-3'], ['ISSUE-7']] }),
+        [permissive(DAG_ISSUE)],
+        [permissive(DAG_ISSUE), permissive({ ...DAG_ISSUE, issueKey: 'ISSUE-3', dependsOn: [] })],
+      ),
   },
   {
     label: 'dag fixCoderPrompt',
     exportKey: 'step-engine/dag-executor.ts#fixCoderPrompt',
-    build: () => fixCoderPrompt(permissive(), permissive(), permissive()),
+    build: () =>
+      fixCoderPrompt(
+        permissive(DAG_ISSUE),
+        [{ severity: 'high', file: 'src/app/admin.ts', description: 'No auth check.' }],
+        DAG_SPEC,
+      ),
   },
   // merge-resolver's conflict-resolution prompt.
   {
@@ -456,11 +533,30 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     exportKey: 'step-engine/step-runner.ts#buildStepSummaryPrompt',
     build: () => buildStepSummaryPrompt(permissive(), permissive(), permissive()),
   },
-  {
-    label: 'buildAgentMiningSummaryPrompt',
+  // CONCRETE agent lists. Through a proxy `agents.slice()` returns [] and `agents.length` is 0, so
+  // `omitted` is 0 and NEITHER region rendered: no per-agent block, and the under-limit instruction
+  // instead of the over-limit one. Production never builds this prompt with no agents at all
+  // (`maybeEnqueueStepSummary` returns first), so the scanned shape was unreachable.
+  //
+  // Both sides of SUMMARY_AGENT_LIMIT (12), since the two arms carry different instructions.
+  ...(
+    [
+      { label: 'under the limit', count: 3 },
+      { label: 'over the limit', count: 15 },
+    ] as const
+  ).map((size) => ({
+    label: `buildAgentMiningSummaryPrompt (${size.label})`,
     exportKey: 'step-engine/step-runner.ts#buildAgentMiningSummaryPrompt',
-    build: () => buildAgentMiningSummaryPrompt(permissive(), permissive(), permissive()),
-  },
+    build: () =>
+      buildAgentMiningSummaryPrompt(
+        'Phase 7: Adversarial QA',
+        { verdict: 'NEEDS_FIXES' },
+        Array.from({ length: size.count }, (_unused, i) => ({
+          title: `Agent ${i + 1}`,
+          text: `Agent ${i + 1} reported one finding against the admin route.`,
+        })),
+      ),
+  })),
   // Constant blocks the DISPATCHER injects, named by the repository's `*_PROMPT` convention rather
   // than a `build*` function. A bare agent path in one of these would reach every prompt that carries
   // it, after the isolation decision was already taken.
@@ -798,12 +894,13 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const { clean, named, unbuildable } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    // MEASURED 2026-09-22: 102 clean + 4 named = 106 built, 12 unreachable. The floor sat at 40 while
-    // the loop path contributed one source per STEP, the verifier one source per proxy and the adversary
-    // one synthetic persona; per role, per lens and per persona they contribute 12, 8 and 6. A floor
-    // under half the real number is a ratchet that never catches anything, so it is re-measured
-    // whenever sources are added.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(106);
+    // MEASURED 2026-09-22: 108 clean + 4 named = 112 built, 12 unreachable. The floor sat at 40 when
+    // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
+    // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
+    // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
+    // half the real number is a ratchet that never catches anything, so it is re-measured whenever
+    // sources are added.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(112);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
     // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
@@ -868,6 +965,51 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(all).toContain('- src/app/handler.ts — lines 12-18, 45');
     expect(all).toContain('LINES: the note after a file is the part of it THIS change wrote');
     expect(all).toContain('COVERAGE: the list above is 2 of 3 changed files.');
+  });
+
+  it('RENDERS every region the permissive proxy left dark', async () => {
+    // One case per swept builder would be four near-identical cases; what matters is that each region
+    // is named, so a fixture that silently stops reaching one fails here. Every string below was
+    // measured absent before its fixture was made concrete.
+    const textFor = async (prefix: string): Promise<string> => {
+      const built = (
+        await Promise.all(
+          promptSources()
+            .filter((source) => source.label.startsWith(prefix))
+            .map(async (source) => builtEntries(source, await source.build())),
+        )
+      ).flat();
+      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
+      return built.map((b) => b.prompt).join('\n\n');
+    };
+
+    // The mining recap: per-agent blocks, and BOTH instruction arms either side of the 12-agent limit.
+    const mining = await textFor('buildAgentMiningSummaryPrompt');
+    expect(mining).toContain('### Agent 1');
+    expect(mining).toContain('"Agent Name — what it found or concluded"');
+    expect(mining).toContain('… and 3 more agents, not shown.');
+    expect(mining).toContain('Those are 12 of 15 agents.');
+
+    // The refuter's lens text and its proposed-fix line.
+    const refute = await textFor('08c-code-review buildRefutePrompt');
+    for (const lens of REFUTE_LENSES) {
+      expect(refute, `refute lens ${lens.id} never rendered`).toContain(lens.lines[0]);
+    }
+    expect(refute).toContain('proposed fix: Require the session middleware on the route.');
+
+    // The dag builders' change set, criteria and spec sections — all gated on `length > 0`.
+    const reviewer = await textFor('dag reviewerPrompt');
+    expect(reviewer).toContain('- src/app/admin.ts');
+    expect(reviewer).toContain('An anonymous request to /admin answers 401.');
+    expect(reviewer).toContain('Spec sections this issue implements:');
+    // The replanner's dependency map, which took the empty arm because a proxy's length IS 0.
+    expect(await textFor('dag replannerPrompt')).toContain('is required by:');
+
+    // Both of the enrich builder's repository arms, and its per-entry existing-article block.
+    const enrich = await textFor('01-enrich buildEnrichPrompt');
+    expect(enrich).toContain('A repository is checked out at the working directory.');
+    expect(enrich).toContain('NO repository is checked out');
+    expect(enrich).toContain('- id: kb-101');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {

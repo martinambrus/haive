@@ -354,7 +354,10 @@ const MAX_REFUTERS = 10;
  *  our default runs the other way: the plugin's verifiers default to FALSE_POSITIVE and a
  *  wrong dismissal there costs a reader's attention, while here gate 2 defaults to approve
  *  when nothing blocks, so a wrongly-dismissed critical is one click from shipping. */
-const REFUTE_LENSES = [
+/** The refuter panel's lenses. Exported for the prompt-path tripwire, which must scan each lens's REAL
+ *  text: a lens-shaped literal built in the test would duplicate these lines and leave production's own
+ *  unscanned. Same reason as 08d's `VERIFY_LENSES`. */
+export const REFUTE_LENSES = [
   {
     id: 'reach',
     title: 'reachability',
