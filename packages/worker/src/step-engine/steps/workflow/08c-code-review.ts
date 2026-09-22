@@ -530,7 +530,10 @@ export function isRefuted(raw: unknown): boolean {
   return hasFileLineEvidence(parsed.evidence);
 }
 
-function buildRefutePrompt(
+/** Exported for `prompt-agent-paths.test.ts`: this prompt is dispatched as a SECOND mining wave
+ *  (`MiningWaveError`), so the isolation rule scans it exactly like a first-wave one, and a wave
+ *  prompt is otherwise unreachable from a unit test without running `apply()`. */
+export function buildRefutePrompt(
   d: CodeReviewDetect,
   f: RefutableFinding,
   lens: RefuteLens | null,

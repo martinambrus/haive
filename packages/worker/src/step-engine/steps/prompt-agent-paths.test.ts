@@ -4,6 +4,10 @@ import { StepRegistry } from '../registry.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import { stripAgentGuidanceBlocks } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
+import { buildRefutePrompt } from './workflow/08c-code-review.js';
+import { buildExpandPrompt } from './plan/01-plan-build.js';
+import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
+import { buildEnrichPrompt } from './kb-author/01-enrich.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -14,8 +18,9 @@ import { registerAllSteps } from './index.js';
  * rendered block is stripped before the scan, and code that WRITES those files
  * (`_agent-templates.ts`, `_scope.ts`). None of those end isolation; a bare path in prompt text does.
  *
- * THREE dispatch paths reach the isolation rule, and an earlier version of this file scanned only the
- * first:
+ * FOUR dispatch paths reach the isolation rule, and an earlier version of this file scanned only the
+ * first (the fourth is documented at NAMED_PROMPT_BUILDERS below, with the part of it that stays out
+ * of reach):
  *
  *   1. `llm.buildPrompt(args)`
  *   2. `loop.buildIterationPrompt(args)` — `step-runner.ts:707` routes to it whenever
@@ -99,9 +104,39 @@ interface PromptSource {
   build: () => string | Promise<string[]>;
 }
 
-/** Every prompt production can dispatch, across all three paths. */
+/**
+ * A FOURTH path: prompts thrown as a later mining wave (`MiningWaveError.dispatches`), which
+ * `step-runner` re-dispatches through `resolveTaskDispatch` exactly like a first wave.
+ *
+ * Eight wave sites exist across five steps (08c, 08d, 01-plan-build, 02-plan-coverage,
+ * 03-plan-sequence). Only the ones with a NAMED builder are reachable from a unit test: the other six
+ * assemble their dispatch arrays inline inside `apply()`, so covering them would mean either
+ * extracting that logic in five production modules or executing `apply()` bodies in CI — which for
+ * steps that write files is a side effect a test should not have. That gap is stated in the coverage
+ * case below rather than papered over.
+ *
+ * 08c's refuter is the one Codex named: read-only (`requiredCapabilities: ['tool_use']`), so the path
+ * scan decides its isolation, and it was previously invisible here.
+ */
+const NAMED_PROMPT_BUILDERS: PromptSource[] = [
+  {
+    label: '08c-code-review buildRefutePrompt (wave 2)',
+    build: () => buildRefutePrompt(permissive(), permissive(), permissive()),
+  },
+  {
+    label: '01-plan-build buildExpandPrompt (wave N)',
+    build: () => buildExpandPrompt(permissive(), permissive(), permissive(), permissive()),
+  },
+  {
+    label: '_agent-selector buildAgentSelectorPrompt',
+    build: () => buildAgentSelectorPrompt(permissive()),
+  },
+  { label: '01-enrich buildEnrichPrompt', build: () => buildEnrichPrompt(permissive()) },
+];
+
+/** Every prompt production can dispatch, across all three registry paths plus the named builders. */
 function promptSources(): PromptSource[] {
-  const out: PromptSource[] = [];
+  const out: PromptSource[] = [...NAMED_PROMPT_BUILDERS];
   for (const def of bootRegistry().all()) {
     const id = def.metadata.id;
     const llm = def.llm;
@@ -252,5 +287,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
     expect(unbuildable.length).toBeLessThanOrEqual(12);
+    // KNOWN RESIDUAL GAP, stated so nobody reads this file as exhaustive: six of the eight
+    // `MiningWaveError` sites (08d x2, 02-plan-coverage x3, 03-plan-sequence) assemble their dispatch
+    // arrays INLINE inside `apply()`, with no named builder to call. Reaching them needs either that
+    // logic extracted in five production modules, or `apply()` executed here — and several applies
+    // write files, which is a side effect a unit test must not have. The two wave prompts that DO have
+    // named builders (08c's refuter, plan-build's expand) are scanned above.
+    expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
   });
 });
