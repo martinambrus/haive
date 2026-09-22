@@ -10,6 +10,7 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { SCOPE_FENCE_DOC_REPORT_ONLY, SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
+import { INVARIANT_CITATION } from '../_invariant-citation.js';
 import {
   assertReviewableChange,
   changedFilesBlock,
@@ -372,6 +373,11 @@ function codeValidatorDefinition(dimensions: readonly ReviewDimension[]): readon
     'missing functionality.',
     '',
     ...SCOPE_FENCE_REPORT_ONLY,
+    '',
+    // Code protocol only. The documentation validator keeps its prompt byte-for-byte, since
+    // the measurement behind this block is about reviewing a code change against a stated
+    // contract and says nothing about editing prose.
+    INVARIANT_CITATION,
     '',
     'You may fix what your protocol REQUIRES you to fix (stale callers in Step 4, dead-code removal',
     'in Step 5) by editing files directly. All OTHER issues you find are reported, not fixed - a',
