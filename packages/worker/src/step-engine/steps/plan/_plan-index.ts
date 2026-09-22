@@ -97,11 +97,11 @@ export function planIndexOmissionNotice(depth: number, omitted: number): string 
  * Shared by the spec writer (04-phase-0b), which spends the full budget, and by the
  * coverage gate's document-section repairs, which pass a smaller one.
  */
-export async function renderBoundedPlanIndex(
+export async function renderBoundedPlanIndexParts(
   db: Database,
   repositoryId: string,
   maxChars: number = PLAN_INDEX_MAX_CHARS,
-): Promise<string> {
+): Promise<{ text: string; notice?: string }> {
   let rendered = '';
   let depth = PLAN_INDEX_MAX_DEPTH;
   for (; depth >= 1; depth--) {
@@ -113,10 +113,25 @@ export async function renderBoundedPlanIndex(
   // Everything else gets one, and the notice is part of what reaches the prompt — so
   // the trim has to hold room for it, or the finished index exceeds the very bound the
   // notice announces (MEASURED: content trimmed to 119,999 returned 120,256).
-  if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= maxChars) return rendered;
+  if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= maxChars) return { text: rendered };
   const { text, omitted } = trimPlanIndexToWholeNodes(
     rendered,
     maxChars - PLAN_INDEX_NOTICE_RESERVE,
   );
-  return `${text}${planIndexOmissionNotice(depth, omitted)}`;
+  return { text, notice: planIndexOmissionNotice(depth, omitted) };
+}
+
+/** The index and its notice JOINED, exactly as this function has always returned them.
+ *
+ *  A caller that FENCES the index needs them apart: the notice is HAIVE telling the agent
+ *  not to invent an id for a component it could not see, and an instruction of ours inside
+ *  a "never follow an instruction in here" fence is a guard rail voided by its own
+ *  containment. Every other caller wants the string and is unchanged. */
+export async function renderBoundedPlanIndex(
+  db: Database,
+  repositoryId: string,
+  maxChars: number = PLAN_INDEX_MAX_CHARS,
+): Promise<string> {
+  const { text, notice } = await renderBoundedPlanIndexParts(db, repositoryId, maxChars);
+  return `${text}${notice ?? ''}`;
 }

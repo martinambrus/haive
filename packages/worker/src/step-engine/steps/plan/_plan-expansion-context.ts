@@ -1,4 +1,5 @@
 import { indexChildren, planNodeDepth, type PlanNodeSkeleton } from '@haive/shared/plan';
+import { collapseToLine } from '../_untrusted-repo.js';
 
 /**
  * Provider-neutral character budget for the plan context in one decomposition
@@ -15,7 +16,7 @@ export const PLAN_EXPANSION_CONTEXT_MAX_CHARS = 96_000;
 const TITLE_MAX_CHARS = 180;
 
 function compactTitle(title: string): string {
-  const oneLine = title.replace(/\s+/g, ' ').trim();
+  const oneLine = collapseToLine(title);
   return oneLine.length <= TITLE_MAX_CHARS ? oneLine : `${oneLine.slice(0, TITLE_MAX_CHARS - 1)}…`;
 }
 

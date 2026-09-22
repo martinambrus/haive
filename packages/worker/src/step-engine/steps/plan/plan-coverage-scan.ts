@@ -6,6 +6,8 @@
  * separate automatic pass with an explicit persisted stopping state.
  */
 
+import { collapseToLine } from '../_untrusted-repo.js';
+
 /** A heading in the source document, with the text beneath it. */
 export interface DocSection {
   /** `## 4.4 SRS and mastery contract` -> `4.4 SRS and mastery contract`. */
@@ -251,7 +253,9 @@ export function findStructuralGaps(
   const latestAttempts = latestExpansionAttempts(agents);
   const out: StructuralGap[] = [];
   const detailOf = (message: string | null, prefix: string): { detail?: string } => {
-    const detail = message?.startsWith(prefix) ? message.slice(prefix.length).trim() : '';
+    // Collapsed to one line, not merely trimmed: the stamp quotes agent-supplied refs
+    // and zod messages, and the repair prompt names it on a line of its own.
+    const detail = message?.startsWith(prefix) ? collapseToLine(message.slice(prefix.length)) : '';
     return detail ? { detail } : {};
   };
 

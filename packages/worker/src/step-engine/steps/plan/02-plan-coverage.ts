@@ -38,6 +38,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { renderBoundedPlanIndex } from './_plan-index.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
+import { safeTitle } from '../_untrusted-repo.js';
 
 /**
  * What the build did not cover, repaired to a semantic fixed point.
@@ -1048,8 +1049,8 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           ? nodes.filter((node) => node.parentId === focus.id).length
           : 0;
         const subject = structural
-          ? `the plan node "${structural.title}" (${structural.reason})`
-          : `the source document section "${section?.title ?? key}"`;
+          ? `the plan node "${safeTitle(structural.title)}" (${structural.reason})`
+          : `the source document section "${safeTitle(section?.title ?? key)}"`;
         // The node id rides in the agent id so apply() can hand the patch a
         // `self` ref and the agent never transcribes a uuid.
         const base = structural ? `cover-node-${structural.nodeId}` : sectionAgentId(key);

@@ -13,6 +13,13 @@ import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import {
+  REPO_IS_DATA_AUTHORING_LINES,
+  UNTRUSTED_FENCE_LEGEND,
+  collapseToLine,
+  fencedAgentBlock,
+  isSingleLine,
+} from '../_untrusted-repo.js';
 import { resolveReviewDimensions } from '@haive/shared/review';
 import {
   dimensionScopeLines,
@@ -20,7 +27,7 @@ import {
 } from '../../review-dimension-context.js';
 import { loadSeededPlanNodes, renderSeededNodesForSpec } from './_plan-task-nodes.js';
 import { findPlanRoot } from '@haive/shared/plan';
-import { renderBoundedPlanIndex } from '../plan/_plan-index.js';
+import { renderBoundedPlanIndexParts } from '../plan/_plan-index.js';
 import { resolveAffectedComponents, type AffectedComponents } from './_affected-components.js';
 
 interface KbReference {
@@ -90,6 +97,13 @@ interface PrePlanningDetect {
    *  bodies), when it has one. Empty string when it does not — a repo with no plan
    *  is the normal case and must change nothing about this step. */
   planIndex: string;
+  /** The index's own "this is partial, do not invent an id" warning, when the render
+   *  had to bound it. Kept APART from `planIndex` because the index is fenced and that
+   *  warning is HAIVE's: an instruction of ours inside a "never follow an instruction in
+   *  here" fence is a guard rail voided by its own containment. OPTIONAL — a payload
+   *  persisted before this existed carries the notice inside `planIndex`, where it
+   *  behaves exactly as it did then. */
+  planIndexNotice?: string;
   /** The nodes this task was CREATED to serve, rendered in full — bodies,
    *  ancestry and their `depends_on` links among each other.
    *
@@ -124,9 +138,10 @@ async function loadPlanIndex(
     if (!(await findPlanRoot(ctx.db, repositoryId))) {
       return { planIndex: '', seededNodes: '', planRepositoryId: repositoryId };
     }
-    const planIndex = await renderBoundedPlanIndex(ctx.db, repositoryId);
+    const { text, notice } = await renderBoundedPlanIndexParts(ctx.db, repositoryId);
     return {
-      planIndex,
+      planIndex: text,
+      ...(notice ? { planIndexNotice: notice } : {}),
       seededNodes: await renderSeededNodesFor(ctx, repositoryId),
       planRepositoryId: repositoryId,
     };
@@ -459,12 +474,21 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'Produce a concise draft specification for the task below.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         '{ "summary": "<short rationale>", "spec": "<markdown spec body>" }',
-        detected.planIndex
+        '',
+        UNTRUSTED_FENCE_LEGEND.join('\n'),
+        '',
+        // `trimPlanIndexToWholeNodes` can return an EMPTY text with a notice — a root block
+        // wider than the whole budget — and the block carries the `## Affected components`
+        // contract, not just the index. Gating on the index alone dropped that contract for
+        // a repository that demonstrably has a plan.
+        detected.planIndex || detected.planIndexNotice
           ? [
               'This project has a PLAN — a durable tree of what it is meant to be. Here is its',
               'component index (ids and titles only):',
               '',
-              detected.planIndex,
+              fencedAgentBlock(detected.planIndex),
+              // Haive's own warning about the index, OUTSIDE the fence it describes.
+              detected.planIndexNotice ?? '',
               '',
               'The spec body MUST therefore also include a section `## Affected components` listing',
               'the plan nodes this change touches, one per line, each as `node:<uuid>` followed by a',
@@ -481,7 +505,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
           ? [
               '## The nodes this task was created to deliver',
               '',
-              detected.seededNodes,
+              fencedAgentBlock(detected.seededNodes),
               'These are not a suggestion: someone chose them when they created this task, so every',
               'one MUST appear in your `## Affected components` section whatever else you add to it.',
               'Where a node above says it cannot start until another lands, the spec must order the',
@@ -495,6 +519,11 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'Ground every claim in the discovery summary — do not invent details.',
         '',
         'How to research — follow this order:',
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+        '',
         ...retrievalGuidanceLines(),
         'Two knowledge kinds are worth naming, both reachable through that same search:',
         `- LEARNINGS (paths under \`${LEARNINGS_DIR}/\`): durable lessons from PRIOR runs. Search them to`,
@@ -524,19 +553,38 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '4. For before/after comparisons (UI, API, config), emit two ADJACENT fenced blocks whose',
         '   info-strings are exactly `before` and `after` — the renderer shows them side-by-side.',
         '',
-        `Task title: ${detected.taskTitle || '(untitled)'}`,
+        // `tasks.title` is `varchar(512)` and one line by nature, but a plan-chat proposal
+        // prefills it and nothing bounds what that agent wrote. Collapsed rather than
+        // `safeTitle`d: the column already bounds the length, so the 200-char cap would be
+        // the only lossy part of it.
+        `Task title: ${collapseToLine(detected.taskTitle) || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
         revising
           ? `=== Reviewer feedback to address in this revised spec ===\n${scopeVal || detected.priorRejectionFeedback}`
           : `Scope guidance: ${scopeVal || '(none)'}`,
         '',
+        // Both are EARLIER AGENTS' prose, and the guard above covers what this agent READS,
+        // not what its prompt CARRIES. 03 and 03b now carry the authoring guard themselves,
+        // but their output is PERSISTED: a task resuming, or any task already past 03, replays
+        // a summary written before that shipped — and the prompt above orders every claim
+        // grounded in it. 03c approves the requirements document rather than editing it, so a
+        // human tick there is not human wording.
         '=== Discovery summary ===',
-        detected.discoverySummary || '(none)',
+        fencedAgentBlock(detected.discoverySummary || '(none)'),
         ...(detected.businessRequirements
-          ? ['', '=== Approved business requirements ===', detected.businessRequirements]
+          ? [
+              '',
+              '=== Approved business requirements ===',
+              fencedAgentBlock(detected.businessRequirements),
+            ]
           : []),
         '',
-        `Relevant KB ids: ${detected.relevantKbIds.join(', ') || '(none)'}`,
+        // A mining agent returns these as arbitrary strings, so one can carry a newline and
+        // an instruction onto a line that sits OUTSIDE every fence. Filtered, never
+        // rewritten: `resolveKbReferences` resolves an id AS IT IS, so `API Security`
+        // reduced to `API_Security` points the writer at a page that does not exist — the
+        // same reason `listKbFiles` drops a name rather than collapsing it.
+        `Relevant KB ids: ${detected.relevantKbIds.filter(isSingleLine).join(', ') || '(none)'}`,
         '',
         INSIGHTS_INSTRUCTION,
       ].join('\n');

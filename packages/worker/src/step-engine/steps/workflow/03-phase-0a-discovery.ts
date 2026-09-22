@@ -10,6 +10,14 @@ import type {
 import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import {
+  REPO_IS_DATA_AUTHORING_LINES,
+  UNTRUSTED_FENCE_LEGEND,
+  collapseToLine,
+  fencedAgentBlock,
+  isSingleLine,
+  survivesFence,
+} from '../_untrusted-repo.js';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -160,35 +168,64 @@ function stubDiscoverySummary(detect: DiscoveryDetect): {
   };
 }
 
-function buildAgentMiningPrompt(
+export function buildAgentMiningPrompt(
   persona: AgentPersona,
   detect: DiscoveryDetect,
   extraContext: string,
 ): string {
-  const snippets = detect.kbSnippets.map((s) => `### ${s.id}\n${s.preview}`).join('\n\n');
-  const fieldLine = persona.field ? `Your field: ${persona.field}` : '';
+  // An id the agent must quote back in `relevantKbIds` has to reach it AS ITSELF, and both
+  // the fence's `fenceSafe` and a line break would rewrite one. Filtered at BUILD time,
+  // not in `collectKbSnippets`: detect output is PERSISTED and replayed.
+  const snippets = detect.kbSnippets
+    .filter((s) => isSingleLine(s.id) && survivesFence(s.id))
+    .map((s) => `### ${s.id}\n${s.preview}`)
+    .join('\n\n');
+  // Every one of these comes from a `.claude/agents/*.md` the repository controls, and
+  // `readFrontmatterFields` returns them with their line breaks intact: a `|` literal
+  // block keeps them, and a double-quoted scalar is decoded through `JSON.parse`, which
+  // turns `\\n` into a real one. They are named ABOVE the guard, so a persona could open
+  // an instruction line in the trusted preamble.
+  const fieldLine = persona.field ? `Your field: ${collapseToLine(persona.field)}` : '';
   return [
-    `You are providing READ-ONLY knowledge analysis as a "${persona.title}" specialist.`,
-    '',
-    `Your specialty: ${persona.description || '(general)'}`,
-    fieldLine,
+    `You are providing READ-ONLY knowledge analysis as a "${collapseToLine(persona.title)}" specialist.`,
     '',
     'This is the knowledge-mining phase that runs BEFORE any implementation. You are NOT',
     'performing the task — your job is READ-ONLY research. Do NOT edit files, write code, run',
     'builds or tests, or any other mutating command, and do NOT ask clarifying questions.',
     '',
     '=== How to research — follow this order ===',
+    // Before the search instruction: the rule about what an agent reads has to arrive
+    // before it is told to go read. Joined into one element so the block's blank lines
+    // survive however this array is assembled.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     ...retrievalGuidanceLines(),
     'Ground your analysis in what you actually retrieve, and stay strictly read-only throughout.',
     '',
+    // BELOW the guard, not above it. Collapsing stopped a persona field forging a LINE and
+    // did nothing about what the line says, and these two are repository-controlled prose
+    // that used to open the prompt — where an injected directive got the first word and the
+    // prompt's own voice. They are not fenced: this IS the agent's assigned persona, the
+    // carve-out every repository-is-data block makes, and that carve-out already answers a
+    // directive inside one. What changes is that the rule is read first.
+    '=== Your specialty ===',
+    collapseToLine(persona.description) || '(general)',
+    fieldLine,
+    '',
     '=== Task being analyzed (DO NOT execute) ===',
-    `Title: ${detect.taskTitle || '(untitled)'}`,
+    `Title: ${collapseToLine(detect.taskTitle) || '(untitled)'}`,
     `Description: ${detect.taskDescription || '(none)'}`,
     `Feature/area: ${detect.feature ?? '(unspecified)'}`,
     `Additional context: ${extraContext || '(none)'}`,
     '',
+    UNTRUSTED_FENCE_LEGEND.join('\n'),
+    '',
     '=== Knowledge base index (previews; use rag_search for full content) ===',
-    snippets || '(no knowledge base files available)',
+    // A preview is the first 600 characters of a repository FILE and the id beside it is
+    // that file's name, so this block is the tree quoted into the prompt — the guard above
+    // covers what the agent goes and reads, not what arrives already inlined. The ids stay
+    // quotable, which is what `relevantKbIds` asks for below.
+    fencedAgentBlock(snippets || '(no knowledge base files available)'),
     '',
     '=== Required output ===',
     'When your research is done, emit ONE JSON object inside a ```json fenced code block with',

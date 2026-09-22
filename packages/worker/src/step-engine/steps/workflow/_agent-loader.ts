@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { readFrontmatterFields, unquoteYamlScalar } from '../_yaml-scalar.js';
+import { isSingleLine } from '../_untrusted-repo.js';
 
 export interface AgentPersona {
   id: string;
@@ -31,7 +32,12 @@ export async function loadAgentPersonas(repoPath: string): Promise<AgentPersona[
     if (!parsed) continue;
     const fallbackId = e.name.replace(/\.md$/i, '');
     const id = (parsed.frontmatter.name ?? fallbackId).trim();
-    if (!id) continue;
+    // `name` can be a `|` block scalar or a double-quoted scalar holding `\\n`, so an id
+    // can span lines. Dropped rather than collapsed: every consumer round-trips an id
+    // verbatim — the selector returns it, the dispatcher matches it, 07 writes the file
+    // — so a rewritten one matches nothing, and an id that cannot be named on a line is
+    // already unusable to every CLI that reads the same frontmatter.
+    if (!id || !isSingleLine(id)) continue;
     personas.push({
       id,
       title: titleFromBody(parsed.body) ?? id,

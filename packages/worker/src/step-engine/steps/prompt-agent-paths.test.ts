@@ -12,6 +12,7 @@ import { registerAllSteps } from './index.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
+import { buildAgentMiningPrompt } from './workflow/03-phase-0a-discovery.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
 import { advisorPrompt, fixCoderPrompt, replannerPrompt, reviewerPrompt } from '../dag-executor.js';
 import { buildMergeFixPrompt } from '../git-merge.js';
@@ -360,6 +361,31 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
             { id: 'knowledge-miner', field: '', title: 'Knowledge miner', description: '' },
           ],
         }),
+      ),
+  },
+  {
+    label: '03-phase-0a buildAgentMiningPrompt',
+    exportKey: 'step-engine/steps/workflow/03-phase-0a-discovery.ts#buildAgentMiningPrompt',
+    // Same trap the selector entry records: `kbSnippets.map(...)` is [] through a proxy, so the
+    // per-page block — where a KB id and the first 600 characters of a repository file reach the
+    // model — would be dark. One real snippet, and a persona with real prose.
+    build: () =>
+      buildAgentMiningPrompt(
+        permissive({
+          id: 'security-auditor',
+          field: 'security',
+          title: 'Security auditor',
+          description: 'Finds authorization gaps.',
+        }),
+        permissive({
+          taskTitle: 'Harden the admin route',
+          taskDescription: 'Reject anonymous callers.',
+          feature: 'admin',
+          kbSnippets: [
+            { id: 'architecture', title: 'Architecture', preview: 'Auth lives in middleware.' },
+          ],
+        }),
+        'extra context',
       ),
   },
   // `hasRepo` is truthy through a proxy, so the NO-repository arm never rendered; and

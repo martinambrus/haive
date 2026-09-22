@@ -31,6 +31,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
@@ -338,13 +339,26 @@ function sourceGuidance(d: PlanBuildDetect): string {
       'STATUS: nothing here is built. Leave status alone — every node is outstanding work.',
     ].join('\n');
   }
+  // Filtered HERE rather than in `listKbFiles`, for the reason `fencedDebtBlock` gives:
+  // detect output is PERSISTED and `step-runner` replays it, so a step detected before
+  // this shipped still carries the raw names. A filename is a `Dirent.name` copied
+  // verbatim onto the prompt's FIRST line, above every guard, and on Linux any byte but
+  // `/` and NUL is legal in one. Dropped rather than collapsed: the agent opens these by
+  // name, so a mangled name is worse than an absent one, and the prompt sends it to the
+  // directory regardless.
+  const kbFiles = d.kbFiles.filter(isSingleLine);
   const kb =
-    d.kbFiles.length > 0
-      ? `Read the knowledge base at ${KB_DIR}/ first (${d.kbFiles.length} file(s): ${d.kbFiles.slice(0, 20).join(', ')}).`
+    kbFiles.length > 0
+      ? `Read the knowledge base at ${KB_DIR}/ first (${kbFiles.length} file(s): ${kbFiles.slice(0, 20).join(', ')}).`
       : `This repository has no knowledge base yet.`;
   return [
     kb,
     'Look up how the code is actually organised before naming a component, in this order:',
+    // Before the search instruction: the rule about what an agent reads has to arrive
+    // before it is told to go read. Joined into one element so the block's blank lines
+    // survive however this array is assembled.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     ...retrievalGuidanceLines(),
     'The plan records what the project is MEANT to be, so a component belongs in it even when',
     'the code for it does not exist yet — but every component that DOES exist should be named',
@@ -407,7 +421,11 @@ export function buildExpandPrompt(
     planMarkdown,
     '',
     `## Your node`,
-    `${node.title} (\`node:${node.id}\`, version ${node.version})`,
+    // A plan title is `z.string().max(512)`, and `.trim()` leaves interior newlines
+    // intact — so a title can put its own instruction line in the trusted preamble,
+    // above every block below it. `buildPlanExpansionContext` already collapses each
+    // title it renders; this one was the one interpolated raw.
+    `${safeTitle(node.title)} (\`node:${node.id}\`, version ${node.version})`,
     '',
     `Break THIS node down into at most ${breadthCap(values)} children. Every new node must have`,
     `\`"parentRef": "${node.id}"\` or the ref of one of your own new nodes.`,
@@ -437,9 +455,15 @@ export function buildExpandPrompt(
     // Gated on from_repo: a greenfield plan has no code to search, and this is also the
     // prompt 02-plan-coverage reuses for its convergence waves.
     d.mode === 'from_repo'
-      ? ['How to find the code you name — follow this order:', ...retrievalGuidanceLines()].join(
-          '\n',
-        )
+      ? [
+          // buildExpandPrompt drives every frontier agent after wave 0, and its nodes become
+          // downstream assignments exactly as the root wave's do. It has its own retrieval
+          // block, so guarding buildRootPrompt alone leaves every later wave uncovered.
+          REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+          '',
+          'How to find the code you name — follow this order:',
+          ...retrievalGuidanceLines(),
+        ].join('\n')
       : '',
     d.mode === 'from_repo'
       ? [
