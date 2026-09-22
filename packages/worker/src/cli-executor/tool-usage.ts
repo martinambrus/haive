@@ -1,4 +1,4 @@
-import { CLI_PROVIDER_LIST, type InvocationToolUsage } from '@haive/shared';
+import { CLI_PROVIDER_LIST, startsWithSegments, type InvocationToolUsage } from '@haive/shared';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 
 /* ------------------------------------------------------------------ */
@@ -154,14 +154,6 @@ function stringsOf(value: unknown): string[] {
 
 function stripQuotes(token: string): string {
   return token.replace(/^['"]+/, '').replace(/['"]+$/, '');
-}
-
-function startsWithSegments(segments: readonly string[], prefix: readonly string[]): boolean {
-  if (segments.length < prefix.length) return false;
-  for (let i = 0; i < prefix.length; i++) {
-    if (segments[i] !== prefix[i]) return false;
-  }
-  return true;
 }
 
 /** Split `mcp__<server>__<tool>` (claude family) or `<server>__<tool>` (grok's `use_tool`) at

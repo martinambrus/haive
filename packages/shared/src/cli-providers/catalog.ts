@@ -485,10 +485,16 @@ const AGENT_DIR_SEGMENTS: string[][] = AGENT_DIRECTORIES.map((dir) =>
  *  a path, then judge each one, rather than to parse prose correctly. */
 const PATH_TOKEN_RE = /[A-Za-z0-9_.~$*/-]+/g;
 
-/** Same rule as `classifyReadPath` in the worker's `cli-executor/tool-usage.ts`, which cannot be
- *  imported here (shared must not depend on worker). Kept byte-identical in behaviour on purpose:
- *  two anchorings that must agree eventually will not. */
-function startsWithSegments(segments: readonly string[], prefix: readonly string[]): boolean {
+/** Whole-segment prefix match: `['a','b','c']` starts with `['a','b']` but `.claude-agents` never
+ *  starts with `.claude`. Shared with `classifyReadPath` in the worker's `cli-executor/tool-usage.ts`,
+ *  which imports it from here — the dependency runs one way only (shared must not depend on worker),
+ *  so this is the home for a rule both sides must agree on. It was duplicated byte-for-byte until
+ *  2026-09-22 on the grounds that two anchorings which must agree eventually will not; one definition
+ *  is the stronger form of the same argument. */
+export function startsWithSegments(
+  segments: readonly string[],
+  prefix: readonly string[],
+): boolean {
   if (segments.length < prefix.length) return false;
   for (let i = 0; i < prefix.length; i++) {
     if (segments[i] !== prefix[i]) return false;
