@@ -38,7 +38,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { renderBoundedPlanIndex } from './_plan-index.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
-import { safeTitle } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES, safeTitle } from '../_untrusted-repo.js';
 
 /**
  * What the build did not cover, repaired to a semantic fixed point.
@@ -557,6 +557,11 @@ export function buildCoverageRepairPrompt(args: {
 }): string {
   return [
     `You are completing a project plan that is missing work under ${args.subject}.`,
+    '',
+    // The nodes this pass adds become task descriptions exactly as the build's do, and the
+    // step holds `tool_use` even though this prompt sends it to a document rather than to
+    // the tree. Joined into one element so the block's blank lines survive.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
     '',
     args.repairInstruction,
     args.lostDetail ? `What the previous attempt lost: ${args.lostDetail}` : '',

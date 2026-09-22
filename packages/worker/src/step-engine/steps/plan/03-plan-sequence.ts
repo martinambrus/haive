@@ -26,7 +26,12 @@ import {
   PLAN_AGENT_TIMEOUT_MS,
 } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
-import { safeTitle } from '../_untrusted-repo.js';
+import {
+  REPO_IS_DATA_AUTHORING_LINES,
+  UNTRUSTED_FENCE_LEGEND,
+  fencedAgentBlock,
+  safeTitle,
+} from '../_untrusted-repo.js';
 
 /**
  * Put the plan in BUILD ORDER.
@@ -391,10 +396,18 @@ export function buildSequencePrompt(
   return [
     'You are deciding the ORDER in which one part of a project plan gets built.',
     '',
+    // An ordering is not prose: a `depends_on` this pass adds BLOCKS work, and the product
+    // refuses to open a task for a node whose prerequisite is unfinished. So what it writes
+    // is an instruction to everything downstream, and the step holds `tool_use` regardless
+    // of where this prompt points it.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
+    UNTRUSTED_FENCE_LEGEND.join('\n'),
+    '',
     'Here is the plan as it stands, for context on what exists elsewhere. Every node carries',
     'its current build-order number, so you can see where your part sits in the whole.',
     '',
-    planMarkdown,
+    fencedAgentBlock(planMarkdown),
     '',
     '## Your node',
     `${safeTitle(target.parentTitle)} (\`node:${target.parentId}\`)`,

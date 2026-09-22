@@ -354,11 +354,6 @@ function sourceGuidance(d: PlanBuildDetect): string {
   return [
     kb,
     'Look up how the code is actually organised before naming a component, in this order:',
-    // Before the search instruction: the rule about what an agent reads has to arrive
-    // before it is told to go read. Joined into one element so the block's blank lines
-    // survive however this array is assembled.
-    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
-    '',
     ...retrievalGuidanceLines(),
     'The plan records what the project is MEANT to be, so a component belongs in it even when',
     'the code for it does not exist yet — but every component that DOES exist should be named',
@@ -384,6 +379,12 @@ export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string 
     'developer task could implement each.',
     '',
     d.brief ? `What the user said about it:\n${d.brief}\n` : '',
+    // Every mode, not only `from_repo`. The RETRIEVAL ladder is gated — a greenfield plan
+    // has no code to search — but the guard is about what the agent READS, and this step
+    // holds `tool_use` in every mode. What it writes becomes a task description either way.
+    // Joined into one element so the block's blank lines survive.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     sourceGuidance(d),
     '',
     `Produce EXACTLY two levels now: one root node for the product as a whole, and at most`,
@@ -452,18 +453,17 @@ export function buildExpandPrompt(
     'where two things are related. Never point one at its own parent or ancestor, and never',
     'close a loop; neither can be satisfied and both strand every node on them permanently.',
     '',
-    // Gated on from_repo: a greenfield plan has no code to search, and this is also the
-    // prompt 02-plan-coverage reuses for its convergence waves.
+    // buildExpandPrompt drives every frontier agent after wave 0, and its nodes become
+    // downstream assignments exactly as the root wave's do — in EVERY mode, so the guard is
+    // not gated. Only the retrieval ladder below is: a greenfield plan has no code to search.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
+    // Gated on from_repo, and this is also the prompt 02-plan-coverage reuses for its
+    // convergence waves.
     d.mode === 'from_repo'
-      ? [
-          // buildExpandPrompt drives every frontier agent after wave 0, and its nodes become
-          // downstream assignments exactly as the root wave's do. It has its own retrieval
-          // block, so guarding buildRootPrompt alone leaves every later wave uncovered.
-          REPO_IS_DATA_AUTHORING_LINES.join('\n'),
-          '',
-          'How to find the code you name — follow this order:',
-          ...retrievalGuidanceLines(),
-        ].join('\n')
+      ? ['How to find the code you name — follow this order:', ...retrievalGuidanceLines()].join(
+          '\n',
+        )
       : '',
     d.mode === 'from_repo'
       ? [

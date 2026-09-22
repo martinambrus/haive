@@ -9,6 +9,7 @@ import {
   stripAgentGuidanceBlocks,
 } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
+import { PLAN_PATCH_CONTRACT } from './plan/_plan-prompt.js';
 import {
   REPO_IS_DATA_ACTING_LINES,
   REPO_IS_DATA_AUTHORING_LINES,
@@ -1679,6 +1680,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['04a-spec-audit', ONE_CLASS, REVIEWING],
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
+      ['01-plan-chat', AUTHORING, REVIEWING],
     ] as const) {
       for (const { key, prompt } of await eachPrompt(prefix)) {
         expect(prompt, key).toContain(expected);
@@ -1714,6 +1716,24 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
           expect(after.trimStart().startsWith(UNTRUSTED_OPEN), `${key}: ${heading}`).toBe(true);
         }
       }
+    }
+
+    // Every step that WRITES plan content, DERIVED rather than listed. A hand list is what
+    // missed `01f-external-plan-sync` and `11f-plan-reconcile`, which live under workflow/
+    // rather than plan/ — so the set is "whatever emits the patch contract", which is what
+    // being a plan writer actually means. What they write becomes a task description, or a
+    // `depends_on` that HOLDS BACK work, and every one of them holds `tool_use` whether or
+    // not its prompt sends it to the tree.
+    const planWriters = (
+      await Promise.all(
+        promptSources().map(async (source) => builtEntries(source, await source.build())),
+      )
+    )
+      .flat()
+      .filter(({ prompt }) => prompt.includes(PLAN_PATCH_CONTRACT));
+    expect(planWriters.length, 'no plan-patch prompt rendered').toBeGreaterThan(0);
+    for (const { key, prompt } of planWriters) {
+      expect(prompt, key).toContain(AUTHORING);
     }
 
     // The fix loop is one hop further on: a reviewing step is TOLD to quote the tree text

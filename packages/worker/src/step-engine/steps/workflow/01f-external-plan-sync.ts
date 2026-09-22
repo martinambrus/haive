@@ -9,6 +9,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
   describeDropped,
@@ -82,6 +83,12 @@ export interface ExternalPlanSyncApply {
 
 function buildPrompt(d: ExternalPlanSyncDetect): string {
   return [
+    // This step reads repository files and emits plan-patch ops, so what it writes becomes
+    // a task description like any other plan node — and its proposals reach a form where
+    // every one is ticked by default, which makes the human gate weak evidence. Joined
+    // into one element so the block's blank lines survive.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     'Commits reached this repository WITHOUT going through this workflow — a teammate',
     'pushed, someone committed from their own editor, or a pull merged other work in.',
     'Bring the PROJECT PLAN back in line with what now exists.',
