@@ -23,6 +23,12 @@
  *  against a reference render, so editing the inline copy alone changes nothing for an
  *  onboarded repo and editing the file would read as drift and be reverted.
  *
+ *  Carried by 08c's `reviewAssignment` (peer, security and every level-gated lens share it),
+ *  07b's code validator, and 08c2's broad auditor. 08c2 builds its own prompt rather than
+ *  going through `reviewAssignment`, so it has to be wired by hand: it is default-ON
+ *  (`broadAudit !== false`) and writes to `review_findings` as `code-auditor`, so a defect
+ *  only it finds would otherwise reach gate 2 with no project-rule citation.
+ *
  *  Deliberately NOT applied to 08d's adversaries. They are attack roles hunting for a way to
  *  break the change, not dimension scorers arguing a defect against a stated contract; the
  *  evidence here is about the latter and does not extend to the former.
