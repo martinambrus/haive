@@ -740,7 +740,7 @@ export function verifierTitle(
   return `${head}: [${worst.severity}] ${group.findings.length} findings @ ${cause}`;
 }
 
-function buildVerifyPrompt(
+export function buildVerifyPrompt(
   d: AdversarialDetect,
   group: FindingGroup,
   lens: VerifyLens | null,
@@ -834,7 +834,7 @@ const SAFETY = [
   'non-destructive proof and stop.',
 ] as const;
 
-function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
+export function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
   return [
     agentDefinitionGuidance(
       a.id,

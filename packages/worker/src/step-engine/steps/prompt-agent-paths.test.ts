@@ -23,6 +23,8 @@ import { WORKTREE_GIT_BOUNDARY_PROMPT } from '../../repo/worktree-git-boundary.j
 import { DDEV_GENERATED_BOUNDARY_PROMPT } from '../../repo/ddev-generated-boundary.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
 import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabilities.js';
+import { buildAdversaryPrompt, buildVerifyPrompt } from './workflow/08d-adversarial-qa.js';
+import { buildSequencePrompt } from './plan/03-plan-sequence.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -130,6 +132,21 @@ function permissive(): never {
   }) as never;
 }
 
+/** A concrete McpSurface, so each branch of `mcpSurfacePrompt` is a separate scanned source. */
+function mcpFixture(
+  rag: boolean,
+  chrome: boolean,
+  ddev: boolean,
+): Parameters<typeof mcpSurfacePrompt>[0] {
+  return {
+    ragOnly: false,
+    rag: { enabled: rag, apiUrl: 'http://api:3001', token: 't' },
+    chromeDevtools: { enabled: chrome, version: '1.7.0' },
+    ddevControl: { enabled: ddev, apiUrl: 'http://api:3001', token: 't' },
+    userServers: {},
+  };
+}
+
 interface Scanned {
   named: string[];
   clean: string[];
@@ -146,11 +163,16 @@ interface PromptSource {
  * `step-runner` re-dispatches through `resolveTaskDispatch` exactly like a first wave.
  *
  * Eight wave sites exist across five steps (08c, 08d, 01-plan-build, 02-plan-coverage,
- * 03-plan-sequence). Only the ones with a NAMED builder are reachable from a unit test: the other six
- * assemble their dispatch arrays inline inside `apply()`, so covering them would mean either
- * extracting that logic in five production modules or executing `apply()` bodies in CI — which for
- * steps that write files is a side effect a test should not have. That gap is stated in the coverage
- * case below rather than papered over.
+ * 03-plan-sequence). SIX are now scanned through named builders — 08c's refuter, plan-build's expand,
+ * 08d's verifier (which feeds BOTH of its wave sites) and 03-plan-sequence's. An earlier version of
+ * this comment claimed the remaining six "assemble their dispatch arrays inline" and was WRONG: I had
+ * read the throw sites, seen array construction, and not looked at what built the prompts inside.
+ * Three were plain functions needing only an `export`.
+ *
+ * TWO remain out of reach, both in 02-plan-coverage: one builds its prompt through
+ * `augmentPromptWithAttachments` (async, needs a database) and one is assembled inline in `apply()`.
+ * Reaching those means executing `apply()` bodies, and several applies write files — a side effect a
+ * unit test must not have. That is the residual gap, restated accurately in the coverage case.
  *
  * 08c's refuter is the one Codex named: read-only (`requiredCapabilities: ['tool_use']`), so the path
  * scan decides its isolation, and it was previously invisible here.
@@ -189,7 +211,58 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // Blocks SPLICED INTO other prompts. A bare agent path in one of these would end isolation for
   // every dispatch that carries it, which is broader than any single step.
   { label: 'globalKbDigestPrompt (block)', build: () => globalKbDigestPrompt(permissive()) },
-  { label: 'mcpSurfacePrompt (block)', build: () => mcpSurfacePrompt(permissive(), permissive()) },
+  // CONCRETE fixtures, for the same reason as appReachPrompt: `mcpSurfacePrompt` branches on
+  // `surface?.rag.enabled`, `chromeDevtools.enabled`, `ddevControl.enabled`, `opts.noBuiltInTools`
+  // and `opts.noRepo`, and a permissive proxy is truthy for all of them — so it emitted only the
+  // everything-enabled arm plus `noBuiltInTools`. The rag-disabled, noRepo, normal-tools and
+  // no-browser/no-container arms are production text the dispatcher appends AFTER the isolation
+  // decision, so each is exercised here.
+  ...(
+    [
+      { label: 'full surface', surface: mcpFixture(true, true, true), opts: {} },
+      { label: 'rag disabled', surface: mcpFixture(false, true, true), opts: {} },
+      { label: 'no browser or container', surface: mcpFixture(true, false, false), opts: {} },
+      {
+        label: 'noBuiltInTools',
+        surface: mcpFixture(true, true, true),
+        opts: { noBuiltInTools: true },
+      },
+      { label: 'noRepo', surface: mcpFixture(true, true, true), opts: { noRepo: true } },
+      { label: 'null surface (amp)', surface: null, opts: {} },
+      { label: 'worktree', surface: mcpFixture(true, true, true), opts: { hasWorktree: true } },
+    ] as const
+  ).map((cell) => ({
+    label: `mcpSurfacePrompt (${cell.label})`,
+    build: () => mcpSurfacePrompt(cell.surface, { ...cell.opts }),
+  })),
+  // The wave builders Codex found to be PURE after all — my earlier claim that all six remaining
+  // `MiningWaveError` sites were inline was wrong: these three are named functions, and 08d's verifier
+  // feeds BOTH of its wave sites. Each gained an `export` for this.
+  {
+    label: '08d buildVerifyPrompt (wave)',
+    build: () => buildVerifyPrompt(permissive(), permissive(), permissive()),
+  },
+  {
+    // A REAL id, not a proxy. This builder embeds a marker block whose text interpolates the id
+    // (`.claude/agents/${a.id}.md`), and a proxy id renders `[[HAIVE_AGENT_DEFINITION:]]` plus
+    // `.claude/agents/.md` — a malformed marker that `stripAgentGuidanceBlocks` cannot match, so the
+    // path survives stripping and the source reports a FALSE positive. MEASURED: with the proxy this
+    // showed up in `named`; with a real id it does not, which is production behaviour.
+    label: '08d buildAdversaryPrompt',
+    build: () =>
+      buildAdversaryPrompt(
+        {
+          id: 'security-auditor',
+          title: 'Security auditor',
+          persona: 'Persona.',
+        } as unknown as Parameters<typeof buildAdversaryPrompt>[0],
+        permissive(),
+      ),
+  },
+  {
+    label: '03-plan-sequence buildSequencePrompt (wave)',
+    build: () => buildSequencePrompt(permissive(), permissive(), permissive()),
+  },
   // EXPLICIT fixtures, not a permissive proxy: `appReachPrompt` branches on
   // `reach.mode === 'sandbox_http'` and then on the URL scheme and `tlsTrusted`, and a proxy fails
   // every strict comparison against a literal — so a proxy scans the browser-only branch and nothing
@@ -314,6 +387,9 @@ const SCANNED_PROMPT_EXPORTS = [
   'DDEV_GENERATED_BOUNDARY_PROMPT',
   'PROMPT_DEFECT_INSTRUCTION',
   'adaptPromptForCliCapabilities',
+  'buildVerifyPrompt',
+  'buildAdversaryPrompt',
+  'buildSequencePrompt',
   // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — names the sweep below
   // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
   // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
@@ -507,12 +583,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // unreachable bucket while the counts still looked healthy.
     const namedLabels = NAMED_PROMPT_BUILDERS.map((s) => s.label);
     expect(unbuildable.filter((label) => namedLabels.includes(label))).toEqual([]);
-    // KNOWN RESIDUAL GAP, stated so nobody reads this file as exhaustive: six of the eight
-    // `MiningWaveError` sites (08d x2, 02-plan-coverage x3, 03-plan-sequence) assemble their dispatch
-    // arrays INLINE inside `apply()`, with no named builder to call. Reaching them needs either that
-    // logic extracted in five production modules, or `apply()` executed here — and several applies
-    // write files, which is a side effect a unit test must not have. The two wave prompts that DO have
-    // named builders (08c's refuter, plan-build's expand) are scanned above.
+    // KNOWN RESIDUAL GAP, stated so nobody reads this file as exhaustive. SIX of the eight
+    // `MiningWaveError` sites are scanned above through named builders (08c's refuter, plan-build's
+    // expand, 08d's verifier for both of its sites, 03-plan-sequence's). TWO remain, both in
+    // 02-plan-coverage: one builds its prompt through `augmentPromptWithAttachments` (async, needs a
+    // database) and one is assembled inline in `apply()`. Reaching those means executing `apply()`
+    // bodies, and several applies write files — a side effect a unit test must not have.
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
   });
 
