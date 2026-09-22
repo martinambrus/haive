@@ -164,7 +164,14 @@ function mcpFixture(
 interface Scanned {
   named: string[];
   clean: string[];
+  /** Sources that produced no prompt. Two DIFFERENT facts, kept apart below. */
   unbuildable: string[];
+  /** The builder THREW. Always a defect of this file: a guard refused the fixture, so a real prompt
+   *  went unscanned while the count still looked healthy. Asserted empty. */
+  threw: string[];
+  /** The step selected NO agents under these inputs, so there was no prompt to scan. Honest, and not
+   *  something a fixture can fix without inventing a plan, a skill set or a KB. Reported, not hidden. */
+  selectedNothing: string[];
 }
 
 /**
@@ -845,6 +852,37 @@ const PRIOR_ITERATIONS: Record<string, unknown[]> = {
   ],
 };
 
+/** A concrete change set, the shape `collectImplementationFiles` returns. */
+const CHANGE_SET = {
+  files: ['src/app/admin.ts', 'src/lib/auth.ts'],
+  total: 3,
+  truncated: true,
+  changedLines: { 'src/app/admin.ts': 'lines 12-18, 45' },
+  scanError: null,
+};
+
+/**
+ * Per-step `detected` fields, for steps whose builders REFUSE an empty payload.
+ *
+ * `assertReviewableChange` throws when the change set is empty — deliberately, since an agent given no
+ * change set would review the whole repository — so every review step's source landed in `unbuildable`
+ * and its prompts were never scanned at all. That bucket was being tolerated by an assertion rather
+ * than emptied, which made it the one place a bare agent path could hide in a REAL read-only prompt:
+ * 08c's peer, security and lens prompts, 08c2's audit, 08d's roster, 07b's validator.
+ *
+ * Keyed by step id, merged into the `detected` proxy. A step absent here still builds with the bare
+ * proxy.
+ */
+const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
+  '08c-code-review': { implementationFiles: CHANGE_SET },
+  '08c2-code-audit': { implementationFiles: CHANGE_SET },
+  '08d-adversarial-qa': { implementationFiles: CHANGE_SET },
+  '07b-phase-4-validate': { implementationFiles: CHANGE_SET },
+  '07a-code-simplify': { implementationFiles: CHANGE_SET },
+  '08a-browser-verify': { implementationFiles: CHANGE_SET },
+  '08b-test-management': { implementationFiles: CHANGE_SET },
+};
+
 /** Every prompt production can dispatch, across all three registry paths plus the named builders. */
 function promptSources(): PromptSource[] {
   const out: PromptSource[] = [...NAMED_PROMPT_BUILDERS];
@@ -854,7 +892,11 @@ function promptSources(): PromptSource[] {
     if (llm) {
       out.push({
         label: id,
-        build: () => llm.buildPrompt({ detected: permissive(), formValues: permissive() }),
+        build: () =>
+          llm.buildPrompt({
+            detected: permissive(DETECT_OVERRIDES[id] ?? {}),
+            formValues: permissive(),
+          }),
       });
     }
     const iteration = def.loop?.buildIterationPrompt;
@@ -880,7 +922,7 @@ function promptSources(): PromptSource[] {
           label: `${id} (loop iteration ${n}/${role})`,
           build: () =>
             iteration({
-              detected: permissive(),
+              detected: permissive(DETECT_OVERRIDES[id] ?? {}),
               formValues: permissive(),
               iteration: n,
               previousIterations: (PRIOR_ITERATIONS[id] ?? []) as Parameters<
@@ -897,7 +939,7 @@ function promptSources(): PromptSource[] {
         build: async () => {
           const dispatches = await mining.selectAgents({
             ctx: permissive(),
-            detected: permissive(),
+            detected: permissive(DETECT_OVERRIDES[id] ?? {}),
             formValues: permissive(),
             llmOutput: permissive(),
           });
@@ -920,12 +962,21 @@ function promptSources(): PromptSource[] {
  * vacuity this file has already been corrected for twice.
  */
 async function classifySource(source: PromptSource): Promise<Scanned> {
-  const out: Scanned = { named: [], clean: [], unbuildable: [] };
+  const out: Scanned = {
+    named: [],
+    clean: [],
+    unbuildable: [],
+    threw: [],
+    selectedNothing: [],
+  };
   let entries: BuiltPrompt[];
   try {
     entries = builtEntries(source, await source.build());
-  } catch {
+  } catch (err) {
+    // A THROW is this file's problem, never the step's: some guard refused the fixture. Carrying the
+    // message means the next reader does not have to re-derive which guard.
     out.unbuildable.push(source.label);
+    out.threw.push(`${source.label} :: ${String((err as Error).message).slice(0, 120)}`);
     return out;
   }
   // A mining step that selects no agent under empty inputs produced no prompt to scan — not the same
@@ -933,6 +984,7 @@ async function classifySource(source: PromptSource): Promise<Scanned> {
   // because there is no invocation to key on.
   if (entries.length === 0) {
     out.unbuildable.push(source.label);
+    out.selectedNothing.push(source.label);
     return out;
   }
   // One verdict per INVOCATION, never one per source: each of these is its own `resolveTaskDispatch`
@@ -948,16 +1000,26 @@ async function classifySource(source: PromptSource): Promise<Scanned> {
 }
 
 async function scanBuiltPrompts(): Promise<Scanned> {
-  const out: Scanned = { named: [], clean: [], unbuildable: [] };
+  const out: Scanned = {
+    named: [],
+    clean: [],
+    unbuildable: [],
+    threw: [],
+    selectedNothing: [],
+  };
   for (const source of promptSources()) {
     const one = await classifySource(source);
     out.named.push(...one.named);
     out.clean.push(...one.clean);
     out.unbuildable.push(...one.unbuildable);
+    out.threw.push(...one.threw);
+    out.selectedNothing.push(...one.selectedNothing);
   }
   out.named.sort();
   out.clean.sort();
   out.unbuildable.sort();
+  out.threw.sort();
+  out.selectedNothing.sort();
   return out;
 }
 
@@ -1041,22 +1103,34 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
   });
 
   it('reports what it still cannot reach, and how much it covers', async () => {
-    const { clean, named, unbuildable } = await scanBuiltPrompts();
+    const { clean, named, unbuildable, threw, selectedNothing } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    // MEASURED 2026-09-22: 111 clean + 4 named = 115 built, 12 unreachable. The floor sat at 40 when
+    // NOTHING may throw. A throwing source is this file's defect, not the step's — a guard refused the
+    // fixture and a REAL prompt went unscanned while the totals still looked healthy. That is exactly
+    // where the four review steps had been hiding: `assertReviewableChange` refuses an empty change set
+    // (correctly — an agent given none would review the whole repository), so 08c's peer, security and
+    // lens prompts, 08c2's audit, 08d's roster and 07b's validator were never built at all, and a
+    // tolerance of 12 absorbed them silently. `DETECT_OVERRIDES` gives them a real change set.
+    expect(threw).toEqual([]);
+    // What is left is the honest half: a mining step that selects NO agent under empty inputs has no
+    // prompt to scan. Fixing those means inventing a plan tree, a skill set or a KB corpus, which is
+    // the "fixture bound to one step's payload" trade this file's header rejects. Held at the measured
+    // 8 so a new one is acknowledged rather than absorbed.
+    expect(selectedNothing.length).toBeLessThanOrEqual(8);
+    expect(unbuildable.length).toBeLessThanOrEqual(8);
+    // MEASURED 2026-09-22: 121 clean + 4 named = 125 built, 8 unreachable (was 12; the four review
+    // steps now build). The floor sat at 40 when
     // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
     // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
     // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(115);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(125);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
-    // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
-    // into slack. One-directional on purpose: something becoming reachable must never fail this.
-    expect(unbuildable.length).toBeLessThanOrEqual(12);
+
     // Every NAMED builder must actually build, or the coverage claimed by listing it is fiction.
     // This is the check that would have caught a hand-added source silently landing in the
     // unreachable bucket while the counts still looked healthy.
