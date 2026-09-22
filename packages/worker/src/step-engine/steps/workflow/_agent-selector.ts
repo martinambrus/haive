@@ -1,5 +1,6 @@
 import type { AgentPersona } from './_agent-loader.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { collapseToLine } from '../_untrusted-repo.js';
 
 export interface AgentSelectorPromptArgs {
   taskTitle: string;
@@ -12,8 +13,12 @@ export interface AgentSelectorPromptArgs {
 export function buildAgentSelectorPrompt(args: AgentSelectorPromptArgs): string {
   const personaList = args.personas
     .map((p) => {
-      const fieldTag = p.field ? ` [field: ${p.field}]` : '';
-      return `- id: ${p.id}${fieldTag}\n  title: ${p.title}\n  description: ${p.description || '(none)'}`;
+      // Repository-controlled frontmatter, and this roster is one entry per LINE — a
+      // persona carrying a line break would both forge an entry and break the shape.
+      const fieldTag = p.field ? ` [field: ${collapseToLine(p.field)}]` : '';
+      const title = collapseToLine(p.title);
+      const description = collapseToLine(p.description) || '(none)';
+      return `- id: ${p.id}${fieldTag}\n  title: ${title}\n  description: ${description}`;
     })
     .join('\n');
   return [

@@ -10,7 +10,7 @@ import type {
 import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES, collapseToLine } from '../_untrusted-repo.js';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -167,11 +167,16 @@ function buildAgentMiningPrompt(
   extraContext: string,
 ): string {
   const snippets = detect.kbSnippets.map((s) => `### ${s.id}\n${s.preview}`).join('\n\n');
-  const fieldLine = persona.field ? `Your field: ${persona.field}` : '';
+  // Every one of these comes from a `.claude/agents/*.md` the repository controls, and
+  // `readFrontmatterFields` returns them with their line breaks intact: a `|` literal
+  // block keeps them, and a double-quoted scalar is decoded through `JSON.parse`, which
+  // turns `\\n` into a real one. They are named ABOVE the guard, so a persona could open
+  // an instruction line in the trusted preamble.
+  const fieldLine = persona.field ? `Your field: ${collapseToLine(persona.field)}` : '';
   return [
-    `You are providing READ-ONLY knowledge analysis as a "${persona.title}" specialist.`,
+    `You are providing READ-ONLY knowledge analysis as a "${collapseToLine(persona.title)}" specialist.`,
     '',
-    `Your specialty: ${persona.description || '(general)'}`,
+    `Your specialty: ${collapseToLine(persona.description) || '(general)'}`,
     fieldLine,
     '',
     'This is the knowledge-mining phase that runs BEFORE any implementation. You are NOT',
@@ -188,7 +193,7 @@ function buildAgentMiningPrompt(
     'Ground your analysis in what you actually retrieve, and stay strictly read-only throughout.',
     '',
     '=== Task being analyzed (DO NOT execute) ===',
-    `Title: ${detect.taskTitle || '(untitled)'}`,
+    `Title: ${collapseToLine(detect.taskTitle) || '(untitled)'}`,
     `Description: ${detect.taskDescription || '(none)'}`,
     `Feature/area: ${detect.feature ?? '(unspecified)'}`,
     `Additional context: ${extraContext || '(none)'}`,

@@ -11,6 +11,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { collapseToLine } from '../_untrusted-repo.js';
 import {
   confirmSupersedeByEmbedding,
   SUPERSEDE_CANDIDATE_LIMIT,
@@ -138,12 +139,14 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
           const stack = [...(e.facets.framework ?? []), ...(e.facets.frameworkMajor ?? [])].join(
             ' ',
           );
+          // One entry per LINE, and every field is stored text: a line break in any of
+          // them forges an entry as well as breaking the shape.
           return [
             `- id: ${e.id}`,
-            `  title: ${e.title}`,
+            `  title: ${collapseToLine(e.title)}`,
             `  category: ${e.category}`,
-            stack ? `  stack: ${stack}` : '',
-            `  excerpt: ${e.excerpt.replace(/\s+/g, ' ').trim()}`,
+            stack ? `  stack: ${collapseToLine(stack)}` : '',
+            `  excerpt: ${collapseToLine(e.excerpt)}`,
           ]
             .filter(Boolean)
             .join('\n');
