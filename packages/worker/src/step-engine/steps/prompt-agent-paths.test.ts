@@ -6,34 +6,86 @@ import { stripAgentGuidanceBlocks } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
 
 /**
- * Verification item 2's tripwire: among the BUILT-IN prompt builders, which ones name an agent
- * directory once Haive's own marker blocks are stripped — i.e. which ones `agentIsolationApplies`
- * refuses to isolate.
+ * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
+ * marker blocks are stripped — i.e. which ones `agentIsolationApplies` refuses to isolate.
  *
  * It has to be the BUILT prompt, not the source file. A grep over `steps/**` matches 23 files,
  * because the source also carries prose in comments, `agentDefinitionGuidance(...)` calls whose
  * rendered block is stripped before the scan, and code that WRITES those files
  * (`_agent-templates.ts`, `_scope.ts`). None of those end isolation; a bare path in prompt text does.
  *
- * So the registry is booted for real — through `registerAllSteps`, the production entry point — and
- * BOTH of a step's prompt builders are called: `llm.buildPrompt` and, where a loop defines one,
- * `loop.buildIterationPrompt`. That is possible because neither takes a live `StepContext`, only a
- * small args bag (`{ detected, formValues, iteration?, previousIterations? }`): no database, no task,
- * no repository.
+ * THREE dispatch paths reach the isolation rule, and an earlier version of this file scanned only the
+ * first:
  *
- * A builder that throws on synthetic args is REPORTED rather than silently skipped — the count is
- * asserted below, so a change that makes more builders unbuildable weakens this guard visibly
- * instead of quietly.
+ *   1. `llm.buildPrompt(args)`
+ *   2. `loop.buildIterationPrompt(args)` — `step-runner.ts:707` routes to it whenever
+ *      `upcomingIteration > 0 || truncationRetries > 0`, so it is the prompt for every pass past the
+ *      first (05, 07a, 07b, 08a, 09_5 define one).
+ *   3. `agentMining.selectAgents(args)` — each returned `AgentMiningDispatch.prompt` is dispatched
+ *      with `kind: 'prompt'`, so a fan-out's prompts are scanned exactly like a single one. Ten
+ *      built-in steps declare mining.
+ *
+ * The registry is booted through `registerAllSteps`, the production entry point, so a step added to
+ * any workflow index is covered without touching this file.
+ *
+ * With all three paths and permissive inputs, 40+ prompts are actually built and scanned, and the
+ * measured positives are exactly the two the plan predicted — `06_5-agent-discovery` and
+ * `09_5-skill-generation`. An earlier version of this file reached only 14 prompts on one path and
+ * reported NONE, which read as "no built-in prompt names an agent path" and was false.
  */
 function bootRegistry(): StepRegistry {
   const registry = new StepRegistry();
   // The PRODUCTION registration, never a hand-kept list of workflow types. This file first rolled its
-  // own and omitted `registerEnvReplicateSteps` while claiming to cover every type: env-replicate
-  // declares no llm phase today, so the scan passed, and any prompt added there would have escaped
-  // the guard silently. `registerAllSteps` also runs the four boot sanity checks, so their drift
-  // surfaces here too.
+  // own and omitted `registerEnvReplicateSteps` while claiming to cover every type. `registerAllSteps`
+  // also runs the four boot sanity checks, so their drift surfaces here too.
   registerAllSteps(registry);
   return registry;
+}
+
+/**
+ * A stand-in for every input a prompt builder reads: `detected`, `formValues`, `llmOutput` and the
+ * mining `ctx`.
+ *
+ * Bespoke fixtures per builder were the obvious alternative and are worse: 26 of them, each shaped
+ * to one step's detect payload, drifting whenever that payload changes and failing for reasons
+ * unrelated to agent paths. What this test asks is whether a builder's own TEMPLATE TEXT carries a
+ * bare agent path, and that text comes from the module, never from the data — so exercising the
+ * template with benign empties is the sound way to reach it.
+ *
+ * Every access answers, so a builder that dereferences deeply still runs: unknown properties give
+ * another permissive value, `map`/`filter`/`slice` give `[]`, `join`/`trim`/`replace` give `''`,
+ * iteration is empty, and string interpolation yields `''`. `then` and `toJSON` are deliberately
+ * undefined — a thenable would make `await` hang, and a `toJSON` that returned another proxy would
+ * send `JSON.stringify` into recursion.
+ */
+function permissive(): never {
+  const target = function noop(): void {};
+  return new Proxy(target, {
+    get(_t, prop) {
+      if (prop === 'then' || prop === 'toJSON') return undefined;
+      if (prop === Symbol.toPrimitive || prop === 'toString' || prop === Symbol.toStringTag) {
+        return () => '';
+      }
+      if (prop === Symbol.iterator) return function* empty() {};
+      if (prop === 'length' || prop === 'size') return 0;
+      if (prop === 'map' || prop === 'filter' || prop === 'flatMap') return () => [];
+      if (prop === 'slice' || prop === 'concat' || prop === 'split' || prop === 'sort')
+        return () => [];
+      if (prop === 'join' || prop === 'trim' || prop === 'replace' || prop === 'replaceAll') {
+        return () => '';
+      }
+      if (prop === 'toLowerCase' || prop === 'toUpperCase') return () => '';
+      if (prop === 'forEach') return () => undefined;
+      if (prop === 'find' || prop === 'at' || prop === 'get') return () => undefined;
+      if (prop === 'some' || prop === 'every' || prop === 'includes' || prop === 'has') {
+        return () => false;
+      }
+      return permissive();
+    },
+    apply() {
+      return permissive();
+    },
+  }) as never;
 }
 
 interface Scanned {
@@ -42,54 +94,78 @@ interface Scanned {
   unbuildable: string[];
 }
 
-/**
- * Every prompt production can DISPATCH, which is two builders per step and not one.
- *
- * `step-runner.ts:707` routes a loop pass to `stepDef.loop.buildIterationPrompt(...)` instead of
- * `llm.buildPrompt(...)` whenever `upcomingIteration > 0 || truncationRetries > 0` — so 05, 07a, 07b,
- * 08a and 09_5 each have an iteration-only prompt that the isolation rule evaluates and that scanning
- * `llm` alone never sees. Missing it was the whole point of this file being wrong once already.
- */
 interface PromptSource {
   label: string;
-  build: () => string;
+  build: () => string | Promise<string[]>;
 }
 
+/** Every prompt production can dispatch, across all three paths. */
 function promptSources(): PromptSource[] {
   const out: PromptSource[] = [];
   for (const def of bootRegistry().all()) {
     const id = def.metadata.id;
     const llm = def.llm;
-    if (llm)
-      out.push({ label: id, build: () => llm.buildPrompt({ detected: {}, formValues: {} }) });
+    if (llm) {
+      out.push({
+        label: id,
+        build: () => llm.buildPrompt({ detected: permissive(), formValues: permissive() }),
+      });
+    }
     const iteration = def.loop?.buildIterationPrompt;
     if (iteration) {
       out.push({
         label: `${id} (loop iteration)`,
         build: () =>
-          iteration({ detected: {}, formValues: {}, iteration: 1, previousIterations: [] }),
+          iteration({
+            detected: permissive(),
+            formValues: permissive(),
+            iteration: 1,
+            previousIterations: [],
+          }),
+      });
+    }
+    const mining = def.agentMining;
+    if (mining) {
+      out.push({
+        label: `${id} (mining)`,
+        build: async () => {
+          const dispatches = await mining.selectAgents({
+            ctx: permissive(),
+            detected: permissive(),
+            formValues: permissive(),
+            llmOutput: permissive(),
+          });
+          return dispatches.map((d) => d.prompt);
+        },
       });
     }
   }
   return out;
 }
 
-function scanBuiltPrompts(): Scanned {
+async function scanBuiltPrompts(): Promise<Scanned> {
   const out: Scanned = { named: [], clean: [], unbuildable: [] };
   for (const source of promptSources()) {
-    let prompt: string;
+    let prompts: string[];
     try {
-      prompt = source.build();
+      const built = await source.build();
+      prompts = typeof built === 'string' ? [built] : built;
     } catch {
       out.unbuildable.push(source.label);
       continue;
     }
-    // Exactly what the dispatch rule does: strip Haive's own marker blocks, then scan what is left.
-    if (promptNamesAgentPath(stripAgentGuidanceBlocks(prompt), SANDBOX_WORKDIR)) {
-      out.named.push(source.label);
-    } else {
-      out.clean.push(source.label);
+    // A mining step that selects no agent under empty inputs produced no prompt to scan — not the
+    // same thing as a clean one, so it is reported rather than counted as covered.
+    if (prompts.length === 0) {
+      out.unbuildable.push(source.label);
+      continue;
     }
+    // Exactly what the dispatch rule does: strip Haive's own marker blocks, then scan what is left.
+    const names = prompts.some((p) =>
+      promptNamesAgentPath(stripAgentGuidanceBlocks(p), SANDBOX_WORKDIR),
+    );
+    if (names) out.named.push(source.label);
+    else out.clean.push(source.label);
   }
   out.named.sort();
   out.clean.sort();
@@ -99,76 +175,82 @@ function scanBuiltPrompts(): Scanned {
 
 describe('built-in prompt builders vs agentIsolationApplies', () => {
   it('boots every workflow type, so no registered step escapes the scan', () => {
-    const registry = bootRegistry();
-    const ids = registry.all().map((d) => d.metadata.id);
-    // A real boot rather than a hand-kept list: the point of registering is that a step added to any
-    // index.ts is scanned below without this file being touched.
+    const ids = bootRegistry()
+      .all()
+      .map((d) => d.metadata.id);
     expect(ids.length).toBeGreaterThan(40);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain('07-generate-files');
     expect(ids).toContain('08c-code-review');
   });
 
-  it('finds NO buildable prompt that names an agent path outside a marker block', () => {
-    const { named, clean } = scanBuiltPrompts();
-    // MEASURED 2026-09-22, not taken from the plan. An entry here is a step whose prompt would NOT be
-    // isolated — possibly correct, but a decision rather than a surprise. Asserted as an explicit
-    // list rather than a snapshot: `vitest -u` rewrites a snapshot silently, and the whole point of
-    // this case is that a new match has to be typed out by a person.
-    expect(named).toEqual([]);
-    // Coverage is asserted so that WEAKENING it is visible: if builders start throwing on synthetic
-    // args, this number drops and the guard shrinks without anyone noticing otherwise.
-    expect(clean.length).toBeGreaterThanOrEqual(18);
-    // The loop-iteration path is IN the scan. Asserted directly because scanning `llm` alone was a
-    // real gap in this file: `step-runner.ts:707` dispatches `buildIterationPrompt` for any pass past
-    // the first, so dropping that branch from `promptSources` would silently stop covering five steps.
-    expect(clean.some((label) => label.endsWith('(loop iteration)'))).toBe(true);
+  it('covers all three dispatch paths', () => {
+    const labels = promptSources().map((s) => s.label);
+    // Each path is asserted present, because each was missing at some point in this file's history:
+    // mining and loop-iteration prompts were both invisible while every count still looked plausible.
+    expect(labels.some((l) => l.endsWith('(loop iteration)'))).toBe(true);
+    expect(labels.some((l) => l.endsWith('(mining)'))).toBe(true);
+    expect(labels.some((l) => !l.endsWith(')'))).toBe(true);
   });
 
-  it('is not vacuous: markers are present, removed, and the rest of the prompt SURVIVES', () => {
-    // `named: []` proves nothing on its own, and there are TWO ways it could be empty for the wrong
-    // reason. Both are checked here:
+  it('names exactly the prompts that would NOT be isolated', async () => {
+    const { named } = await scanBuiltPrompts();
+    // MEASURED 2026-09-22 across all three dispatch paths — and it is exactly what the plan
+    // predicted: 06_5 and 09_5, nobody else. An entry here is a step whose own prompt disables its
+    // isolation through the path scan, which has to be a decision rather than a surprise.
     //
-    //   1. the scan reads nothing at all — then no prompt would name a path even UNSTRIPPED;
-    //   2. `stripAgentGuidanceBlocks` swallows the whole prompt — then the scan reads empty strings,
-    //      every builder classifies clean, and check 1 STILL passes because it reads the unstripped
-    //      text. An earlier version of this case tested only 1 and claimed to have ruled out both.
+    // Both are deliberate, for different reasons:
+    //   06_5-agent-discovery declares `requiredCapabilities: []`, so this path IS what disables its
+    //     isolation — and correctly: the step discovers agents and its prompt tells the model to read
+    //     prior-setup definitions as evidence about the REPOSITORY. Masking that directory would hide
+    //     the files it is being asked to interpret.
+    //   09_5-skill-generation declares `file_write` on both its llm and mining specs, so
+    //     `agentIsolationApplies` already excludes it two conditions earlier. Its paths are moot.
+    //
+    // An explicit list rather than a snapshot: `vitest -u` rewrites a snapshot silently.
+    expect(named).toEqual([
+      '06_5-agent-discovery',
+      '09_5-skill-generation',
+      '09_5-skill-generation (loop iteration)',
+    ]);
+  });
+
+  it('is not vacuous: markers are removed and the rest of the prompt SURVIVES', async () => {
+    // `named` proves nothing on its own, and there are two ways it could be wrong:
+    //   1. the scan reads nothing — then no prompt would match even UNSTRIPPED;
+    //   2. `stripAgentGuidanceBlocks` swallows whole prompts — then the scan reads empty strings and
+    //      check 1 still passes, because it reads the unstripped text.
     const unstripped: string[] = [];
     let markerRemoved = 0;
     for (const source of promptSources()) {
-      let prompt: string;
+      let prompts: string[];
       try {
-        prompt = source.build();
+        const built = await source.build();
+        prompts = typeof built === 'string' ? [built] : built;
       } catch {
         continue;
       }
-      if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(source.label);
-      const stripped = stripAgentGuidanceBlocks(prompt);
-      // (2) Every scanned prompt still carries content after stripping. This is what makes the
-      // `named` result a reading of prompt TEXT rather than of an empty string.
-      expect(
-        stripped.trim().length,
-        `${source.label}: stripping emptied the prompt`,
-      ).toBeGreaterThan(0);
-      if (stripped.length < prompt.length) markerRemoved += 1;
+      for (const prompt of prompts) {
+        if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(source.label);
+        const stripped = stripAgentGuidanceBlocks(prompt);
+        expect(
+          stripped.trim().length,
+          `${source.label}: stripping emptied the prompt`,
+        ).toBeGreaterThan(0);
+        if (stripped.length < prompt.length) markerRemoved += 1;
+      }
     }
-    // Stripping is doing work rather than passing every prompt through untouched.
     expect(markerRemoved).toBeGreaterThan(0);
-    // (1) The scan sees real prompt text: unstripped, some prompts DO name an agent path.
     expect(unstripped.length).toBeGreaterThan(0);
   });
 
-  it('reports which builders it could NOT reach, 06_5 and 09_5 among them', () => {
-    const { unbuildable } = scanBuiltPrompts();
-    // The honest limit of this file, and the reason the plan's own phrasing of this assertion — "only
-    // 06_5 and 09_5 match" — is NOT established here: both cast `args.detected` to a rich typed shape
-    // and dereference it (`buildSkillPrompt(args.detected as SkillGenDetect, …)`), so an empty args
-    // bag throws before any prompt exists. Bespoke `detected` fixtures were considered and rejected:
-    // they would drift with each step's detect payload and fail for reasons unrelated to agent paths.
-    expect(unbuildable).toContain('06_5-agent-discovery');
-    expect(unbuildable).toContain('09_5-skill-generation');
-    // Pinned so a step MOVING between the two buckets — newly buildable, or newly throwing — shows up
-    // as a diff here. That is what keeps a new step from landing unexamined in either direction.
-    expect(unbuildable.length).toBe(26);
+  it('reports what it still cannot reach, and how much it covers', async () => {
+    const { clean, named, unbuildable } = await scanBuiltPrompts();
+    // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
+    // inputs, this drops and the guard shrinks without anyone noticing otherwise.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(40);
+    // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
+    // empty inputs, or a builder that rejects them outright.
+    expect(unbuildable.length).toBeLessThanOrEqual(12);
   });
 });
