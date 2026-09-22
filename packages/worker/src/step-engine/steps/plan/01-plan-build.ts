@@ -440,9 +440,15 @@ export function buildExpandPrompt(
     // Gated on from_repo: a greenfield plan has no code to search, and this is also the
     // prompt 02-plan-coverage reuses for its convergence waves.
     d.mode === 'from_repo'
-      ? ['How to find the code you name — follow this order:', ...retrievalGuidanceLines()].join(
-          '\n',
-        )
+      ? [
+          // buildExpandPrompt drives every frontier agent after wave 0, and its nodes become
+          // downstream assignments exactly as the root wave's do. It has its own retrieval
+          // block, so guarding buildRootPrompt alone leaves every later wave uncovered.
+          REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+          '',
+          'How to find the code you name — follow this order:',
+          ...retrievalGuidanceLines(),
+        ].join('\n')
       : '',
     d.mode === 'from_repo'
       ? [
