@@ -921,6 +921,39 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
       },
     ],
   },
+  // `parseAgentSelection` needs a persona ROSTER: with none, it selects nothing and never reaches
+  // `fallbackSelection`. No llmOutput fixture is needed — the fallback is what an unparseable reply
+  // already takes in production.
+  '03-phase-0a-discovery': {
+    personas: [
+      {
+        id: 'security-auditor',
+        title: 'Security auditor',
+        description: 'Finds authorization gaps.',
+        field: 'security',
+        color: null,
+        allowedTools: [],
+        body: 'Audit authorization paths.',
+        sourcePath: '.claude/agents/security-auditor.md',
+      },
+      {
+        id: 'knowledge-miner',
+        title: 'Knowledge miner',
+        description: 'Reads the knowledge base.',
+        field: 'research',
+        color: null,
+        allowedTools: [],
+        body: 'Mine the KB.',
+        sourcePath: '.claude/agents/knowledge-miner.md',
+      },
+    ],
+  },
+  // `computeDomainPlan` takes the DETERMINISTIC arm at three or more required domains, which is what
+  // dispatches one agent per domain; below three it returns `discovery` with an empty list and selects
+  // nothing. So this fixture also picks the arm, not just the count.
+  '09_5-skill-generation': {
+    requiredDomains: ['entity-api', 'routing', 'testing', 'theming'],
+  },
   '09_5b-skill-repair': {
     skillTargetDirs: ['.claude/skills'],
     framework: 'drupal',
@@ -1110,9 +1143,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     //     isolation — and correctly: the step discovers agents and its prompt tells the model to read
     //     prior-setup definitions as evidence about the REPOSITORY. Masking that directory would hide
     //     the files it is being asked to interpret.
-    //   09_5-skill-generation declares `file_write` on both its llm and mining specs, so
+    //   09_5-skill-generation declares `file_write` on both its llm and mining specs
+    //     (`requiredCapabilities: ['tool_use', 'file_write']`, lines 1137 and 1207), so
     //     `agentIsolationApplies` already excludes it two conditions earlier. Its paths are moot. Both
-    //     of its loop roles name one, which is why it appears twice.
+    //     loop roles name one, and so does every agent of its deterministic mining fan-out — one per
+    //     required domain — which is why it appears six times rather than once.
     //
     // What enumerating the loop ROLES showed, and it is the reassuring answer rather than a new hole:
     // the even/first arms of 05, 07b, 08a and 07a — reviewer, validator, tester, simplifier, none of
@@ -1124,7 +1159,17 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '09_5-skill-generation',
       '09_5-skill-generation (loop iteration 0/first)',
       '09_5-skill-generation (loop iteration 1/later)',
+      // One per `requiredDomains` entry in the fixture: the fan-out is per DOMAIN, and each agent's
+      // prompt carries the same pointer. Keyed by agent id, so the four are four invocations rather
+      // than one source-level verdict.
+      '09_5-skill-generation (mining) [0:cap-0-entity-api]',
+      '09_5-skill-generation (mining) [1:cap-1-routing]',
+      '09_5-skill-generation (mining) [2:cap-2-testing]',
+      '09_5-skill-generation (mining) [3:cap-3-theming]',
     ]);
+    // And the answer to the finding that added these fixtures: `03-phase-0a-discovery` is NOT here.
+    // Its mining prompt is clean, which is the one thing scanning it could establish.
+    expect(named.filter((l) => l.startsWith('03-phase-0a-discovery'))).toEqual([]);
   });
 
   it('is not vacuous: markers are removed and the rest of the prompt SURVIVES', async () => {
@@ -1171,21 +1216,27 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // prompt to scan. Fixing those means inventing a plan tree, a skill set or a KB corpus, which is
     // the "fixture bound to one step's payload" trade this file's header rejects. Held at the measured
     // 8 so a new one is acknowledged rather than absorbed.
-    // Down to 5, and what is left is bounded by something a unit test cannot supply rather than by a
-    // fixture nobody wrote. THREE of them — `00-plan-sequence`, `02-plan-coverage`, `03-plan-sequence` —
-    // call `loadPlanSkeletons(ctx.db, …)` inside `selectAgents`, so they need a live database, not a
-    // richer payload. That is the honest floor of this approach.
-    expect(selectedNothing.length).toBeLessThanOrEqual(5);
-    expect(unbuildable.length).toBeLessThanOrEqual(5);
-    // MEASURED 2026-09-22: 124 clean + 4 named = 128 built, 5 unreachable (12 before the review steps
-    // got a change set, 8 before the list-driven miners got their lists). The floor sat at 40 when
+    // Down to THREE, and every one is unreachable for a reason that can be cited rather than for want
+    // of a fixture: `00-plan-sequence`, `02-plan-coverage` and `03-plan-sequence` all call
+    // `loadPlanSkeletons(ctx.db, …)` INSIDE `selectAgents`, so they need a live database and no payload
+    // reaches them. Asserted by NAME, not just by count — a count would let a new fixture-shaped gap
+    // take a retiring one's slot, which is the substitution this allowance was hiding two rounds ago.
+    expect(selectedNothing).toEqual([
+      '00-plan-sequence (mining)',
+      '02-plan-coverage (mining)',
+      '03-plan-sequence (mining)',
+    ]);
+    expect(unbuildable.length).toBeLessThanOrEqual(3);
+    // MEASURED 2026-09-22: 125 clean + 8 named = 133 built, 3 unreachable. The unreachable count walked
+    // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
+    // and discovery got a persona roster. The floor sat at 40 when
     // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
     // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
     // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(128);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(133);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
