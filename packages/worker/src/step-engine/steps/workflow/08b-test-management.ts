@@ -9,6 +9,7 @@ import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_ACTING_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
   changedFilesBlock,
@@ -873,6 +874,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         '',
         'Do NOT run the tests yourself (the orchestrator runs the related tests after you',
         'finish) and do NOT run git (it is unavailable in this environment).',
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_ACTING_LINES.join('\n'),
+        '',
         ...SEARCH_LADDER,
         '',
         'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',

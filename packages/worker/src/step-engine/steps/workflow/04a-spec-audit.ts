@@ -4,6 +4,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-repo.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -55,6 +56,15 @@ const AUDIT_RULES = [
   '',
   'Verify every code / file / "follow the pattern from X" claim against the actual codebase,',
   'in this order:',
+  // The ONE-CLASS variant: this findings array describes problems with the SPEC, so a
+  // prompt-injection report filed there arrives as a spec defect — and 05a's corrector
+  // would then EDIT the spec in response to something it read in a source file. The
+  // `## INSIGHTS` channel is no better: 08e interpolates what lands there.
+  // Before the search instruction: the rule about what an agent reads has to arrive
+  // before it is told to go read. Joined into one element so the block's blank lines
+  // survive however this array is assembled.
+  REPO_IS_DATA_ONE_CLASS_LINES.join('\n'),
+  '',
   ...retrievalGuidanceLines(),
   'A reference to code that does not exist is an error finding.',
   '',

@@ -11,7 +11,11 @@ import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { SCOPE_FENCE_DOC_REPORT_ONLY, SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
 import { INVARIANT_CITATION } from '../_invariant-citation.js';
-import { fencedDebtBlock } from '../_untrusted-repo.js';
+import {
+  REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_LINES,
+  fencedDebtBlock,
+} from '../_untrusted-repo.js';
 import {
   assertReviewableChange,
   changedFilesBlock,
@@ -709,6 +713,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         'Do NOT run git (it is unavailable in this environment — the orchestrator commits later)',
         'and do NOT run the test suite (a later step does).',
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_LINES.join('\n'),
+        '',
         ...SEARCH_LADDER,
         '',
         ...outputContract(d.docsOnly, dimensionsFor(d)),
@@ -767,6 +776,14 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           // ceiling only three points above the best unaided run — so an invented sentence
           // written while closing a gap costs more than the gap did.
           ...(d.docsOnly ? DOC_FIXER_EVIDENCE_BAR : []),
+          // The ACTING variant, not the reviewing one this step's other two prompts
+          // take: this pass EDITS, and its `notes` are handed to later agents, so it
+          // must not quote what it found into its own output.
+          // Before the search instruction: the rule about what an agent reads has to arrive
+          // before it is told to go read. Joined into one element so the block's blank lines
+          // survive however this array is assembled.
+          REPO_IS_DATA_ACTING_LINES.join('\n'),
+          '',
           ...SEARCH_LADDER,
           ...(d.browserTesting
             ? [
@@ -814,6 +831,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         'Re-validate from scratch — verify the fixes hold AND nothing else broke.',
         'Do NOT run git and do NOT run the test suite.',
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_LINES.join('\n'),
+        '',
         ...SEARCH_LADDER,
         '',
         ...outputContract(d.docsOnly, dimensionsFor(d)),

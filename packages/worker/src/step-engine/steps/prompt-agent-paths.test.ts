@@ -9,6 +9,12 @@ import {
   stripAgentGuidanceBlocks,
 } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
+import {
+  REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_AUTHORING_LINES,
+  REPO_IS_DATA_LINES,
+  REPO_IS_DATA_ONE_CLASS_LINES,
+} from './_untrusted-repo.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
@@ -1613,6 +1619,59 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(await textFor('07a-code-simplify (loop iteration')).toContain(
       'Collapsed two duplicate guards in the admin handler.',
     );
+  });
+
+  it('gives every tree-reading step the guard variant its OUTPUT can carry', async () => {
+    // The four variants differ in their ENDING, and the ending is the whole choice: a
+    // reviewer is told to report the text it found, a pass whose findings array holds one
+    // kind of thing is told not to, a coder is told what it may not CHANGE, and an author is
+    // told what its words become. Handing a step the wrong one files a report in a schema
+    // that describes something else — the failure REPO_IS_DATA_ONE_CLASS_LINES documents.
+    const textFor = async (prefix: string): Promise<string> => {
+      const built = (
+        await Promise.all(
+          promptSources()
+            .filter((source) => source.label.startsWith(prefix))
+            .map(async (source) => builtEntries(source, await source.build())),
+        )
+      ).flat();
+      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
+      return built.map((b) => b.prompt).join('\n\n');
+    };
+
+    const REVIEWING = 'Report it as a finding, naming';
+    const ONE_CLASS = 'your findings array holds one kind of thing';
+    const ACTING = 'You EDIT files, so the stakes are higher here';
+    const AUTHORING = 'becomes another agent\u2019s ASSIGNMENT';
+
+    // Every variant carries the persona carve-out. ONE_CLASS was the one that did not, and
+    // 05's reviewer is wrapped in `agentDefinitionGuidance` — so it would have been told the
+    // definition it was just pointed at is data.
+    for (const [label, block] of [
+      ['reviewing', REPO_IS_DATA_LINES],
+      ['one-class', REPO_IS_DATA_ONE_CLASS_LINES],
+      ['acting', REPO_IS_DATA_ACTING_LINES],
+      ['authoring', REPO_IS_DATA_AUTHORING_LINES],
+    ] as const) {
+      expect(block.join('\n'), label).toContain('is your PERSONA');
+    }
+
+    for (const [prefix, expected, forbidden] of [
+      ['04a-spec-audit', ONE_CLASS, REVIEWING],
+      ['05-phase-0b5-spec-quality', ONE_CLASS, REVIEWING],
+      ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
+      ['08b-test-management', ACTING, REVIEWING],
+    ] as const) {
+      const text = await textFor(prefix);
+      expect(text, prefix).toContain(expected);
+      expect(text, prefix).not.toContain(forbidden);
+    }
+
+    // 07b is the one step carrying TWO variants: its validator reports findings, its fixer
+    // edits files and hands `notes` to later agents.
+    const validate = await textFor('07b-phase-4-validate');
+    expect(validate).toContain(REVIEWING);
+    expect(validate).toContain(ACTING);
   });
 
   it('RENDERS the data-driven bodies the empty proxy skipped', async () => {
