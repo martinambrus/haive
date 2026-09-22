@@ -1078,25 +1078,38 @@ function promptSources(): PromptSource[] {
       // Emitted for EVERY loop step rather than for a list of today's consumers. Keying on such a list
       // is the exact shape of miss this file keeps being corrected for: a step that starts reading the
       // argument would be silently uncovered, and the extra scans cost nothing in a 130-source sweep.
+      // Three axes: ROLE, truncation retry, and HISTORY.
+      //
+      // The history axis exists because adding `PRIOR_ITERATIONS` REPLACED the empty-history shape
+      // instead of adding to it, and that took a live arm dark: 05's corrector renders
+      // `SELF_REVIEW_FALLBACK` when the preceding review was lost (absent, a `stub`, or zero findings),
+      // and with a valid review always supplied that block stopped being scanned. Production reaches it
+      // whenever a reviewer's output does not parse, so BOTH shapes are dispatched and both are built
+      // here. A step with no recorded history has only the empty shape, which is what it always had.
+      const histories: Array<{ suffix: string; value: unknown[] }> = PRIOR_ITERATIONS[id]
+        ? [
+            { suffix: '', value: PRIOR_ITERATIONS[id]! },
+            { suffix: ', no prior pass', value: [] },
+          ]
+        : [{ suffix: '', value: [] }];
       for (const [role, n] of byRole) {
         for (const retries of [0, 2]) {
-          const label =
-            retries === 0
-              ? `${id} (loop iteration ${n}/${role})`
-              : `${id} (loop iteration ${n}/${role}, truncation retry ${retries})`;
-          out.push({
-            label,
-            build: () =>
-              iteration({
-                detected: permissive(DETECT_OVERRIDES[id] ?? {}),
-                formValues: permissive(),
-                iteration: n,
-                truncationRetries: retries,
-                previousIterations: (PRIOR_ITERATIONS[id] ?? []) as Parameters<
-                  typeof iteration
-                >[0]['previousIterations'],
-              }),
-          });
+          for (const history of histories) {
+            const retrySuffix = retries === 0 ? '' : `, truncation retry ${retries}`;
+            out.push({
+              label: `${id} (loop iteration ${n}/${role}${retrySuffix}${history.suffix})`,
+              build: () =>
+                iteration({
+                  detected: permissive(DETECT_OVERRIDES[id] ?? {}),
+                  formValues: permissive(),
+                  iteration: n,
+                  truncationRetries: retries,
+                  previousIterations: history.value as Parameters<
+                    typeof iteration
+                  >[0]['previousIterations'],
+                }),
+            });
+          }
         }
       }
     }
@@ -1320,7 +1333,8 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 140 clean + 12 named = 152 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 156 clean + 12 named = 168 built, 3 unreachable. The loop path alone is now
+    // role x truncation-retry x history, which is why it dominates the count. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
     // axis, which doubles every loop role. The floor sat at 40 when
@@ -1330,7 +1344,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(152);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(168);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1460,6 +1474,10 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const specQuality = await textFor('05-phase-0b5-spec-quality (loop iteration');
     expect(specQuality).toContain('=== Findings from iteration 1 ===');
     expect(specQuality).toContain('[high] goal_clarity: The success criterion');
+    // And the OTHER arm of the same branch, which adding the history fixture had taken dark: the
+    // corrector self-reviews when the preceding review was lost (absent, `stub`, or zero findings).
+    // Production reaches it whenever a reviewer's output does not parse, so both arms are live.
+    expect(specQuality).toContain('=== No usable reviewer findings this round ===');
 
     expect(await textFor('07b-phase-4-validate (loop iteration')).toContain(
       'Required the session middleware on the admin route.',
@@ -1574,13 +1592,20 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     );
     expect(promptNamesAgentPath(benign, SANDBOX_WORKDIR)).toBe(false);
 
-    // The MCP names are ONE instance. `adaptPrompt` makes seven appends after the decision and THREE
+    // The MCP names are ONE instance. `adaptPrompt` makes seven appends after the decision and three
     // carry text Haive did not write: `withMcpSurface` (repository `mcpServers` keys),
-    // `withGlobalKbDigest` (author-written KB titles) and `withAppReach` (the resolved app URL and
-    // `addHosts`). The other four are Haive constants or persona bodies, which are scanned separately and
-    // verbatim. So the fix is not "also scan server names" — it is that the decision must account for
-    // every append carrying external text. The digest half is asserted here too, so what is pinned is the
-    // CLASS rather than one field.
+    // `withGlobalKbDigest` (author-written KB titles) and `withAppReach` (the resolved app URL).
+    //
+    // Only TWO of those three can express an agent path, and that is traced rather than assumed:
+    // `appReachPrompt` interpolates `reach.url` ALONE — never `addHosts` — and that url is ddev's
+    // `primary_url` (`ddev-runner.ts:1528`), i.e. scheme://host[:port] with no path component. A hostname
+    // cannot contain `/`, and `promptNamesAgentPath` matches whole segments from the mount root, so no
+    // repository name can make that string name an agent directory. It carries external text and is
+    // still worth knowing about; it is not a hole.
+    //
+    // So the fix is not "also scan server names" — it is that the decision must account for every append
+    // carrying external text. The digest half is asserted here too, so what is pinned is the CLASS rather
+    // than one field.
     const digestWithPath = globalKbDigestPrompt([
       { category: 'standards', title: '.claude/agents/foo' },
     ]);
