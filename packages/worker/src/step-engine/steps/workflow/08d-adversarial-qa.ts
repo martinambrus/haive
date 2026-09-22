@@ -66,7 +66,10 @@ interface AdversaryDef {
 }
 
 // Roster, cumulative by level (poc ⊂ standard ⊂ enterprise).
-const ADVERSARIES: AdversaryDef[] = [
+// Exported for the prompt-path tripwire: the registry mining source cannot reach these prompts
+// (`assertReviewableChange` throws on an empty change set before the roster is mapped), so scanning
+// each persona's REAL text is only possible from the roster itself.
+export const ADVERSARIES: AdversaryDef[] = [
   {
     id: 'edge-case-breaker',
     title: 'Edge Case Breaker',
@@ -245,7 +248,10 @@ const MAX_VERIFIED_ADVISORY = 20;
  *  looks fine and stops — and the three map the distinct ways a PoC can be wrong while
  *  still appearing to work: it never ran, it ran against something that only exists in
  *  this sandbox, or it ran and succeeded for a reason unrelated to the code blamed. */
-const VERIFY_LENSES = [
+/** The verifier panel's lenses. Exported for the prompt-path tripwire, which must scan each lens's
+ *  REAL text: a locally built lens-shaped fixture would duplicate these lines and leave the ones
+ *  production appends unscanned. */
+export const VERIFY_LENSES = [
   {
     id: 'execute',
     title: 'executes',
@@ -740,7 +746,7 @@ export function verifierTitle(
   return `${head}: [${worst.severity}] ${group.findings.length} findings @ ${cause}`;
 }
 
-function buildVerifyPrompt(
+export function buildVerifyPrompt(
   d: AdversarialDetect,
   group: FindingGroup,
   lens: VerifyLens | null,
@@ -834,7 +840,7 @@ const SAFETY = [
   'non-destructive proof and stop.',
 ] as const;
 
-function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
+export function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
   return [
     agentDefinitionGuidance(
       a.id,

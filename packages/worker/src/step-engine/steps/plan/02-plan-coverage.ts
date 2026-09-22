@@ -533,6 +533,49 @@ function coverageSelfNodeId(agentId: string): string | null {
  * of them re-added exactly as many as were already there — the same subtree
  * again, which the cap was all that kept out of the plan.
  */
+/**
+ * The coverage re-decomposition prompt, thrown as a `MiningWaveError` wave from apply().
+ *
+ * Extracted from an inline template so it can be scanned by
+ * `steps/prompt-agent-paths.test.ts`: this step declares only `tool_use`, so
+ * `agentIsolationApplies` reaches this prompt, and a bare agent-directory path in it would
+ * silently stop the invocation being isolated. Every DECISION stays with the caller; only the
+ * TEXT moved, including the `.filter(Boolean)` that drops the blank separators — an empty line
+ * renders one of these blocks two different ways.
+ */
+export function buildCoverageRepairPrompt(args: {
+  subject: string;
+  repairInstruction: string;
+  lostDetail: string | null;
+  /** The section body, or null when no source section is in play. `''` is a real section with an
+   *  empty body and keeps its heading, exactly as the inline version did. */
+  sectionBody: string | null;
+  note: string | null;
+  maxChildren: number;
+  context: string[];
+}): string {
+  return [
+    `You are completing a project plan that is missing work under ${args.subject}.`,
+    '',
+    args.repairInstruction,
+    args.lostDetail ? `What the previous attempt lost: ${args.lostDetail}` : '',
+    '',
+    args.sectionBody == null ? '' : `The section reads:\n\n${args.sectionBody.slice(0, 20_000)}\n`,
+    args.note ? `The user adds: ${args.note}\n` : '',
+    `Hard breadth limit: no parent touched by this patch may have more than ${args.maxChildren} direct children in total. If a subject needs more parts, group them under meaningful intermediate nodes, with at most ${args.maxChildren} children under each group.`,
+    '',
+    ...args.context,
+    '',
+    'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
+    'duplicate a sibling under a different name — the reader is looking at this plan',
+    'and will see both.',
+    '',
+    PLAN_PATCH_CONTRACT,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 function structuralRepairInstruction(existingChildren: number, maxChildren: number): string {
   if (existingChildren === 0) {
     return [
@@ -1014,32 +1057,19 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           agentId: manualAgentId(base, nextManualRound(base, d.manualRounds)),
           agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
           roleKey: 'expand',
-          prompt: [
-            `You are completing a project plan that is missing work under ${subject}.`,
-            '',
-            structural
+          prompt: buildCoverageRepairPrompt({
+            subject,
+            repairInstruction: structural
               ? structuralRepairInstruction(existingChildren, maxChildren)
               : 'No node in the plan covers this section. Add what it describes, under whichever existing node fits best.',
-            structural?.detail ? `What the previous attempt lost: ${structural.detail}` : '',
-            '',
-            section
-              ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n`
-              : '',
-            note ? `The user adds: ${note}\n` : '',
-            `Hard breadth limit: no parent touched by this patch may have more than ${maxChildren} direct children in total. If a subject needs more parts, group them under meaningful intermediate nodes, with at most ${maxChildren} children under each group.`,
-            '',
-            ...(focus
+            lostDetail: structural?.detail ?? null,
+            sectionBody: section ? (d.sectionBodies[key] ?? '') : null,
+            note: note ?? null,
+            maxChildren,
+            context: focus
               ? [buildPlanExpansionContext(nodes, focus)]
-              : ['The plan as it stands (titles only):', '', planIndex]),
-            '',
-            'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
-            'duplicate a sibling under a different name — the reader is looking at this plan',
-            'and will see both.',
-            '',
-            PLAN_PATCH_CONTRACT,
-          ]
-            .filter(Boolean)
-            .join('\n'),
+              : ['The plan as it stands (titles only):', '', planIndex],
+          }),
         };
       });
 
