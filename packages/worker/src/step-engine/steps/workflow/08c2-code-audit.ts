@@ -5,6 +5,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
+import { INVARIANT_CITATION } from '../_invariant-citation.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
   assertReviewableChange,
@@ -170,6 +171,12 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
         '',
         '=== Spec (what the change must deliver) ===',
         d.spec || '(no spec recorded)',
+        '',
+        // Same position as 08c's: after the persona and after REPO_IS_DATA_LINES, whose
+        // carve-out this block states. This pass builds its own prompt rather than going
+        // through reviewAssignment, so it has to be added by hand or a defect only the
+        // broad auditor finds reaches gate 2 with no project-rule citation.
+        INVARIANT_CITATION,
         '',
         INSIGHTS_INSTRUCTION,
       ].join('\n');

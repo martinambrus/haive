@@ -12,6 +12,7 @@ import {
   type ReplannerOutput,
 } from '@haive/shared';
 import type { StepCapability } from '@haive/shared';
+import { INVARIANT_CITATION } from './steps/_invariant-citation.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
@@ -782,6 +783,13 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
     spec
       ? 'The criteria are a summary — also check the code against the spec sections themselves.'
       : '',
+    '',
+    // The per-issue DAG reviewer is the one whose findings cause EDITS: a `fix_required`
+    // verdict goes straight to `fixCoderPrompt` before the merge, where every other
+    // reviewer's output surfaces to a person at a gate. A fix coder told which documented
+    // rule the code breaks writes a fix that satisfies it; one handed an unsourced assertion
+    // is guessing at the contract.
+    INVARIANT_CITATION,
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',

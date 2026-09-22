@@ -20,6 +20,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence.js';
+import { INVARIANT_CITATION } from '../_invariant-citation.js';
 import { REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES, REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
@@ -820,6 +821,10 @@ function reviewAssignment(d: CodeReviewDetect): string {
     '=== Spec (what the change must deliver) ===',
     d.spec || '(no spec recorded)',
     '',
+    // Carried here rather than in each builder: peer, security and every level-gated lens
+    // share this block, and it already sits after their personas, which is where an
+    // instruction that must outrank an on-disk agent definition has to be.
+    `\n${INVARIANT_CITATION}`,
     INSIGHTS_INSTRUCTION,
     d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
   ]
