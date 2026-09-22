@@ -52,7 +52,7 @@ jobs:
         run: echo "HAIVE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Setup Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # No login action: the CLI does it in one line with the token the job already has.
       - name: Log in to GHCR
