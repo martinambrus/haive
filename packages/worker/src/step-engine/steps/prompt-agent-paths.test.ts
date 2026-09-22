@@ -407,54 +407,69 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
 ];
 
 /**
- * Exported `*Prompt` symbols that are deliberately NOT scanned, each with the reason. The
- * completeness case below fails if a new one appears in neither list — which is what ends the
- * round-by-round discovery that produced this file: llm, then loop, then mining, then waves, then
- * dag-executor's direct dispatches were each found one review at a time.
+ * Every exported prompt-like symbol this file SCANS, keyed `path#symbol` relative to the worker's
+ * `src/`. File-qualified rather than by bare identifier: two modules exporting the same name collapse
+ * into ONE entry under a name key, so the second source silently inherits the first's ruling and is
+ * never scanned. The cost is that moving a file edits this list, which is the point — the audit then
+ * reports the old key stale and the new one unclassified instead of carrying the ruling across.
  */
 const SCANNED_PROMPT_EXPORTS = [
-  'buildRefutePrompt',
-  'buildExpandPrompt',
-  'buildAgentSelectorPrompt',
-  'buildEnrichPrompt',
-  'reviewerPrompt',
-  'advisorPrompt',
-  'replannerPrompt',
-  'fixCoderPrompt',
-  'buildMergeFixPrompt',
-  'globalKbDigestPrompt',
-  'mcpSurfacePrompt',
-  'appReachPrompt',
-  'buildStepSummaryPrompt',
-  'buildAgentMiningSummaryPrompt',
-  'WORKTREE_GIT_BOUNDARY_PROMPT',
-  'DDEV_GENERATED_BOUNDARY_PROMPT',
-  'PROMPT_DEFECT_INSTRUCTION',
-  'adaptPromptForCliCapabilities',
-  'buildVerifyPrompt',
-  'buildAdversaryPrompt',
-  'buildSequencePrompt',
-  'buildCoverageRepairPrompt',
-  'appAuthPromptLines',
-  // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — names the sweep below
+  'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
+  'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
+  'step-engine/steps/workflow/_agent-selector.ts#buildAgentSelectorPrompt',
+  'step-engine/steps/kb-author/01-enrich.ts#buildEnrichPrompt',
+  'step-engine/dag-executor.ts#reviewerPrompt',
+  'step-engine/dag-executor.ts#advisorPrompt',
+  'step-engine/dag-executor.ts#replannerPrompt',
+  'step-engine/dag-executor.ts#fixCoderPrompt',
+  'step-engine/git-merge.ts#buildMergeFixPrompt',
+  'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
+  'sandbox/mcp-surface.ts#mcpSurfacePrompt',
+  'queues/cli-exec/app-reach.ts#appReachPrompt',
+  'step-engine/step-runner.ts#buildStepSummaryPrompt',
+  'step-engine/step-runner.ts#buildAgentMiningSummaryPrompt',
+  'repo/worktree-git-boundary.ts#WORKTREE_GIT_BOUNDARY_PROMPT',
+  'repo/ddev-generated-boundary.ts#DDEV_GENERATED_BOUNDARY_PROMPT',
+  'step-engine/steps/workflow/_prompt-defect.ts#PROMPT_DEFECT_INSTRUCTION',
+  'step-engine/steps/_retrieval-guidance.ts#adaptPromptForCliCapabilities',
+  'step-engine/steps/workflow/08d-adversarial-qa.ts#buildVerifyPrompt',
+  'step-engine/steps/workflow/08d-adversarial-qa.ts#buildAdversaryPrompt',
+  'step-engine/steps/plan/03-plan-sequence.ts#buildSequencePrompt',
+  'step-engine/steps/plan/02-plan-coverage.ts#buildCoverageRepairPrompt',
+  'step-engine/steps/workflow/_app-auth.ts#appAuthPromptLines',
+  // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — symbols the sweep below
   // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
   // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
   // audit cannot name is still a source.
 ];
 
+/**
+ * Exported prompt-like symbols deliberately NOT scanned, each with the reason, keyed the same
+ * `path#symbol` way. The completeness case below fails if a new one appears in neither list — which is
+ * what ends the round-by-round discovery that produced this file: llm, then loop, then mining, then
+ * waves, then dag-executor's direct dispatches were each found one review at a time.
+ */
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
-  antigravityStdinPrompt: 'wraps an already-built prompt for stdin; adds no text of its own',
-  deliverPrompt: 'delivery mechanism (argv vs stdin), not a builder',
-  expiredPromptFilter: 'a SQL predicate for stream-log retention',
-  parsePromptDefects: 'a parser of agent OUTPUT',
-  assembleNativePrompt:
+  'cli-adapters/antigravity.ts#antigravityStdinPrompt':
+    'wraps an already-built prompt for stdin; adds no text of its own',
+  'cli-adapters/prompt-delivery.ts#deliverPrompt':
+    'delivery mechanism (argv vs stdin), not a builder',
+  'queues/cli-exec/stream-log-retention.ts#expiredPromptFilter':
+    'a SQL predicate for stream-log retention',
+  'step-engine/steps/workflow/_prompt-defect.ts#parsePromptDefects': 'a parser of agent OUTPUT',
+  'sub-agent-emulator/native-mode.ts#assembleNativePrompt':
     'sub-agent assembly — `input.kind` is not `prompt` there, so agentIsolationApplies excludes it',
-  buildAgentDiscoveryPrompt: "06_5's llm builder, already scanned through the registry",
-  PROMPT_ARGV_LIMIT_BYTES: 'a byte limit for argv delivery, not text',
-  PROMPT_FILE_PATH: 'the in-container path a long prompt is written to, not text',
-  promptCarriesPastedPersona: 'a predicate ABOUT a prompt; contributes no text',
-  promptDefectFingerprint: 'a fingerprint over a defect, not prompt text',
-  promptGuidanceStep:
+  'step-engine/steps/onboarding/06_5-agent-discovery.ts#buildAgentDiscoveryPrompt':
+    "06_5's llm builder, already scanned through the registry",
+  'cli-adapters/prompt-delivery.ts#PROMPT_ARGV_LIMIT_BYTES':
+    'a byte limit for argv delivery, not text',
+  'cli-adapters/prompt-delivery.ts#PROMPT_FILE_PATH':
+    'the in-container path a long prompt is written to, not text',
+  'step-engine/steps/_retrieval-guidance.ts#promptCarriesPastedPersona':
+    'a predicate ABOUT a prompt; contributes no text',
+  'step-engine/steps/workflow/_prompt-defect.ts#promptDefectFingerprint':
+    'a fingerprint over a defect, not prompt text',
+  'step-engine/steps/workflow/11e-prompt-guidance.ts#promptGuidanceStep':
     '11e-prompt-guidance StepDefinition — already scanned through the registry; it matches only ' +
     'because the step is NAMED for prompts',
   // The four augmenters take a `db` and RETURN THE PROMPT UNCHANGED when there is no data — no
@@ -464,10 +479,14 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   // text is data-derived (filenames, stored guidance) rather than a static template, so a fixed bare
   // agent path cannot live in the part that varies; a path in their unconditional wrapper text is a
   // real residual gap and is recorded as one here.
-  augmentPromptWithLedger: 'data-derived; returns the prompt unchanged with no ledger entries',
-  augmentPromptWithAttachments: 'data-derived; returns the prompt unchanged with no attachments',
-  augmentPromptWithLearnedGuidance: 'data-derived; returns the prompt unchanged with no guidance',
-  augmentPromptWithTerseness: 'reads a config value; returns the prompt unchanged when unset',
+  'step-engine/task-ledger.ts#augmentPromptWithLedger':
+    'data-derived; returns the prompt unchanged with no ledger entries',
+  'step-engine/attachments-context.ts#augmentPromptWithAttachments':
+    'data-derived; returns the prompt unchanged with no attachments',
+  'step-engine/guidance-context.ts#augmentPromptWithLearnedGuidance':
+    'data-derived; returns the prompt unchanged with no guidance',
+  'step-engine/terseness-context.ts#augmentPromptWithTerseness':
+    'reads a config value; returns the prompt unchanged when unset',
 };
 
 /** Every prompt production can dispatch, across all three registry paths plus the named builders. */
@@ -651,7 +670,9 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // exported prompt builder now fails here until someone either scans it or excludes it by name.
     const { readdirSync, readFileSync, statSync } = await import('node:fs');
     const { fileURLToPath } = await import('node:url');
-    const srcRoot = fileURLToPath(new URL('../../', import.meta.url));
+    // No trailing slash: `walk` joins with its own, and a doubled separator would leave every relative
+    // path below starting with one — a `path#symbol` key that matches nothing in either list.
+    const srcRoot = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/, '');
 
     const files: string[] = [];
     const walk = (dir: string): void => {
@@ -663,30 +684,36 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     };
     walk(srcRoot);
 
+    // Keyed `path#symbol`, never by the identifier alone: two modules exporting the same prompt-like
+    // name are TWO sources, and a name key merges them into one — whichever was classified first then
+    // vouches for a module nothing has read.
     const exported = new Set<string>();
     for (const file of files) {
       const src = readFileSync(file, 'utf8');
+      const rel = file.slice(srcRoot.length + 1);
       // Case-INSENSITIVE, and matched on the whole identifier rather than a `Prompt` substring
       // pattern: the repository names constant blocks in SCREAMING_CASE (`WORKTREE_GIT_BOUNDARY_PROMPT`,
       // `DDEV_GENERATED_BOUNDARY_PROMPT`), which a case-sensitive `\w*Prompt\w*` misses entirely — so
       // the first version of this "exhaustive" audit was not.
       for (const m of src.matchAll(/^export (?:async )?function (\w+)\s*\(/gm)) {
-        if (/prompt/i.test(m[1]!)) exported.add(m[1]!);
+        if (/prompt/i.test(m[1]!)) exported.add(`${rel}#${m[1]!}`);
       }
       for (const m of src.matchAll(/^export const (\w+)\s*[=:]/gm)) {
-        if (/prompt/i.test(m[1]!)) exported.add(m[1]!);
+        if (/prompt/i.test(m[1]!)) exported.add(`${rel}#${m[1]!}`);
       }
     }
 
     const scanned = new Set(SCANNED_PROMPT_EXPORTS);
     const unclassified = [...exported]
-      .filter((name) => !scanned.has(name) && !(name in NOT_A_DISPATCHED_PROMPT))
+      .filter((key) => !scanned.has(key) && !(key in NOT_A_DISPATCHED_PROMPT))
       .sort();
     expect(unclassified).toEqual([]);
 
-    // No stale bookkeeping either: every name claimed as scanned or excluded must still exist.
+    // No stale bookkeeping either: every key claimed as scanned or excluded must still exist. A moved
+    // file therefore fails BOTH assertions, which is the honest reading — the ruling was made about a
+    // module at a path, and the path is half of what was ruled on.
     const stale = [...scanned, ...Object.keys(NOT_A_DISPATCHED_PROMPT)]
-      .filter((name) => !exported.has(name))
+      .filter((key) => !exported.has(key))
       .sort();
     expect(stale).toEqual([]);
 
