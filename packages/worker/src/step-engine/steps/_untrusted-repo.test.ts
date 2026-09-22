@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_AUTHORING_LINES,
+  REPO_IS_DATA_LINES,
+  REPO_IS_DATA_ONE_CLASS_LINES,
   collapseToLine,
   fenceSafe,
   fencedAgentBlock,
@@ -61,6 +65,48 @@ describe('the one-line rule is a CLASS, not a list', () => {
     expect(safeTitle('x'.repeat(500))).toHaveLength(200);
     expect(safeTitle('\u0085\u001e')).toBe('(untitled)');
     expect(safeTitle(null)).toBe('(untitled)');
+  });
+});
+
+describe('the persona carve-out', () => {
+  // These arrays are WRAPPED prose, so a phrase routinely straddles two entries. Every
+  // assertion below reads the block as one line, or it pins the wrap rather than the words.
+  const flat = (block: readonly string[]): string => block.join(' ').replace(/\s+/g, ' ');
+
+  const VARIANTS = [
+    ['reviewing', REPO_IS_DATA_LINES],
+    ['one-class', REPO_IS_DATA_ONE_CLASS_LINES],
+    ['acting', REPO_IS_DATA_ACTING_LINES],
+    ['authoring', REPO_IS_DATA_AUTHORING_LINES],
+  ] as const;
+
+  it('every variant makes it, so no step is told its own persona is data', () => {
+    // ONE_CLASS shipped without one, and 05's reviewer is wrapped in
+    // `agentDefinitionGuidance` — it would have been told the definition it was just
+    // pointed at is data.
+    for (const [label, block] of VARIANTS) {
+      expect(flat(block), label).toContain('is your PERSONA');
+    }
+  });
+
+  it('every variant STATES ITS LIMIT — a carve-out with none is a licence', () => {
+    // The limit is the half that matters and it is easy to leave out: a persona says HOW to
+    // work and never what the agent may find, edit or conclude.
+    for (const [label, block] of VARIANTS) {
+      expect(flat(block), label).toMatch(/not obeyed|not a requirement/);
+    }
+  });
+
+  it('a REPORTING pass refuses suppression, downgrade and a dictated verdict', () => {
+    // Narrowing what it looks at is not the whole attack: a checked-in persona telling a
+    // spec reviewer to answer APPROVED with no findings, or to downgrade everything, acts
+    // after the inspection rather than before it.
+    for (const [label, block] of [VARIANTS[0], VARIANTS[1]] as const) {
+      const text = flat(block);
+      expect(text, label).toContain('downgrade');
+      expect(text, label).toContain('verdict');
+      expect(text, label).toMatch(/what you actually observed/);
+    }
   });
 });
 
