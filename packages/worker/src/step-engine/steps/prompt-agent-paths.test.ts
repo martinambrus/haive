@@ -529,16 +529,34 @@ function promptSources(): PromptSource[] {
     }
     const iteration = def.loop?.buildIterationPrompt;
     if (iteration) {
-      out.push({
-        label: `${id} (loop iteration)`,
-        build: () =>
-          iteration({
-            detected: permissive(),
-            formValues: permissive(),
-            iteration: 1,
-            previousIterations: [],
-          }),
-      });
+      // One source per ROLE, not one per step and not a sample of one iteration. Four loop steps give
+      // an iteration two different prompts: 05, 07b and 08a on PARITY (`iteration % 2 === 0`, so
+      // reviewer/validator/tester on even and corrector/fixer on odd) and 07a on `iteration === 0`.
+      // A fixed `iteration: 1` built only the odd arm, so a bare agent path in a re-review prompt
+      // would have disabled isolation in production with every assertion here still passing.
+      //
+      // The roles come from the loop's own `resolveRole`, so this cannot drift from the step's rule.
+      // Where there is none, 0 and 1 are still both built: 08b and 09_5 branch on `iteration === 0`
+      // inside apply and may grow the same split in their prompt.
+      const loop = def.loop!;
+      const cap = Math.max(1, Math.min(loop.maxIterations ?? 1, 4));
+      const byRole = new Map<string, number>();
+      for (let n = 0; n <= cap; n += 1) {
+        const role = loop.resolveRole?.(n) ?? (n === 0 ? 'first' : 'later');
+        if (!byRole.has(role)) byRole.set(role, n);
+      }
+      for (const [role, n] of byRole) {
+        out.push({
+          label: `${id} (loop iteration ${n}/${role})`,
+          build: () =>
+            iteration({
+              detected: permissive(),
+              formValues: permissive(),
+              iteration: n,
+              previousIterations: [],
+            }),
+        });
+      }
     }
     const mining = def.agentMining;
     if (mining) {
@@ -626,7 +644,9 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const labels = promptSources().map((s) => s.label);
     // Each path is asserted present, because each was missing at some point in this file's history:
     // mining and loop-iteration prompts were both invisible while every count still looked plausible.
-    expect(labels.some((l) => l.endsWith('(loop iteration)'))).toBe(true);
+    // Matched on the SHAPE `(loop iteration <n>/<role>)`, because the loop path now contributes one
+    // source per role rather than one per step.
+    expect(labels.some((l) => /\(loop iteration \d+\/.+\)$/.test(l))).toBe(true);
     expect(labels.some((l) => l.endsWith('(mining)'))).toBe(true);
     expect(labels.some((l) => !l.endsWith(')'))).toBe(true);
   });
@@ -643,13 +663,19 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     //     prior-setup definitions as evidence about the REPOSITORY. Masking that directory would hide
     //     the files it is being asked to interpret.
     //   09_5-skill-generation declares `file_write` on both its llm and mining specs, so
-    //     `agentIsolationApplies` already excludes it two conditions earlier. Its paths are moot.
+    //     `agentIsolationApplies` already excludes it two conditions earlier. Its paths are moot. Both
+    //     of its loop roles name one, which is why it appears twice.
+    //
+    // What enumerating the loop ROLES showed, and it is the reassuring answer rather than a new hole:
+    // the even/first arms of 05, 07b, 08a and 07a — reviewer, validator, tester, simplifier, none of
+    // which this scan built while it sampled `iteration: 1` — are all CLEAN. No step joined this list.
     //
     // An explicit list rather than a snapshot: `vitest -u` rewrites a snapshot silently.
     expect(named).toEqual([
       '06_5-agent-discovery',
       '09_5-skill-generation',
-      '09_5-skill-generation (loop iteration)',
+      '09_5-skill-generation (loop iteration 0/first)',
+      '09_5-skill-generation (loop iteration 1/later)',
     ]);
   });
 
@@ -686,10 +712,15 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const { clean, named, unbuildable } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(40);
+    // MEASURED 2026-09-22: 90 clean + 4 named = 94 built, 12 unreachable. The floor sat at 40 while the
+    // loop path contributed one source per STEP; per-role it contributes 12, and a floor less than half
+    // the real number is a ratchet that never catches anything.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(90);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
-    expect(unbuildable.length).toBeLessThanOrEqual(14);
+    // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
+    // into slack. One-directional on purpose: something becoming reachable must never fail this.
+    expect(unbuildable.length).toBeLessThanOrEqual(12);
     // Every NAMED builder must actually build, or the coverage claimed by listing it is fiction.
     // This is the check that would have caught a hand-added source silently landing in the
     // unreachable bucket while the counts still looked healthy.
