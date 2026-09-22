@@ -10,7 +10,7 @@ import {
 } from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
-import { buildExpandPrompt } from './plan/01-plan-build.js';
+import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
 import { advisorPrompt, fixCoderPrompt, replannerPrompt, reviewerPrompt } from '../dag-executor.js';
@@ -288,6 +288,35 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
     build: () => buildExpandPrompt(permissive(), permissive(), permissive(), permissive()),
   },
+  // The ROOT prompt, which is what `01-plan-build`'s INITIAL mining dispatch sends — a different builder
+  // from `buildExpandPrompt` below, and one this file had never reached. Its `sourceGuidance` has an arm
+  // per build mode and the proxy fails every strict comparison, so only the `from_repo` fallback was
+  // ever rendered: the `from_md` decomposition instruction and the whole greenfield block (including the
+  // `inputIndexPath` sub-arm that names the extracted-sidecar index) were dark.
+  ...(
+    [
+      { mode: 'from_repo', inputIndexPath: null },
+      { mode: 'from_md', inputIndexPath: null },
+      { mode: 'greenfield', inputIndexPath: null },
+      { mode: 'greenfield', inputIndexPath: '_PLAN_INPUTS.md' },
+    ] as const
+  ).map((arm) => ({
+    label: `01-plan-build buildRootPrompt (${arm.mode}${arm.inputIndexPath ? ', with input index' : ''})`,
+    exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildRootPrompt',
+    build: () =>
+      buildRootPrompt(
+        permissive({
+          mode: arm.mode,
+          repoName: 'haive',
+          inputIndexPath: arm.inputIndexPath,
+          existingNodeCount: 0,
+          hasRoot: false,
+          brief: 'Reject anonymous callers on the admin route.',
+          kbFiles: [],
+        }),
+        permissive({ depth: 3 }),
+      ),
+  })),
   // BOTH plan modes. `d.mode === 'from_repo'` is a strict comparison against a literal, which a proxy
   // always fails — so the two `from_repo` arms, one of which splices the whole retrieval protocol,
   // were never rendered. The bare-proxy source above is kept: it IS the greenfield arm, and keeping it
@@ -1246,7 +1275,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 135 clean + 10 named = 145 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 139 clean + 10 named = 149 built, 3 unreachable. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
     // axis, which doubles every loop role. The floor sat at 40 when
@@ -1256,7 +1285,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(145);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(149);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1439,6 +1468,26 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const merge = await textFor('git-merge buildMergeFixPrompt');
     expect(merge).toContain('User guidance for resolving this conflict:');
     expect(merge).toContain('Conflicting branch: feat/admin-auth.');
+  });
+
+  it('RENDERS every build-mode arm of the plan ROOT prompt', async () => {
+    const built = (
+      await Promise.all(
+        promptSources()
+          .filter((source) => source.label.startsWith('01-plan-build buildRootPrompt'))
+          .map(async (source) => builtEntries(source, await source.build())),
+      )
+    ).flat();
+    expect(built.length).toBe(4);
+    const all = built.map((b) => b.prompt).join('\n\n');
+
+    // `sourceGuidance` keys on `d.mode` with strict comparisons, so a proxy reached only the third of
+    // these. The first two are whole instruction blocks, not variations on a sentence.
+    expect(all).toContain('The user attached a document describing what they want built');
+    expect(all).toContain('This project does not exist yet.');
+    // The nested arm: an input index exists only for greenfield, and it NAMES a file for the agent to
+    // open, which is precisely the kind of text this tripwire is scanning for.
+    expect(all).toContain('Read _PLAN_INPUTS.md FIRST.');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {

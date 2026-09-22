@@ -358,7 +358,10 @@ function sourceGuidance(d: PlanBuildDetect): string {
   ].join('\n');
 }
 
-function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
+/** The INITIAL mining dispatch's prompt (wave 0), distinct from `buildExpandPrompt`'s per-node one.
+ *  Exported for the prompt-path tripwire: its `sourceGuidance` has a branch per build mode, and only a
+ *  real mode string reaches any but the fallback. */
+export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
   return [
     `You are drafting the top of a project plan for "${d.repoName}".`,
     '',
