@@ -31,7 +31,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES, safeTitle } from '../_untrusted-repo.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
@@ -410,7 +410,11 @@ export function buildExpandPrompt(
     planMarkdown,
     '',
     `## Your node`,
-    `${node.title} (\`node:${node.id}\`, version ${node.version})`,
+    // A plan title is `z.string().max(512)`, and `.trim()` leaves interior newlines
+    // intact — so a title can put its own instruction line in the trusted preamble,
+    // above every block below it. `buildPlanExpansionContext` already collapses each
+    // title it renders; this one was the one interpolated raw.
+    `${safeTitle(node.title)} (\`node:${node.id}\`, version ${node.version})`,
     '',
     `Break THIS node down into at most ${breadthCap(values)} children. Every new node must have`,
     `\`"parentRef": "${node.id}"\` or the ref of one of your own new nodes.`,

@@ -251,7 +251,11 @@ export function findStructuralGaps(
   const latestAttempts = latestExpansionAttempts(agents);
   const out: StructuralGap[] = [];
   const detailOf = (message: string | null, prefix: string): { detail?: string } => {
-    const detail = message?.startsWith(prefix) ? message.slice(prefix.length).trim() : '';
+    // Collapsed to one line, not merely trimmed: the stamp quotes agent-supplied refs
+    // and zod messages, and the repair prompt names it on a line of its own.
+    const detail = message?.startsWith(prefix)
+      ? message.slice(prefix.length).replace(/\s+/g, ' ').trim()
+      : '';
     return detail ? { detail } : {};
   };
 

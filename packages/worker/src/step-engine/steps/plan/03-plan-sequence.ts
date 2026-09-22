@@ -26,6 +26,7 @@ import {
   PLAN_AGENT_TIMEOUT_MS,
 } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import { safeTitle } from '../_untrusted-repo.js';
 
 /**
  * Put the plan in BUILD ORDER.
@@ -396,12 +397,12 @@ function buildSequencePrompt(
     planMarkdown,
     '',
     '## Your node',
-    `${target.parentTitle} (\`node:${target.parentId}\`)`,
+    `${safeTitle(target.parentTitle)} (\`node:${target.parentId}\`)`,
     '',
     'Its children, in their CURRENT order — which is the order an agent happened to write them',
     'in, not a considered one:',
     '',
-    ...children.map((c, i) => `${i}. ${c.title} (\`node:${c.id}\`)`),
+    ...children.map((c, i) => `${i}. ${safeTitle(c.title)} (\`node:${c.id}\`)`),
     '',
     'Decide the order a developer would actually build these in: foundations, data shapes and',
     'contracts before the things that use them; a thing before the thing that tests or presents',
