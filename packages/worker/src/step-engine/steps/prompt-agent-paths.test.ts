@@ -22,6 +22,7 @@ import { buildAgentMiningSummaryPrompt, buildStepSummaryPrompt } from '../step-r
 import { WORKTREE_GIT_BOUNDARY_PROMPT } from '../../repo/worktree-git-boundary.js';
 import { DDEV_GENERATED_BOUNDARY_PROMPT } from '../../repo/ddev-generated-boundary.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
+import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabilities.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -230,6 +231,21 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     build: () => DDEV_GENERATED_BOUNDARY_PROMPT,
   },
   { label: 'PROMPT_DEFECT_INSTRUCTION (const block)', build: () => PROMPT_DEFECT_INSTRUCTION },
+  // `NO_VISION_BOUNDARY_PROMPT` is PRIVATE to `cli-adapters/model-capabilities.ts`, so neither it nor
+  // its wrapper's name matches the export audit below — yet `dispatcher.ts:517` appends it AFTER the
+  // isolation decision. Reached through the exported wrapper, with a fixture that satisfies its guard
+  // (`resolveModelLimits` returns the limits only when `modelLimits.model` equals `provider.model`,
+  // and the block is added only for `vision === false`). A permissive proxy takes the other branch and
+  // returns the prompt untouched.
+  {
+    label: 'withModelCapabilityBoundary (no-vision block)',
+    build: () =>
+      withModelCapabilityBoundary('BASE PROMPT', {
+        name: 'claude-code',
+        model: 'vision-less-model',
+        modelLimits: { model: 'vision-less-model', vision: false },
+      } as unknown as Parameters<typeof withModelCapabilityBoundary>[1]),
+  },
   // `adaptPromptForCliCapabilities` SUBSTITUTES text — the retrieval-protocol cell for the provider's
   // (LSP, rag) pair, and the agent-guidance arm — and it runs AFTER `agentIsolationApplies` has
   // decided. So a variant that named an agent directory would reach an invocation whose mask hides
@@ -298,6 +314,10 @@ const SCANNED_PROMPT_EXPORTS = [
   'DDEV_GENERATED_BOUNDARY_PROMPT',
   'PROMPT_DEFECT_INSTRUCTION',
   'adaptPromptForCliCapabilities',
+  // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — names the sweep below
+  // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
+  // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
+  // audit cannot name is still a source.
 ];
 
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
@@ -496,7 +516,14 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
   });
 
-  it('classifies EVERY exported prompt symbol, so a new one cannot escape unnoticed', async () => {
+  it('classifies every EXPORTED prompt symbol — private fragments are a stated gap', async () => {
+    // Scope, stated precisely because an earlier version of this comment implied exhaustiveness and
+    // was wrong: this audits EXPORTED symbols whose name contains "prompt". Prompt text living in a
+    // PRIVATE constant is invisible to it, and such text exists — `NO_VISION_BOUNDARY_PROMPT` is
+    // private to `cli-adapters/model-capabilities.ts` and appended at `dispatcher.ts:517`, with a
+    // wrapper whose own name contains no "prompt" either. That one is scanned above through its
+    // wrapper; another private fragment reached by a differently-named wrapper would evade this audit,
+    // and no name-based rule can close that. It is a real boundary, not an oversight.
     // This case exists because of how this file grew: llm, then loop iterations, then mining, then
     // mining waves, then dag-executor's direct dispatches were each found ONE REVIEW AT A TIME, and
     // every intermediate version looked complete. Enumerating the symbols ends that loop — a new
