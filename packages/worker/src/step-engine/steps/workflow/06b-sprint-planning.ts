@@ -14,6 +14,7 @@ import { resolveSpecView } from './_spec-artifact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, fileOverlapTaskIds, overlapRefinedEstimate } from './_estimate.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import { loadSeededPlanNodes, renderPlanOrderingConstraint } from './_plan-task-nodes.js';
 
 // Phase 2c — Sprint planning (the DAG decision). An agent reads the spec
@@ -139,6 +140,12 @@ const PLANNER_RULES = [
   'together), completable by one agent in one session, scoped to specific spec sections. Use',
   '`depends_on` for ordering and `level` for the dependency wave (0 = no dependencies). Set',
   '`max_parallel` to the widest level size (no hard cap — the runner bounds live parallelism).',
+  '',
+  // Before the search instruction below, not after: the rule about what it reads has to
+  // arrive before it is told to go read. Joined into one element so the block's blank lines
+  // survive whether or not this array is filtered.
+  REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+  '',
   'Search the repo to size issues and list the files each will touch, in this order:',
   ...retrievalGuidanceLines(),
   '',
