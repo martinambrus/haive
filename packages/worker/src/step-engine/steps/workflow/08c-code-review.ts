@@ -359,7 +359,10 @@ const MAX_REFUTERS = 10;
  *  our default runs the other way: the plugin's verifiers default to FALSE_POSITIVE and a
  *  wrong dismissal there costs a reader's attention, while here gate 2 defaults to approve
  *  when nothing blocks, so a wrongly-dismissed critical is one click from shipping. */
-const REFUTE_LENSES = [
+/** The refuter panel's lenses. Exported for the prompt-path tripwire, which must scan each lens's REAL
+ *  text: a lens-shaped literal built in the test would duplicate these lines and leave production's own
+ *  unscanned. Same reason as 08d's `VERIFY_LENSES`. */
+export const REFUTE_LENSES = [
   {
     id: 'reach',
     title: 'reachability',
@@ -535,7 +538,10 @@ export function isRefuted(raw: unknown): boolean {
   return hasFileLineEvidence(parsed.evidence);
 }
 
-function buildRefutePrompt(
+/** Exported for `prompt-agent-paths.test.ts`: this prompt is dispatched as a SECOND mining wave
+ *  (`MiningWaveError`), so the isolation rule scans it exactly like a first-wave one, and a wave
+ *  prompt is otherwise unreachable from a unit test without running `apply()`. */
+export function buildRefutePrompt(
   d: CodeReviewDetect,
   f: RefutableFinding,
   lens: RefuteLens | null,

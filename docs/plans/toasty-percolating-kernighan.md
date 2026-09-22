@@ -1,8 +1,17 @@
 # Per-call agent isolation (PR 1)
 
 > **LANDED 2026-09-21, in six PRs** — #191 `7deb542d`, #192 `bde5722e`, #193 `fe3148a5`, #194
-> `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45`. What is left is this plan's own Verification
-> section: items 1, 2 and 4. Planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against
+> `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45`. **Verification item 2 COMPLETED 2026-09-22** in #200
+> (two assertions) and #202 `842012ff` (the third, the built-in prompt-builder scan). What is left is
+> items 1 and 4, both of which need a live run.
+>
+> Item 2's own work found a PRODUCTION defect the plan had not predicted, fixed in #211 `689f842a`:
+> `adaptPrompt` splices the MCP surface and the global-KB digest in AFTER `agentIsolationApplies`
+> returns, and both carry text Haive did not write — a repository's own `mcpServers` keys and
+> author-written KB titles — so either could put an agent path into the final prompt of an invocation
+> already chosen for isolation. The rule now has a SEVENTH condition scanning those resolved values.
+> That is the argument for writing the assertion rather than reasoning about it: the scan was specified
+> to catch a new prompt builder, and what it actually caught was the dispatcher. Planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against
 > the code the same day. Built-in steps only; custom task types reach the same rule through
 > `rippling-wibbling-puffin` Phase 3.1, whose companion edits are listed below and are ALREADY
 > FOLDED INTO that plan — its prompt-template entry shape carries `agentPool?`, its `{{agent:<id>}}`
@@ -707,7 +716,18 @@ scratch.
    - a fixture repository with a distinct sentinel in each candidate instruction file (`CLAUDE.md`,
      `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, and a copy in a nested directory) shows which of
      them each CLI puts in its first request, checked against its `rulesFile` and that file's imports.
-2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
+2. **DONE** — #200 landed the catalog and `invocationRepoSubpath` assertions; #202 landed the
+   built-in-prompt-builder scan as `packages/worker/src/step-engine/steps/prompt-agent-paths.test.ts`,
+   which boots the production registry and scans 186 built prompts across every dispatch path (llm,
+   loop by role x truncation-retry x history x detect-variant, mining, `MiningWaveError` waves, the
+   direct `resolveTaskDispatch` calls no registry step owns, and the blocks spliced in after the
+   decision). Thirteen prompts legitimately name a path, each with its reason recorded; three sources
+   stay unreachable and are asserted BY NAME because `selectAgents` needs a live database there. Two
+   things that file learned the hard way are worth carrying into any similar harness: a permissive
+   proxy stand-in reaches only a builder's DEFAULT arm, and an assertion written to bound a gap will
+   hide it unless it names what it tolerates.
+
+   Unit tests (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
    masks under a masked directory dropped), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included; the pointer inside a prompt's persona marker does not count, while the same marker-shaped block inside a pasted body does and keeps the invocation unmasked), a catalog assertion that
@@ -715,8 +735,19 @@ scratch.
    `promptNamesAgentPath` (`.claude/agents/`, `.claude/agents`, `.claude/agents/x.md`,
    `./.claude/agents/x.md` and `/haive/workdir/.claude/agents/x.md` in running text match; `.claude`,
    `docs/.claude/agents/x.md` and `.claude/agents-old/x.md` do not; among built-in prompt builders,
-   with persona markers removed the way `agentIsolationApplies` removes them, only 06_5 and 09_5 match, so a new match fails the test and
-   becomes a conscious decision), marker ids, the persona path
+   with persona markers removed the way `agentIsolationApplies` removes them, every match is an explicit
+   list entry, so a new one fails the test and becomes a conscious decision — the criterion is the
+   EXPLICITNESS, not a count. As built the list holds 13, and each is a decision rather than a leak:
+   `06_5-agent-discovery`, whose prose legitimately points at prior-setup agent files and which declares
+   `requiredCapabilities: []`, so this scan IS what disables its isolation; `09_5-skill-generation` in six
+   variants (llm, both loop roles, both truncation-retry roles and its four-agent mining fan-out), moot
+   because it declares `file_write` and is excluded two conditions earlier; `11-final-review`'s no-agents
+   variant, where the path arrives in DATA rather than a template — it serialises its findings and the
+   `no-agents` finding interpolates the agent directory it is reporting as empty; and two fixtures that
+   exist to exercise the SEVENTH condition (a repository-shaped MCP server name and a KB digest title),
+   which are positives by construction. Planned as "only 06_5 and 09_5", which was right for the three
+   paths this plan knew about and wrong once the scan reached the wave, data-carried and post-decision
+   ones), marker ids, the persona path
    (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec, including one whose file was deleted before exec / the link, FIFO, pseudo-file and out-of-tree cases DELEGATED to `packages/shared/test/fs-safe.test.ts`, which already pins them for the primitive this reader now calls — a symlinked or out-of-tree `<id>.md`, an agent directory swapped for a symlink, a FIFO that does not block, a pseudo-file reporting size 0 — so they are asserted once, where the guarantee lives / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv

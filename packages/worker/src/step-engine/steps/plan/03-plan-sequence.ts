@@ -383,7 +383,7 @@ export function sequencePassComplete(pendingTargets: number, agentsUsed: number)
   return pendingTargets === 0 || agentsUsed >= SEQUENCE_AGENTS_PER_PASS;
 }
 
-function buildSequencePrompt(
+export function buildSequencePrompt(
   target: SequenceTarget,
   children: PlanNodeSkeleton[],
   planMarkdown: string,
