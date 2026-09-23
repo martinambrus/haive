@@ -5,7 +5,6 @@ import {
   readdirNoFollow,
   removeNoFollow,
   renameNoFollow,
-  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, asc, eq, isNull } from 'drizzle-orm';
@@ -17,17 +16,16 @@ import {
   ATTACHMENT_ARCHIVE_MAX_FILES,
   ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES,
   ATTACHMENT_MAX_PATH_LENGTH,
-  ATTACHMENTS_MANIFEST_NAME,
   AttachmentPathError,
   detectAttachmentArchiveFormat,
   isReservedAttachmentName,
   logger,
-  renderAttachmentsManifest,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
   splitAttachmentPath,
   splitAttachmentStoredPath,
 } from '@haive/shared';
+import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
 import { extractArchive } from '../repo/clone.js';
 import { collapseToLine } from '../step-engine/steps/_untrusted-repo.js';
 
@@ -238,32 +236,6 @@ async function harmonize(anchor: string, rel: string, mode: number): Promise<voi
   await chmodNoFollow(anchor, rel, mode).catch(() => {});
 }
 
-/** Rewrite `_ATTACHMENTS.md` from the task's rows. The api owns this file on
- *  upload and delete; expansion is the third writer, and a prompt that tells every
- *  agent to read it must not point at an index missing the files just added. */
-async function rewriteManifest(
-  db: Database,
-  taskId: string,
-  anchor: string,
-  uploadsRel: string,
-): Promise<void> {
-  const rows = await db.query.taskAttachments.findMany({
-    where: eq(schema.taskAttachments.taskId, taskId),
-    orderBy: asc(schema.taskAttachments.createdAt),
-    columns: { filename: true, description: true },
-  });
-  const manifestRel = `${uploadsRel}/${ATTACHMENTS_MANIFEST_NAME}`;
-  const body = renderAttachmentsManifest(rows);
-  if (body === null) {
-    await removeNoFollow(anchor, manifestRel).catch(() => {});
-    return;
-  }
-  // Replace-atomic, and owned by the sandbox uid: every agent is told to read this index, so a
-  // reader must see the old one or the new one and never a partial write.
-  await writeFileNoFollow(anchor, manifestRel, body, { fileMode: 0o644 });
-  await harmonize(anchor, manifestRel, 0o644);
-}
-
 /** Move one extracted file to its place under the uploads dir, creating the
  *  directories it needs. Returns the relative path it now lives at. */
 async function placeFile(
@@ -457,11 +429,9 @@ export async function ensureArchivesExpanded(
     if (note) result.notes.push({ filename: archive.filename, note });
   }
 
-  if (result.filesAdded > 0) {
-    await rewriteManifest(db, taskId, anchor, uploadsRel).catch((err: unknown) => {
-      log.warn({ err, taskId }, 'could not rewrite the attachments manifest after expansion');
-    });
-  }
+  // The api writes this index on upload and delete; the expansion is the third writer, and a prompt
+  // that tells every agent to read it must not point at an index missing the files just added.
+  if (result.filesAdded > 0) await rewriteAttachmentsManifest(db, taskId, anchor, uploadsRel);
   log.info(
     { taskId, expanded: result.expanded, filesAdded: result.filesAdded },
     'expanded task archives',

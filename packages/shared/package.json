@@ -79,6 +79,10 @@
       "types": "./dist/fs-safe.d.ts",
       "import": "./dist/fs-safe.js"
     },
+    "./attachments-fs": {
+      "types": "./dist/attachments-fs.d.ts",
+      "import": "./dist/attachments-fs.js"
+    },
     "./knowledge-paths": {
       "types": "./dist/knowledge-paths.d.ts",
       "import": "./dist/knowledge-paths.js"

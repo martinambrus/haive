@@ -586,6 +586,29 @@ describe('fs-safe write primitives', () => {
         reason: 'invalid-path',
       });
     });
+
+    it('replaceLeafLink replaces a link AS a link and inherits nothing from it', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
+      await symlink(path.join(outside, 'nowhere.txt'), path.join(root, 'dangling.txt'));
+      for (const name of ['live.txt', 'dangling.txt']) {
+        expect(await writeFileNoFollow(root, name, 'generated', { replaceLeafLink: true })).toBe(
+          'overwritten',
+        );
+        const st = await lstat(path.join(root, name));
+        expect(st.isFile()).toBe(true);
+        // A link's own mode is 0777; the file written in its place must not carry it on.
+        expect(st.mode & 0o777).toBe(0o644);
+        expect(await readFile(path.join(root, name), 'utf8')).toBe('generated');
+      }
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+      await expect(lstat(path.join(outside, 'nowhere.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      // Only a LINK is replaced: anything else at the name is still refused.
+      await expect(
+        writeFileNoFollow(root, 'src', 'x', { replaceLeafLink: true }),
+      ).rejects.toMatchObject({ reason: 'not-regular-file' });
+    });
   });
 
   describe('updateFileNoFollow', () => {

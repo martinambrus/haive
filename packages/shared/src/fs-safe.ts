@@ -1159,6 +1159,12 @@ export interface WriteFileOptions {
   createParents?: boolean;
   /** fsync the content before it becomes visible. */
   durable?: boolean;
+  /** `replace-atomic` only: replace a symbolic link standing at the name instead of refusing it.
+   *  For a file Haive GENERATES and nobody else may own, where a link planted at its name would
+   *  otherwise block every later write. The final rename replaces the link as a link, so its target
+   *  is never touched, and neither its owner nor its mode is inherited. Anything else at the name —
+   *  a directory, a device — is still refused. */
+  replaceLeafLink?: boolean;
 }
 
 /**
@@ -1216,10 +1222,12 @@ export async function writeFileNoFollow(
   const segs = segments(safe);
   const leaf = segs.pop();
   if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
-  const existing = await lstatNoFollow(anchor, safe, { strict: true });
-  if (existing !== null && existing.kind === 'symlink') {
+  const found = await lstatNoFollow(anchor, safe, { strict: true });
+  if (found !== null && found.kind === 'symlink' && !opts.replaceLeafLink) {
     throw new PathContainmentError('link', anchor, rel, safe);
   }
+  // A link being replaced is not a file whose owner or mode the new one should carry on.
+  const existing = found !== null && found.kind === 'symlink' ? null : found;
   if (existing !== null && existing.kind !== 'file') {
     throw new PathContainmentError('not-regular-file', anchor, rel, safe);
   }
@@ -1249,7 +1257,7 @@ export async function writeFileNoFollow(
     await closeQuietly(fh);
     if (!renamed) await removeNoFollow(anchor, tmpRel).catch(() => undefined);
   }
-  return existing === null ? 'created' : 'overwritten';
+  return found === null ? 'created' : 'overwritten';
 }
 
 export interface UpdateFileOptions {

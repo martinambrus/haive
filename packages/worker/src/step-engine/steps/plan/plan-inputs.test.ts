@@ -415,6 +415,76 @@ describe('a sidecar written while its document is deleted', () => {
   });
 });
 
+describe('a generated file something else stands in the way of', () => {
+  // Nothing an upload or an archive can create may hold the index's or a sidecar's name, so what
+  // stands there was planted. A refusal used to fail the whole step.
+  async function prepare(block: (uploads: string) => Promise<void>) {
+    const repo = await mkdtemp(path.join(dir, 'repo-'));
+    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
+    await mkdir(uploads, { recursive: true });
+    const zip = new JSZip();
+    zip.file('word/document.xml', docxDocument('<w:p><w:r><w:t>The spec.</w:t></w:r></w:p>'));
+    const file = path.join(uploads, 'spec.docx');
+    await writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }));
+    await block(uploads);
+    const ctx = {
+      taskId: 't1',
+      repoPath: repo,
+      db: { query: { taskAttachments: { findFirst: async () => ({ id: 'a1' }) } } },
+      logger: { warn() {} },
+      emitProgress: async () => {},
+    } as never;
+    const out = await planInputsStep.apply(ctx, {
+      detected: {
+        greenfield: true,
+        briefLength: 0,
+        uploadsDir: uploads,
+        attachments: [
+          {
+            id: 'a1',
+            filename: 'spec.docx',
+            storedPath: file,
+            contentType: null,
+            description: null,
+          },
+        ],
+        missing: [],
+      },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    return { out, uploads };
+  }
+
+  it('replaces a link planted at the index, and leaves what it pointed at alone', async () => {
+    const target = path.join(await mkdtemp(path.join(dir, 'outside-')), 'target.md');
+    await writeFile(target, 'not the index');
+    const { out, uploads } = await prepare((u) => symlink(target, path.join(u, '_PLAN_INPUTS.md')));
+    expect(out.indexPath).not.toBeNull();
+    expect((await lstat(path.join(uploads, '_PLAN_INPUTS.md'))).isFile()).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe('not the index');
+  });
+
+  it('carries on without the index when a directory stands at its name', async () => {
+    const { out } = await prepare((u) => mkdir(path.join(u, '_PLAN_INPUTS.md')));
+    expect(out.indexPath).toBeNull();
+    expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
+  });
+
+  it('skips a document whose extracted text cannot be stored, and says so', async () => {
+    const { out } = await prepare((u) => mkdir(path.join(u, 'spec.docx.extracted.md')));
+    expect(out.inputs).toHaveLength(1);
+    expect(out.inputs[0]).toMatchObject({
+      sidecar: null,
+      hasText: false,
+      note: 'extracted text could not be stored beside it',
+    });
+    expect(out.unreadable).toEqual(['spec.docx']);
+    expect(out.indexPath).not.toBeNull();
+  });
+});
+
 describe('the archive notes the step carries', () => {
   it('takes them from the column, so a retry after the expansion keeps them', async () => {
     const note = '1 archive member(s) were not extracted (1 symlink(s)): bundle/escape';
