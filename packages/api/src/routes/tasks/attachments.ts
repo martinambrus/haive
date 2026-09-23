@@ -245,6 +245,20 @@ async function removeFiles(anchor: string, uploadsRel: string, files: readonly s
   }
 }
 
+/** Remove the listed sidecars AGAIN, once the rows are gone. `00-plan-inputs` may have been
+ *  extracting one of these documents during the first pass and written its sidecar after it; the
+ *  worker checks for the row only after writing, so whichever comes last, one of the two sees the
+ *  other. Only sidecar paths get a second pass: no upload can hold such a name (see
+ *  `createUniqueAttachment`), whereas an original's name is free again the moment the first pass
+ *  unlinks it, and an upload could already have taken it. */
+async function removeLateSidecars(anchor: string, uploadsRel: string, files: readonly string[]) {
+  await removeFiles(
+    anchor,
+    uploadsRel,
+    files.filter((f) => f.endsWith(PLAN_INPUT_SIDECAR_SUFFIX)),
+  );
+}
+
 /** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
  *  the children that kept it alive. */
 async function pruneAfter(
@@ -560,6 +574,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   const files = filesToRemove(new Set([attachmentId]), rows);
   await removeFiles(anchor, uploadsRel, files);
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
+  await removeLateSidecars(anchor, uploadsRel, files);
   await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true });
@@ -601,6 +616,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
       marked.map((r) => r.id),
     ),
   );
+  await removeLateSidecars(anchor, uploadsRel, files);
   await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true, removed: marked.length });

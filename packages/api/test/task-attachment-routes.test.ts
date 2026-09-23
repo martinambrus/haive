@@ -191,6 +191,9 @@ function createFakeDb() {
     }
   }
 
+  /** Test-side only: something that happens the moment a row is gone, such as a worker write. */
+  const hooks: { afterDelete: (() => Promise<void>) | null } = { afterDelete: null };
+
   const api = (table: PgTable) => ({
     findFirst: async (opts?: Record<string, unknown>) => select(table, opts)[0],
     findMany: async (opts?: Record<string, unknown>) => select(table, opts),
@@ -207,9 +210,13 @@ function createFakeDb() {
         values: (values: Row) => ({ returning: async () => [insert(table, values)] }),
       }),
       delete: (table: PgTable) => ({
-        where: async (cond: unknown) => remove(table, compileWhere(table, cond)),
+        where: async (cond: unknown) => {
+          remove(table, compileWhere(table, cond));
+          await hooks.afterDelete?.();
+        },
       }),
     },
+    hooks,
     insert,
     patch,
     rows: (table: PgTable): Row[] => select(table, {}),
@@ -785,6 +792,17 @@ describe('task attachment routes', () => {
       expect(await exists(up('docs'))).toBe(false);
     });
 
+    it('removes a sidecar the worker wrote while the delete was running', async () => {
+      // `00-plan-inputs` can be extracting this document as it is deleted, and so write the sidecar
+      // after the first pass. The api removes sidecars again once the row is gone, and the worker
+      // checks for the row after writing, so whichever comes last, one of the two sees the other.
+      const doc = await seedFile('spec.docx', 'docx');
+      fake.hooks.afterDelete = () => writeFile(up('spec.docx.extracted.md'), '# late');
+
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await exists(up('spec.docx.extracted.md'))).toBe(false);
+    });
+
     it('keeps an upload that merely has the sidecar’s name', async () => {
       const doc = await seedFile('x.docx', 'docx');
       await seedFile('x.docx.extracted.md', 'mine');
@@ -899,6 +917,14 @@ describe('task attachment routes', () => {
       expect(await exists(up('x/a.md'))).toBe(false);
       expect(await readFile(up('docs/late.md'), 'utf8')).toBe('late');
       expect(await readFile(up('x/late.md'), 'utf8')).toBe('late');
+    });
+
+    it('removes a sidecar the worker wrote while the folder delete was running', async () => {
+      await seedFile('docs/spec.pdf', 'pdf');
+      fake.hooks.afterDelete = () => writeFile(up('docs/spec.pdf.extracted.md'), '# late');
+
+      await send('DELETE', `/${TASK}/attachments?prefix=docs`);
+      expect(await exists(up('docs'))).toBe(false);
     });
 
     it('prunes a parent the folder leaves empty', async () => {
