@@ -2006,4 +2006,7 @@ process's output buffer and a file past it would read as "missing"; a check that
 reason other than a missing HEAD stages nothing. It never stages rules files by name beyond that, so a person's uncommitted edits
 elsewhere stay out of the upgrade commit; a stub that IS staged goes in whole, the same file-level
 granularity AGENTS.md already had. A link is staged through its own check (`isLinkToAgentsMd`),
-since `hasWorkspaceEntry` refuses every link.
+since `hasWorkspaceEntry` refuses every link. A rules file git ignores is left out on every route
+and reported (`isGitIgnored`): the stage runs `git add -f` for `.haive/install.json`'s sake, which
+would otherwise commit a personal CLAUDE.md the repository deliberately keeps out of history. The
+check runs after any `git init`, since before it there is no repository to ask.

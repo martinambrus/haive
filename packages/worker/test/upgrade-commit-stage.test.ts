@@ -200,6 +200,22 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
     expect(await headTree()).toMatch(/120000 blob \w+\tCLAUDE\.md/);
   });
 
+  it('keeps a rules file the repository ignores out of the commit, and says so', async () => {
+    await writeFile(join(repo, '.gitignore'), 'CLAUDE.md\n');
+    await run('git', ['-C', repo, 'add', '.gitignore']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'ignore']);
+    await writeFile(join(repo, 'CLAUDE.md'), '# private\n@AGENTS.md\n');
+    for (const result of ['unchanged', 'created'] as const) {
+      const out = await applyWith({
+        writtenPaths: result === 'created' ? ['CLAUDE.md'] : [],
+        rulesImportStubs: [{ file: 'CLAUDE.md', result }],
+      });
+      expect(out.commitPerformed).toBe(false);
+      expect(out.warnings.join('\n')).toContain('CLAUDE.md is ignored by git');
+    }
+    expect(await headTree()).not.toContain('CLAUDE.md');
+  });
+
   it('leaves a committed stub and the edits beside it alone', async () => {
     await writeFile(join(repo, 'CLAUDE.md'), '# Notes\n@AGENTS.md\n');
     await run('git', ['-C', repo, 'add', 'CLAUDE.md']);
@@ -210,5 +226,55 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
     expect((await run('git', ['-C', repo, 'status', '--porcelain'])).stdout).toContain(
       ' M CLAUDE.md',
     );
+  });
+});
+
+describe('03 apply on a repository with no git yet', () => {
+  let dir: string;
+  const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'haive-upgrade-nogit-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('checks the new repository against its .gitignore before forcing anything in', async () => {
+    await writeFile(join(dir, 'AGENTS.md'), '# Agents\n');
+    await writeFile(join(dir, '.gitignore'), 'CLAUDE.md\n');
+    await writeFile(join(dir, 'CLAUDE.md'), '# private\n@AGENTS.md\n');
+    const rows = [
+      {
+        detectOutput: null,
+        output: { rulesImportStubs: [{ file: 'CLAUDE.md', result: 'unchanged' }] },
+        iterations: [],
+      },
+    ];
+    const chain: Record<string, unknown> = {};
+    Object.assign(chain, {
+      from: () => chain,
+      where: () => chain,
+      orderBy: () => chain,
+      limit: async () => rows,
+    });
+    const db = {
+      select: () => chain,
+      query: {
+        cliProviders: { findMany: async () => [] },
+        tasks: { findFirst: async () => null },
+        users: { findFirst: async () => null },
+      },
+    };
+    const out = await upgradeCommitStep.apply(
+      { db, repoPath: dir, taskId: 't1', userId: 'u1', logger } as never as StepContext,
+      { detected: { hasGit: false }, formValues: { commit: true, initBranch: 'main' } } as never,
+    );
+    expect(out.commitPerformed).toBe(true);
+    const tree = (await run('git', ['-C', dir, 'ls-tree', '--name-only', 'HEAD'])).stdout;
+    expect(tree).toContain('AGENTS.md');
+    expect(tree).not.toContain('CLAUDE.md');
+    expect(out.warnings.join('\n')).toContain('CLAUDE.md is ignored by git');
   });
 });

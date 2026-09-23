@@ -111,6 +111,18 @@ export async function headLacksImport(repoPath: string, rel: string): Promise<bo
   }
 }
 
+/** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of the
+ *  upgrade commit too: the `git add -f` that stages the rest would otherwise commit it. A tracked
+ *  file is never reported ignored, and a failed check answers false. */
+export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repoPath });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Used only when neither the repo's bound credential nor the user carries an identity,
  *  preserving the bot attribution these commits have always had. */
 const FALLBACK_GIT_IDENTITY = {
@@ -233,7 +245,8 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     // `hasWorkspaceEntry` refuses every link, so a link to AGENTS.md is re-checked and staged
     // on its own; adding an already committed one changes nothing.
     const linkPaths: string[] = [];
-    for (const stub of appliedImportStubs(applied?.output)) {
+    const stubs = appliedImportStubs(applied?.output);
+    for (const stub of stubs) {
       if (stub.link) {
         if (await isLinkToAgentsMd(ctx.repoPath, stub.file)) linkPaths.push(stub.file);
       } else if (await headLacksImport(ctx.repoPath, stub.file)) {
@@ -275,10 +288,24 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath });
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }
+      // After any init, so a repository that had no git yet is checked against its .gitignore too.
+      const ruleFiles = new Set(stubs.map((s) => s.file));
+      const toStage: string[] = [];
+      for (const rel of existingPaths) {
+        if (ruleFiles.has(rel) && (await isGitIgnored(ctx.repoPath, rel))) {
+          warnings.push(
+            `${rel} is ignored by git, so it stays out of this commit and a workflow task will not load AGENTS.md through it`,
+          );
+        } else {
+          toStage.push(rel);
+        }
+      }
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
-      await execFileAsync('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
+      if (toStage.length > 0) {
+        await execFileAsync('git', ['add', '-f', '--', ...toStage], { cwd: ctx.repoPath });
+      }
       const { stdout: stagedOut } = await execFileAsync(
         'git',
         ['diff', '--cached', '--name-only'],
