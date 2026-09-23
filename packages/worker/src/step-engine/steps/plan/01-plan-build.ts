@@ -328,6 +328,9 @@ export async function withLiveInputs(
         inputIndexPath = null;
       }
     } catch (err) {
+      // The index on disk still names what was deleted, so the prompt must not send the agent to
+      // it. The attachments notice still names every live file.
+      inputIndexPath = null;
       ctx.logger.warn({ err }, 'plan build: could not re-render the plan-inputs index');
     }
   }

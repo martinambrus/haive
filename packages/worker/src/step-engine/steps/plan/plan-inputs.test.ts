@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -665,10 +665,19 @@ describe('a build dispatching on what is still attached', () => {
   async function dispatchView(
     live: (string | { id: string; filename: string })[] | 'unreadable',
     stored: PlanInputsApply | null,
+    opts: { linkedUploads?: boolean } = {},
   ) {
     const repo = await mkdtemp(path.join(dir, 'build-'));
     const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
-    await mkdir(uploads, { recursive: true });
+    if (opts.linkedUploads) {
+      // A link where the uploads directory should be, which the index write refuses to go through.
+      const real = path.join(repo, 'elsewhere');
+      await mkdir(real, { recursive: true });
+      await mkdir(path.dirname(uploads), { recursive: true });
+      await symlink(real, uploads);
+    } else {
+      await mkdir(uploads, { recursive: true });
+    }
     await writeFile(path.join(uploads, '_PLAN_INPUTS.md'), 'as 00-plan-inputs wrote it');
     // Exactly what detect copies out of the recorded output.
     const d = {
@@ -777,6 +786,17 @@ describe('a build dispatching on what is still attached', () => {
     expect(view.inputIndexPath).toBeNull();
     expect(index).toBeNull();
     expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+  });
+
+  it('drops the index from the prompt when it cannot be rewritten, rather than name a stale one', async () => {
+    const { view, index } = await dispatchView(['brief.md', 'spec.pdf'], recorded(), {
+      linkedUploads: true,
+    });
+    expect(index).toBe('as 00-plan-inputs wrote it');
+    expect(view.inputIndexPath).toBeNull();
+    expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+    // The capabilities still follow the deletion.
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
   it('keeps the detected fields when the attachments cannot be read', async () => {

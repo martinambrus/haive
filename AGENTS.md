@@ -918,7 +918,9 @@ live row, so its kind still counts (`unpreparedAttachments`): a picture requires
 prefers it. A greenfield root with no brief refuses to dispatch once nothing at all is attached
 (`assertSomethingToBuildFrom`), which is 00's own "a brief or a file" rule re-checked against the
 live rows. 02's manual repair drops a picked section whose document is gone, because the gate
-carries its BODY. Every lookup fails open, onto the fields the build had before.
+carries its BODY. Every lookup fails open, onto the fields the build had before. A failed index
+REWRITE is the exception: it drops the index from the prompt, since the file on disk still names
+what was deleted.
 
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 
