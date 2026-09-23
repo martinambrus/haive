@@ -831,7 +831,10 @@ cannot reach the disk, so a delete removes what the attachment left there too
 never a directory, and a folder goes only by pruning once it is empty: a recursive removal takes
 whatever else lives there — a later upload named like the expansion directory lands inside it (the
 api de-dupes files, not directories), and an upload racing the delete has its file on disk before
-its row exists, where no list of rows can see it. Neither may be left: an orphaned
+its row exists, where no list of rows can see it. That makes the rows the whole inventory, and two
+rules keep them so: an upload may not take a name ending in `.extracted.md` (a delete unlinks a
+document's sidecar path whether or not the sidecar exists yet), and the expansion takes a placed
+member back off the disk when its row cannot be written. Neither may be left: an orphaned
 tree stays bind-mounted, and an agent would keep reading files the user believes they removed.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the
