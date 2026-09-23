@@ -137,6 +137,15 @@ describe('loadTaskSimilarSites', () => {
   });
 });
 
+describe('loadTaskSimilarSites across passes', () => {
+  it('counts what one issue gathered past the cap instead of dropping it', async () => {
+    const sites = Array.from({ length: 60 }, (_, i) => ({ path: `f${i}.ts`, reason: '' }));
+    const out = await loadTaskSimilarSites(tableDb([{ issueKey: 'I-1', sites }], []), 't1');
+    expect(out.sites).toHaveLength(SIMILAR_SITES_AT_GATE);
+    expect(out.omitted).toBe(60 - SIMILAR_SITES_AT_GATE);
+  });
+});
+
 describe('similarSitesRow', () => {
   it('renders nothing when there is nothing to show', () => {
     expect(similarSitesRow([], 0, 'x')).toBeNull();

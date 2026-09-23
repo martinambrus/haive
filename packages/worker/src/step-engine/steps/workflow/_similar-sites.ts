@@ -73,7 +73,8 @@ export function mergeSimilarSites<T extends SimilarSite>(
 
 /** Every site this task's implementing passes reported, in the order the work ran: the DAG
  *  build's issues, then each round of 07. Re-sanitised on read, since a stored value is only as
- *  good as whatever wrote it. */
+ *  good as whatever wrote it, but never capped per source: a DAG issue gathers sites across passes,
+ *  and only the merged list's cap is counted in `omitted`. */
 export async function loadTaskSimilarSites(
   db: Database,
   taskId: string,
@@ -93,7 +94,7 @@ export async function loadTaskSimilarSites(
   let all: GateSimilarSite[] = [];
   for (const issue of issues) {
     const source = `DAG issue ${issue.issueKey}`;
-    const sites = sanitizeSimilarSites(issue.sites, SIMILAR_SITES_AT_GATE);
+    const sites = sanitizeSimilarSites(issue.sites, Number.POSITIVE_INFINITY);
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),
@@ -102,7 +103,7 @@ export async function loadTaskSimilarSites(
   for (const row of rounds) {
     const source = `implementation round ${row.round}`;
     const raw = (row.output as { similarSites?: unknown } | null)?.similarSites;
-    const sites = sanitizeSimilarSites(raw, SIMILAR_SITES_AT_GATE);
+    const sites = sanitizeSimilarSites(raw, Number.POSITIVE_INFINITY);
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),
