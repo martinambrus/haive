@@ -1,7 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StatusSummaryItem } from '@haive/shared';
-import { collapseToLine, isSingleLine, survivesFence } from '../_untrusted-repo.js';
+import { collapseToLine, isSingleLine, safeKey, survivesFence } from '../_untrusted-repo.js';
 import { code } from './_plan-ops.js';
 
 /** A place with the same code or defect that an implementing agent found and deliberately did
@@ -90,7 +90,7 @@ export async function loadTaskSimilarSites(
     .orderBy(asc(schema.taskSteps.round));
   let all: GateSimilarSite[] = [];
   for (const issue of issues) {
-    const source = `DAG issue ${issue.issueKey}`;
+    const source = `DAG issue ${safeKey(issue.issueKey)}`;
     const sites = sanitizeSimilarSites(issue.sites);
     all = mergeSimilarSites(
       all,

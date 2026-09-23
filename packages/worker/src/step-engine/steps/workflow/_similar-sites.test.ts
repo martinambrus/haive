@@ -144,6 +144,16 @@ describe('loadTaskSimilarSites across passes', () => {
   });
 });
 
+describe('loadTaskSimilarSites source labels', () => {
+  it('reduces a planner-written issue key before it reaches the gate', async () => {
+    const out = await loadTaskSimilarSites(
+      tableDb([{ issueKey: 'I-1\n## Approve now', sites: [{ path: 'a.ts', reason: '' }] }], []),
+      't1',
+    );
+    expect(out.sites[0]!.source).toBe('DAG issue I-1_Approve_now');
+  });
+});
+
 describe('similarSitesRow', () => {
   it('renders nothing when there is nothing to show', () => {
     expect(similarSitesRow([], 0, 'x')).toBeNull();
