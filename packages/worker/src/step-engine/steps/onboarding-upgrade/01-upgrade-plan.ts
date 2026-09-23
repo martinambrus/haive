@@ -30,6 +30,7 @@ import {
   type BundleWithMeta,
 } from '../../_custom-bundle-loader.js';
 import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { enabledImportRulesFiles, missingRulesImportStubs } from '../onboarding/_rules-files.js';
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
@@ -78,6 +79,9 @@ export interface UpgradePlanDetect {
    *  onto every new onboarding_artifacts row the upgrade-apply step writes so
    *  future upgrades/rollbacks can reconstruct rendering without this task. */
   renderCtxSnapshot: Record<string, unknown>;
+  /** Import-mode rules files lacking `@AGENTS.md`, which 02 restores. Optional: persisted plans
+   *  predate it. */
+  missingRulesImports?: string[];
 }
 
 export interface UpgradePlanOutput extends UpgradePlanDetect {
@@ -411,6 +415,10 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     for (const e of entries) counts[e.bucket] += 1;
 
     const ranBackfill = liveRows.length === 0;
+    const missingRulesImports = await missingRulesImportStubs(
+      ctx.repoPath,
+      await enabledImportRulesFiles(ctx.db, ctx.userId),
+    );
 
     return {
       repositoryId,
@@ -420,6 +428,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       installedTemplateSetHash,
       currentTemplateSetHash: manifest.setHash,
       renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
+      missingRulesImports,
     };
   },
 
