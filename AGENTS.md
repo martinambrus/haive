@@ -832,11 +832,12 @@ tree stays bind-mounted, and an agent would keep reading files the user believes
 column.** The expansion call reports only the archives THAT call expanded, so a later step, a
 retried `00-plan-inputs`, and every workflow task (whose call site discards the result) used to
 see nothing. `augmentPromptWithAttachments` now names each incomplete archive in an INCOMPLETE
-ARCHIVES block, and `00-plan-inputs` takes its `archiveNotes` from the column. Both gate on
-`expanded_at`; the note is only the words. It carries archive member names (tar keeps a name's
-bytes, newlines included) and an extractor's error line, so it is WRITTEN as one bounded line
-(`expansionErrorLine`, `describePathDrops`) and collapsed and capped AGAIN wherever it meets a
-prompt (`safeNote`), because rows written before that exist.
+ARCHIVES block, `00-plan-inputs` takes its `archiveNotes` from the column, and the attachments
+panel shows it under the archive (`archiveExpansionBanner`, `web/src/lib/step-banners.ts`). All
+three gate on `expanded_at`; the note is only the words. It carries archive member names (tar
+keeps a name's bytes, newlines included) and an extractor's error line, so it is WRITTEN as one
+bounded line (`expansionErrorLine`, `describePathDrops`) and collapsed and capped AGAIN wherever
+it meets a prompt (`safeNote`), because rows written before that exist.
 
 Three caps exist because a folder is not a handful of files. `augmentPromptWithAttachments`
 rides EVERY step's prompt, so past `ATTACHMENT_PROMPT_FILE_LIMIT` (40) it collapses to one
