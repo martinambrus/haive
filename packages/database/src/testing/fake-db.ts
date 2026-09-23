@@ -93,9 +93,11 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   const hooks: {
     /** Awaited before a transaction asks for the attachments lock, with the lock's key. */
     beforeLock: ((key: string) => void | Promise<void>) | null;
-    /** Awaited before a delete removes its rows. */
-    beforeDelete: (() => void | Promise<void>) | null;
-  } = { beforeLock: null, beforeDelete: null };
+    /** Awaited before an insert, an update or a delete writes; a throw fails that statement. */
+    beforeInsert: ((table: PgTable) => void | Promise<void>) | null;
+    beforeUpdate: ((table: PgTable) => void | Promise<void>) | null;
+    beforeDelete: ((table: PgTable) => void | Promise<void>) | null;
+  } = { beforeLock: null, beforeInsert: null, beforeUpdate: null, beforeDelete: null };
 
   const checkValue = (col: Column, value: unknown): unknown => {
     if (is(col, PgUUID) && typeof value === 'string' && !UUID.test(value)) {
@@ -316,21 +318,26 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
       insert: (table: PgTable) => ({
         values: (values: FakeRow | FakeRow[]) =>
-          lazy(() =>
-            (Array.isArray(values) ? values : [values]).map((v) => insertRow(ctx, table, v)),
-          ),
+          lazy(async () => {
+            await hooks.beforeInsert?.(table);
+            return (Array.isArray(values) ? values : [values]).map((v) => insertRow(ctx, table, v));
+          }),
       }),
       update: (table: PgTable) => ({
         set: (values: FakeRow) => ({
           where: (cond: unknown) =>
-            lazy(() => update(ctx, table, compileWhere(table, cond), values)),
+            lazy(async () => {
+              const match = compileWhere(table, cond);
+              await hooks.beforeUpdate?.(table);
+              return update(ctx, table, match, values);
+            }),
         }),
       }),
       delete: (table: PgTable) => ({
         where: (cond: unknown) =>
           lazy(async () => {
             const match = compileWhere(table, cond);
-            await hooks.beforeDelete?.();
+            await hooks.beforeDelete?.(table);
             remove(ctx, table, match);
           }),
       }),

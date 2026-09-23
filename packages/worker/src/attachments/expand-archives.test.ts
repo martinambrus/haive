@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { eq } from 'drizzle-orm';
 import { describe, it, expect, afterEach } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import {
   ensureArchivesExpanded,
   EXPANSION_ERROR_CHARS,
@@ -13,31 +15,11 @@ import {
 
 const exec = promisify(execFile);
 
-/** Rows the module reads, plus the two writes it makes. Drizzle's builders are
- *  stubbed to the exact shape this module calls — anything else would be a
- *  different module's contract. `failInsertAt` makes that insert (0-based) throw. */
-function stubDb(rows: Record<string, unknown>[], opts: { failInsertAt?: number } = {}) {
-  const inserted: Record<string, unknown>[] = [];
-  const updated: Record<string, unknown>[] = [];
-  const db = {
-    query: { taskAttachments: { findMany: async () => rows } },
-    insert: () => ({
-      values: async (v: Record<string, unknown>) => {
-        if (inserted.length === opts.failInsertAt) throw new Error('insert failed');
-        inserted.push(v);
-      },
-    }),
-    update: () => ({
-      set: (v: Record<string, unknown>) => ({
-        where: () => {
-          updated.push(v);
-          return Promise.resolve();
-        },
-      }),
-    }),
-  } as unknown as Database;
-  return { db, inserted, updated };
-}
+// Uuid-shaped on purpose: every id lands in a uuid column, and the fake answers a malformed one the
+// way Postgres does rather than with a quiet "not found".
+const TASK = '00000000-0000-4000-8000-000000000001';
+const USER = '00000000-0000-4000-8000-0000000000a1';
+const t = schema.taskAttachments;
 
 const dirs: string[] = [];
 
@@ -45,21 +27,43 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-/** The uploads dir in the layout the api actually writes:
- *  `<repoRoot>/.haive/task-uploads/<taskId>`.
+/** A task and its uploads dir, on the in-memory database the api's route tests share.
  *
+ *  The dir is in the layout the api actually writes: `<repoRoot>/.haive/task-uploads/<taskId>`.
  *  The shape is load-bearing, not decoration. `splitAttachmentStoredPath` recovers the containment
  *  ANCHOR — the repository root — by removing exactly that suffix from a row's `storedPath`, and
  *  answers null for anything else, because the uploads dir itself sits under `.haive/` and is
- *  mounted read-write into the sandbox, so it can never be an anchor. A flat temp dir here (what
- *  this fixture used to build) is a layout the api never produces, and it made every row unreadable
- *  to that helper. The tracked path stays the OUTERMOST directory so the cleanup removes the lot. */
-async function uploadsDir(): Promise<string> {
+ *  mounted read-write into the sandbox, so it can never be an anchor. The tracked path stays the
+ *  OUTERMOST directory so the cleanup removes the lot. */
+async function setup() {
   const root = await mkdtemp(path.join(tmpdir(), 'haive-attach-'));
   dirs.push(root);
-  const dir = path.join(root, 'repo', '.haive', 'task-uploads', 'task-1');
-  await mkdir(dir, { recursive: true });
-  return dir;
+  const uploads = path.join(root, 'repo', '.haive', 'task-uploads', TASK);
+  await mkdir(uploads, { recursive: true });
+  const fake = createFakeDb({ tasks: schema.tasks, taskAttachments: t });
+  fake.insert(schema.tasks, { id: TASK, userId: USER, type: 'plan_build', title: 'plan' });
+  /** A row as the api writes one; its file is the caller's to create. */
+  const attach = (filename: string, over: Record<string, unknown> = {}) =>
+    fake.insert(t, {
+      taskId: TASK,
+      userId: USER,
+      filename,
+      storedPath: path.join(uploads, filename),
+      sizeBytes: 1,
+      ...over,
+    });
+  /** The rows an expansion wrote, by name. */
+  const members = (): string[] =>
+    fake
+      .rows(t)
+      .filter((r) => r.expandedFromId !== null)
+      .map((r) => String(r.filename))
+      .sort();
+  const row = (filename: string) => fake.rows(t).find((r) => r.filename === filename)!;
+  const expand = () => ensureArchivesExpanded(fake.db as unknown as Database, TASK);
+  const staging = async (): Promise<string[]> =>
+    (await readdir(uploads)).filter((n) => n.startsWith('.expanding-'));
+  return { uploads, fake, attach, members, row, expand, staging };
 }
 
 /** A `.tar` built from a directory tree, written into the uploads dir as an
@@ -74,21 +78,21 @@ async function tarball(uploads: string, name: string, build: (src: string) => Pr
   return dest;
 }
 
-function archiveRow(uploads: string, filename: string) {
-  return {
-    id: '11111111-1111-1111-1111-111111111111',
-    taskId: 'task-1',
-    userId: 'user-1',
-    filename,
-    storedPath: path.join(uploads, filename),
-    sizeBytes: 1,
-    contentType: null,
-    description: null,
-    expandedFromId: null,
-    expandedAt: null,
-    expansionNote: null,
-    createdAt: new Date(),
-  };
+/** Two plain members, enough for an archive whose content is not the point. */
+const twoFiles = async (src: string): Promise<void> => {
+  await writeFile(path.join(src, 'a.md'), 'a');
+  await writeFile(path.join(src, 'b.md'), 'b');
+};
+
+const exists = (p: string): Promise<boolean> =>
+  lstat(p).then(
+    () => true,
+    () => false,
+  );
+
+/** A lock wait that ran out, as Postgres reports it. */
+function lockTimeout(): Error {
+  return Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
 }
 
 describe('expansionErrorLine', () => {
@@ -120,85 +124,310 @@ describe('expansionErrorLine', () => {
 
 describe('ensureArchivesExpanded', () => {
   it('does nothing when no attachment is an archive', async () => {
-    const uploads = await uploadsDir();
-    const { db, inserted } = stubDb([archiveRow(uploads, 'brief.md')]);
-    expect(await ensureArchivesExpanded(db, 'task-1')).toEqual({
-      expanded: 0,
-      filesAdded: 0,
-      notes: [],
-    });
-    expect(inserted).toHaveLength(0);
+    const f = await setup();
+    f.attach('brief.md');
+    expect(await f.expand()).toEqual({ expanded: 0, filesAdded: 0, notes: [] });
+    expect(f.members()).toEqual([]);
   });
 
   it('expands a tree into rows named by their relative path', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'spec.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', async (src) => {
       await mkdir(path.join(src, 'docs', 'api'), { recursive: true });
       await writeFile(path.join(src, 'brief.md'), '# brief');
       await writeFile(path.join(src, 'docs', 'api', 'schema.json'), '{}');
     });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'spec.tar')]);
+    const archive = f.attach('spec.tar');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
     expect(result.filesAdded).toBe(2);
-    expect(inserted.map((r) => r.filename).sort()).toEqual([
-      'spec/brief.md',
-      'spec/docs/api/schema.json',
-    ]);
+    expect(f.members()).toEqual(['spec/brief.md', 'spec/docs/api/schema.json']);
     // Every produced row points back at the archive, so removing it removes them.
-    expect(inserted.every((r) => r.expandedFromId === archiveRow(uploads, 'x').id)).toBe(true);
-    expect(await readFile(path.join(uploads, 'spec', 'docs', 'api', 'schema.json'), 'utf8')).toBe(
+    expect(
+      f.fake
+        .rows(t)
+        .filter((r) => r.expandedFromId !== null)
+        .every((r) => r.expandedFromId === archive.id),
+    ).toBe(true);
+    expect(await readFile(path.join(f.uploads, 'spec', 'docs', 'api', 'schema.json'), 'utf8')).toBe(
       '{}',
     );
-    expect(updated[0]?.expandedAt).toBeInstanceOf(Date);
-    // The temp extraction dir never survives the call.
-    expect((await readdir(uploads)).some((n) => n.startsWith('.expanding-'))).toBe(false);
+    expect(f.row('spec.tar').expandedAt).toBeInstanceOf(Date);
+    // The staging dir never survives a call that finished.
+    expect(await f.staging()).toEqual([]);
   });
 
-  it('takes a member back off the disk when its row cannot be written', async () => {
+  it('places nothing and records nothing when its rows cannot be written', async () => {
     // A delete removes what ROWS name, so a placed file with none would outlive the archive's
-    // delete, still mounted in the sandbox.
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'spec.tar', async (src) => {
-      await writeFile(path.join(src, 'a.md'), 'a');
-      await writeFile(path.join(src, 'b.md'), 'b');
-    });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'spec.tar')], {
-      failInsertAt: 1,
-    });
+    // delete, still mounted in the sandbox — and half a tree is worse than none.
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    f.fake.hooks.beforeInsert = () => {
+      throw new Error('insert failed');
+    };
 
-    await ensureArchivesExpanded(db, 'task-1');
+    expect(await f.expand()).toEqual({ expanded: 0, filesAdded: 0, notes: [] });
 
-    expect(inserted).toHaveLength(1);
-    const onDisk = (await readdir(path.join(uploads, 'spec'))).map((n) => `spec/${n}`);
-    expect(onDisk).toEqual(inserted.map((r) => r.filename));
-    expect(updated[0]?.expansionNote).toBe('could not be expanded: insert failed');
+    expect(f.members()).toEqual([]);
+    expect(await exists(path.join(f.uploads, 'spec'))).toBe(false);
+    expect(await f.staging()).toEqual([]);
+    // Left a candidate, so the next call starts it over.
+    expect(f.row('spec.tar').expandedAt).toBeNull();
+  });
+
+  it('reuses the folder name after a placement whose stamp failed', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    f.fake.hooks.beforeUpdate = () => {
+      f.fake.hooks.beforeUpdate = null;
+      throw new Error('stamp failed');
+    };
+
+    await f.expand();
+    expect(f.members()).toEqual([]);
+    expect(await exists(path.join(f.uploads, 'spec'))).toBe(false);
+
+    const retried = await f.expand();
+    expect(retried.filesAdded).toBe(2);
+    expect(f.members()).toEqual(['spec/a.md', 'spec/b.md']);
+    expect(f.row('spec.tar').expandedAt).toBeInstanceOf(Date);
+  });
+
+  it('produces one tree when two calls expand the same archive at once', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+
+    const results = await Promise.all([f.expand(), f.expand()]);
+
+    expect(results.map((r) => r.filesAdded).sort()).toEqual([0, 2]);
+    expect(f.members()).toEqual(['spec/a.md', 'spec/b.md']);
+    expect((await readdir(f.uploads)).sort()).toEqual(['_ATTACHMENTS.md', 'spec', 'spec.tar']);
+    expect(f.row('spec.tar').expandedAt).toBeInstanceOf(Date);
+  });
+
+  it('places nothing for an archive deleted while it was being extracted', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    const archive = f.attach('spec.tar');
+    // The first time anything asks for the lock is the placement, after the extraction.
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.fake.db.delete(t).where(eq(t.id, archive.id as string));
+    };
+    // Not even placed and taken back: an agent reading the uploads dir meanwhile would see it.
+    let wrote = false;
+    f.fake.hooks.beforeInsert = () => {
+      wrote = true;
+    };
+
+    expect(await f.expand()).toEqual({ expanded: 0, filesAdded: 0, notes: [] });
+
+    expect(wrote).toBe(false);
+    expect(f.fake.rows(t)).toEqual([]);
+    expect(await exists(path.join(f.uploads, 'spec'))).toBe(false);
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('takes back what an interrupted attempt placed, and expands again under the same name', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    const archive = f.attach('spec.tar');
+    // An attempt that moved its tree into place and died before its rows committed.
+    const died = path.join(
+      f.uploads,
+      `.expanding-${archive.id as string}-${'1'.repeat(8)}-1111-4111-8111-${'1'.repeat(12)}`,
+    );
+    await mkdir(died, { recursive: true });
+    await writeFile(
+      path.join(died, 'placed-as'),
+      JSON.stringify({ dir: 'spec', files: ['a.md', 'old.md'] }),
+    );
+    await mkdir(path.join(f.uploads, 'spec'));
+    await writeFile(path.join(f.uploads, 'spec', 'a.md'), 'stale');
+    await writeFile(path.join(f.uploads, 'spec', 'old.md'), 'stale');
+
+    const result = await f.expand();
+
+    expect(result.filesAdded).toBe(2);
+    expect(f.members()).toEqual(['spec/a.md', 'spec/b.md']);
+    expect((await readdir(path.join(f.uploads, 'spec'))).sort()).toEqual(['a.md', 'b.md']);
+    expect(await readFile(path.join(f.uploads, 'spec', 'a.md'), 'utf8')).toBe('a');
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('keeps what an interrupted attempt placed once its rows did commit', async () => {
+    // The commit landed and only its answer was lost: the rows own those files now.
+    const f = await setup();
+    const archive = f.attach('spec.tar', { expandedAt: new Date() });
+    f.attach('spec/a.md', { expandedFromId: archive.id });
+    await mkdir(path.join(f.uploads, 'spec'));
+    await writeFile(path.join(f.uploads, 'spec', 'a.md'), 'a');
+    const died = path.join(
+      f.uploads,
+      `.expanding-${archive.id as string}-${'2'.repeat(8)}-2222-4222-8222-${'2'.repeat(12)}`,
+    );
+    await mkdir(died);
+    await writeFile(path.join(died, 'placed-as'), JSON.stringify({ dir: 'spec', files: ['a.md'] }));
+
+    await f.expand();
+
+    expect(await readFile(path.join(f.uploads, 'spec', 'a.md'), 'utf8')).toBe('a');
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('removes the tree an interrupted attempt placed for an archive deleted since', async () => {
+    const f = await setup();
+    f.attach('brief.md');
+    await writeFile(path.join(f.uploads, 'brief.md'), 'brief');
+    const gone = '00000000-0000-4000-8000-0000000000e1';
+    const died = path.join(
+      f.uploads,
+      `.expanding-${gone}-${'3'.repeat(8)}-3333-4333-8333-${'3'.repeat(12)}`,
+    );
+    await mkdir(died);
+    await writeFile(path.join(died, 'placed-as'), JSON.stringify({ dir: 'old', files: ['x.md'] }));
+    await mkdir(path.join(f.uploads, 'old'));
+    await writeFile(path.join(f.uploads, 'old', 'x.md'), 'orphan');
+
+    await f.expand();
+
+    expect(await exists(path.join(f.uploads, 'old'))).toBe(false);
+    expect(await f.staging()).toEqual([]);
+    expect(await readFile(path.join(f.uploads, 'brief.md'), 'utf8')).toBe('brief');
+  });
+
+  it('takes nothing from a folder an interrupted attempt claimed but never moved into', async () => {
+    // Its tree is still staged, so whatever the claimed folder holds is someone else's — here an
+    // upload whose row is not written yet.
+    const f = await setup();
+    f.attach('brief.md');
+    await writeFile(path.join(f.uploads, 'brief.md'), 'brief');
+    const gone = '00000000-0000-4000-8000-0000000000e3';
+    const died = path.join(
+      f.uploads,
+      `.expanding-${gone}-${'4'.repeat(8)}-4444-4444-8444-${'4'.repeat(12)}`,
+    );
+    await mkdir(path.join(died, 'tree'), { recursive: true });
+    await writeFile(path.join(died, 'tree', 'a.md'), 'staged');
+    await writeFile(path.join(died, 'placed-as'), JSON.stringify({ dir: 'spec', files: ['a.md'] }));
+    await mkdir(path.join(f.uploads, 'spec'));
+    await writeFile(path.join(f.uploads, 'spec', 'a.md'), 'in flight');
+
+    await f.expand();
+
+    expect(await readFile(path.join(f.uploads, 'spec', 'a.md'), 'utf8')).toBe('in flight');
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('takes nothing an intent names that an expansion could not have placed', async () => {
+    // The uploads dir sits in a tree the sandbox can write, so `placed-as` is untrusted. A sidecar
+    // has no row of its own, so an intent naming one would pass it off as an orphan.
+    const f = await setup();
+    await mkdir(path.join(f.uploads, 'docs'));
+    await writeFile(path.join(f.uploads, 'docs', 'a.pdf'), 'pdf');
+    await writeFile(path.join(f.uploads, 'docs', 'a.pdf.extracted.md'), '# text');
+    f.attach('docs/a.pdf');
+    const gone = '00000000-0000-4000-8000-0000000000e2';
+    const died = path.join(f.uploads, `.expanding-${gone}`);
+    await mkdir(died);
+    await writeFile(
+      path.join(died, 'placed-as'),
+      JSON.stringify({ dir: 'docs', files: ['a.pdf.extracted.md'] }),
+    );
+
+    await f.expand();
+
+    expect(await readFile(path.join(f.uploads, 'docs', 'a.pdf.extracted.md'), 'utf8')).toBe(
+      '# text',
+    );
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('takes a placed tree back even when nothing can settle the attempt afterwards', async () => {
+    // The take-back inside the section is the only one when the lock is gone by the time the
+    // attempt could be settled; the intent is then left for the next call.
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    f.fake.hooks.beforeInsert = () => {
+      throw new Error('insert failed');
+    };
+    let asked = 0;
+    f.fake.hooks.beforeLock = () => {
+      asked += 1;
+      if (asked > 1) throw lockTimeout();
+    };
+
+    await f.expand();
+
+    expect(await exists(path.join(f.uploads, 'spec'))).toBe(false);
+    expect(await f.staging()).toHaveLength(1);
+
+    f.fake.hooks.beforeInsert = null;
+    f.fake.hooks.beforeLock = null;
+    expect((await f.expand()).filesAdded).toBe(2);
+    expect(f.members()).toEqual(['spec/a.md', 'spec/b.md']);
+    expect(await f.staging()).toEqual([]);
+  });
+
+  it('expands beside a folder an upload already holds', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    await mkdir(path.join(f.uploads, 'spec'));
+    await writeFile(path.join(f.uploads, 'spec', 'readme.md'), 'mine');
+    f.attach('spec/readme.md');
+
+    await f.expand();
+
+    expect(f.members()).toEqual(['spec (2)/a.md', 'spec (2)/b.md']);
+    expect(await readdir(path.join(f.uploads, 'spec'))).toEqual(['readme.md']);
+  });
+
+  it('leaves the archive for the next call when the lock cannot be had in time', async () => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    f.fake.hooks.beforeLock = () => {
+      throw lockTimeout();
+    };
+
+    expect(await f.expand()).toEqual({ expanded: 0, filesAdded: 0, notes: [] });
+    expect(f.row('spec.tar').expandedAt).toBeNull();
+    expect(await exists(path.join(f.uploads, 'spec'))).toBe(false);
+    expect(await f.staging()).toEqual([]);
+
+    f.fake.hooks.beforeLock = null;
+    expect((await f.expand()).filesAdded).toBe(2);
   });
 
   it('drops symlinks instead of following them, and says how many', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'evil.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'evil.tar', async (src) => {
       await writeFile(path.join(src, 'real.md'), 'ok');
       await symlink('/etc/passwd', path.join(src, 'passwd-link'));
     });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'evil.tar')]);
+    f.attach('evil.tar');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
-    expect(inserted.map((r) => r.filename)).toEqual(['evil/real.md']);
-    // The note now comes from EXTRACTION's own report rather than from the walk's skip count: the
+    expect(f.members()).toEqual(['evil/real.md']);
+    // The note comes from EXTRACTION's own report rather than from the walk's skip count: the
     // symlink is removed inside the staged tree, so `walkRegularFiles` never sees it to count. What
     // must not change is that the drop is still stated.
     expect(result.notes[0]?.note).toContain('not extracted');
     expect(result.notes[0]?.note).toContain('symlink');
-    expect(updated[0]?.expansionNote).toContain('not extracted');
+    expect(f.row('evil.tar').expansionNote).toContain('not extracted');
   });
 
   it('keeps a traversing member inside the uploads directory', async () => {
-    const uploads = await uploadsDir();
-    const outside = path.join(uploads, '..', 'escaped.txt');
-    await tarball(uploads, 'slip.tar', async (src) => {
+    const f = await setup();
+    const outside = path.join(f.uploads, '..', 'escaped.txt');
+    await tarball(f.uploads, 'slip.tar', async (src) => {
       await writeFile(path.join(src, 'fine.md'), 'ok');
     });
     // Appended after the fact: `tar -c ../x` refuses, so the member is added with
@@ -206,57 +435,53 @@ describe('ensureArchivesExpanded', () => {
     await exec('tar', [
       '--append',
       '--file',
-      path.join(uploads, 'slip.tar'),
+      path.join(f.uploads, 'slip.tar'),
       '--transform',
       's|.*|../escaped.txt|',
       '-C',
-      uploads,
+      f.uploads,
       'slip.tar',
     ]);
-    const { db, inserted } = stubDb([archiveRow(uploads, 'slip.tar')]);
+    f.attach('slip.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    expect(inserted.every((r) => !String(r.filename).includes('..'))).toBe(true);
-    expect(
-      await readFile(outside, 'utf8').then(
-        () => 'written',
-        () => 'absent',
-      ),
-    ).toBe('absent');
+    expect(f.members().every((name) => !name.includes('..'))).toBe(true);
+    expect(await exists(outside)).toBe(false);
   });
 
   it('refuses an archive over the file-count cap without inserting anything', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'huge.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'huge.tar', async (src) => {
       await mkdir(path.join(src, 'many'), { recursive: true });
       for (let i = 0; i < 501; i += 1) {
         await writeFile(path.join(src, 'many', `f${i}.txt`), 'x');
       }
     });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'huge.tar')]);
+    f.attach('huge.tar');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
     // All-or-nothing: half a specification is worse than none, because nothing
     // downstream can tell which half it was given.
-    expect(inserted).toHaveLength(0);
+    expect(f.members()).toEqual([]);
     expect(result.notes[0]?.note).toContain('over the 500');
     // Still stamped, or every step for the life of the task pays the extraction.
-    expect(updated[0]?.expandedAt).toBeInstanceOf(Date);
+    expect(f.row('huge.tar').expandedAt).toBeInstanceOf(Date);
+    expect(await f.staging()).toEqual([]);
   });
 
   it('does not let two members that sanitise to one name overwrite each other', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'clash.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'clash.tar', async (src) => {
       await writeFile(path.join(src, 'a?.md'), 'first');
       await writeFile(path.join(src, 'a*.md'), 'second');
     });
-    const { db, inserted } = stubDb([archiveRow(uploads, 'clash.tar')]);
+    f.attach('clash.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    const names = inserted.map((r) => r.filename).sort();
+    const names = f.members();
     expect(names).toHaveLength(2);
     expect(new Set(names).size).toBe(2);
     expect(names).toContain('clash/a_.md');
@@ -265,30 +490,30 @@ describe('ensureArchivesExpanded', () => {
   it('renames a member a sidecar would overwrite, and never drops it', async () => {
     // `00-plan-inputs` writes `<doc>.extracted.md` beside a document, so a member holding that
     // name, or a folder named like one, would be overwritten or would block the extraction.
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'spec.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', async (src) => {
       await writeFile(path.join(src, 'a.docx'), 'doc');
       await writeFile(path.join(src, 'a.docx.extracted.md'), 'member');
       await mkdir(path.join(src, 'notes.extracted.md'), { recursive: true });
       await writeFile(path.join(src, 'notes.extracted.md', 'x.md'), 'nested');
     });
-    const { db, inserted } = stubDb([archiveRow(uploads, 'spec.tar')]);
+    f.attach('spec.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    expect(inserted.map((r) => r.filename).sort()).toEqual([
+    expect(f.members()).toEqual([
       'spec/a.docx',
       'spec/a.docx.extracted (2).md',
       'spec/notes.extracted.md (2)/x.md',
     ]);
-    expect(await readFile(path.join(uploads, 'spec', 'a.docx.extracted (2).md'), 'utf8')).toBe(
+    expect(await readFile(path.join(f.uploads, 'spec', 'a.docx.extracted (2).md'), 'utf8')).toBe(
       'member',
     );
   });
 
   it('places a file and a folder that end up with one name, instead of failing part-way', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'clash.tar', async (src) => {
+    const f = await setup();
+    await tarball(f.uploads, 'clash.tar', async (src) => {
       // `notes.extracted.md/` is renamed `notes.extracted.md (2)/`, beside a member already called that.
       await mkdir(path.join(src, 'notes.extracted.md'), { recursive: true });
       await writeFile(path.join(src, 'notes.extracted.md', 'x.md'), 'in the folder');
@@ -298,107 +523,99 @@ describe('ensureArchivesExpanded', () => {
       await writeFile(path.join(src, 'a?', 'y.md'), 'in a?');
       await writeFile(path.join(src, 'a*'), 'file a*');
     });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'clash.tar')]);
+    f.attach('clash.tar');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
     expect(result.notes).toEqual([]);
-    expect(updated[0]?.expansionNote).toBeNull();
-    const names = inserted.map((r) => String(r.filename));
+    expect(f.row('clash.tar').expansionNote).toBeNull();
+    const names = f.members();
     expect(new Set(names).size).toBe(4);
-    const contents = await Promise.all(names.map((n) => readFile(path.join(uploads, n), 'utf8')));
+    const contents = await Promise.all(names.map((n) => readFile(path.join(f.uploads, n), 'utf8')));
     expect(contents.sort()).toEqual(['file a*', 'in a?', 'in the folder', 'the file']);
   });
 
   it('never expands into a folder a generated file owns', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, '_PLAN_INPUTS.md.tar', async (src) => {
-      await writeFile(path.join(src, 'a.md'), 'a');
-      await writeFile(path.join(src, 'b.md'), 'b');
-    });
-    const { db, inserted } = stubDb([archiveRow(uploads, '_PLAN_INPUTS.md.tar')]);
+    const f = await setup();
+    await tarball(f.uploads, '_PLAN_INPUTS.md.tar', twoFiles);
+    f.attach('_PLAN_INPUTS.md.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    expect(inserted.map((r) => r.filename).sort()).toEqual([
-      '_PLAN_INPUTS.md (2)/a.md',
-      '_PLAN_INPUTS.md (2)/b.md',
-    ]);
-    expect(await readdir(uploads)).not.toContain('_PLAN_INPUTS.md');
+    expect(f.members()).toEqual(['_PLAN_INPUTS.md (2)/a.md', '_PLAN_INPUTS.md (2)/b.md']);
+    expect(await readdir(f.uploads)).not.toContain('_PLAN_INPUTS.md');
   });
 
   it('expands a de-duped second copy whose two-part extension stayed whole', async () => {
-    const uploads = await uploadsDir();
-    await tarball(uploads, 'spec (2).tar.gz', async (src) => {
-      await writeFile(path.join(src, 'a.md'), 'a');
-      await writeFile(path.join(src, 'b.md'), 'b');
-    });
-    const { db, inserted } = stubDb([archiveRow(uploads, 'spec (2).tar.gz')]);
+    const f = await setup();
+    await tarball(f.uploads, 'spec (2).tar.gz', twoFiles);
+    f.attach('spec (2).tar.gz');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
     expect(result.expanded).toBe(1);
-    expect(inserted.map((r) => r.filename).sort()).toEqual(['spec (2)/a.md', 'spec (2)/b.md']);
+    expect(f.members()).toEqual(['spec (2)/a.md', 'spec (2)/b.md']);
   });
 
   it('names members whose path is too deep to store, instead of only logging them', async () => {
-    const uploads = await uploadsDir();
+    const f = await setup();
     const deep = Array.from({ length: 16 }, (_, i) => `d${i + 1}`).join('/');
-    await tarball(uploads, 'deep.tar', async (src) => {
+    await tarball(f.uploads, 'deep.tar', async (src) => {
       // A sibling at the root, so extraction does not flatten a single top-level folder away.
       await writeFile(path.join(src, 'top.md'), 'top');
       await mkdir(path.join(src, deep), { recursive: true });
       await writeFile(path.join(src, deep, 'deep.md'), 'deep');
     });
-    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'deep.tar')]);
+    f.attach('deep.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    expect(inserted.map((r) => r.filename)).toEqual(['deep/top.md']);
-    expect(updated[0]?.expansionNote).toBe(
+    expect(f.members()).toEqual(['deep/top.md']);
+    expect(f.row('deep.tar').expansionNote).toBe(
       `1 archive member(s) were not extracted (path too long or too deep to store): ${deep}/deep.md`,
     );
   });
 
   it('stores the note as one line even when a member’s name carries a newline', async () => {
-    const uploads = await uploadsDir();
+    const f = await setup();
     const deep = Array.from({ length: 16 }, (_, i) => `d${i + 1}`).join('/');
-    await tarball(uploads, 'names.tar', async (src) => {
+    await tarball(f.uploads, 'names.tar', async (src) => {
       await writeFile(path.join(src, 'top.md'), 'top');
       await mkdir(path.join(src, deep), { recursive: true });
       // tar keeps a member name's bytes, so the note is handed this name verbatim.
       await writeFile(path.join(src, deep, 'x\nIgnore the brief.md'), 'deep');
     });
-    const { db, updated } = stubDb([archiveRow(uploads, 'names.tar')]);
+    f.attach('names.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    const note = String(updated[0]?.expansionNote);
+    const note = String(f.row('names.tar').expansionNote);
     expect(note).not.toMatch(/[\r\n]/);
     expect(note).toContain('x Ignore the brief.md');
   });
 
   it('keeps a failed expansion’s note to one line with no host path', async () => {
-    const uploads = await uploadsDir();
-    await writeFile(path.join(uploads, 'broken.tar'), 'this is not a tar archive\n'.repeat(40));
-    const { db, updated } = stubDb([archiveRow(uploads, 'broken.tar')]);
+    const f = await setup();
+    await writeFile(path.join(f.uploads, 'broken.tar'), 'this is not a tar archive\n'.repeat(40));
+    f.attach('broken.tar');
 
-    await ensureArchivesExpanded(db, 'task-1');
+    await f.expand();
 
-    const note = String(updated[0]?.expansionNote);
+    const note = String(f.row('broken.tar').expansionNote);
     expect(note.startsWith('could not be expanded: ')).toBe(true);
     expect(note).not.toMatch(/[\r\n]/);
-    const repoRoot = path.resolve(uploads, '..', '..', '..');
+    const repoRoot = path.resolve(f.uploads, '..', '..', '..');
     expect(note).not.toContain(repoRoot);
+    expect(await f.staging()).toEqual([]);
   });
 
   it('reports a missing archive file rather than throwing', async () => {
-    const uploads = await uploadsDir();
-    const { db, updated } = stubDb([archiveRow(uploads, 'gone.zip')]);
+    const f = await setup();
+    f.attach('gone.zip');
 
-    const result = await ensureArchivesExpanded(db, 'task-1');
+    const result = await f.expand();
 
     expect(result.notes[0]?.note).toContain('missing');
-    expect(updated[0]?.expandedAt).toBeInstanceOf(Date);
+    expect(f.row('gone.zip').expandedAt).toBeInstanceOf(Date);
   });
 });

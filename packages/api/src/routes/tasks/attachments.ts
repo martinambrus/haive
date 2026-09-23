@@ -28,7 +28,7 @@ import {
   openFileNoFollow,
   removeNoFollow,
 } from '@haive/shared/fs-safe';
-import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
+import { pruneAfter, removeFiles, rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
 import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
@@ -260,42 +260,6 @@ async function claimAttachmentName(
     }
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
   }
-}
-
-/** Remove the directories a deleted file left empty, stopping at the uploads root
- *  or at the first directory something else still lives in. */
-async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
-  let cursor = relDir;
-  while (cursor !== '' && cursor !== '.') {
-    try {
-      // Non-recursive on purpose: ENOTEMPTY is the signal to stop, so a directory something else
-      // still lives in is left exactly as it is.
-      await removeNoFollow(anchor, `${uploadsRel}/${cursor}`);
-    } catch {
-      return; // not empty, or already gone
-    }
-    cursor = splitAttachmentPath(cursor).dir;
-  }
-}
-
-/** Remove what `filesToRemove` lists. Walked under the repository root like every other removal
- *  here, so a link in a path is refused rather than followed, and a file already gone is fine. */
-async function removeFiles(anchor: string, uploadsRel: string, files: readonly string[]) {
-  for (const file of files) {
-    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
-  }
-}
-
-/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
- *  the children that kept it alive. */
-async function pruneAfter(
-  anchor: string,
-  uploadsRel: string,
-  removed: readonly string[],
-): Promise<void> {
-  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
-  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
-  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
 }
 
 /** Stream the request body to `destPath`, aborting + unlinking once the byte count

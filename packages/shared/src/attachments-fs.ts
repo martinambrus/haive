@@ -1,6 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { schema, withTaskAttachmentsLock, type Database, type DbTx } from '@haive/database';
 import { ATTACHMENTS_MANIFEST_NAME, renderAttachmentsManifest } from './attachments/manifest.js';
+import { splitAttachmentPath } from './attachments/paths.js';
 import { chownNoFollow, removeNoFollow, writeFileNoFollow } from './fs-safe.js';
 import { logger } from './logger/index.js';
 
@@ -66,4 +67,49 @@ export async function rewriteAttachmentsManifest(
   } catch (err) {
     log.warn({ err, taskId }, 'could not rewrite the attachments manifest');
   }
+}
+
+/** Remove each listed file (relative to the uploads dir), walked under the repository root like
+ *  every other removal of an attachment, so a link in a path is refused rather than followed. A file
+ *  already gone is fine: every caller lists what SHOULD be gone. */
+export async function removeFiles(
+  anchor: string,
+  uploadsRel: string,
+  files: readonly string[],
+): Promise<void> {
+  for (const file of files) {
+    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
+  }
+}
+
+/** Remove the directories a removed file left empty, stopping at the uploads root or at the first
+ *  directory something else still lives in. */
+export async function pruneEmptyDirs(
+  anchor: string,
+  uploadsRel: string,
+  relDir: string,
+): Promise<void> {
+  let cursor = relDir;
+  while (cursor !== '' && cursor !== '.') {
+    try {
+      // Non-recursive on purpose: ENOTEMPTY is the signal to stop, so a directory something else
+      // still lives in is left exactly as it is.
+      await removeNoFollow(anchor, `${uploadsRel}/${cursor}`);
+    } catch {
+      return; // not empty, or already gone
+    }
+    cursor = splitAttachmentPath(cursor).dir;
+  }
+}
+
+/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
+ *  the children that kept it alive. */
+export async function pruneAfter(
+  anchor: string,
+  uploadsRel: string,
+  removed: readonly string[],
+): Promise<void> {
+  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
+  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
 }

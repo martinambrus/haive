@@ -831,9 +831,12 @@ to sanitise. All-or-nothing per archive: over `ATTACHMENT_ARCHIVE_MAX_FILES` (50
 `expansion_note`, because half a specification is worse than none — nothing downstream can
 tell which half it was given. The cap is measured AFTER extraction on purpose: the alternative
 parses `unzip -Z`/`tar -tv` human-facing output, and a bomb is exactly the input that lies in
-it. `expanded_at` is stamped whatever happened, or a failed archive is re-extracted on every
-step for the life of the task; `expanded_from_id` cascades the rows AND is what makes "nested
-archives are not recursed" structural (a row with a parent is never a candidate). The FK
+it. `expanded_at` is stamped for every archive that will not expand — a cap breach, an unreadable
+archive, no free folder name — or a failed archive is re-extracted on every step for the life of
+the task. A PLACEMENT that fails is the one exception: it takes back all it placed and leaves the
+archive a candidate, since a lost database round trip is no verdict on the archive.
+`expanded_from_id` cascades the rows AND is what makes "nested archives are not recursed"
+structural (a row with a parent is never a candidate). The FK
 cannot reach the disk, so a delete removes what the attachment left there too
 (`filesToRemove`): an archive's MEMBERS, which a folder delete has to reach at the uploads ROOT
 (`docs/x.zip` expands into `x/`), and each document's extracted-text SIDECAR. It removes FILES,
@@ -841,8 +844,8 @@ never a directory, and a folder goes only by pruning once it is empty: a recursi
 whatever else lives there — a later upload named like the expansion directory lands inside it (the
 api de-dupes files, not directories), and an upload racing the delete has its file on disk before
 its row exists, where no list of rows can see it. That makes the rows the whole inventory, and two
-rules keep them so: no attachment may take a name a generated file owns, and the expansion takes a
-placed member back off the disk when its row cannot be written. The first rule is ONE predicate
+rules keep them so: no attachment may take a name a generated file owns, and no expansion leaves a
+placed file without its row (below). The first rule is ONE predicate
 (`isReservedAttachmentName`, `@haive/shared/attachments`) that an upload, an archive member and an
 expansion folder all apply: `_ATTACHMENTS.md` and `_PLAN_INPUTS.md` at the root, `*.extracted.md` at
 any depth, since a delete unlinks a document's sidecar path whether or not the sidecar exists yet. A
@@ -868,6 +871,25 @@ calling it missing, since a delete removes files before rows and a deleted attac
 missing one. The upload's INSERT stays outside the lock with its id chosen beforehand, so one whose
 answer was lost can be told from one that failed: the file is taken back only when a second look
 finds no row, since answering 500 for a stored upload sends the client's retry to store it twice.
+
+**The expansion is the lock's longest section, and a crash anywhere in it leaves something the
+next call can settle.** Each attempt extracts OUTSIDE the lock into its own
+`.expanding-<archiveId>-<nonce>` staging dir and builds the finished tree there. The dir is 0711,
+because the unprivileged extraction uid has to traverse it; the nonce is what stops a second call
+moving the first's tree aside, which `extractArchive` does to any existing destination. One locked
+section then re-checks that the archive is still unstamped, settles earlier attempts at it, claims
+the first free folder by moving the tree WHOLE (`renameNoFollow` with `noReplace`), and writes every
+member row and the stamp together — so two overlapping calls produce one tree. Before each move it
+writes `placed-as`, naming the folder and its files, and the staging dir goes only after a confirmed
+COMMIT, so an attempt that died after its move and before its rows is taken back by the next call
+to hold the lock: whatever `placed-as` names that no row owns is removed. A tree still staged means
+the move never happened, and then only the claimed folder goes, and only while it is an empty
+directory. The intent is untrusted — the sandbox can write the uploads dir — so it may name one
+folder and only names an expansion could have written: a sidecar has no row, and an intent naming
+one would pass live extracted text off as an orphan. A throw after the move takes the files back
+INSIDE the callback, since postgres.js can reject the transaction while the callback still runs.
+Every call first settles the attempts at archives deleted or stamped since, re-checked under the
+lock, so an archive attached a moment ago keeps its attempt in flight.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the
 column.** The expansion call reports only the archives THAT call expanded, so a later step, a

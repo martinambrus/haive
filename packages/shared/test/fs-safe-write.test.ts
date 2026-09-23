@@ -486,6 +486,16 @@ describe('fs-safe write primitives', () => {
       expect((await stat(path.join(root, 'to'))).isDirectory()).toBe(true);
     });
 
+    it('noReplace takes its claim back when the directory cannot be moved into it', async () => {
+      // The claim is an empty directory made before the move; left behind, it holds the name for
+      // good. A directory cannot be moved inside itself, so this move fails after the claim.
+      await mkdir(path.join(root, 'from', 'inner'), { recursive: true });
+      await expect(
+        renameNoFollow(root, 'from', 'from/inner/claim', { noReplace: true }),
+      ).rejects.toMatchObject({ code: 'EINVAL' });
+      expect(await readdir(path.join(root, 'from', 'inner'))).toEqual([]);
+    });
+
     it('refuses an empty rel on either side', async () => {
       await expect(renameNoFollow(root, '', 'x.txt')).rejects.toMatchObject({
         reason: 'invalid-path',
