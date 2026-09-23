@@ -792,6 +792,17 @@ describe('task attachment routes', () => {
       expect(filenames()).toEqual(['bundle/mine.md']);
     });
 
+    it('leaves a file that reached the expansion folder after the delete read its rows', async () => {
+      // An upload racing the delete: its file is on disk and its row is not written yet, which is
+      // exactly what the delete's snapshot cannot see. Nothing no deleted row names may go.
+      const bundle = await seedArchive('bundle.zip', { 'bundle/a.md': 'a' });
+      await writeFile(up('bundle/late.md'), 'late');
+
+      await send('DELETE', `/${TASK}/attachments/${bundle.id as string}`);
+      expect(await exists(up('bundle/a.md'))).toBe(false);
+      expect(await readFile(up('bundle/late.md'), 'utf8')).toBe('late');
+    });
+
     it('deletes the row of a file that is already gone', async () => {
       const res = await upload('a.md', 'x');
       await rm(up('a.md'));
@@ -858,6 +869,22 @@ describe('task attachment routes', () => {
       expect(await exists(up('x'))).toBe(false);
       expect(await readFile(up('y/b.md'), 'utf8')).toBe('b');
       expect(filenames()).toEqual(['y.zip', 'y/b.md']);
+    });
+
+    it('leaves a file that reached the folder or an archive’s tree after the delete read its rows', async () => {
+      await seedArchive('docs/x.zip', { 'x/a.md': 'a' });
+      await seedFile('docs/readme.md', 'r');
+      await writeFile(up('docs/late.md'), 'late');
+      await writeFile(up('x/late.md'), 'late');
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 2 },
+      });
+      expect(await exists(up('docs/readme.md'))).toBe(false);
+      expect(await exists(up('x/a.md'))).toBe(false);
+      expect(await readFile(up('docs/late.md'), 'utf8')).toBe('late');
+      expect(await readFile(up('x/late.md'), 'utf8')).toBe('late');
     });
 
     it('prunes a parent the folder leaves empty', async () => {

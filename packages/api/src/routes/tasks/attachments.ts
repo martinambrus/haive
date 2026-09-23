@@ -28,7 +28,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { attachmentRemovalPlan, type AttachmentRemovalPlan } from '../../lib/attachment-removal.js';
+import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -231,17 +231,10 @@ async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string
   }
 }
 
-/** Remove what `attachmentRemovalPlan` lists. Walked under the repository root like every other
- *  removal here, so a link in a path is refused rather than followed, and one already gone is fine. */
-async function removePlanned(
-  anchor: string,
-  uploadsRel: string,
-  plan: AttachmentRemovalPlan,
-): Promise<void> {
-  for (const tree of plan.trees) {
-    await removeNoFollow(anchor, `${uploadsRel}/${tree}`, { recursive: true }).catch(() => {});
-  }
-  for (const file of plan.files) {
+/** Remove what `filesToRemove` lists. Walked under the repository root like every other removal
+ *  here, so a link in a path is refused rather than followed, and a file already gone is fine. */
+async function removeFiles(anchor: string, uploadsRel: string, files: readonly string[]) {
+  for (const file of files) {
     await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
   }
 }
@@ -548,8 +541,8 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
 
-  // What the FK cannot reach: the expansion tree if this is an archive (its member ROWS cascade on
-  // the delete below) and the extracted-text sidecar. Both stay bind-mounted into the sandbox, so an
+  // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on the
+  // delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox, so an
   // agent would keep reading files the user believes they removed.
   const rows = await db.query.taskAttachments.findMany({
     where: and(
@@ -558,12 +551,10 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
     ),
     columns: { id: true, filename: true, expandedFromId: true },
   });
-  const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
-  await removePlanned(anchor, uploadsRel, plan);
-
-  await removeNoFollow(anchor, split.rel).catch(() => {});
+  const files = filesToRemove(new Set([attachmentId]), rows);
+  await removeFiles(anchor, uploadsRel, files);
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-  await pruneAfter(anchor, uploadsRel, [row.filename, ...plan.files]);
+  await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true });
 });
@@ -593,23 +584,18 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const split = splitAttachmentStoredPath(marked[0]!, taskId);
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
-  // Recursive on purpose: the tree also holds the worker's extracted sidecars,
-  // which carry no row of their own and are meaningless once the originals go.
-  // The prefix is walked under the repository root, so no resolve-then-compare check is
-  // needed — a component that is a link is refused by the walk rather than resolved and
-  // then trusted.
-  await removeNoFollow(anchor, `${uploadsRel}/${prefix}`, { recursive: true }).catch(() => {});
-  // An archive inside the folder expanded into a directory at the uploads ROOT, not under the
-  // folder, so the recursive removal above never reaches it — the planner does.
-  const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
-  await removePlanned(anchor, uploadsRel, plan);
+  // File by file, and the folder goes by pruning once it is empty: a recursive removal would also
+  // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
+  // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the folder.
+  const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
+  await removeFiles(anchor, uploadsRel, files);
   await db.delete(schema.taskAttachments).where(
     inArray(
       schema.taskAttachments.id,
       marked.map((r) => r.id),
     ),
   );
-  await pruneAfter(anchor, uploadsRel, [prefix, ...plan.files]);
+  await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true, removed: marked.length });
 });

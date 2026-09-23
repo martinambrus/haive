@@ -826,10 +826,12 @@ it. `expanded_at` is stamped whatever happened, or a failed archive is re-extrac
 step for the life of the task; `expanded_from_id` cascades the rows AND is what makes "nested
 archives are not recursed" structural (a row with a parent is never a candidate). The FK
 cannot reach the disk, so a delete removes what the attachment left there too
-(`attachmentRemovalPlan`): an archive's expansion DIRECTORY, which a folder delete has to reach at
-the uploads ROOT (`docs/x.zip` expands into `x/`), and a document's extracted-text SIDECAR. A
-tree a surviving upload also lives in goes member by member, since the api de-dupes files and
-not directories. Neither may be left: an orphaned
+(`filesToRemove`): an archive's MEMBERS, which a folder delete has to reach at the uploads ROOT
+(`docs/x.zip` expands into `x/`), and each document's extracted-text SIDECAR. It removes FILES,
+never a directory, and a folder goes only by pruning once it is empty: a recursive removal takes
+whatever else lives there — a later upload named like the expansion directory lands inside it (the
+api de-dupes files, not directories), and an upload racing the delete has its file on disk before
+its row exists, where no list of rows can see it. Neither may be left: an orphaned
 tree stays bind-mounted, and an agent would keep reading files the user believes they removed.
 
 Three caps exist because a folder is not a handful of files. `augmentPromptWithAttachments`
