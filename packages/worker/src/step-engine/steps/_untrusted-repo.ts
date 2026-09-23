@@ -351,6 +351,16 @@ export const safeTitle = (t: string | null | undefined): string => {
   return s.length > 0 ? s : '(untitled)';
 };
 
+/** Reduce a NOTE Haive composed around names it does not control — an archive member path, an
+ *  extractor's error line — to one capped line. Same protection as `safeTitle`, but a note is
+ *  longer and has no placeholder: an empty note says nothing and is left out by the caller. The
+ *  ellipsis states the cut, so a truncated note never reads as a complete one. */
+export const SAFE_NOTE_CHARS = 300;
+export const safeNote = (s: string | null | undefined): string => {
+  const line = collapseToLine(s);
+  return line.length > SAFE_NOTE_CHARS ? `${line.slice(0, SAFE_NOTE_CHARS - 1)}…` : line;
+};
+
 /** Reduce a REF name. Same idea as `safeKey`, different alphabet: a branch name
  *  legitimately contains `/`, which `safeKey` replaces — MEASURED by git-merge.test.ts,
  *  which expects `feature/x` and was handed `feature_x`. Whitespace and newlines still go,
