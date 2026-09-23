@@ -4,7 +4,7 @@ import {
   lstatNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
+import { PLAN_INPUTS_INDEX_NAME, splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
 import path from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -47,7 +47,7 @@ import {
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
-export const PLAN_INPUTS_INDEX = '_PLAN_INPUTS.md';
+export const PLAN_INPUTS_INDEX = PLAN_INPUTS_INDEX_NAME;
 
 /** Documents given an extracted text sidecar. Each one is a subprocess
  *  (`pdftotext`, `unzip`), which is fine for the handful this step was built for

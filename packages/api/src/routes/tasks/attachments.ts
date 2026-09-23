@@ -11,6 +11,7 @@ import {
   configService,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
+  PLAN_INPUTS_INDEX_NAME,
   renderAttachmentsManifest,
   sanitizeAttachmentPath,
   splitAttachmentPath,
@@ -49,10 +50,10 @@ const NODE_GID = 1000;
 /** Names the uploads dir owns. An upload allowed to take one of these is
  *  overwritten the next time that file is generated — the user's document
  *  silently replaced by our index, with their attachment row still pointing at
- *  it. `_PLAN_INPUTS.md` is written by the worker's 00-plan-inputs step; it is
- *  listed here rather than imported because the api must not depend on the
- *  worker, and a name the api hands out is a name the api has to reserve. */
-const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, '_PLAN_INPUTS.md']);
+ *  it. The plan-inputs index is the worker's `00-plan-inputs` output; its name
+ *  lives in `@haive/shared` so the api can reserve it without depending on the
+ *  worker. */
+const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, PLAN_INPUTS_INDEX_NAME]);
 
 /** Resolve the task's on-disk uploads dir, enforcing ownership + a writable
  *  volume-backed repo. Throws 404/409 with an actionable message otherwise.
