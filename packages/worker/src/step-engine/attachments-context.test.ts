@@ -52,6 +52,56 @@ describe('augmentPromptWithAttachments', () => {
     expect(out).toContain('COVERAGE: the list above names 1 of 126 attached files');
   });
 
+  // Exact pins: this notice rides every step's prompt, so any change to it is a prompt change for
+  // every task. `toContain` would let a new line appear anywhere without a test noticing.
+  const DIR = '/haive/workdir/.haive/task-uploads/task-1';
+  const SEE = `See ${DIR}/_ATTACHMENTS.md for descriptions. Read any that are relevant before proceeding.`;
+
+  it('renders a short list exactly', async () => {
+    const out = await augmentPromptWithAttachments(
+      mockDb([
+        { filename: 'spec.md', description: 'the spec' },
+        { filename: 'docs/shot.png', description: null },
+      ]),
+      'task-1',
+      'ORIGINAL',
+    );
+    expect(out).toBe(
+      [
+        '[User-attached files]',
+        'The user attached 2 reference file(s) for this task, available read-only at:',
+        `  ${DIR}/`,
+        '  - spec.md — the spec',
+        '  - docs/shot.png',
+        SEE,
+        '',
+        'ORIGINAL',
+      ].join('\n'),
+    );
+  });
+
+  it('renders a collapsed list exactly', async () => {
+    const rows = [
+      { filename: 'brief.md', description: null },
+      ...Array.from({ length: 45 }, (_, i) => ({ filename: `docs/p${i}.md`, description: null })),
+    ];
+    const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');
+    expect(out).toBe(
+      [
+        '[User-attached files]',
+        'The user attached 46 reference file(s) for this task, available read-only at:',
+        `  ${DIR}/`,
+        '  - brief.md',
+        '  - docs/ — 45 file(s)',
+        'COVERAGE: the list above names 1 of 46 attached files; the rest are',
+        `inside the folders listed. ${DIR}/_ATTACHMENTS.md indexes every one of them by path.`,
+        SEE,
+        '',
+        'ORIGINAL',
+      ].join('\n'),
+    );
+  });
+
   it('leaves a list under the limit exactly as it was', async () => {
     const rows = Array.from({ length: 40 }, (_, i) => ({
       filename: `docs/f${i}.md`,
