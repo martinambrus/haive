@@ -1084,8 +1084,11 @@ its last report edited is MARKED, not dropped (`editedInRound`): that round may 
 for something else, and dropping the site would then hide one still left unchanged. The mark reads
 07's `filesTouched`, the agent's own and possibly incomplete account, so it is a hint and never
 proof, and the row says the agent LEFT each site unchanged when it reported it rather than
-asserting the site is unchanged now. `quick_bugfix` runs no gate 2, so gate 3 shows the row
-whenever no gate-2 decision exists.
+asserting the site is unchanged now. A manual retry of 07 replaces that round's pass, its reports
+included, exactly as it replaces the pass's summary and `filesTouched`: a retry means "redo this
+step", the edits the pass left stay visible to every reviewer through the dirty-worktree scan, and
+the rerun reads the same code. `quick_bugfix` runs no gate 2, so gate 3 shows the row whenever no
+gate-2 decision exists.
 
 The lists are display copy and are kept that way. They are sanitised on the way in and again on
 read (`_similar-sites.ts`): a path must be single-line, fence-safe and inside the repository, and
