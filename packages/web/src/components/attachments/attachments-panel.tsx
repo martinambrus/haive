@@ -12,7 +12,12 @@ import {
   uploadTaskAttachment,
   type TaskAttachment,
 } from '@/lib/api-client';
+import { pollForExpansion } from '@/lib/attachment-expansion';
+import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
+
+/** How often the panel re-reads while an archive waits for the worker. */
+const EXPANSION_POLL_MS = 5000;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -25,7 +30,7 @@ function formatBytes(n: number): string {
  *  row's full path rather than becoming another level of chrome. */
 function groupByFolder(items: TaskAttachment[]): {
   loose: TaskAttachment[];
-  folders: { name: string; items: TaskAttachment[]; bytes: number }[];
+  folders: { name: string; items: TaskAttachment[]; bytes: number; incomplete: number }[];
 } {
   const loose: TaskAttachment[] = [];
   const byTop = new Map<string, TaskAttachment[]>();
@@ -48,13 +53,22 @@ function groupByFolder(items: TaskAttachment[]): {
         name,
         items: group,
         bytes: group.reduce((sum, i) => sum + i.sizeBytes, 0),
+        // Counted so a COLLAPSED folder still says an archive in it did not fully expand.
+        incomplete: group.filter((i) => archiveExpansionBanner(i) !== null).length,
       })),
   };
 }
 
 /** Task attachments tab: list, upload and remove user-supplied reference files the
  *  AI agent reads from the task workspace. Works for new and running tasks alike. */
-export function AttachmentsPanel({ taskId }: { taskId: string }) {
+export function AttachmentsPanel({
+  taskId,
+  taskEnded = false,
+}: {
+  taskId: string;
+  /** The task completed, failed or was cancelled, so no step will run to expand an archive. */
+  taskEnded?: boolean;
+}) {
   const [items, setItems] = useState<TaskAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
@@ -75,6 +89,16 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
   }, [reload]);
 
   const grouped = useMemo(() => groupByFolder(items ?? []), [items]);
+
+  // The worker expands an archive at the start of its next step and nothing tells this view when,
+  // so it re-reads while one is waiting: the members, and any note about what the archive lost,
+  // then appear without leaving the tab.
+  const poll = useMemo(() => pollForExpansion(items ?? [], taskEnded), [items, taskEnded]);
+  useEffect(() => {
+    if (!poll) return;
+    const timer = setInterval(() => void reload(), EXPANSION_POLL_MS);
+    return () => clearInterval(timer);
+  }, [poll, reload]);
 
   async function onPick(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -127,6 +151,7 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
     'block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-600 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-white hover:file:bg-indigo-500';
 
   function row(a: TaskAttachment) {
+    const incomplete = archiveExpansionBanner(a);
     return (
       <Card key={a.id} className="flex items-center justify-between gap-3 p-3">
         <div className="min-w-0">
@@ -142,6 +167,9 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
           <p className="text-[11px] text-neutral-500">
             {formatBytes(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
           </p>
+          {incomplete && (
+            <p className="mt-1 break-words text-xs text-amber-400">{incomplete.text}</p>
+          )}
         </div>
         <Button
           size="sm"
@@ -229,6 +257,12 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
                   </span>
                   <span className="text-[11px] text-neutral-500">
                     {folder.items.length} file(s) · {formatBytes(folder.bytes)}
+                    {folder.incomplete > 0 && (
+                      <span className="text-amber-400">
+                        {' '}
+                        · {folder.incomplete} archive(s) not fully expanded
+                      </span>
+                    )}
                   </span>
                 </span>
               </button>

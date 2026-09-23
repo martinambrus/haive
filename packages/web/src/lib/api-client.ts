@@ -227,6 +227,14 @@ export interface TaskAttachment {
   contentType: string | null;
   description: string | null;
   createdAt: string;
+  /** When the worker expanded this archive. Optional: an api that predates it omits it. */
+  expandedAt?: string | null;
+  /** Why that expansion produced less than the archive holds. Display copy: read it only through
+   *  `archiveExpansionBanner`, which gates it on `expandedAt`. */
+  expansionNote?: string | null;
+  /** The archive this file came out of; null for anything uploaded directly. Optional like the two
+   *  above. */
+  expandedFromId?: string | null;
 }
 
 /** The name an upload travels under: the path INSIDE the picked folder when the

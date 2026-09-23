@@ -41,8 +41,8 @@ export const taskAttachments = pgTable(
     /** Why an expansion produced nothing or less than the archive holds (a cap
      *  breach, members refused or too deep to store, an unreadable archive).
      *  Written once, with `expanded_at`, and never rewritten, so it cannot outlive
-     *  what it describes. The prompt notice and `00-plan-inputs` read it, always
-     *  gated on `expanded_at` — the note is only the words. */
+     *  what it describes. The prompt notice, `00-plan-inputs` and the attachments
+     *  panel read it, always gated on `expanded_at` — the note is only the words. */
     expansionNote: text('expansion_note'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },

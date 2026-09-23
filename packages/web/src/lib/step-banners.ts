@@ -1,4 +1,4 @@
-/** Banner visibility for step cards and invocation terminals.
+/** Banner visibility for step cards, invocation terminals and attachment rows.
  *
  *  ONE RULE: a message column is display copy, not state. `task_steps.status_message`,
  *  `task_steps.error_message` and `cli_invocations.status_message` all outlive the thing they
@@ -144,4 +144,21 @@ export function invocationBanner(
   // the message is the whole content, and an absent one means nothing to report.
   if (!inv.statusMessage) return queued ? { kind: 'queued', text: QUEUED_WAIT_TEXT } : null;
   return { kind: queued ? 'queued' : 'running', text: inv.statusMessage };
+}
+
+/** The attachment fields the archive rule reads. Both optional: an api that predates them sends
+ *  neither, and that has to read as "nothing to say". */
+export interface ArchiveBannerRow {
+  expandedAt?: Date | string | null;
+  expansionNote?: string | null;
+}
+
+/** Copy for the amber "this archive did not fully expand" line under an attachment, or null.
+ *
+ *  Gated on `expandedAt`, the stamp proving the worker ran the expansion the note describes.
+ *  Nothing writes a note without it today, since both land in one UPDATE. But a path that cleared
+ *  the stamp to force a re-expansion would leave the old line describing a run about to be redone. */
+export function archiveExpansionBanner(a: ArchiveBannerRow): { text: string } | null {
+  if (a.expandedAt == null || !a.expansionNote) return null;
+  return { text: a.expansionNote };
 }

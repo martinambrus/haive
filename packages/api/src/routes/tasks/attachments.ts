@@ -123,6 +123,9 @@ function toClient(row: typeof schema.taskAttachments.$inferSelect) {
     contentType: row.contentType,
     description: row.description,
     createdAt: row.createdAt.toISOString(),
+    expandedAt: row.expandedAt?.toISOString() ?? null,
+    expansionNote: row.expansionNote,
+    expandedFromId: row.expandedFromId,
   };
 }
 

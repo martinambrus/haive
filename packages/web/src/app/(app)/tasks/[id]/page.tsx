@@ -2073,7 +2073,7 @@ export default function TaskDetailPage() {
 
       {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
 
-      {tab === 'attachments' && <AttachmentsPanel taskId={id} />}
+      {tab === 'attachments' && <AttachmentsPanel taskId={id} taskEnded={taskEnded} />}
 
       {tab === 'terminal' && (
         <TerminalTab

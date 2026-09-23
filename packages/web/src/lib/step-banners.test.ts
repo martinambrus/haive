@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  archiveExpansionBanner,
   failureBanner,
   invocationBanner,
   modelIdentityBanner,
@@ -204,5 +205,32 @@ describe('modelIdentityBanner', () => {
     expect(
       modelIdentityBanner({ requested: 'same-model', served: 'same-model', match: 'differs' }),
     ).not.toBeNull();
+  });
+});
+
+describe('archiveExpansionBanner', () => {
+  const NOTE = '2 archive members were not extracted (path too long or too deep to store): a, b';
+  const STAMP = '2026-09-23T12:00:00.000Z';
+
+  it('shows the note of an archive the worker expanded', () => {
+    expect(archiveExpansionBanner({ expandedAt: STAMP, expansionNote: NOTE })).toEqual({
+      text: NOTE,
+    });
+  });
+
+  it('says nothing for an archive that expanded in full', () => {
+    expect(archiveExpansionBanner({ expandedAt: STAMP, expansionNote: null })).toBeNull();
+    expect(archiveExpansionBanner({ expandedAt: STAMP, expansionNote: '' })).toBeNull();
+  });
+
+  it('shows no note the stamp does not vouch for', () => {
+    // Nothing writes one today, since the worker stamps both in one UPDATE. But a path that
+    // cleared the stamp to force a re-expansion would leave the old line describing a run
+    // that is about to be redone.
+    expect(archiveExpansionBanner({ expandedAt: null, expansionNote: NOTE })).toBeNull();
+  });
+
+  it('says nothing for an attachment from an api that predates the fields', () => {
+    expect(archiveExpansionBanner({})).toBeNull();
   });
 });
