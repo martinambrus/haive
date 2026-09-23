@@ -358,6 +358,19 @@ describe('bounded coverage recovery', () => {
   });
 });
 
+/** A step context whose task has exactly these attachments. The coverage gate reads them only for a
+ *  picked section, so a structural repair runs with none of it. */
+const attachedCtx = (filenames: string[]) =>
+  ({
+    taskId: 't1',
+    logger: { warn() {}, info() {} },
+    db: {
+      select: () => ({
+        from: () => ({ where: async () => filenames.map((filename) => ({ filename })) }),
+      }),
+    },
+  }) as never;
+
 describe('the structural repair prompt', () => {
   const TARGET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const node = (id: string, title: string, parentId: string | null, path: string) =>
@@ -387,16 +400,13 @@ describe('the structural repair prompt', () => {
   ];
 
   const promptFor = async (items: string[], over: Partial<Detected> = {}) => {
-    const error = await planCoverageStep.apply!(
-      {} as never,
-      {
-        detected: detected({
-          structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
-          ...over,
-        }),
-        formValues: { decision: 'redecompose', items },
-      } as never,
-    ).catch((err: unknown) => err);
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: detected({
+        structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
+        ...over,
+      }),
+      formValues: { decision: 'redecompose', items },
+    } as never).catch((err: unknown) => err);
     expect(error).toBeInstanceOf(MiningWaveError);
     return (error as MiningWaveError).dispatches[0]!.prompt;
   };
@@ -487,6 +497,64 @@ describe('the structural repair prompt', () => {
     const refs = prompt.match(/node:[0-9a-f-]+/g) ?? [];
     expect(refs.length).toBeGreaterThan(30);
     expect(refs.every((ref) => ref.length === 'node:'.length + 36)).toBe(true);
+  });
+});
+
+describe('a repair picked from a document deleted since the gate drafted it', () => {
+  const section = (source: string, line: number) => ({
+    source,
+    line,
+    title: `Section ${line}`,
+    score: 0,
+    matchedNodes: 0,
+    missingTerms: ['x'],
+  });
+  const d = detected({
+    structural: [],
+    sections: [section('spec.md', 12), section('old.md', 4)],
+    sectionBodies: { 'doc:spec.md:12': 'Billing runs monthly.', 'doc:old.md:4': 'Retired text.' },
+    docNames: ['spec.md', 'old.md'],
+  });
+
+  it('never sends the deleted document’s section, whose body the gate still holds', async () => {
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+    } as never).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MiningWaveError);
+    const prompts = (error as MiningWaveError).dispatches.map((x) => x.prompt);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Billing runs monthly.');
+    expect(prompts.join('\n')).not.toContain('Retired text.');
+  });
+
+  it('keeps every picked section when the attachments cannot be read', async () => {
+    const unreadable = {
+      taskId: 't1',
+      logger: { warn() {}, info() {} },
+      db: {
+        select: () => ({
+          from: () => ({
+            where: async () => {
+              throw new Error('connection lost');
+            },
+          }),
+        }),
+      },
+    } as never;
+    const error = await planCoverageStep.apply!(unreadable, {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+    } as never).catch((err: unknown) => err);
+    expect((error as MiningWaveError).dispatches).toHaveLength(2);
+  });
+
+  it('has nothing to repair when every picked section came from deleted documents', async () => {
+    const out = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:old.md:4'] },
+    } as never);
+    expect(out.decision).toBe('accepted');
   });
 });
 
@@ -797,14 +865,11 @@ describe('re-offering a gap the gate already tried', () => {
   const SECOND = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
   const dispatchIds = async (over: Partial<Detected>, items: string[], exhausted = false) => {
-    const error = await planCoverageStep.apply!(
-      {} as never,
-      {
-        detected: detected(over),
-        formValues: { decision: 'redecompose', items },
-        ...(exhausted ? { miningWaveExhausted: true } : {}),
-      } as never,
-    ).catch((err: unknown) => err);
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: detected(over),
+      formValues: { decision: 'redecompose', items },
+      ...(exhausted ? { miningWaveExhausted: true } : {}),
+    } as never).catch((err: unknown) => err);
     return error;
   };
 
