@@ -18,9 +18,13 @@ import {
   ATTACHMENTS_MANIFEST_NAME,
   AttachmentPathError,
   detectAttachmentArchiveFormat,
+  isReservedAttachmentName,
   logger,
   renderAttachmentsManifest,
+  reserveAttachmentDirs,
   sanitizeAttachmentPath,
+  splitAttachmentExtension,
+  splitAttachmentPath,
   splitAttachmentStoredPath,
 } from '@haive/shared';
 import { extractArchive } from '../repo/clone.js';
@@ -151,14 +155,19 @@ async function walkRegularFiles(
 
 /** A directory name for the archive's contents that is not already taken. Mirrors
  *  the api's per-directory de-dupe, so an archive uploaded twice lands as `spec/`
- *  and `spec (2)/` rather than merging into one tree. */
+ *  and `spec (2)/` rather than merging into one tree. A name a generated file owns
+ *  counts as taken too: `_PLAN_INPUTS.md.zip` expanded into a FOLDER named
+ *  `_PLAN_INPUTS.md` would stop the plan-inputs index from ever being written. */
 async function uniqueDirName(anchor: string, uploadsRel: string, stem: string): Promise<string> {
   const base = sanitizeAttachmentPath(stem).split('/').pop() || 'archive';
   let candidate = base;
   let n = 1;
   // A LINK at that name counts as TAKEN, which is the point: an occupied name is not free
   // space, and the `stat` this replaced would have followed it to decide.
-  while ((await lstatNoFollow(anchor, `${uploadsRel}/${candidate}`)) !== null) {
+  while (
+    isReservedAttachmentName(candidate, true) ||
+    (await lstatNoFollow(anchor, `${uploadsRel}/${candidate}`)) !== null
+  ) {
     n += 1;
     candidate = `${base} (${n})`;
   }
@@ -167,23 +176,26 @@ async function uniqueDirName(anchor: string, uploadsRel: string, stem: string): 
 
 /** `relPath` if free, else the same name with ` (n)` before the extension. The
  *  set is per-archive: the destination directory is brand new, so nothing else
- *  can be in it. */
+ *  can be in it. A member named like a sidecar is renamed, never dropped:
+ *  `00-plan-inputs` writes `<doc>.extracted.md` beside a document and would
+ *  overwrite a member holding that name. Members never sit at the uploads root,
+ *  so only the sidecar half of the reserved names applies here. */
 function uniqueWithin(taken: Set<string>, relPath: string): string {
-  if (!taken.has(relPath)) {
+  const free = (candidate: string): boolean =>
+    !taken.has(candidate) && !isReservedAttachmentName(splitAttachmentPath(candidate).base, false);
+  if (free(relPath)) {
     taken.add(relPath);
     return relPath;
   }
-  const dot = relPath.lastIndexOf('.');
-  const cut = relPath.lastIndexOf('/');
-  const hasExt = dot > cut + 1;
-  const stem = hasExt ? relPath.slice(0, dot) : relPath;
-  const ext = hasExt ? relPath.slice(dot) : '';
+  const { dir, base } = splitAttachmentPath(relPath);
+  const { stem, ext } = splitAttachmentExtension(base);
+  const prefix = dir === '' ? '' : `${dir}/`;
   let n = 1;
   let candidate = relPath;
   do {
     n += 1;
-    candidate = `${stem} (${n})${ext}`;
-  } while (taken.has(candidate));
+    candidate = `${prefix}${stem} (${n})${ext}`;
+  } while (!free(candidate));
   taken.add(candidate);
   return candidate;
 }
@@ -344,7 +356,10 @@ export async function ensureArchivesExpanded(
           for (const file of files) {
             let relPath: string;
             try {
-              relPath = uniqueWithin(taken, sanitizeAttachmentPath(`${dirName}/${file.rel}`));
+              relPath = uniqueWithin(
+                taken,
+                reserveAttachmentDirs(sanitizeAttachmentPath(`${dirName}/${file.rel}`)),
+              );
             } catch (err) {
               // The same rules the api enforces on an upload. A member that cannot be
               // expressed as a safe relative path is dropped, and named in the note below.

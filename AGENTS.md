@@ -808,7 +808,8 @@ disagree about a name: a `..` segment THROWS rather than being dropped — every
 producer can express a path without one, so its presence is an upload to refuse (400), not a
 name to repair quietly — and leading dots are stripped per SEGMENT, so no dotfile or
 dot-directory survives anywhere. De-dupe is per DIRECTORY: two folders' `README.md` are two
-documents.
+documents. It keeps an archive's two-part extension whole (`splitAttachmentExtension`): a second
+`spec.tar.gz` is `spec (2).tar.gz`, never `spec.tar (2).gz`, which no archive rule recognises.
 
 `ensureArchivesExpanded` (`worker/src/attachments/expand-archives.ts`) runs lazily, at
 `00-plan-inputs.detect` and again before `augmentPromptWithAttachments` in `step-runner`, so
@@ -832,9 +833,14 @@ never a directory, and a folder goes only by pruning once it is empty: a recursi
 whatever else lives there — a later upload named like the expansion directory lands inside it (the
 api de-dupes files, not directories), and an upload racing the delete has its file on disk before
 its row exists, where no list of rows can see it. That makes the rows the whole inventory, and two
-rules keep them so: an upload may not take a name ending in `.extracted.md` (a delete unlinks a
-document's sidecar path whether or not the sidecar exists yet), and the expansion takes a placed
-member back off the disk when its row cannot be written. A sidecar `00-plan-inputs` writes while
+rules keep them so: no attachment may take a name a generated file owns, and the expansion takes a
+placed member back off the disk when its row cannot be written. The first rule is ONE predicate
+(`isReservedAttachmentName`, `@haive/shared/attachments`) that an upload, an archive member and an
+expansion folder all apply: `_ATTACHMENTS.md` and `_PLAN_INPUTS.md` at the root, `*.extracted.md` at
+any depth, since a delete unlinks a document's sidecar path whether or not the sidecar exists yet. A
+file is probed onto the next free ` (n)` name; a FOLDER is renamed `<name> (2)` deterministically
+(`reserveAttachmentDirs`), because a folder upload is one request per file and every file of it has
+to land in the same place. A sidecar `00-plan-inputs` writes while
 the delete runs is caught from both sides: the api removes sidecar paths again once the row is
 gone, and the worker looks for the row only after writing, so whichever comes last sees the other.
 Neither may be left: an orphaned

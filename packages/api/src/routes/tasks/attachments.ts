@@ -11,10 +11,12 @@ import {
   configService,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
+  isReservedAttachmentName,
   PLAN_INPUT_SIDECAR_SUFFIX,
-  PLAN_INPUTS_INDEX_NAME,
   renderAttachmentsManifest,
+  reserveAttachmentDirs,
   sanitizeAttachmentPath,
+  splitAttachmentExtension,
   splitAttachmentPath,
   splitAttachmentStoredPath,
   taskUploadsRel,
@@ -49,13 +51,6 @@ export const attachmentRoutes = new Hono<AppEnv>();
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
-/** Names the uploads dir owns. An upload allowed to take one of these is
- *  overwritten the next time that file is generated — the user's document
- *  silently replaced by our index, with their attachment row still pointing at
- *  it. The plan-inputs index is the worker's `00-plan-inputs` output; its name
- *  lives in `@haive/shared` so the api can reserve it without depending on the
- *  worker. */
-const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, PLAN_INPUTS_INDEX_NAME]);
 
 /** Resolve the task's on-disk uploads dir, enforcing ownership + a writable
  *  volume-backed repo. Throws 404/409 with an actionable message otherwise.
@@ -177,32 +172,26 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
 
 /** De-dupe within the file's OWN directory by appending ` (n)` before the
  *  extension, and create that directory. Per-directory because two folders'
- *  `README.md` are two documents, not a collision. Reserved names bite only at
- *  the root, which is where the generated indexes live. A sidecar's name is
- *  reserved at every depth: the worker writes `<doc>.extracted.md` beside its
- *  document wherever that sits, and a delete of the document unlinks that path
- *  whether or not the sidecar exists yet, so an upload holding it would be
- *  overwritten by the extraction or unlinked by a delete that raced it. */
+ *  `README.md` are two documents, not a collision. A name a generated file owns
+ *  is never taken (`isReservedAttachmentName`): a reserved FOLDER is renamed
+ *  before anything is created, and a reserved file name is skipped like a taken
+ *  one. */
 async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
-  relPath: string,
+  requested: string,
 ): Promise<{ rel: string; fh: FileHandle }> {
-  const { dir: relDir, base } = splitAttachmentPath(relPath);
+  const { dir: relDir, base } = splitAttachmentPath(reserveAttachmentDirs(requested));
   await ensureDirTree(anchor, uploadsRel, relDir);
-  const reserved = (name: string): boolean =>
-    (relDir === '' && RESERVED_NAMES.has(name)) || name.endsWith(PLAN_INPUT_SIDECAR_SUFFIX);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
-  const dot = base.lastIndexOf('.');
-  const stem = dot > 0 ? base.slice(0, dot) : base;
-  const ext = dot > 0 ? base.slice(dot) : '';
+  const { stem, ext } = splitAttachmentExtension(base);
 
   // The name is CLAIMED by creating it, not by probing for it. The `access` probe this replaces
   // could pass and the name be taken before the write landed — and it reported a dangling link as
   // free, so the upload went wherever that link pointed.
   for (let n = 1; n <= 1000; n += 1) {
     const candidate = n === 1 ? base : `${stem} (${n})${ext}`;
-    if (reserved(candidate)) continue;
+    if (isReservedAttachmentName(candidate, relDir === '')) continue;
     try {
       const fh = await openFileNoFollow(
         anchor,
