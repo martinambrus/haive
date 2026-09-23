@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   chmod,
   lstat,
@@ -13,22 +12,8 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import {
-  and,
-  Column,
-  eq,
-  getTableColumns,
-  getTableName,
-  inArray,
-  is,
-  isNull,
-  like,
-  or,
-  Param,
-  SQL,
-  StringChunk,
-} from 'drizzle-orm';
-import { getTableConfig, PgUUID, type PgTable } from 'drizzle-orm/pg-core';
+import { eq } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
@@ -36,7 +21,8 @@ const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
 import { Hono } from 'hono';
-import { schema } from '@haive/database';
+import { schema, withTaskAttachmentsLock, type Database } from '@haive/database';
+import { createFakeDb, type FakeRow } from '@haive/database/testing';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import { attachmentRoutes } from '../src/routes/tasks/attachments.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -50,179 +36,30 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const TASK2 = '00000000-0000-4000-8000-000000000002';
 const REPO = '00000000-0000-4000-8000-0000000000f1';
 
-type Row = Record<string, unknown>;
-type Pred = (row: Row) => boolean;
+type Row = FakeRow;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function text(chunk: unknown): string | null {
-  return chunk instanceof StringChunk ? chunk.value.join('') : null;
-}
-
-function columnKeys(table: PgTable): Map<unknown, string> {
-  return new Map(Object.entries(getTableColumns(table)).map(([key, col]) => [col, key]));
-}
-
-/**
- * An in-memory stand-in for the three tables the routes touch.
- *
- * It evaluates `where` rather than ignoring it, because the routes' correctness rides on it: the
- * delete-one children lookup that ignored its filter would hand back a sibling archive's row and
- * delete the wrong folder. It supports exactly the conditions the routes build — `and` of `eq` /
- * `inArray` — and throws on anything else, so a drizzle upgrade or a new query shape fails loudly
- * instead of matching every row. The foreign-key cascade is read off the schema, not restated.
- */
-function createFakeDb() {
-  const tables: PgTable[] = [schema.tasks, schema.repositories, schema.taskAttachments];
-  const store = new Map<PgTable, Row[]>(tables.map((t) => [t, []]));
-  let tick = 0;
-  const now = (): Date => new Date(Date.UTC(2026, 1, 1) + (tick += 1) * 1000);
-
-  const checkValue = (col: Column, value: unknown): unknown => {
-    if (is(col, PgUUID) && typeof value === 'string' && !UUID.test(value)) {
-      throw new Error(`invalid input syntax for type uuid: "${value}"`);
-    }
-    return value;
-  };
-
-  function compileWhere(table: PgTable, cond: unknown): Pred {
-    const keyOf = columnKeys(table);
-    const refuse = (): never => {
-      throw new Error(`fake db: unsupported condition on ${getTableName(table)}`);
-    };
-    const compile = (node: unknown): Pred => {
-      if (!is(node, SQL)) return refuse();
-      const ch = node.queryChunks.filter((c) => text(c) !== '');
-      if (ch.length === 1) return compile(ch[0]);
-      if (ch.length === 3 && text(ch[0]) === '(' && text(ch[2]) === ')') return compile(ch[1]);
-      if (
-        ch.length >= 3 &&
-        ch.length % 2 === 1 &&
-        ch.every((c, i) => (i % 2 === 1 ? text(c) === ' and ' : is(c, SQL)))
-      ) {
-        const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
-        return (row) => parts.every((part) => part(row));
-      }
-      const [col, op, val] = ch;
-      const key = ch.length === 3 && is(col, Column) ? keyOf.get(col) : undefined;
-      if (key !== undefined && is(col, Column)) {
-        if (text(op) === ' = ' && is(val, Param)) {
-          const v = checkValue(col, val.value);
-          return (row) => row[key] === v;
-        }
-        if (text(op) === ' in ' && Array.isArray(val) && val.every((p) => is(p, Param))) {
-          const vs = new Set(val.map((p) => checkValue(col, (p as Param).value)));
-          return (row) => vs.has(row[key]);
-        }
-      }
-      return refuse();
-    };
-    return compile(cond);
-  }
-
-  function sortBy(table: PgTable, rows: Row[], order: unknown): Row[] {
-    const ch = is(order, SQL) ? order.queryChunks.filter((c) => text(c) !== '') : [];
-    const key = is(ch[0], Column) ? columnKeys(table).get(ch[0]) : undefined;
-    const dir = text(ch[1]);
-    if (ch.length !== 2 || key === undefined || (dir !== ' asc' && dir !== ' desc')) {
-      throw new Error(`fake db: unsupported orderBy on ${getTableName(table)}`);
-    }
-    const sign = dir === ' asc' ? 1 : -1;
-    const value = (row: Row): number => {
-      const v = row[key];
-      return v instanceof Date ? v.getTime() : Number(v);
-    };
-    return [...rows].sort((a, b) => sign * (value(a) - value(b)));
-  }
-
-  function select(table: PgTable, opts: Record<string, unknown> = {}): Row[] {
-    for (const k of Object.keys(opts)) {
-      if (!['where', 'orderBy', 'columns', 'limit'].includes(k)) {
-        throw new Error(`fake db: unsupported option "${k}"`);
-      }
-    }
-    const pred = opts.where === undefined ? () => true : compileWhere(table, opts.where);
-    let rows = store.get(table)!.filter(pred);
-    if (opts.orderBy !== undefined) rows = sortBy(table, rows, opts.orderBy);
-    if (typeof opts.limit === 'number') rows = rows.slice(0, opts.limit);
-    const columns = opts.columns as Record<string, boolean> | undefined;
-    return rows.map((row) =>
-      columns ? Object.fromEntries(Object.keys(columns).map((k) => [k, row[k]])) : { ...row },
-    );
-  }
-
-  function insert(table: PgTable, values: Row): Row {
-    const cols = getTableColumns(table);
-    for (const k of Object.keys(values)) {
-      if (!(k in cols)) throw new Error(`fake db: ${getTableName(table)} has no column "${k}"`);
-    }
-    const row: Row = Object.fromEntries(Object.keys(cols).map((k) => [k, null]));
-    Object.assign(row, { id: randomUUID() }, 'createdAt' in cols ? { createdAt: now() } : {});
-    Object.assign(row, values);
-    store.get(table)!.push(row);
-    return { ...row };
-  }
-
-  /** Test-side setup only: change a stored row in place. */
-  function patch(table: PgTable, id: string, values: Row): void {
-    const row = store.get(table)!.find((r) => r.id === id);
-    if (!row) throw new Error(`fake db: no ${getTableName(table)} row ${id}`);
-    Object.assign(row, values);
-  }
-
-  function remove(table: PgTable, match: Pred): void {
-    const rows = store.get(table)!;
-    const gone = rows.filter(match);
-    store.set(
-      table,
-      rows.filter((r) => !match(r)),
-    );
-    for (const child of tables) {
-      for (const fk of getTableConfig(child).foreignKeys) {
-        const { columns, foreignColumns } = fk.reference();
-        const col = columns[0];
-        const ref = foreignColumns[0];
-        if (fk.onDelete !== 'cascade' || !col || !ref || ref.table !== table) continue;
-        const refKey = columnKeys(table).get(ref)!;
-        const childKey = columnKeys(child).get(col)!;
-        const ids = new Set(gone.map((r) => r[refKey]));
-        if (ids.size > 0) remove(child, (r) => ids.has(r[childKey]));
-      }
-    }
-  }
-
-  /** Test-side only: something that happens the moment a row is gone, such as a worker write. */
-  const hooks: { afterDelete: (() => Promise<void>) | null } = { afterDelete: null };
-
-  const api = (table: PgTable) => ({
-    findFirst: async (opts?: Record<string, unknown>) => select(table, opts)[0],
-    findMany: async (opts?: Record<string, unknown>) => select(table, opts),
+/** The three tables the routes touch, in the in-memory stand-in the worker's tests share. */
+function createRouteDb() {
+  return createFakeDb({
+    tasks: schema.tasks,
+    repositories: schema.repositories,
+    taskAttachments: schema.taskAttachments,
   });
+}
 
-  return {
-    db: {
-      query: {
-        tasks: api(schema.tasks),
-        repositories: api(schema.repositories),
-        taskAttachments: api(schema.taskAttachments),
-      },
-      insert: (table: PgTable) => ({
-        values: (values: Row) => ({ returning: async () => [insert(table, values)] }),
-      }),
-      delete: (table: PgTable) => ({
-        where: async (cond: unknown) => {
-          remove(table, compileWhere(table, cond));
-          await hooks.afterDelete?.();
-        },
-      }),
-    },
-    hooks,
-    insert,
-    patch,
-    rows: (table: PgTable): Row[] => select(table, {}),
-    compileWhere,
-    now,
-  };
+/** Resolves the next time a section asks for the task's attachments lock. */
+function nextLockRequest(fake: ReturnType<typeof createRouteDb>): Promise<void> {
+  return new Promise((resolve) => {
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      resolve();
+    };
+  });
+}
+
+/** A lock wait that ran out, as Postgres reports it. */
+function lockTimeout(): Error {
+  return Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
 }
 
 // `requireAuth` sets `userId` in the real app; here a header picks the caller, so a test can ask
@@ -239,7 +76,7 @@ describe('task attachment routes', () => {
   let storage: string;
   let outside: string;
   let repo: string;
-  let fake: ReturnType<typeof createFakeDb>;
+  let fake: ReturnType<typeof createRouteDb>;
   let cap: number;
 
   const up = (rel = ''): string => path.join(repo, '.haive', 'task-uploads', TASK, rel);
@@ -336,6 +173,42 @@ describe('task attachment routes', () => {
   }
 
   const filenames = (): unknown[] => fake.rows(schema.taskAttachments).map((r) => r.filename);
+  const busy = {
+    status: 503,
+    body: {
+      error: 'Another change to this task’s attachments is in progress; try again',
+      code: null,
+    },
+  };
+
+  /** What `00-plan-inputs` does to store a sidecar — under the lock, and only while the row is
+   *  there — started the moment the delete is about to remove its rows. The delete is held until
+   *  that write has either looked for the row or is waiting for the lock: the fake shows every write
+   *  at once, so without the hold the look would always come after the rows went, lock or no lock.
+   *  `result` says whether it wrote. */
+  function raceSidecar(id: string, sidecar: string): { result: Promise<boolean> } {
+    let resolveResult!: (wrote: Promise<boolean>) => void;
+    const result = new Promise<boolean>((resolve) => (resolveResult = resolve));
+    fake.hooks.beforeDelete = async () => {
+      fake.hooks.beforeDelete = null;
+      const asked = nextLockRequest(fake);
+      let looked!: () => void;
+      const lookedForRow = new Promise<void>((resolve) => (looked = resolve));
+      resolveResult(
+        withTaskAttachmentsLock(fake.db as unknown as Database, TASK, async (tx) => {
+          const row = await tx.query.taskAttachments.findFirst({
+            where: eq(schema.taskAttachments.id, id),
+          });
+          looked();
+          if (row) await writeFile(up(sidecar), '# late');
+          return row !== undefined;
+        }),
+      );
+      await asked;
+      await Promise.race([lookedForRow, new Promise((resolve) => setTimeout(resolve, 20))]);
+    };
+    return { result };
+  }
   const exists = (p: string): Promise<boolean> =>
     lstat(p).then(
       () => true,
@@ -361,7 +234,7 @@ describe('task attachment routes', () => {
     repo = path.join(storage, USER, 'repo-1');
     await mkdir(repo, { recursive: true });
 
-    fake = createFakeDb();
+    fake = createRouteDb();
     fake.insert(schema.repositories, {
       id: REPO,
       userId: USER,
@@ -650,6 +523,74 @@ describe('task attachment routes', () => {
       expect(await readFile(up(two), 'utf8')).toBe('second');
     });
 
+    it('waits for a section holding the task’s attachments lock before it claims a name', async () => {
+      // A delete holds the lock while it prunes the folders it emptied; a folder created for this
+      // upload in the middle of that would be pruned from under it.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let held!: () => void;
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      const holder = withTaskAttachmentsLock(fake.db as unknown as Database, TASK, async () => {
+        held();
+        await gate;
+      });
+      await holding;
+      const asked = nextLockRequest(fake);
+      const pending = upload('docs/a.md', 'a');
+      await asked;
+      expect(await exists(up('docs'))).toBe(false);
+
+      release();
+      await holder;
+      expect((await pending).status).toBe(201);
+      expect(await readFile(up('docs/a.md'), 'utf8')).toBe('a');
+      expect(await indexed()).toEqual(['docs/a.md']);
+    });
+
+    it('answers 503 and leaves nothing behind when the lock cannot be had in time', async () => {
+      fake.hooks.beforeLock = () => {
+        throw lockTimeout();
+      };
+      expect(await upload('docs/a.md', 'a')).toEqual(busy);
+      expect(filenames()).toEqual([]);
+      expect(await exists(up('docs'))).toBe(false);
+    });
+
+    it('keeps an upload whose insert committed although its answer was lost', async () => {
+      // Answering 500 here would send the client's retry to store the file a second time.
+      const insert = fake.db.insert;
+      fake.db.insert = ((table: PgTable) => ({
+        values: (values: Row) => ({
+          returning: async () => {
+            await insert(table).values(values);
+            throw new Error('connection lost');
+          },
+        }),
+      })) as unknown as typeof fake.db.insert;
+
+      const res = await upload('a.md', 'kept');
+      expect(res.status).toBe(201);
+      const [row] = fake.rows(schema.taskAttachments);
+      expect(res.body?.attachment).toMatchObject({ id: row!.id, filename: 'a.md' });
+      expect(await readFile(up('a.md'), 'utf8')).toBe('kept');
+      expect(await indexed()).toEqual(['a.md']);
+    });
+
+    it('takes the file back when its row could not be written', async () => {
+      // A file no row names is invisible to every delete, and stays mounted into the sandbox.
+      fake.db.insert = (() => ({
+        values: () => ({
+          returning: async () => {
+            throw new Error('insert failed');
+          },
+        }),
+      })) as unknown as typeof fake.db.insert;
+
+      expect((await upload('a.md', 'x')).status).toBe(500);
+      expect(filenames()).toEqual([]);
+      expect(await exists(up('a.md'))).toBe(false);
+    });
+
     it('refuses a name that climbs out of the uploads directory', async () => {
       const res = await upload('../x', 'escape');
       expect(res.status).toBe(400);
@@ -907,15 +848,26 @@ describe('task attachment routes', () => {
       expect(await exists(up('docs'))).toBe(false);
     });
 
-    it('removes a sidecar the worker wrote while the delete was running', async () => {
-      // `00-plan-inputs` can be extracting this document as it is deleted, and so write the sidecar
-      // after the first pass. The api removes sidecars again once the row is gone, and the worker
-      // checks for the row after writing, so whichever comes last, one of the two sees the other.
+    it('makes a sidecar write that lands mid-delete wait for it, and then skip', async () => {
+      // `00-plan-inputs` stores a sidecar only under the task's attachments lock and only while its
+      // row exists. The delete holds that lock from reading the rows to rewriting the manifest, so a
+      // write that starts after the files went and before the rows go waits for the whole delete.
       const doc = await seedFile('spec.docx', 'docx');
-      fake.hooks.afterDelete = () => writeFile(up('spec.docx.extracted.md'), '# late');
+      const late = raceSidecar(doc.id as string, 'spec.docx.extracted.md');
 
       await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await late.result).toBe(false);
       expect(await exists(up('spec.docx.extracted.md'))).toBe(false);
+    });
+
+    it('answers 503 and changes nothing when the lock cannot be had in time', async () => {
+      const doc = await seedFile('a.md', 'a');
+      fake.hooks.beforeLock = () => {
+        throw lockTimeout();
+      };
+      expect(await send('DELETE', `/${TASK}/attachments/${doc.id as string}`)).toEqual(busy);
+      expect(filenames()).toEqual(['a.md']);
+      expect(await readFile(up('a.md'), 'utf8')).toBe('a');
     });
 
     it('keeps an upload that merely has the sidecar’s name', async () => {
@@ -1034,12 +986,23 @@ describe('task attachment routes', () => {
       expect(await readFile(up('x/late.md'), 'utf8')).toBe('late');
     });
 
-    it('removes a sidecar the worker wrote while the folder delete was running', async () => {
-      await seedFile('docs/spec.pdf', 'pdf');
-      fake.hooks.afterDelete = () => writeFile(up('docs/spec.pdf.extracted.md'), '# late');
+    it('makes a sidecar write that lands mid-delete wait for it, and then skip', async () => {
+      const doc = await seedFile('docs/spec.pdf', 'pdf');
+      const late = raceSidecar(doc.id as string, 'docs/spec.pdf.extracted.md');
 
       await send('DELETE', `/${TASK}/attachments?prefix=docs`);
+      expect(await late.result).toBe(false);
       expect(await exists(up('docs'))).toBe(false);
+    });
+
+    it('answers 503 and changes nothing when the lock cannot be had in time', async () => {
+      await seedFile('docs/a.md', 'a');
+      fake.hooks.beforeLock = () => {
+        throw lockTimeout();
+      };
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual(busy);
+      expect(filenames()).toEqual(['docs/a.md']);
+      expect(await readFile(up('docs/a.md'), 'utf8')).toBe('a');
     });
 
     it('prunes a parent the folder leaves empty', async () => {
@@ -1140,34 +1103,5 @@ describe('task attachment routes', () => {
       expect(await readFile(path.join(outside, 'old', 'b.md'), 'utf8')).toBe('b');
       expect(filenames()).toEqual(['a.md', 'old/b.md']);
     });
-  });
-
-  it('the fake evaluates only the conditions the routes build', () => {
-    const t = schema.taskAttachments;
-    const [a, b] = [
-      seedAttachment('a.md', 'a', { taskId: TASK }),
-      seedAttachment('b.md', 'b', { taskId: TASK2 }),
-    ];
-    const match = (cond: unknown): unknown[] =>
-      fake
-        .rows(t)
-        .filter(fake.compileWhere(t, cond))
-        .map((r) => r.filename);
-    expect(match(and(eq(t.taskId, TASK), eq(t.userId, USER)))).toEqual(['a.md']);
-    expect(match(inArray(t.id, [a.id as string, b.id as string]))).toEqual(['a.md', 'b.md']);
-    expect(match(and(eq(t.id, b.id as string)))).toEqual(['b.md']);
-
-    for (const cond of [
-      or(eq(t.taskId, TASK), eq(t.taskId, TASK2)),
-      isNull(t.expandedFromId),
-      like(t.filename, 'a%'),
-      eq(schema.tasks.id, TASK),
-      inArray(t.id, []),
-    ]) {
-      expect(() => fake.compileWhere(t, cond)).toThrow(/unsupported condition/);
-    }
-    expect(() => fake.compileWhere(t, eq(t.id, 'nope'))).toThrow(
-      /invalid input syntax for type uuid/,
-    );
   });
 });

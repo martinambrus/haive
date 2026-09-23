@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { and, asc, eq, inArray } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isLockNotAvailable, schema, withTaskAttachmentsLock } from '@haive/database';
 import {
   attachmentCopyName,
   AttachmentPathError,
@@ -12,7 +13,6 @@ import {
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
   isReservedAttachmentName,
-  PLAN_INPUT_SIDECAR_SUFFIX,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
   splitAttachmentPath,
@@ -161,6 +161,15 @@ function uploadPathError(err: unknown): never {
   throw err;
 }
 
+/** A section that waited out `TASK_ATTACHMENTS_LOCK_TIMEOUT_MS` behind another writer answers 503:
+ *  nothing was changed, and trying again is the whole remedy. Anything else is rethrown. */
+function lockBusyError(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    throw new HttpError(503, 'Another change to this task’s attachments is in progress; try again');
+  }
+  throw err;
+}
+
 /** Make every level of `relDir` under the uploads root traversable + owned by the
  *  sandbox user. A folder upload creates directories the api never touched. */
 async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
@@ -221,6 +230,38 @@ async function createUniqueAttachment(
   throw new HttpError(409, `too many attachments named like "${base}"`);
 }
 
+/**
+ * Claim an upload's name under the task's attachments lock. A delete holds the same lock while it
+ * removes files, deletes rows and prunes the folders they emptied, so it can neither prune the folder
+ * this name is being created in nor take a file of that name between the two.
+ *
+ * The claim is kept OUTSIDE the section: the driver can reject the transaction while its callback is
+ * still running (a lost connection), and a file created after that has to be found and taken back
+ * rather than left on disk with no row.
+ */
+async function claimAttachmentName(
+  taskId: string,
+  anchor: string,
+  uploadsRel: string,
+  relPath: string,
+): Promise<{ rel: string; fh: FileHandle }> {
+  let claim = null as Promise<{ rel: string; fh: FileHandle }> | null;
+  try {
+    await withTaskAttachmentsLock(getDb(), taskId, async () => {
+      claim = createUniqueAttachment(anchor, uploadsRel, relPath);
+      await claim;
+    });
+    return await claim!;
+  } catch (err) {
+    const claimed = claim === null ? null : await claim.catch(() => null);
+    if (claimed !== null) {
+      await claimed.fh.close().catch(() => {});
+      await removeNoFollow(anchor, `${uploadsRel}/${claimed.rel}`).catch(() => {});
+    }
+    return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
+  }
+}
+
 /** Remove the directories a deleted file left empty, stopping at the uploads root
  *  or at the first directory something else still lives in. */
 async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
@@ -243,20 +284,6 @@ async function removeFiles(anchor: string, uploadsRel: string, files: readonly s
   for (const file of files) {
     await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
   }
-}
-
-/** Remove the listed sidecars AGAIN, once the rows are gone. `00-plan-inputs` may have been
- *  extracting one of these documents during the first pass and written its sidecar after it; the
- *  worker checks for the row only after writing, so whichever comes last, one of the two sees the
- *  other. Only sidecar paths get a second pass: no upload can hold such a name (see
- *  `createUniqueAttachment`), whereas an original's name is free again the moment the first pass
- *  unlinks it, and an upload could already have taken it. */
-async function removeLateSidecars(anchor: string, uploadsRel: string, files: readonly string[]) {
-  await removeFiles(
-    anchor,
-    uploadsRel,
-    files.filter((f) => f.endsWith(PLAN_INPUT_SIDECAR_SUFFIX)),
-  );
 }
 
 /** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
@@ -353,21 +380,39 @@ async function finalizeAttachment(args: {
   // No chmod/chown here any more: the file was created through `create-exclusive`, which applied
   // the mode and owner to the descriptor before any bytes were written — so there is no window in
   // which the agent's file exists with the wrong owner.
-  const inserted = await getDb()
-    .insert(schema.taskAttachments)
-    .values({
-      taskId: args.taskId,
-      userId: args.userId,
-      filename: args.filename,
-      storedPath: args.destPath,
-      sizeBytes: args.sizeBytes,
-      contentType: args.contentType,
-      description: args.description,
-    })
-    .returning();
+  // The id is chosen here so a failed insert can be told from one whose answer was lost.
+  const id = randomUUID();
+  let row: typeof schema.taskAttachments.$inferSelect | undefined;
+  try {
+    [row] = await getDb()
+      .insert(schema.taskAttachments)
+      .values({
+        id,
+        taskId: args.taskId,
+        userId: args.userId,
+        filename: args.filename,
+        storedPath: args.destPath,
+        sizeBytes: args.sizeBytes,
+        contentType: args.contentType,
+        description: args.description,
+      })
+      .returning();
+  } catch (err) {
+    // A file with no row is invisible to every delete, and stays mounted into the sandbox. But the
+    // insert can have committed with only its answer lost, and then the file is the attachment:
+    // it is taken back only once a second look finds no row, and kept when that look fails too.
+    const found = await getDb()
+      .query.taskAttachments.findFirst({ where: eq(schema.taskAttachments.id, id) })
+      .catch(() => null);
+    if (found === undefined) {
+      await removeNoFollow(args.anchor, `${args.uploadsRel}/${args.filename}`).catch(() => {});
+    }
+    if (!found) throw err;
+    row = found;
+  }
 
   await rewriteAttachmentsManifest(getDb(), args.taskId, args.anchor, args.uploadsRel);
-  return inserted[0]!;
+  return row!;
 }
 
 /**
@@ -387,7 +432,8 @@ export async function writeTaskAttachment(args: {
   const { dir, anchor, rel: uploadsRel } = await resolveTaskUploadsDir(args.taskId, args.userId);
   await ensureUploadsDir(anchor, uploadsRel);
 
-  const { rel: safeName, fh } = await createUniqueAttachment(
+  const { rel: safeName, fh } = await claimAttachmentName(
+    args.taskId,
     anchor,
     uploadsRel,
     safeUploadPath(args.filename),
@@ -442,9 +488,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
 
   await ensureUploadsDir(anchor, uploadsRel).catch(uploadPathError);
 
-  const { rel: safeName, fh } = await createUniqueAttachment(anchor, uploadsRel, relPath).catch(
-    uploadPathError,
-  );
+  const { rel: safeName, fh } = await claimAttachmentName(taskId, anchor, uploadsRel, relPath);
   const destPath = join(dir, safeName);
   let size: number;
   try {
@@ -537,22 +581,26 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
 
-  // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on the
-  // delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox, so an
-  // agent would keep reading files the user believes they removed.
-  const rows = await db.query.taskAttachments.findMany({
-    where: and(
-      eq(schema.taskAttachments.taskId, taskId),
-      eq(schema.taskAttachments.userId, userId),
-    ),
-    columns: { id: true, filename: true, expandedFromId: true },
-  });
-  const files = filesToRemove(new Set([attachmentId]), rows);
-  await removeFiles(anchor, uploadsRel, files);
-  await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-  await removeLateSidecars(anchor, uploadsRel, files);
-  await pruneAfter(anchor, uploadsRel, files);
-  await rewriteAttachmentsManifest(db, taskId, anchor, uploadsRel);
+  // One section under the task's attachments lock, from reading the rows to rewriting the
+  // manifest: the worker writes a sidecar only under the same lock and only while its row exists,
+  // so no sidecar can land between the files going and the rows going and outlive both.
+  await withTaskAttachmentsLock(db, taskId, async (tx) => {
+    // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on
+    // the delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox,
+    // so an agent would keep reading files the user believes they removed.
+    const rows = await tx.query.taskAttachments.findMany({
+      where: and(
+        eq(schema.taskAttachments.taskId, taskId),
+        eq(schema.taskAttachments.userId, userId),
+      ),
+      columns: { id: true, filename: true, expandedFromId: true },
+    });
+    const files = filesToRemove(new Set([attachmentId]), rows);
+    await removeFiles(anchor, uploadsRel, files);
+    await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
+    await pruneAfter(anchor, uploadsRel, files);
+    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+  }).catch(lockBusyError);
   return c.json({ ok: true });
 });
 
@@ -566,34 +614,37 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   if (!raw) throw new HttpError(400, 'prefix query parameter is required');
   const prefix = safeAttachmentPath(raw);
 
-  const db = getDb();
-  const rows = await db.query.taskAttachments.findMany({
-    where: and(
-      eq(schema.taskAttachments.taskId, taskId),
-      eq(schema.taskAttachments.userId, userId),
-    ),
-  });
-  // Filtered here rather than with a SQL LIKE: `_` is a LIKE wildcard AND a legal
-  // filename character, so `docs_v2/a.md` would match a `docs/v2` prefix.
-  const marked = rows.filter((r) => r.filename.startsWith(`${prefix}/`));
-  if (marked.length === 0) throw new HttpError(404, `No attachments under "${prefix}/"`);
+  // The same one section as the single delete, and for the same reason.
+  const removed = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
+    const rows = await tx.query.taskAttachments.findMany({
+      where: and(
+        eq(schema.taskAttachments.taskId, taskId),
+        eq(schema.taskAttachments.userId, userId),
+      ),
+    });
+    // Filtered here rather than with a SQL LIKE: `_` is a LIKE wildcard AND a legal
+    // filename character, so `docs_v2/a.md` would match a `docs/v2` prefix.
+    const marked = rows.filter((r) => r.filename.startsWith(`${prefix}/`));
+    if (marked.length === 0) throw new HttpError(404, `No attachments under "${prefix}/"`);
 
-  const split = splitAttachmentStoredPath(marked[0]!, taskId);
-  if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
-  const { anchor, uploadsRel } = split;
-  // File by file, and the folder goes by pruning once it is empty: a recursive removal would also
-  // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
-  // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the folder.
-  const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
-  await removeFiles(anchor, uploadsRel, files);
-  await db.delete(schema.taskAttachments).where(
-    inArray(
-      schema.taskAttachments.id,
-      marked.map((r) => r.id),
-    ),
-  );
-  await removeLateSidecars(anchor, uploadsRel, files);
-  await pruneAfter(anchor, uploadsRel, files);
-  await rewriteAttachmentsManifest(db, taskId, anchor, uploadsRel);
-  return c.json({ ok: true, removed: marked.length });
+    const split = splitAttachmentStoredPath(marked[0]!, taskId);
+    if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
+    const { anchor, uploadsRel } = split;
+    // File by file, and the folder goes by pruning once it is empty: a recursive removal would also
+    // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
+    // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the
+    // folder.
+    const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
+    await removeFiles(anchor, uploadsRel, files);
+    await tx.delete(schema.taskAttachments).where(
+      inArray(
+        schema.taskAttachments.id,
+        marked.map((r) => r.id),
+      ),
+    );
+    await pruneAfter(anchor, uploadsRel, files);
+    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    return marked.length;
+  }).catch(lockBusyError);
+  return c.json({ ok: true, removed });
 });

@@ -1,5 +1,5 @@
 import { asc, eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, withTaskAttachmentsLock, type Database, type DbTx } from '@haive/database';
 import { ATTACHMENTS_MANIFEST_NAME, renderAttachmentsManifest } from './attachments/manifest.js';
 import { chownNoFollow, removeNoFollow, writeFileNoFollow } from './fs-safe.js';
 import { logger } from './logger/index.js';
@@ -25,32 +25,44 @@ const SANDBOX_GID = 1000;
  * the client retries, which for an upload is a second copy of the file. A link planted at the name
  * is replaced as a link (`replaceLeafLink`), so one planted link no longer blocks every later
  * upload and delete; anything else standing there is logged and left for the next write.
+ *
+ * The rows are read and the file written under the task's attachments lock, so the last writer to
+ * hold it describes the latest rows: two writers reading, then writing in the other order, used to
+ * leave a manifest naming a file already deleted. Handed a transaction that holds the lock, it runs
+ * as a savepoint of it, which is also what keeps a failed read here from aborting the caller's
+ * transaction.
  */
 export async function rewriteAttachmentsManifest(
-  db: Database,
+  handle: Database | DbTx,
   taskId: string,
   anchor: string,
   uploadsRel: string,
 ): Promise<void> {
   const manifestRel = `${uploadsRel}/${ATTACHMENTS_MANIFEST_NAME}`;
   try {
-    const rows = await db.query.taskAttachments.findMany({
-      where: eq(schema.taskAttachments.taskId, taskId),
-      orderBy: asc(schema.taskAttachments.createdAt),
-      columns: { filename: true, description: true },
+    await withTaskAttachmentsLock(handle, taskId, async (tx) => {
+      const rows = await tx.query.taskAttachments.findMany({
+        where: eq(schema.taskAttachments.taskId, taskId),
+        orderBy: asc(schema.taskAttachments.createdAt),
+        columns: { filename: true, description: true },
+      });
+      const body = renderAttachmentsManifest(rows);
+      if (body === null) {
+        await removeNoFollow(anchor, manifestRel).catch(() => {});
+        return;
+      }
+      // Replace-atomic: every agent is told to read this index, so a reader sees the old one or
+      // the new one and never a partial write.
+      await writeFileNoFollow(anchor, manifestRel, body, {
+        fileMode: 0o644,
+        replaceLeafLink: true,
+      });
+      // Best-effort: a writer that is not root cannot hand the file over, and 0644 is
+      // world-readable.
+      await chownNoFollow(anchor, manifestRel, { uid: SANDBOX_UID, gid: SANDBOX_GID }).catch(
+        () => {},
+      );
     });
-    const body = renderAttachmentsManifest(rows);
-    if (body === null) {
-      await removeNoFollow(anchor, manifestRel).catch(() => {});
-      return;
-    }
-    // Replace-atomic: every agent is told to read this index, so a reader sees the old one or the
-    // new one and never a partial write.
-    await writeFileNoFollow(anchor, manifestRel, body, { fileMode: 0o644, replaceLeafLink: true });
-    // Best-effort: a writer that is not root cannot hand the file over, and 0644 is world-readable.
-    await chownNoFollow(anchor, manifestRel, { uid: SANDBOX_UID, gid: SANDBOX_GID }).catch(
-      () => {},
-    );
   } catch (err) {
     log.warn({ err, taskId }, 'could not rewrite the attachments manifest');
   }

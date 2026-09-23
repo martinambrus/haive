@@ -15,7 +15,12 @@ export type { StepGuidanceScope, StepGuidanceCause, StepGuidanceStatus } from '.
 export { waitForDatabaseReady, type WaitForDatabaseOptions } from './wait-for-ready.js';
 export { resetDagCurrentLevelForRetry } from './dag-reset.js';
 export { CLOSED_GAP_INTO_IDLE_MS } from './closed-gap.js';
-export { isUniqueViolation, isUndefinedTable } from './pg-errors.js';
+export { isLockNotAvailable, isUniqueViolation, isUndefinedTable } from './pg-errors.js';
+export {
+  TASK_ATTACHMENTS_LOCK_TIMEOUT_MS,
+  withTaskAttachmentsLock,
+  type DbTx,
+} from './task-attachments-lock.js';
 export {
   ROOT_CLAIM_RENEW_MS,
   ROOT_CLAIM_STALE_MS,

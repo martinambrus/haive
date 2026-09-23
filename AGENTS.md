@@ -848,11 +848,26 @@ expansion folder all apply: `_ATTACHMENTS.md` and `_PLAN_INPUTS.md` at the root,
 any depth, since a delete unlinks a document's sidecar path whether or not the sidecar exists yet. A
 file is probed onto the next free ` (n)` name; a FOLDER is renamed `<name> (2)` deterministically
 (`reserveAttachmentDirs`), because a folder upload is one request per file and every file of it has
-to land in the same place. A sidecar `00-plan-inputs` writes while
-the delete runs is caught from both sides: the api removes sidecar paths again once the row is
-gone, and the worker looks for the row only after writing, so whichever comes last sees the other.
-Neither may be left: an orphaned
-tree stays bind-mounted, and an agent would keep reading files the user believes they removed.
+to land in the same place. Neither may be left: an orphaned tree stays bind-mounted, and an agent
+would keep reading files the user believes they removed.
+
+**One lock serialises every write that changes which files a task has.** `withTaskAttachmentsLock`
+(`@haive/database`) is a transaction-scoped advisory lock keyed on the task — `plan/mirror.ts`'s
+shape — that the api and the worker share: an upload CLAIMING its name, a delete from reading its
+rows to rewriting the manifest, a sidecar stored only while its row exists, and every manifest
+rewrite. A delete removes a sidecar path and its row in one section, so no sidecar can land between
+the two; that replaced a two-sided check in which the api removed sidecars twice and the worker
+looked for the row after writing. Three rules make it safe to hold. Sections are SHORT — never
+across an upload stream or an archive extraction, because every waiter holds a pooled connection
+and both pools are `max: 10`. Everything inside goes through `tx`, never the pool. And nothing that
+takes the lock is called on the POOL from inside a section: handed `tx`, it nests as a savepoint,
+where the lock is re-entrant. A wait past 30s is `55P03` (`isLockNotAvailable`): the api answers 503
+having changed nothing, and the worker counts it as a per-item miss — a sidecar not stored, a
+missing file still missing. `00-plan-inputs` re-checks a file it found gone under the lock before
+calling it missing, since a delete removes files before rows and a deleted attachment is not a
+missing one. The upload's INSERT stays outside the lock with its id chosen beforehand, so one whose
+answer was lost can be told from one that failed: the file is taken back only when a second look
+finds no row, since answering 500 for a stored upload sends the client's retry to store it twice.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the
 column.** The expansion call reports only the archives THAT call expanded, so a later step, a
