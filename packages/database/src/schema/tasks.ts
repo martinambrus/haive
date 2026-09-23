@@ -753,16 +753,23 @@ export const taskStepAgentMinings = pgTable(
      *  The fan-out barrier re-dispatches marked rows through retryMiningAgents and clears the
      *  mark, so it fires exactly once.
      *
-     *  A marker rather than a restored `attempts` budget because only 08c and 08d declare a
-     *  retry spec at all — for the other five fan-out steps `spec.retry` is undefined and both
-     *  automatic re-roll paths are dead code, so a budget-based trigger would reach two steps
-     *  out of seven. For the same reason the mark BYPASSES the per-agent budget: that budget
-     *  bounds automatic thrash, and a person asking is not thrash. */
+     *  A marker rather than a restored `attempts` budget, and it BYPASSES that budget: the
+     *  budget bounds automatic thrash, and a person asking is not thrash. A budget-based
+     *  trigger would also never reach `09_5-skill-generation`, the one fan-out step of ten that
+     *  declares no retry spec, where both automatic re-roll paths are dead code. */
     userRetryRequestedAt: timestamp('user_retry_requested_at'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** What the agent's last dispatch asked for beyond the step's spec — its seat
+     *  (`AgentMiningDispatch.roleKey`), its capability override and `preferVision` — so a
+     *  retry that cannot rebuild the dispatch, a wave agent recovered from its stored
+     *  prompt, runs in the same seat under the same requirements. NULL: the dispatch set
+     *  none, which resolves exactly as it did (the `default` seat, the spec's capabilities). */
+    roleKey: text('role_key'),
+    capabilities: text('capabilities').array(),
+    preferVision: boolean('prefer_vision'),
   },
   (table) => [
     index('task_step_agent_minings_task_step_id_idx').on(table.taskStepId),
