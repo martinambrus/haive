@@ -28,7 +28,13 @@ import {
   openFileNoFollow,
   removeNoFollow,
 } from '@haive/shared/fs-safe';
-import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
+import {
+  pruneAfter,
+  removeExpansionStagings,
+  removeFiles,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempts,
+} from '@haive/shared/attachments-fs';
 import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
@@ -260,42 +266,6 @@ async function claimAttachmentName(
     }
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
   }
-}
-
-/** Remove the directories a deleted file left empty, stopping at the uploads root
- *  or at the first directory something else still lives in. */
-async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
-  let cursor = relDir;
-  while (cursor !== '' && cursor !== '.') {
-    try {
-      // Non-recursive on purpose: ENOTEMPTY is the signal to stop, so a directory something else
-      // still lives in is left exactly as it is.
-      await removeNoFollow(anchor, `${uploadsRel}/${cursor}`);
-    } catch {
-      return; // not empty, or already gone
-    }
-    cursor = splitAttachmentPath(cursor).dir;
-  }
-}
-
-/** Remove what `filesToRemove` lists. Walked under the repository root like every other removal
- *  here, so a link in a path is refused rather than followed, and a file already gone is fine. */
-async function removeFiles(anchor: string, uploadsRel: string, files: readonly string[]) {
-  for (const file of files) {
-    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
-  }
-}
-
-/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
- *  the children that kept it alive. */
-async function pruneAfter(
-  anchor: string,
-  uploadsRel: string,
-  removed: readonly string[],
-): Promise<void> {
-  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
-  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
-  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
 }
 
 /** Stream the request body to `destPath`, aborting + unlinking once the byte count
@@ -584,7 +554,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   // One section under the task's attachments lock, from reading the rows to rewriting the
   // manifest: the worker writes a sidecar only under the same lock and only while its row exists,
   // so no sidecar can land between the files going and the rows going and outlive both.
-  await withTaskAttachmentsLock(db, taskId, async (tx) => {
+  const settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
     // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on
     // the delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox,
     // so an agent would keep reading files the user believes they removed.
@@ -598,9 +568,21 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
     const files = filesToRemove(new Set([attachmentId]), rows);
     await removeFiles(anchor, uploadsRel, files);
     await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
+    // An expansion of this archive the worker was interrupted in: with the archive's row gone, no
+    // later call would know it had anything to take back.
+    const attempts = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set([attachmentId]),
+    );
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    return attempts;
   }).catch(lockBusyError);
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(anchor, uploadsRel, settled);
   return c.json({ ok: true });
 });
 
@@ -615,7 +597,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const prefix = safeAttachmentPath(raw);
 
   // The same one section as the single delete, and for the same reason.
-  const removed = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
+  const done = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
     const rows = await tx.query.taskAttachments.findMany({
       where: and(
         eq(schema.taskAttachments.taskId, taskId),
@@ -642,9 +624,18 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
         marked.map((r) => r.id),
       ),
     );
+    const settled = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set(marked.map((r) => r.id)),
+    );
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
-    return marked.length;
+    return { removed: marked.length, anchor, uploadsRel, settled };
   }).catch(lockBusyError);
-  return c.json({ ok: true, removed });
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled);
+  return c.json({ ok: true, removed: done.removed });
 });

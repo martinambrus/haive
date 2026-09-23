@@ -93,9 +93,20 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   const hooks: {
     /** Awaited before a transaction asks for the attachments lock, with the lock's key. */
     beforeLock: ((key: string) => void | Promise<void>) | null;
-    /** Awaited before a delete removes its rows. */
-    beforeDelete: (() => void | Promise<void>) | null;
-  } = { beforeLock: null, beforeDelete: null };
+    /** Awaited before an insert, an update or a delete writes; a throw fails that statement. */
+    beforeInsert: ((table: PgTable) => void | Promise<void>) | null;
+    beforeUpdate: ((table: PgTable) => void | Promise<void>) | null;
+    beforeDelete: ((table: PgTable) => void | Promise<void>) | null;
+    /** Awaited when an outermost transaction's work is done, just before it commits and releases
+     *  its locks; a throw fails the commit, which rolls it back. */
+    beforeCommit: (() => void | Promise<void>) | null;
+  } = {
+    beforeLock: null,
+    beforeInsert: null,
+    beforeUpdate: null,
+    beforeDelete: null,
+    beforeCommit: null,
+  };
 
   const checkValue = (col: Column, value: unknown): unknown => {
     if (is(col, PgUUID) && typeof value === 'string' && !UUID.test(value)) {
@@ -316,21 +327,26 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
       insert: (table: PgTable) => ({
         values: (values: FakeRow | FakeRow[]) =>
-          lazy(() =>
-            (Array.isArray(values) ? values : [values]).map((v) => insertRow(ctx, table, v)),
-          ),
+          lazy(async () => {
+            await hooks.beforeInsert?.(table);
+            return (Array.isArray(values) ? values : [values]).map((v) => insertRow(ctx, table, v));
+          }),
       }),
       update: (table: PgTable) => ({
         set: (values: FakeRow) => ({
           where: (cond: unknown) =>
-            lazy(() => update(ctx, table, compileWhere(table, cond), values)),
+            lazy(async () => {
+              const match = compileWhere(table, cond);
+              await hooks.beforeUpdate?.(table);
+              return update(ctx, table, match, values);
+            }),
         }),
       }),
       delete: (table: PgTable) => ({
         where: (cond: unknown) =>
           lazy(async () => {
             const match = compileWhere(table, cond);
-            await hooks.beforeDelete?.();
+            await hooks.beforeDelete?.(table);
             remove(ctx, table, match);
           }),
       }),
@@ -363,6 +379,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           // A savepoint that is released hands its writes to the level above, which may still
           // roll them back.
           chain.frames.at(-1)?.push(...frame);
+          if (ctx === null) await hooks.beforeCommit?.();
           return result;
         } catch (err) {
           chain.frames.pop();
