@@ -5,13 +5,11 @@ import {
   isPathContainmentError,
   lstatNoFollow,
   readdirNoFollow,
-  readLinkNoFollow,
   renameNoFollow,
   updateFileNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import {
-  buildCliRulesBlock,
   CLI_RULES_START,
   CLI_RULES_END,
   getCliProviderMetadata,
@@ -43,6 +41,9 @@ import {
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
 } from './_rtk-templates.js';
+import { ensureRulesImportStub, isLinkToAgentsMd, planRulesFiles } from './_rules-files.js';
+
+export { planRulesFiles, type RulesPlan } from './_rules-files.js';
 
 export interface ProjectInfo {
   name: string | null;
@@ -300,41 +301,6 @@ export function workflowConfigJson(framework: string | null): string {
     framework: framework ?? null,
   };
   return `${JSON.stringify(config, null, 2)}\n`;
-}
-
-export interface RulesPlan {
-  /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
-   *  provider has rules content. */
-  agentsRulesBlock: string | null;
-  /** Files (CLAUDE.md, GEMINI.md) that receive only an `@AGENTS.md` import. */
-  importFiles: string[];
-  /** Files that receive a full duplicate of AGENTS.md (project-info + rules) —
-   *  for CLIs supporting neither native AGENTS.md nor `@` imports. Unused by
-   *  the current adapter set. */
-  copyFiles: string[];
-}
-
-/** Decide what each CLI's rules file gets, given the enabled providers joined
- *  with their adapter rules-file metadata. AGENTS.md is the single source of
- *  truth (every provider's rules merged + trim-equal deduped); import-mode
- *  files (CLAUDE.md, GEMINI.md) just point at it via `@AGENTS.md`; native-mode
- *  files (rulesFile === 'AGENTS.md') need nothing extra. */
-export function planRulesFiles(
-  providers: ReadonlyArray<{
-    rulesContent: string;
-    rulesFile: string;
-    rulesFileMode: 'native' | 'import' | 'copy';
-  }>,
-): RulesPlan {
-  const agentsRulesBlock = buildCliRulesBlock(providers.map((p) => p.rulesContent));
-  const importFiles = new Set<string>();
-  const copyFiles = new Set<string>();
-  for (const p of providers) {
-    if (p.rulesFile === 'AGENTS.md') continue;
-    if (p.rulesFileMode === 'import') importFiles.add(p.rulesFile);
-    else if (p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
-  }
-  return { agentsRulesBlock, importFiles: [...importFiles], copyFiles: [...copyFiles] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -985,23 +951,17 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     if (rulesPlan.agentsRulesBlock) {
       await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
     }
-    // A repo may legitimately carry `CLAUDE.md -> AGENTS.md`: the convention predates Haive, and the
-    // target is written at its own path in the same run, so such a link is SKIPPED with a note
-    // rather than written through. Any OTHER link stays refused — `updateFileNoFollow` throws —
-    // because a rules file pointing somewhere nobody here chose is exactly what must not be written.
-    const linkedToAgentsMd = async (rel: string): Promise<boolean> => {
-      if ((await lstatNoFollow(ctx.repoPath, rel))?.kind !== 'symlink') return false;
-      const target = await readLinkNoFollow(ctx.repoPath, rel);
-      if (target !== 'AGENTS.md' && target !== './AGENTS.md') return false;
-      skippedFiles.push(rel);
-      return true;
-    };
     for (const rf of rulesPlan.importFiles) {
-      if (await linkedToAgentsMd(rf)) continue;
-      await appendOrCreate(rf, '@AGENTS.md\n', '@AGENTS.md');
+      const stub = await ensureRulesImportStub(ctx.repoPath, rf);
+      if (stub === 'created') wroteFiles.push(rf);
+      else if (stub === 'appended') appendedFiles.push(rf);
+      else skippedFiles.push(rf);
     }
     for (const rf of rulesPlan.copyFiles) {
-      if (await linkedToAgentsMd(rf)) continue;
+      if (await isLinkToAgentsMd(ctx.repoPath, rf)) {
+        skippedFiles.push(rf);
+        continue;
+      }
       await appendOrCreate(
         rf,
         projectInfoMarkdown(detected.projectInfo),

@@ -201,3 +201,21 @@ describe('upgradeApplyStep.form() — empty plan returns null', () => {
     expect(result).toBeNull();
   });
 });
+
+describe('upgradeApplyStep.form() — rules import note', () => {
+  it('names each rules file whose @AGENTS.md import the apply will restore', () => {
+    const schema = callForm({ ...plan([]), missingRulesImports: ['CLAUDE.md', 'GEMINI.md'] });
+    const note = schema.fields.find((f) => f.id === 'rulesImportNote');
+    expect(note).toMatchObject({ type: 'note' });
+    const body = (note as { body: string }).body;
+    expect(body).toContain('`CLAUDE.md`');
+    expect(body).toContain('`GEMINI.md`');
+  });
+
+  it('adds nothing when every import is in place, or for a plan persisted before the field', () => {
+    const form = (detected: UpgradePlanOutput) =>
+      upgradeApplyStep.form?.({} as unknown as StepContext, detected);
+    expect(form({ ...plan([]), missingRulesImports: [] })).toBeNull();
+    expect(form(plan([]))).toBeNull();
+  });
+});

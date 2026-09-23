@@ -28,6 +28,11 @@ import {
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import {
+  enabledImportRulesFiles,
+  restoreRulesImportStubs,
+  type RulesImportStubOutcome,
+} from '../onboarding/_rules-files.js';
 import type { UpgradePlanOutput, UpgradePlanEntry } from './01-upgrade-plan.js';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
@@ -159,12 +164,16 @@ export function safeDiskRel(diskPath: string): string | null {
   return rel === '' ? null : rel;
 }
 
-interface UpgradeApplyOutput {
+export interface UpgradeApplyOutput {
   appliedCount: number;
   skippedCount: number;
   deletedCount: number;
   warnings: string[];
   installManifestWritten: boolean;
+  rulesImportStubs: RulesImportStubOutcome[];
+  /** Every repository path this run wrote, for 03 to stage. Optional because it is read back
+   *  from a persisted output that may predate it. */
+  writtenPaths?: string[];
 }
 
 async function resolvePlanFromStep(ctx: {
@@ -314,6 +323,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         defaults: [],
       });
     }
+    const missingImports = detected.missingRulesImports ?? [];
+    if (missingImports.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'rulesImportNote',
+        label: 'Restores the AGENTS.md import',
+        body:
+          `${missingImports.map((f) => `\`${f}\``).join(', ')} will get an \`@AGENTS.md\` line, ` +
+          'so its CLI loads AGENTS.md and the rules in it.',
+        variant: 'info',
+      });
+    }
 
     if (fields.length === 0) return null;
 
@@ -353,6 +374,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let appliedCount = 0;
     let skippedCount = 0;
     let deletedCount = 0;
+    const writtenPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -417,6 +439,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               rel,
               upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
             );
+            writtenPaths.push(rel);
           } else {
             await removeNoFollow(ctx.repoPath, rel);
           }
@@ -486,6 +509,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       } else {
         await writeFileNoFollow(ctx.repoPath, rel, entry.newContent, { createParents: true });
       }
+      writtenPaths.push(rel);
       appliedCount += 1;
 
       if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
@@ -510,6 +534,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         haiveVersion,
         bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
       });
+    }
+
+    // Not an artifact, but without its `@AGENTS.md` line a claude-family CLI never loads AGENTS.md.
+    const rulesImportStubs = await restoreRulesImportStubs(
+      ctx.repoPath,
+      await enabledImportRulesFiles(ctx.db, ctx.userId),
+    );
+    for (const stub of rulesImportStubs) {
+      if (stub.result === 'created' || stub.result === 'appended') writtenPaths.push(stub.file);
+      if (stub.result === 'refused') {
+        warnings.push(`did not restore the @AGENTS.md import in ${stub.file}: ${stub.error}`);
+      }
     }
 
     // Defensive supersede + insert. Plan's `liveArtifactId` is what the plan
@@ -594,6 +630,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       deletedCount,
       warnings,
       installManifestWritten,
+      rulesImportStubs,
+      writtenPaths,
     };
   },
 };
