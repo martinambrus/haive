@@ -1997,5 +1997,9 @@ skip the applicable-template and install-manifest writes after it. Without the s
 claude-family CLI never loads AGENTS.md, rules block included, and nothing else ever wrote it back.
 `03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
-stages exactly those, never whole rules files by name, so a person's uncommitted edits elsewhere
-stay out of the upgrade commit.
+also stages each stub 02 left holding the import whose HEAD copy lacks the line
+(`headLacksImport`). A write list alone misses two cases: 02 reports `unchanged` for a stub an
+earlier attempt of the step wrote before failing, and for one onboarding wrote with its commit
+off, so both stayed out of HEAD for good. It never stages rules files by name beyond that, so a
+person's uncommitted edits elsewhere stay out of the upgrade commit; a stub that IS staged goes
+in whole, the same file-level granularity AGENTS.md already had.

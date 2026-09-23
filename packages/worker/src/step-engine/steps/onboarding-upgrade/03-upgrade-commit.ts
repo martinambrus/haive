@@ -12,6 +12,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { RULES_IMPORT_LINE } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +69,31 @@ export function appliedWrittenPaths(applyOutput: unknown): string[] {
     .filter((p): p is string => typeof p === 'string')
     .map((p) => safeDiskRel(p))
     .filter((p): p is string => p !== null);
+}
+
+/** The import stubs 02 left holding `@AGENTS.md`, whether or not it had to write them. */
+export function appliedImportStubs(applyOutput: unknown): string[] {
+  const raw = (applyOutput as { rulesImportStubs?: unknown } | null)?.rulesImportStubs;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s): s is { file: string; result: string } => {
+      const o = s as { file?: unknown; result?: unknown } | null;
+      return typeof o?.file === 'string' && typeof o.result === 'string';
+    })
+    .filter((s) => s.result === 'created' || s.result === 'appended' || s.result === 'unchanged')
+    .map((s) => safeDiskRel(s.file))
+    .filter((p): p is string => p !== null);
+}
+
+/** A worktree sees a stub only through HEAD. 02 reports `unchanged` for one an earlier attempt
+ *  wrote, or one onboarding left uncommitted, so its own write list cannot answer this. */
+export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['show', `HEAD:${rel}`], { cwd: repoPath });
+    return !stdout.includes(RULES_IMPORT_LINE);
+  } catch {
+    return true;
+  }
 }
 
 /** Used only when neither the repo's bound credential nor the user carries an identity,
@@ -188,10 +214,15 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     }
 
     const applied = await loadPreviousStepOutput(ctx.db, ctx.taskId, '02-upgrade-apply');
+    const stubPaths: string[] = [];
+    for (const rel of appliedImportStubs(applied?.output)) {
+      if (await headLacksImport(ctx.repoPath, rel)) stubPaths.push(rel);
+    }
     const stagePaths = [
       ...new Set([
         ...(await resolveStagePaths(ctx.db, ctx.userId)),
         ...appliedWrittenPaths(applied?.output),
+        ...stubPaths,
       ]),
     ];
     const existingPaths: string[] = [];
