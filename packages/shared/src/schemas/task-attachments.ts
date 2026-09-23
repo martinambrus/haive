@@ -10,6 +10,11 @@ export const taskAttachmentSchema = z.object({
   contentType: z.string().nullable(),
   description: z.string().nullable(),
   createdAt: z.string(),
+  /** When the worker expanded this archive; null for anything never expanded. */
+  expandedAt: z.string().nullable(),
+  /** Why that expansion produced less than the archive holds. Display copy, meaningful only
+   *  while `expandedAt` is set. */
+  expansionNote: z.string().nullable(),
 });
 
 export type TaskAttachment = z.infer<typeof taskAttachmentSchema>;
