@@ -24,6 +24,9 @@ export const SIMILAR_SITES_AT_GATE = 50;
 const SIMILAR_SITE_REASON_CHARS = 200;
 const LINES_PATTERN = /^\d+(-\d+)?(,\s*\d+(-\d+)?)*$/;
 
+/** One spelling per path, so two passes naming one file key and compare as one. */
+const canonicalPath = (path: string): string => path.trim().replace(/^(?:\.\/)+/, '');
+
 /** Keep only well-formed entries from agent output. A path that could not be shown as itself or
  *  that leaves the repository drops the entry; malformed `lines` drops only the range. Nothing is
  *  capped here: the reply is already stored whole, and the gate is where the list is cut and the
@@ -35,7 +38,7 @@ export function sanitizeSimilarSites(raw: unknown): SimilarSite[] {
     if (!item || typeof item !== 'object') continue;
     const { path, lines, reason } = item as Record<string, unknown>;
     if (typeof path !== 'string') continue;
-    const p = path.trim();
+    const p = canonicalPath(path);
     if (!p || !isSingleLine(p) || !survivesFence(p)) continue;
     if (p.startsWith('/') || p.split('/').includes('..')) continue;
     const site: SimilarSite = {
@@ -112,9 +115,7 @@ export async function loadTaskSimilarSites(
     const files = Array.isArray(output?.filesTouched) ? output.filesTouched : [];
     touched.push({
       round: row.round,
-      files: new Set(
-        files.filter((f): f is string => typeof f === 'string').map((f) => f.replace(/^\.\//, '')),
-      ),
+      files: new Set(files.filter((f): f is string => typeof f === 'string').map(canonicalPath)),
     });
     all = mergeSimilarSites(
       all,

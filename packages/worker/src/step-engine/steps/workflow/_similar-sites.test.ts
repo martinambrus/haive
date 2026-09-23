@@ -57,6 +57,29 @@ describe('sanitizeSimilarSites', () => {
   });
 });
 
+describe('path spelling', () => {
+  it('stores one spelling, so two passes naming one file merge and match its edits', async () => {
+    expect(sanitizeSimilarSites([{ path: '././src/a.ts', reason: '' }])[0]!.path).toBe('src/a.ts');
+    const out = await loadTaskSimilarSites(
+      tableDb(
+        [],
+        [
+          { round: 0, output: { similarSites: [{ path: './a.ts', reason: 'x' }] } },
+          {
+            round: 1,
+            output: { filesTouched: ['./a.ts'], similarSites: [{ path: 'a.ts', reason: 'y' }] },
+          },
+          { round: 2, output: { filesTouched: ['a.ts'] } },
+        ],
+      ),
+      't1',
+    );
+    expect(out.sites).toEqual([
+      { path: 'a.ts', reason: 'x', source: 'implementation round 0', editedInRound: 2 },
+    ]);
+  });
+});
+
 describe('mergeSimilarSites', () => {
   it('unions by path and range, the first report winning', () => {
     const merged = mergeSimilarSites(
