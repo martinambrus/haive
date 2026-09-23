@@ -12,7 +12,7 @@ import {
   uploadTaskAttachment,
   type TaskAttachment,
 } from '@/lib/api-client';
-import { awaitingExpansion } from '@/lib/attachment-expansion';
+import { pollForExpansion } from '@/lib/attachment-expansion';
 import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
 
@@ -61,7 +61,14 @@ function groupByFolder(items: TaskAttachment[]): {
 
 /** Task attachments tab: list, upload and remove user-supplied reference files the
  *  AI agent reads from the task workspace. Works for new and running tasks alike. */
-export function AttachmentsPanel({ taskId }: { taskId: string }) {
+export function AttachmentsPanel({
+  taskId,
+  taskEnded = false,
+}: {
+  taskId: string;
+  /** The task completed, failed or was cancelled, so no step will run to expand an archive. */
+  taskEnded?: boolean;
+}) {
   const [items, setItems] = useState<TaskAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
@@ -86,12 +93,12 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
   // The worker expands an archive at the start of its next step and nothing tells this view when,
   // so it re-reads while one is waiting: the members, and any note about what the archive lost,
   // then appear without leaving the tab.
-  const waiting = useMemo(() => (items ?? []).some(awaitingExpansion), [items]);
+  const poll = useMemo(() => pollForExpansion(items ?? [], taskEnded), [items, taskEnded]);
   useEffect(() => {
-    if (!waiting) return;
+    if (!poll) return;
     const timer = setInterval(() => void reload(), EXPANSION_POLL_MS);
     return () => clearInterval(timer);
-  }, [waiting, reload]);
+  }, [poll, reload]);
 
   async function onPick(files: FileList | null) {
     if (!files || files.length === 0) return;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskAttachment } from './api-client';
-import { awaitingExpansion } from './attachment-expansion';
+import { awaitingExpansion, pollForExpansion } from './attachment-expansion';
 
 const row = (filename: string, over: Partial<TaskAttachment> = {}): TaskAttachment => ({
   id: 'a',
@@ -40,5 +40,22 @@ describe('awaitingExpansion', () => {
   it('never waits on a row from an api that predates these fields', () => {
     const { expandedAt: _a, expansionNote: _n, expandedFromId: _f, ...legacy } = row('spec.zip');
     expect(awaitingExpansion(legacy)).toBe(false);
+  });
+});
+
+describe('pollForExpansion', () => {
+  const waiting = [row('notes.md'), row('spec.zip')];
+
+  it('polls while an archive waits and a step can still expand it', () => {
+    expect(pollForExpansion(waiting, false)).toBe(true);
+  });
+
+  it('never polls an ended task, which runs no step to expand anything', () => {
+    // An archive uploaded after the task completed, failed or was cancelled waits forever.
+    expect(pollForExpansion(waiting, true)).toBe(false);
+  });
+
+  it('never polls when nothing waits', () => {
+    expect(pollForExpansion([row('notes.md')], false)).toBe(false);
   });
 });

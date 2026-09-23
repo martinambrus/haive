@@ -13,3 +13,10 @@ export function awaitingExpansion(a: TaskAttachment): boolean {
     detectAttachmentArchiveFormat(a.filename) !== null
   );
 }
+
+/** Whether the attachments panel should keep re-reading. Only while an archive waits AND the task
+ *  can still run a step, since steps are the only thing that expands one: an archive attached to a
+ *  task that completed, failed or was cancelled waits forever. A retry makes the task live again. */
+export function pollForExpansion(items: readonly TaskAttachment[], taskEnded: boolean): boolean {
+  return !taskEnded && items.some(awaitingExpansion);
+}
