@@ -70,7 +70,7 @@ async function tarball(uploads: string, name: string, build: (src: string) => Pr
   dirs.push(src);
   await build(src);
   const dest = path.join(uploads, name);
-  await exec('tar', ['-cf', dest, '-C', src, '.']);
+  await exec('tar', [/\.(tar\.gz|tgz)$/i.test(name) ? '-czf' : '-cf', dest, '-C', src, '.']);
   return dest;
 }
 
@@ -260,6 +260,85 @@ describe('ensureArchivesExpanded', () => {
     expect(names).toHaveLength(2);
     expect(new Set(names).size).toBe(2);
     expect(names).toContain('clash/a_.md');
+  });
+
+  it('renames a member a sidecar would overwrite, and never drops it', async () => {
+    // `00-plan-inputs` writes `<doc>.extracted.md` beside a document, so a member holding that
+    // name, or a folder named like one, would be overwritten or would block the extraction.
+    const uploads = await uploadsDir();
+    await tarball(uploads, 'spec.tar', async (src) => {
+      await writeFile(path.join(src, 'a.docx'), 'doc');
+      await writeFile(path.join(src, 'a.docx.extracted.md'), 'member');
+      await mkdir(path.join(src, 'notes.extracted.md'), { recursive: true });
+      await writeFile(path.join(src, 'notes.extracted.md', 'x.md'), 'nested');
+    });
+    const { db, inserted } = stubDb([archiveRow(uploads, 'spec.tar')]);
+
+    await ensureArchivesExpanded(db, 'task-1');
+
+    expect(inserted.map((r) => r.filename).sort()).toEqual([
+      'spec/a.docx',
+      'spec/a.docx.extracted (2).md',
+      'spec/notes.extracted.md (2)/x.md',
+    ]);
+    expect(await readFile(path.join(uploads, 'spec', 'a.docx.extracted (2).md'), 'utf8')).toBe(
+      'member',
+    );
+  });
+
+  it('places a file and a folder that end up with one name, instead of failing part-way', async () => {
+    const uploads = await uploadsDir();
+    await tarball(uploads, 'clash.tar', async (src) => {
+      // `notes.extracted.md/` is renamed `notes.extracted.md (2)/`, beside a member already called that.
+      await mkdir(path.join(src, 'notes.extracted.md'), { recursive: true });
+      await writeFile(path.join(src, 'notes.extracted.md', 'x.md'), 'in the folder');
+      await writeFile(path.join(src, 'notes.extracted.md (2)'), 'the file');
+      // And two names the sanitiser folds into one: a folder `a?/` and a file `a*`, both `a_`.
+      await mkdir(path.join(src, 'a?'), { recursive: true });
+      await writeFile(path.join(src, 'a?', 'y.md'), 'in a?');
+      await writeFile(path.join(src, 'a*'), 'file a*');
+    });
+    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'clash.tar')]);
+
+    const result = await ensureArchivesExpanded(db, 'task-1');
+
+    expect(result.notes).toEqual([]);
+    expect(updated[0]?.expansionNote).toBeNull();
+    const names = inserted.map((r) => String(r.filename));
+    expect(new Set(names).size).toBe(4);
+    const contents = await Promise.all(names.map((n) => readFile(path.join(uploads, n), 'utf8')));
+    expect(contents.sort()).toEqual(['file a*', 'in a?', 'in the folder', 'the file']);
+  });
+
+  it('never expands into a folder a generated file owns', async () => {
+    const uploads = await uploadsDir();
+    await tarball(uploads, '_PLAN_INPUTS.md.tar', async (src) => {
+      await writeFile(path.join(src, 'a.md'), 'a');
+      await writeFile(path.join(src, 'b.md'), 'b');
+    });
+    const { db, inserted } = stubDb([archiveRow(uploads, '_PLAN_INPUTS.md.tar')]);
+
+    await ensureArchivesExpanded(db, 'task-1');
+
+    expect(inserted.map((r) => r.filename).sort()).toEqual([
+      '_PLAN_INPUTS.md (2)/a.md',
+      '_PLAN_INPUTS.md (2)/b.md',
+    ]);
+    expect(await readdir(uploads)).not.toContain('_PLAN_INPUTS.md');
+  });
+
+  it('expands a de-duped second copy whose two-part extension stayed whole', async () => {
+    const uploads = await uploadsDir();
+    await tarball(uploads, 'spec (2).tar.gz', async (src) => {
+      await writeFile(path.join(src, 'a.md'), 'a');
+      await writeFile(path.join(src, 'b.md'), 'b');
+    });
+    const { db, inserted } = stubDb([archiveRow(uploads, 'spec (2).tar.gz')]);
+
+    const result = await ensureArchivesExpanded(db, 'task-1');
+
+    expect(result.expanded).toBe(1);
+    expect(inserted.map((r) => r.filename).sort()).toEqual(['spec (2)/a.md', 'spec (2)/b.md']);
   });
 
   it('names members whose path is too deep to store, instead of only logging them', async () => {

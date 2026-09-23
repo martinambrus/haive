@@ -493,6 +493,60 @@ describe('task attachment routes', () => {
       expect(await exists(up('x.docx.extracted.md'))).toBe(false);
     });
 
+    it('keeps an archive’s two-part extension whole when it de-dupes', async () => {
+      // `spec.tar (2).gz` is a name no archive rule recognises, so it would never be expanded.
+      const first = await upload('spec.tar.gz', 'one');
+      const second = await upload('spec.tar.gz', 'two');
+      expect((first.body?.attachment as Row).filename).toBe('spec.tar.gz');
+      expect((second.body?.attachment as Row).filename).toBe('spec (2).tar.gz');
+      expect(await readFile(up('spec (2).tar.gz'), 'utf8')).toBe('two');
+    });
+
+    it('renames a folder a generated file needs, the same way for every file in it', async () => {
+      // A folder arrives one request per file, so the rename is fixed rather than probed: every
+      // file of `_ATTACHMENTS.md/` has to land in ONE folder.
+      const names: unknown[] = [];
+      for (const name of [
+        '_ATTACHMENTS.md/a.txt',
+        '_ATTACHMENTS.md/b.txt',
+        'docs/a.pdf.extracted.md/c.txt',
+        'docs/_ATTACHMENTS.md/d.txt',
+      ]) {
+        const res = await upload(name, 'mine');
+        expect(res.status).toBe(201);
+        names.push((res.body?.attachment as Row).filename);
+      }
+      expect(names).toEqual([
+        '_ATTACHMENTS.md (2)/a.txt',
+        '_ATTACHMENTS.md (2)/b.txt',
+        'docs/a.pdf.extracted.md (2)/c.txt',
+        'docs/_ATTACHMENTS.md/d.txt',
+      ]);
+      // The root name stays the index FILE every agent is told to read.
+      expect((await lstat(up('_ATTACHMENTS.md'))).isFile()).toBe(true);
+      expect([...((await indexed()) ?? [])].sort()).toEqual([...(names as string[])].sort());
+      expect(await exists(up('docs/a.pdf.extracted.md'))).toBe(false);
+    });
+
+    it('keeps a renamed folder inside the path rules, so its prefix still removes it', async () => {
+      // 200 characters: at the segment limit before ` (2)` is added.
+      const folder = `${'x'.repeat(187)}.extracted.md`;
+      const res = await upload(`${folder}/a.txt`, 'mine');
+      expect(res.status).toBe(201);
+      const [renamed] = String((res.body?.attachment as Row).filename).split('/');
+      expect(renamed!.length).toBeLessThanOrEqual(200);
+      const qs = new URLSearchParams({ prefix: renamed! });
+      const del = await send('DELETE', `/${TASK}/attachments?${qs.toString()}`);
+      expect(del.status).toBe(200);
+      expect(filenames()).toEqual([]);
+
+      // A path the rename would take past the path limit is refused like any too-long path.
+      const tooLong = `_ATTACHMENTS.md/${'a'.repeat(199)}/${'b'.repeat(184)}`;
+      expect(tooLong).toHaveLength(400);
+      expect((await upload(tooLong, 'x')).status).toBe(400);
+      expect(filenames()).toEqual([]);
+    });
+
     it('treats a link at the name as taken and writes nothing through it', async () => {
       await mkdir(up(), { recursive: true });
       await writeFile(path.join(outside, 'secret.md'), 'secret');
