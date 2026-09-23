@@ -37,9 +37,11 @@ import {
   loadLiveAttachments,
   loadPlanInputsOutput,
   removePlanInputsIndex,
+  unpreparedAttachments,
   writePlanInputsIndex,
   type PlanInputsApply,
 } from './00-plan-inputs.js';
+import { classifyPlanInput } from './_plan-inputs.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -284,14 +286,15 @@ function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
 }
 
 /**
- * `d` as a dispatch should see it: the three input fields recomputed from what is STILL attached.
+ * `d` as a dispatch should see it: the three input fields recomputed from what is attached NOW.
  * detect copied them from `00-plan-inputs`, and a person can delete an attachment while the build
  * runs, so a deleted image would otherwise still demand `vision` and the index the root prompt says
  * to read FIRST would still name a deleted file. The index is re-rendered, or removed once nothing
- * in it is left. An attachment added since is not picked up: nothing extracted it.
+ * in it is left. A file attached since is neither extracted nor indexed, but the attachments notice
+ * names every live row, so its KIND still counts: a picture requires `vision`, a PDF prefers it.
  *
- * Returns `d` itself when nothing was deleted, and when either lookup fails, which leaves the
- * build on the fields it had before this existed.
+ * Returns `d` itself when nothing changed, and when either lookup fails, which leaves the build on
+ * the fields it had before this existed.
  */
 export async function withLiveInputs(
   ctx: StepContext,
@@ -302,29 +305,58 @@ export async function withLiveInputs(
   const live = await loadLiveAttachments(ctx);
   if (!live) return d;
   const { output, changed } = livePlanInputs(prepared, live);
-  if (!changed) return d;
-  let inputIndexPath: string | null = null;
-  try {
-    if (output.inputs.length > 0) {
-      inputIndexPath = await writePlanInputsIndex(
-        ctx.repoPath,
-        ctx.taskId,
-        output.inputs,
-        output.archiveNotes,
-      );
-    } else {
-      await removePlanInputsIndex(ctx.repoPath, ctx.taskId);
+  const added = unpreparedAttachments(prepared, live).map((r) => ({
+    filename: r.filename,
+    kind: classifyPlanInput(r.filename, r.contentType),
+  }));
+  const addedPictures = added.filter((a) => a.kind === 'image').map((a) => a.filename);
+  const addedPdf = added.some((a) => a.kind === 'pdf');
+  if (!changed && addedPictures.length === 0 && !addedPdf) return d;
+  let inputIndexPath = d.inputIndexPath ?? null;
+  // Only a deletion touches the index: it lists what was prepared, and nothing prepared an addition.
+  if (changed) {
+    try {
+      if (output.inputs.length > 0) {
+        inputIndexPath = await writePlanInputsIndex(
+          ctx.repoPath,
+          ctx.taskId,
+          output.inputs,
+          output.archiveNotes,
+        );
+      } else {
+        await removePlanInputsIndex(ctx.repoPath, ctx.taskId);
+        inputIndexPath = null;
+      }
+    } catch (err) {
+      ctx.logger.warn({ err }, 'plan build: could not re-render the plan-inputs index');
     }
-  } catch (err) {
-    ctx.logger.warn({ err }, 'plan build: could not re-render the plan-inputs index');
-    inputIndexPath = d.inputIndexPath ?? null;
   }
   return {
     ...d,
     inputIndexPath,
-    visualOnlyInputs: visualOnlyInputsOf(output),
-    hasPdfInputs: output.hasPdfInputs === true,
+    visualOnlyInputs: [...visualOnlyInputsOf(output), ...addedPictures],
+    hasPdfInputs: output.hasPdfInputs === true || addedPdf,
   };
+}
+
+/**
+ * A greenfield build needs a brief or a file. `00-plan-inputs` checked that when it ran; the root
+ * dispatch checks it again against what is attached NOW, since a file deleted since would send the
+ * root agent out with no specification and spend a run on an invented plan. Any live attachment
+ * counts, prepared or not, because the attachments notice lets the agent read it. A lookup that
+ * fails does not refuse.
+ */
+export async function assertSomethingToBuildFrom(
+  ctx: StepContext,
+  d: PlanBuildDetect,
+): Promise<void> {
+  if (d.mode !== 'greenfield' || d.brief.trim() !== '') return;
+  const live = await loadLiveAttachments(ctx);
+  if (live !== null && live.rows.length === 0) {
+    throw new Error(
+      'This plan has nothing to build from: no description was written and every attached file has been removed. Attach the files again (the task Attachments tab accepts files), then retry "Prepare the inputs" so they are read.',
+    );
+  }
 }
 
 /** The capabilities every agent of THIS build needs.
@@ -689,6 +721,7 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
+        await assertSomethingToBuildFrom(ctx, d);
         const live = await withLiveInputs(ctx, d);
         return [
           {

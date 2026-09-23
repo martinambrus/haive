@@ -24,6 +24,7 @@ import {
   type PlanInputsDetect,
 } from './00-plan-inputs.js';
 import {
+  assertSomethingToBuildFrom,
   buildRootPrompt,
   planAgentCapabilities,
   withLiveInputs,
@@ -679,7 +680,12 @@ describe('a build dispatching on what is still attached', () => {
       brief: 'a shop',
       repoName: 'shop',
       inputIndexPath: stored?.indexPath ?? null,
-      visualOnlyInputs: stored ? ['wire.png'] : [],
+      visualOnlyInputs: stored
+        ? [
+            ...stored.inputs.filter((i) => i.kind === 'image').map((i) => i.filename),
+            ...(stored.visualOnly ?? []),
+          ]
+        : [],
       hasPdfInputs: stored?.hasPdfInputs === true,
     } as PlanBuildDetect;
     const ctx = {
@@ -721,7 +727,9 @@ describe('a build dispatching on what is still attached', () => {
     expect(index).not.toContain('wire.png');
   });
 
-  it('stops requiring vision when the picture was replaced under the same name', async () => {
+  it('still requires vision when the picture was replaced under the same name', async () => {
+    // The recorded picture is gone, but the replacement is a picture too, and the attachments notice
+    // points the agent at it.
     const stored = recorded({
       inputs: [inputRow('brief.md', 'text'), inputRow('wire.png', 'image', { id: 'img-1' })],
       hasPdfInputs: false,
@@ -730,6 +738,31 @@ describe('a build dispatching on what is still attached', () => {
       ['brief.md', { id: 'img-2', filename: 'wire.png' }],
       stored,
     );
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+  });
+
+  it('requires vision for a picture attached after the inputs were prepared', async () => {
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text')],
+      hasImageInputs: false,
+      hasPdfInputs: false,
+    });
+    const { d, view, index } = await dispatchView(['brief.md', 'new.png'], stored);
+    expect(planAgentCapabilities(d)).toEqual(['tool_use']);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    // Nothing was deleted, so the index 00-plan-inputs wrote still stands.
+    expect(view.inputIndexPath).toBe(stored.indexPath);
+    expect(index).toBe('as 00-plan-inputs wrote it');
+  });
+
+  it('prefers vision, without requiring it, for a PDF attached after the inputs were prepared', async () => {
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text')],
+      hasImageInputs: false,
+      hasPdfInputs: false,
+    });
+    const { view } = await dispatchView(['brief.md', 'scan.pdf'], stored);
+    expect(view.hasPdfInputs).toBe(true);
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
@@ -755,6 +788,55 @@ describe('a build dispatching on what is still attached', () => {
   it('leaves a build that recorded no inputs alone', async () => {
     const { d, view } = await dispatchView([], null);
     expect(view).toBe(d);
+  });
+});
+
+describe('a greenfield root with nothing left to build from', () => {
+  const greenfield = (brief: string, mode = 'greenfield') =>
+    ({ mode, repositoryId: 'r1', brief }) as PlanBuildDetect;
+  const ctxWith = (rows: { id: string; filename: string }[] | 'unreadable') =>
+    ({
+      taskId: 't1',
+      logger: { warn() {} },
+      db: {
+        select: () => ({
+          from: () => ({
+            where: () =>
+              rows === 'unreadable'
+                ? Promise.reject(new Error('connection lost'))
+                : Promise.resolve(rows),
+          }),
+        }),
+      },
+    }) as never;
+
+  it('refuses a build with no brief once every attached file is gone', async () => {
+    // 00-plan-inputs checked "a brief or a file" when it ran; a deletion since would otherwise send
+    // the root agent out with no specification at all, spending a run on an invented plan.
+    await expect(assertSomethingToBuildFrom(ctxWith([]), greenfield(''))).rejects.toThrow(
+      /nothing to build from/,
+    );
+  });
+
+  it('lets it through while anything is attached, prepared or not', async () => {
+    await expect(
+      assertSomethingToBuildFrom(ctxWith([{ id: 'n', filename: 'late.md' }]), greenfield('')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('lets a build with a brief through with nothing attached', async () => {
+    await expect(
+      assertSomethingToBuildFrom(ctxWith([]), greenfield('A shop.')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('never refuses on a lookup that failed, or for a repository build', async () => {
+    await expect(
+      assertSomethingToBuildFrom(ctxWith('unreadable'), greenfield('')),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertSomethingToBuildFrom(ctxWith([]), greenfield('', 'from_repo')),
+    ).resolves.toBeUndefined();
   });
 });
 

@@ -199,8 +199,15 @@ export async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputs
   }
 }
 
-/** What is attached to the task right now: the rows, and the names they carry. */
+export interface LiveAttachmentRow {
+  id: string;
+  filename: string;
+  contentType: string | null;
+}
+
+/** What is attached to the task right now: the rows, their ids, and the names they carry. */
 export interface LiveAttachments {
+  rows: readonly LiveAttachmentRow[];
   ids: ReadonlySet<string>;
   names: ReadonlySet<string>;
 }
@@ -209,10 +216,18 @@ export interface LiveAttachments {
 export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachments | null> {
   try {
     const rows = await ctx.db
-      .select({ id: schema.taskAttachments.id, filename: schema.taskAttachments.filename })
+      .select({
+        id: schema.taskAttachments.id,
+        filename: schema.taskAttachments.filename,
+        contentType: schema.taskAttachments.contentType,
+      })
       .from(schema.taskAttachments)
       .where(eq(schema.taskAttachments.taskId, ctx.taskId));
-    return { ids: new Set(rows.map((r) => r.id)), names: new Set(rows.map((r) => r.filename)) };
+    return {
+      rows,
+      ids: new Set(rows.map((r) => r.id)),
+      names: new Set(rows.map((r) => r.filename)),
+    };
   } catch (err) {
     ctx.logger.warn({ err }, 'plan inputs: could not read the task attachments');
     return null;
@@ -223,9 +238,21 @@ export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachm
  *  different document, and by name only for a row recorded before ids were. */
 export function stillAttachedInput(
   input: { id?: string; filename: string },
-  live: LiveAttachments,
+  live: Pick<LiveAttachments, 'ids' | 'names'>,
 ): boolean {
   return input.id ? live.ids.has(input.id) : live.names.has(input.filename);
+}
+
+/** Live attachments no recorded input accounts for: attached after this step ran, or re-uploaded
+ *  under a recorded name. Nothing prepared them, yet the attachments notice lists every live row,
+ *  so a dispatch still has to account for what they are. */
+export function unpreparedAttachments(
+  prepared: PlanInputsApply,
+  live: LiveAttachments,
+): LiveAttachmentRow[] {
+  const ids = new Set(prepared.inputs.flatMap((i) => (i.id ? [i.id] : [])));
+  const legacyNames = new Set(prepared.inputs.filter((i) => !i.id).map((i) => i.filename));
+  return live.rows.filter((r) => !ids.has(r.id) && !legacyNames.has(r.filename));
 }
 
 /** What this step recorded, less any attachment deleted since. Membership is the only thing that
@@ -234,7 +261,7 @@ export function stillAttachedInput(
  *  kind flags are recomputed from what remains. */
 export function livePlanInputs(
   prepared: PlanInputsApply,
-  live: LiveAttachments,
+  live: Pick<LiveAttachments, 'ids' | 'names'>,
 ): { output: PlanInputsApply; changed: boolean } {
   const visualOnlyBefore = prepared.visualOnly ?? [];
   const archiveNotesBefore = prepared.archiveNotes ?? [];
