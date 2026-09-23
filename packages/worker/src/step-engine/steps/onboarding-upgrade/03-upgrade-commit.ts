@@ -12,7 +12,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { RULES_IMPORT_LINE } from '../onboarding/_rules-files.js';
+import { RULES_IMPORT_LINE, isLinkToAgentsMd } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
 
 const execFileAsync = promisify(execFile);
@@ -71,28 +71,43 @@ export function appliedWrittenPaths(applyOutput: unknown): string[] {
     .filter((p): p is string => p !== null);
 }
 
-/** The import stubs 02 left holding `@AGENTS.md`, whether or not it had to write them. */
-export function appliedImportStubs(applyOutput: unknown): string[] {
+/** The rules files 02 left delivering AGENTS.md: a stub holding the import, whether or not it
+ *  had to write it, or a link to AGENTS.md it left alone. */
+export function appliedImportStubs(applyOutput: unknown): { file: string; link: boolean }[] {
   const raw = (applyOutput as { rulesImportStubs?: unknown } | null)?.rulesImportStubs;
   if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((s): s is { file: string; result: string } => {
-      const o = s as { file?: unknown; result?: unknown } | null;
-      return typeof o?.file === 'string' && typeof o.result === 'string';
-    })
-    .filter((s) => s.result === 'created' || s.result === 'appended' || s.result === 'unchanged')
-    .map((s) => safeDiskRel(s.file))
-    .filter((p): p is string => p !== null);
+  const out: { file: string; link: boolean }[] = [];
+  for (const s of raw) {
+    const o = s as { file?: unknown; result?: unknown } | null;
+    if (typeof o?.file !== 'string') continue;
+    const file = safeDiskRel(o.file);
+    if (file === null) continue;
+    if (o.result === 'created' || o.result === 'appended' || o.result === 'unchanged') {
+      out.push({ file, link: false });
+    } else if (o.result === 'skipped-link') {
+      out.push({ file, link: true });
+    }
+  }
+  return out;
 }
 
 /** A worktree sees a stub only through HEAD. 02 reports `unchanged` for one an earlier attempt
- *  wrote, or one onboarding left uncommitted, so its own write list cannot answer this. */
+ *  wrote, or one onboarding left uncommitted, so its own write list cannot answer this. With no
+ *  HEAD the line is missing; a grep failing any other way proves nothing, so it answers false,
+ *  which leaves the file and any unrelated edits in it unstaged. */
 export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync('git', ['show', `HEAD:${rel}`], { cwd: repoPath });
-    return !stdout.includes(RULES_IMPORT_LINE);
+    await execFileAsync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
   } catch {
     return true;
+  }
+  try {
+    await execFileAsync('git', ['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
+      cwd: repoPath,
+    });
+    return false;
+  } catch (err) {
+    return (err as { code?: unknown }).code === 1;
   }
 }
 
@@ -215,8 +230,15 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
 
     const applied = await loadPreviousStepOutput(ctx.db, ctx.taskId, '02-upgrade-apply');
     const stubPaths: string[] = [];
-    for (const rel of appliedImportStubs(applied?.output)) {
-      if (await headLacksImport(ctx.repoPath, rel)) stubPaths.push(rel);
+    // `hasWorkspaceEntry` refuses every link, so a link to AGENTS.md is re-checked and staged
+    // on its own; adding an already committed one changes nothing.
+    const linkPaths: string[] = [];
+    for (const stub of appliedImportStubs(applied?.output)) {
+      if (stub.link) {
+        if (await isLinkToAgentsMd(ctx.repoPath, stub.file)) linkPaths.push(stub.file);
+      } else if (await headLacksImport(ctx.repoPath, stub.file)) {
+        stubPaths.push(stub.file);
+      }
     }
     const stagePaths = [
       ...new Set([
@@ -229,6 +251,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     for (const rel of stagePaths) {
       if (await hasWorkspaceEntry(ctx.repoPath, rel)) existingPaths.push(rel);
     }
+    existingPaths.push(...linkPaths);
     if (existingPaths.length === 0) {
       warnings.push('no upgrade files found to stage');
       return { commitPerformed, commitSha, stagedPaths, warnings };

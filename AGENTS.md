@@ -1998,8 +1998,12 @@ claude-family CLI never loads AGENTS.md, rules block included, and nothing else 
 `03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
-(`headLacksImport`). A write list alone misses two cases: 02 reports `unchanged` for a stub an
-earlier attempt of the step wrote before failing, and for one onboarding wrote with its commit
-off, so both stayed out of HEAD for good. It never stages rules files by name beyond that, so a
-person's uncommitted edits elsewhere stay out of the upgrade commit; a stub that IS staged goes
-in whole, the same file-level granularity AGENTS.md already had.
+(`headLacksImport`), and a `CLAUDE.md -> AGENTS.md` link 02 left alone. A write list alone misses
+two cases: 02 reports `unchanged` for a stub an earlier attempt of the step wrote before failing,
+and for one onboarding wrote with its commit off, so both stayed out of HEAD for good. The HEAD
+check greps the blob rather than reading it back, since a read-back is capped by the child
+process's output buffer and a file past it would read as "missing"; a check that fails for any
+reason other than a missing HEAD stages nothing. It never stages rules files by name beyond that, so a person's uncommitted edits
+elsewhere stay out of the upgrade commit; a stub that IS staged goes in whole, the same file-level
+granularity AGENTS.md already had. A link is staged through its own check (`isLinkToAgentsMd`),
+since `hasWorkspaceEntry` refuses every link.
