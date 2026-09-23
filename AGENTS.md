@@ -838,8 +838,13 @@ archive a candidate, since a lost database round trip is no verdict on the archi
 `expanded_from_id` cascades the rows AND is what makes "nested archives are not recursed"
 structural (a row with a parent is never a candidate). The FK
 cannot reach the disk, so a delete removes what the attachment left there too
-(`filesToRemove`): an archive's MEMBERS, which a folder delete has to reach at the uploads ROOT
-(`docs/x.zip` expands into `x/`), and each document's extracted-text SIDECAR. It removes FILES,
+(`attachmentRemovalPlan`): an archive's MEMBERS, which a folder delete has to reach at the uploads
+ROOT (`docs/x.zip` expands into `x/`), and each document's extracted-text SIDECAR. A delete that takes
+the LAST file extracted from an archive takes the archive too (`archivesEmptiedBy`,
+`@haive/shared/attachments`, which the panel's confirmation names from the same rule), or it would
+stay listed as expanded with nothing of it left and never be expanded again. A file a SURVIVING row
+still names is never removed: the upload claim reads the disk, not the rows, so two rows can name one
+file, and deleting one must not take the other's. It removes FILES,
 never a directory, and a folder goes only by pruning once it is empty: a recursive removal takes
 whatever else lives there — a later upload named like the expansion directory lands inside it (the
 api de-dupes files, not directories), and an upload racing the delete has its file on disk before

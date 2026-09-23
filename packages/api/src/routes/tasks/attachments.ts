@@ -35,7 +35,7 @@ import {
   rewriteAttachmentsManifest,
   settleExpansionAttempts,
 } from '@haive/shared/attachments-fs';
-import { filesToRemove } from '../../lib/attachment-removal.js';
+import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -557,7 +557,8 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   const settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
     // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on
     // the delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox,
-    // so an agent would keep reading files the user believes they removed.
+    // so an agent would keep reading files the user believes they removed. And the archive itself,
+    // when this was the last file extracted from it.
     const rows = await tx.query.taskAttachments.findMany({
       where: and(
         eq(schema.taskAttachments.taskId, taskId),
@@ -565,19 +566,19 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
       ),
       columns: { id: true, filename: true, expandedFromId: true },
     });
-    const files = filesToRemove(new Set([attachmentId]), rows);
-    await removeFiles(anchor, uploadsRel, files);
-    await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-    // An expansion of this archive the worker was interrupted in: with the archive's row gone, no
-    // later call would know it had anything to take back.
+    const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
+    await removeFiles(anchor, uploadsRel, plan.files);
+    await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
+    // An expansion of a removed archive the worker was interrupted in: with the archive's row gone,
+    // no later call would know it had anything to take back.
     const attempts = await settleExpansionAttempts(
       tx,
       taskId,
       anchor,
       uploadsRel,
-      new Set([attachmentId]),
+      new Set(plan.ids),
     );
-    await pruneAfter(anchor, uploadsRel, files);
+    await pruneAfter(anchor, uploadsRel, plan.files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
     return attempts;
   }).catch(lockBusyError);
@@ -616,24 +617,19 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
     // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
     // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the
     // folder.
-    const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
-    await removeFiles(anchor, uploadsRel, files);
-    await tx.delete(schema.taskAttachments).where(
-      inArray(
-        schema.taskAttachments.id,
-        marked.map((r) => r.id),
-      ),
-    );
+    const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
+    await removeFiles(anchor, uploadsRel, plan.files);
+    await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
     const settled = await settleExpansionAttempts(
       tx,
       taskId,
       anchor,
       uploadsRel,
-      new Set(marked.map((r) => r.id)),
+      new Set(plan.ids),
     );
-    await pruneAfter(anchor, uploadsRel, files);
+    await pruneAfter(anchor, uploadsRel, plan.files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
-    return { removed: marked.length, anchor, uploadsRel, settled };
+    return { removed: plan.ids.length, anchor, uploadsRel, settled };
   }).catch(lockBusyError);
   // Outside the section: a staging dir can hold a whole extracted archive.
   await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled);

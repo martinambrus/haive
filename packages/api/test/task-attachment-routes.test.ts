@@ -904,6 +904,34 @@ describe('task attachment routes', () => {
       expect(await listing(up())).toEqual([]);
     });
 
+    it('removes an archive with the last file extracted from it, and keeps it until then', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/b.md': 'b' });
+      await plantSidecar('spec.zip');
+      const idOf = (name: string) =>
+        fake.rows(schema.taskAttachments).find((r) => r.filename === name)!.id as string;
+
+      await send('DELETE', `/${TASK}/attachments/${idOf('spec/a.md')}`);
+      expect(filenames()).toEqual(['spec.zip', 'spec/b.md']);
+
+      expect(await send('DELETE', `/${TASK}/attachments/${idOf('spec/b.md')}`)).toEqual({
+        status: 200,
+        body: { ok: true },
+      });
+      expect(filenames()).toEqual([]);
+      expect(await exists(up('spec.zip'))).toBe(false);
+      expect(await exists(up('spec.zip.extracted.md'))).toBe(false);
+      expect(await indexed()).toBeNull();
+    });
+
+    it('keeps a file another row still names', async () => {
+      // Two rows can name one file: the upload claim reads the disk, not the rows.
+      const first = await seedFile('a.md', 'shared');
+      seedAttachment('a.md', 'shared');
+      await send('DELETE', `/${TASK}/attachments/${first.id as string}`);
+      expect(await readFile(up('a.md'), 'utf8')).toBe('shared');
+      expect(filenames()).toEqual(['a.md']);
+    });
+
     it('keeps an upload that merely has the sidecar’s name', async () => {
       const doc = await seedFile('x.docx', 'docx');
       await seedFile('x.docx.extracted.md', 'mine');
@@ -1055,6 +1083,33 @@ describe('task attachment routes', () => {
       expect(atCommit.at(-1)).toHaveLength(1);
       expect(await exists(up('x'))).toBe(false);
       expect(await listing(up())).toEqual(['_ATTACHMENTS.md', 'keep.md']);
+    });
+
+    it('removes the archive whose every extracted file was in the folder', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/sub/b.md': 'b' });
+      await plantSidecar('spec.zip');
+      await seedFile('keep.md', 'keep');
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=spec`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 3 },
+      });
+      expect(filenames()).toEqual(['keep.md']);
+      expect(await exists(up('spec.zip'))).toBe(false);
+      expect(await exists(up('spec.zip.extracted.md'))).toBe(false);
+      expect(await exists(up('spec'))).toBe(false);
+      expect(await indexed()).toEqual(['keep.md']);
+    });
+
+    it('keeps the archive when the folder held only some of its files', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/sub/b.md': 'b' });
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=spec/sub`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 1 },
+      });
+      expect(filenames()).toEqual(['spec.zip', 'spec/a.md']);
+      expect(await readFile(up('spec.zip'), 'utf8')).toBe('PK');
     });
 
     it('prunes a parent the folder leaves empty', async () => {
