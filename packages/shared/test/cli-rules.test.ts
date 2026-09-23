@@ -9,6 +9,7 @@ import {
   extractRegion,
   upsertRegion,
 } from '../src/templates/cli-rules.js';
+import { promptNamesAgentPath } from '../src/cli-providers/catalog.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
 import {
   DEFAULT_AGENT_RULES,
@@ -46,6 +47,10 @@ describe('dedupLines', () => {
     const block = 'one\n\n```\nx\n```\n';
     expect(dedupLines([block, block, `  ${block}`])).toBe(dedupLines([block]));
   });
+
+  it('renders the shipped default without losing a line', () => {
+    expect(dedupLines([DEFAULT_AGENT_RULES])).toBe(`${DEFAULT_AGENT_RULES.trim()}\n`);
+  });
 });
 
 describe('buildCliRulesBlock', () => {
@@ -79,6 +84,10 @@ describe('resolveEffectiveRules', () => {
 
   it('keeps an explicit override as-is', () => {
     expect(resolveEffectiveRules('- my custom rule')).toBe('- my custom rule');
+  });
+
+  it('names no agent directory, which would end agent isolation wherever it is read', () => {
+    expect(promptNamesAgentPath(DEFAULT_AGENT_RULES, '/haive/workdir')).toBe(false);
   });
 
   it("keeps the shipped default's own hash in KNOWN_DEFAULT_RULES_HASHES", () => {
