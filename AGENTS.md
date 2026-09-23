@@ -1081,8 +1081,11 @@ read, so `ingestReviewRun` parses it for this field alone. Gate 2 shows the unio
 round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
 with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
 its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
-for something else, and dropping the site would then hide one still left unchanged. `quick_bugfix`
-runs no gate 2, so gate 3 shows the row whenever no gate-2 decision exists.
+for something else, and dropping the site would then hide one still left unchanged. The mark reads
+07's `filesTouched`, the agent's own and possibly incomplete account, so it is a hint and never
+proof, and the row says the agent LEFT each site unchanged when it reported it rather than
+asserting the site is unchanged now. `quick_bugfix` runs no gate 2, so gate 3 shows the row
+whenever no gate-2 decision exists.
 
 The lists are display copy and are kept that way. They are sanitised on the way in and again on
 read (`_similar-sites.ts`): a path must be single-line, fence-safe and inside the repository, and

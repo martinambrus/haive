@@ -202,7 +202,7 @@ describe('similarSitesRow', () => {
       0,
       'Next.',
     )!;
-    expect(row.body).toContain('in this place and left it unchanged. Next.');
+    expect(row.body).toContain('in this place and left it unchanged at that point. Next.');
     expect(row.body).toContain('(lines 12-18, 40)');
     expect(row.detail).toBe('1 place left for you to decide on');
   });
@@ -218,7 +218,9 @@ describe('similarSitesRow', () => {
     )!;
     expect(row.status).toBe('info');
     expect(row.statusLabel).toBe('6 FOUND');
-    expect(row.body).toContain('in these places and left them unchanged. Do something.');
+    expect(row.body).toContain(
+      'The implementing agent reported the same code or defect in these places and left them unchanged at that point. Do something.',
+    );
     expect(row.body).toContain('- ``a`b.ts`` (line 3) — same bug (from implementation round 0)');
     expect(row.body).toContain('- `c.ts` (from DAG issue I-1)');
     expect(row.body).toContain('4 more not shown.');

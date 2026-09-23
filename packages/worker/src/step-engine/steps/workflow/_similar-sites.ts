@@ -146,7 +146,7 @@ export function similarSitesRow(
   const where = total === 1 ? 'in this place and left it' : 'in these places and left them';
   const range = (lines: string): string => `${/^\d+$/.test(lines) ? 'line' : 'lines'} ${lines}`;
   const body = [
-    `The implementation found the same code or defect ${where} unchanged. ${nextStep}`,
+    `The implementing agent reported the same code or defect ${where} unchanged at that point. ${nextStep}`,
     '',
     ...sites.map(
       (s) =>
