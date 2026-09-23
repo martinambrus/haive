@@ -36,6 +36,16 @@ describe('dedupLines', () => {
     const out = dedupLines(['- a\n- b', '  - a  \n- c']);
     expect(out).toBe('- a\n- b\n- c\n');
   });
+
+  it('keeps every paragraph break, rule and code fence', () => {
+    const block = '# A\n\none\n\ntwo\n\n---\n\n```\nx\n```\n\nthree';
+    expect(dedupLines([block])).toBe(`${block}\n`);
+  });
+
+  it('adds nothing for a block identical to an earlier one', () => {
+    const block = 'one\n\n```\nx\n```\n';
+    expect(dedupLines([block, block, `  ${block}`])).toBe(dedupLines([block]));
+  });
 });
 
 describe('buildCliRulesBlock', () => {
