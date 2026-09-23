@@ -161,7 +161,9 @@ async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
 }
 
 /** Write the index for these inputs and return the path an agent sees it at. Shared with the plan
- *  builder, which re-renders it at dispatch once attachments have been deleted. */
+ *  builder, which re-renders it at dispatch once attachments have been deleted. A link planted at
+ *  the name is replaced as a link: no attachment may hold that name, so whatever stands there is not
+ *  a person's file, and refusing it would fail every later write. */
 export async function writePlanInputsIndex(
   repoPath: string,
   taskId: string,
@@ -171,6 +173,7 @@ export async function writePlanInputsIndex(
   const indexRel = `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`;
   await writeFileNoFollow(repoPath, indexRel, renderIndex(taskId, inputs, archiveNotes), {
     fileMode: 0o644,
+    replaceLeafLink: true,
   });
   await harmonizeOwnership(repoPath, indexRel);
   return `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}/${PLAN_INPUTS_INDEX}`;
@@ -568,7 +571,28 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
                 : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
             // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here,
             // and passing it to the primitive would make a non-root worker fail the whole step.
-            await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
+            // A write that is refused (something that is not a file stands at the name) is a
+            // per-item skip, like an extraction that failed: the original is still mounted, and
+            // one bad name must not discard the sidecars written beside it.
+            const stored = await writeFileNoFollow(ctx.repoPath, sidecarRel, body, {
+              fileMode: 0o644,
+              replaceLeafLink: true,
+            }).then(
+              () => true,
+              (err: unknown) => {
+                ctx.logger.warn(
+                  { err, file: attachment.filename, sidecar: name },
+                  'plan inputs: could not store the extracted text',
+                );
+                return false;
+              },
+            );
+            if (!stored) {
+              row.note = 'extracted text could not be stored beside it';
+              unreadable.push(attachment.filename);
+              inputs.push(row);
+              continue;
+            }
             // A delete can land while the extraction runs. The api removes sidecars again once the
             // row is gone and this looks for the row only after writing, so whichever comes last,
             // one of the two sees the other and the text does not outlive its document.
@@ -594,7 +618,14 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     let indexPath: string | null = null;
     if (inputs.length > 0 && uploadsDir) {
-      indexPath = await writePlanInputsIndex(ctx.repoPath, ctx.taskId, inputs, archiveNotes);
+      // Without the index the prompt simply does not send the agent to it: the attachments notice
+      // still names every file, so a refused write is no reason to fail the build.
+      indexPath = await writePlanInputsIndex(ctx.repoPath, ctx.taskId, inputs, archiveNotes).catch(
+        (err: unknown) => {
+          ctx.logger.warn({ err }, 'plan inputs: could not write the index');
+          return null;
+        },
+      );
     }
 
     return {

@@ -5,7 +5,6 @@ import { Hono } from 'hono';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  ATTACHMENTS_MANIFEST_NAME,
   attachmentCopyName,
   AttachmentPathError,
   CONFIG_KEYS,
@@ -14,7 +13,6 @@ import {
   isReadOnlyLocalRepo,
   isReservedAttachmentName,
   PLAN_INPUT_SIDECAR_SUFFIX,
-  renderAttachmentsManifest,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
   splitAttachmentPath,
@@ -29,8 +27,8 @@ import {
   isPathContainmentError,
   openFileNoFollow,
   removeNoFollow,
-  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
 import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
@@ -307,30 +305,6 @@ async function streamToFileWithCap(
   return total;
 }
 
-/** Rewrite `<dir>/_ATTACHMENTS.md` from the task's current rows (or delete it when
- *  none remain). Read by the agent for per-file descriptions. */
-async function regenerateManifest(
-  anchor: string,
-  uploadsRel: string,
-  taskId: string,
-): Promise<void> {
-  const db = getDb();
-  const rows = await db.query.taskAttachments.findMany({
-    where: eq(schema.taskAttachments.taskId, taskId),
-    orderBy: asc(schema.taskAttachments.createdAt),
-  });
-  const manifestRel = `${uploadsRel}/${ATTACHMENTS_MANIFEST_NAME}`;
-  const body = renderAttachmentsManifest(rows);
-  if (body === null) {
-    await removeNoFollow(anchor, manifestRel).catch(() => {});
-    return;
-  }
-  // Replace-atomic: every agent is told to read this file unconditionally, so a reader must see the
-  // old index or the new one, never a half-written one.
-  await writeFileNoFollow(anchor, manifestRel, body, { fileMode: 0o644 });
-  await chownNoFollow(anchor, manifestRel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
-}
-
 /** Make a freshly-created dir traversable + owned by the sandbox user. Best-effort
  *  (the api is root; failures are non-fatal since 0755/0644 are world-readable). */
 async function ensureUploadsDir(anchor: string, uploadsRel: string): Promise<void> {
@@ -392,7 +366,7 @@ async function finalizeAttachment(args: {
     })
     .returning();
 
-  await regenerateManifest(args.anchor, args.uploadsRel, args.taskId);
+  await rewriteAttachmentsManifest(getDb(), args.taskId, args.anchor, args.uploadsRel);
   return inserted[0]!;
 }
 
@@ -578,7 +552,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
   await removeLateSidecars(anchor, uploadsRel, files);
   await pruneAfter(anchor, uploadsRel, files);
-  await regenerateManifest(anchor, uploadsRel, taskId);
+  await rewriteAttachmentsManifest(db, taskId, anchor, uploadsRel);
   return c.json({ ok: true });
 });
 
@@ -620,6 +594,6 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   );
   await removeLateSidecars(anchor, uploadsRel, files);
   await pruneAfter(anchor, uploadsRel, files);
-  await regenerateManifest(anchor, uploadsRel, taskId);
+  await rewriteAttachmentsManifest(db, taskId, anchor, uploadsRel);
   return c.json({ ok: true, removed: marked.length });
 });

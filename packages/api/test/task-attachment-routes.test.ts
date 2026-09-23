@@ -563,6 +563,43 @@ describe('task attachment routes', () => {
       expect((await lstat(up('b.md'))).isSymbolicLink()).toBe(true);
     });
 
+    it('replaces a link planted at the index instead of failing after the work is done', async () => {
+      // The index is written AFTER the row exists, so a refusal there used to answer 500 for an
+      // upload that had happened, and a client retry then stored the file twice.
+      await mkdir(up(), { recursive: true });
+      await writeFile(path.join(outside, 'secret.md'), 'secret');
+      await symlink(path.join(outside, 'secret.md'), up('_ATTACHMENTS.md'));
+
+      const first = await upload('a.md', 'one');
+      expect(first.status).toBe(201);
+      expect((await lstat(up('_ATTACHMENTS.md'))).isFile()).toBe(true);
+      expect(await indexed()).toEqual(['a.md']);
+
+      await rm(up('_ATTACHMENTS.md'));
+      await symlink(path.join(outside, 'secret.md'), up('_ATTACHMENTS.md'));
+      await upload('b.md', 'two');
+      const del = await send(
+        'DELETE',
+        `/${TASK}/attachments/${(first.body?.attachment as Row).id}`,
+      );
+      expect(del.status).toBe(200);
+      expect(await indexed()).toEqual(['b.md']);
+      expect(await readFile(path.join(outside, 'secret.md'), 'utf8')).toBe('secret');
+    });
+
+    it('still answers when a directory blocks the index, and does the work', async () => {
+      await mkdir(up('_ATTACHMENTS.md'), { recursive: true });
+      await writeFile(up('_ATTACHMENTS.md/keep.txt'), 'someone else’s');
+
+      const res = await upload('a.md', 'mine');
+      expect(res.status).toBe(201);
+      expect(filenames()).toEqual(['a.md']);
+      const del = await send('DELETE', `/${TASK}/attachments/${(res.body?.attachment as Row).id}`);
+      expect(del.status).toBe(200);
+      expect(filenames()).toEqual([]);
+      expect(await readFile(up('_ATTACHMENTS.md/keep.txt'), 'utf8')).toBe('someone else’s');
+    });
+
     it('answers 413 past the cap, keeps nothing, and accepts exactly the cap', async () => {
       cap = 8;
       const over = await upload('a.bin', '123456789');
