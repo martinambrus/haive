@@ -12,8 +12,12 @@ import {
   uploadTaskAttachment,
   type TaskAttachment,
 } from '@/lib/api-client';
+import { awaitingExpansion } from '@/lib/attachment-expansion';
 import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
+
+/** How often the panel re-reads while an archive waits for the worker. */
+const EXPANSION_POLL_MS = 5000;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -78,6 +82,16 @@ export function AttachmentsPanel({ taskId }: { taskId: string }) {
   }, [reload]);
 
   const grouped = useMemo(() => groupByFolder(items ?? []), [items]);
+
+  // The worker expands an archive at the start of its next step and nothing tells this view when,
+  // so it re-reads while one is waiting: the members, and any note about what the archive lost,
+  // then appear without leaving the tab.
+  const waiting = useMemo(() => (items ?? []).some(awaitingExpansion), [items]);
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setInterval(() => void reload(), EXPANSION_POLL_MS);
+    return () => clearInterval(timer);
+  }, [waiting, reload]);
 
   async function onPick(files: FileList | null) {
     if (!files || files.length === 0) return;

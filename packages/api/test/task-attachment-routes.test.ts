@@ -406,6 +406,7 @@ describe('task attachment routes', () => {
         createdAt: (row!.createdAt as Date).toISOString(),
         expandedAt: null,
         expansionNote: null,
+        expandedFromId: null,
       });
       // The stored path has exactly this shape: the worker's expansion and every delete recover
       // the repository root by stripping it.
@@ -659,16 +660,20 @@ describe('task attachment routes', () => {
       const note =
         '2 archive members were not extracted (path too long or too deep to store): a, b';
       await seedFile('later.zip', 'PK');
-      await seedFile('spec.zip', 'PK', {
+      const spec = await seedFile('spec.zip', 'PK', {
         expandedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 5)),
         expansionNote: note,
       });
+      await seedFile('spec/a.md', 'a', { expandedFromId: spec.id });
 
       const res = await send('GET', `/${TASK}/attachments`);
       const listed = res.body?.attachments as Row[];
-      expect(listed.map((a) => [a.filename, a.expandedAt, a.expansionNote])).toEqual([
-        ['later.zip', null, null],
-        ['spec.zip', '2026-01-01T00:00:05.000Z', note],
+      expect(
+        listed.map((a) => [a.filename, a.expandedAt, a.expansionNote, a.expandedFromId]),
+      ).toEqual([
+        ['later.zip', null, null, null],
+        ['spec.zip', '2026-01-01T00:00:05.000Z', note, null],
+        ['spec/a.md', null, null, spec.id],
       ]);
     });
   });

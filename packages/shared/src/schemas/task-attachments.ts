@@ -15,6 +15,8 @@ export const taskAttachmentSchema = z.object({
   /** Why that expansion produced less than the archive holds. Display copy, meaningful only
    *  while `expandedAt` is set. */
   expansionNote: z.string().nullable(),
+  /** The archive this file came out of; null for anything uploaded directly. */
+  expandedFromId: z.string().uuid().nullable(),
 });
 
 export type TaskAttachment = z.infer<typeof taskAttachmentSchema>;
