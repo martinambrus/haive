@@ -6,6 +6,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ATTACHMENTS_MANIFEST_NAME,
+  attachmentCopyName,
   AttachmentPathError,
   CONFIG_KEYS,
   configService,
@@ -16,7 +17,6 @@ import {
   renderAttachmentsManifest,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
-  splitAttachmentExtension,
   splitAttachmentPath,
   splitAttachmentStoredPath,
   taskUploadsRel,
@@ -136,6 +136,18 @@ function safeAttachmentPath(raw: string): string {
   }
 }
 
+/** `safeAttachmentPath` for a name an upload is about to CREATE: a folder a generated file owns is
+ *  renamed as well (`reserveAttachmentDirs`), and a path that rename makes too long is a 400 like
+ *  any other. Not for a delete prefix, which has to name a legacy folder by what it is really called. */
+function safeUploadPath(raw: string): string {
+  try {
+    return reserveAttachmentDirs(sanitizeAttachmentPath(raw));
+  } catch (err) {
+    if (err instanceof AttachmentPathError) throw new HttpError(400, err.message);
+    throw err;
+  }
+}
+
 /** How an upload answers a path the containment walk refused, instead of an unhandled 500.
  *  Not `containmentHttpError` as it stands: its fallback reports every other error as a 400 and
  *  its `not-directory` answer is "File not found", both wrong for a write. A file standing where
@@ -172,25 +184,23 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
 
 /** De-dupe within the file's OWN directory by appending ` (n)` before the
  *  extension, and create that directory. Per-directory because two folders'
- *  `README.md` are two documents, not a collision. A name a generated file owns
- *  is never taken (`isReservedAttachmentName`): a reserved FOLDER is renamed
- *  before anything is created, and a reserved file name is skipped like a taken
- *  one. */
+ *  `README.md` are two documents, not a collision. A file name a generated file
+ *  owns is skipped like a taken one (`isReservedAttachmentName`); a reserved
+ *  FOLDER was already renamed by `safeUploadPath`. */
 async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
-  requested: string,
+  relPath: string,
 ): Promise<{ rel: string; fh: FileHandle }> {
-  const { dir: relDir, base } = splitAttachmentPath(reserveAttachmentDirs(requested));
+  const { dir: relDir, base } = splitAttachmentPath(relPath);
   await ensureDirTree(anchor, uploadsRel, relDir);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
-  const { stem, ext } = splitAttachmentExtension(base);
 
   // The name is CLAIMED by creating it, not by probing for it. The `access` probe this replaces
   // could pass and the name be taken before the write landed — and it reported a dangling link as
   // free, so the upload went wherever that link pointed.
   for (let n = 1; n <= 1000; n += 1) {
-    const candidate = n === 1 ? base : `${stem} (${n})${ext}`;
+    const candidate = n === 1 ? base : attachmentCopyName(base, n, true);
     if (isReservedAttachmentName(candidate, relDir === '')) continue;
     try {
       const fh = await openFileNoFollow(
@@ -406,7 +416,7 @@ export async function writeTaskAttachment(args: {
   const { rel: safeName, fh } = await createUniqueAttachment(
     anchor,
     uploadsRel,
-    safeAttachmentPath(args.filename),
+    safeUploadPath(args.filename),
   );
   const bytes = typeof args.content === 'string' ? Buffer.from(args.content, 'utf8') : args.content;
   try {
@@ -446,7 +456,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     description: c.req.query('description'),
   });
   // Checked before anything is created, so a refused name leaves no directory behind.
-  const relPath = safeAttachmentPath(query.filename);
+  const relPath = safeUploadPath(query.filename);
 
   const body = c.req.raw.body;
   if (!body) throw new HttpError(400, 'request body is empty');

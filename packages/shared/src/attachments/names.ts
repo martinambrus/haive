@@ -1,5 +1,10 @@
 import { ATTACHMENT_ARCHIVE_EXTENSIONS } from './archive.js';
 import { ATTACHMENTS_MANIFEST_NAME } from './manifest.js';
+import {
+  ATTACHMENT_MAX_PATH_LENGTH,
+  ATTACHMENT_MAX_SEGMENT_LENGTH,
+  AttachmentPathError,
+} from './paths.js';
 import { PLAN_INPUT_SIDECAR_SUFFIX, PLAN_INPUTS_INDEX_NAME } from './plan-inputs.js';
 
 /**
@@ -44,6 +49,19 @@ export function splitAttachmentExtension(base: string): { stem: string; ext: str
 }
 
 /**
+ * The `n`th copy of `name`: ` (n)` added — before the extension when `keepExtension` — with the name
+ * shortened so the result still fits {@link ATTACHMENT_MAX_SEGMENT_LENGTH}. Every ` (n)` producer uses
+ * this, because a longer segment is one the path rules cut back the next time it is sanitised, and a
+ * folder-delete prefix naming it then matches nothing.
+ */
+export function attachmentCopyName(name: string, n: number, keepExtension: boolean): string {
+  const suffix = ` (${n})`;
+  const { stem, ext } = keepExtension ? splitAttachmentExtension(name) : { stem: name, ext: '' };
+  const room = Math.max(ATTACHMENT_MAX_SEGMENT_LENGTH - suffix.length - ext.length, 1);
+  return `${stem.slice(0, room)}${suffix}${ext}`;
+}
+
+/**
  * `relPath` with every FOLDER a generated file would collide with renamed to `<name> (2)`.
  *
  * Deterministic rather than probed, because a folder upload arrives one file per request: every file
@@ -51,13 +69,27 @@ export function splitAttachmentExtension(base: string): { stem: string; ext: str
  * free name could not promise. Renamed rather than refused, because the panel uploads a folder in a
  * loop that stops at the first error, so a refusal would drop the rest of the folder. The LEAF is left
  * alone: whoever creates the file probes for a free name and skips a reserved one there.
+ *
+ * The new name can still meet a sibling that already has it. No deterministic rename can rule that
+ * out — it has to land in the same name space it came from — so whoever places the files resolves it:
+ * the archive expansion numbers past the clash, and an upload gets the 409 a file-versus-folder clash
+ * already answers.
  */
 export function reserveAttachmentDirs(relPath: string): string {
   const segments = relPath.split('/');
   const leaf = segments.pop()!;
   if (segments.length === 0) return relPath;
   const dirs = segments.map((segment, index) =>
-    isReservedAttachmentName(segment, index === 0) ? `${segment} (2)` : segment,
+    isReservedAttachmentName(segment, index === 0)
+      ? attachmentCopyName(segment, 2, false)
+      : segment,
   );
-  return [...dirs, leaf].join('/');
+  const renamed = [...dirs, leaf].join('/');
+  // The rename can only lengthen the path, so it is checked against the limit the path already met.
+  if (renamed.length > ATTACHMENT_MAX_PATH_LENGTH) {
+    throw new AttachmentPathError(
+      `attachment path "${relPath}" is longer than ${ATTACHMENT_MAX_PATH_LENGTH} characters once a reserved folder in it is renamed`,
+    );
+  }
+  return renamed;
 }

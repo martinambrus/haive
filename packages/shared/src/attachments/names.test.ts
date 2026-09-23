@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  attachmentCopyName,
   isReservedAttachmentName,
   reserveAttachmentDirs,
   splitAttachmentExtension,
 } from './names.js';
+import {
+  ATTACHMENT_MAX_PATH_LENGTH,
+  ATTACHMENT_MAX_SEGMENT_LENGTH,
+  AttachmentPathError,
+  sanitizeAttachmentPath,
+} from './paths.js';
 
 describe('isReservedAttachmentName', () => {
   it('reserves the generated indexes at the uploads root only', () => {
@@ -46,6 +53,27 @@ describe('splitAttachmentExtension', () => {
   });
 });
 
+describe('attachmentCopyName', () => {
+  it('numbers a file before its extension and a folder at its end', () => {
+    expect(attachmentCopyName('spec.tar.gz', 2, true)).toBe('spec (2).tar.gz');
+    expect(attachmentCopyName('README', 3, true)).toBe('README (3)');
+    expect(attachmentCopyName('docs.v2', 2, false)).toBe('docs.v2 (2)');
+  });
+
+  it('stays inside the segment limit, so sanitising the result changes nothing', () => {
+    const long = `${'a'.repeat(ATTACHMENT_MAX_SEGMENT_LENGTH - 3)}.md`;
+    for (const [name, keepExtension] of [
+      [long, true],
+      ['b'.repeat(ATTACHMENT_MAX_SEGMENT_LENGTH), false],
+    ] as const) {
+      const copy = attachmentCopyName(name, 12, keepExtension);
+      expect(copy.length).toBeLessThanOrEqual(ATTACHMENT_MAX_SEGMENT_LENGTH);
+      expect(sanitizeAttachmentPath(copy)).toBe(copy);
+    }
+    expect(attachmentCopyName(long, 2, true).endsWith(' (2).md')).toBe(true);
+  });
+});
+
 describe('reserveAttachmentDirs', () => {
   it('renames a root folder a generated index would need', () => {
     expect(reserveAttachmentDirs('_ATTACHMENTS.md/a.txt')).toBe('_ATTACHMENTS.md (2)/a.txt');
@@ -64,6 +92,22 @@ describe('reserveAttachmentDirs', () => {
 
   it('leaves a folder alone below the root when only the root reserves its name', () => {
     expect(reserveAttachmentDirs('docs/_ATTACHMENTS.md/x.txt')).toBe('docs/_ATTACHMENTS.md/x.txt');
+  });
+
+  it('keeps a renamed folder inside the segment limit', () => {
+    const folder = `${'x'.repeat(ATTACHMENT_MAX_SEGMENT_LENGTH - 13)}.extracted.md`;
+    expect(folder).toHaveLength(ATTACHMENT_MAX_SEGMENT_LENGTH);
+    const [renamed] = reserveAttachmentDirs(`${folder}/a.txt`).split('/');
+    expect(renamed!.length).toBeLessThanOrEqual(ATTACHMENT_MAX_SEGMENT_LENGTH);
+    expect(isReservedAttachmentName(renamed!, false)).toBe(false);
+    expect(sanitizeAttachmentPath(`${renamed}/a.txt`)).toBe(`${renamed}/a.txt`);
+  });
+
+  it('refuses a path the rename would take past the path limit', () => {
+    const filler = 'y'.repeat(ATTACHMENT_MAX_PATH_LENGTH - '_ATTACHMENTS.md/'.length);
+    const path = `_ATTACHMENTS.md/${filler}`;
+    expect(path).toHaveLength(ATTACHMENT_MAX_PATH_LENGTH);
+    expect(() => reserveAttachmentDirs(path)).toThrow(AttachmentPathError);
   });
 
   it('never touches the file itself, which its creator probes for', () => {

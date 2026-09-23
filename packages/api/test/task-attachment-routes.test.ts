@@ -528,6 +528,25 @@ describe('task attachment routes', () => {
       expect(await exists(up('docs/a.pdf.extracted.md'))).toBe(false);
     });
 
+    it('keeps a renamed folder inside the path rules, so its prefix still removes it', async () => {
+      // 200 characters: at the segment limit before ` (2)` is added.
+      const folder = `${'x'.repeat(187)}.extracted.md`;
+      const res = await upload(`${folder}/a.txt`, 'mine');
+      expect(res.status).toBe(201);
+      const [renamed] = String((res.body?.attachment as Row).filename).split('/');
+      expect(renamed!.length).toBeLessThanOrEqual(200);
+      const qs = new URLSearchParams({ prefix: renamed! });
+      const del = await send('DELETE', `/${TASK}/attachments?${qs.toString()}`);
+      expect(del.status).toBe(200);
+      expect(filenames()).toEqual([]);
+
+      // A path the rename would take past the path limit is refused like any too-long path.
+      const tooLong = `_ATTACHMENTS.md/${'a'.repeat(199)}/${'b'.repeat(184)}`;
+      expect(tooLong).toHaveLength(400);
+      expect((await upload(tooLong, 'x')).status).toBe(400);
+      expect(filenames()).toEqual([]);
+    });
+
     it('treats a link at the name as taken and writes nothing through it', async () => {
       await mkdir(up(), { recursive: true });
       await writeFile(path.join(outside, 'secret.md'), 'secret');

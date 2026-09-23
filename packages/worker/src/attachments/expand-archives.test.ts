@@ -286,6 +286,30 @@ describe('ensureArchivesExpanded', () => {
     );
   });
 
+  it('places a file and a folder that end up with one name, instead of failing part-way', async () => {
+    const uploads = await uploadsDir();
+    await tarball(uploads, 'clash.tar', async (src) => {
+      // `notes.extracted.md/` is renamed `notes.extracted.md (2)/`, beside a member already called that.
+      await mkdir(path.join(src, 'notes.extracted.md'), { recursive: true });
+      await writeFile(path.join(src, 'notes.extracted.md', 'x.md'), 'in the folder');
+      await writeFile(path.join(src, 'notes.extracted.md (2)'), 'the file');
+      // And two names the sanitiser folds into one: a folder `a?/` and a file `a*`, both `a_`.
+      await mkdir(path.join(src, 'a?'), { recursive: true });
+      await writeFile(path.join(src, 'a?', 'y.md'), 'in a?');
+      await writeFile(path.join(src, 'a*'), 'file a*');
+    });
+    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'clash.tar')]);
+
+    const result = await ensureArchivesExpanded(db, 'task-1');
+
+    expect(result.notes).toEqual([]);
+    expect(updated[0]?.expansionNote).toBeNull();
+    const names = inserted.map((r) => String(r.filename));
+    expect(new Set(names).size).toBe(4);
+    const contents = await Promise.all(names.map((n) => readFile(path.join(uploads, n), 'utf8')));
+    expect(contents.sort()).toEqual(['file a*', 'in a?', 'in the folder', 'the file']);
+  });
+
   it('never expands into a folder a generated file owns', async () => {
     const uploads = await uploadsDir();
     await tarball(uploads, '_PLAN_INPUTS.md.tar', async (src) => {

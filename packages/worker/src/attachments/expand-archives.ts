@@ -13,8 +13,10 @@ import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import {
   archiveStem,
+  attachmentCopyName,
   ATTACHMENT_ARCHIVE_MAX_FILES,
   ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES,
+  ATTACHMENT_MAX_PATH_LENGTH,
   ATTACHMENTS_MANIFEST_NAME,
   AttachmentPathError,
   detectAttachmentArchiveFormat,
@@ -23,7 +25,6 @@ import {
   renderAttachmentsManifest,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
-  splitAttachmentExtension,
   splitAttachmentPath,
   splitAttachmentStoredPath,
 } from '@haive/shared';
@@ -169,35 +170,67 @@ async function uniqueDirName(anchor: string, uploadsRel: string, stem: string): 
     (await lstatNoFollow(anchor, `${uploadsRel}/${candidate}`)) !== null
   ) {
     n += 1;
-    candidate = `${base} (${n})`;
+    candidate = attachmentCopyName(base, n, false);
   }
   return candidate;
 }
 
-/** `relPath` if free, else the same name with ` (n)` before the extension. The
- *  set is per-archive: the destination directory is brand new, so nothing else
- *  can be in it. A member named like a sidecar is renamed, never dropped:
- *  `00-plan-inputs` writes `<doc>.extracted.md` beside a document and would
- *  overwrite a member holding that name. Members never sit at the uploads root,
- *  so only the sidecar half of the reserved names applies here. */
-function uniqueWithin(taken: Set<string>, relPath: string): string {
-  const free = (candidate: string): boolean =>
-    !taken.has(candidate) && !isReservedAttachmentName(splitAttachmentPath(candidate).base, false);
-  if (free(relPath)) {
-    taken.add(relPath);
-    return relPath;
-  }
-  const { dir, base } = splitAttachmentPath(relPath);
-  const { stem, ext } = splitAttachmentExtension(base);
-  const prefix = dir === '' ? '' : `${dir}/`;
-  let n = 1;
-  let candidate = relPath;
-  do {
-    n += 1;
-    candidate = `${prefix}${stem} (${n})${ext}`;
-  } while (!free(candidate));
-  taken.add(candidate);
-  return candidate;
+/**
+ * Where each of one archive's members is placed. The destination directory is brand new, so nothing
+ * but the archive's own members can be in it, and they share one name space per folder:
+ *
+ * - two FILES that sanitise to one name (`a?.md` and `a*.md` are both `a_.md`) get ` (n)`, or the
+ *   second would overwrite the first while both rows pointed at it;
+ * - a FILE and a FOLDER that end up with one name get the same treatment. That happens when a
+ *   reserved folder is renamed `<name> (2)` beside a member already called that, or when `a?/` and
+ *   `a*` both sanitise to `a_` — and one of the two then could not be placed at all, which failed the
+ *   expansion part-way. The folder keeps one placement for every member inside it.
+ *
+ * A member named like a sidecar is renamed, never dropped: `00-plan-inputs` writes
+ * `<doc>.extracted.md` beside a document and would overwrite it. Members never sit at the uploads
+ * root, so only the sidecar half of the reserved names applies here.
+ */
+function memberLayout(): (relPath: string) => string {
+  const files = new Set<string>();
+  const folders = new Set<string>();
+  /** A folder as the member paths name it, to where it was placed. */
+  const placedFolder = new Map<string, string>();
+  const fileFree = (candidate: string): boolean =>
+    !files.has(candidate) &&
+    !folders.has(candidate) &&
+    !isReservedAttachmentName(splitAttachmentPath(candidate).base, false);
+
+  return (relPath) => {
+    const segments = relPath.split('/');
+    const leaf = segments.pop()!;
+    let named = '';
+    let parent = '';
+    for (const segment of segments) {
+      named = named === '' ? segment : `${named}/${segment}`;
+      let placed = placedFolder.get(named);
+      if (placed === undefined) {
+        const within = parent === '' ? '' : `${parent}/`;
+        placed = `${within}${segment}`;
+        for (let n = 2; files.has(placed); n += 1) {
+          placed = `${within}${attachmentCopyName(segment, n, false)}`;
+        }
+        placedFolder.set(named, placed);
+        folders.add(placed);
+      }
+      parent = placed;
+    }
+    const within = parent === '' ? '' : `${parent}/`;
+    let candidate = `${within}${leaf}`;
+    for (let n = 2; !fileFree(candidate); n += 1) {
+      candidate = `${within}${attachmentCopyName(leaf, n, true)}`;
+    }
+    // Numbering only lengthens a path, so it is held to the limit the member already met.
+    if (candidate.length > ATTACHMENT_MAX_PATH_LENGTH) {
+      throw new AttachmentPathError(`archive member "${relPath}" is too long once it is de-duped`);
+    }
+    files.add(candidate);
+    return candidate;
+  };
 }
 
 async function harmonize(anchor: string, rel: string, mode: number): Promise<void> {
@@ -348,16 +381,12 @@ export async function ensureArchivesExpanded(
           note = `expands to ${Math.round(totalBytes / 1024 / 1024)} MB, over the ${Math.round(ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES / 1024 / 1024)} MB limit — nothing was extracted`;
         } else {
           const dirName = await uniqueDirName(anchor, uploadsRel, archiveStem(archive.filename));
-          // Two members can sanitise to ONE name (`a?.md` and `a*.md` both become
-          // `a_.md`), and the second would then overwrite the first while both
-          // rows pointed at it. Same ` (n)` de-dupe the api applies to uploads.
-          const taken = new Set<string>();
+          const place = memberLayout();
           const pathDropped: string[] = [];
           for (const file of files) {
             let relPath: string;
             try {
-              relPath = uniqueWithin(
-                taken,
+              relPath = place(
                 reserveAttachmentDirs(sanitizeAttachmentPath(`${dirName}/${file.rel}`)),
               );
             } catch (err) {
