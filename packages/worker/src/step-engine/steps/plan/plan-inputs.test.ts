@@ -665,7 +665,7 @@ describe('a build dispatching on what is still attached', () => {
   async function dispatchView(
     live: (string | { id: string; filename: string })[] | 'unreadable',
     stored: PlanInputsApply | null,
-    opts: { linkedUploads?: boolean } = {},
+    opts: { linkedUploads?: boolean; snapshot?: string[] } = {},
   ) {
     const repo = await mkdtemp(path.join(dir, 'build-'));
     const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
@@ -716,7 +716,16 @@ describe('a build dispatching on what is still attached', () => {
         }),
       },
     } as never;
-    const view = await withLiveInputs(ctx, d);
+    const handed = opts.snapshot && {
+      rows: opts.snapshot.map((filename) => ({
+        id: `id-${filename}`,
+        filename,
+        contentType: null,
+      })),
+      ids: new Set(opts.snapshot.map((f) => `id-${f}`)),
+      names: new Set(opts.snapshot),
+    };
+    const view = await withLiveInputs(ctx, d, handed);
     const index = await readFile(path.join(uploads, '_PLAN_INPUTS.md'), 'utf8').catch(() => null);
     return { d, view, index };
   }
@@ -799,6 +808,15 @@ describe('a build dispatching on what is still attached', () => {
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
+  it('judges the snapshot it is handed rather than reading the attachments again', async () => {
+    // The root dispatch reads once, so refusing and choosing capabilities see the same rows. Here
+    // the database would answer every file; the handed snapshot has lost the picture.
+    const { view } = await dispatchView(['brief.md', 'wire.png', 'spec.pdf'], recorded(), {
+      snapshot: ['brief.md', 'spec.pdf'],
+    });
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+  });
+
   it('keeps the detected fields when the attachments cannot be read', async () => {
     const { d, view } = await dispatchView('unreadable', recorded());
     expect(view).toBe(d);
@@ -814,49 +832,32 @@ describe('a build dispatching on what is still attached', () => {
 describe('a greenfield root with nothing left to build from', () => {
   const greenfield = (brief: string, mode = 'greenfield') =>
     ({ mode, repositoryId: 'r1', brief }) as PlanBuildDetect;
-  const ctxWith = (rows: { id: string; filename: string }[] | 'unreadable') =>
-    ({
-      taskId: 't1',
-      logger: { warn() {} },
-      db: {
-        select: () => ({
-          from: () => ({
-            where: () =>
-              rows === 'unreadable'
-                ? Promise.reject(new Error('connection lost'))
-                : Promise.resolve(rows),
-          }),
-        }),
-      },
-    }) as never;
+  /** The one attachment snapshot the root dispatch reads. */
+  const snapshot = (...filenames: string[]) => ({
+    rows: filenames.map((filename) => ({ id: `id-${filename}`, filename, contentType: null })),
+    ids: new Set(filenames.map((f) => `id-${f}`)),
+    names: new Set(filenames),
+  });
 
-  it('refuses a build with no brief once every attached file is gone', async () => {
+  it('refuses a build with no brief once every attached file is gone', () => {
     // 00-plan-inputs checked "a brief or a file" when it ran; a deletion since would otherwise send
     // the root agent out with no specification at all, spending a run on an invented plan.
-    await expect(assertSomethingToBuildFrom(ctxWith([]), greenfield(''))).rejects.toThrow(
+    expect(() => assertSomethingToBuildFrom(greenfield(''), snapshot())).toThrow(
       /nothing to build from/,
     );
   });
 
-  it('lets it through while anything is attached, prepared or not', async () => {
-    await expect(
-      assertSomethingToBuildFrom(ctxWith([{ id: 'n', filename: 'late.md' }]), greenfield('')),
-    ).resolves.toBeUndefined();
+  it('lets it through while anything is attached, prepared or not', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield(''), snapshot('late.md'))).not.toThrow();
   });
 
-  it('lets a build with a brief through with nothing attached', async () => {
-    await expect(
-      assertSomethingToBuildFrom(ctxWith([]), greenfield('A shop.')),
-    ).resolves.toBeUndefined();
+  it('lets a build with a brief through with nothing attached', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield('A shop.'), snapshot())).not.toThrow();
   });
 
-  it('never refuses on a lookup that failed, or for a repository build', async () => {
-    await expect(
-      assertSomethingToBuildFrom(ctxWith('unreadable'), greenfield('')),
-    ).resolves.toBeUndefined();
-    await expect(
-      assertSomethingToBuildFrom(ctxWith([]), greenfield('', 'from_repo')),
-    ).resolves.toBeUndefined();
+  it('never refuses on a lookup that failed, or for a repository build', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield(''), null)).not.toThrow();
+    expect(() => assertSomethingToBuildFrom(greenfield('', 'from_repo'), snapshot())).not.toThrow();
   });
 });
 

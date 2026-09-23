@@ -39,6 +39,7 @@ import {
   removePlanInputsIndex,
   unpreparedAttachments,
   writePlanInputsIndex,
+  type LiveAttachments,
   type PlanInputsApply,
 } from './00-plan-inputs.js';
 import { classifyPlanInput } from './_plan-inputs.js';
@@ -294,15 +295,17 @@ function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
  * names every live row, so its KIND still counts: a picture requires `vision`, a PDF prefers it.
  *
  * Returns `d` itself when nothing changed, and when either lookup fails, which leaves the build on
- * the fields it had before this existed.
+ * the fields it had before this existed. `attachments` is a snapshot the caller already read, so
+ * that its other decisions see the same rows; without one this reads its own.
  */
 export async function withLiveInputs(
   ctx: StepContext,
   d: PlanBuildDetect,
+  attachments?: LiveAttachments | null,
 ): Promise<PlanBuildDetect> {
   const prepared = await loadPlanInputsOutput(ctx);
   if (!prepared) return d;
-  const live = await loadLiveAttachments(ctx);
+  const live = attachments === undefined ? await loadLiveAttachments(ctx) : attachments;
   if (!live) return d;
   const { output, changed } = livePlanInputs(prepared, live);
   const added = unpreparedAttachments(prepared, live).map((r) => ({
@@ -347,14 +350,10 @@ export async function withLiveInputs(
  * dispatch checks it again against what is attached NOW, since a file deleted since would send the
  * root agent out with no specification and spend a run on an invented plan. Any live attachment
  * counts, prepared or not, because the attachments notice lets the agent read it. A lookup that
- * fails does not refuse.
+ * failed (`null`) does not refuse.
  */
-export async function assertSomethingToBuildFrom(
-  ctx: StepContext,
-  d: PlanBuildDetect,
-): Promise<void> {
+export function assertSomethingToBuildFrom(d: PlanBuildDetect, live: LiveAttachments | null): void {
   if (d.mode !== 'greenfield' || d.brief.trim() !== '') return;
-  const live = await loadLiveAttachments(ctx);
   if (live !== null && live.rows.length === 0) {
     throw new Error(
       'This plan has nothing to build from: no description was written and every attached file has been removed. Attach the files again (the task Attachments tab accepts files), then retry "Prepare the inputs" so they are read.',
@@ -724,8 +723,11 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
-        await assertSomethingToBuildFrom(ctx, d);
-        const live = await withLiveInputs(ctx, d);
+        // One read of the attachments for the whole root dispatch, so refusing and choosing the
+        // capabilities see the same rows.
+        const attachments = await loadLiveAttachments(ctx);
+        assertSomethingToBuildFrom(d, attachments);
+        const live = await withLiveInputs(ctx, d, attachments);
         return [
           {
             agentId: 'plan-root',
