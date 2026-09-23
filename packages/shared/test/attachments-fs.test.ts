@@ -5,7 +5,12 @@ import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema, withTaskAttachmentsLock, type Database, type DbTx } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { rewriteAttachmentsManifest, settleExpansionAttempt } from '../src/attachments-fs.js';
+import { ATTACHMENT_ARCHIVE_MAX_FILES } from '../src/attachments/archive.js';
+import {
+  readExpansionIntent,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempt,
+} from '../src/attachments-fs.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-0000000000a1';
@@ -121,5 +126,27 @@ describe('settleExpansionAttempt', () => {
     expect(await readFile(path.join(f.anchor, f.uploadsRel, 'spec', 'a.md'), 'utf8')).toBe(
       'a new upload',
     );
+  });
+});
+
+describe('readExpansionIntent', () => {
+  it('accepts as many names as an archive may hold, and refuses one more', async () => {
+    // Every name becomes a bind parameter of the settle's query. A forged list past Postgres' limit
+    // would fail a delete's section after its files had already gone.
+    const f = await fixture();
+    const stagingRel = `${f.uploadsRel}/.expanding-x`;
+    await mkdir(path.join(f.anchor, stagingRel), { recursive: true });
+    const intent = (count: number) =>
+      writeFile(
+        path.join(f.anchor, stagingRel, 'placed-as'),
+        JSON.stringify({ dir: 'spec', files: Array.from({ length: count }, (_, i) => `f${i}.md`) }),
+      );
+
+    await intent(ATTACHMENT_ARCHIVE_MAX_FILES);
+    expect((await readExpansionIntent(f.anchor, stagingRel))?.files).toHaveLength(
+      ATTACHMENT_ARCHIVE_MAX_FILES,
+    );
+    await intent(ATTACHMENT_ARCHIVE_MAX_FILES + 1);
+    expect(await readExpansionIntent(f.anchor, stagingRel)).toBeNull();
   });
 });

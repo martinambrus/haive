@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema, withTaskAttachmentsLock, type Database, type DbTx } from '@haive/database';
+import { ATTACHMENT_ARCHIVE_MAX_FILES } from './attachments/archive.js';
 import { ATTACHMENTS_MANIFEST_NAME, renderAttachmentsManifest } from './attachments/manifest.js';
 import { isReservedAttachmentName } from './attachments/names.js';
 import { sanitizeAttachmentPath, splitAttachmentPath } from './attachments/paths.js';
@@ -152,9 +153,11 @@ export function expansionAttemptArchiveId(name: string): string | null {
 /**
  * Read an attempt's `placed-as`, or null when there is none — or none to trust. The uploads dir is
  * inside a tree the sandbox can write, so an intent is held to what an expansion could have written:
- * one folder, and names that pass the attachment path rules and that no generated file owns. A
- * sidecar has no row of its own, so an intent naming one would otherwise remove a live document's
- * extracted text as an orphan.
+ * one folder, no more names than an archive may hold, and names that pass the attachment path rules
+ * and that no generated file owns. A sidecar has no row of its own, so an intent naming one would
+ * otherwise remove a live document's extracted text as an orphan. The count matters as much: every
+ * name becomes a bind parameter of the settle's one query, and a list past Postgres' limit fails the
+ * section — in a delete, after the files have gone.
  */
 export async function readExpansionIntent(
   anchor: string,
@@ -169,7 +172,7 @@ export async function readExpansionIntent(
     if (typeof dir !== 'string' || dir.includes('/') || sanitizeAttachmentPath(dir) !== dir) {
       return null;
     }
-    if (!Array.isArray(files)) return null;
+    if (!Array.isArray(files) || files.length > ATTACHMENT_ARCHIVE_MAX_FILES) return null;
     for (const file of files) {
       if (
         typeof file !== 'string' ||

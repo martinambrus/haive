@@ -886,7 +886,9 @@ to hold the lock: whatever `placed-as` names that no row owns is removed. A tree
 the move never happened, and then only the claimed folder goes, and only while it is an empty
 directory. The intent is untrusted — the sandbox can write the uploads dir — so it may name one
 folder and only names an expansion could have written: a sidecar has no row, and an intent naming
-one would pass live extracted text off as an orphan. A throw after the move takes the files back
+one would pass live extracted text off as an orphan. Nor more names than an archive may hold, since
+each is a bind parameter of the settle's one query, and a list past Postgres' limit fails a delete's
+section after its files have gone. A throw after the move takes the files back
 INSIDE the callback, since postgres.js can reject the transaction while the callback still runs.
 Every call first settles the attempts at archives deleted or stamped since, re-checked under the
 lock, so an archive attached a moment ago keeps its attempt in flight. A DELETE settles the attempts
