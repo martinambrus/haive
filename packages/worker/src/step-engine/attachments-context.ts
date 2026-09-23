@@ -3,11 +3,21 @@ import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { logger, splitAttachmentPath } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { isSingleLine, safeNote } from './steps/_untrusted-repo.js';
 
 const log = logger.child({ module: 'attachments-context' });
 
 /** Files the prompt names one by one before it collapses to folder counts. */
 const ATTACHMENT_PROMPT_FILE_LIMIT = 40;
+/** Incomplete archives the prompt names before it counts the rest. */
+const INCOMPLETE_ARCHIVE_LIMIT = 10;
+
+interface AttachmentRow {
+  filename: string;
+  description: string | null;
+  expandedAt?: Date | null;
+  expansionNote?: string | null;
+}
 
 /** Prepend a compact "attached files" notice to a step's LLM prompt when the task
  *  has user-uploaded attachments. The prompt flows through the dispatcher to every
@@ -22,12 +32,12 @@ export async function augmentPromptWithAttachments(
   taskId: string,
   prompt: string,
 ): Promise<string> {
-  let rows: Array<{ filename: string; description: string | null }>;
+  let rows: AttachmentRow[];
   try {
     rows = await db.query.taskAttachments.findMany({
       where: eq(schema.taskAttachments.taskId, taskId),
       orderBy: asc(schema.taskAttachments.createdAt),
-      columns: { filename: true, description: true },
+      columns: { filename: true, description: true, expandedAt: true, expansionNote: true },
     });
   } catch (err) {
     // Attachments are optional context — never fail a step because the lookup
@@ -50,11 +60,39 @@ export async function augmentPromptWithAttachments(
           `inside the folders listed. ${dir}/_ATTACHMENTS.md indexes every one of them by path.`,
         ]
       : []),
+    ...describeIncompleteArchives(rows),
     `See ${dir}/_ATTACHMENTS.md for descriptions. Read any that are relevant before proceeding.`,
     '',
     '',
   ].join('\n');
   return notice + prompt;
+}
+
+/**
+ * Archives that did not fully expand, told to the agent that is handed their files.
+ *
+ * Read from `expansion_note` rather than from the expansion call's result: that result names only
+ * the archives expanded by THAT call, so every later step — and every retry — would see nothing.
+ * Gated on `expanded_at`, the column that proves an expansion ran; the note is only its words. A
+ * note carries archive member names and an extractor's error line, so it is collapsed and capped,
+ * and an archive name that cannot be a single line is left out rather than rewritten. Empty when
+ * nothing is incomplete, which keeps the notice byte-identical for every task without such an
+ * archive.
+ */
+function describeIncompleteArchives(rows: readonly AttachmentRow[]): string[] {
+  const incomplete = rows.filter(
+    (r) => r.expandedAt != null && Boolean(r.expansionNote) && isSingleLine(r.filename),
+  );
+  if (incomplete.length === 0) return [];
+  const shown = incomplete.slice(0, INCOMPLETE_ARCHIVE_LIMIT);
+  return [
+    'INCOMPLETE ARCHIVES: part of what these attached archives hold is NOT among the files above.',
+    'Treat that content as missing and say so; do not guess it.',
+    ...shown.map((r) => `  - ${r.filename} — ${safeNote(r.expansionNote)}`),
+    ...(incomplete.length > shown.length
+      ? [`  - and ${incomplete.length - shown.length} more`]
+      : []),
+  ];
 }
 
 /**
@@ -69,11 +107,11 @@ export async function augmentPromptWithAttachments(
  * Under the limit the output is byte-identical to what it always was, which is
  * what keeps the common case (a handful of files) unchanged.
  */
-function describeAttachments(rows: readonly { filename: string; description: string | null }[]): {
+function describeAttachments(rows: readonly AttachmentRow[]): {
   lines: string[];
   named: number;
 } {
-  const line = (r: { filename: string; description: string | null }): string =>
+  const line = (r: AttachmentRow): string =>
     `  - ${r.filename}${r.description ? ` — ${r.description}` : ''}`;
   if (rows.length <= ATTACHMENT_PROMPT_FILE_LIMIT) {
     return { lines: rows.map(line), named: rows.length };
