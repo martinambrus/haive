@@ -589,6 +589,34 @@ describe('task attachment routes', () => {
       }
     });
 
+    it('refuses a folder that is a link, with a status and nothing written outside', async () => {
+      await mkdir(up(), { recursive: true });
+      await symlink(outside, up('docs'));
+      expect(await upload('docs/a.md', 'x')).toEqual({
+        status: 403,
+        body: { error: 'Path is a symlink', code: null },
+      });
+      expect(await listing(outside)).toEqual([]);
+      expect(filenames()).toEqual([]);
+      expect(await indexed()).toBeNull();
+
+      // The uploads directory itself swapped for a link is refused the same way.
+      await rm(up(), { recursive: true });
+      await symlink(outside, up());
+      expect((await upload('b.md', 'x')).status).toBe(403);
+      expect(await listing(outside)).toEqual([]);
+    });
+
+    it('answers 409 when a file already has the name a folder needs', async () => {
+      expect((await upload('spec', 'the file')).status).toBe(201);
+      expect(await upload('spec/a.md', 'x')).toEqual({
+        status: 409,
+        body: { error: 'A file already has the name of a folder in that path', code: null },
+      });
+      expect(await readFile(up('spec'), 'utf8')).toBe('the file');
+      expect(filenames()).toEqual(['spec']);
+    });
+
     it('validates the query before touching disk', async () => {
       const res = await send('POST', `/${TASK}/attachments`, { body: 'x' });
       expect(res.status).toBe(400);

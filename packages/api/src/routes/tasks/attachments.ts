@@ -22,6 +22,7 @@ import {
   chmodNoFollow,
   chownNoFollow,
   ensureDirNoFollow,
+  isPathContainmentError,
   openFileNoFollow,
   removeNoFollow,
   writeFileNoFollow,
@@ -132,6 +133,21 @@ function safeAttachmentPath(raw: string): string {
     if (err instanceof AttachmentPathError) throw new HttpError(400, err.message);
     throw err;
   }
+}
+
+/** How an upload answers a path the containment walk refused, instead of an unhandled 500.
+ *  Not `containmentHttpError` as it stands: its fallback reports every other error as a 400 and
+ *  its `not-directory` answer is "File not found", both wrong for a write. A file standing where
+ *  the upload needs a folder is a conflict the user can resolve; any other refusal gets the read
+ *  routes' answer; anything that is not a refusal (a full disk) stays a 500. */
+function uploadPathError(err: unknown): never {
+  if (isPathContainmentError(err, 'not-directory')) {
+    throw new HttpError(409, 'A file already has the name of a folder in that path');
+  }
+  if (isPathContainmentError(err)) {
+    containmentHttpError(err, 'Attachment path is outside the task workspace');
+  }
+  throw err;
 }
 
 /** Make every level of `relDir` under the uploads root traversable + owned by the
@@ -404,13 +420,13 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   );
 
-  await ensureUploadsDir(anchor, uploadsRel);
+  await ensureUploadsDir(anchor, uploadsRel).catch(uploadPathError);
 
   const { rel: safeName, fh } = await createUniqueAttachment(
     anchor,
     uploadsRel,
     safeAttachmentPath(query.filename),
-  );
+  ).catch(uploadPathError);
   const destPath = join(dir, safeName);
   let size: number;
   try {
