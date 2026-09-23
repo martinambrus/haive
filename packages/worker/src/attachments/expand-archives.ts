@@ -4,7 +4,6 @@ import {
   ensureDirNoFollow,
   lstatNoFollow,
   readdirNoFollow,
-  readTextNoFollow,
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
@@ -33,7 +32,17 @@ import {
   splitAttachmentPath,
   splitAttachmentStoredPath,
 } from '@haive/shared';
-import { pruneAfter, removeFiles, rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
+import {
+  EXPANSION_INTENT_FILE,
+  EXPANSION_STAGING_PREFIX,
+  expansionAttemptArchiveId,
+  pruneAfter,
+  readExpansionIntent,
+  removeFiles,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempt,
+  settleExpansionAttempts,
+} from '@haive/shared/attachments-fs';
 import { extractArchive } from '../repo/clone.js';
 import { collapseToLine } from '../step-engine/steps/_untrusted-repo.js';
 
@@ -77,20 +86,10 @@ const EXPANSION_NOTE_CHARS = 1000;
 const PATH_DROP_NAMES = 3;
 const PATH_DROP_NAME_CHARS = 80;
 
-/**
- * One attempt at one archive works in its own `.expanding-<archiveId>-<nonce>` directory under the
- * uploads dir. The leading dot keeps it out of every attachment's way (the path sanitiser strips
- * leading dots per segment); the nonce is what lets two overlapping calls at one archive each extract
- * without the second moving the first's tree aside. Before its tree is moved into place the attempt
- * writes `placed-as` there — the folder and the files it is about to own — and removes the directory
- * only once the rows naming them are committed, so an attempt that died in between can be taken back.
- */
-const STAGING_PREFIX = '.expanding-';
-const INTENT_FILE = 'placed-as';
-const INTENT_MAX_BYTES = 1024 * 1024;
-const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-/** Also matches the nonce-less `.expanding-<archiveId>` an interrupted run before this left. */
-const STAGING_NAME = new RegExp(`^\\.expanding-(${UUID})(?:-${UUID})?$`, 'i');
+/* Each attempt at one archive works in its own `.expanding-<archiveId>-<nonce>` directory under the
+ * uploads dir: `EXPANSION_STAGING_PREFIX`, with the rules for settling an interrupted attempt beside
+ * it in `@haive/shared/attachments-fs`. The nonce is what lets two overlapping calls at one archive
+ * each extract without the second moving the first's tree aside. */
 /** How many folder names an expansion tries, the api's bound for a file name. */
 const FOLDER_CANDIDATES = 1000;
 const NO_FOLDER_NOTE =
@@ -262,114 +261,7 @@ interface StagedTree {
   note: string | null;
 }
 
-/** What `placed-as` records: the folder a staged tree was about to become, and its files. */
-interface PlacementIntent {
-  dir: string;
-  files: string[];
-}
-
 const stagingRelOf = (uploadsRel: string, staging: string): string => `${uploadsRel}/${staging}`;
-
-/** The archive an attempt's staging dir belongs to, or null for any other name. */
-function stagingArchiveId(name: string): string | null {
-  return STAGING_NAME.exec(name)?.[1] ?? null;
-}
-
-/**
- * Read an attempt's `placed-as`, or null when there is none — or none to trust. The uploads dir is
- * inside a tree the sandbox can write, so an intent is held to what an expansion could have written:
- * one folder, and names that pass the attachment path rules and that no generated file owns. A
- * sidecar has no row of its own, so an intent naming one would otherwise remove a live document's
- * extracted text as an orphan.
- */
-async function readIntent(anchor: string, stagingRel: string): Promise<PlacementIntent | null> {
-  const text = await readTextNoFollow(anchor, `${stagingRel}/${INTENT_FILE}`, {
-    maxBytes: INTENT_MAX_BYTES,
-  }).catch(() => null);
-  if (text === null) return null;
-  try {
-    const parsed = JSON.parse(text) as { dir?: unknown; files?: unknown };
-    const { dir, files } = parsed;
-    if (typeof dir !== 'string' || dir.includes('/') || sanitizeAttachmentPath(dir) !== dir) {
-      return null;
-    }
-    if (!Array.isArray(files)) return null;
-    for (const file of files) {
-      if (
-        typeof file !== 'string' ||
-        sanitizeAttachmentPath(file) !== file ||
-        isReservedAttachmentName(splitAttachmentPath(file).base, false)
-      ) {
-        return null;
-      }
-    }
-    return { dir, files: files as string[] };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Settle one earlier attempt at an archive, under the task's attachments lock. Its intent says what
- * it may have placed; a file no row owns was placed by an attempt whose rows never committed, and it
- * is removed. Its staged tree still being there means the move never happened, and then at most the
- * empty folder it claimed is left — which is removed only while it is an empty DIRECTORY. The staging
- * dir goes last.
- */
-async function recoverAttempt(
-  tx: DbTx,
-  taskId: string,
-  anchor: string,
-  uploadsRel: string,
-  staging: string,
-): Promise<void> {
-  const stagingRel = stagingRelOf(uploadsRel, staging);
-  const intent = await readIntent(anchor, stagingRel);
-  if (intent !== null) {
-    const claimed = `${uploadsRel}/${intent.dir}`;
-    if ((await lstatNoFollow(anchor, `${stagingRel}/tree`)) !== null) {
-      if ((await lstatNoFollow(anchor, claimed))?.kind === 'directory') {
-        await removeNoFollow(anchor, claimed).catch(() => {});
-      }
-    } else {
-      const names = intent.files.map((file) => `${intent.dir}/${file}`);
-      const owned = new Set<string>();
-      if (names.length > 0) {
-        const rows = await tx.query.taskAttachments.findMany({
-          where: and(
-            eq(schema.taskAttachments.taskId, taskId),
-            inArray(schema.taskAttachments.filename, names),
-          ),
-          columns: { filename: true },
-        });
-        for (const row of rows) owned.add(row.filename);
-      }
-      const orphans = names.filter((name) => !owned.has(name));
-      await removeFiles(anchor, uploadsRel, orphans);
-      await pruneAfter(anchor, uploadsRel, orphans);
-    }
-  }
-  await removeNoFollow(anchor, stagingRel, { recursive: true, repairPermissions: true }).catch(
-    () => {},
-  );
-}
-
-/** Settle every attempt at one archive but `keep`, under the lock the caller holds. */
-async function recoverAttemptsAt(
-  tx: DbTx,
-  taskId: string,
-  anchor: string,
-  uploadsRel: string,
-  archiveId: string,
-  keep: string | null,
-): Promise<void> {
-  const entries = (await readdirNoFollow(anchor, uploadsRel)) ?? [];
-  for (const entry of entries) {
-    if (entry.name !== keep && stagingArchiveId(entry.name) === archiveId) {
-      await recoverAttempt(tx, taskId, anchor, uploadsRel, entry.name);
-    }
-  }
-}
 
 /**
  * Settle the attempts whose archive nothing will expand any more: deleted, or already stamped. The
@@ -386,13 +278,13 @@ async function sweepStaleAttempts(
   const stale = ((await readdirNoFollow(anchor, uploadsRel)) ?? [])
     .map((entry) => entry.name)
     .filter((name) => {
-      const id = stagingArchiveId(name);
+      const id = expansionAttemptArchiveId(name);
       return id !== null && !candidateIds.has(id);
     });
   if (stale.length === 0) return;
   try {
     await withTaskAttachmentsLock(db, taskId, async (tx) => {
-      const ids = [...new Set(stale.map((name) => stagingArchiveId(name)!))];
+      const ids = [...new Set(stale.map((name) => expansionAttemptArchiveId(name)!))];
       const pending = new Set(
         (
           await tx.query.taskAttachments.findMany({
@@ -407,8 +299,8 @@ async function sweepStaleAttempts(
           .map((row) => row.id),
       );
       for (const name of stale) {
-        if (!pending.has(stagingArchiveId(name)!)) {
-          await recoverAttempt(tx, taskId, anchor, uploadsRel, name);
+        if (!pending.has(expansionAttemptArchiveId(name)!)) {
+          await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, name);
         }
       }
     });
@@ -443,7 +335,7 @@ async function stampNote(
 ): Promise<boolean> {
   try {
     return await withTaskAttachmentsLock(db, taskId, async (tx) => {
-      await recoverAttemptsAt(tx, taskId, anchor, uploadsRel, archiveId, null);
+      await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archiveId]));
       return stamp(tx, archiveId, note);
     });
   } catch (err) {
@@ -577,7 +469,7 @@ async function placeTree(
       columns: { id: true, expandedAt: true },
     });
     if (current === undefined || current.expandedAt !== null) return { kind: 'superseded' };
-    await recoverAttemptsAt(tx, taskId, anchor, uploadsRel, archive.id, staging);
+    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archive.id]), staging);
 
     const files = staged.members.map((m) => m.rel);
     let dir: string | null = null;
@@ -586,7 +478,7 @@ async function placeTree(
       if (candidate.length + 1 + staged.longest > ATTACHMENT_MAX_PATH_LENGTH) break;
       await writeFileNoFollow(
         anchor,
-        `${stagingRel}/${INTENT_FILE}`,
+        `${stagingRel}/${EXPANSION_INTENT_FILE}`,
         JSON.stringify({ dir: candidate, files }),
         { fileMode: 0o600 },
       );
@@ -638,7 +530,7 @@ async function placeTree(
  *  a `placed-as` whose tree has left. That one is settled by the next call that holds the lock. */
 async function discardStaging(anchor: string, stagingRel: string): Promise<void> {
   if (
-    (await readIntent(anchor, stagingRel)) !== null &&
+    (await readExpansionIntent(anchor, stagingRel)) !== null &&
     (await lstatNoFollow(anchor, `${stagingRel}/tree`)) === null
   ) {
     return;
@@ -700,7 +592,7 @@ export async function ensureArchivesExpanded(
 
   const result: ExpandArchivesResult = { expanded: 0, filesAdded: 0, notes: [] };
   for (const archive of archives) {
-    const staging = `${STAGING_PREFIX}${archive.id}-${randomUUID()}`;
+    const staging = `${EXPANSION_STAGING_PREFIX}${archive.id}-${randomUUID()}`;
     const stagingRel = stagingRelOf(uploadsRel, staging);
 
     let staged: StagedTree | string;
@@ -732,7 +624,7 @@ export async function ensureArchivesExpanded(
       // was the problem.
       if (!isLockNotAvailable(err)) {
         await withTaskAttachmentsLock(db, taskId, (tx) =>
-          recoverAttemptsAt(tx, taskId, anchor, uploadsRel, archive.id, null),
+          settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archive.id])),
         ).catch(() => {});
       }
       await discardStaging(anchor, stagingRel);

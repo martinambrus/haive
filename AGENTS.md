@@ -889,7 +889,10 @@ folder and only names an expansion could have written: a sidecar has no row, and
 one would pass live extracted text off as an orphan. A throw after the move takes the files back
 INSIDE the callback, since postgres.js can reject the transaction while the callback still runs.
 Every call first settles the attempts at archives deleted or stamped since, re-checked under the
-lock, so an archive attached a moment ago keeps its attempt in flight.
+lock, so an archive attached a moment ago keeps its attempt in flight. A DELETE settles the attempts
+at the archives it removes in its own section (`settleExpansionAttempts`,
+`@haive/shared/attachments-fs`), because the worker finds the uploads dir only through a row, and
+once the last attachment is gone no later call can reach what an attempt left behind.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the
 column.** The expansion call reports only the archives THAT call expanded, so a later step, a

@@ -28,7 +28,12 @@ import {
   openFileNoFollow,
   removeNoFollow,
 } from '@haive/shared/fs-safe';
-import { pruneAfter, removeFiles, rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
+import {
+  pruneAfter,
+  removeFiles,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempts,
+} from '@haive/shared/attachments-fs';
 import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
@@ -562,6 +567,9 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
     const files = filesToRemove(new Set([attachmentId]), rows);
     await removeFiles(anchor, uploadsRel, files);
     await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
+    // An expansion of this archive the worker was interrupted in: with the archive's row gone, no
+    // later call would know it had anything to take back.
+    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([attachmentId]));
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
   }).catch(lockBusyError);
@@ -606,6 +614,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
         marked.map((r) => r.id),
       ),
     );
+    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set(marked.map((r) => r.id)));
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
     return marked.length;
