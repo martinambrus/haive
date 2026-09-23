@@ -32,7 +32,13 @@ import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
-import type { PlanInputsApply } from './00-plan-inputs.js';
+import {
+  livePlanInputs,
+  loadLiveAttachmentNames,
+  removePlanInputsIndex,
+  writePlanInputsIndex,
+  type PlanInputsApply,
+} from './00-plan-inputs.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -285,6 +291,58 @@ async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply |
     ctx.logger.warn({ err }, 'could not read prepared plan inputs');
     return null;
   }
+}
+
+/** Images are always visual-only; a document joins them when nothing readable came out of it. */
+function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
+  return [
+    ...(inputs?.inputs ?? []).filter((i) => i.kind === 'image').map((i) => i.filename),
+    ...(inputs?.visualOnly ?? []),
+  ];
+}
+
+/**
+ * `d` as a dispatch should see it: the three input fields recomputed from what is STILL attached.
+ * detect copied them from `00-plan-inputs`, and a person can delete an attachment while the build
+ * runs, so a deleted image would otherwise still demand `vision` and the index the root prompt says
+ * to read FIRST would still name a deleted file. The index is re-rendered, or removed once nothing
+ * in it is left. An attachment added since is not picked up: nothing extracted it.
+ *
+ * Returns `d` itself when nothing was deleted, and when either lookup fails, which leaves the
+ * build on the fields it had before this existed.
+ */
+export async function withLiveInputs(
+  ctx: StepContext,
+  d: PlanBuildDetect,
+): Promise<PlanBuildDetect> {
+  const prepared = await loadPlanInputsOutput(ctx);
+  if (!prepared) return d;
+  const live = await loadLiveAttachmentNames(ctx);
+  if (!live) return d;
+  const { output, changed } = livePlanInputs(prepared, live);
+  if (!changed) return d;
+  let inputIndexPath: string | null = null;
+  try {
+    if (output.inputs.length > 0) {
+      inputIndexPath = await writePlanInputsIndex(
+        ctx.repoPath,
+        ctx.taskId,
+        output.inputs,
+        output.archiveNotes,
+      );
+    } else {
+      await removePlanInputsIndex(ctx.repoPath, ctx.taskId);
+    }
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan build: could not re-render the plan-inputs index');
+    inputIndexPath = d.inputIndexPath ?? null;
+  }
+  return {
+    ...d,
+    inputIndexPath,
+    visualOnlyInputs: visualOnlyInputsOf(output),
+    hasPdfInputs: output.hasPdfInputs === true,
+  };
 }
 
 /** The capabilities every agent of THIS build needs.
@@ -580,12 +638,7 @@ export function createPlanBuildStep(
         brief: (task?.description ?? '').trim(),
         repoName,
         inputIndexPath: inputs?.indexPath ?? null,
-        // Images are always visual-only; a document joins them when nothing
-        // readable came out of it.
-        visualOnlyInputs: [
-          ...(inputs?.inputs ?? []).filter((i) => i.kind === 'image').map((i) => i.filename),
-          ...(inputs?.visualOnly ?? []),
-        ],
+        visualOnlyInputs: visualOnlyInputsOf(inputs),
         hasPdfInputs: inputs?.hasPdfInputs === true,
       };
     },
@@ -654,17 +707,18 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
+        const live = await withLiveInputs(ctx, d);
         return [
           {
             agentId: 'plan-root',
             agentTitle: 'Plan outline',
             roleKey: 'outline',
-            capabilities: planAgentCapabilities(d),
-            preferVision: d.hasPdfInputs === true,
+            capabilities: planAgentCapabilities(live),
+            preferVision: live.hasPdfInputs === true,
             prompt: await augmentPromptWithAttachments(
               ctx.db,
               ctx.taskId,
-              buildRootPrompt(d, formValues),
+              buildRootPrompt(live, formValues),
             ),
           },
         ];
@@ -859,17 +913,23 @@ export function createPlanBuildStep(
         // refs for its local neighborhood are always retained; the global title
         // index is compacted before provider selection, so this contract is the
         // same for every supported CLI.
+        const live = await withLiveInputs(ctx, d);
         const dispatches = await Promise.all(
           slice.map(async (node) => ({
             agentId: `plan-expand-${node.id}-p${nextWave}`,
             agentTitle: `Expand: ${node.title}`,
             roleKey: 'expand',
-            capabilities: planAgentCapabilities(d),
-            preferVision: d.hasPdfInputs === true,
+            capabilities: planAgentCapabilities(live),
+            preferVision: live.hasPdfInputs === true,
             prompt: await augmentPromptWithAttachments(
               ctx.db,
               ctx.taskId,
-              buildExpandPrompt(d, args.formValues, node, buildPlanExpansionContext(nodes, node)),
+              buildExpandPrompt(
+                live,
+                args.formValues,
+                node,
+                buildPlanExpansionContext(nodes, node),
+              ),
             ),
           })),
         );

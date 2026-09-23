@@ -156,6 +156,75 @@ async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
   await chmodNoFollow(anchor, rel, 0o644).catch(() => {});
 }
 
+/** Write the index for these inputs and return the path an agent sees it at. Shared with the plan
+ *  builder, which re-renders it at dispatch once attachments have been deleted. */
+export async function writePlanInputsIndex(
+  repoPath: string,
+  taskId: string,
+  inputs: PlanInputRow[],
+  archiveNotes: { filename: string; note: string }[],
+): Promise<string> {
+  const indexRel = `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`;
+  await writeFileNoFollow(repoPath, indexRel, renderIndex(taskId, inputs, archiveNotes), {
+    fileMode: 0o644,
+  });
+  await harmonizeOwnership(repoPath, indexRel);
+  return `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}/${PLAN_INPUTS_INDEX}`;
+}
+
+/** Remove the index, once nothing it would list is still attached. */
+export async function removePlanInputsIndex(repoPath: string, taskId: string): Promise<void> {
+  await removeNoFollow(repoPath, `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`).catch(() => {});
+}
+
+/** The filenames attached to the task right now, or null when they cannot be read. */
+export async function loadLiveAttachmentNames(ctx: StepContext): Promise<Set<string> | null> {
+  try {
+    const rows = await ctx.db
+      .select({ filename: schema.taskAttachments.filename })
+      .from(schema.taskAttachments)
+      .where(eq(schema.taskAttachments.taskId, ctx.taskId));
+    return new Set(rows.map((r) => r.filename));
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan inputs: could not read the task attachments');
+    return null;
+  }
+}
+
+/** What this step recorded, less any attachment deleted since. Membership is the only thing that
+ *  changes: a verdict stays as it was measured (a document that yielded no text stays visual-only),
+ *  and a file attached after this step ran is not added, since nothing extracted it. The two
+ *  kind flags are recomputed from what remains. */
+export function livePlanInputs(
+  prepared: PlanInputsApply,
+  live: ReadonlySet<string>,
+): { output: PlanInputsApply; changed: boolean } {
+  const visualOnlyBefore = prepared.visualOnly ?? [];
+  const archiveNotesBefore = prepared.archiveNotes ?? [];
+  const inputs = prepared.inputs.filter((i) => live.has(i.filename));
+  const visualOnly = visualOnlyBefore.filter((f) => live.has(f));
+  const unreadable = prepared.unreadable.filter((f) => live.has(f));
+  const archiveNotes = archiveNotesBefore.filter((n) => live.has(n.filename));
+  const changed =
+    inputs.length !== prepared.inputs.length ||
+    visualOnly.length !== visualOnlyBefore.length ||
+    unreadable.length !== prepared.unreadable.length ||
+    archiveNotes.length !== archiveNotesBefore.length;
+  if (!changed) return { output: prepared, changed: false };
+  return {
+    changed: true,
+    output: {
+      ...prepared,
+      inputs,
+      visualOnly,
+      unreadable,
+      archiveNotes,
+      hasImageInputs: inputs.some((i) => i.kind === 'image'),
+      hasPdfInputs: inputs.some((i) => i.kind === 'pdf'),
+    },
+  };
+}
+
 /** The index the greenfield root prompt tells its agent to read FIRST, so every value it names is
  *  held to the prompt-line rule here, at render time — a stored note from before this rule
  *  existed is reduced too. Notes are prose built around archive member names and extractor
@@ -457,15 +526,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     let indexPath: string | null = null;
     if (inputs.length > 0 && uploadsDir) {
-      const indexRel = `${taskUploadsRel(ctx.taskId)}/${PLAN_INPUTS_INDEX}`;
-      await writeFileNoFollow(
-        ctx.repoPath,
-        indexRel,
-        renderIndex(ctx.taskId, inputs, archiveNotes),
-        { fileMode: 0o644 },
-      );
-      await harmonizeOwnership(ctx.repoPath, indexRel);
-      indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
+      indexPath = await writePlanInputsIndex(ctx.repoPath, ctx.taskId, inputs, archiveNotes);
     }
 
     return {
