@@ -31,10 +31,11 @@ export const CLI_RULES_DISK_PATH = 'AGENTS.md';
 
 /** Merge rule blocks line-by-line, deduplicating on trimmed content so the
  *  first-seen capitalization and leading whitespace win. A block identical to an
- *  earlier one adds nothing, and a line with no letter or digit (a blank line, a
- *  code fence, a rule) is structure and never deduplicated, since dropping one
- *  removes a paragraph break or a code block's closing fence. Runs of 3+ blank
- *  lines collapse to 2. Output is trimmed and ends with exactly one newline. */
+ *  earlier one adds nothing, and structure is never deduplicated: a line with no
+ *  letter or digit (a blank line, a rule) and any code fence, a language tag
+ *  included, since dropping one removes a paragraph break or unbalances a code
+ *  block. Runs of 3+ blank lines collapse to 2. Output is trimmed and ends with
+ *  exactly one newline. */
 export function dedupLines(blocks: string[]): string {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -44,7 +45,7 @@ export function dedupLines(blocks: string[]): string {
     seenBlocks.add(block.trim());
     for (const line of block.split('\n')) {
       const key = line.trim();
-      if (/[\p{L}\p{N}]/u.test(key)) {
+      if (/[\p{L}\p{N}]/u.test(key) && !/^(`{3,}|~{3,})/.test(key)) {
         if (seen.has(key)) continue;
         seen.add(key);
       }

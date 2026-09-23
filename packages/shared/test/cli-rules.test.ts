@@ -44,6 +44,11 @@ describe('dedupLines', () => {
     expect(dedupLines([block])).toBe(`${block}\n`);
   });
 
+  it('keeps a repeated fence that carries a language tag', () => {
+    const block = '```json\n{"a":1}\n```\n\n```json\n{"b":2}\n```';
+    expect(dedupLines([block])).toBe(`${block}\n`);
+  });
+
   it('adds nothing for a block identical to an earlier one', () => {
     const block = 'one\n\n```\nx\n```\n';
     expect(dedupLines([block, block, `  ${block}`])).toBe(dedupLines([block]));
