@@ -2,6 +2,9 @@
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  // `next dev` started from an AI agent's shell writes packages/web/AGENTS.md and CLAUDE.md
+  // with Vercel's own instruction block. Project instructions live in the root AGENTS.md.
+  agentRules: false,
   // Next's standalone trace copies only the CJS half of @swc/helpers under pnpm, while its own
   // `require-hook` loads `@swc/helpers/esm/_interop_require_default.js` at runtime — so the
   // production image starts, fails MODULE_NOT_FOUND and crash-loops. MEASURED in the published

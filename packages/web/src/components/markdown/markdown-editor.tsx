@@ -2,11 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { EditorContent, useEditor, useEditorState } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import { TableKit } from '@tiptap/extension-table';
-import { TaskItem, TaskList } from '@tiptap/extension-list';
-import { Placeholder } from '@tiptap/extensions';
-import { Markdown, type MarkdownStorage } from 'tiptap-markdown';
+import type { MarkdownStorage } from 'tiptap-markdown';
 import {
   Bold,
   Code,
@@ -30,6 +26,7 @@ import {
 } from 'lucide-react';
 import type { Editor } from '@tiptap/react';
 import { cn } from '@/lib/cn';
+import { markdownEditorExtensions } from './markdown-extensions';
 
 /**
  * A WYSIWYG markdown editor for prose bodies.
@@ -104,19 +101,7 @@ export function MarkdownEditor({
 
   const editor = useEditor({
     content: value,
-    extensions: [
-      StarterKit.configure({
-        link: { openOnClick: false, autolink: true },
-        // Underline has no markdown representation — disabled so it can never
-        // appear in the document and silently drop on save.
-        underline: false,
-      }),
-      TableKit,
-      TaskList,
-      TaskItem.configure({ nested: true }),
-      ...(placeholder ? [Placeholder.configure({ placeholder })] : []),
-      Markdown.configure({ html: true, tightLists: true, breaks, linkify: false }),
-    ],
+    extensions: markdownEditorExtensions({ placeholder, breaks }),
     autofocus: 'end',
     immediatelyRender: false,
     editorProps: {
