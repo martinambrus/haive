@@ -469,6 +469,20 @@ describe('task attachment routes', () => {
       expect(await exists(up('_PLAN_INPUTS.md'))).toBe(false);
     });
 
+    it('never takes a sidecar’s name, at any depth', async () => {
+      // The worker writes `<doc>.extracted.md` beside its document wherever that sits, and a delete of
+      // the document unlinks that path whether or not the sidecar exists yet. An upload holding the
+      // name would be overwritten by the extraction, or unlinked by a delete that raced it.
+      const names: unknown[] = [];
+      for (const name of ['x.docx.extracted.md', 'docs/a.pdf.extracted.md']) {
+        const res = await upload(name, 'mine');
+        expect(res.status).toBe(201);
+        names.push((res.body?.attachment as Row).filename);
+      }
+      expect(names).toEqual(['x.docx.extracted (2).md', 'docs/a.pdf.extracted (2).md']);
+      expect(await exists(up('x.docx.extracted.md'))).toBe(false);
+    });
+
     it('treats a link at the name as taken and writes nothing through it', async () => {
       await mkdir(up(), { recursive: true });
       await writeFile(path.join(outside, 'secret.md'), 'secret');

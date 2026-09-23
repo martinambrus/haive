@@ -11,6 +11,7 @@ import {
   configService,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
+  PLAN_INPUT_SIDECAR_SUFFIX,
   PLAN_INPUTS_INDEX_NAME,
   renderAttachmentsManifest,
   sanitizeAttachmentPath,
@@ -174,7 +175,11 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
 /** De-dupe within the file's OWN directory by appending ` (n)` before the
  *  extension, and create that directory. Per-directory because two folders'
  *  `README.md` are two documents, not a collision. Reserved names bite only at
- *  the root, which is where the generated indexes live. */
+ *  the root, which is where the generated indexes live. A sidecar's name is
+ *  reserved at every depth: the worker writes `<doc>.extracted.md` beside its
+ *  document wherever that sits, and a delete of the document unlinks that path
+ *  whether or not the sidecar exists yet, so an upload holding it would be
+ *  overwritten by the extraction or unlinked by a delete that raced it. */
 async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
@@ -182,7 +187,8 @@ async function createUniqueAttachment(
 ): Promise<{ rel: string; fh: FileHandle }> {
   const { dir: relDir, base } = splitAttachmentPath(relPath);
   await ensureDirTree(anchor, uploadsRel, relDir);
-  const reserved = (name: string): boolean => relDir === '' && RESERVED_NAMES.has(name);
+  const reserved = (name: string): boolean =>
+    (relDir === '' && RESERVED_NAMES.has(name)) || name.endsWith(PLAN_INPUT_SIDECAR_SUFFIX);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
