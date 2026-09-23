@@ -148,6 +148,10 @@ export const CONFIG_KEYS = {
   // pasted into its prompt instead). Default true; 'false' restores the previous behaviour
   // for every newly dispatched invocation, and one already queued keeps its decision.
   AGENT_ISOLATION_ENABLED: 'config:sandbox:agentIsolationEnabled',
+  // Global switch for giving every dispatch its provider's effective agent rules at the top of
+  // its prompt. Default true; 'false' leaves the rules to whatever AGENTS.md the checkout holds,
+  // for every newly dispatched invocation.
+  AGENT_RULES_INJECTION_ENABLED: 'config:sandbox:agentRulesInjectionEnabled',
   // Global kill-switch for carrying a repository's untracked runtime files (the
   // secret-mask glob set: .env, settings.local.php, service-account json …) from the
   // repo root into each newly created worktree. `git worktree add` materialises tracked
@@ -659,6 +663,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.AGENT_ISOLATION_ENABLED]: 'true',
+  [CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED]: 'true',
   [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.CODEX_APP_SERVER_ENABLED]: 'true',

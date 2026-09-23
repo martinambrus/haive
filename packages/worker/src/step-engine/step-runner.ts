@@ -759,6 +759,7 @@ async function resolveLlmPhase(
     },
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
+    skipAgentRules: llmSpec.skipAgentRules,
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -2790,6 +2791,7 @@ async function maybeEnqueueStepSummary(
       providers,
       preferredProviderId,
       toolProfile: 'none',
+      skipAgentRules: true,
       input: { kind: 'prompt', prompt, capabilities: [] },
       invokeOpts: {
         cwd: params.workspacePath,

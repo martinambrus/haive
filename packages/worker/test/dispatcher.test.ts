@@ -10,6 +10,12 @@ import {
 } from '../src/step-engine/steps/_retrieval-guidance.js';
 import { WORKTREE_GIT_BOUNDARY_MARKER } from '../src/repo/worktree-git-boundary.js';
 import { mcpSurfacePrompt, type McpSurface } from '../src/sandbox/mcp-surface.js';
+import { DEFAULT_AGENT_RULES } from '@haive/shared';
+import { AGENT_RULES_MARKER, agentRulesHash } from '../src/orchestrator/agent-rules.js';
+import {
+  PROMPT_ARGV_LIMIT_BYTES,
+  PromptTooLargeError,
+} from '../src/cli-adapters/prompt-delivery.js';
 
 function surface(ragEnabled: boolean): McpSurface {
   return {
@@ -673,5 +679,107 @@ describe('vision', () => {
       invokeOpts: {},
     });
     expect(plan.providerId).toBe('prov-b');
+  });
+});
+
+describe('agent rules injection', () => {
+  // makeProvider copies only the fields it names, so rules are set on the record it returns.
+  const claude = (rulesContent?: string): CliProviderRecord => ({
+    ...makeProvider({ id: 'prov-claude', name: 'claude-code' }),
+    ...(rulesContent !== undefined ? { rulesContent } : {}),
+  });
+  const dispatch = (
+    extra: Partial<Parameters<typeof resolveDispatch>[0]>,
+    prompt = 'do the work',
+    provider = claude(),
+  ) => {
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: {},
+      ...extra,
+    });
+    if (plan.invocation?.kind !== 'cli') throw new Error('expected a cli invocation');
+    return { prompt: plan.effectivePrompt!, spec: plan.invocation.spec };
+  };
+  const hashOf = (rules: string) => agentRulesHash(rules);
+
+  it('opens every prompt with the provider effective rules when switched on', () => {
+    const { prompt, spec } = dispatch({ agentRulesInjection: true });
+    expect(prompt.startsWith(AGENT_RULES_MARKER)).toBe(true);
+    expect(prompt).toContain(DEFAULT_AGENT_RULES.trim().split('\n')[0]!);
+    expect(prompt.endsWith('do the work')).toBe(true);
+    expect(spec.agentRules).toEqual({ hash: hashOf(DEFAULT_AGENT_RULES), injected: true });
+  });
+
+  it('gives each provider its own rules, not a merge', () => {
+    const { prompt, spec } = dispatch({ agentRulesInjection: true }, 'x', claude('- only mine'));
+    expect(prompt).toContain('- only mine');
+    expect(prompt).not.toContain(DEFAULT_AGENT_RULES.trim().split('\n')[0]!);
+    expect(spec.agentRules).toEqual({ hash: hashOf('- only mine'), injected: true });
+  });
+
+  it('adds nothing when the switch is absent, and records why', () => {
+    const { prompt, spec } = dispatch({});
+    expect(prompt).toBe(`${NO_MCP}do the work`);
+    expect(spec.agentRules).toEqual({
+      hash: hashOf(DEFAULT_AGENT_RULES),
+      injected: false,
+      reason: 'disabled',
+    });
+  });
+
+  it('adds nothing to a dispatch that opts out, and records why', () => {
+    const { prompt, spec } = dispatch({ agentRulesInjection: true, skipAgentRules: true });
+    expect(prompt).not.toContain(AGENT_RULES_MARKER);
+    expect(spec.agentRules?.reason).toBe('opt-out');
+  });
+
+  it('gives a stored prompt dispatched again the current rules, once', () => {
+    const first = dispatch({ agentRulesInjection: true }, 'do the work', claude('- old'));
+    const again = dispatch({ agentRulesInjection: true }, first.prompt, claude('- new'));
+    expect(again.prompt.split(AGENT_RULES_MARKER)).toHaveLength(2);
+    expect(again.prompt).toContain('- new');
+    expect(again.prompt).not.toContain('- old');
+    expect(again.prompt).toBe(
+      dispatch({ agentRulesInjection: true }, 'do the work', claude('- new')).prompt,
+    );
+  });
+
+  it('ends isolation for rules that name an agent path, since the mask would hide the file', () => {
+    const isolatedWith = (rules: string) =>
+      resolveDispatch({
+        providers: [claude(rules)],
+        input: { kind: 'prompt', prompt: 'review it', capabilities: ['tool_use'] },
+        invokeOpts: {},
+        agentIsolation: true,
+        agentRulesInjection: true,
+      });
+    const masked = (plan: ReturnType<typeof resolveDispatch>) =>
+      plan.invocation?.kind === 'cli' ? plan.invocation.spec.maskAgentDefinitions === true : null;
+    expect(masked(isolatedWith('- Keep changes small.'))).toBe(true);
+    expect(masked(isolatedWith('- Read .claude/agents/reviewer.md first.'))).toBe(false);
+  });
+
+  it('drops the rules rather than fail a prompt they would push past an argv-only limit', () => {
+    const gemini = makeProvider({ id: 'prov-gemini', name: 'gemini', authMode: 'api_key' });
+    const overhead = (prompt: string) =>
+      Buffer.byteLength(dispatch({}, prompt, gemini).prompt, 'utf8') -
+      Buffer.byteLength(prompt, 'utf8');
+    const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead('x') - 16);
+    const { prompt, spec } = dispatch({ agentRulesInjection: true }, fits, gemini);
+    expect(prompt).not.toContain(AGENT_RULES_MARKER);
+    expect(spec.agentRules).toEqual({
+      hash: hashOf(DEFAULT_AGENT_RULES),
+      injected: false,
+      reason: 'prompt-too-large',
+    });
+  });
+
+  it('still fails a prompt too large even without the rules', () => {
+    const gemini = makeProvider({ id: 'prov-gemini', name: 'gemini', authMode: 'api_key' });
+    expect(() =>
+      dispatch({ agentRulesInjection: true }, 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES + 10), gemini),
+    ).toThrow(PromptTooLargeError);
   });
 });

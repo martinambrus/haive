@@ -112,6 +112,14 @@ describe('agentIsolationApplies', () => {
     expect(agentIsolationApplies(req)).toBe(false);
   });
 
+  it('is off when the injected agent RULES name an agent path', () => {
+    const rules = '- Before reviewing, read .claude/agents/reviewer.md.';
+    expect(agentIsolationApplies(isolatedRequest(), rules)).toBe(false);
+    // The pre-check runs before a provider is known and so without the rules: it stays permissive.
+    expect(agentIsolationApplies(isolatedRequest())).toBe(true);
+    expect(agentIsolationApplies(isolatedRequest(), '- Keep changes small.')).toBe(true);
+  });
+
   it('KEEPS isolation for benign external text, and for none at all', () => {
     // The condition is about the CONTENT of those blocks, not their presence: a surface and a digest
     // that name nothing must not cost a dispatch its isolation.

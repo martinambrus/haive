@@ -90,6 +90,7 @@ import {
   recordCodexAppServerRuntimeFailure,
 } from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
+import { agentRulesOf } from '../../orchestrator/agent-rules.js';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -146,13 +147,20 @@ export async function handleCliExecJob(
     return;
   }
 
+  // Decided with the prompt at dispatch, recorded when the run starts: a job that never starts was
+  // given nothing.
+  const agentRules = agentRulesOf(payload.spec);
   await db
     .update(schema.cliInvocations)
     // Run truly begins here. Overwrite any waiting copy a gate wrote while this was held
     // (markWaiting in agent-reserve.ts) with the live default, so a multi-invocation step's
     // blue status banner shows "Waiting for AI analysis…" instead of the stale queued
     // message; the statusUpdater later refines it to the actual tool/activity.
-    .set({ startedAt: new Date(), statusMessage: STATUS_DEFAULT_MESSAGE })
+    .set({
+      startedAt: new Date(),
+      statusMessage: STATUS_DEFAULT_MESSAGE,
+      ...(agentRules ? { agentRules } : {}),
+    })
     .where(eq(schema.cliInvocations.id, row.id));
 
   // Work resumed: this invocation is now running, so close any waiting_cli park the step
