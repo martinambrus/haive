@@ -11,6 +11,8 @@ import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { safeDiskRel } from './02-upgrade-apply.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +57,17 @@ async function resolveStagePaths(db: Database, userId: string): Promise<string[]
     if (meta.projectSkillsDir) extra.add(`${meta.projectSkillsDir}/`);
   }
   return [...BASE_STAGE_PATHS, ...Array.from(extra)];
+}
+
+/** The paths 02 reports writing, as repository-relative ones. They come from a persisted step
+ *  output — one written before the field existed has none — so each is validated again. */
+export function appliedWrittenPaths(applyOutput: unknown): string[] {
+  const raw = (applyOutput as { writtenPaths?: unknown } | null)?.writtenPaths;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p): p is string => typeof p === 'string')
+    .map((p) => safeDiskRel(p))
+    .filter((p): p is string => p !== null);
 }
 
 /** Used only when neither the repo's bound credential nor the user carries an identity,
@@ -174,7 +187,13 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       return { commitPerformed, commitSha, stagedPaths, warnings };
     }
 
-    const stagePaths = await resolveStagePaths(ctx.db, ctx.userId);
+    const applied = await loadPreviousStepOutput(ctx.db, ctx.taskId, '02-upgrade-apply');
+    const stagePaths = [
+      ...new Set([
+        ...(await resolveStagePaths(ctx.db, ctx.userId)),
+        ...appliedWrittenPaths(applied?.output),
+      ]),
+    ];
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
       if (await hasWorkspaceEntry(ctx.repoPath, rel)) existingPaths.push(rel);
