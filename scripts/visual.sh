@@ -19,12 +19,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Volatile by nature: bump WITH @playwright/test, never on its own.
-readonly PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v1.62.1-noble"
+readonly PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v1.63.0-noble"
 
 say() { echo "[visual] $*"; }
 
-# The RESOLVED version, not the declared range: package.json says ^1.62.0 while node_modules holds
-# 1.62.1, and it is the installed one whose browser revisions have to match the image's.
+# The RESOLVED version, not the declared range: a caret range resolves to whatever patch the lockfile
+# pins, and it is the installed one whose browser revisions have to match the image's.
 installed=$(node -p "require('@playwright/test/package.json').version" 2>/dev/null || echo unknown)
 case "$PLAYWRIGHT_IMAGE" in
   *"v${installed}-"*) ;;

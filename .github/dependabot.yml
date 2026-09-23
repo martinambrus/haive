@@ -9,6 +9,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # The @tiptap packages share one @tiptap/core and only work at one version.
+    # Bumped one per PR, each leaves a second core in the tree and the web
+    # typecheck loses every command the extensions declare (#111, #112).
+    groups:
+      tiptap:
+        patterns:
+          - "@tiptap/*"
 
   # GitHub Actions pinned in the CI workflow.
   - package-ecosystem: github-actions
