@@ -58,6 +58,42 @@ export interface ExpandArchivesResult {
 
 const EMPTY: ExpandArchivesResult = { expanded: 0, filesAdded: 0, notes: [] };
 
+/** A note is stored once and shown to people and agents for the life of the task, so it is kept to
+ *  what they can use. Member names are the archive's to choose and unbounded, and a failure can
+ *  quote a tool's whole stderr. */
+export const EXPANSION_ERROR_CHARS = 300;
+const EXPANSION_NOTE_CHARS = 1000;
+const PATH_DROP_NAMES = 3;
+const PATH_DROP_NAME_CHARS = 80;
+
+const cap = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+
+/** The line of an expansion failure worth keeping: the first non-empty one, with the repository's
+ *  host path taken out. An extractor reports `<tool> failed (exit N): <stderr>`, which is usually
+ *  several lines, and a containment refusal names the anchor itself — neither belongs in a note a
+ *  person reads in the UI and every agent is handed. */
+export function expansionErrorLine(err: unknown, anchor: string): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const line =
+    message
+      .split(/[\r\n\u2028\u2029]/)
+      .map((l) => l.trim())
+      .find((l) => l !== '') ?? '';
+  return cap(
+    line.split(`${anchor}/`).join('').split(anchor).join('the repository'),
+    EXPANSION_ERROR_CHARS,
+  );
+}
+
+/** Members whose path cannot be stored under the attachment path rules (too deep or too long),
+ *  named the way `describeDrops` names the ones extraction refused. */
+function describePathDrops(rels: string[]): string | null {
+  if (rels.length === 0) return null;
+  const shown = rels.slice(0, PATH_DROP_NAMES).map((r) => cap(r, PATH_DROP_NAME_CHARS));
+  const more = rels.length > shown.length ? ` and ${rels.length - shown.length} more` : '';
+  return `${rels.length} archive member(s) were not extracted (path too long or too deep to store): ${shown.join(', ')}${more}`;
+}
+
 interface WalkedFile {
   /** Path relative to the extraction root, with `/` separators. */
   rel: string;
@@ -300,15 +336,17 @@ export async function ensureArchivesExpanded(
           // `a_.md`), and the second would then overwrite the first while both
           // rows pointed at it. Same ` (n)` de-dupe the api applies to uploads.
           const taken = new Set<string>();
+          const pathDropped: string[] = [];
           for (const file of files) {
             let relPath: string;
             try {
               relPath = uniqueWithin(taken, sanitizeAttachmentPath(`${dirName}/${file.rel}`));
             } catch (err) {
-              // The same rules the api enforces on an upload. A member that
-              // cannot be expressed as a safe relative path is dropped, named.
+              // The same rules the api enforces on an upload. A member that cannot be
+              // expressed as a safe relative path is dropped, and named in the note below.
               if (!(err instanceof AttachmentPathError)) throw err;
               log.warn({ member: file.rel, archive: archive.filename }, 'dropped archive member');
+              pathDropped.push(file.rel);
               continue;
             }
             const stored = await placeFile(anchor, uploadsRel, relPath, `${tmpRel}/${file.rel}`);
@@ -331,11 +369,14 @@ export async function ensureArchivesExpanded(
             skipped > 0
               ? `${skipped} entr(y/ies) were skipped: only regular files are extracted (no symlinks or devices)`
               : null;
-          note = [dropNote, walkNote].filter((n) => n !== null).join('; ') || null;
+          note =
+            [dropNote, walkNote, describePathDrops(pathDropped)]
+              .filter((n) => n !== null)
+              .join('; ') || null;
         }
       }
     } catch (err) {
-      note = `could not be expanded: ${(err as Error).message}`;
+      note = `could not be expanded: ${expansionErrorLine(err, anchor)}`;
       log.warn({ err, taskId, archive: archive.filename }, 'archive expansion failed');
     } finally {
       await removeNoFollow(anchor, `${uploadsRel}/.expanding-${archive.id}`, {
@@ -345,6 +386,7 @@ export async function ensureArchivesExpanded(
 
     // Stamped whatever happened. Without it a failed or capped archive is retried
     // on every step for the life of the task, each time paying a full extraction.
+    if (note !== null) note = cap(note, EXPANSION_NOTE_CHARS);
     await db
       .update(schema.taskAttachments)
       .set({ expandedAt: new Date(), expansionNote: note })
