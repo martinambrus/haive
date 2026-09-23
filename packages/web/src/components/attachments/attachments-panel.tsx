@@ -12,6 +12,7 @@ import {
   uploadTaskAttachment,
   type TaskAttachment,
 } from '@/lib/api-client';
+import { deleteAttachmentConfirmation, deleteFolderConfirmation } from '@/lib/attachment-delete';
 import { pollForExpansion } from '@/lib/attachment-expansion';
 import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
@@ -122,7 +123,7 @@ export function AttachmentsPanel({
   }
 
   async function onDelete(id: string) {
-    if (!confirm('Remove this attachment? The agent will no longer see it.')) return;
+    if (!confirm(deleteAttachmentConfirmation(items ?? [], id))) return;
     setDeletingId(id);
     try {
       await deleteTaskAttachment(taskId, id);
@@ -134,8 +135,8 @@ export function AttachmentsPanel({
     }
   }
 
-  async function onDeleteFolder(name: string, count: number) {
-    if (!confirm(`Remove the folder "${name}" and all ${count} file(s) in it?`)) return;
+  async function onDeleteFolder(name: string) {
+    if (!confirm(deleteFolderConfirmation(items ?? [], name))) return;
     setDeletingId(name);
     try {
       await deleteTaskAttachmentFolder(taskId, name);
@@ -270,7 +271,7 @@ export function AttachmentsPanel({
                 size="sm"
                 variant="secondary"
                 disabled={deletingId === folder.name}
-                onClick={() => void onDeleteFolder(folder.name, folder.items.length)}
+                onClick={() => void onDeleteFolder(folder.name)}
               >
                 {deletingId === folder.name ? 'Removing...' : 'Remove folder'}
               </Button>
