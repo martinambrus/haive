@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import JSZip from 'jszip';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
 import {
   classifyPlanInput,
   docxToMarkdown,
@@ -326,6 +327,47 @@ describe('the plan-inputs step', () => {
     // from_repo reads the knowledge base; it needs neither a brief nor a file.
     const out = await apply(detected({ greenfield: false }));
     expect(out.hasImageInputs).toBe(false);
+  });
+});
+
+describe('the archive notes the step carries', () => {
+  it('takes them from the column, so a retry after the expansion keeps them', async () => {
+    const note = '1 archive member(s) were not extracted (1 symlink(s)): bundle/escape';
+    const stored = (filename: string) => ({
+      filename,
+      storedPath: `/repo/.haive/task-uploads/t1/${filename}`,
+      contentType: null,
+      description: null,
+    });
+    const rows = [
+      { ...stored('bundle.zip'), expandedAt: new Date(), expansionNote: note },
+      { ...stored('bundle/readme.md'), expandedAt: null, expansionNote: null },
+    ];
+    const db = {
+      // Already stamped, so the expansion call finds nothing to do and reports no notes — the retry.
+      query: { taskAttachments: { findMany: async () => [] } },
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () =>
+            table === schema.tasks
+              ? {
+                  limit: async () => [{ description: 'a brief', metadata: {}, repositoryId: 'r1' }],
+                }
+              : { orderBy: async () => rows },
+        }),
+      }),
+    };
+    const ctx = {
+      taskId: 't1',
+      repoPath: '/repo',
+      db,
+      logger: { warn() {} },
+      emitProgress: async () => {},
+    } as never;
+
+    const d = await planInputsStep.detect!(ctx);
+    expect(d.archiveNotes).toEqual([{ filename: 'bundle.zip', note }]);
+    expect(d.attachments).toEqual([stored('bundle.zip'), stored('bundle/readme.md')]);
   });
 });
 

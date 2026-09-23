@@ -241,10 +241,22 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         storedPath: schema.taskAttachments.storedPath,
         contentType: schema.taskAttachments.contentType,
         description: schema.taskAttachments.description,
+        expandedAt: schema.taskAttachments.expandedAt,
+        expansionNote: schema.taskAttachments.expansionNote,
       })
       .from(schema.taskAttachments)
       .where(eq(schema.taskAttachments.taskId, ctx.taskId))
       .orderBy(asc(schema.taskAttachments.createdAt));
+
+    // From the column, not only from this call: the call reports just the archives IT expanded, so
+    // a retry — which runs after the expansion was stamped — would rewrite the index without them.
+    // This call's own notes are still merged in, for an archive whose stamp failed to land.
+    const archiveNotes = rows
+      .filter((r) => r.expandedAt !== null && Boolean(r.expansionNote))
+      .map((r) => ({ filename: r.filename, note: r.expansionNote as string }));
+    for (const n of expansion.notes) {
+      if (!archiveNotes.some((a) => a.filename === n.filename)) archiveNotes.push(n);
+    }
 
     await ctx.emitProgress(
       rows.length === 0 ? 'No attached files.' : `Checking ${rows.length} attached file(s)...`,
@@ -280,9 +292,15 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         task?.repositoryId && rows.length > 0
           ? path.join(ctx.repoPath, '.haive', 'task-uploads', ctx.taskId)
           : null,
-      attachments: rows,
+      // The persisted detect payload keeps its shape: the two expansion columns are read, not carried.
+      attachments: rows.map(({ filename, storedPath, contentType, description }) => ({
+        filename,
+        storedPath,
+        contentType,
+        description,
+      })),
       missing,
-      archiveNotes: expansion.notes,
+      archiveNotes,
     };
   },
 
