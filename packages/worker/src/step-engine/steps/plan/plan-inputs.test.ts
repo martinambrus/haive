@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -327,6 +327,80 @@ describe('the plan-inputs step', () => {
     // from_repo reads the knowledge base; it needs neither a brief nor a file.
     const out = await apply(detected({ greenfield: false }));
     expect(out.hasImageInputs).toBe(false);
+  });
+});
+
+describe('a sidecar written while its document is deleted', () => {
+  // `00-plan-inputs` checks for the row AFTER writing, and the api removes sidecars again after
+  // deleting it, so whichever comes last, one of the two sees the other.
+  async function extractOne(stillAttached: boolean) {
+    const repo = await mkdtemp(path.join(dir, 'repo-'));
+    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
+    await mkdir(uploads, { recursive: true });
+    const zip = new JSZip();
+    zip.file('word/document.xml', docxDocument('<w:p><w:r><w:t>The spec.</w:t></w:r></w:p>'));
+    const file = path.join(uploads, 'spec.docx');
+    await writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }));
+    const asked: unknown[] = [];
+    const ctx = {
+      taskId: 't1',
+      repoPath: repo,
+      db: {
+        query: {
+          taskAttachments: {
+            findFirst: async (opts: unknown) => {
+              asked.push(opts);
+              return stillAttached ? { id: 'a1' } : undefined;
+            },
+          },
+        },
+      },
+      logger: { warn() {} },
+      emitProgress: async () => {},
+    } as never;
+    const out = await planInputsStep.apply(ctx, {
+      detected: {
+        greenfield: true,
+        briefLength: 0,
+        uploadsDir: uploads,
+        attachments: [
+          {
+            id: 'a1',
+            filename: 'spec.docx',
+            storedPath: file,
+            contentType: null,
+            description: null,
+          },
+        ],
+        missing: [],
+      },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    const sidecar = path.join(uploads, 'spec.docx.extracted.md');
+    return {
+      out,
+      asked,
+      sidecar: await lstat(sidecar).then(
+        () => readFile(sidecar, 'utf8'),
+        () => null,
+      ),
+    };
+  }
+
+  it('takes it back when the row is gone, and leaves the document out of the index', async () => {
+    const { out, asked, sidecar } = await extractOne(false);
+    expect(asked).toHaveLength(1);
+    expect(sidecar).toBeNull();
+    expect(out.inputs).toEqual([]);
+    expect(out.indexPath).toBeNull();
+  });
+
+  it('keeps it while the row is still there', async () => {
+    const { out, sidecar } = await extractOne(true);
+    expect(sidecar).toContain('The spec.');
+    expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
   });
 });
 

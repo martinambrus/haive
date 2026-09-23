@@ -825,7 +825,19 @@ parses `unzip -Z`/`tar -tv` human-facing output, and a bomb is exactly the input
 it. `expanded_at` is stamped whatever happened, or a failed archive is re-extracted on every
 step for the life of the task; `expanded_from_id` cascades the rows AND is what makes "nested
 archives are not recursed" structural (a row with a parent is never a candidate). The FK
-cannot reach the disk, so the api's delete removes the expansion DIRECTORY too — an orphaned
+cannot reach the disk, so a delete removes what the attachment left there too
+(`filesToRemove`): an archive's MEMBERS, which a folder delete has to reach at the uploads ROOT
+(`docs/x.zip` expands into `x/`), and each document's extracted-text SIDECAR. It removes FILES,
+never a directory, and a folder goes only by pruning once it is empty: a recursive removal takes
+whatever else lives there — a later upload named like the expansion directory lands inside it (the
+api de-dupes files, not directories), and an upload racing the delete has its file on disk before
+its row exists, where no list of rows can see it. That makes the rows the whole inventory, and two
+rules keep them so: an upload may not take a name ending in `.extracted.md` (a delete unlinks a
+document's sidecar path whether or not the sidecar exists yet), and the expansion takes a placed
+member back off the disk when its row cannot be written. A sidecar `00-plan-inputs` writes while
+the delete runs is caught from both sides: the api removes sidecar paths again once the row is
+gone, and the worker looks for the row only after writing, so whichever comes last sees the other.
+Neither may be left: an orphaned
 tree stays bind-mounted, and an agent would keep reading files the user believes they removed.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the

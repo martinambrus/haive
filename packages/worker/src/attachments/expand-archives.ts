@@ -354,16 +354,23 @@ export async function ensureArchivesExpanded(
               continue;
             }
             const stored = await placeFile(anchor, uploadsRel, relPath, `${tmpRel}/${file.rel}`);
-            await db.insert(schema.taskAttachments).values({
-              taskId,
-              userId: archive.userId,
-              filename: stored,
-              storedPath: path.join(uploadsDir, stored),
-              sizeBytes: file.size,
-              contentType: null,
-              description: null,
-              expandedFromId: archive.id,
-            });
+            try {
+              await db.insert(schema.taskAttachments).values({
+                taskId,
+                userId: archive.userId,
+                filename: stored,
+                storedPath: path.join(uploadsDir, stored),
+                sizeBytes: file.size,
+                contentType: null,
+                description: null,
+                expandedFromId: archive.id,
+              });
+            } catch (err) {
+              // A delete removes what ROWS name, so a placed file with none would outlive the
+              // archive's delete, still mounted in the sandbox. Take it back before failing.
+              await removeNoFollow(anchor, `${uploadsRel}/${stored}`).catch(() => {});
+              throw err;
+            }
             added += 1;
           }
           // Both halves are reported: what extraction dropped, and anything the walk still skipped

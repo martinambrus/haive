@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { taskUploadsRel } from '@haive/shared';
+import { planInputSidecarName, taskUploadsRel } from '@haive/shared';
 
 const exec = promisify(execFile);
 
@@ -449,10 +449,10 @@ export async function extractPlanInput(
   }
 }
 
-/** Sidecar name for an original. Suffixed rather than extension-swapped so
- *  `spec.docx` and `spec.xlsx` cannot collide on one `spec.md`. */
+/** Sidecar name for an original. The rule lives in `@haive/shared` because the api's delete has
+ *  to find the sidecar too. */
 export function sidecarName(filename: string): string {
-  return `${filename}.extracted.md`;
+  return planInputSidecarName(filename);
 }
 
 /**

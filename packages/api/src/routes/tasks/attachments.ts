@@ -11,6 +11,8 @@ import {
   configService,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
+  PLAN_INPUT_SIDECAR_SUFFIX,
+  PLAN_INPUTS_INDEX_NAME,
   renderAttachmentsManifest,
   sanitizeAttachmentPath,
   splitAttachmentPath,
@@ -27,6 +29,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { filesToRemove } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -49,10 +52,10 @@ const NODE_GID = 1000;
 /** Names the uploads dir owns. An upload allowed to take one of these is
  *  overwritten the next time that file is generated — the user's document
  *  silently replaced by our index, with their attachment row still pointing at
- *  it. `_PLAN_INPUTS.md` is written by the worker's 00-plan-inputs step; it is
- *  listed here rather than imported because the api must not depend on the
- *  worker, and a name the api hands out is a name the api has to reserve. */
-const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, '_PLAN_INPUTS.md']);
+ *  it. The plan-inputs index is the worker's `00-plan-inputs` output; its name
+ *  lives in `@haive/shared` so the api can reserve it without depending on the
+ *  worker. */
+const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, PLAN_INPUTS_INDEX_NAME]);
 
 /** Resolve the task's on-disk uploads dir, enforcing ownership + a writable
  *  volume-backed repo. Throws 404/409 with an actionable message otherwise.
@@ -172,7 +175,11 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
 /** De-dupe within the file's OWN directory by appending ` (n)` before the
  *  extension, and create that directory. Per-directory because two folders'
  *  `README.md` are two documents, not a collision. Reserved names bite only at
- *  the root, which is where the generated indexes live. */
+ *  the root, which is where the generated indexes live. A sidecar's name is
+ *  reserved at every depth: the worker writes `<doc>.extracted.md` beside its
+ *  document wherever that sits, and a delete of the document unlinks that path
+ *  whether or not the sidecar exists yet, so an upload holding it would be
+ *  overwritten by the extraction or unlinked by a delete that raced it. */
 async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
@@ -180,7 +187,8 @@ async function createUniqueAttachment(
 ): Promise<{ rel: string; fh: FileHandle }> {
   const { dir: relDir, base } = splitAttachmentPath(relPath);
   await ensureDirTree(anchor, uploadsRel, relDir);
-  const reserved = (name: string): boolean => relDir === '' && RESERVED_NAMES.has(name);
+  const reserved = (name: string): boolean =>
+    (relDir === '' && RESERVED_NAMES.has(name)) || name.endsWith(PLAN_INPUT_SIDECAR_SUFFIX);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
@@ -227,6 +235,40 @@ async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string
     }
     cursor = splitAttachmentPath(cursor).dir;
   }
+}
+
+/** Remove what `filesToRemove` lists. Walked under the repository root like every other removal
+ *  here, so a link in a path is refused rather than followed, and a file already gone is fine. */
+async function removeFiles(anchor: string, uploadsRel: string, files: readonly string[]) {
+  for (const file of files) {
+    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
+  }
+}
+
+/** Remove the listed sidecars AGAIN, once the rows are gone. `00-plan-inputs` may have been
+ *  extracting one of these documents during the first pass and written its sidecar after it; the
+ *  worker checks for the row only after writing, so whichever comes last, one of the two sees the
+ *  other. Only sidecar paths get a second pass: no upload can hold such a name (see
+ *  `createUniqueAttachment`), whereas an original's name is free again the moment the first pass
+ *  unlinks it, and an upload could already have taken it. */
+async function removeLateSidecars(anchor: string, uploadsRel: string, files: readonly string[]) {
+  await removeFiles(
+    anchor,
+    uploadsRel,
+    files.filter((f) => f.endsWith(PLAN_INPUT_SIDECAR_SUFFIX)),
+  );
+}
+
+/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
+ *  the children that kept it alive. */
+async function pruneAfter(
+  anchor: string,
+  uploadsRel: string,
+  removed: readonly string[],
+): Promise<void> {
+  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
+  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
 }
 
 /** Stream the request body to `destPath`, aborting + unlinking once the byte count
@@ -519,28 +561,21 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
 
-  // Files this row produced by being expanded. Their ROWS cascade on the delete
-  // below, but the FK cannot reach the disk — and an orphaned tree stays
-  // bind-mounted into the sandbox, so an agent would keep reading files the user
-  // believes they removed. Every child lives under one directory (the expansion
-  // dir), which is what gets removed, sidecars and all.
-  const children = await db.query.taskAttachments.findMany({
-    where: eq(schema.taskAttachments.expandedFromId, attachmentId),
-    columns: { filename: true },
-    limit: 1,
+  // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on the
+  // delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox, so an
+  // agent would keep reading files the user believes they removed.
+  const rows = await db.query.taskAttachments.findMany({
+    where: and(
+      eq(schema.taskAttachments.taskId, taskId),
+      eq(schema.taskAttachments.userId, userId),
+    ),
+    columns: { id: true, filename: true, expandedFromId: true },
   });
-  const expansionDir = children[0]
-    ? (splitAttachmentPath(children[0].filename).dir.split('/')[0] ?? '')
-    : '';
-  if (expansionDir !== '') {
-    await removeNoFollow(anchor, `${uploadsRel}/${expansionDir}`, { recursive: true }).catch(
-      () => {},
-    );
-  }
-
-  await removeNoFollow(anchor, split.rel).catch(() => {});
+  const files = filesToRemove(new Set([attachmentId]), rows);
+  await removeFiles(anchor, uploadsRel, files);
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-  await pruneEmptyDirs(anchor, uploadsRel, splitAttachmentPath(row.filename).dir);
+  await removeLateSidecars(anchor, uploadsRel, files);
+  await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true });
 });
@@ -570,19 +605,19 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const split = splitAttachmentStoredPath(marked[0]!, taskId);
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
-  // Recursive on purpose: the tree also holds the worker's extracted sidecars,
-  // which carry no row of their own and are meaningless once the originals go.
-  // The prefix is walked under the repository root, so no resolve-then-compare check is
-  // needed — a component that is a link is refused by the walk rather than resolved and
-  // then trusted.
-  await removeNoFollow(anchor, `${uploadsRel}/${prefix}`, { recursive: true }).catch(() => {});
+  // File by file, and the folder goes by pruning once it is empty: a recursive removal would also
+  // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
+  // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the folder.
+  const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
+  await removeFiles(anchor, uploadsRel, files);
   await db.delete(schema.taskAttachments).where(
     inArray(
       schema.taskAttachments.id,
       marked.map((r) => r.id),
     ),
   );
-  await pruneEmptyDirs(anchor, uploadsRel, splitAttachmentPath(prefix).dir);
+  await removeLateSidecars(anchor, uploadsRel, files);
+  await pruneAfter(anchor, uploadsRel, files);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true, removed: marked.length });
 });

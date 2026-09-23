@@ -2,11 +2,12 @@ import {
   chmodNoFollow,
   chownNoFollow,
   lstatNoFollow,
+  removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
+import { PLAN_INPUTS_INDEX_NAME, splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
 import path from 'node:path';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { ensureArchivesExpanded } from '../../../attachments/expand-archives.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
@@ -48,7 +49,7 @@ import {
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
-export const PLAN_INPUTS_INDEX = '_PLAN_INPUTS.md';
+export const PLAN_INPUTS_INDEX = PLAN_INPUTS_INDEX_NAME;
 
 /** Documents given an extracted text sidecar. Each one is a subprocess
  *  (`pdftotext`, `unzip`), which is fine for the handful this step was built for
@@ -87,6 +88,9 @@ export interface PlanInputsDetect {
   briefLength: number;
   uploadsDir: string | null;
   attachments: {
+    /** The row, for the check after a sidecar is written. Optional: a detect payload persisted
+     *  before it was recorded has none, and is checked by filename instead. */
+    id?: string;
     filename: string;
     storedPath: string;
     contentType: string | null;
@@ -120,6 +124,29 @@ export interface PlanInputsApply {
   /** Archives that could not be fully expanded, carried through so the step's
    *  output records it and the index can say so. */
   archiveNotes: { filename: string; note: string }[];
+}
+
+/** Whether the attachment is still on the task. A failed lookup answers yes: keeping the sidecar
+ *  is what happened before this check existed, and the api's second pass still covers a delete. */
+async function stillAttached(
+  ctx: StepContext,
+  a: { id?: string; filename: string },
+): Promise<boolean> {
+  try {
+    const row = await ctx.db.query.taskAttachments.findFirst({
+      where: a.id
+        ? eq(schema.taskAttachments.id, a.id)
+        : and(
+            eq(schema.taskAttachments.taskId, ctx.taskId),
+            eq(schema.taskAttachments.filename, a.filename),
+          ),
+      columns: { id: true },
+    });
+    return row !== undefined;
+  } catch (err) {
+    ctx.logger.warn({ err, file: a.filename }, 'plan inputs: could not recheck an attachment');
+    return true;
+  }
 }
 
 /** Best-effort: the api chowns what it writes for the same reason, and a failure
@@ -237,6 +264,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     }
     const rows = await ctx.db
       .select({
+        id: schema.taskAttachments.id,
         filename: schema.taskAttachments.filename,
         storedPath: schema.taskAttachments.storedPath,
         contentType: schema.taskAttachments.contentType,
@@ -292,8 +320,9 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         task?.repositoryId && rows.length > 0
           ? path.join(ctx.repoPath, '.haive', 'task-uploads', ctx.taskId)
           : null,
-      // The persisted detect payload keeps its shape: the two expansion columns are read, not carried.
-      attachments: rows.map(({ filename, storedPath, contentType, description }) => ({
+      // The two expansion columns are read, not carried in the persisted detect payload.
+      attachments: rows.map(({ id, filename, storedPath, contentType, description }) => ({
+        id,
         filename,
         storedPath,
         contentType,
@@ -403,6 +432,13 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
             // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here,
             // and passing it to the primitive would make a non-root worker fail the whole step.
             await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
+            // A delete can land while the extraction runs. The api removes sidecars again once the
+            // row is gone and this looks for the row only after writing, so whichever comes last,
+            // one of the two sees the other and the text does not outlive its document.
+            if (!(await stillAttached(ctx, attachment))) {
+              await removeNoFollow(ctx.repoPath, sidecarRel).catch(() => {});
+              continue;
+            }
             await harmonizeOwnership(ctx.repoPath, sidecarRel);
             row.sidecar = name;
             // The extractor's own verdict on its INPUT, never a test on the string

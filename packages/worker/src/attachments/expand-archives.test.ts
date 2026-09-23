@@ -15,14 +15,15 @@ const exec = promisify(execFile);
 
 /** Rows the module reads, plus the two writes it makes. Drizzle's builders are
  *  stubbed to the exact shape this module calls — anything else would be a
- *  different module's contract. */
-function stubDb(rows: Record<string, unknown>[]) {
+ *  different module's contract. `failInsertAt` makes that insert (0-based) throw. */
+function stubDb(rows: Record<string, unknown>[], opts: { failInsertAt?: number } = {}) {
   const inserted: Record<string, unknown>[] = [];
   const updated: Record<string, unknown>[] = [];
   const db = {
     query: { taskAttachments: { findMany: async () => rows } },
     insert: () => ({
       values: async (v: Record<string, unknown>) => {
+        if (inserted.length === opts.failInsertAt) throw new Error('insert failed');
         inserted.push(v);
       },
     }),
@@ -153,6 +154,26 @@ describe('ensureArchivesExpanded', () => {
     expect(updated[0]?.expandedAt).toBeInstanceOf(Date);
     // The temp extraction dir never survives the call.
     expect((await readdir(uploads)).some((n) => n.startsWith('.expanding-'))).toBe(false);
+  });
+
+  it('takes a member back off the disk when its row cannot be written', async () => {
+    // A delete removes what ROWS name, so a placed file with none would outlive the archive's
+    // delete, still mounted in the sandbox.
+    const uploads = await uploadsDir();
+    await tarball(uploads, 'spec.tar', async (src) => {
+      await writeFile(path.join(src, 'a.md'), 'a');
+      await writeFile(path.join(src, 'b.md'), 'b');
+    });
+    const { db, inserted, updated } = stubDb([archiveRow(uploads, 'spec.tar')], {
+      failInsertAt: 1,
+    });
+
+    await ensureArchivesExpanded(db, 'task-1');
+
+    expect(inserted).toHaveLength(1);
+    const onDisk = (await readdir(path.join(uploads, 'spec'))).map((n) => `spec/${n}`);
+    expect(onDisk).toEqual(inserted.map((r) => r.filename));
+    expect(updated[0]?.expansionNote).toBe('could not be expanded: insert failed');
   });
 
   it('drops symlinks instead of following them, and says how many', async () => {

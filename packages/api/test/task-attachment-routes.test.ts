@@ -191,6 +191,9 @@ function createFakeDb() {
     }
   }
 
+  /** Test-side only: something that happens the moment a row is gone, such as a worker write. */
+  const hooks: { afterDelete: (() => Promise<void>) | null } = { afterDelete: null };
+
   const api = (table: PgTable) => ({
     findFirst: async (opts?: Record<string, unknown>) => select(table, opts)[0],
     findMany: async (opts?: Record<string, unknown>) => select(table, opts),
@@ -207,9 +210,13 @@ function createFakeDb() {
         values: (values: Row) => ({ returning: async () => [insert(table, values)] }),
       }),
       delete: (table: PgTable) => ({
-        where: async (cond: unknown) => remove(table, compileWhere(table, cond)),
+        where: async (cond: unknown) => {
+          remove(table, compileWhere(table, cond));
+          await hooks.afterDelete?.();
+        },
       }),
     },
+    hooks,
     insert,
     patch,
     rows: (table: PgTable): Row[] => select(table, {}),
@@ -467,6 +474,20 @@ describe('task attachment routes', () => {
         'docs/_ATTACHMENTS.md',
       ]);
       expect(await exists(up('_PLAN_INPUTS.md'))).toBe(false);
+    });
+
+    it('never takes a sidecar’s name, at any depth', async () => {
+      // The worker writes `<doc>.extracted.md` beside its document wherever that sits, and a delete of
+      // the document unlinks that path whether or not the sidecar exists yet. An upload holding the
+      // name would be overwritten by the extraction, or unlinked by a delete that raced it.
+      const names: unknown[] = [];
+      for (const name of ['x.docx.extracted.md', 'docs/a.pdf.extracted.md']) {
+        const res = await upload(name, 'mine');
+        expect(res.status).toBe(201);
+        names.push((res.body?.attachment as Row).filename);
+      }
+      expect(names).toEqual(['x.docx.extracted (2).md', 'docs/a.pdf.extracted (2).md']);
+      expect(await exists(up('x.docx.extracted.md'))).toBe(false);
     });
 
     it('treats a link at the name as taken and writes nothing through it', async () => {
@@ -754,6 +775,66 @@ describe('task attachment routes', () => {
       expect(await indexed()).toEqual(['other.zip', 'keep.md', 'other/c.md']);
     });
 
+    it('takes a document’s extracted text with it', async () => {
+      const doc = await seedFile('spec.docx', 'docx');
+      await plantSidecar('spec.docx');
+      expect(await send('DELETE', `/${TASK}/attachments/${doc.id as string}`)).toEqual({
+        status: 200,
+        body: { ok: true },
+      });
+      expect(await exists(up('spec.docx.extracted.md'))).toBe(false);
+    });
+
+    it('prunes a folder its sidecar would otherwise keep alive', async () => {
+      const doc = await seedFile('docs/spec.pdf', 'pdf');
+      await plantSidecar('docs/spec.pdf');
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await exists(up('docs'))).toBe(false);
+    });
+
+    it('removes a sidecar the worker wrote while the delete was running', async () => {
+      // `00-plan-inputs` can be extracting this document as it is deleted, and so write the sidecar
+      // after the first pass. The api removes sidecars again once the row is gone, and the worker
+      // checks for the row after writing, so whichever comes last, one of the two sees the other.
+      const doc = await seedFile('spec.docx', 'docx');
+      fake.hooks.afterDelete = () => writeFile(up('spec.docx.extracted.md'), '# late');
+
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await exists(up('spec.docx.extracted.md'))).toBe(false);
+    });
+
+    it('keeps an upload that merely has the sidecar’s name', async () => {
+      const doc = await seedFile('x.docx', 'docx');
+      await seedFile('x.docx.extracted.md', 'mine');
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await readFile(up('x.docx.extracted.md'), 'utf8')).toBe('mine');
+      expect(filenames()).toEqual(['x.docx.extracted.md']);
+    });
+
+    it('takes an archive apart member by member when a later upload lives in its folder', async () => {
+      const bundle = await seedArchive('bundle.zip', { 'bundle/a.md': 'a' });
+      await plantSidecar('bundle/a.md');
+      // A folder upload whose top level matches the expansion directory lands inside it.
+      await seedFile('bundle/mine.md', 'mine');
+
+      await send('DELETE', `/${TASK}/attachments/${bundle.id as string}`);
+      expect(await exists(up('bundle/a.md'))).toBe(false);
+      expect(await exists(up('bundle/a.md.extracted.md'))).toBe(false);
+      expect(await readFile(up('bundle/mine.md'), 'utf8')).toBe('mine');
+      expect(filenames()).toEqual(['bundle/mine.md']);
+    });
+
+    it('leaves a file that reached the expansion folder after the delete read its rows', async () => {
+      // An upload racing the delete: its file is on disk and its row is not written yet, which is
+      // exactly what the delete's snapshot cannot see. Nothing no deleted row names may go.
+      const bundle = await seedArchive('bundle.zip', { 'bundle/a.md': 'a' });
+      await writeFile(up('bundle/late.md'), 'late');
+
+      await send('DELETE', `/${TASK}/attachments/${bundle.id as string}`);
+      expect(await exists(up('bundle/a.md'))).toBe(false);
+      expect(await readFile(up('bundle/late.md'), 'utf8')).toBe('late');
+    });
+
     it('deletes the row of a file that is already gone', async () => {
       const res = await upload('a.md', 'x');
       await rm(up('a.md'));
@@ -806,6 +887,44 @@ describe('task attachment routes', () => {
       expect(await exists(up('docs'))).toBe(false);
       expect(filenames()).toEqual(['d.md']);
       expect(await indexed()).toEqual(['d.md']);
+    });
+
+    it('also removes the expansion tree of an archive inside the folder, which sits at the root', async () => {
+      await seedArchive('docs/x.zip', { 'x/a.md': 'a' });
+      await seedFile('docs/readme.md', 'r');
+      await seedArchive('y.zip', { 'y/b.md': 'b' });
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 2 },
+      });
+      expect(await exists(up('x'))).toBe(false);
+      expect(await readFile(up('y/b.md'), 'utf8')).toBe('b');
+      expect(filenames()).toEqual(['y.zip', 'y/b.md']);
+    });
+
+    it('leaves a file that reached the folder or an archive’s tree after the delete read its rows', async () => {
+      await seedArchive('docs/x.zip', { 'x/a.md': 'a' });
+      await seedFile('docs/readme.md', 'r');
+      await writeFile(up('docs/late.md'), 'late');
+      await writeFile(up('x/late.md'), 'late');
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 2 },
+      });
+      expect(await exists(up('docs/readme.md'))).toBe(false);
+      expect(await exists(up('x/a.md'))).toBe(false);
+      expect(await readFile(up('docs/late.md'), 'utf8')).toBe('late');
+      expect(await readFile(up('x/late.md'), 'utf8')).toBe('late');
+    });
+
+    it('removes a sidecar the worker wrote while the folder delete was running', async () => {
+      await seedFile('docs/spec.pdf', 'pdf');
+      fake.hooks.afterDelete = () => writeFile(up('docs/spec.pdf.extracted.md'), '# late');
+
+      await send('DELETE', `/${TASK}/attachments?prefix=docs`);
+      expect(await exists(up('docs'))).toBe(false);
     });
 
     it('prunes a parent the folder leaves empty', async () => {
