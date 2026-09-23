@@ -23,7 +23,6 @@ const exec = promisify(execFile);
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
-import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
@@ -735,11 +734,7 @@ export function createPlanBuildStep(
             roleKey: 'outline',
             capabilities: planAgentCapabilities(live),
             preferVision: live.hasPdfInputs === true,
-            prompt: await augmentPromptWithAttachments(
-              ctx.db,
-              ctx.taskId,
-              buildRootPrompt(live, formValues),
-            ),
+            prompt: buildRootPrompt(live, formValues),
           },
         ];
       },
@@ -934,25 +929,19 @@ export function createPlanBuildStep(
         // index is compacted before provider selection, so this contract is the
         // same for every supported CLI.
         const live = await withLiveInputs(ctx, d);
-        const dispatches = await Promise.all(
-          slice.map(async (node) => ({
-            agentId: `plan-expand-${node.id}-p${nextWave}`,
-            agentTitle: `Expand: ${node.title}`,
-            roleKey: 'expand',
-            capabilities: planAgentCapabilities(live),
-            preferVision: live.hasPdfInputs === true,
-            prompt: await augmentPromptWithAttachments(
-              ctx.db,
-              ctx.taskId,
-              buildExpandPrompt(
-                live,
-                args.formValues,
-                node,
-                buildPlanExpansionContext(nodes, node),
-              ),
-            ),
-          })),
-        );
+        const dispatches = slice.map((node) => ({
+          agentId: `plan-expand-${node.id}-p${nextWave}`,
+          agentTitle: `Expand: ${node.title}`,
+          roleKey: 'expand',
+          capabilities: planAgentCapabilities(live),
+          preferVision: live.hasPdfInputs === true,
+          prompt: buildExpandPrompt(
+            live,
+            args.formValues,
+            node,
+            buildPlanExpansionContext(nodes, node),
+          ),
+        }));
         throw new MiningWaveError(
           dispatches,
           `next plan level: ${dispatches.length} node(s) to expand`,

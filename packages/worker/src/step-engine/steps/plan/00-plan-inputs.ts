@@ -282,8 +282,11 @@ export interface LiveAttachments {
   names: ReadonlySet<string>;
 }
 
-/** The task's attachments as they stand, or null when they cannot be read. */
+/** The task's attachments as they stand, or null when they cannot be read. An archive attached late
+ *  is expanded first, so what a dispatch requires is chosen from its members — a wireframe inside a
+ *  `.zip` — and not from one opaque `binary` file. */
 export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachments | null> {
+  await ensureArchivesExpanded(ctx.db, ctx.taskId);
   try {
     const rows = await ctx.db
       .select({

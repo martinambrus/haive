@@ -7,7 +7,6 @@ import type { PlanNodeSkeleton } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
-import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   APPLY_FAILURE_PREFIX,
@@ -731,8 +730,7 @@ async function refreshPlanMirror(ctx: StepContext, repositoryId: string): Promis
   }
 }
 
-async function buildAutomaticConvergenceWave(
-  ctx: StepContext,
+function buildAutomaticConvergenceWave(
   detected: CoverageDetect,
   nodes: PlanNodeSkeleton[],
   frontier: PlanNodeSkeleton[],
@@ -752,23 +750,17 @@ async function buildAutomaticConvergenceWave(
       brief: '',
       repoName: 'this project',
     } satisfies PlanBuildDetect);
-  return Promise.all(
-    slice.map(async (node) => ({
-      agentId: continuationAgentId(detected.continuationBatch, node.id, wave),
-      agentTitle: `Assess: ${node.title}`,
-      roleKey: 'expand',
-      prompt: await augmentPromptWithAttachments(
-        ctx.db,
-        ctx.taskId,
-        buildExpandPrompt(
-          buildDetect,
-          detected.buildFormValues,
-          node,
-          buildPlanExpansionContext(nodes, node),
-        ),
-      ),
-    })),
-  );
+  return slice.map((node) => ({
+    agentId: continuationAgentId(detected.continuationBatch, node.id, wave),
+    agentTitle: `Assess: ${node.title}`,
+    roleKey: 'expand',
+    prompt: buildExpandPrompt(
+      buildDetect,
+      detected.buildFormValues,
+      node,
+      buildPlanExpansionContext(nodes, node),
+    ),
+  }));
 }
 
 export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
@@ -951,7 +943,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       const state = continuationState(coverageRows);
       const agentsUsed = state.agentsByBatch.get(d.continuationBatch) ?? 0;
       const wave = (state.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;
-      return buildAutomaticConvergenceWave(ctx, d, nodes, frontier, agentsUsed, wave);
+      return buildAutomaticConvergenceWave(d, nodes, frontier, agentsUsed, wave);
     },
   },
 
@@ -1022,8 +1014,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
               'automatic semantic-review safety budget reached; frontier remains',
             );
           }
-          const dispatches = await buildAutomaticConvergenceWave(
-            ctx,
+          const dispatches = buildAutomaticConvergenceWave(
             automaticDetected,
             nodes,
             frontier,
@@ -1167,14 +1158,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     // Every assessor derives a bounded view from the same live node snapshot.
     // It first decides whether the leaf is already taskable and only then
     // decomposes it; compaction and breadth enforcement are provider-neutral.
-    const dispatches = await buildAutomaticConvergenceWave(
-      ctx,
-      d,
-      nodes,
-      frontier,
-      agentsUsed,
-      nextWave,
-    );
+    const dispatches = buildAutomaticConvergenceWave(d, nodes, frontier, agentsUsed, nextWave);
     if (dispatches.length === 0) {
       throw new Error('Automatic plan convergence found a frontier but could not build a wave.');
     }

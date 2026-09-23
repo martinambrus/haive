@@ -234,18 +234,20 @@ function builtEntries(source: PromptSource, built: string | BuiltPrompt[]): Buil
  * `step-runner` re-dispatches through `resolveTaskDispatch` exactly like a first wave.
  *
  * Eight wave sites exist across five steps, and every one of their prompt TEMPLATES is now scanned.
- * MEASURED by reading each throw site's dispatch array: 08c:1357 `buildRefutePrompt`; 08d:1135 and
- * 08d:1244 both `buildVerifyPrompt`; 01-plan-build:849 `buildExpandPrompt`; 03-plan-sequence:883
- * `buildSequencePrompt`; 02-plan-coverage:1076 `buildCoverageRepairPrompt`; and 02-plan-coverage:995
- * and :1138 both `buildAutomaticConvergenceWave`, which wraps `buildExpandPrompt` in
- * `augmentPromptWithAttachments`.
+ * MEASURED by reading each throw site's dispatch array: 08c's `buildRefutePrompt`; 08d's two verify
+ * waves, both `buildVerifyPrompt`; 01-plan-build's expand wave, `buildExpandPrompt`;
+ * 03-plan-sequence's `buildSequencePrompt`; 02-plan-coverage's repair wave,
+ * `buildCoverageRepairPrompt`, and its two convergence waves, both `buildAutomaticConvergenceWave`
+ * over `buildExpandPrompt`.
  *
- * So what those last two leave unscanned is NOT a template but the augmenter's own contribution, which
- * is data-derived (attachment filenames) and cannot hold a fixed agent path — and MEASURED, that
- * module contains no agent-directory literal at all. Two earlier versions of this comment were wrong in
- * the same direction and are corrected rather than annotated: the first claimed six sites "assemble
- * their dispatch arrays inline" (I had read the throws, seen array construction, and not looked
- * inside), the second still said two were out of reach after one of them had been extracted.
+ * No wave builder adds the attachments notice any more: `dispatchMiningAgents` prepends it to every
+ * fan-out at dispatch, beside the ledger and the terseness directive, where this file does not look.
+ * Its contribution is data-derived — attachment filenames and descriptions — and CAN name an agent
+ * path; `agentIsolationApplies` scans the final prompt at dispatch, so such an invocation runs
+ * unisolated, which is the safe direction. Two earlier versions of this comment were wrong in the same
+ * direction and are corrected rather than annotated: the first claimed six sites "assemble their
+ * dispatch arrays inline" (I had read the throws, seen array construction, and not looked inside),
+ * the second still said two were out of reach after one of them had been extracted.
  *
  * 08c's refuter is the one Codex named: read-only (`requiredCapabilities: ['tool_use']`), so the path
  * scan decides its isolation, and it was previously invisible here.
@@ -1470,9 +1472,9 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // as an obvious win. `loadPlanSkeletons` (`shared/src/plan/read.ts:62`) is a drizzle builder chain,
     // so a stub means mimicking `select().from().where().orderBy()` — brittle against any query change.
     // And it would scan NO new text: all three dispatch prompts this file already covers as named
-    // builders (`buildSequencePrompt`, `buildCoverageRepairPrompt`, and `buildExpandPrompt` wrapped in
-    // `augmentPromptWithAttachments`, whose own additions are measured to carry no agent-directory
-    // literal). It would move a counter from 3 to 0 and prove nothing further.
+    // builders (`buildSequencePrompt`, `buildCoverageRepairPrompt` and `buildExpandPrompt`; the
+    // attachments notice joins at dispatch, as the ledger does). It would move a counter from 3 to 0
+    // and prove nothing further.
     expect(selectedNothing).toEqual([
       '00-plan-sequence (mining)',
       '02-plan-coverage (mining)',
@@ -1502,10 +1504,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(unbuildable.filter((label) => namedLabels.includes(label))).toEqual([]);
     // Stated so nobody reads this file as exhaustive. All eight `MiningWaveError` sites have their
     // prompt TEMPLATE scanned above (see the enumeration on NAMED_PROMPT_BUILDERS). What is still
-    // unscanned is what `augmentPromptWithAttachments` adds to 02-plan-coverage's two convergence
-    // waves — data-derived filenames, in a module carrying no agent-directory literal. Executing the
-    // `apply()` bodies to reach it is not the answer: several applies write files, which a unit test
-    // must not do.
+    // unscanned is what the dispatch-time augmenters add to every fan-out — the attachments notice,
+    // the ledger, the terseness directive — which is data-derived: a filename or description can
+    // name an agent path, and `agentIsolationApplies` then runs that invocation unisolated, the safe
+    // direction. Executing the `apply()` bodies to reach it is not the answer: several applies write
+    // files, which a unit test must not do.
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
   });
 

@@ -51,6 +51,8 @@ import { loadPlanImpactContext, planImpactBlock } from './steps/workflow/_plan-i
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
+import { augmentPromptWithAttachments } from './attachments-context.js';
+import { ensureArchivesExpanded } from '../attachments/expand-archives.js';
 import {
   workspaceAnchor,
   worktreeDirName,
@@ -2017,19 +2019,25 @@ export async function resolveDagPhase(
       // says exactly that, and asks for a small edit plus `concerns` rather than a
       // refusal; see the arm's note in `_plan-impact.ts`.
       const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'dag-coder' });
+      // Once per dispatch pass too: what the task has attached, after the same expansion every
+      // other dispatch path runs, so a coder is told about the files as a single-agent step is.
+      // `''` when nothing is attached.
+      await ensureArchivesExpanded(db, ctx.taskId);
+      const attachmentsNotice = await augmentPromptWithAttachments(db, ctx.taskId, '');
       let dispatched = 0;
       for (const issue of undispatched) {
         const issueSpec = await issueSpecText(specView, issue);
-        // This path bypasses resolveLlmPhase's augmentation chain entirely, so the ledger
-        // is applied here directly. (Attachments and terseness are still missing on this
-        // path — a pre-existing gap, not addressed here.)
+        // This path bypasses resolveLlmPhase's augmentation chain entirely, so the attachments
+        // notice and the ledger are applied here directly, in its order. Terseness is not: on the
+        // implementation path it would change what a coder writes, which is a decision of its own.
         const prompt = await augmentPromptWithLedger(
           db,
           ctx.taskId,
-          spec.buildCoderPrompt(
-            coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
-            upstreamDebt,
-          ),
+          attachmentsNotice +
+            spec.buildCoderPrompt(
+              coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
+              upstreamDebt,
+            ),
         );
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {

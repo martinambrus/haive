@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import {
   MiningRetryError,
@@ -131,6 +131,8 @@ function makeMockDb(state: MockState): Database {
       taskSteps: { findFirst: async () => undefined },
       envTemplates: { findFirst: async () => undefined },
       repositories: { findFirst: async () => undefined },
+      // Every fan-out reads what is attached to the task; nothing is, unless a test says so.
+      taskAttachments: { findMany: async () => [] },
     },
   } as unknown as Database;
   return db;
@@ -991,5 +993,100 @@ describe('advanceStep agentMining retry for a wave-dispatched step', () => {
     expect(enqueued).toHaveLength(1);
     const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(invocation?.row.prompt).toContain('review');
+  });
+});
+
+describe('what a mining agent is told about the task', () => {
+  // Every augmenter is a no-op in the other tests here (no attachments, no stored terseness
+  // level), which is exactly why nothing pinned whether a fan-out was augmented at all, or twice.
+  const attached = [
+    {
+      id: 'att-1',
+      taskId: 'task-1',
+      filename: 'brief.pdf',
+      description: null,
+      storedPath: '/elsewhere/brief.pdf',
+      contentType: null,
+      sizeBytes: 1,
+      expandedAt: null,
+      expansionNote: null,
+      expandedFromId: null,
+      createdAt: new Date(),
+    },
+  ];
+  const count = (text: string, needle: string): number => text.split(needle).length - 1;
+  const sentPrompts = (state: MockState): string[] =>
+    state.inserts.filter((i) => i.table === 'cli_invocations').map((i) => String(i.row.prompt));
+
+  beforeEach(() => {
+    const original = configService.get.bind(configService);
+    vi.spyOn(configService, 'get').mockImplementation(async (key) =>
+      key === CONFIG_KEYS.TERSENESS_LEVEL ? 'full' : original(key),
+    );
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function withAttachments(state: MockState): Database {
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.taskAttachments = { findMany: async () => attached };
+    return db as unknown as Database;
+  }
+
+  it('tells every agent of a fan-out what is attached, once', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(withAttachments(state), waveStep([], ['refute-abc', 'refute-def']), []);
+
+    const prompts = sentPrompts(state);
+    expect(prompts).toHaveLength(2);
+    for (const prompt of prompts) {
+      expect(count(prompt, '[User-attached files]')).toBe(1);
+      expect(prompt).toContain('brief.pdf');
+      expect(count(prompt, '## Response style')).toBe(1);
+    }
+  });
+
+  it('sends a recovered agent the prompt its last run sent, without augmenting it again', async () => {
+    // The stored prompt is the text that run SENT, so it already carries every block; putting it
+    // through the augmenters again doubles the notice and the style directive.
+    const recovering = {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-plan-expand-abc-p3',
+        prompt:
+          '[User-attached files]\n  - brief.pdf\n\nexpand node abc\n\n## Response style\nBe concise.',
+      },
+    ];
+    await run(withAttachments(state), recovering, []);
+
+    const [prompt] = sentPrompts(state);
+    expect(prompt).toContain('expand node abc');
+    expect(count(prompt!, '[User-attached files]')).toBe(1);
+    expect(count(prompt!, '## Response style')).toBe(1);
   });
 });
