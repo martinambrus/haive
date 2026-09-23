@@ -17,21 +17,18 @@ export interface GateSimilarSite extends SimilarSite {
   source: string;
 }
 
-export const SIMILAR_SITES_PER_OUTPUT = 30;
 export const SIMILAR_SITES_AT_GATE = 50;
 const SIMILAR_SITE_REASON_CHARS = 200;
 const LINES_PATTERN = /^\d+(-\d+)?(,\s*\d+(-\d+)?)*$/;
 
 /** Keep only well-formed entries from agent output. A path that could not be shown as itself or
- *  that leaves the repository drops the entry; malformed `lines` drops only the range. */
-export function sanitizeSimilarSites(
-  raw: unknown,
-  limit: number = SIMILAR_SITES_PER_OUTPUT,
-): SimilarSite[] {
+ *  that leaves the repository drops the entry; malformed `lines` drops only the range. Nothing is
+ *  capped here: the reply is already stored whole, and the gate is where the list is cut and the
+ *  rest counted. */
+export function sanitizeSimilarSites(raw: unknown): SimilarSite[] {
   if (!Array.isArray(raw)) return [];
   const out: SimilarSite[] = [];
   for (const item of raw) {
-    if (out.length >= limit) break;
     if (!item || typeof item !== 'object') continue;
     const { path, lines, reason } = item as Record<string, unknown>;
     if (typeof path !== 'string') continue;
@@ -73,8 +70,8 @@ export function mergeSimilarSites<T extends SimilarSite>(
 
 /** Every site this task's implementing passes reported, in the order the work ran: the DAG
  *  build's issues, then each round of 07. Re-sanitised on read, since a stored value is only as
- *  good as whatever wrote it, but never capped per source: a DAG issue gathers sites across passes,
- *  and only the merged list's cap is counted in `omitted`. */
+ *  good as whatever wrote it. Only the merged list is capped, and what the cap cuts is counted in
+ *  `omitted`. */
 export async function loadTaskSimilarSites(
   db: Database,
   taskId: string,
@@ -94,7 +91,7 @@ export async function loadTaskSimilarSites(
   let all: GateSimilarSite[] = [];
   for (const issue of issues) {
     const source = `DAG issue ${issue.issueKey}`;
-    const sites = sanitizeSimilarSites(issue.sites, Number.POSITIVE_INFINITY);
+    const sites = sanitizeSimilarSites(issue.sites);
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),
@@ -103,7 +100,7 @@ export async function loadTaskSimilarSites(
   for (const row of rounds) {
     const source = `implementation round ${row.round}`;
     const raw = (row.output as { similarSites?: unknown } | null)?.similarSites;
-    const sites = sanitizeSimilarSites(raw, Number.POSITIVE_INFINITY);
+    const sites = sanitizeSimilarSites(raw);
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import {
   SIMILAR_SITES_AT_GATE,
-  SIMILAR_SITES_PER_OUTPUT,
   loadTaskSimilarSites,
   mergeSimilarSites,
   sanitizeSimilarSites,
@@ -50,10 +49,9 @@ describe('sanitizeSimilarSites', () => {
     expect(site!.reason.length).toBeLessThanOrEqual(200);
   });
 
-  it('caps the list and reads a non-array as none', () => {
-    const many = Array.from({ length: 40 }, (_, i) => ({ path: `f${i}.ts`, reason: '' }));
-    expect(sanitizeSimilarSites(many)).toHaveLength(SIMILAR_SITES_PER_OUTPUT);
-    expect(sanitizeSimilarSites(many, 35)).toHaveLength(35);
+  it('keeps every well-formed entry, however many, and reads a non-array as none', () => {
+    const many = Array.from({ length: 120 }, (_, i) => ({ path: `f${i}.ts`, reason: '' }));
+    expect(sanitizeSimilarSites(many)).toHaveLength(120);
     expect(sanitizeSimilarSites('src/a.ts')).toEqual([]);
     expect(sanitizeSimilarSites(undefined)).toEqual([]);
   });
