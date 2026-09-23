@@ -1,16 +1,21 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
-import { schema, withTaskAttachmentsLock, type Database } from '@haive/database';
+import { schema, withTaskAttachmentsLock, type Database, type DbTx } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { rewriteAttachmentsManifest } from '../src/attachments-fs.js';
+import { rewriteAttachmentsManifest, settleExpansionAttempt } from '../src/attachments-fs.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const t = schema.taskAttachments;
 const dirs: string[] = [];
+const exists = (p: string): Promise<boolean> =>
+  lstat(p).then(
+    () => true,
+    () => false,
+  );
 
 afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
@@ -88,5 +93,33 @@ describe('rewriteAttachmentsManifest', () => {
       rewriteAttachmentsManifest(f.db, TASK, f.anchor, f.uploadsRel),
     ).resolves.toBeUndefined();
     expect(await f.listed()).toBeNull();
+  });
+});
+
+describe('settleExpansionAttempt', () => {
+  it('acts on an intent once, so a name it freed is never taken back from its next owner', async () => {
+    // An upload's file exists before its row does. Were the intent left behind, a second settle
+    // would read that file as the interrupted attempt's orphan and remove it.
+    const f = await fixture();
+    const staging = `.expanding-${'0'.repeat(8)}-0000-4000-8000-000000000011-${'0'.repeat(8)}-0000-4000-8000-000000000012`;
+    const stagingDir = path.join(f.anchor, f.uploadsRel, staging);
+    await mkdir(stagingDir, { recursive: true });
+    await writeFile(
+      path.join(stagingDir, 'placed-as'),
+      JSON.stringify({ dir: 'spec', files: ['a.md'] }),
+    );
+    await mkdir(path.join(f.anchor, f.uploadsRel, 'spec'));
+    await writeFile(path.join(f.anchor, f.uploadsRel, 'spec', 'a.md'), 'orphan');
+    const tx = f.db as unknown as DbTx;
+
+    await settleExpansionAttempt(tx, TASK, f.anchor, f.uploadsRel, staging);
+    expect(await exists(path.join(f.anchor, f.uploadsRel, 'spec', 'a.md'))).toBe(false);
+
+    await mkdir(path.join(f.anchor, f.uploadsRel, 'spec'), { recursive: true });
+    await writeFile(path.join(f.anchor, f.uploadsRel, 'spec', 'a.md'), 'a new upload');
+    await settleExpansionAttempt(tx, TASK, f.anchor, f.uploadsRel, staging);
+    expect(await readFile(path.join(f.anchor, f.uploadsRel, 'spec', 'a.md'), 'utf8')).toBe(
+      'a new upload',
+    );
   });
 });

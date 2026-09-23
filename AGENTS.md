@@ -892,7 +892,12 @@ Every call first settles the attempts at archives deleted or stamped since, re-c
 lock, so an archive attached a moment ago keeps its attempt in flight. A DELETE settles the attempts
 at the archives it removes in its own section (`settleExpansionAttempts`,
 `@haive/shared/attachments-fs`), because the worker finds the uploads dir only through a row, and
-once the last attachment is gone no later call can reach what an attempt left behind.
+once the last attachment is gone no later call can reach what an attempt left behind. Settling
+removes the intent inside the section, so no later settle acts on it twice — a name it freed is one
+an upload can take, and that upload's file has no row until its bytes are in. The staging dirs
+themselves are removed AFTER the section (`removeExpansionStagings`), never inside it: one can hold
+a whole extracted archive, and removing it there would hold the lock and a pooled connection for as
+long as that takes.
 
 **`expansion_note` is the one durable account of what an archive lost, so it is read from the
 column.** The expansion call reports only the archives THAT call expanded, so a later step, a

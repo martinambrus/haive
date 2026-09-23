@@ -471,6 +471,30 @@ describe('ensureArchivesExpanded', () => {
     expect(await f.staging()).toEqual([]);
   });
 
+  it('removes a capped archive’s extracted tree only once its section is over', async () => {
+    // Past a cap the staging dir holds the whole extracted archive; removing it under the lock would
+    // hold the task's attachments, and a pooled connection, for as long as that takes.
+    const f = await setup();
+    await tarball(f.uploads, 'huge.tar', async (src) => {
+      await mkdir(path.join(src, 'many'), { recursive: true });
+      for (let i = 0; i < 501; i += 1) {
+        await writeFile(path.join(src, 'many', `f${i}.txt`), 'x');
+      }
+    });
+    f.attach('huge.tar');
+    const atCommit: string[][] = [];
+    f.fake.hooks.beforeCommit = async () => {
+      atCommit.push(await f.staging());
+    };
+
+    await f.expand();
+
+    expect(atCommit).toHaveLength(1);
+    expect(atCommit[0]).toHaveLength(1);
+    expect(f.row('huge.tar').expandedAt).toBeInstanceOf(Date);
+    expect(await f.staging()).toEqual([]);
+  });
+
   it('does not let two members that sanitise to one name overwrite each other', async () => {
     const f = await setup();
     await tarball(f.uploads, 'clash.tar', async (src) => {

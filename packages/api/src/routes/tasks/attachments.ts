@@ -30,6 +30,7 @@ import {
 } from '@haive/shared/fs-safe';
 import {
   pruneAfter,
+  removeExpansionStagings,
   removeFiles,
   rewriteAttachmentsManifest,
   settleExpansionAttempts,
@@ -553,7 +554,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   // One section under the task's attachments lock, from reading the rows to rewriting the
   // manifest: the worker writes a sidecar only under the same lock and only while its row exists,
   // so no sidecar can land between the files going and the rows going and outlive both.
-  await withTaskAttachmentsLock(db, taskId, async (tx) => {
+  const settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
     // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on
     // the delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox,
     // so an agent would keep reading files the user believes they removed.
@@ -569,10 +570,19 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
     await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
     // An expansion of this archive the worker was interrupted in: with the archive's row gone, no
     // later call would know it had anything to take back.
-    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([attachmentId]));
+    const attempts = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set([attachmentId]),
+    );
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    return attempts;
   }).catch(lockBusyError);
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(anchor, uploadsRel, settled);
   return c.json({ ok: true });
 });
 
@@ -587,7 +597,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const prefix = safeAttachmentPath(raw);
 
   // The same one section as the single delete, and for the same reason.
-  const removed = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
+  const done = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
     const rows = await tx.query.taskAttachments.findMany({
       where: and(
         eq(schema.taskAttachments.taskId, taskId),
@@ -614,10 +624,18 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
         marked.map((r) => r.id),
       ),
     );
-    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set(marked.map((r) => r.id)));
+    const settled = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set(marked.map((r) => r.id)),
+    );
     await pruneAfter(anchor, uploadsRel, files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
-    return marked.length;
+    return { removed: marked.length, anchor, uploadsRel, settled };
   }).catch(lockBusyError);
-  return c.json({ ok: true, removed });
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled);
+  return c.json({ ok: true, removed: done.removed });
 });

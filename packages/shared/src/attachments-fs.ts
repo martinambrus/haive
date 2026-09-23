@@ -190,7 +190,13 @@ export async function readExpansionIntent(
  * says what it may have placed; a file no row owns was placed by an attempt whose rows never
  * committed, and it is removed. Its staged tree still being there means the move never happened, and
  * then at most the empty folder it claimed is left — which is removed only while it is an empty
- * DIRECTORY. The staging dir goes last.
+ * DIRECTORY.
+ *
+ * The intent goes here, inside the section, so no later settle can act on what this one resolved: a
+ * name freed by it is one an upload can take, and that upload's file has no row until its bytes are
+ * in. The staging dir does NOT go here — it can hold a whole extracted archive, bomb-sized included,
+ * and removing it must not hold the lock and a pooled connection. `removeExpansionStagings` takes it
+ * once the section is over.
  */
 export async function settleExpansionAttempt(
   tx: DbTx,
@@ -224,14 +230,13 @@ export async function settleExpansionAttempt(
       await removeFiles(anchor, uploadsRel, orphans);
       await pruneAfter(anchor, uploadsRel, orphans);
     }
+    await removeNoFollow(anchor, `${stagingRel}/${EXPANSION_INTENT_FILE}`).catch(() => {});
   }
-  await removeNoFollow(anchor, stagingRel, { recursive: true, repairPermissions: true }).catch(
-    () => {},
-  );
 }
 
 /** Settle every expansion attempt at the given archives but `keep`, inside a section holding the
- *  task's attachments lock. */
+ *  task's attachments lock. Answers the staging dirs it settled, for `removeExpansionStagings` once
+ *  the section is over. */
 export async function settleExpansionAttempts(
   tx: DbTx,
   taskId: string,
@@ -239,12 +244,30 @@ export async function settleExpansionAttempts(
   uploadsRel: string,
   archiveIds: ReadonlySet<string>,
   keep: string | null = null,
-): Promise<void> {
+): Promise<string[]> {
+  const settled: string[] = [];
   const entries = (await readdirNoFollow(anchor, uploadsRel)) ?? [];
   for (const entry of entries) {
     const archiveId = expansionAttemptArchiveId(entry.name);
     if (entry.name !== keep && archiveId !== null && archiveIds.has(archiveId)) {
       await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name);
+      settled.push(entry.name);
     }
+  }
+  return settled;
+}
+
+/** Remove settled attempts' staging dirs — OUTSIDE any section, since one can hold a whole extracted
+ *  archive. Best-effort: once settled a dir is inert, and the worker's sweep retries one left behind. */
+export async function removeExpansionStagings(
+  anchor: string,
+  uploadsRel: string,
+  stagings: readonly string[],
+): Promise<void> {
+  for (const staging of stagings) {
+    await removeNoFollow(anchor, `${uploadsRel}/${staging}`, {
+      recursive: true,
+      repairPermissions: true,
+    }).catch(() => {});
   }
 }

@@ -97,7 +97,16 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     beforeInsert: ((table: PgTable) => void | Promise<void>) | null;
     beforeUpdate: ((table: PgTable) => void | Promise<void>) | null;
     beforeDelete: ((table: PgTable) => void | Promise<void>) | null;
-  } = { beforeLock: null, beforeInsert: null, beforeUpdate: null, beforeDelete: null };
+    /** Awaited when an outermost transaction's work is done, just before it commits and releases
+     *  its locks; a throw fails the commit, which rolls it back. */
+    beforeCommit: (() => void | Promise<void>) | null;
+  } = {
+    beforeLock: null,
+    beforeInsert: null,
+    beforeUpdate: null,
+    beforeDelete: null,
+    beforeCommit: null,
+  };
 
   const checkValue = (col: Column, value: unknown): unknown => {
     if (is(col, PgUUID) && typeof value === 'string' && !UUID.test(value)) {
@@ -370,6 +379,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           // A savepoint that is released hands its writes to the level above, which may still
           // roll them back.
           chain.frames.at(-1)?.push(...frame);
+          if (ctx === null) await hooks.beforeCommit?.();
           return result;
         } catch (err) {
           chain.frames.pop();

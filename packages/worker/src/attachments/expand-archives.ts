@@ -38,6 +38,7 @@ import {
   expansionAttemptArchiveId,
   pruneAfter,
   readExpansionIntent,
+  removeExpansionStagings,
   removeFiles,
   rewriteAttachmentsManifest,
   settleExpansionAttempt,
@@ -282,8 +283,9 @@ async function sweepStaleAttempts(
       return id !== null && !candidateIds.has(id);
     });
   if (stale.length === 0) return;
+  let settled: string[] = [];
   try {
-    await withTaskAttachmentsLock(db, taskId, async (tx) => {
+    settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
       const ids = [...new Set(stale.map((name) => expansionAttemptArchiveId(name)!))];
       const pending = new Set(
         (
@@ -298,15 +300,19 @@ async function sweepStaleAttempts(
           .filter((row) => row.expandedAt === null)
           .map((row) => row.id),
       );
+      const done: string[] = [];
       for (const name of stale) {
         if (!pending.has(expansionAttemptArchiveId(name)!)) {
           await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, name);
+          done.push(name);
         }
       }
+      return done;
     });
   } catch (err) {
     log.warn({ err, taskId }, 'could not settle interrupted archive expansions');
   }
+  await removeExpansionStagings(anchor, uploadsRel, settled);
 }
 
 /** Mark an archive as expanded, only while nothing else has. True when this call did. */
@@ -320,10 +326,12 @@ async function stamp(tx: DbTx, archiveId: string, note: string | null): Promise<
 }
 
 /**
- * Record an archive that will not be expanded, and settle every attempt at it on the way — this one
- * included. Stamped whatever the reason, or a failed or capped archive is re-extracted on every step
- * for the life of the task. False when it was not this call that recorded it: already stamped,
- * deleted, or the lock could not be had, in which case the archive stays a candidate.
+ * Record an archive that will not be expanded, and settle the other attempts at it on the way.
+ * Stamped whatever the reason, or a failed or capped archive is re-extracted on every step for the
+ * life of the task. This attempt's own staging dir is left to the caller, outside the section: after
+ * a cap breach it holds the whole extracted archive. False when it was not this call that recorded
+ * it: already stamped, deleted, or the lock could not be had, in which case the archive stays a
+ * candidate.
  */
 async function stampNote(
   db: Database,
@@ -332,16 +340,27 @@ async function stampNote(
   uploadsRel: string,
   archiveId: string,
   note: string,
+  staging: string,
 ): Promise<boolean> {
+  let settled: string[] = [];
+  let stamped = false;
   try {
-    return await withTaskAttachmentsLock(db, taskId, async (tx) => {
-      await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archiveId]));
-      return stamp(tx, archiveId, note);
-    });
+    ({ settled, stamped } = await withTaskAttachmentsLock(db, taskId, async (tx) => ({
+      settled: await settleExpansionAttempts(
+        tx,
+        taskId,
+        anchor,
+        uploadsRel,
+        new Set([archiveId]),
+        staging,
+      ),
+      stamped: await stamp(tx, archiveId, note),
+    })));
   } catch (err) {
     log.warn({ err, taskId, archiveId }, 'could not stamp archive expansion');
-    return false;
   }
+  await removeExpansionStagings(anchor, uploadsRel, settled);
+  return stamped;
 }
 
 /**
@@ -439,7 +458,11 @@ async function stageTree(
   };
 }
 
-type Placement = { kind: 'placed' } | { kind: 'superseded' } | { kind: 'unplaced' };
+interface Placement {
+  kind: 'placed' | 'superseded' | 'unplaced';
+  /** Earlier attempts this section settled, whose staging dirs go once it is over. */
+  settled: string[];
+}
 
 /**
  * Move a staged tree into place and write its rows, as ONE section under the task's attachments
@@ -468,8 +491,17 @@ async function placeTree(
       where: eq(schema.taskAttachments.id, archive.id),
       columns: { id: true, expandedAt: true },
     });
-    if (current === undefined || current.expandedAt !== null) return { kind: 'superseded' };
-    await settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archive.id]), staging);
+    if (current === undefined || current.expandedAt !== null) {
+      return { kind: 'superseded', settled: [] };
+    }
+    const settled = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set([archive.id]),
+      staging,
+    );
 
     const files = staged.members.map((m) => m.rel);
     let dir: string | null = null;
@@ -495,7 +527,7 @@ async function placeTree(
     }
     if (dir === null) {
       await stamp(tx, archive.id, NO_FOLDER_NOTE);
-      return { kind: 'unplaced' };
+      return { kind: 'unplaced', settled };
     }
 
     try {
@@ -522,7 +554,7 @@ async function placeTree(
       await pruneAfter(anchor, uploadsRel, placed);
       throw err;
     }
-    return { kind: 'placed' };
+    return { kind: 'placed', settled };
   });
 }
 
@@ -606,7 +638,7 @@ export async function ensureArchivesExpanded(
       // ONE line whatever produced it — extraction's own drop note names members raw too — so the
       // stored note is what AGENTS.md promises it is, and not only what a prompt makes of it.
       const note = storedNote(staged);
-      if (await stampNote(db, taskId, anchor, uploadsRel, archive.id, note)) {
+      if (await stampNote(db, taskId, anchor, uploadsRel, archive.id, note, staging)) {
         result.expanded += 1;
         result.notes.push({ filename: archive.filename, note });
       }
@@ -623,17 +655,17 @@ export async function ensureArchivesExpanded(
       // placement that reached the disk is settled first, under the lock, unless the lock itself
       // was the problem.
       if (!isLockNotAvailable(err)) {
-        await withTaskAttachmentsLock(db, taskId, (tx) =>
+        const settled = await withTaskAttachmentsLock(db, taskId, (tx) =>
           settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archive.id])),
-        ).catch(() => {});
+        ).catch(() => [] as string[]);
+        await removeExpansionStagings(anchor, uploadsRel, settled);
       }
       await discardStaging(anchor, stagingRel);
       continue;
     }
-    // Committed, so what `placed-as` names is owned by rows now, and the staging dir can go whole.
-    await removeNoFollow(anchor, stagingRel, { recursive: true, repairPermissions: true }).catch(
-      () => {},
-    );
+    // Committed, so what this attempt's `placed-as` names is owned by rows now, and its staging dir
+    // goes whole, with those of the earlier attempts the section settled.
+    await removeExpansionStagings(anchor, uploadsRel, [...placement.settled, staging]);
     if (placement.kind === 'superseded') continue;
     result.expanded += 1;
     if (placement.kind === 'unplaced') {

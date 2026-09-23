@@ -889,10 +889,17 @@ describe('task attachment routes', () => {
       const archive = await seedFile('spec.zip', 'PK');
       await interruptedExpansion(archive.id as string, 'spec', ['a.md']);
 
+      // Its staging dir outlives the section: it can hold a whole extracted archive.
+      const atCommit: string[][] = [];
+      fake.hooks.beforeCommit = async () => {
+        atCommit.push((await listing(up())).filter((n) => n.startsWith('.expanding-')));
+      };
+
       expect(await send('DELETE', `/${TASK}/attachments/${archive.id as string}`)).toEqual({
         status: 200,
         body: { ok: true },
       });
+      expect(atCommit.at(-1)).toHaveLength(1);
       expect(await exists(up('spec'))).toBe(false);
       expect(await listing(up())).toEqual([]);
     });
@@ -1036,8 +1043,16 @@ describe('task attachment routes', () => {
       const archive = await seedFile('docs/x.zip', 'PK');
       await seedFile('keep.md', 'keep');
       await interruptedExpansion(archive.id as string, 'x', ['a.md']);
+      const atCommit: string[][] = [];
+      fake.hooks.beforeCommit = async () => {
+        atCommit.push((await listing(up())).filter((n) => n.startsWith('.expanding-')));
+      };
 
-      await send('DELETE', `/${TASK}/attachments?prefix=docs`);
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 1 },
+      });
+      expect(atCommit.at(-1)).toHaveLength(1);
       expect(await exists(up('x'))).toBe(false);
       expect(await listing(up())).toEqual(['_ATTACHMENTS.md', 'keep.md']);
     });
