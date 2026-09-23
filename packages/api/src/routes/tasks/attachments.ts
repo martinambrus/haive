@@ -599,13 +599,17 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   // needed — a component that is a link is refused by the walk rather than resolved and
   // then trusted.
   await removeNoFollow(anchor, `${uploadsRel}/${prefix}`, { recursive: true }).catch(() => {});
+  // An archive inside the folder expanded into a directory at the uploads ROOT, not under the
+  // folder, so the recursive removal above never reaches it — the planner does.
+  const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
+  await removePlanned(anchor, uploadsRel, plan);
   await db.delete(schema.taskAttachments).where(
     inArray(
       schema.taskAttachments.id,
       marked.map((r) => r.id),
     ),
   );
-  await pruneEmptyDirs(anchor, uploadsRel, splitAttachmentPath(prefix).dir);
+  await pruneAfter(anchor, uploadsRel, [prefix, ...plan.files]);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true, removed: marked.length });
 });

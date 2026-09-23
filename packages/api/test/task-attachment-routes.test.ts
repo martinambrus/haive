@@ -846,6 +846,20 @@ describe('task attachment routes', () => {
       expect(await indexed()).toEqual(['d.md']);
     });
 
+    it('also removes the expansion tree of an archive inside the folder, which sits at the root', async () => {
+      await seedArchive('docs/x.zip', { 'x/a.md': 'a' });
+      await seedFile('docs/readme.md', 'r');
+      await seedArchive('y.zip', { 'y/b.md': 'b' });
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 2 },
+      });
+      expect(await exists(up('x'))).toBe(false);
+      expect(await readFile(up('y/b.md'), 'utf8')).toBe('b');
+      expect(filenames()).toEqual(['y.zip', 'y/b.md']);
+    });
+
     it('prunes a parent the folder leaves empty', async () => {
       await seedFile('specs/api/a.md', 'a');
       expect(await send('DELETE', `/${TASK}/attachments?prefix=specs/api`)).toEqual({
