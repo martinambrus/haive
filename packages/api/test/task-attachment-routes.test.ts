@@ -540,9 +540,8 @@ describe('task attachment routes', () => {
       expect(res.status).toBe(400);
       expect(String(res.body?.error)).toContain('parent-directory');
       expect(filenames()).toEqual([]);
-      expect(await exists(path.join(repo, '.haive', 'task-uploads', 'x'))).toBe(false);
-      expect(await exists(up('x'))).toBe(false);
-      expect(await indexed()).toBeNull();
+      // Refused before anything is created, not after the uploads directory was made for it.
+      expect(await listing(repo)).toEqual([]);
     });
 
     it.each([

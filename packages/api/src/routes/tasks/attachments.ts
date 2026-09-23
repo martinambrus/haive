@@ -411,6 +411,8 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     filename: c.req.query('filename'),
     description: c.req.query('description'),
   });
+  // Checked before anything is created, so a refused name leaves no directory behind.
+  const relPath = safeAttachmentPath(query.filename);
 
   const body = c.req.raw.body;
   if (!body) throw new HttpError(400, 'request body is empty');
@@ -422,11 +424,9 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
 
   await ensureUploadsDir(anchor, uploadsRel).catch(uploadPathError);
 
-  const { rel: safeName, fh } = await createUniqueAttachment(
-    anchor,
-    uploadsRel,
-    safeAttachmentPath(query.filename),
-  ).catch(uploadPathError);
+  const { rel: safeName, fh } = await createUniqueAttachment(anchor, uploadsRel, relPath).catch(
+    uploadPathError,
+  );
   const destPath = join(dir, safeName);
   let size: number;
   try {
