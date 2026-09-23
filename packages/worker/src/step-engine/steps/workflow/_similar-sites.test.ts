@@ -154,6 +154,43 @@ describe('loadTaskSimilarSites source labels', () => {
   });
 });
 
+describe('loadTaskSimilarSites after a later round edits the file', () => {
+  it('marks a site whose file a round after its last report edited, and keeps it listed', async () => {
+    const out = await loadTaskSimilarSites(
+      tableDb(
+        [],
+        [
+          { round: 0, output: { similarSites: [{ path: 'a.ts', reason: 'same bug' }] } },
+          { round: 1, output: { filesTouched: ['./a.ts'], similarSites: [] } },
+        ],
+      ),
+      't1',
+    );
+    expect(out.sites).toEqual([
+      { path: 'a.ts', reason: 'same bug', source: 'implementation round 0', editedInRound: 1 },
+    ]);
+    const row = similarSitesRow(out.sites, 0, 'x')!;
+    expect(row.body).toContain('edited again in implementation round 1, so it may be addressed');
+  });
+
+  it('does not mark a site the editing round reported again, nor one no later round touched', async () => {
+    const out = await loadTaskSimilarSites(
+      tableDb(
+        [{ issueKey: 'I-1', sites: [{ path: 'b.ts', reason: '' }] }],
+        [
+          { round: 0, output: { similarSites: [{ path: 'a.ts', reason: '' }] } },
+          {
+            round: 1,
+            output: { filesTouched: ['a.ts'], similarSites: [{ path: 'a.ts', reason: '' }] },
+          },
+        ],
+      ),
+      't1',
+    );
+    expect(out.sites.map((s) => s.editedInRound)).toEqual([undefined, undefined]);
+  });
+});
+
 describe('similarSitesRow', () => {
   it('renders nothing when there is nothing to show', () => {
     expect(similarSitesRow([], 0, 'x')).toBeNull();

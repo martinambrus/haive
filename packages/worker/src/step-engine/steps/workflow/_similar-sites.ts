@@ -15,6 +15,9 @@ export interface SimilarSite {
 /** A site as a gate shows it: which pass reported it. */
 export interface GateSimilarSite extends SimilarSite {
   source: string;
+  /** The first implementation round after the last one that reported this site to edit its file,
+   *  so the site may have been fixed since. Absent when no later round touched the file. */
+  editedInRound?: number;
 }
 
 export const SIMILAR_SITES_AT_GATE = 50;
@@ -89,23 +92,42 @@ export async function loadTaskSimilarSites(
     )
     .orderBy(asc(schema.taskSteps.round));
   let all: GateSimilarSite[] = [];
+  // The last pass that reported each site; the DAG build (-1) runs before every round.
+  const lastReport = new Map<string, number>();
   for (const issue of issues) {
     const source = `DAG issue ${safeKey(issue.issueKey)}`;
     const sites = sanitizeSimilarSites(issue.sites);
+    for (const site of sites) lastReport.set(siteKey(site), lastReport.get(siteKey(site)) ?? -1);
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),
     );
   }
+  const touched: { round: number; files: Set<string> }[] = [];
   for (const row of rounds) {
     const source = `implementation round ${row.round}`;
-    const raw = (row.output as { similarSites?: unknown } | null)?.similarSites;
-    const sites = sanitizeSimilarSites(raw);
+    const output = row.output as { similarSites?: unknown; filesTouched?: unknown } | null;
+    const sites = sanitizeSimilarSites(output?.similarSites);
+    for (const site of sites) lastReport.set(siteKey(site), row.round);
+    const files = Array.isArray(output?.filesTouched) ? output.filesTouched : [];
+    touched.push({
+      round: row.round,
+      files: new Set(
+        files.filter((f): f is string => typeof f === 'string').map((f) => f.replace(/^\.\//, '')),
+      ),
+    });
     all = mergeSimilarSites(
       all,
       sites.map((s) => ({ ...s, source })),
     );
   }
+  // Shown beside the site rather than used to drop it: that round may have edited the file for
+  // something else, and the site is then still unchanged.
+  all = all.map((site) => {
+    const after = lastReport.get(siteKey(site)) ?? -1;
+    const edit = touched.find((t) => t.round > after && t.files.has(site.path));
+    return edit ? { ...site, editedInRound: edit.round } : site;
+  });
   return {
     sites: all.slice(0, SIMILAR_SITES_AT_GATE),
     omitted: Math.max(0, all.length - SIMILAR_SITES_AT_GATE),
@@ -128,7 +150,7 @@ export function similarSitesRow(
     '',
     ...sites.map(
       (s) =>
-        `- ${code(s.path)}${s.lines ? ` (${range(s.lines)})` : ''}${s.reason ? ` — ${s.reason}` : ''} (from ${s.source})`,
+        `- ${code(s.path)}${s.lines ? ` (${range(s.lines)})` : ''}${s.reason ? ` — ${s.reason}` : ''} (from ${s.source}${s.editedInRound !== undefined ? `; its file was edited again in implementation round ${s.editedInRound}, so it may be addressed` : ''})`,
     ),
     ...(omitted > 0 ? ['', `${omitted} more not shown.`] : []),
   ].join('\n');

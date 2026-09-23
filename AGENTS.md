@@ -1079,8 +1079,10 @@ code or defect it finds outside the task alone and to list it instead: 07 as `si
 DAG level coder and the DAG fix coder as `similar_sites`. The fix coder's JSON is otherwise never
 read, so `ingestReviewRun` parses it for this field alone. Gate 2 shows the union of every 07
 round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
-with feedback that names it, which reaches 07 as a human directive. `quick_bugfix` runs no gate 2,
-so gate 3 shows the row whenever no gate-2 decision exists.
+with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
+its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
+for something else, and dropping the site would then hide one still left unchanged. `quick_bugfix`
+runs no gate 2, so gate 3 shows the row whenever no gate-2 decision exists.
 
 The lists are display copy and are kept that way. They are sanitised on the way in and again on
 read (`_similar-sites.ts`): a path must be single-line, fence-safe and inside the repository, and
