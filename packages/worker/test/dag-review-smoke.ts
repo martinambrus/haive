@@ -230,6 +230,7 @@ async function main(): Promise<void> {
           files_modified: [`${issue.issueKey}.txt`],
           debt_items: [],
           concerns: '',
+          similar_sites: [{ path: 'shared/a.ts', lines: '3', reason: 'coder' }],
         });
         return;
       }
@@ -248,13 +249,17 @@ async function main(): Promise<void> {
         );
         return;
       }
-      // fix coder
+      // fix coder: repeats one site the coder reported and adds its own
       await finish({
         issue_id: 'fix',
         outcome: 'completed',
         files_modified: [],
         debt_items: [],
         concerns: '',
+        similar_sites: [
+          { path: 'shared/a.ts', lines: '3', reason: 'repeat' },
+          { path: 'shared/b.ts', reason: 'fixer' },
+        ],
       });
     };
 
@@ -325,6 +330,19 @@ async function main(): Promise<void> {
     // 2 issues x (reviewer iter0 + fix coder + reviewer iter1) = 4 reviewers + 2 fixers.
     if (reviewers !== 4 || fixers !== 2) {
       throw new Error(`expected 4 reviewer + 2 fix runs, got ${reviewers} + ${fixers}`);
+    }
+    // Every pass that reports similar sites adds to the issue's list; none overwrites it.
+    // Compared as tuples because jsonb does not keep an object's key order.
+    const siteTuples = (sites: { path: string; lines?: string; reason: string }[]) =>
+      JSON.stringify(sites.map((x) => [x.path, x.lines ?? null, x.reason]));
+    const wantSites = JSON.stringify([
+      ['shared/a.ts', '3', 'coder'],
+      ['shared/b.ts', null, 'fixer'],
+    ]);
+    for (const i of issues) {
+      if (siteTuples(i.similarSites) !== wantSites) {
+        throw new Error(`${i.issueKey} similar sites: ${JSON.stringify(i.similarSites)}`);
+      }
     }
 
     console.log(

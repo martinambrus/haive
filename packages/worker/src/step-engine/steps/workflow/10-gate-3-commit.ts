@@ -6,6 +6,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { buildCommitDiffArtifact } from './_commit-diff.js';
+import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 
@@ -34,6 +35,10 @@ interface CommitGateDetect {
   diffArtifactPath: string | null;
   changedFileCount: number;
   diffArtifactTruncated: boolean;
+  /** Only when no gate 2 decided on this run's similar sites (quick_bugfix has none). Optional
+   *  because this payload is persisted. */
+  similarSites?: GateSimilarSite[];
+  similarSitesOmitted?: number;
 }
 
 interface CommitGateApply {
@@ -115,6 +120,10 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
+    const gate2 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09-gate-2-verify-approval');
+    const similar = gate2?.output
+      ? { sites: [], omitted: 0 }
+      : await loadTaskSimilarSites(ctx.db, ctx.taskId);
     // Throws on a present-but-unusable `.git`: reporting corruption as "0 dirty
     // files" defaults the commit checkbox off and drops the whole changeset.
     if (!(await requireUsableGit(workspacePath))) {
@@ -126,6 +135,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactPath: null,
         changedFileCount: 0,
         diffArtifactTruncated: false,
+        similarSites: similar.sites,
+        similarSitesOmitted: similar.omitted,
       };
     }
     const status = await gitRun(workspacePath, ['status', '--porcelain']);
@@ -165,10 +176,17 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       diffArtifactPath,
       changedFileCount,
       diffArtifactTruncated,
+      similarSites: similar.sites,
+      similarSitesOmitted: similar.omitted,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    const similarRow = similarSitesRow(
+      detected.similarSites ?? [],
+      detected.similarSitesOmitted ?? 0,
+      'Anything listed here needs a follow-up task to be fixed.',
+    );
     return {
       title: 'Gate 3: Commit',
       description: [
@@ -178,6 +196,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         'Diff summary:',
         detected.diffSummary,
       ].join('\n'),
+      ...(similarRow ? { statusSummary: [similarRow] } : {}),
       fields: [
         {
           type: 'checkbox',

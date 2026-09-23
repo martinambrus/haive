@@ -139,6 +139,66 @@ describe('parseImplementOutput environmentFindings', () => {
   });
 });
 
+describe('07 similar sites', () => {
+  const agentJson = (sites: unknown) =>
+    '```json\n' +
+    JSON.stringify({ summary: 'did x', filesTouched: ['a.ts'], similarSites: sites }) +
+    '\n```';
+
+  it('parses the sites the agent left unchanged, sanitised', () => {
+    const out = parseImplementOutput(
+      agentJson([
+        { path: 'src/b.ts', lines: '4-9', reason: 'same off-by-one' },
+        { path: '/etc/passwd', reason: 'escapes' },
+        { path: 'src/c.ts', lines: 'somewhere', reason: 'bad range' },
+      ]),
+    );
+    expect(out!.similarSites).toEqual([
+      { path: 'src/b.ts', lines: '4-9', reason: 'same off-by-one' },
+      { path: 'src/c.ts', reason: 'bad range' },
+    ]);
+  });
+
+  it('reads a missing or malformed list as none, never as a failed parse', () => {
+    expect(parseImplementOutput('```json\n{"summary":"did x"}\n```')!.similarSites).toEqual([]);
+    const out = parseImplementOutput(agentJson('src/b.ts'));
+    expect(out!.summary).toBe('did x');
+    expect(out!.similarSites).toEqual([]);
+  });
+
+  it('keeps the sites of an off-format reply that salvage recovers', () => {
+    const s = salvageImplementOutput({
+      status: 'done',
+      files: ['a.ts'],
+      similarSites: [{ path: 'b.ts', reason: 'same' }],
+    });
+    expect(s!.similarSites).toEqual([{ path: 'b.ts', reason: 'same' }]);
+  });
+
+  it('asks for them in the output contract on both passes', () => {
+    const detect = {
+      specSummary: '',
+      spec: 'spec',
+      sandboxWorkspacePath: '/ws',
+      gateFeedback: '',
+      fixIsHuman: false,
+      priorFixContext: '',
+      browserTesting: false,
+    };
+    for (const over of [
+      { fixContext: null, round: 0 },
+      { fixContext: 'tests fail', round: 1 },
+    ]) {
+      const p = phase2ImplementStep.llm!.buildPrompt({
+        detected: { ...detect, ...over },
+        formValues: {},
+      } as never);
+      expect(p).toContain('leave it unchanged and list it under "similarSites"');
+      expect(p).toContain('"similarSites": [{ "path"');
+    }
+  });
+});
+
 describe('phase2ImplementStep prior-fix-rounds ledger', () => {
   const detect = (over: Record<string, unknown>) => ({
     specSummary: '',

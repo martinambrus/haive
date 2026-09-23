@@ -53,6 +53,8 @@ export const dagIssueResultSchema = z.object({
   files_modified: z.array(z.string()).default([]),
   debt_items: z.array(z.unknown()).default([]),
   concerns: z.string().default(''),
+  // Sanitised by the worker. A malformed list must never fail a coder that otherwise finished.
+  similar_sites: z.array(z.unknown()).catch([]),
 });
 export type DagIssueResult = z.infer<typeof dagIssueResultSchema>;
 

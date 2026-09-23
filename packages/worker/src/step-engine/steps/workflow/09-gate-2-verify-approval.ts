@@ -31,6 +31,7 @@ import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 import type { FileCoverage } from './_impl-changes.js';
 import { fencedAgentBlock } from '../_untrusted-repo.js';
+import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 
 /** Coverage as a step wrote it into `task_steps.output`. */
 interface CoverageOutput {
@@ -172,6 +173,10 @@ interface VerifyGateDetect {
     url: string | null;
     errorExcerpt: string;
   } | null;
+  /** Same code or defect elsewhere that the implementation left alone. Optional because this
+   *  payload is persisted: a gate parked before the field existed replays without it. */
+  similarSites?: GateSimilarSite[];
+  similarSitesOmitted?: number;
 }
 
 interface Phase8dOutput {
@@ -717,6 +722,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const screenshotsArtifactPath = (await hasWorkspaceEntry(screenshotRoot, manifestRel))
       ? screenshotsManifest
       : null;
+    const similar = await loadTaskSimilarSites(ctx.db, ctx.taskId);
 
     return {
       verify: {
@@ -736,6 +742,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       dbAccess,
       screenshotsArtifactPath,
       runtimeSmoke,
+      similarSites: similar.sites,
+      similarSitesOmitted: similar.omitted,
     };
   },
 
@@ -1121,6 +1129,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         defaultOpen: smokeFailed && !smokeAdvisory,
       });
     }
+
+    const similarRow = similarSitesRow(
+      detected.similarSites ?? [],
+      detected.similarSitesOmitted ?? 0,
+      'To have this task fix one, reject with feedback that names it; otherwise consider a follow-up task.',
+    );
+    if (similarRow) rows.push(similarRow);
 
     return {
       title: 'Gate 2: Verification approval',
