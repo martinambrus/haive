@@ -48,7 +48,15 @@ export async function augmentPromptWithAttachments(
   if (rows.length === 0) return prompt;
 
   const dir = `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}`;
-  const { lines, named } = describeAttachments(rows);
+  const { lines, named, unnamedTopLevel } = describeAttachments(rows);
+  // The count of top-level files the list could not name goes in the sentence, never on a bullet
+  // line of its own: `  - and 12 more` is also what a file named `and 12 more` renders as.
+  const rest =
+    unnamedTopLevel === 0
+      ? 'inside the folders listed.'
+      : named + unnamedTopLevel === rows.length
+        ? `${unnamedTopLevel} top-level files it does not name.`
+        : `inside the folders listed, except ${unnamedTopLevel} top-level files it does not name.`;
   const notice = [
     '[User-attached files]',
     `The user attached ${rows.length} reference file(s) for this task, available read-only at:`,
@@ -57,7 +65,7 @@ export async function augmentPromptWithAttachments(
     ...(named < rows.length
       ? [
           `COVERAGE: the list above names ${named} of ${rows.length} attached files; the rest are`,
-          `inside the folders listed. ${dir}/_ATTACHMENTS.md indexes every one of them by path.`,
+          `${rest} ${dir}/_ATTACHMENTS.md indexes every one of them by path.`,
         ]
       : []),
     ...describeIncompleteArchives(rows),
@@ -110,11 +118,13 @@ function describeIncompleteArchives(rows: readonly AttachmentRow[]): string[] {
 function describeAttachments(rows: readonly AttachmentRow[]): {
   lines: string[];
   named: number;
+  /** Top-level files past the limit, which no line names or counts. */
+  unnamedTopLevel: number;
 } {
   const line = (r: AttachmentRow): string =>
     `  - ${r.filename}${r.description ? ` — ${r.description}` : ''}`;
   if (rows.length <= ATTACHMENT_PROMPT_FILE_LIMIT) {
-    return { lines: rows.map(line), named: rows.length };
+    return { lines: rows.map(line), named: rows.length, unnamedTopLevel: 0 };
   }
 
   const loose: typeof rows = rows.filter((r) => splitAttachmentPath(r.filename).dir === '');
@@ -135,5 +145,6 @@ function describeAttachments(rows: readonly AttachmentRow[]): {
         .map(([name, count]) => `  - ${name}/ — ${count} file(s)`),
     ],
     named: shownLoose.length,
+    unnamedTopLevel: loose.length - shownLoose.length,
   };
 }
