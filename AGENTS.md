@@ -825,7 +825,11 @@ parses `unzip -Z`/`tar -tv` human-facing output, and a bomb is exactly the input
 it. `expanded_at` is stamped whatever happened, or a failed archive is re-extracted on every
 step for the life of the task; `expanded_from_id` cascades the rows AND is what makes "nested
 archives are not recursed" structural (a row with a parent is never a candidate). The FK
-cannot reach the disk, so the api's delete removes the expansion DIRECTORY too — an orphaned
+cannot reach the disk, so a delete removes what the attachment left there too
+(`attachmentRemovalPlan`): an archive's expansion DIRECTORY, which a folder delete has to reach at
+the uploads ROOT (`docs/x.zip` expands into `x/`), and a document's extracted-text SIDECAR. A
+tree a surviving upload also lives in goes member by member, since the api de-dupes files and
+not directories. Neither may be left: an orphaned
 tree stays bind-mounted, and an agent would keep reading files the user believes they removed.
 
 Three caps exist because a folder is not a handful of files. `augmentPromptWithAttachments`
