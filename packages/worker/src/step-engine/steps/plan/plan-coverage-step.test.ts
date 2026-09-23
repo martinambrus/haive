@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { schema } from '@haive/database';
 import { loadPlanSkeletons, type PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   AUTO_CONVERGENCE_AGENTS_PER_PASS,
@@ -358,6 +359,30 @@ describe('bounded coverage recovery', () => {
   });
 });
 
+/** A step context whose task has exactly these attachments, and whose `00-plan-inputs` recorded
+ *  `recorded` (by name and row). The coverage gate reads both only for a picked section, so a
+ *  structural repair runs with none of it. */
+const attachedCtx = (
+  rows: (string | { id: string; filename: string })[],
+  recorded: { id?: string; filename: string }[] = [],
+) =>
+  ({
+    taskId: 't1',
+    logger: { warn() {}, info() {} },
+    db: {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () =>
+            table === schema.taskSteps
+              ? { limit: async () => [{ output: { inputs: recorded } }] }
+              : Promise.resolve(
+                  rows.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
+                ),
+        }),
+      }),
+    },
+  }) as never;
+
 describe('the structural repair prompt', () => {
   const TARGET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const node = (id: string, title: string, parentId: string | null, path: string) =>
@@ -387,16 +412,13 @@ describe('the structural repair prompt', () => {
   ];
 
   const promptFor = async (items: string[], over: Partial<Detected> = {}) => {
-    const error = await planCoverageStep.apply!(
-      {} as never,
-      {
-        detected: detected({
-          structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
-          ...over,
-        }),
-        formValues: { decision: 'redecompose', items },
-      } as never,
-    ).catch((err: unknown) => err);
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: detected({
+        structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
+        ...over,
+      }),
+      formValues: { decision: 'redecompose', items },
+    } as never).catch((err: unknown) => err);
     expect(error).toBeInstanceOf(MiningWaveError);
     return (error as MiningWaveError).dispatches[0]!.prompt;
   };
@@ -487,6 +509,91 @@ describe('the structural repair prompt', () => {
     const refs = prompt.match(/node:[0-9a-f-]+/g) ?? [];
     expect(refs.length).toBeGreaterThan(30);
     expect(refs.every((ref) => ref.length === 'node:'.length + 36)).toBe(true);
+  });
+});
+
+describe('a repair picked from a document deleted since the gate drafted it', () => {
+  const section = (source: string, line: number) => ({
+    source,
+    line,
+    title: `Section ${line}`,
+    score: 0,
+    matchedNodes: 0,
+    missingTerms: ['x'],
+  });
+  const d = detected({
+    structural: [],
+    sections: [section('spec.md', 12), section('old.md', 4)],
+    sectionBodies: { 'doc:spec.md:12': 'Billing runs monthly.', 'doc:old.md:4': 'Retired text.' },
+    docNames: ['spec.md', 'old.md'],
+  });
+
+  it('never sends the deleted document’s section, whose body the gate still holds', async () => {
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+    } as never).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MiningWaveError);
+    const prompts = (error as MiningWaveError).dispatches.map((x) => x.prompt);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Billing runs monthly.');
+    expect(prompts.join('\n')).not.toContain('Retired text.');
+  });
+
+  it('never sends a section drafted from a document since replaced under the same name', async () => {
+    // `spec.md` was deleted and re-uploaded: the gate still holds the OLD body under that name.
+    const error = await planCoverageStep.apply!(
+      attachedCtx(
+        [{ id: 'new', filename: 'spec.md' }, 'old.md'],
+        [
+          { id: 'first', filename: 'spec.md' },
+          { id: 'id-old.md', filename: 'old.md' },
+        ],
+      ),
+      {
+        detected: d,
+        formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+      } as never,
+    ).catch((err: unknown) => err);
+    const prompts = (error as MiningWaveError).dispatches.map((x) => x.prompt);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Retired text.');
+    expect(prompts.join('\n')).not.toContain('Billing runs monthly.');
+  });
+
+  it('keeps every picked section when the attachments cannot be read', async () => {
+    // Shaped like a drizzle builder, which is awaitable AND carries `.limit`: an async `where` would
+    // hand the `.limit` caller a rejected promise nobody awaits.
+    const lost = () => new Error('connection lost');
+    const unreadable = {
+      taskId: 't1',
+      logger: { warn() {}, info() {} },
+      db: {
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => {
+                throw lost();
+              },
+              then: (_resolve: unknown, reject: (err: Error) => void) => reject(lost()),
+            }),
+          }),
+        }),
+      },
+    } as never;
+    const error = await planCoverageStep.apply!(unreadable, {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+    } as never).catch((err: unknown) => err);
+    expect((error as MiningWaveError).dispatches).toHaveLength(2);
+  });
+
+  it('has nothing to repair when every picked section came from deleted documents', async () => {
+    const out = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: d,
+      formValues: { decision: 'redecompose', items: ['doc:old.md:4'] },
+    } as never);
+    expect(out.decision).toBe('accepted');
   });
 });
 
@@ -797,14 +904,11 @@ describe('re-offering a gap the gate already tried', () => {
   const SECOND = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
   const dispatchIds = async (over: Partial<Detected>, items: string[], exhausted = false) => {
-    const error = await planCoverageStep.apply!(
-      {} as never,
-      {
-        detected: detected(over),
-        formValues: { decision: 'redecompose', items },
-        ...(exhausted ? { miningWaveExhausted: true } : {}),
-      } as never,
-    ).catch((err: unknown) => err);
+    const error = await planCoverageStep.apply!(attachedCtx(['spec.md']), {
+      detected: detected(over),
+      formValues: { decision: 'redecompose', items },
+      ...(exhausted ? { miningWaveExhausted: true } : {}),
+    } as never).catch((err: unknown) => err);
     return error;
   };
 

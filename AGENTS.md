@@ -905,6 +905,23 @@ already seeded the old one (`seedDefaults` is `setnx`), so `reconcileRaisedDefau
 stored value that is still exactly the previous default, on every boot, idempotently — the
 deploy path a config-only change would otherwise not have.
 
+**Plan inputs follow deletions; additions count only by kind.** `00-plan-inputs` records the set
+once, and 01's detect copies what it found into a PERSISTED payload, so a deleted picture kept
+demanding `vision` and the index the root prompt reads FIRST kept naming a deleted file.
+`withLiveInputs` (`01-plan-build.ts`) recomputes those fields at DISPATCH, the root and every
+wave, through `livePlanInputs` (`00-plan-inputs.ts`). Membership changes and a measured verdict
+never does: a PDF that yielded no text stays visual-only. Membership is by ROW, never by name: a
+file deleted and re-uploaded under the same name is a different document that nothing extracted,
+so it counts as a deletion plus an addition. The index is re-rendered, or removed once nothing in
+it is left. An ADDITION is neither extracted nor indexed, but the attachments notice names every
+live row, so its kind still counts (`unpreparedAttachments`): a picture requires `vision`, a PDF
+prefers it. A greenfield root with no brief refuses to dispatch once nothing at all is attached
+(`assertSomethingToBuildFrom`), which is 00's own "a brief or a file" rule re-checked against the
+live rows. 02's manual repair drops a picked section whose document is gone, because the gate
+carries its BODY. Every lookup fails open, onto the fields the build had before. A failed index
+REWRITE is the exception: it drops the index from the prompt, since the file on disk still names
+what was deleted.
+
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`

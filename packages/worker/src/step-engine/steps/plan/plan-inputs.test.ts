@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -16,12 +16,20 @@ import {
   uploadsInputRel,
 } from './_plan-inputs.js';
 import {
+  livePlanInputs,
   planInputsStep,
   renderIndex,
   type PlanInputRow,
+  type PlanInputsApply,
   type PlanInputsDetect,
 } from './00-plan-inputs.js';
-import { planAgentCapabilities, type PlanBuildDetect } from './01-plan-build.js';
+import {
+  assertSomethingToBuildFrom,
+  buildRootPrompt,
+  planAgentCapabilities,
+  withLiveInputs,
+  type PlanBuildDetect,
+} from './01-plan-build.js';
 
 let dir: string;
 
@@ -401,6 +409,9 @@ describe('a sidecar written while its document is deleted', () => {
     const { out, sidecar } = await extractOne(true);
     expect(sidecar).toContain('The spec.');
     expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
+    // The row it was prepared from, so a later reader can tell this file from a same-named
+    // replacement.
+    expect(out.inputs.map((i) => i.id)).toEqual(['a1']);
   });
 });
 
@@ -530,6 +541,323 @@ describe('what a model has to be able to SEE', () => {
   it('does not require vision for a build with no prepared inputs at all', () => {
     // The onboarding wrapper runs the same builder with no 00-plan-inputs step.
     expect(planAgentCapabilities({ mode: 'from_repo' } as PlanBuildDetect)).toEqual(['tool_use']);
+  });
+});
+
+const inputRow = (
+  filename: string,
+  kind: PlanInputRow['kind'],
+  over: Partial<PlanInputRow> = {},
+): PlanInputRow => ({
+  filename,
+  kind,
+  bytes: 1,
+  description: null,
+  sidecar: null,
+  hasText: kind === 'text',
+  note: null,
+  ...over,
+});
+
+/** What `00-plan-inputs` records for a brief, a wireframe picture and a PDF that has text. */
+const recorded = (over: Partial<PlanInputsApply> = {}): PlanInputsApply => ({
+  inputs: [
+    inputRow('brief.md', 'text'),
+    inputRow('wire.png', 'image'),
+    inputRow('spec.pdf', 'pdf', { sidecar: 'spec.pdf.extracted.md', hasText: true }),
+  ],
+  extracted: 1,
+  unreadable: [],
+  hasImageInputs: true,
+  hasPdfInputs: true,
+  visualOnly: [],
+  indexPath: '/haive/workdir/.haive/task-uploads/t1/_PLAN_INPUTS.md',
+  archiveNotes: [],
+  ...over,
+});
+
+/** What is attached now: rows by id, and the names they carry. */
+const attached = (names: string[], ids: string[] = []) => ({
+  ids: new Set(ids),
+  names: new Set(names),
+});
+
+describe('the inputs that are still attached', () => {
+  it('changes nothing while every recorded input is still attached', () => {
+    const prepared = recorded();
+    const { output, changed } = livePlanInputs(
+      prepared,
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
+    );
+    expect(changed).toBe(false);
+    expect(output).toBe(prepared);
+  });
+
+  it('drops a deleted input and recomputes what kinds remain', () => {
+    const { output, changed } = livePlanInputs(recorded(), attached(['brief.md', 'spec.pdf']));
+    expect(changed).toBe(true);
+    expect(output.inputs.map((i) => i.filename)).toEqual(['brief.md', 'spec.pdf']);
+    expect(output.hasImageInputs).toBe(false);
+    expect(output.hasPdfInputs).toBe(true);
+  });
+
+  it('keeps a measured verdict for what remains, and drops it with its document', () => {
+    // A PDF that yielded no text stays visual-only: that was measured, and deleting some other file
+    // changes nothing about it.
+    const prepared = recorded({
+      inputs: [inputRow('wire.pdf', 'pdf', { sidecar: 'wire.pdf.extracted.md' })],
+      visualOnly: ['wire.pdf'],
+      unreadable: ['broken.docx'],
+    });
+    expect(livePlanInputs(prepared, attached(['wire.pdf'])).output.visualOnly).toEqual([
+      'wire.pdf',
+    ]);
+    const gone = livePlanInputs(prepared, attached([])).output;
+    expect(gone.visualOnly).toEqual([]);
+    expect(gone.unreadable).toEqual([]);
+  });
+
+  it('drops the note of a deleted archive', () => {
+    const prepared = recorded({ archiveNotes: [{ filename: 'bundle.zip', note: 'cut' }] });
+    const { output, changed } = livePlanInputs(
+      prepared,
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
+    );
+    expect(changed).toBe(true);
+    expect(output.archiveNotes).toEqual([]);
+  });
+
+  it('reads an output recorded before the archive notes existed', () => {
+    const { archiveNotes: _gone, ...old } = recorded();
+    const { changed } = livePlanInputs(
+      old as PlanInputsApply,
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
+    );
+    expect(changed).toBe(false);
+  });
+
+  it('drops an input deleted and re-uploaded under the same name', () => {
+    // The replacement is a different document, and nothing extracted it: keeping the old row would
+    // hand it the original's verdicts and a sidecar the delete already removed.
+    const prepared = recorded({
+      inputs: [
+        inputRow('brief.md', 'text', { id: 'b1' }),
+        inputRow('spec.pdf', 'pdf', { id: 'p1', sidecar: 'spec.pdf.extracted.md', hasText: true }),
+      ],
+    });
+    const { output, changed } = livePlanInputs(
+      prepared,
+      attached(['brief.md', 'spec.pdf'], ['b1', 'p2']),
+    );
+    expect(changed).toBe(true);
+    expect(output.inputs.map((i) => i.filename)).toEqual(['brief.md']);
+    expect(output.hasPdfInputs).toBe(false);
+  });
+
+  it('matches a row recorded before ids existed by its name', () => {
+    const prepared = recorded({ inputs: [inputRow('brief.md', 'text')] });
+    expect(livePlanInputs(prepared, attached(['brief.md'], ['b9'])).changed).toBe(false);
+    expect(livePlanInputs(prepared, attached([], ['b9'])).changed).toBe(true);
+  });
+});
+
+describe('a build dispatching on what is still attached', () => {
+  async function dispatchView(
+    live: (string | { id: string; filename: string })[] | 'unreadable',
+    stored: PlanInputsApply | null,
+    opts: { linkedUploads?: boolean; snapshot?: string[] } = {},
+  ) {
+    const repo = await mkdtemp(path.join(dir, 'build-'));
+    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
+    if (opts.linkedUploads) {
+      // A link where the uploads directory should be, which the index write refuses to go through.
+      const real = path.join(repo, 'elsewhere');
+      await mkdir(real, { recursive: true });
+      await mkdir(path.dirname(uploads), { recursive: true });
+      await symlink(real, uploads);
+    } else {
+      await mkdir(uploads, { recursive: true });
+    }
+    await writeFile(path.join(uploads, '_PLAN_INPUTS.md'), 'as 00-plan-inputs wrote it');
+    // Exactly what detect copies out of the recorded output.
+    const d = {
+      mode: 'greenfield',
+      repositoryId: 'r1',
+      existingNodeCount: 0,
+      hasRoot: false,
+      kbFiles: [],
+      brief: 'a shop',
+      repoName: 'shop',
+      inputIndexPath: stored?.indexPath ?? null,
+      visualOnlyInputs: stored
+        ? [
+            ...stored.inputs.filter((i) => i.kind === 'image').map((i) => i.filename),
+            ...(stored.visualOnly ?? []),
+          ]
+        : [],
+      hasPdfInputs: stored?.hasPdfInputs === true,
+    } as PlanBuildDetect;
+    const ctx = {
+      taskId: 't1',
+      repoPath: repo,
+      logger: { warn() {} },
+      db: {
+        select: () => ({
+          from: (table: unknown) => ({
+            where: () =>
+              table === schema.taskSteps
+                ? { limit: async () => (stored ? [{ output: stored }] : []) }
+                : live === 'unreadable'
+                  ? Promise.reject(new Error('connection lost'))
+                  : Promise.resolve(
+                      live.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
+                    ),
+          }),
+        }),
+      },
+    } as never;
+    const handed = opts.snapshot && {
+      rows: opts.snapshot.map((filename) => ({
+        id: `id-${filename}`,
+        filename,
+        contentType: null,
+      })),
+      ids: new Set(opts.snapshot.map((f) => `id-${f}`)),
+      names: new Set(opts.snapshot),
+    };
+    const view = await withLiveInputs(ctx, d, handed);
+    const index = await readFile(path.join(uploads, '_PLAN_INPUTS.md'), 'utf8').catch(() => null);
+    return { d, view, index };
+  }
+
+  it('dispatches exactly as detected while everything is still attached', async () => {
+    const { d, view, index } = await dispatchView(['brief.md', 'wire.png', 'spec.pdf'], recorded());
+    expect(view).toBe(d);
+    expect(index).toBe('as 00-plan-inputs wrote it');
+  });
+
+  it('stops requiring vision once the only picture is deleted, and re-renders the index', async () => {
+    const { view, index } = await dispatchView(['brief.md', 'spec.pdf'], recorded());
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(view.hasPdfInputs).toBe(true);
+    expect(view.inputIndexPath).toBe(recorded().indexPath);
+    expect(index).toContain('`spec.pdf`');
+    expect(index).not.toContain('wire.png');
+  });
+
+  it('still requires vision when the picture was replaced under the same name', async () => {
+    // The recorded picture is gone, but the replacement is a picture too, and the attachments notice
+    // points the agent at it.
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text'), inputRow('wire.png', 'image', { id: 'img-1' })],
+      hasPdfInputs: false,
+    });
+    const { view } = await dispatchView(
+      ['brief.md', { id: 'img-2', filename: 'wire.png' }],
+      stored,
+    );
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+  });
+
+  it('requires vision for a picture attached after the inputs were prepared', async () => {
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text')],
+      hasImageInputs: false,
+      hasPdfInputs: false,
+    });
+    const { d, view, index } = await dispatchView(['brief.md', 'new.png'], stored);
+    expect(planAgentCapabilities(d)).toEqual(['tool_use']);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    // Nothing was deleted, so the index 00-plan-inputs wrote still stands.
+    expect(view.inputIndexPath).toBe(stored.indexPath);
+    expect(index).toBe('as 00-plan-inputs wrote it');
+  });
+
+  it('prefers vision, without requiring it, for a PDF attached after the inputs were prepared', async () => {
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text')],
+      hasImageInputs: false,
+      hasPdfInputs: false,
+    });
+    const { view } = await dispatchView(['brief.md', 'scan.pdf'], stored);
+    expect(view.hasPdfInputs).toBe(true);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+  });
+
+  it('stops preferring vision once the PDF is deleted', async () => {
+    const { view } = await dispatchView(['brief.md', 'wire.png'], recorded());
+    expect(view.hasPdfInputs).toBe(false);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+  });
+
+  it('removes the index, and the line telling the agent to read it, once nothing is left', async () => {
+    const { view, index } = await dispatchView([], recorded());
+    expect(view.inputIndexPath).toBeNull();
+    expect(index).toBeNull();
+    expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+  });
+
+  it('drops the index from the prompt when it cannot be rewritten, rather than name a stale one', async () => {
+    const { view, index } = await dispatchView(['brief.md', 'spec.pdf'], recorded(), {
+      linkedUploads: true,
+    });
+    expect(index).toBe('as 00-plan-inputs wrote it');
+    expect(view.inputIndexPath).toBeNull();
+    expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+    // The capabilities still follow the deletion.
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+  });
+
+  it('judges the snapshot it is handed rather than reading the attachments again', async () => {
+    // The root dispatch reads once, so refusing and choosing capabilities see the same rows. Here
+    // the database would answer every file; the handed snapshot has lost the picture.
+    const { view } = await dispatchView(['brief.md', 'wire.png', 'spec.pdf'], recorded(), {
+      snapshot: ['brief.md', 'spec.pdf'],
+    });
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+  });
+
+  it('keeps the detected fields when the attachments cannot be read', async () => {
+    const { d, view } = await dispatchView('unreadable', recorded());
+    expect(view).toBe(d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+  });
+
+  it('leaves a build that recorded no inputs alone', async () => {
+    const { d, view } = await dispatchView([], null);
+    expect(view).toBe(d);
+  });
+});
+
+describe('a greenfield root with nothing left to build from', () => {
+  const greenfield = (brief: string, mode = 'greenfield') =>
+    ({ mode, repositoryId: 'r1', brief }) as PlanBuildDetect;
+  /** The one attachment snapshot the root dispatch reads. */
+  const snapshot = (...filenames: string[]) => ({
+    rows: filenames.map((filename) => ({ id: `id-${filename}`, filename, contentType: null })),
+    ids: new Set(filenames.map((f) => `id-${f}`)),
+    names: new Set(filenames),
+  });
+
+  it('refuses a build with no brief once every attached file is gone', () => {
+    // 00-plan-inputs checked "a brief or a file" when it ran; a deletion since would otherwise send
+    // the root agent out with no specification at all, spending a run on an invented plan.
+    expect(() => assertSomethingToBuildFrom(greenfield(''), snapshot())).toThrow(
+      /nothing to build from/,
+    );
+  });
+
+  it('lets it through while anything is attached, prepared or not', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield(''), snapshot('late.md'))).not.toThrow();
+  });
+
+  it('lets a build with a brief through with nothing attached', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield('A shop.'), snapshot())).not.toThrow();
+  });
+
+  it('never refuses on a lookup that failed, or for a repository build', () => {
+    expect(() => assertSomethingToBuildFrom(greenfield(''), null)).not.toThrow();
+    expect(() => assertSomethingToBuildFrom(greenfield('', 'from_repo'), snapshot())).not.toThrow();
   });
 });
 

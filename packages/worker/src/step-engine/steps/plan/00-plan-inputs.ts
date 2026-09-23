@@ -80,6 +80,10 @@ export interface PlanInputRow {
   /** Why the sidecar is missing or empty. Display copy only — nothing branches on
    *  it. Null when there is nothing to say. */
   note: string | null;
+  /** The attachment row this was prepared from. A file deleted and re-uploaded under the same
+   *  name is a different document, which nothing extracted, so a later reader matches by this.
+   *  Optional: a row recorded before it existed is matched by name. */
+  id?: string;
 }
 
 export interface PlanInputsDetect {
@@ -154,6 +158,138 @@ async function stillAttached(
 async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
   await chownNoFollow(anchor, rel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
   await chmodNoFollow(anchor, rel, 0o644).catch(() => {});
+}
+
+/** Write the index for these inputs and return the path an agent sees it at. Shared with the plan
+ *  builder, which re-renders it at dispatch once attachments have been deleted. */
+export async function writePlanInputsIndex(
+  repoPath: string,
+  taskId: string,
+  inputs: PlanInputRow[],
+  archiveNotes: { filename: string; note: string }[],
+): Promise<string> {
+  const indexRel = `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`;
+  await writeFileNoFollow(repoPath, indexRel, renderIndex(taskId, inputs, archiveNotes), {
+    fileMode: 0o644,
+  });
+  await harmonizeOwnership(repoPath, indexRel);
+  return `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}/${PLAN_INPUTS_INDEX}`;
+}
+
+/** Remove the index, once nothing it would list is still attached. */
+export async function removePlanInputsIndex(repoPath: string, taskId: string): Promise<void> {
+  await removeNoFollow(repoPath, `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`).catch(() => {});
+}
+
+/** What this step recorded, or null when it did not run for the task (the onboarding wrapper
+ *  registers no such step). Never throws: a build must not fail because the lookup did. */
+export async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
+  try {
+    const [row] = await ctx.db
+      .select({ output: schema.taskSteps.output })
+      .from(schema.taskSteps)
+      .where(
+        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
+      )
+      .limit(1);
+    return (row?.output as PlanInputsApply | null) ?? null;
+  } catch (err) {
+    ctx.logger.warn({ err }, 'could not read prepared plan inputs');
+    return null;
+  }
+}
+
+export interface LiveAttachmentRow {
+  id: string;
+  filename: string;
+  contentType: string | null;
+}
+
+/** What is attached to the task right now: the rows, their ids, and the names they carry. */
+export interface LiveAttachments {
+  rows: readonly LiveAttachmentRow[];
+  ids: ReadonlySet<string>;
+  names: ReadonlySet<string>;
+}
+
+/** The task's attachments as they stand, or null when they cannot be read. */
+export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachments | null> {
+  try {
+    const rows = await ctx.db
+      .select({
+        id: schema.taskAttachments.id,
+        filename: schema.taskAttachments.filename,
+        contentType: schema.taskAttachments.contentType,
+      })
+      .from(schema.taskAttachments)
+      .where(eq(schema.taskAttachments.taskId, ctx.taskId));
+    return {
+      rows,
+      ids: new Set(rows.map((r) => r.id)),
+      names: new Set(rows.map((r) => r.filename)),
+    };
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan inputs: could not read the task attachments');
+    return null;
+  }
+}
+
+/** Whether a recorded input is still attached: by ROW, since a same-named replacement is a
+ *  different document, and by name only for a row recorded before ids were. */
+export function stillAttachedInput(
+  input: { id?: string; filename: string },
+  live: Pick<LiveAttachments, 'ids' | 'names'>,
+): boolean {
+  return input.id ? live.ids.has(input.id) : live.names.has(input.filename);
+}
+
+/** Live attachments no recorded input accounts for: attached after this step ran, or re-uploaded
+ *  under a recorded name. Nothing prepared them, yet the attachments notice lists every live row,
+ *  so a dispatch still has to account for what they are. */
+export function unpreparedAttachments(
+  prepared: PlanInputsApply,
+  live: LiveAttachments,
+): LiveAttachmentRow[] {
+  const ids = new Set(prepared.inputs.flatMap((i) => (i.id ? [i.id] : [])));
+  const legacyNames = new Set(prepared.inputs.filter((i) => !i.id).map((i) => i.filename));
+  return live.rows.filter((r) => !ids.has(r.id) && !legacyNames.has(r.filename));
+}
+
+/** What this step recorded, less any attachment deleted since. Membership is the only thing that
+ *  changes: a verdict stays as it was measured (a document that yielded no text stays visual-only),
+ *  and a file attached after this step ran is not added, since nothing extracted it. The two
+ *  kind flags are recomputed from what remains. */
+export function livePlanInputs(
+  prepared: PlanInputsApply,
+  live: Pick<LiveAttachments, 'ids' | 'names'>,
+): { output: PlanInputsApply; changed: boolean } {
+  const visualOnlyBefore = prepared.visualOnly ?? [];
+  const archiveNotesBefore = prepared.archiveNotes ?? [];
+  const inputs = prepared.inputs.filter((i) => stillAttachedInput(i, live));
+  // The lists below name inputs, so they follow the rows that were kept rather than the live
+  // names, which a same-named replacement would still carry.
+  const kept = new Set(inputs.map((i) => i.filename));
+  const visualOnly = visualOnlyBefore.filter((f) => kept.has(f));
+  const unreadable = prepared.unreadable.filter((f) => kept.has(f));
+  const archiveNotes = archiveNotesBefore.filter((n) => kept.has(n.filename));
+  const changed =
+    inputs.length !== prepared.inputs.length ||
+    visualOnly.length !== visualOnlyBefore.length ||
+    unreadable.length !== prepared.unreadable.length ||
+    archiveNotes.length !== archiveNotesBefore.length;
+  if (!changed) return { output: prepared, changed: false };
+  return {
+    changed: true,
+    output: {
+      ...prepared,
+      inputs,
+      visualOnly,
+      unreadable,
+      archiveNotes,
+      hasImageInputs: inputs.some((i) => i.kind === 'image'),
+      hasPdfInputs: inputs.some((i) => i.kind === 'pdf'),
+    },
+  };
 }
 
 /** The index the greenfield root prompt tells its agent to read FIRST, so every value it names is
@@ -373,6 +509,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         );
       }
       const row: PlanInputRow = {
+        id: attachment.id,
         filename: attachment.filename,
         kind,
         bytes: info.stats.size,
@@ -457,15 +594,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     let indexPath: string | null = null;
     if (inputs.length > 0 && uploadsDir) {
-      const indexRel = `${taskUploadsRel(ctx.taskId)}/${PLAN_INPUTS_INDEX}`;
-      await writeFileNoFollow(
-        ctx.repoPath,
-        indexRel,
-        renderIndex(ctx.taskId, inputs, archiveNotes),
-        { fileMode: 0o644 },
-      );
-      await harmonizeOwnership(ctx.repoPath, indexRel);
-      indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
+      indexPath = await writePlanInputsIndex(ctx.repoPath, ctx.taskId, inputs, archiveNotes);
     }
 
     return {
