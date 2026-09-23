@@ -31,7 +31,12 @@ import {
   type DocSection,
   type StructuralGap,
 } from './plan-coverage-scan.js';
-import { loadLiveAttachmentNames, type PlanInputsApply } from './00-plan-inputs.js';
+import {
+  loadLiveAttachments,
+  loadPlanInputsOutput,
+  stillAttachedInput,
+  type PlanInputsApply,
+} from './00-plan-inputs.js';
 import { uploadsInputRel } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
@@ -198,8 +203,10 @@ const sectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`
 /**
  * The picked items less any section whose document is no longer attached. A section is sent WITH
  * its body, which detect copied out when it drafted this gate, so a document deleted while the gate
- * waited would otherwise still reach an agent. The attachments are read only when a section was
- * picked, and a lookup that fails keeps every item, which is what happened before this existed.
+ * waited would otherwise still reach an agent. The document is the ROW `00-plan-inputs` recorded
+ * under the section's name, so one deleted and re-uploaded under the same name is gone too. The
+ * attachments are read only when a section was picked, and a lookup that fails keeps every item,
+ * which is what happened before this existed.
  */
 async function dropDeletedSources(
   ctx: StepContext,
@@ -208,9 +215,14 @@ async function dropDeletedSources(
 ): Promise<string[]> {
   const pickedSections = sections.filter((c) => picked.includes(sectionKey(c)));
   if (pickedSections.length === 0) return picked;
-  const live = await loadLiveAttachmentNames(ctx);
+  const [live, prepared] = await Promise.all([loadLiveAttachments(ctx), loadPlanInputsOutput(ctx)]);
   if (live === null) return picked;
-  const gone = new Set(pickedSections.filter((c) => !live.has(c.source)).map(sectionKey));
+  const recorded = new Map((prepared?.inputs ?? []).map((i) => [i.filename, i]));
+  const gone = new Set(
+    pickedSections
+      .filter((c) => !stillAttachedInput(recorded.get(c.source) ?? { filename: c.source }, live))
+      .map(sectionKey),
+  );
   if (gone.size === 0) return picked;
   ctx.logger.info({ dropped: [...gone] }, 'coverage: skipping gaps from deleted documents');
   return picked.filter((key) => !gone.has(key));

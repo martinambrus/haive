@@ -910,8 +910,9 @@ detect copies what it found into a PERSISTED payload, so a deleted picture kept 
 and the index the root prompt reads FIRST kept naming a deleted file. `withLiveInputs`
 (`01-plan-build.ts`) recomputes those fields at DISPATCH, the root and every wave, through
 `livePlanInputs` (`00-plan-inputs.ts`). Membership changes and a measured verdict never does: a
-PDF that yielded no text stays visual-only. The index is re-rendered, or removed once nothing in
-it is left. 02's manual repair drops a picked section whose document is gone, because the gate
+PDF that yielded no text stays visual-only. Membership is by ROW, never by name: a file deleted
+and re-uploaded under the same name is a different document that nothing extracted, so it counts
+as a deletion plus an addition. The index is re-rendered, or removed once nothing in it is left. 02's manual repair drops a picked section whose document is gone, because the gate
 carries its BODY. Both lookups fail open, onto the fields the build had before. An attachment
 ADDED after `00-plan-inputs` is not picked up, since nothing extracted it.
 

@@ -34,7 +34,8 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
 import {
   livePlanInputs,
-  loadLiveAttachmentNames,
+  loadLiveAttachments,
+  loadPlanInputsOutput,
   removePlanInputsIndex,
   writePlanInputsIndex,
   type PlanInputsApply,
@@ -274,25 +275,6 @@ export function askedState(results: { agentId: string; errorMessage?: string | n
   return { asked, waves, expandAsked: asked.size, expandDispatched };
 }
 
-/** What `00-plan-inputs` found, or null when it did not run for this task (the
- *  onboarding wrapper registers no such step). Never throws: a build must not
- *  fail because the index lookup did. */
-async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
-  try {
-    const [row] = await ctx.db
-      .select({ output: schema.taskSteps.output })
-      .from(schema.taskSteps)
-      .where(
-        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
-      )
-      .limit(1);
-    return (row?.output as PlanInputsApply | null) ?? null;
-  } catch (err) {
-    ctx.logger.warn({ err }, 'could not read prepared plan inputs');
-    return null;
-  }
-}
-
 /** Images are always visual-only; a document joins them when nothing readable came out of it. */
 function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
   return [
@@ -317,7 +299,7 @@ export async function withLiveInputs(
 ): Promise<PlanBuildDetect> {
   const prepared = await loadPlanInputsOutput(ctx);
   if (!prepared) return d;
-  const live = await loadLiveAttachmentNames(ctx);
+  const live = await loadLiveAttachments(ctx);
   if (!live) return d;
   const { output, changed } = livePlanInputs(prepared, live);
   if (!changed) return d;

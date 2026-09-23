@@ -80,6 +80,10 @@ export interface PlanInputRow {
   /** Why the sidecar is missing or empty. Display copy only — nothing branches on
    *  it. Null when there is nothing to say. */
   note: string | null;
+  /** The attachment row this was prepared from. A file deleted and re-uploaded under the same
+   *  name is a different document, which nothing extracted, so a later reader matches by this.
+   *  Optional: a row recorded before it existed is matched by name. */
+  id?: string;
 }
 
 export interface PlanInputsDetect {
@@ -177,18 +181,51 @@ export async function removePlanInputsIndex(repoPath: string, taskId: string): P
   await removeNoFollow(repoPath, `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`).catch(() => {});
 }
 
-/** The filenames attached to the task right now, or null when they cannot be read. */
-export async function loadLiveAttachmentNames(ctx: StepContext): Promise<Set<string> | null> {
+/** What this step recorded, or null when it did not run for the task (the onboarding wrapper
+ *  registers no such step). Never throws: a build must not fail because the lookup did. */
+export async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
+  try {
+    const [row] = await ctx.db
+      .select({ output: schema.taskSteps.output })
+      .from(schema.taskSteps)
+      .where(
+        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
+      )
+      .limit(1);
+    return (row?.output as PlanInputsApply | null) ?? null;
+  } catch (err) {
+    ctx.logger.warn({ err }, 'could not read prepared plan inputs');
+    return null;
+  }
+}
+
+/** What is attached to the task right now: the rows, and the names they carry. */
+export interface LiveAttachments {
+  ids: ReadonlySet<string>;
+  names: ReadonlySet<string>;
+}
+
+/** The task's attachments as they stand, or null when they cannot be read. */
+export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachments | null> {
   try {
     const rows = await ctx.db
-      .select({ filename: schema.taskAttachments.filename })
+      .select({ id: schema.taskAttachments.id, filename: schema.taskAttachments.filename })
       .from(schema.taskAttachments)
       .where(eq(schema.taskAttachments.taskId, ctx.taskId));
-    return new Set(rows.map((r) => r.filename));
+    return { ids: new Set(rows.map((r) => r.id)), names: new Set(rows.map((r) => r.filename)) };
   } catch (err) {
     ctx.logger.warn({ err }, 'plan inputs: could not read the task attachments');
     return null;
   }
+}
+
+/** Whether a recorded input is still attached: by ROW, since a same-named replacement is a
+ *  different document, and by name only for a row recorded before ids were. */
+export function stillAttachedInput(
+  input: { id?: string; filename: string },
+  live: LiveAttachments,
+): boolean {
+  return input.id ? live.ids.has(input.id) : live.names.has(input.filename);
 }
 
 /** What this step recorded, less any attachment deleted since. Membership is the only thing that
@@ -197,14 +234,17 @@ export async function loadLiveAttachmentNames(ctx: StepContext): Promise<Set<str
  *  kind flags are recomputed from what remains. */
 export function livePlanInputs(
   prepared: PlanInputsApply,
-  live: ReadonlySet<string>,
+  live: LiveAttachments,
 ): { output: PlanInputsApply; changed: boolean } {
   const visualOnlyBefore = prepared.visualOnly ?? [];
   const archiveNotesBefore = prepared.archiveNotes ?? [];
-  const inputs = prepared.inputs.filter((i) => live.has(i.filename));
-  const visualOnly = visualOnlyBefore.filter((f) => live.has(f));
-  const unreadable = prepared.unreadable.filter((f) => live.has(f));
-  const archiveNotes = archiveNotesBefore.filter((n) => live.has(n.filename));
+  const inputs = prepared.inputs.filter((i) => stillAttachedInput(i, live));
+  // The lists below name inputs, so they follow the rows that were kept rather than the live
+  // names, which a same-named replacement would still carry.
+  const kept = new Set(inputs.map((i) => i.filename));
+  const visualOnly = visualOnlyBefore.filter((f) => kept.has(f));
+  const unreadable = prepared.unreadable.filter((f) => kept.has(f));
+  const archiveNotes = archiveNotesBefore.filter((n) => kept.has(n.filename));
   const changed =
     inputs.length !== prepared.inputs.length ||
     visualOnly.length !== visualOnlyBefore.length ||
@@ -442,6 +482,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         );
       }
       const row: PlanInputRow = {
+        id: attachment.id,
         filename: attachment.filename,
         kind,
         bytes: info.stats.size,

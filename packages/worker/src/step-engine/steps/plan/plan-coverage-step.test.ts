@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { schema } from '@haive/database';
 import { loadPlanSkeletons, type PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   AUTO_CONVERGENCE_AGENTS_PER_PASS,
@@ -358,15 +359,26 @@ describe('bounded coverage recovery', () => {
   });
 });
 
-/** A step context whose task has exactly these attachments. The coverage gate reads them only for a
- *  picked section, so a structural repair runs with none of it. */
-const attachedCtx = (filenames: string[]) =>
+/** A step context whose task has exactly these attachments, and whose `00-plan-inputs` recorded
+ *  `recorded` (by name and row). The coverage gate reads both only for a picked section, so a
+ *  structural repair runs with none of it. */
+const attachedCtx = (
+  rows: (string | { id: string; filename: string })[],
+  recorded: { id?: string; filename: string }[] = [],
+) =>
   ({
     taskId: 't1',
     logger: { warn() {}, info() {} },
     db: {
       select: () => ({
-        from: () => ({ where: async () => filenames.map((filename) => ({ filename })) }),
+        from: (table: unknown) => ({
+          where: () =>
+            table === schema.taskSteps
+              ? { limit: async () => [{ output: { inputs: recorded } }] }
+              : Promise.resolve(
+                  rows.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
+                ),
+        }),
       }),
     },
   }) as never;
@@ -528,16 +540,43 @@ describe('a repair picked from a document deleted since the gate drafted it', ()
     expect(prompts.join('\n')).not.toContain('Retired text.');
   });
 
+  it('never sends a section drafted from a document since replaced under the same name', async () => {
+    // `spec.md` was deleted and re-uploaded: the gate still holds the OLD body under that name.
+    const error = await planCoverageStep.apply!(
+      attachedCtx(
+        [{ id: 'new', filename: 'spec.md' }, 'old.md'],
+        [
+          { id: 'first', filename: 'spec.md' },
+          { id: 'id-old.md', filename: 'old.md' },
+        ],
+      ),
+      {
+        detected: d,
+        formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+      } as never,
+    ).catch((err: unknown) => err);
+    const prompts = (error as MiningWaveError).dispatches.map((x) => x.prompt);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Retired text.');
+    expect(prompts.join('\n')).not.toContain('Billing runs monthly.');
+  });
+
   it('keeps every picked section when the attachments cannot be read', async () => {
+    // Shaped like a drizzle builder, which is awaitable AND carries `.limit`: an async `where` would
+    // hand the `.limit` caller a rejected promise nobody awaits.
+    const lost = () => new Error('connection lost');
     const unreadable = {
       taskId: 't1',
       logger: { warn() {}, info() {} },
       db: {
         select: () => ({
           from: () => ({
-            where: async () => {
-              throw new Error('connection lost');
-            },
+            where: () => ({
+              limit: async () => {
+                throw lost();
+              },
+              then: (_resolve: unknown, reject: (err: Error) => void) => reject(lost()),
+            }),
           }),
         }),
       },

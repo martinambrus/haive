@@ -408,6 +408,9 @@ describe('a sidecar written while its document is deleted', () => {
     const { out, sidecar } = await extractOne(true);
     expect(sidecar).toContain('The spec.');
     expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
+    // The row it was prepared from, so a later reader can tell this file from a same-named
+    // replacement.
+    expect(out.inputs.map((i) => i.id)).toEqual(['a1']);
   });
 });
 
@@ -572,19 +575,25 @@ const recorded = (over: Partial<PlanInputsApply> = {}): PlanInputsApply => ({
   ...over,
 });
 
+/** What is attached now: rows by id, and the names they carry. */
+const attached = (names: string[], ids: string[] = []) => ({
+  ids: new Set(ids),
+  names: new Set(names),
+});
+
 describe('the inputs that are still attached', () => {
   it('changes nothing while every recorded input is still attached', () => {
     const prepared = recorded();
     const { output, changed } = livePlanInputs(
       prepared,
-      new Set(['brief.md', 'wire.png', 'spec.pdf']),
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
     );
     expect(changed).toBe(false);
     expect(output).toBe(prepared);
   });
 
   it('drops a deleted input and recomputes what kinds remain', () => {
-    const { output, changed } = livePlanInputs(recorded(), new Set(['brief.md', 'spec.pdf']));
+    const { output, changed } = livePlanInputs(recorded(), attached(['brief.md', 'spec.pdf']));
     expect(changed).toBe(true);
     expect(output.inputs.map((i) => i.filename)).toEqual(['brief.md', 'spec.pdf']);
     expect(output.hasImageInputs).toBe(false);
@@ -599,8 +608,10 @@ describe('the inputs that are still attached', () => {
       visualOnly: ['wire.pdf'],
       unreadable: ['broken.docx'],
     });
-    expect(livePlanInputs(prepared, new Set(['wire.pdf'])).output.visualOnly).toEqual(['wire.pdf']);
-    const gone = livePlanInputs(prepared, new Set()).output;
+    expect(livePlanInputs(prepared, attached(['wire.pdf'])).output.visualOnly).toEqual([
+      'wire.pdf',
+    ]);
+    const gone = livePlanInputs(prepared, attached([])).output;
     expect(gone.visualOnly).toEqual([]);
     expect(gone.unreadable).toEqual([]);
   });
@@ -609,7 +620,7 @@ describe('the inputs that are still attached', () => {
     const prepared = recorded({ archiveNotes: [{ filename: 'bundle.zip', note: 'cut' }] });
     const { output, changed } = livePlanInputs(
       prepared,
-      new Set(['brief.md', 'wire.png', 'spec.pdf']),
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
     );
     expect(changed).toBe(true);
     expect(output.archiveNotes).toEqual([]);
@@ -619,14 +630,41 @@ describe('the inputs that are still attached', () => {
     const { archiveNotes: _gone, ...old } = recorded();
     const { changed } = livePlanInputs(
       old as PlanInputsApply,
-      new Set(['brief.md', 'wire.png', 'spec.pdf']),
+      attached(['brief.md', 'wire.png', 'spec.pdf']),
     );
     expect(changed).toBe(false);
+  });
+
+  it('drops an input deleted and re-uploaded under the same name', () => {
+    // The replacement is a different document, and nothing extracted it: keeping the old row would
+    // hand it the original's verdicts and a sidecar the delete already removed.
+    const prepared = recorded({
+      inputs: [
+        inputRow('brief.md', 'text', { id: 'b1' }),
+        inputRow('spec.pdf', 'pdf', { id: 'p1', sidecar: 'spec.pdf.extracted.md', hasText: true }),
+      ],
+    });
+    const { output, changed } = livePlanInputs(
+      prepared,
+      attached(['brief.md', 'spec.pdf'], ['b1', 'p2']),
+    );
+    expect(changed).toBe(true);
+    expect(output.inputs.map((i) => i.filename)).toEqual(['brief.md']);
+    expect(output.hasPdfInputs).toBe(false);
+  });
+
+  it('matches a row recorded before ids existed by its name', () => {
+    const prepared = recorded({ inputs: [inputRow('brief.md', 'text')] });
+    expect(livePlanInputs(prepared, attached(['brief.md'], ['b9'])).changed).toBe(false);
+    expect(livePlanInputs(prepared, attached([], ['b9'])).changed).toBe(true);
   });
 });
 
 describe('a build dispatching on what is still attached', () => {
-  async function dispatchView(live: string[] | 'unreadable', stored: PlanInputsApply | null) {
+  async function dispatchView(
+    live: (string | { id: string; filename: string })[] | 'unreadable',
+    stored: PlanInputsApply | null,
+  ) {
     const repo = await mkdtemp(path.join(dir, 'build-'));
     const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
     await mkdir(uploads, { recursive: true });
@@ -656,7 +694,9 @@ describe('a build dispatching on what is still attached', () => {
                 ? { limit: async () => (stored ? [{ output: stored }] : []) }
                 : live === 'unreadable'
                   ? Promise.reject(new Error('connection lost'))
-                  : Promise.resolve(live.map((filename) => ({ filename }))),
+                  : Promise.resolve(
+                      live.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
+                    ),
           }),
         }),
       },
@@ -679,6 +719,18 @@ describe('a build dispatching on what is still attached', () => {
     expect(view.inputIndexPath).toBe(recorded().indexPath);
     expect(index).toContain('`spec.pdf`');
     expect(index).not.toContain('wire.png');
+  });
+
+  it('stops requiring vision when the picture was replaced under the same name', async () => {
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text'), inputRow('wire.png', 'image', { id: 'img-1' })],
+      hasPdfInputs: false,
+    });
+    const { view } = await dispatchView(
+      ['brief.md', { id: 'img-2', filename: 'wire.png' }],
+      stored,
+    );
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
   it('stops preferring vision once the PDF is deleted', async () => {
