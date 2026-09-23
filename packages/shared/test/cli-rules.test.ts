@@ -6,6 +6,7 @@ import {
   buildCliRulesBlock,
   buildCliRulesBlockFromProviders,
   resolveEffectiveRules,
+  inheritsDefaultRules,
   extractRegion,
   upsertRegion,
 } from '../src/templates/cli-rules.js';
@@ -94,6 +95,19 @@ describe('resolveEffectiveRules', () => {
     // The test above cannot catch a missing hash: an unknown hash returns the
     // input, which there IS the default. Editing the rules needs this to fail.
     expect(KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(DEFAULT_AGENT_RULES))).toBe(true);
+  });
+});
+
+describe('inheritsDefaultRules', () => {
+  it('reads empty rules and a copy of a shipped default as inheriting', () => {
+    expect(inheritsDefaultRules('')).toBe(true);
+    expect(inheritsDefaultRules('  \n')).toBe(true);
+    expect(inheritsDefaultRules(DEFAULT_AGENT_RULES)).toBe(true);
+  });
+
+  it('reads anything else as an override, a one-character edit of the default included', () => {
+    expect(inheritsDefaultRules('- my custom rule')).toBe(false);
+    expect(inheritsDefaultRules(`${DEFAULT_AGENT_RULES}x`)).toBe(false);
   });
 });
 

@@ -77,9 +77,14 @@ export function buildCliRulesBlock(rulesContents: readonly string[]): string | n
  *  it inherits the live DEFAULT_AGENT_RULES — letting template edits propagate.
  *  Anything else is an explicit override and is used as-is. */
 export function resolveEffectiveRules(rulesContent: string): string {
-  if (rulesContent.trim().length === 0) return DEFAULT_AGENT_RULES;
-  if (KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))) return DEFAULT_AGENT_RULES;
-  return rulesContent;
+  return inheritsDefaultRules(rulesContent) ? DEFAULT_AGENT_RULES : rulesContent;
+}
+
+/** Whether a provider's stored rules inherit the live default rather than override it. */
+export function inheritsDefaultRules(rulesContent: string): boolean {
+  return (
+    rulesContent.trim().length === 0 || KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))
+  );
 }
 
 /** Convenience over buildCliRulesBlock for the common call shape: take every
