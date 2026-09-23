@@ -24,6 +24,7 @@ import {
   splitAttachmentStoredPath,
 } from '@haive/shared';
 import { extractArchive } from '../repo/clone.js';
+import { collapseToLine } from '../step-engine/steps/_untrusted-repo.js';
 
 /**
  * An uploaded archive becomes the tree it contains.
@@ -80,7 +81,7 @@ export function expansionErrorLine(err: unknown, anchor: string): string {
       .map((l) => l.trim())
       .find((l) => l !== '') ?? '';
   return cap(
-    line.split(`${anchor}/`).join('').split(anchor).join('the repository'),
+    collapseToLine(line.split(`${anchor}/`).join('').split(anchor).join('the repository')),
     EXPANSION_ERROR_CHARS,
   );
 }
@@ -89,7 +90,10 @@ export function expansionErrorLine(err: unknown, anchor: string): string {
  *  named the way `describeDrops` names the ones extraction refused. */
 function describePathDrops(rels: string[]): string | null {
   if (rels.length === 0) return null;
-  const shown = rels.slice(0, PATH_DROP_NAMES).map((r) => cap(r, PATH_DROP_NAME_CHARS));
+  // Collapsed before the cap: tar keeps a member name's bytes, newlines included.
+  const shown = rels
+    .slice(0, PATH_DROP_NAMES)
+    .map((r) => cap(collapseToLine(r), PATH_DROP_NAME_CHARS));
   const more = rels.length > shown.length ? ` and ${rels.length - shown.length} more` : '';
   return `${rels.length} archive member(s) were not extracted (path too long or too deep to store): ${shown.join(', ')}${more}`;
 }
@@ -386,7 +390,9 @@ export async function ensureArchivesExpanded(
 
     // Stamped whatever happened. Without it a failed or capped archive is retried
     // on every step for the life of the task, each time paying a full extraction.
-    if (note !== null) note = cap(note, EXPANSION_NOTE_CHARS);
+    // ONE line whatever produced it — extraction's own drop note names members raw too — so the
+    // stored note is what AGENTS.md promises it is, and not only what a prompt makes of it.
+    if (note !== null) note = cap(collapseToLine(note), EXPANSION_NOTE_CHARS);
     await db
       .update(schema.taskAttachments)
       .set({ expandedAt: new Date(), expansionNote: note })
