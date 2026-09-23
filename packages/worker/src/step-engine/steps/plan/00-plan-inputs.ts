@@ -11,6 +11,7 @@ import { schema } from '@haive/database';
 import { ensureArchivesExpanded } from '../../../attachments/expand-archives.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { isSingleLine, safeNote } from '../_untrusted-repo.js';
 import {
   classifyPlanInput,
   extractPlanInput,
@@ -55,7 +56,7 @@ export const PLAN_INPUTS_INDEX = '_PLAN_INPUTS.md';
  *  is still mounted and the index says plainly that no text was pulled from it. */
 const PLAN_INPUT_EXTRACTION_LIMIT = 50;
 
-interface PlanInputRow {
+export interface PlanInputRow {
   filename: string;
   kind: PlanInputKind;
   bytes: number;
@@ -128,7 +129,12 @@ async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
   await chmodNoFollow(anchor, rel, 0o644).catch(() => {});
 }
 
-function renderIndex(
+/** The index the greenfield root prompt tells its agent to read FIRST, so every value it names is
+ *  held to the prompt-line rule here, at render time — a stored note from before this rule
+ *  existed is reduced too. Notes are prose built around archive member names and extractor
+ *  errors, so they are collapsed and capped; an archive name that cannot be a single line is left
+ *  out rather than rewritten, since the agent has to be able to find that file. */
+export function renderIndex(
   taskId: string,
   rows: PlanInputRow[],
   archiveNotes: { filename: string; note: string }[],
@@ -164,16 +170,17 @@ function renderIndex(
     if (!row.description && !row.note) continue;
     lines.push(
       `- \`${row.filename}\`${row.description ? ` — ${row.description}` : ''}${
-        row.note ? ` _(${row.note})_` : ''
+        row.note ? ` _(${safeNote(row.note)})_` : ''
       }`,
     );
   }
-  if (archiveNotes.length > 0) {
+  const shownNotes = archiveNotes.filter((n) => isSingleLine(n.filename));
+  if (shownNotes.length > 0) {
     lines.push(
       '',
       'Some attached archives were not fully expanded. What they contain is NOT in the',
       'list above; treat the plan as missing whatever they hold and say so.',
-      ...archiveNotes.map((n) => `- \`${n.filename}\` — ${n.note}`),
+      ...shownNotes.map((n) => `- \`${n.filename}\` — ${safeNote(n.note)}`),
     );
   }
   const visual = rows.filter(
