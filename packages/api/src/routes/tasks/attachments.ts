@@ -28,6 +28,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { attachmentRemovalPlan, type AttachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -228,6 +229,33 @@ async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string
     }
     cursor = splitAttachmentPath(cursor).dir;
   }
+}
+
+/** Remove what `attachmentRemovalPlan` lists. Walked under the repository root like every other
+ *  removal here, so a link in a path is refused rather than followed, and one already gone is fine. */
+async function removePlanned(
+  anchor: string,
+  uploadsRel: string,
+  plan: AttachmentRemovalPlan,
+): Promise<void> {
+  for (const tree of plan.trees) {
+    await removeNoFollow(anchor, `${uploadsRel}/${tree}`, { recursive: true }).catch(() => {});
+  }
+  for (const file of plan.files) {
+    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
+  }
+}
+
+/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
+ *  the children that kept it alive. */
+async function pruneAfter(
+  anchor: string,
+  uploadsRel: string,
+  removed: readonly string[],
+): Promise<void> {
+  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
+  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
 }
 
 /** Stream the request body to `destPath`, aborting + unlinking once the byte count
@@ -520,28 +548,22 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
   const { anchor, uploadsRel } = split;
 
-  // Files this row produced by being expanded. Their ROWS cascade on the delete
-  // below, but the FK cannot reach the disk — and an orphaned tree stays
-  // bind-mounted into the sandbox, so an agent would keep reading files the user
-  // believes they removed. Every child lives under one directory (the expansion
-  // dir), which is what gets removed, sidecars and all.
-  const children = await db.query.taskAttachments.findMany({
-    where: eq(schema.taskAttachments.expandedFromId, attachmentId),
-    columns: { filename: true },
-    limit: 1,
+  // What the FK cannot reach: the expansion tree if this is an archive (its member ROWS cascade on
+  // the delete below) and the extracted-text sidecar. Both stay bind-mounted into the sandbox, so an
+  // agent would keep reading files the user believes they removed.
+  const rows = await db.query.taskAttachments.findMany({
+    where: and(
+      eq(schema.taskAttachments.taskId, taskId),
+      eq(schema.taskAttachments.userId, userId),
+    ),
+    columns: { id: true, filename: true, expandedFromId: true },
   });
-  const expansionDir = children[0]
-    ? (splitAttachmentPath(children[0].filename).dir.split('/')[0] ?? '')
-    : '';
-  if (expansionDir !== '') {
-    await removeNoFollow(anchor, `${uploadsRel}/${expansionDir}`, { recursive: true }).catch(
-      () => {},
-    );
-  }
+  const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
+  await removePlanned(anchor, uploadsRel, plan);
 
   await removeNoFollow(anchor, split.rel).catch(() => {});
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-  await pruneEmptyDirs(anchor, uploadsRel, splitAttachmentPath(row.filename).dir);
+  await pruneAfter(anchor, uploadsRel, [row.filename, ...plan.files]);
   await regenerateManifest(anchor, uploadsRel, taskId);
   return c.json({ ok: true });
 });

@@ -754,6 +754,44 @@ describe('task attachment routes', () => {
       expect(await indexed()).toEqual(['other.zip', 'keep.md', 'other/c.md']);
     });
 
+    it('takes a document’s extracted text with it', async () => {
+      const doc = await seedFile('spec.docx', 'docx');
+      await plantSidecar('spec.docx');
+      expect(await send('DELETE', `/${TASK}/attachments/${doc.id as string}`)).toEqual({
+        status: 200,
+        body: { ok: true },
+      });
+      expect(await exists(up('spec.docx.extracted.md'))).toBe(false);
+    });
+
+    it('prunes a folder its sidecar would otherwise keep alive', async () => {
+      const doc = await seedFile('docs/spec.pdf', 'pdf');
+      await plantSidecar('docs/spec.pdf');
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await exists(up('docs'))).toBe(false);
+    });
+
+    it('keeps an upload that merely has the sidecar’s name', async () => {
+      const doc = await seedFile('x.docx', 'docx');
+      await seedFile('x.docx.extracted.md', 'mine');
+      await send('DELETE', `/${TASK}/attachments/${doc.id as string}`);
+      expect(await readFile(up('x.docx.extracted.md'), 'utf8')).toBe('mine');
+      expect(filenames()).toEqual(['x.docx.extracted.md']);
+    });
+
+    it('takes an archive apart member by member when a later upload lives in its folder', async () => {
+      const bundle = await seedArchive('bundle.zip', { 'bundle/a.md': 'a' });
+      await plantSidecar('bundle/a.md');
+      // A folder upload whose top level matches the expansion directory lands inside it.
+      await seedFile('bundle/mine.md', 'mine');
+
+      await send('DELETE', `/${TASK}/attachments/${bundle.id as string}`);
+      expect(await exists(up('bundle/a.md'))).toBe(false);
+      expect(await exists(up('bundle/a.md.extracted.md'))).toBe(false);
+      expect(await readFile(up('bundle/mine.md'), 'utf8')).toBe('mine');
+      expect(filenames()).toEqual(['bundle/mine.md']);
+    });
+
     it('deletes the row of a file that is already gone', async () => {
       const res = await upload('a.md', 'x');
       await rm(up('a.md'));
