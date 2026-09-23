@@ -4,6 +4,8 @@ const UNIQUE_VIOLATION = '23505';
 const UNDEFINED_TABLE = '42P01';
 /** Postgres SQLSTATE for active_sql_transaction. */
 const ACTIVE_SQL_TRANSACTION = '25001';
+/** Postgres SQLSTATE for lock_not_available, raised when a `lock_timeout` runs out. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 /**
  * True when an error — or anything it wraps — carries the given Postgres SQLSTATE.
@@ -60,4 +62,13 @@ export function isUndefinedTable(err: unknown): boolean {
  */
 export function isActiveSqlTransaction(err: unknown): boolean {
   return hasPgCode(err, ACTIVE_SQL_TRANSACTION);
+}
+
+/**
+ * True when an error — or anything it wraps — is `55P03 lock_not_available`: a lock wait ran past
+ * the transaction's `lock_timeout`. Same cause-chain walk as its siblings, since drizzle wraps the
+ * driver error that carries the code.
+ */
+export function isLockNotAvailable(err: unknown): boolean {
+  return hasPgCode(err, LOCK_NOT_AVAILABLE);
 }

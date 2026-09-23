@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import JSZip from 'jszip';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { schema } from '@haive/database';
+import { schema, withTaskAttachmentsLock, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import {
   classifyPlanInput,
   docxToMarkdown,
@@ -338,80 +340,210 @@ describe('the plan-inputs step', () => {
   });
 });
 
-describe('a sidecar written while its document is deleted', () => {
-  // `00-plan-inputs` checks for the row AFTER writing, and the api removes sidecars again after
-  // deleting it, so whichever comes last, one of the two sees the other.
-  async function extractOne(stillAttached: boolean) {
-    const repo = await mkdtemp(path.join(dir, 'repo-'));
-    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
-    await mkdir(uploads, { recursive: true });
-    const zip = new JSZip();
-    zip.file('word/document.xml', docxDocument('<w:p><w:r><w:t>The spec.</w:t></w:r></w:p>'));
-    const file = path.join(uploads, 'spec.docx');
-    await writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }));
-    const asked: unknown[] = [];
-    const ctx = {
-      taskId: 't1',
-      repoPath: repo,
-      db: {
-        query: {
-          taskAttachments: {
-            findFirst: async (opts: unknown) => {
-              asked.push(opts);
-              return stillAttached ? { id: 'a1' } : undefined;
-            },
-          },
-        },
-      },
-      logger: { warn() {} },
-      emitProgress: async () => {},
-    } as never;
-    const out = await planInputsStep.apply(ctx, {
+/** A task with its uploads dir, on the in-memory database the api's route tests share. Ids are
+ *  uuid-shaped because the fake answers a malformed one the way Postgres does. */
+const TASK_ID = '00000000-0000-4000-8000-000000000001';
+const USER_ID = '00000000-0000-4000-8000-0000000000a1';
+
+async function stepFixture(meta: Record<string, unknown> = { planBuildMode: 'greenfield' }) {
+  const repo = await mkdtemp(path.join(dir, 'repo-'));
+  const uploads = path.join(repo, '.haive', 'task-uploads', TASK_ID);
+  await mkdir(uploads, { recursive: true });
+  const fake = createFakeDb({ tasks: schema.tasks, taskAttachments: schema.taskAttachments });
+  fake.insert(schema.tasks, {
+    id: TASK_ID,
+    userId: USER_ID,
+    repositoryId: '00000000-0000-4000-8000-0000000000f1',
+    type: 'plan_build',
+    title: 'plan',
+    description: '',
+    metadata: meta,
+  });
+  const ctx = {
+    taskId: TASK_ID,
+    repoPath: repo,
+    db: fake.db,
+    logger: { warn() {} },
+    emitProgress: async () => {},
+  } as never;
+  /** A row, and its file unless `content` is null. */
+  async function attach(filename: string, content: string | Buffer | null, over = {}) {
+    const file = path.join(uploads, filename);
+    if (content !== null) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, content);
+    }
+    return fake.insert(schema.taskAttachments, {
+      taskId: TASK_ID,
+      userId: USER_ID,
+      filename,
+      storedPath: file,
+      sizeBytes: 1,
+      ...over,
+    });
+  }
+  const apply = (rows: Record<string, unknown>[]) =>
+    planInputsStep.apply(ctx, {
       detected: {
         greenfield: true,
         briefLength: 0,
         uploadsDir: uploads,
-        attachments: [
-          {
-            id: 'a1',
-            filename: 'spec.docx',
-            storedPath: file,
-            contentType: null,
-            description: null,
-          },
-        ],
+        attachments: rows.map((r) => ({
+          id: r.id as string,
+          filename: r.filename as string,
+          storedPath: r.storedPath as string,
+          contentType: null,
+          description: null,
+        })),
         missing: [],
       },
       formValues: {},
       iteration: 0,
       previousIterations: [],
     });
-    const sidecar = path.join(uploads, 'spec.docx.extracted.md');
-    return {
-      out,
-      asked,
-      sidecar: await lstat(sidecar).then(
-        () => readFile(sidecar, 'utf8'),
-        () => null,
-      ),
-    };
-  }
+  const readSidecar = (name: string): Promise<string | null> =>
+    readFile(path.join(uploads, name), 'utf8').catch(() => null);
+  return { repo, uploads, fake, ctx, attach, apply, readSidecar };
+}
 
-  it('takes it back when the row is gone, and leaves the document out of the index', async () => {
-    const { out, asked, sidecar } = await extractOne(false);
-    expect(asked).toHaveLength(1);
-    expect(sidecar).toBeNull();
+async function docxBytes(text: string): Promise<Buffer> {
+  const zip = new JSZip();
+  zip.file('word/document.xml', docxDocument(`<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+/** A lock wait that ran out, as Postgres reports it. */
+function lockTimeout(): Error {
+  return Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+}
+
+/** Resolves the next time a section asks for the task's attachments lock, and fails the test
+ *  quickly rather than hanging when nothing ever asks. */
+function nextLockRequest(fake: ReturnType<typeof createFakeDb>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('nothing asked for the lock')), 2000);
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+}
+
+describe('storing a sidecar under the attachments lock', () => {
+  // A delete removes a document's sidecar path and its row in one section under the task's
+  // attachments lock, and the sidecar is stored under the same lock only while the row is there, so
+  // whichever holds the lock second sees what the first did.
+  it('keeps it while the row is still there', async () => {
+    const f = await stepFixture();
+    const doc = await f.attach('spec.docx', await docxBytes('The spec.'));
+    const out = await f.apply([doc]);
+    expect(await f.readSidecar('spec.docx.extracted.md')).toContain('The spec.');
+    expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
+    // The row it was prepared from, so a later reader can tell this file from a same-named
+    // replacement.
+    expect(out.inputs.map((i) => i.id)).toEqual([doc.id]);
+  });
+
+  it('skips a document deleted while its text was extracted, and leaves it out of the index', async () => {
+    const f = await stepFixture();
+    const doc = await f.attach('spec.docx', await docxBytes('The spec.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.fake.db
+        .delete(schema.taskAttachments)
+        .where(eq(schema.taskAttachments.id, doc.id as string));
+    };
+    const out = await f.apply([doc]);
+    expect(await f.readSidecar('spec.docx.extracted.md')).toBeNull();
     expect(out.inputs).toEqual([]);
     expect(out.indexPath).toBeNull();
   });
 
-  it('keeps it while the row is still there', async () => {
-    const { out, sidecar } = await extractOne(true);
-    expect(sidecar).toContain('The spec.');
-    expect(out.inputs.map((i) => i.sidecar)).toEqual(['spec.docx.extracted.md']);
-    // The row it was prepared from, so a later reader can tell this file from a same-named
-    // replacement.
-    expect(out.inputs.map((i) => i.id)).toEqual(['a1']);
+  it('waits for a delete holding the lock, then skips the document it removed', async () => {
+    const f = await stepFixture();
+    const doc = await f.attach('spec.docx', await docxBytes('The spec.'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    const del = withTaskAttachmentsLock(f.fake.db as unknown as Database, TASK_ID, async (tx) => {
+      held();
+      await gate;
+      await tx
+        .delete(schema.taskAttachments)
+        .where(eq(schema.taskAttachments.id, doc.id as string));
+    });
+    await holding;
+    const asked = nextLockRequest(f.fake);
+    const run = f.apply([doc]);
+    await asked;
+    expect(await f.readSidecar('spec.docx.extracted.md')).toBeNull();
+
+    release();
+    await del;
+    const out = await run;
+    expect(await f.readSidecar('spec.docx.extracted.md')).toBeNull();
+    expect(out.inputs).toEqual([]);
+  });
+
+  it('reports the text as not stored when the lock cannot be had in time', async () => {
+    const f = await stepFixture();
+    const doc = await f.attach('spec.docx', await docxBytes('The spec.'));
+    f.fake.hooks.beforeLock = () => {
+      throw lockTimeout();
+    };
+    const out = await f.apply([doc]);
+    expect(await f.readSidecar('spec.docx.extracted.md')).toBeNull();
+    expect(out.inputs[0]).toMatchObject({
+      sidecar: null,
+      hasText: false,
+      note: 'extracted text could not be stored beside it',
+    });
+    expect(out.unreadable).toEqual(['spec.docx']);
+  });
+});
+
+describe('a file gone from the task workspace', () => {
+  // A delete removes the files before the rows, both inside one section under the attachments lock,
+  // so a file found gone outside that lock can belong to a row that is about to go.
+  it('is not called missing when its attachment was deleted during the check', async () => {
+    const f = await stepFixture();
+    await f.attach('kept.md', 'kept');
+    const gone = await f.attach('gone.md', null);
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.fake.db
+        .delete(schema.taskAttachments)
+        .where(eq(schema.taskAttachments.id, gone.id as string));
+    };
+    const d = await planInputsStep.detect!(f.ctx);
+    expect(d.missing).toEqual([]);
+    expect(d.attachments.map((a) => a.filename)).toEqual(['kept.md']);
+  });
+
+  it('is missing while its attachment is still there', async () => {
+    const f = await stepFixture();
+    await f.attach('kept.md', 'kept');
+    await f.attach('gone.md', null);
+    const d = await planInputsStep.detect!(f.ctx);
+    expect(d.missing).toEqual(['gone.md']);
+    expect(d.attachments.map((a) => a.filename)).toEqual(['kept.md', 'gone.md']);
+  });
+
+  it('drops an input deleted after detect ran, and still fails one that is really missing', async () => {
+    const f = await stepFixture();
+    const kept = await f.attach('kept.md', 'kept');
+    const gone = await f.attach('gone.md', null);
+    const missing = { ...gone };
+    await f.fake.db
+      .delete(schema.taskAttachments)
+      .where(eq(schema.taskAttachments.id, gone.id as string));
+    const out = await f.apply([kept, missing]);
+    expect(out.inputs.map((i) => i.filename)).toEqual(['kept.md']);
+
+    const lost = await f.attach('lost.md', null);
+    await expect(f.apply([kept, lost])).rejects.toThrow(/"lost\.md" is no longer readable/);
   });
 });
 
@@ -419,42 +551,10 @@ describe('a generated file something else stands in the way of', () => {
   // Nothing an upload or an archive can create may hold the index's or a sidecar's name, so what
   // stands there was planted. A refusal used to fail the whole step.
   async function prepare(block: (uploads: string) => Promise<void>) {
-    const repo = await mkdtemp(path.join(dir, 'repo-'));
-    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
-    await mkdir(uploads, { recursive: true });
-    const zip = new JSZip();
-    zip.file('word/document.xml', docxDocument('<w:p><w:r><w:t>The spec.</w:t></w:r></w:p>'));
-    const file = path.join(uploads, 'spec.docx');
-    await writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }));
-    await block(uploads);
-    const ctx = {
-      taskId: 't1',
-      repoPath: repo,
-      db: { query: { taskAttachments: { findFirst: async () => ({ id: 'a1' }) } } },
-      logger: { warn() {} },
-      emitProgress: async () => {},
-    } as never;
-    const out = await planInputsStep.apply(ctx, {
-      detected: {
-        greenfield: true,
-        briefLength: 0,
-        uploadsDir: uploads,
-        attachments: [
-          {
-            id: 'a1',
-            filename: 'spec.docx',
-            storedPath: file,
-            contentType: null,
-            description: null,
-          },
-        ],
-        missing: [],
-      },
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
-    return { out, uploads };
+    const f = await stepFixture();
+    const doc = await f.attach('spec.docx', await docxBytes('The spec.'));
+    await block(f.uploads);
+    return { out: await f.apply([doc]), uploads: f.uploads };
   }
 
   it('replaces a link planted at the index, and leaves what it pointed at alone', async () => {
@@ -488,41 +588,17 @@ describe('a generated file something else stands in the way of', () => {
 describe('the archive notes the step carries', () => {
   it('takes them from the column, so a retry after the expansion keeps them', async () => {
     const note = '1 archive member(s) were not extracted (1 symlink(s)): bundle/escape';
-    const stored = (filename: string) => ({
-      filename,
-      storedPath: `/repo/.haive/task-uploads/t1/${filename}`,
-      contentType: null,
-      description: null,
+    const f = await stepFixture({});
+    // Already stamped, so the expansion call finds nothing to do and reports no notes — the retry.
+    const bundle = await f.attach('bundle.zip', 'PK', {
+      expandedAt: new Date(),
+      expansionNote: note,
     });
-    const rows = [
-      { ...stored('bundle.zip'), expandedAt: new Date(), expansionNote: note },
-      { ...stored('bundle/readme.md'), expandedAt: null, expansionNote: null },
-    ];
-    const db = {
-      // Already stamped, so the expansion call finds nothing to do and reports no notes — the retry.
-      query: { taskAttachments: { findMany: async () => [] } },
-      select: () => ({
-        from: (table: unknown) => ({
-          where: () =>
-            table === schema.tasks
-              ? {
-                  limit: async () => [{ description: 'a brief', metadata: {}, repositoryId: 'r1' }],
-                }
-              : { orderBy: async () => rows },
-        }),
-      }),
-    };
-    const ctx = {
-      taskId: 't1',
-      repoPath: '/repo',
-      db,
-      logger: { warn() {} },
-      emitProgress: async () => {},
-    } as never;
+    await f.attach('bundle/readme.md', 'readme', { expandedFromId: bundle.id });
 
-    const d = await planInputsStep.detect!(ctx);
+    const d = await planInputsStep.detect!(f.ctx);
     expect(d.archiveNotes).toEqual([{ filename: 'bundle.zip', note }]);
-    expect(d.attachments).toEqual([stored('bundle.zip'), stored('bundle/readme.md')]);
+    expect(d.attachments.map((a) => a.filename)).toEqual(['bundle.zip', 'bundle/readme.md']);
   });
 });
 

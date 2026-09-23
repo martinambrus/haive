@@ -8,7 +8,7 @@ import {
 import { PLAN_INPUTS_INDEX_NAME, splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
 import path from 'node:path';
 import { and, asc, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, withTaskAttachmentsLock } from '@haive/database';
 import { ensureArchivesExpanded } from '../../../attachments/expand-archives.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -92,8 +92,8 @@ export interface PlanInputsDetect {
   briefLength: number;
   uploadsDir: string | null;
   attachments: {
-    /** The row, for the check after a sidecar is written. Optional: a detect payload persisted
-     *  before it was recorded has none, and is checked by filename instead. */
+    /** The row, for the checks made under the attachments lock. Optional: a detect payload
+     *  persisted before it was recorded has none, and is checked by filename instead. */
     id?: string;
     filename: string;
     storedPath: string;
@@ -130,26 +130,93 @@ export interface PlanInputsApply {
   archiveNotes: { filename: string; note: string }[];
 }
 
-/** Whether the attachment is still on the task. A failed lookup answers yes: keeping the sidecar
- *  is what happened before this check existed, and the api's second pass still covers a delete. */
-async function stillAttached(
+/** The row an input was read from: by id, and by name only for a detect payload persisted before
+ *  ids were recorded. */
+function attachmentRow(taskId: string, a: { id?: string; filename: string }) {
+  return a.id
+    ? eq(schema.taskAttachments.id, a.id)
+    : and(
+        eq(schema.taskAttachments.taskId, taskId),
+        eq(schema.taskAttachments.filename, a.filename),
+      );
+}
+
+/** Whether an attachment whose file is not on disk is still on the task, asked under the task's
+ *  attachments lock. A delete removes the files before the rows, both inside one section under that
+ *  lock, so a file found gone outside it can belong to a row that is about to go — and a deleted
+ *  attachment is not a missing one. A row still there once the lock is held really has lost its
+ *  file. A lookup that fails answers yes, which is what the step concluded before it asked. */
+async function stillAttachedUnderLock(
   ctx: StepContext,
   a: { id?: string; filename: string },
 ): Promise<boolean> {
   try {
-    const row = await ctx.db.query.taskAttachments.findFirst({
-      where: a.id
-        ? eq(schema.taskAttachments.id, a.id)
-        : and(
-            eq(schema.taskAttachments.taskId, ctx.taskId),
-            eq(schema.taskAttachments.filename, a.filename),
-          ),
-      columns: { id: true },
+    return await withTaskAttachmentsLock(ctx.db, ctx.taskId, async (tx) => {
+      const row = await tx.query.taskAttachments.findFirst({
+        where: attachmentRow(ctx.taskId, a),
+        columns: { id: true },
+      });
+      return row !== undefined;
     });
-    return row !== undefined;
   } catch (err) {
     ctx.logger.warn({ err, file: a.filename }, 'plan inputs: could not recheck an attachment');
     return true;
+  }
+}
+
+type SidecarOutcome = 'stored' | 'deleted' | 'refused';
+
+/**
+ * Store a document's extracted text beside it, under the task's attachments lock and only while its
+ * row is still there. A delete removes the sidecar path together with the rows in one section under
+ * the same lock, so the two cannot interleave: whichever holds the lock second sees what the first
+ * did, and the text never outlives its document.
+ *
+ * `refused` covers everything that left no text stored: something that is not a file stands at the
+ * name, the lock could not be had in time, or the section failed. A section can fail AFTER the write
+ * landed (a connection lost at COMMIT); the text is then taken back, so what is on disk agrees with
+ * the note the step reports.
+ */
+async function storeSidecar(
+  ctx: StepContext,
+  attachment: { id?: string; filename: string },
+  sidecarRel: string,
+  body: string,
+): Promise<SidecarOutcome> {
+  let write = null as Promise<boolean> | null;
+  try {
+    return await withTaskAttachmentsLock<SidecarOutcome>(ctx.db, ctx.taskId, async (tx) => {
+      const row = await tx.query.taskAttachments.findFirst({
+        where: attachmentRow(ctx.taskId, attachment),
+        columns: { id: true },
+      });
+      if (row === undefined) return 'deleted';
+      // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here, and
+      // passing it to the primitive would make a non-root worker fail the whole step.
+      write = writeFileNoFollow(ctx.repoPath, sidecarRel, body, {
+        fileMode: 0o644,
+        replaceLeafLink: true,
+      }).then(
+        () => true,
+        (err: unknown) => {
+          ctx.logger.warn(
+            { err, file: attachment.filename },
+            'plan inputs: could not store the extracted text',
+          );
+          return false;
+        },
+      );
+      return (await write) ? 'stored' : 'refused';
+    });
+  } catch (err) {
+    ctx.logger.warn(
+      { err, file: attachment.filename },
+      'plan inputs: could not store the extracted text',
+    );
+    if (write !== null && (await write)) {
+      await removeNoFollow(ctx.repoPath, sidecarRel).catch(() => {});
+    }
+    return 'refused';
   }
 }
 
@@ -430,6 +497,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     );
 
     const missing: string[] = [];
+    const deleted = new Set<string>();
     for (const row of rows) {
       // The repository root is RECOVERED from the row rather than trusted: the stored
       // path names the uploads dir, which is under `.haive/` and mounted read-write into
@@ -442,25 +510,27 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
           { file: row.filename },
           'plan inputs: attachment row is not stored under the task uploads directory',
         );
-        missing.push(row.filename);
-        continue;
       }
       // Lenient: absent and refused both mean there is nothing to plan from, which is
       // what the `catch` this replaced folded them into. A link now reads as a link
       // rather than as whatever it points at.
-      const info = await lstatNoFollow(split.anchor, split.rel);
-      if (info?.kind !== 'file') missing.push(row.filename);
+      const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
+      if (info?.kind === 'file') continue;
+      if (await stillAttachedUnderLock(ctx, row)) missing.push(row.filename);
+      else deleted.add(row.id);
     }
+    const kept = rows.filter((r) => !deleted.has(r.id));
+    const keptNames = new Set(kept.map((r) => r.filename));
 
     return {
       greenfield: meta.planBuildMode === 'greenfield',
       briefLength: (task?.description ?? '').trim().length,
       uploadsDir:
-        task?.repositoryId && rows.length > 0
+        task?.repositoryId && kept.length > 0
           ? path.join(ctx.repoPath, '.haive', 'task-uploads', ctx.taskId)
           : null,
       // The two expansion columns are read, not carried in the persisted detect payload.
-      attachments: rows.map(({ id, filename, storedPath, contentType, description }) => ({
+      attachments: kept.map(({ id, filename, storedPath, contentType, description }) => ({
         id,
         filename,
         storedPath,
@@ -468,7 +538,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         description,
       })),
       missing,
-      archiveNotes,
+      archiveNotes: archiveNotes.filter((n) => keptNames.has(n.filename)),
     };
   },
 
@@ -502,11 +572,12 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     for (const attachment of d.attachments) {
       const kind = classifyPlanInput(attachment.filename, attachment.contentType);
       // detect() proved every row had a real file; one that cannot be split or read now
-      // changed between the two phases, which is the same fact — and the same fix — as a
-      // row that was missing then.
+      // changed between the two phases. Deleted meanwhile, it is simply no longer an input;
+      // still attached, it is the same fact — and the same fix — as a row missing then.
       const split = splitAttachmentStoredPath(attachment, ctx.taskId);
       const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
       if (info === null || info.kind !== 'file') {
+        if (!(await stillAttachedUnderLock(ctx, attachment))) continue;
         throw new Error(
           `Attached file "${attachment.filename}" is no longer readable in the task workspace. Re-attach it and retry this step.`,
         );
@@ -569,35 +640,15 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
               result.markdown.length > 0
                 ? `# ${attachment.filename}\n\n${result.markdown}\n`
                 : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
-            // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here,
-            // and passing it to the primitive would make a non-root worker fail the whole step.
-            // A write that is refused (something that is not a file stands at the name) is a
-            // per-item skip, like an extraction that failed: the original is still mounted, and
-            // one bad name must not discard the sidecars written beside it.
-            const stored = await writeFileNoFollow(ctx.repoPath, sidecarRel, body, {
-              fileMode: 0o644,
-              replaceLeafLink: true,
-            }).then(
-              () => true,
-              (err: unknown) => {
-                ctx.logger.warn(
-                  { err, file: attachment.filename, sidecar: name },
-                  'plan inputs: could not store the extracted text',
-                );
-                return false;
-              },
-            );
-            if (!stored) {
+            const outcome = await storeSidecar(ctx, attachment, sidecarRel, body);
+            // Deleted while it was being extracted: it is no longer an input at all.
+            if (outcome === 'deleted') continue;
+            // A refused write is a per-item skip, like an extraction that failed: the original is
+            // still mounted, and one bad name must not discard the sidecars written beside it.
+            if (outcome === 'refused') {
               row.note = 'extracted text could not be stored beside it';
               unreadable.push(attachment.filename);
               inputs.push(row);
-              continue;
-            }
-            // A delete can land while the extraction runs. The api removes sidecars again once the
-            // row is gone and this looks for the row only after writing, so whichever comes last,
-            // one of the two sees the other and the text does not outlive its document.
-            if (!(await stillAttached(ctx, attachment))) {
-              await removeNoFollow(ctx.repoPath, sidecarRel).catch(() => {});
               continue;
             }
             await harmonizeOwnership(ctx.repoPath, sidecarRel);

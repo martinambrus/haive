@@ -14,6 +14,10 @@
     "./schema": {
       "types": "./dist/schema/index.d.ts",
       "import": "./dist/schema/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/fake-db.d.ts",
+      "import": "./dist/testing/fake-db.js"
     }
   },
   "scripts": {
