@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Haive &mdash; TASK-185 Three-Workflow Comparison, 2026-09-07</title>
+<style>
+:root{--bg:#0b0f14;--bg2:#11171f;--card:#151c26;--card2:#1b2430;--ink:#e7edf3;--mut:#8da0b3;--line:#243140;
+--accent:#3ddc97;--accent2:#4aa8ff;--warn:#f5b14c;--bad:#f2607a;--dim:#5d7085;
+--old:#f5b14c;--plan:#c69cff;--noplan:#3ddc97;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+a{color:var(--accent2);text-decoration:none}a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.86em;color:#b6c6d6;background:#0e141b;padding:1px 5px;border-radius:4px;border:1px solid #1c2735}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px 90px}
+header.hero{padding:52px 0 24px;border-bottom:1px solid var(--line)}
+.kicker{font:600 12px/1 var(--mono);letter-spacing:.5px;text-transform:uppercase;color:var(--accent)}
+h1{font-size:33px;line-height:1.12;margin:14px 0 8px}
+h2{font-size:22px;margin:54px 0 6px;scroll-margin-top:20px}
+h2 .num{font:600 13px/1 var(--mono);color:var(--accent);margin-right:10px;vertical-align:2px}
+h3{font-size:16px;margin:28px 0 4px}
+h4{font-size:14px;margin:20px 0 4px;color:var(--mut);font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px}
+p.sub{color:var(--mut);max-width:88ch;margin:6px 0}
+p{max-width:92ch}
+.meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;font:500 13px/1.4 var(--mono);color:var(--mut)}
+.meta b{color:var(--ink);font-weight:600}
+.src{margin-top:16px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:8px;font-size:13.5px;color:var(--mut)}
+.src.warn{border-left-color:var(--warn)}
+.src.bad{border-left-color:var(--bad)}
+.src b{color:var(--ink)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:1px}
+.f-old{background:var(--old)}.f-plan{background:var(--plan)}.f-noplan{background:var(--noplan)}
+.verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin-top:24px}
+.vcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:15px 16px 16px;position:relative;overflow:hidden}
+.vcard .lab{font:700 11px/1 var(--mono);text-transform:uppercase;color:var(--mut)}
+.vcard .who{font-size:17px;font-weight:700;margin:9px 0 6px;line-height:1.25}
+.vcard .why{font-size:13px;color:var(--mut)}
+.vcard::after{content:"";position:absolute;inset:0 auto 0 0;width:3px}
+.vcard.win{border-color:#2f6b52}.vcard.win::after{background:var(--accent)}
+.vcard.val{border-color:#2c4d70}.vcard.val::after{background:var(--accent2)}
+.vcard.deep{border-color:#6b5a2f}.vcard.deep::after{background:var(--warn)}
+.vcard.avoid{border-color:#6b2f3e}.vcard.avoid::after{background:var(--bad)}
+.tbl-scroll{overflow-x:auto;margin-top:14px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--card2);font:600 12px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.3px;color:var(--mut);white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+td.mono{font-family:var(--mono);font-size:12.5px}
+tr.tot td{background:#101823;font-weight:700;border-top:2px solid var(--line)}
+.g{color:var(--accent)}.b{color:var(--bad)}.w{color:var(--warn)}.m{color:var(--mut)}
+.pill{display:inline-block;font:600 11px/1.5 var(--mono);padding:1px 7px;border-radius:99px;border:1px solid var(--line);background:#0e141b;color:var(--mut)}
+.pill.ok{color:var(--accent);border-color:#2f6b52}
+.pill.no{color:var(--bad);border-color:#6b2f3e}
+.pill.part{color:var(--warn);border-color:#6b5a2f}
+blockquote{margin:14px 0;padding:11px 16px;background:var(--bg2);border-left:3px solid var(--dim);border-radius:0 6px 6px 0;color:#c3d2e0;font-size:13.5px}
+blockquote .att{display:block;margin-top:7px;font:600 11px/1 var(--mono);color:var(--mut);text-transform:uppercase;letter-spacing:.3px}
+ul.tight{margin:8px 0;padding-left:20px}ul.tight li{margin:5px 0;max-width:92ch}
+.bars{margin-top:14px}
+.bar{display:grid;grid-template-columns:150px 1fr 54px;gap:12px;align-items:center;margin:7px 0;font-size:13px}
+.bar .t{color:var(--mut);font-family:var(--mono);font-size:12px}
+.bar .track{background:#0e141b;border:1px solid var(--line);border-radius:4px;height:17px;overflow:hidden}
+.bar .fill{height:100%;border-radius:3px 0 0 3px}
+.bar .v{text-align:right;font-family:var(--mono);font-size:12.5px}
+nav.toc{margin-top:26px;display:flex;flex-wrap:wrap;gap:6px 10px;font:500 12.5px/1 var(--mono)}
+nav.toc a{color:var(--mut);border:1px solid var(--line);border-radius:99px;padding:6px 11px;background:var(--card)}
+nav.toc a:hover{color:var(--ink);border-color:var(--accent2);text-decoration:none}
+footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);color:var(--mut);font-size:13px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;margin-top:16px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.panel h4{margin-top:0}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0 0;font:500 12.5px/1 var(--mono);color:var(--mut)}
+</style></head>
+<body><div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Haive &middot; deterministic multi-CLI orchestration</div>
+  <h1>Three workflows, one task &mdash; TASK-185<br/><span style="color:var(--mut);font-size:.62em;font-weight:500">Selective PDF field visibility across the four gas inspection forms</span></h1>
+  <p class="sub">The same customer request was implemented three times from a comparable base commit: once by the legacy markdown-driven Claude&nbsp;Code <code>/workflow</code> (August 2026), and twice by Haive in September 2026 &mdash; once driven from a repository plan, once from a bare task description. This grades what each one actually shipped, what it cost, and where the differences come from.</p>
+  <div class="meta">
+    <span><b>Compiled</b> 2026-09-07</span>
+    <span><b>Repo</b> elmont_rs (Drupal 7, custom inspection modules)</span>
+    <span><b>Runs</b> 3</span>
+    <span><b>Evidence</b> git commits, Haive Postgres, Claude Code timing wrapper, session memories</span>
+  </div>
+  <div class="src warn"><b>Model correction, stated up front.</b> The old run was assumed to be Opus&nbsp;4.7/4.8 at max reasoning. The evidence says otherwise: both of its commits carry <code>Co-Authored-By: Claude Opus 5 (1M context)</code>, and the timing log shows the run hit a 5-hour usage cap at <span class="mono">2026-08-04 07:23 UTC</span> after which the operator wrote <em>&ldquo;I&rsquo;m now using a different model and provider which has no such limit &mdash; resume now please&rdquo;</em>. So at least part of that implementation ran on an unrecorded non-Anthropic endpoint. The old workflow recorded no per-invocation model identity, which is itself one of the differences being measured. Both Haive runs recorded <code>served: claude-opus-5</code>, effort <code>medium</code>, on every invocation.</div>
+  <nav class="toc">
+    <a href="#s1">01 The three runs</a><a href="#s2">02 What landed</a><a href="#s3">03 Defects by inspection</a>
+    <a href="#s4">04 Tests</a><a href="#s5">05 Process &amp; rounds</a><a href="#s6">06 Cost</a>
+    <a href="#s7">07 What the plan bought</a><a href="#s8">08 Review rigor</a><a href="#s9">09 Knowledge</a>
+    <a href="#s10">10 Scorecard</a><a href="#s11">11 Confounds</a>
+  </nav>
+</header>
+
+<div class="verdicts">
+  <div class="vcard win">
+    <div class="lab">Best first submission</div>
+    <div class="who"><span class="dot f-noplan"></span>Haive, no plan</div>
+    <div class="why">Cleanest scope, cache invalidation done on all four types, every new control given an accessible name &mdash; and it passed the developer&rsquo;s Gate&nbsp;2 with no comment, in <b>6.8&nbsp;h</b> and <b>13&nbsp;min</b> of human attention.</div>
+  </div>
+  <div class="vcard deep">
+    <div class="lab">Best final artifact</div>
+    <div class="who"><span class="dot f-old"></span>Legacy <code>/workflow</code></div>
+    <div class="why">159 checkboxes at per-subfield granularity, all labelled, tests actually executed. But its <em>first</em> submission shipped 10 fields with no checkbox at all &mdash; the completeness is the human&rsquo;s two rejection rounds, not the workflow&rsquo;s.</div>
+  </div>
+  <div class="vcard val">
+    <div class="lab">Best analysis &amp; test architecture</div>
+    <div class="who"><span class="dot f-plan"></span>Haive, with plan</div>
+    <div class="why">47% longer spec, 161 named affected components, one parameterised suite covering all four form types. The richest thinking of the three &mdash; attached to the weakest shipped code.</div>
+  </div>
+  <div class="vcard avoid">
+    <div class="lab">The shared failure</div>
+    <div class="who">Neither Haive run executed its own tests</div>
+    <div class="why">All 4 fix-loop rounds across both runs were triggered by <code>08b-test-management</code> failing to <em>invoke</em> Playwright, never by a code defect. The old workflow ran its suite three times.</div>
+  </div>
+</div>
+
+<h2 id="s1"><span class="num">01</span>The three runs</h2>
+<p class="sub">All three implement the same written request (<code>.claude/tasks/185.txt</code>): add &ldquo;Zobrazi&#357; v PDF&rdquo; checkboxes to Ai/Bi section&nbsp;II, Af/Bf+g sections&nbsp;I&nbsp;+&nbsp;II, Ah/Bh sections&nbsp;III&nbsp;+&nbsp;IV and NTL&nbsp;kotol&#328;a section&nbsp;IV, replicating the pattern already shipped for pressure inspections.</p>
+
+<div class="tbl-scroll"><table>
+<thead><tr><th></th><th><span class="dot f-old"></span>OLD &mdash; legacy /workflow</th><th><span class="dot f-plan"></span>A &mdash; Haive, with plan</th><th><span class="dot f-noplan"></span>B &mdash; Haive, no plan</th></tr></thead>
+<tbody>
+<tr><td>Identifier</td><td class="mono">TASK-2026-185<br/>session <code>f0eef6b4</code></td><td class="mono">681f0f99</td><td class="mono">f4483235</td></tr>
+<tr><td>Repository</td><td class="mono">elmont_rs (live)</td><td class="mono">elmont_rs_185-testa</td><td class="mono">elmont_rs_185-test-b</td></tr>
+<tr><td>Base commit</td><td class="mono">655e04bc<br/><span class="m">(Merge TASK-178)</span></td><td class="mono">05e615e<br/><span class="m">(Merge TASK-179)</span></td><td class="mono">05e615e<br/><span class="m">(Merge TASK-179)</span></td></tr>
+<tr><td>Delivered</td><td class="mono">2a6d8775 + af2dbfb8<br/>merged as 536ef5d2</td><td class="mono">c1613b1 (+ 4416e7d KB)</td><td class="mono">0ebcc7a (+ 37fb4ba KB)</td></tr>
+<tr><td>Model</td><td>Opus 5 (1M) per commit trailer;<br/><span class="w">provider switched mid-run after a usage cap</span></td><td>claude-opus-5, effort <code>medium</code></td><td>claude-opus-5, effort <code>medium</code></td></tr>
+<tr><td>Execution shape</td><td>15 named sub-agent dispatches on one main loop,<br/>5 of them failed and were re-run</td><td>DAG, 5 issues / 3 dependency levels</td><td>DAG, 4 issues</td></tr>
+<tr><td>Elapsed</td><td class="num">~47 h 02 m<br/><span class="m">interleaved with 4 other tasks</span></td><td class="num">14 h 36 m</td><td class="num">6 h 48 m</td></tr>
+<tr><td>Agent / CLI time</td><td class="num">8.98 h<br/><span class="m">6.93 fg + 2.04 bg</span></td><td class="num">7.47 h<br/><span class="m">summed over 121 invocations</span></td><td class="num">4.33 h<br/><span class="m">summed over 81 invocations</span></td></tr>
+<tr><td>Human turns</td><td class="num">&ge; 6 substantive<br/><span class="m">+ 2 defect-finding rounds</span></td><td class="num">5 form submits<br/>23.1 min active</td><td class="num">5 form submits<br/>13.2 min active</td></tr>
+<tr><td>Rounds</td><td class="num">2 fix loops<br/><span class="m">both human-triggered</span></td><td class="num">4<br/><span class="m">1 spec reject + 3 test-runner</span></td><td class="num">2<br/><span class="m">1 spec reject + 1 test-runner</span></td></tr>
+</tbody></table></div>
+
+<div class="src"><b>Two clocks, two meanings.</b> The old run&rsquo;s 8.98&nbsp;h is main-loop agent time from the timing wrapper &mdash; sub-agent work runs <em>inside</em> a foreground turn, so it is closer to elapsed-agent-wall-clock. Haive&rsquo;s figure is the sum of <code>cli_invocations.duration_ms</code>, which double-counts parallel DAG coders. The two are not the same measurement and the gap between them is smaller than it looks in either direction. Elapsed wall clock is reported for all three but is close to meaningless for the old run, which was interleaved with TASK-178/179/180/181 and a second project.</div>
+
+<h2 id="s2"><span class="num">02</span>What actually landed</h2>
+<p class="sub">Counted from the delivered trees, not from any run&rsquo;s self-report: every <code>'#type' =&gt; 'checkbox'</code> declaration in the four gas form files.</p>
+
+<div class="tbl-scroll"><table>
+<thead><tr><th>Form file</th><th class="num">base</th><th class="num">OLD</th><th class="num">A (plan)</th><th class="num">B (no plan)</th><th>Task-named sections</th></tr></thead>
+<tbody>
+<tr><td class="mono">n_inspection_plynove_ai_bi.inc</td><td class="num m">33</td><td class="num">53</td><td class="num">54</td><td class="num">54</td><td>II</td></tr>
+<tr><td class="mono">n_inspection_plynove_af_bf_g_regulatory.inc</td><td class="num m">0</td><td class="num g">30</td><td class="num b">21</td><td class="num b">22</td><td>I + II</td></tr>
+<tr><td class="mono">n_inspection_plynove_ah_bh.inc</td><td class="num m">0</td><td class="num g">33</td><td class="num w">29</td><td class="num w">29</td><td>III + IV</td></tr>
+<tr><td class="mono">n_inspection_plynove_ntl_kotolna.inc</td><td class="num m">0</td><td class="num">43</td><td class="num">44</td><td class="num">44</td><td>IV</td></tr>
+<tr class="tot"><td>Total</td><td class="num">33</td><td class="num g">159</td><td class="num">148</td><td class="num">149</td><td></td></tr>
+</tbody></table></div>
+
+<h3>The 10&ndash;11 checkbox gap is a granularity decision, and it is the customer&rsquo;s own</h3>
+<p>Both Haive runs put <b>one checkbox per rendered PDF row</b>. The old run ended with <b>one checkbox per form field</b>, so a composite row governed by two fields carries two checkboxes and renders only when both are ticked. Reading the delivered keys makes it unambiguous:</p>
+
+<div class="tbl-scroll"><table>
+<thead><tr><th>Af/Bf+g composite row</th><th>OLD keys</th><th>A keys</th><th>B keys</th></tr></thead>
+<tbody>
+<tr><td class="mono">field_2_5a &ldquo;V&yacute;stupn&yacute; pretlak kPa&rdquo;<br/>+ field_2_5b &ldquo;&hellip; vyhovuje&rdquo;</td><td class="mono g">field_2_5ac<br/>field_2_5c</td><td class="mono">field_2_5ac</td><td class="mono">field_2_5_show</td></tr>
+<tr><td class="mono">field_3_3a / 3_3b / 3_3c<br/><span class="m">(three-part measurement row)</span></td><td class="mono g">field_3_3ac<br/>field_3_3bc<br/>field_3_3cc</td><td class="mono">field_3_3_pdf_c</td><td class="mono">field_3_3_show</td></tr>
+<tr><td class="mono">field_2_4 &ldquo;Rok v&yacute;roby&rdquo;</td><td class="mono g">field_2_4c</td><td class="mono b">&mdash; none &mdash;</td><td class="mono b">&mdash; none &mdash;</td></tr>
+<tr><td class="mono">Ah/Bh burner column:<br/>2_4, 2_6, 2_8, 2_10, 2_12</td><td class="mono g">5 checkboxes</td><td class="mono b">0 &mdash; shares the device column&rsquo;s</td><td class="mono b">0 &mdash; shares the device column&rsquo;s</td></tr>
+</tbody></table></div>
+
+<div class="src bad"><b>This is not a stylistic tie.</b> The old run reached per-subfield granularity only in <em>fix loop #2</em>, after the developer rejected the previous shape twice. Its own session memory records the reason verbatim:
+<blockquote>&ldquo;Composite PDF rows (<code>&lt;field_2_5a&gt; kPa - &lt;field_2_5b&gt;</code>) render from two form fields but shipped with one checkbox. Fix loop #1 <em>moved</em> that checkbox from before subfield&nbsp;A to between A and B &mdash; removing it from subfield&nbsp;A, which was exactly what the user had reported. Round two the user replied that &lsquo;almost none of the issues got fixed&rsquo;, which was accurate. <b>The correct shape was one checkbox per subfield</b>, with the composite row rendering only when all its subfield checkboxes are on.&rdquo;
+<span class="att">~/.claude/projects/-home-activit-elmont-rs/memory/gate2-human-check-catches-what-agents-miss.md &mdash; originSessionId f0eef6b4, written 2026-08-06T05:52Z</span></blockquote>
+So the customer&rsquo;s stated requirement, established in that run, is per-subfield. On that requirement both Haive runs under-deliver by the same amount &mdash; and neither run&rsquo;s reviewers, nor the developer at Gate&nbsp;2, raised it.</div>
+
+<h2 id="s3"><span class="num">03</span>Defects found by direct inspection of the delivered trees</h2>
+<p class="sub">Three checks were run against all four trees (base + three deliveries) rather than against any run&rsquo;s report.</p>
+
+<h3>1. Cached-PDF invalidation &mdash; A ships a user-visible staleness bug</h3>
+<p>The base tree invalidates the cached unsigned PDF on save for <code>ai_bi</code> only (4 <code>unlink</code> calls). Both new sections had to inherit it.</p>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Cache-invalidation calls per form file</th><th class="num">base</th><th class="num">OLD</th><th class="num">A</th><th class="num">B</th></tr></thead>
+<tbody>
+<tr><td class="mono">af_bf_g_regulatory</td><td class="num m">0</td><td class="num g">3</td><td class="num b">0</td><td class="num g">4</td></tr>
+<tr><td class="mono">ah_bh</td><td class="num m">0</td><td class="num g">3</td><td class="num b">0</td><td class="num g">4</td></tr>
+<tr><td class="mono">ntl_kotolna</td><td class="num m">0</td><td class="num g">3</td><td class="num b">0</td><td class="num g">4</td></tr>
+<tr><td class="mono">ai_bi</td><td class="num m">4</td><td class="num">4</td><td class="num">4</td><td class="num">4</td></tr>
+</tbody></table></div>
+<p>A&rsquo;s own operational reviewer found it &mdash; at round 4, after the last fix round, so nothing acted on it:</p>
+<blockquote>&ldquo;this change adds <code>use_in_pdf</code> checkboxes to Ah/Bh, Af/Bf+G and NTL, but none of those three types invalidate the cached unsigned PDF on save. Ai/Bi added exactly that invalidation for exactly this scenario (<code>n_inspection_plynove_ai_bi.inc:1587-1608</code>, comment: &lsquo;a user who toggles checkboxes and saves would see stale content&rsquo;) &hellip; So an untick can silently fail to reach the delivered PDF on three of the four types.&rdquo;
+<span class="att">review_findings &mdash; task 681f0f99, operational-reviewer, round 4, severity medium, disposition open</span></blockquote>
+<p>It was open at Gate&nbsp;2 and the developer approved with no feedback. On the delivered A tree, a technician who unticks a field on Af/Bf+G, Ah/Bh or NTL and saves gets the old PDF back.</p>
+
+<h3>2. Accessible names on the new controls</h3>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th>Shape of the new checkbox</th><th>Accessible name?</th><th>Pre-existing 33 in Ai/Bi §I</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="mono">'#title' =&gt; t('Zobrazi&#357; v PDF: @field', &hellip;)<br/>'#title_display' =&gt; 'invisible'</td><td><span class="pill ok">all 159</span></td><td><span class="pill ok">retro-fitted in a second commit</span></td></tr>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="mono">'#title' =&gt; ''<br/>'#attributes' =&gt; array(&hellip; 'aria-label' =&gt; t(&hellip;))</td><td><span class="pill ok">all 116 new</span></td><td><span class="pill part">left unnamed, explicitly scoped out in the spec</span></td></tr>
+<tr><td><span class="dot f-plan"></span>A</td><td class="mono">'#title' =&gt; ''<br/>'#attributes' =&gt; array('class' =&gt; array('use_in_pdf'))</td><td><span class="pill no">none of 148</span></td><td><span class="pill no">left unnamed</span></td></tr>
+</tbody></table></div>
+<p>This traces straight back to the specs. B&rsquo;s spec has a <code>§10 Style and accessibility</code> section that reasons the decision out:</p>
+<blockquote>&ldquo;The shipped pattern uses <code>'#title' =&gt; ''</code> with no label at all. Rather than replicate an unlabeled control ~116 times, <b>new</b> checkboxes add <code>'aria-label' =&gt; t('Zobrazi&#357; v PDF: @label', &hellip;)</code> inside <code>#attributes</code> &hellip; This lands on the <code>&lt;input&gt;</code> and changes neither layout nor the <code>.use_in_pdf</code> CSS hook &hellip; Existing checkboxes are left alone (out of scope).&rdquo;
+<span class="att">task f4483235 &mdash; 04-phase-0b technical spec, round 1</span></blockquote>
+<p>A&rsquo;s 39,424-character spec &mdash; the longest of the three &mdash; has no accessibility section at all. It copied the base file&rsquo;s unlabeled pattern 148 times. The repo&rsquo;s own knowledge base carries <code>accessibility/inspection-form-a11y.md</code>, which the old run updated on exactly this point.</p>
+
+<h3>3. Scope discipline</h3>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">Files changed</th><th class="num">Insertions</th><th>Out-of-scope changes that shipped</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="num g">10</td><td class="num">3,662</td><td>One line: <code>postgresql-17-pgvector</code> in <code>.ddev/db-build/Dockerfile</code>. Flagged by 3 reviewers, shipped anyway.</td></tr>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="num">17</td><td class="num">3,998</td><td>None in the source tree. The 5 knowledge-base files and 1 new agent definition are deliberate outputs of its learning phase.</td></tr>
+<tr><td><span class="dot f-plan"></span>A</td><td class="num b">23</td><td class="num">28,215<br/><span class="m">23,477 of it plan.json/plan.md</span></td><td><code>test-playwright/.env</code> <span class="b">(changed a superadmin password in a committed plaintext credential file)</span>, <code>.gitignore</code>, <code>yarn.lock</code>, a rewritten pgvector <code>Dockerfile</code>, <code>utils/pdf-debug.ts</code>, <code>utils/medical-inspection.ts</code>, 4 baseline HTML fixtures.</td></tr>
+</tbody></table></div>
+<div class="src bad"><b>A knew and shipped it anyway.</b> The Dockerfile it rewrote carries a header comment written by the run itself: <em>&ldquo;RAG tooling infrastructure, NOT part of the TASK-185 rendering change &hellip; Land it separately if the branch is ever split.&rdquo;</em> Four separate reviewers (validator r1, code-auditor r4, operational-reviewer r4, peer-reviewer r4) raised it. It shipped. A also committed a 506&nbsp;KB generated <code>playwright-report/</code> at the repository root at round&nbsp;2 &mdash; that one <em>was</em> caught and reverted by <code>07b</code> in the same round, which is the loop working.</div>
+
+<h2 id="s4"><span class="num">04</span>Tests: written versus executed</h2>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">spec files</th><th class="num">tests in them</th><th class="num">tests added</th><th class="num">expect()</th><th class="num">lower-bound asserts</th><th>Did the suite ever run?</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="num">5 + 1 util</td><td class="num">29</td><td class="num">24</td><td class="num">141</td><td class="num b">25 <span class="m">(17.7%)</span></td><td><span class="pill ok">yes &mdash; 3 background runs: 1 failed, 2 completed, with a <code>playwright-tester</code> fix pass between them</span></td></tr>
+<tr><td><span class="dot f-plan"></span>A</td><td class="num">2 + 3 utils + 4 baselines</td><td class="num g">40</td><td class="num g">35</td><td class="num">192</td><td class="num g">10 <span class="m">(5.2%)</span></td><td><span class="pill no">never &mdash; <code>testsPassed:false</code> in rounds 1-3, no run at all in round 4</span></td></tr>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="num">4</td><td class="num">37</td><td class="num">32</td><td class="num">215</td><td class="num w">25 <span class="m">(11.6%)</span></td><td><span class="pill no">never green &mdash; <code>testsPassed:false</code> r1; r2 verified only that 32 tests <em>load</em> via <code>--list</code></span></td></tr>
+</tbody></table></div>
+
+<p>A&rsquo;s suite has the best architecture of the three: a descriptor table (<code>tests/utils/inspection-types.ts</code>, 363 lines) drives one parameterised spec across all four form types and both sections of each, plus per-type baseline HTML fixtures and a shared <code>pdf-debug.ts</code> harness. B duplicates a similar spec four times. The old run sits in between with five specs over one shared util. On assertion quality A is also cleanest &mdash; lower-bound assertions (<code>toBeGreaterThanOrEqual</code>) are the exact anti-pattern the old run wrote into the repo&rsquo;s <code>TESTING_STANDARDS.md</code> because they pass while items are missing, and A uses a third as many proportionally as either alternative. Two of these counts are self-validating: the old run&rsquo;s commit message claims &ldquo;24 Playwright tests&rdquo; and B&rsquo;s own <code>08b</code> step reported &ldquo;all 32 tests load cleanly&rdquo;, which is exactly what the trees measure.</p>
+
+<div class="src bad"><b>None of that was worth anything, because A never ran it.</b> Every fix-loop round in both Haive runs was triggered by <code>08b-test-management</code>, and every one of them turned out to be an invocation or environment problem rather than a defect:
+<ul class="tight">
+<li><b>A r1, A r2, B r1</b> &mdash; <code>Error: Playwright Test did not expect test.describe() to be called here</code>. The runner was invoked from the docroot, where there is no <code>playwright.config.ts</code>, so the spec was evaluated outside its collection phase. B additionally recorded that <code>npx</code> then fetched playwright 1.63.0 while the specs import 1.54.1.</li>
+<li><b>A r3</b> &mdash; <code>chromium.launch()</code> in <code>global-setup.ts</code>: <em>&ldquo;Playwright&rsquo;s browser binaries are not installed in the DDEV web container: <code>/home/ddev/.cache/ms-playwright/chromium_headless_shell-1181</code> is absent.&rdquo;</em></li>
+<li><b>A r4, B r2</b> &mdash; no run attempted; both steps audited the specs statically and returned no verdict.</li>
+</ul>
+Each of those rounds burned 5 internal fix passes first: <b>15 wasted passes in A, 5 in B</b>. The old workflow&rsquo;s equivalent phase failed once, was fixed by a <code>playwright-tester</code> agent, and then completed twice.</div>
+
+<h2 id="s5"><span class="num">05</span>Process &amp; rounds</h2>
+
+<div class="two">
+<div class="panel">
+<h4>Where A&rsquo;s four rounds went</h4>
+<ul class="tight">
+<li><b>Round 0 &rarr; 1</b> &mdash; developer rejected at Gate 1: <em>&ldquo;resolve the points listed in quality review&rdquo;</em>. Spec rewritten, re-audited, approved (quality score 9).</li>
+<li><b>Round 1 &rarr; 2, 2 &rarr; 3, 3 &rarr; 4</b> &mdash; three identical <code>fix_loop.requested</code> events, all sourced from <code>08b-test-management</code>, all reading <em>&ldquo;The related tests still fail after 5 fix pass(es)&hellip;&rdquo;</em>.</li>
+<li>In every one of those rounds <code>07-phase-2-implement</code> was <b>skipped</b> &mdash; so no agent ever read the diagnosis, and the whole review chain re-ran against unchanged code.</li>
+</ul>
+<div class="src warn" style="margin-top:12px"><b>That last item is a since-fixed harness bug, not a property of the plan.</b> In DAG mode <code>07</code> used to skip at every round. Its <code>shouldRun</code> now splits by round (<code>mode !== 'dag' || ctx.round &gt; 0</code>) and the fix&rsquo;s own source comment names this task: <em>&ldquo;task 681f0f99 spent 3 rounds that way, each recording a <code>fix_loop.requested</code> nothing consumed.&rdquo;</em> Read A&rsquo;s round count as 1 real round plus 3 that the orchestrator could not have used.</div>
+</div>
+<div class="panel">
+<h4>Where the old run&rsquo;s two rounds went</h4>
+<ul class="tight">
+<li><b>Phase 4 validator, Phase 5 browser test, Phase 6 peer + security review all passed</b> &mdash; while 10 fields had no checkbox at all.</li>
+<li><b>Gate 2</b> &mdash; the developer found all 10 by eye.</li>
+<li><b>Fix loop #1</b> &mdash; relocated an existing checkbox instead of adding one, re-creating the reported bug elsewhere.</li>
+<li><b>Fix loop #2</b> &mdash; <code>&ldquo;Fix loop #2: add per-subfield checkboxes&rdquo;</code>, then a green Playwright regression run.</li>
+<li>Afterwards, one more human turn: <em>&ldquo;fix the Ai/Bi section I labels too&rdquo;</em> &rarr; commit <code>af2dbfb8</code>.</li>
+</ul>
+<blockquote style="margin-top:12px">&ldquo;Lower-bound assertions (<code>count &gt;= 8</code>) are actively harmful here: they pass when items are missing &hellip; Two agents reported &lsquo;all verified&rsquo; while the user&rsquo;s issues persisted.&rdquo;
+<span class="att">memory/verify-missing-not-just-present.md, written by that session</span></blockquote>
+</div>
+</div>
+
+<h4 style="margin-top:30px">Step execution</h4>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">step rows</th><th class="num">done</th><th class="num">skipped</th><th class="num">CLI invocations</th><th class="num">human active</th><th class="num">time parked at gates</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-plan"></span>A</td><td class="num">59</td><td class="num">52</td><td class="num">7</td><td class="num">121</td><td class="num">23.1 min</td><td class="num">156.6 min</td></tr>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="num">51</td><td class="num">46</td><td class="num">5</td><td class="num">81</td><td class="num">13.2 min</td><td class="num">123.0 min</td></tr>
+</tbody></table></div>
+<p class="sub">The old workflow has no equivalent structured record; its 15 named agent dispatches and 3 background commands were reconstructed from the timing wrapper&rsquo;s task notifications. That asymmetry is itself a result: the Haive runs are auditable at row level three weeks later, the old run is auditable only because a side-channel wrapper happened to be recording and two memory files survived. Its own <code>.claude/tasks/TASK-2026-185/</code> directory contains a truncated <code>history.md</code> that stops at the RAG health check and an empty <code>mining-stats/</code>; the session transcript and the worktree were both cleaned up.</p>
+
+<h2 id="s6"><span class="num">06</span>Cost</h2>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">invocations</th><th class="num">total tokens</th><th class="num">notional USD</th><th>Breakdown</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-plan"></span>A &mdash; the task</td><td class="num">121</td><td class="num">284.0 M</td><td class="num">$274.54</td><td class="m">claude-opus-5 cli $174.82 &middot; dag_parallel $71.62 &middot; agent_mining $24.22 &middot; step summaries on gemma4:31b-cloud $3.88</td></tr>
+<tr><td><span class="dot f-noplan"></span>B &mdash; the task</td><td class="num">81</td><td class="num">140.1 M</td><td class="num">$145.29</td><td class="m">claude-opus-5 cli $78.31 &middot; dag_parallel $42.32 &middot; agent_mining $20.98 &middot; step summaries $3.68</td></tr>
+<tr><td><span class="dot f-plan"></span>A &mdash; setup it alone paid</td><td class="num">167</td><td class="num">98.7 M</td><td class="num">$120.14</td><td class="m">onboarding $24.43 &middot; plan build $76.84 (+ $15.14 for a cancelled first attempt) &middot; plan chat $3.73</td></tr>
+<tr class="tot"><td>A total, first task on the repo</td><td class="num">288</td><td class="num">382.7 M</td><td class="num">$394.68</td><td class="m">2.7&times; B</td></tr>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="num">15 dispatches</td><td class="num m">not recorded</td><td class="num m">not recorded</td><td class="m">no per-invocation accounting existed; the run did hit a 5-hour usage cap once, costing ~90 min and a provider switch</td></tr>
+</tbody></table></div>
+<div class="src"><b>Both Haive runs ran on subscription auth, so every row is <code>billable:false</code>.</b> The dollar figures are the subscription counterfactual &mdash; what those tokens would have cost at list API rates &mdash; not money that was spent. They are still the right axis for comparing the two runs against each other. The setup cost amortises: it is paid once per repository, not once per task.</div>
+
+<div class="bars">
+<div class="bar"><span class="t">A &mdash; with plan</span><span class="track"><span class="fill" style="width:100%;background:var(--plan)"></span></span><span class="v">284 M</span></div>
+<div class="bar"><span class="t">B &mdash; no plan</span><span class="track"><span class="fill" style="width:49.3%;background:var(--noplan)"></span></span><span class="v">140 M</span></div>
+<div class="legend"><span>tokens consumed by the implementation task alone</span></div>
+</div>
+
+<h2 id="s7"><span class="num">07</span>What the plan actually bought</h2>
+<p class="sub">Repo A carried a 544-node plan built from the codebase (536 component, 4 decision, 4 research). The TASK-185 work entered it as 6 nodes created by one plan-chat turn on 2026-09-06 09:30: an umbrella node plus five taskable children &mdash; one per form type, plus <em>&ldquo;Extend the show/hide E2E spec to the three newly-covered gas types&rdquo;</em>.</p>
+
+<div class="tbl-scroll"><table>
+<thead><tr><th>What the plan changed</th><th><span class="dot f-plan"></span>A</th><th><span class="dot f-noplan"></span>B</th></tr></thead>
+<tbody>
+<tr><td>Spec length</td><td class="num">39,424 chars / 332 lines</td><td class="num">26,736 chars / 284 lines</td></tr>
+<tr><td>Spec sections</td><td>Adds <b>Affected components</b> (5 sub-groups), <b>Risks</b>, a 7-part numbered approach with a &ldquo;convention-setter&rdquo; ordering</td><td>Adds <b>§10 Style and accessibility</b>, per-section row-level scope maps with renderer line ranges</td></tr>
+<tr><td>Affected plan components named</td><td class="num">161 <span class="m">(11 at round 0)</span></td><td class="num">&mdash;</td></tr>
+<tr><td>DAG decomposition</td><td>5 issues / 3 dependency levels, with a convention-setter issue landing first</td><td>4 issues, flat</td></tr>
+<tr><td>RAG index available to agents</td><td>9,283 code + <b>41 KB</b> + 4 runbook + 2 task chunks</td><td>9,272 code + 6 learning chunks<br/><span class="m">no KB chunks &mdash; repo was never onboarded</span></td></tr>
+<tr><td>Extra steps only A ran</td><td><code>11f-plan-reconcile</code> &mdash; 22 min, 8 of them human</td><td>&mdash;</td></tr>
+</tbody></table></div>
+
+<div class="src warn"><b>The plan bought breadth of analysis, not correctness.</b> It produced the longer spec, the explicit dependency ordering and the better test architecture. But the two real defects in A&rsquo;s delivery &mdash; no accessible names, no cache invalidation &mdash; are both things that a shorter, plan-free spec covered and the longer one did not. The impact walk named 161 components and returned <b>0 traversal hops</b>, so what it delivered was a wide inventory rather than a dependency answer. And of A&rsquo;s five planned issues, the fifth (&ldquo;extend the E2E spec&rdquo;) is precisely the one whose output never ran.</div>
+
+<h2 id="s8"><span class="num">08</span>Review rigor: who caught what</h2>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">findings</th><th class="num">high</th><th class="num">medium</th><th class="num">low</th><th>Reviewers that fired</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-plan"></span>A</td><td class="num">30</td><td class="num">1</td><td class="num">8</td><td class="num">21</td><td>validator (r1-r4), code-auditor, operational-reviewer, peer-reviewer, security-code-reviewer</td></tr>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="num">19</td><td class="num">1</td><td class="num">7</td><td class="num">11</td><td>same five</td></tr>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="num m">not recorded</td><td class="num m">&mdash;</td><td class="num m">&mdash;</td><td class="num m">&mdash;</td><td>implementation-validator, integration-tester, peer-reviewer, security-code-reviewer &mdash; findings lived only in the transcript, which is gone</td></tr>
+</tbody></table></div>
+
+<p>Both Haive runs independently found the same pre-existing <b>high</b>: broken access control on <code>/inspection-generate-pdf/%</code>, authorised by the generic <code>access content</code> permission with no per-node ownership check. Both found the stored-XSS surface in the <code>?ait_debug_printout=1</code> branch. Neither was in scope and neither was fixed; B wrote one of them to a learning file (<code>inspection-generate-pdf-idor-open.md</code>), A did not.</p>
+
+<div class="src bad"><b>Every finding in both runs carries <code>disposition: open</code>.</b> Nothing was refuted, nothing was waived at Gate 1.5, nothing was accepted at an escalation gate &mdash; the developer approved Gate 2 outright in both runs with an empty feedback field. So A&rsquo;s cache-invalidation defect and its three <code>.env</code> credential findings were on the screen at the moment of approval and were not acted on. The comparison to the old run is exact and uncomfortable: there, three automated tiers passed a broken artifact and the <em>human</em> caught it; here, the automated tier caught real problems and the human passed them.</div>
+
+<h2 id="s9"><span class="num">09</span>Knowledge left behind</h2>
+<div class="tbl-scroll"><table>
+<thead><tr><th>Run</th><th class="num">KB documents</th><th class="num">learnings</th><th>What it wrote</th></tr></thead>
+<tbody>
+<tr><td><span class="dot f-old"></span>OLD</td><td class="num g">5 (+712 lines)</td><td class="num">2 session memories</td><td><code>TESTING_STANDARDS.md</code> (new, 198 lines), <code>ANTI_PATTERNS/drupal7.md</code> (+130), <code>TECH_PATTERNS/drupal7/form-api.md</code> (+119), <code>business/inspection-types.md</code>, <code>accessibility/inspection-form-a11y.md</code> &mdash; <b>plus a new agent definition</b>, <code>.claude/agents/implementation-validator.md</code>, encoding &ldquo;enumerate the target surface before validating it&rdquo;</td></tr>
+<tr><td><span class="dot f-plan"></span>A</td><td class="num">1 (+105 lines)</td><td class="num">4 + 1 investigation</td><td><code>pdf-generation.md</code>; learnings on the key-collision sweep, the unsigned-PDF cache, the Playwright working directory, and the dedup-latch relocation trap</td></tr>
+<tr><td><span class="dot f-noplan"></span>B</td><td class="num b">0</td><td class="num">6</td><td>Learnings only: IDOR left open, prescan orphan-header invariant, legacy-blob default, the label-borrowing checkbox, the Playwright directory, and &ldquo;no absolute line numbers in <code>d_inspection</code> comments&rdquo;</td></tr>
+</tbody></table></div>
+<p>The old workflow is still ahead here, and by a wide margin &mdash; it converted a painful run into durable process rules and a <em>new reviewer role</em>. Both Haive runs wrote useful learnings, and both independently recorded the Playwright working-directory problem, which is the correct instinct. Neither promoted anything to a reusable agent or standards document.</p>
+
+<h2 id="s10"><span class="num">10</span>Scorecard</h2>
+<p class="sub">Eight dimensions, 0&ndash;10 each, scored from the evidence above. The weighting is uniform and stated so it can be argued with; the two lines that matter most are called out underneath.</p>
+
+<div class="tbl-scroll"><table>
+<thead><tr><th>Dimension</th><th class="num"><span class="dot f-old"></span>OLD</th><th class="num"><span class="dot f-plan"></span>A</th><th class="num"><span class="dot f-noplan"></span>B</th><th>Decided by</th></tr></thead>
+<tbody>
+<tr><td>Requirement coverage</td><td class="num g">10</td><td class="num">6</td><td class="num">6</td><td>159 vs 148 / 149 checkboxes; per-subfield vs per-row; <code>Rok v&yacute;roby</code> + 5 burner fields missing in both Haive runs</td></tr>
+<tr><td>Operational correctness</td><td class="num g">9</td><td class="num b">4</td><td class="num g">9</td><td>cached-PDF invalidation on 3 of 4 types</td></tr>
+<tr><td>Accessibility</td><td class="num g">10</td><td class="num b">2</td><td class="num">8</td><td>159 / 0 / 116 controls with an accessible name</td></tr>
+<tr><td>Scope discipline</td><td class="num">8</td><td class="num b">3</td><td class="num g">9</td><td>17 / 23 / 10 files; <code>.env</code> credential edit; self-declared out-of-scope Dockerfile</td></tr>
+<tr><td>Test design</td><td class="num">7</td><td class="num g">9</td><td class="num">7</td><td>40 tests from one parameterised suite; 5.2% lower-bound asserts vs 11.6% / 17.7%</td></tr>
+<tr><td>Test evidence</td><td class="num g">8</td><td class="num b">1</td><td class="num b">1</td><td>the only run whose suite actually executed</td></tr>
+<tr><td>Human cost (inverse)</td><td class="num b">2</td><td class="num">8</td><td class="num g">10</td><td>&ge;6 substantive turns + hand-finding 10 defects vs 23 min vs 13 min</td></tr>
+<tr><td>Knowledge left behind</td><td class="num g">9</td><td class="num">6</td><td class="num">4</td><td>5 KB docs + a new agent vs 1 KB doc + 4 learnings vs 6 learnings</td></tr>
+<tr class="tot"><td>Total / 80</td><td class="num g">63</td><td class="num b">39</td><td class="num">54</td><td></td></tr>
+</tbody></table></div>
+
+<div class="bars" style="margin-top:20px">
+<div class="bar"><span class="t">OLD /workflow</span><span class="track"><span class="fill" style="width:78.8%;background:var(--old)"></span></span><span class="v">63</span></div>
+<div class="bar"><span class="t">B &mdash; Haive, no plan</span><span class="track"><span class="fill" style="width:67.5%;background:var(--noplan)"></span></span><span class="v">54</span></div>
+<div class="bar"><span class="t">A &mdash; Haive, with plan</span><span class="track"><span class="fill" style="width:48.8%;background:var(--plan)"></span></span><span class="v">39</span></div>
+</div>
+
+<div class="src warn" style="margin-top:22px"><b>Read the total with two corrections, both of which cut against the ranking.</b>
+<ul class="tight">
+<li><b>The old run&rsquo;s lead is bought with human labour.</b> Its three decisive advantages &mdash; per-subfield granularity, full accessible names, a green test run &mdash; are all downstream of the developer rejecting the work twice at Gate&nbsp;2 and then asking for the labels by hand. Score its <em>first submission</em> instead and it loses to both Haive runs: 10 fields with no checkbox at all, which its own automated validator, browser test and peer+security review had all just passed.</li>
+<li><b>Three of A&rsquo;s four rounds were a harness bug that is already fixed.</b> With <code>07-phase-2-implement</code> skipping every DAG fix round, no agent could read the diagnosis. Corrected for that, A&rsquo;s process cost is much closer to B&rsquo;s &mdash; but its <em>artifact</em> defects (accessibility, cache invalidation, scope) are independent of it and would have shipped either way.</li>
+</ul></div>
+
+<h3>The honest one-line answers</h3>
+<ul class="tight">
+<li><b>Which workflow is best as a whole?</b> Haive, run without a plan. It got within 10 checkboxes of an artifact that took a human two rejection rounds to reach, with no defects the human had to find, for 13 minutes of attention and 6.8 hours of elapsed time.</li>
+<li><b>Where is the old workflow still ahead?</b> It ran its tests, and it converted the run into durable knowledge and a new reviewer role. Both are things Haive should be able to do and did not.</li>
+<li><b>Did the plan help?</b> On analysis, decomposition and test architecture, clearly yes. On the code that shipped, no &mdash; it cost 2.0&times; the tokens and 2.1&times; the wall clock and delivered the worse artifact of the two.</li>
+<li><b>Is the Haive workflow an improvement on the original?</b> On process, decisively &mdash; auditability, review depth, human cost, and reviewers that find real security defects rather than passing a broken artifact. On <em>verification</em>, it has regressed: the old loop proved its work by running it, and neither new run did.</li>
+</ul>
+
+<h2 id="s11"><span class="num">11</span>Confounds &amp; methodology</h2>
+<ul class="tight">
+<li><b>The two Haive repos are not equally prepared.</b> Repo A was onboarded through Haive (62 tracked artifacts, KB indexed into RAG, 544-node plan). Repo B was never onboarded &mdash; 0 artifacts, and its RAG index carries code chunks only. Both trees carry the <em>same</em> 28 on-disk agent definitions and 41 knowledge-base files inherited from the source repo, so B&rsquo;s agents could read the KB from disk but could not <code>rag_search</code> it. The user&rsquo;s framing was &ldquo;plan vs no plan&rdquo;; the actual difference is &ldquo;onboarded + planned vs neither&rdquo;.</li>
+<li><b>Different base commits.</b> A and B branch from <code>05e615e</code> (Merge TASK-179). The old run branched from <code>655e04bc</code> (Merge TASK-178), one merge later. The 185 work is absent from both Haive bases, so no run could see another&rsquo;s answer.</li>
+<li><b>The old run&rsquo;s diffstat against its merge base includes unrelated drift</b> (a <code>master</code>&rarr;<code>dev</code> difference touching <code>inspection.class.inc</code>, <code>notification_email.class.inc</code>, <code>CRON_JOBS.md</code>). All figures quoted for it come from its own two commits (<code>2a6d8775</code>, <code>af2dbfb8</code>) or from the merge commit&rsquo;s first-parent stat, not from that diff.</li>
+<li><b>Checkbox counts</b> come from <code>'#type'\s*=&gt;\s*'checkbox'</code> over the delivered file, whitespace-insensitive &mdash; B aligns its arrows in two files and not the other two, which a naive grep miscounts by 51.</li>
+<li><b>The field-coverage table</b> was produced by parsing <code>$form['myform']['part_N']['KEY'] = array(&hellip;)</code> blocks out of each delivered file and matching data fields against checkbox keys under three naming conventions (<code>&hellip;c</code>, <code>&hellip;_show</code>, <code>&hellip;_pdf_c</code>). Fields outside the task&rsquo;s named sections (<code>part_0</code>, <code>part_6</code>, <code>part_7</code>, <code>part_12</code>, <code>part_13</code>) are uncovered in all three runs and are excluded from the comparison.</li>
+<li><b>The old run&rsquo;s timeline</b> was reconstructed from <code>~/.claude/timings/*.jsonl</code> (a local instrumentation wrapper) across four wrapper sessions carrying <code>claude_session f0eef6b4-6bad-441b-ae18-81a18db9c0cb</code>, cross-checked against <code>~/.claude/history.jsonl</code>. The session transcript itself no longer exists. The Gate&nbsp;2 rejection text is not in either log; the two session-memory files written by that run at <span class="mono">2026-08-06T05:52Z</span> are the surviving first-party record and are quoted rather than paraphrased.</li>
+<li><b>Nothing here is scored on a run&rsquo;s self-report.</b> Coverage, accessibility, cache invalidation, scope and test counts were all measured against the delivered git trees. Round counts, findings and costs come from Haive&rsquo;s Postgres rows.</li>
+<li><b>Not measured:</b> whether the delivered PDFs actually render correctly. No run in this comparison produced a green browser verification against all four forms, so functional PDF correctness is asserted by none of them and checked by none of this.</li>
+</ul>
+
+<footer>
+Generated 2026-09-07 &middot; Haive benchmarks &middot; sources: <code>git</code> (elmont_rs + both Haive repo checkouts), Haive Postgres (<code>tasks</code>, <code>task_steps</code>, <code>cli_invocations</code>, <code>review_findings</code>, <code>task_events</code>, <code>plan_nodes</code>), <code>~/.claude/timings/</code>, <code>~/.claude/history.jsonl</code>, <code>~/.claude/projects/-home-activit-elmont-rs/memory/</code>.
+</footer>
+
+</div></body></html>
