@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
@@ -20,6 +20,31 @@ function tableNameOf(table: unknown): string {
     }
   }
   return '';
+}
+
+/** Values a drizzle condition binds, in order. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) conditionValues(item, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) acc.push(obj.value);
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
+}
+
+/** finishRow's guard, evaluated against the mock row: an outcome lands only while the row is not
+ *  `pending` or `skipped`. */
+function refusedByFinishGuard(cond: unknown, status: unknown): boolean {
+  const values = conditionValues(cond);
+  return (
+    values.includes('pending') &&
+    values.includes('skipped') &&
+    (status === 'pending' || status === 'skipped')
+  );
 }
 
 function makeMockDb(state: MockState): Database {
@@ -60,8 +85,14 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         set: (v: Record<string, unknown>) => ({
-          where: () => ({
+          where: (cond: unknown) => ({
             returning: async () => {
+              if (
+                tableName === 'task_steps' &&
+                refusedByFinishGuard(cond, state.taskStepRow.status)
+              ) {
+                return [];
+              }
               state.updates.push({ table: tableName, patch: v });
               if (tableName === 'task_steps') {
                 state.taskStepRow = { ...state.taskStepRow, ...v };
@@ -472,5 +503,117 @@ describe('advanceStep continuing a parked step with saved answers', () => {
     const result = await run(state, step(), { action: 'not-an-option' });
 
     expect(result.status).toBe('failed');
+  });
+});
+
+describe('advanceStep outcome after a Retry or Skip took the row over', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const doneWrites = (state: MockState) =>
+    state.updates.filter((u) => u.table === 'task_steps' && u.patch.status === 'done');
+
+  it('writes no outcome over a row a Retry reset while apply ran', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async () => {
+      // The api's Retry resets the row to pending while this pass is still applying.
+      state.taskStepRow.status = 'pending';
+      return { applied: true };
+    };
+
+    const result = await run(state, def);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(doneWrites(state)).toEqual([]);
+  });
+
+  it('writes no failure over a row a Skip took while apply failed', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async () => {
+      state.taskStepRow.status = 'skipped';
+      throw new Error('apply lost its workspace');
+    };
+
+    const result = await run(state, def);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('skipped');
+    expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
+  });
+
+  it('stops a pass whose task a Retry moved to a newer epoch, writing nothing', async () => {
+    vi.useFakeTimers();
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: null,
+      status: 'running',
+      orchestrationEpoch: 6,
+    };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async (ctx) => {
+      // A long deterministic apply that checks for cancellation, as RAG sync does.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      ctx.throwIfCancelled();
+      return { applied: true };
+    };
+
+    const pass = advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: def,
+      epoch: 5,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await pass;
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('running');
+    expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
+    expect(doneWrites(state)).toEqual([]);
+  });
+
+  it('lets a pass at the task epoch finish as before', async () => {
+    vi.useFakeTimers();
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: null,
+      status: 'running',
+      orchestrationEpoch: 6,
+    };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async (ctx) => {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      ctx.throwIfCancelled();
+      return { applied: true };
+    };
+
+    const pass = advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: def,
+      epoch: 6,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect((await pass).status).toBe('done');
+    expect(doneWrites(state)).toHaveLength(1);
   });
 });

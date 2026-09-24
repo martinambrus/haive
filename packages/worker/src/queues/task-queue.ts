@@ -1001,6 +1001,10 @@ async function handleResult(
 ): Promise<void> {
   const stepDef = stepRegistry.require(stepId);
   switch (result.status) {
+    case 'superseded':
+      // A Retry or Skip took the row over; the pass that replaced this one carries the task.
+      logger.info({ taskId: ctx.taskId, stepId }, 'step pass superseded; nothing to hand off');
+      return;
     case 'done':
     case 'skipped': {
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
@@ -1590,6 +1594,7 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
     runSeq: 0,
     providers,
     deps: workerDeps,
+    epoch: ctx.orchestrationEpoch,
   });
   await handleResult(db, ctx, first.metadata.id, result);
 }
@@ -2132,6 +2137,7 @@ async function handleAdvanceStep(
       formValues,
       providers,
       deps: workerDeps,
+      epoch: ctx.orchestrationEpoch,
     });
     await handleResult(db, ctx, payload.stepId, result);
   } finally {

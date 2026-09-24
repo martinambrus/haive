@@ -274,6 +274,11 @@ queued for. It replaced a guard that let a second advance skip only while the ro
 which no continuation does any more. The hold is taken outside the job's own catch, since that
 catch fails the task, and it is per process, like the queue's single worker.
 
+A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
+reset. Its outcome writes (`finishRow`) land only while the row is still its own, not `pending` or
+`skipped`, and the cancel poll stops a pass whose task moved to a newer epoch. Either way the pass
+writes no outcome and hands nothing off (`superseded`), and the Retry's pass runs once it lets go.
+
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.

@@ -242,6 +242,9 @@ export interface AdvanceStepParams {
   formValues?: FormValues;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
+  /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
+   *  next cancellation check and writes no outcome. Undefined never stops on it. */
+  epoch?: number | null;
 }
 
 export type AdvanceStepResult =
@@ -259,7 +262,9 @@ export type AdvanceStepResult =
       uncapped?: boolean;
     }
   | { status: 'revise'; row: TaskStepRow; targetStepId: string; sourceStepId: string }
-  | { status: 'failed'; row: TaskStepRow; error: string };
+  | { status: 'failed'; row: TaskStepRow; error: string }
+  /** A Retry or Skip took the row over while this pass ran; the pass wrote no outcome. */
+  | { status: 'superseded'; row: TaskStepRow };
 
 type UpdatePatch = Partial<{
   status: StepStatus;
@@ -2101,17 +2106,22 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   if (row.status === 'skipped') return { status: 'skipped', row };
 
   const controller = new AbortController();
+  let superseded = false;
   const throwIfCancelled = (): void => {
     if (controller.signal.aborted) {
       throw new TaskCancelledError();
     }
+  };
+  const supersededPass = (current: TaskStepRow): AdvanceStepResult => {
+    log.info({ stepId: meta.id, taskId, round }, 'step pass superseded by a retry or skip');
+    return { status: 'superseded', row: current };
   };
   const pollTimer = setInterval(() => {
     void (async () => {
       try {
         const statusRow = await db.query.tasks.findFirst({
           where: eq(schema.tasks.id, taskId),
-          columns: { status: true },
+          columns: { status: true, orchestrationEpoch: true },
         });
         // Abort the in-flight step when the task is stopped out-of-band. A user
         // Cancel sets the task `cancelled`; a user Stop (cancel-active-cli) sets
@@ -2119,6 +2129,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // only polls this flag, not its own step row — or Stop can't halt a long
         // run like RAG-populate (it would keep embedding after the click).
         if (statusRow?.status === 'cancelled' || statusRow?.status === 'failed') {
+          controller.abort();
+        } else if (
+          params.epoch != null &&
+          statusRow != null &&
+          statusRow.orchestrationEpoch > params.epoch
+        ) {
+          // A Retry moved the task past this pass, and the Retry's own pass waits for this one.
+          superseded = true;
           controller.abort();
         }
       } catch (err) {
@@ -2908,7 +2926,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
       const verdict = stepDef.fixLoop.evaluate(output);
       if (verdict?.blocking) {
-        const finished = await updateRow(db, current.id, {
+        const finished = await finishRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -2917,6 +2935,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
+        if (!finished) return supersededPass(current);
         ctx.logger.info(
           { stepId: meta.id, round },
           'fix-loop: blocking defect found; routing back to implementation',
@@ -2938,7 +2957,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.restartLoop) {
       const restart = stepDef.restartLoop.evaluate(output);
       if (restart) {
-        const finished = await updateRow(db, current.id, {
+        const finished = await finishRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -2947,6 +2966,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
+        if (!finished) return supersededPass(current);
         ctx.logger.info(
           { stepId: meta.id, round },
           'restart-loop: human gate requested restart from implementation (uncapped)',
@@ -2969,7 +2989,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.reviseLoop) {
       const target = stepDef.reviseLoop.evaluate(output);
       if (target) {
-        const finished = await updateRow(db, current.id, {
+        const finished = await finishRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -2978,6 +2998,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
+        if (!finished) return supersededPass(current);
         ctx.logger.info(
           { stepId: meta.id, targetStepId: target.targetStepId },
           'revise-loop: apply requested revising an earlier step',
@@ -2997,7 +3018,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // advance. Long deterministic steps (RAG sync) also poll the signal internally;
     // this closes the return-race generically for every step.
     throwIfCancelled();
-    const done = await updateRow(db, current.id, {
+    const done = await finishRow(db, current.id, {
       status: 'done',
       output,
       summary: curatedSummary,
@@ -3011,6 +3032,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage: null,
       endedAt: new Date(),
     });
+    if (!done) return supersededPass(current);
 
     // Surface B: freeze context-window usage on the finished step (best-effort; never
     // blocks completion). No-op for deterministic steps (no CLI invocations). Returns
@@ -3028,6 +3050,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     return { status: 'done', row: done, output };
   } catch (err) {
+    if (superseded) return supersededPass(row);
     const cancelled = err instanceof TaskCancelledError;
     const errorMessage = cancelled
       ? 'task cancelled by user'
@@ -3050,24 +3073,26 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ? stepDef.fixLoopOnError(errorMessage)
         : stepDef.fixLoopOnError === true;
     if (!cancelled && routeErrorToFixLoop) {
-      const finished = await updateRow(db, row.id, {
+      const finished = await finishRow(db, row.id, {
         status: 'done',
         statusMessage: null,
         errorMessage,
         endedAt: new Date(),
       }).catch(() => row);
+      if (!finished) return supersededPass(row);
       log.info(
         { stepId: meta.id, taskId, round },
         'fix-loop: step error routed back to implementation',
       );
       return { status: 'loop_back', row: finished, diagnosis: errorMessage, sourceStepId: meta.id };
     }
-    const failed = await updateRow(db, row.id, {
+    const failed = await finishRow(db, row.id, {
       status: 'failed',
       statusMessage: null,
       errorMessage,
       endedAt: new Date(),
     }).catch(() => row);
+    if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };
   } finally {
     clearInterval(pollTimer);
@@ -3136,6 +3161,24 @@ export async function upsertRow(
   const row = inserted[0];
   if (!row) throw new Error('Failed to insert task step row');
   return row;
+}
+
+/** updateRow for a pass's outcome. It lands only while the row is still the pass's own: a Retry
+ *  or a Skip that arrived meanwhile left it `pending` or `skipped`, and writing over that would
+ *  swallow the Retry. Null when one had. */
+async function finishRow(
+  db: Database,
+  id: string,
+  patch: UpdatePatch,
+): Promise<TaskStepRow | null> {
+  const rows = await db
+    .update(schema.taskSteps)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(
+      and(eq(schema.taskSteps.id, id), notInArray(schema.taskSteps.status, ['pending', 'skipped'])),
+    )
+    .returning();
+  return rows[0] ?? null;
 }
 
 async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
