@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { blockedByActiveStepMessage, isStaleSubmit, staleSubmitAction } from './_advance-guards.js';
+import {
+  blockedByActiveStepMessage,
+  failedTaskRefusesAdvance,
+  isStaleSubmit,
+  staleSubmitAction,
+} from './_advance-guards.js';
 
 describe('blockedByActiveStepMessage', () => {
   it('names the step that could not advance and says what unblocks the task', () => {
@@ -54,5 +59,23 @@ describe('staleSubmitAction', () => {
   it('lets anything that is not a stale submit proceed', () => {
     expect(staleSubmitAction(parked, true, parkedAt.getTime() + 1, 'running')).toBe('proceed');
     expect(staleSubmitAction(parked, false, before, 'running')).toBe('proceed');
+  });
+});
+
+describe('failedTaskRefusesAdvance', () => {
+  it('keeps out an advance on a failed task, whatever the step row says', () => {
+    for (const row of ['failed', 'running', 'waiting_cli', 'pending', 'done', undefined]) {
+      expect(failedTaskRefusesAdvance('failed', row)).toBe(true);
+    }
+  });
+
+  it('lets an answer to a form still parked on a failed task through', () => {
+    expect(failedTaskRefusesAdvance('failed', 'waiting_form')).toBe(false);
+  });
+
+  it('lets any advance through on a task something has reopened', () => {
+    for (const task of ['running', 'waiting_user', 'paused', 'queued']) {
+      expect(failedTaskRefusesAdvance(task, 'failed')).toBe(false);
+    }
   });
 });

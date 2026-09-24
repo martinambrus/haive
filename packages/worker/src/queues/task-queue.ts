@@ -80,7 +80,11 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, staleSubmitAction } from './_advance-guards.js';
+import {
+  blockedByActiveStepMessage,
+  failedTaskRefusesAdvance,
+  staleSubmitAction,
+} from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1811,6 +1815,17 @@ async function handleAdvanceStep(
     )
     .limit(1);
   const existing = existingRows[0];
+
+  // An advance queued before the task failed, such as one a fan-out's agent queued and the step's
+  // hold deferred behind the pass that then failed the step, would otherwise revive the task and run
+  // the step again.
+  if (failedTaskRefusesAdvance(ctx.status, existing?.status)) {
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
+      'advance-step skipped: the task failed and nothing has reopened it',
+    );
+    return;
+  }
 
   // Already finalized at this round — a duplicate delivery must NOT re-run apply().
   // A second job that arrives after the first finished, or was deferred behind it

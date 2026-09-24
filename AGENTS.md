@@ -272,7 +272,11 @@ at a time in the worker and defers a second with `moveToDelayed` rather than dro
 advance already running may be a barrier check that parks without seeing what the second was
 queued for. It replaced a guard that let a second advance skip only while the row read `running`,
 which no continuation does any more. The hold is taken outside the job's own catch, since that
-catch fails the task, and it is per process, like the queue's single worker.
+catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
+then run after the pass it waited behind failed the step, so an advance on a `failed` task is
+dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
+task `running` first. A form still parked is the one exception, since answering it is what reopens
+the task.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the

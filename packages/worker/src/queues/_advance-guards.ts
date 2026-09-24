@@ -43,3 +43,13 @@ export function staleSubmitAction(
   if (!isStaleSubmit(row, carriesFormValues, jobTimestamp)) return 'proceed';
   return taskStatus === 'running' ? 'repark' : 'drop';
 }
+
+/** Whether a failed task keeps an advance out. A Retry, a Resume and the allowance auto-resume each
+ *  set the task `running` before their advance runs, so a task still `failed` has not been reopened.
+ *  A form still parked is the exception: the person answering it is what reopens the task. */
+export function failedTaskRefusesAdvance(
+  taskStatus: string,
+  rowStatus: string | null | undefined,
+): boolean {
+  return taskStatus === 'failed' && rowStatus !== 'waiting_form';
+}
