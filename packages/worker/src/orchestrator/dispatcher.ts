@@ -229,8 +229,14 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   if (req.instructionsNameAgentPath === true) return false;
   // Haive's own marker pointers name `.claude/agents/<id>.md` by construction, so they are removed
   // before the scan; a user-forged marker-shaped block is removed with them and never reaches the
-  // model. Bodies are scanned as they are, because they DO reach it unrewritten.
-  if (promptNamesAgentPath(stripAgentGuidanceBlocks(req.input.prompt), SANDBOX_WORKDIR))
+  // model. Bodies are scanned as they are, because they DO reach it unrewritten. A re-fed prompt's
+  // stored rules block goes too: `adaptPrompt` drops it, and the current rules are scanned below.
+  if (
+    promptNamesAgentPath(
+      stripAgentGuidanceBlocks(withAgentRules(req.input.prompt, null).prompt),
+      SANDBOX_WORKDIR,
+    )
+  )
     return false;
   for (const body of Object.values(req.agentBodies ?? {})) {
     if (promptNamesAgentPath(body, SANDBOX_WORKDIR)) return false;
@@ -506,7 +512,9 @@ function buildCliSidePlan(
   // chooses whether a persona body replaces the pointer and whether exec masks the directories.
   const isolated = agentIsolationApplies(req, rules.text ?? undefined);
   const adaptPrompt = (prompt: string, rulesText: string | null = rules.text): string => {
-    const capabilityAdapted = adaptPromptForCliCapabilities(prompt, {
+    // A stored prompt dispatched again opens with its old rules block; every adapter below prepends,
+    // so one that newly applies would bury that block where the replacement at the end cannot see it.
+    const capabilityAdapted = adaptPromptForCliCapabilities(withAgentRules(prompt, null).prompt, {
       supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
       ragWired,
       projectAgentsDir: providerMetadata.projectAgentsDir,

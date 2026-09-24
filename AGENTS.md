@@ -468,8 +468,11 @@ repository copy also loads.
 
 - **Only a block at position 0 is Haive's.** A stored prompt dispatched again has its block
   REPLACED with today's rules, and null rules strip a leading block, so a switched-off dispatch
-  never keeps a stored one. A marker anywhere else is text the prompt carries and can neither
-  suppress nor replace the injection.
+  never keeps a stored one. The strip runs BEFORE the other adapters, because every one of them
+  prepends: one that applies now but did not on the stored run (a model newly learned to lack
+  vision) would otherwise bury the old block and leave two. The isolation scan reads the prompt
+  with that block removed for the same reason. A marker anywhere else is text the prompt carries
+  and can neither suppress nor replace the injection.
 - **Unfenced**, because providers are per-user and edited by their owner: this is operator text.
 - **Opt-outs** (`skipAgentRules`): the step recap, `01-env-detect` and the model-health canary,
   whose prompts carry their whole task and whose replies are parsed as they are. The sub-agent

@@ -11,7 +11,11 @@ import {
 import { WORKTREE_GIT_BOUNDARY_MARKER } from '../src/repo/worktree-git-boundary.js';
 import { mcpSurfacePrompt, type McpSurface } from '../src/sandbox/mcp-surface.js';
 import { DEFAULT_AGENT_RULES } from '@haive/shared';
-import { AGENT_RULES_MARKER, agentRulesHash } from '../src/orchestrator/agent-rules.js';
+import {
+  AGENT_RULES_MARKER,
+  agentRulesHash,
+  withAgentRules,
+} from '../src/orchestrator/agent-rules.js';
 import {
   PROMPT_ARGV_LIMIT_BYTES,
   PromptTooLargeError,
@@ -744,6 +748,39 @@ describe('agent rules injection', () => {
     expect(again.prompt).toBe(
       dispatch({ agentRulesInjection: true }, 'do the work', claude('- new')).prompt,
     );
+  });
+
+  it('keeps one current block when an adapter that newly applies prepends ahead of the stored one', () => {
+    const first = dispatch({ agentRulesInjection: true }, 'do the work', claude('- old'));
+    const again = dispatch(
+      { agentRulesInjection: true, worktreeGitBoundary: true },
+      first.prompt,
+      claude('- new'),
+    );
+    expect(again.prompt.startsWith(AGENT_RULES_MARKER)).toBe(true);
+    expect(again.prompt.split(AGENT_RULES_MARKER)).toHaveLength(2);
+    expect(again.prompt).toContain('- new');
+    expect(again.prompt).not.toContain('- old');
+    expect(again.prompt).toContain(WORKTREE_GIT_BOUNDARY_MARKER);
+  });
+
+  it('leaves no stored block behind when injection is now off and an adapter newly applies', () => {
+    const first = dispatch({ agentRulesInjection: true }, 'do the work', claude('- old'));
+    const again = dispatch({ worktreeGitBoundary: true }, first.prompt, claude('- old'));
+    expect(again.prompt).not.toContain(AGENT_RULES_MARKER);
+    expect(again.prompt).not.toContain('- old');
+  });
+
+  it('does not let the stored rules block of a re-fed prompt end isolation', () => {
+    const stored = withAgentRules('review it', '- Read .claude/agents/reviewer.md first.').prompt;
+    const plan = resolveDispatch({
+      providers: [claude('- Keep changes small.')],
+      input: { kind: 'prompt', prompt: stored, capabilities: ['tool_use'] },
+      invokeOpts: {},
+      agentIsolation: true,
+      agentRulesInjection: true,
+    });
+    expect(plan.invocation?.kind === 'cli' && plan.invocation.spec.maskAgentDefinitions).toBe(true);
   });
 
   it('ends isolation for rules that name an agent path, since the mask would hide the file', () => {
