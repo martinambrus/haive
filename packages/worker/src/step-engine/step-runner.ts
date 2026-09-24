@@ -277,6 +277,7 @@ type UpdatePatch = Partial<{
   degradedNote: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
   pauseFormOnRetry: boolean;
+  waitingStartedAt: Date | null;
   startedAt: Date;
   endedAt: Date;
 }>;
@@ -2392,6 +2393,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (!formValues) {
         current = await updateRow(db, current.id, {
           status: 'waiting_form',
+          // Stamped with the park rather than after it, so a submit redelivered before the task is
+          // marked waiting is still older than the park (isStaleSubmit).
+          waitingStartedAt: new Date(),
           // One-shot: a manual Retry set pauseFormOnRetry to force this park instead
           // of auto-submitting. Clear it here so the pause never leaks into a later
           // automatic re-run (fix-loop / revise / gate loop-back) of this same step.
@@ -2632,6 +2636,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             formSchema: refreshedSchema,
             formValues: null,
             pauseFormOnRetry: false,
+            waitingStartedAt: new Date(),
             statusMessage: null,
             errorMessage: null,
           });

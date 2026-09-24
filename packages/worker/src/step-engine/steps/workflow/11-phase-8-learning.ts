@@ -554,14 +554,15 @@ interface PlannedLearningOp {
 /** Read the existing learnings so the agent can reconcile against them and the
  *  diff/apply can update/delete by id. Missing dir -> []. */
 export async function readExistingLearnings(worktree: string): Promise<ExistingLearning[]> {
-  const entries = await readdirNoFollow(worktree, LEARNINGS_DIR);
+  const wa = workspaceAnchor(worktree);
+  const entries = await readdirNoFollow(wa.anchor, `${wa.prefix}${LEARNINGS_DIR}`);
   if (entries === null) return [];
   const names = entries.filter((e) => e.isFile()).map((e) => e.name);
   const out: ExistingLearning[] = [];
   for (const name of names) {
     if (!name.endsWith('.md')) continue;
     try {
-      const body = await readTextNoFollow(worktree, `${LEARNINGS_DIR}/${name}`);
+      const body = await readTextNoFollow(wa.anchor, `${wa.prefix}${LEARNINGS_DIR}/${name}`);
       if (body === null) continue;
       const title = (body.match(/^#\s+(.+)$/m)?.[1] ?? name.slice(0, -3)).trim();
       out.push({ id: name.slice(0, -3), title, body });
@@ -717,7 +718,8 @@ export async function stageLearningDrafts(
  *  keeps the agent's own body. An EMPTY file is NOT null: that is the reviewer
  *  clearing the draft, which callers honor by dropping the entry. */
 async function readStagedDraft(worktree: string, rel: string): Promise<string | null> {
-  return await readTextNoFollow(worktree, rel);
+  const wa = workspaceAnchor(worktree);
+  return await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`);
 }
 
 /** Fold the reviewer's staged edits into the plan: an edited body replaces the
@@ -871,9 +873,10 @@ async function investigationDiffFile(
   content: string,
 ): Promise<CommitDiffFile> {
   const rel = investigationRelPath(inv);
+  const wa = workspaceAnchor(worktree);
   let oldContent = '';
   try {
-    oldContent = (await readTextNoFollow(worktree, rel)) ?? '';
+    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`)) ?? '';
   } catch {
     // not there yet -> a new file
   }

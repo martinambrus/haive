@@ -11,6 +11,7 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   APPLY_FAILURE_PREFIX,
   PARTIAL_APPLY_PREFIX,
+  partialApplyNote,
   PLAN_AGENT_TIMEOUT_MS,
   breadthCap,
   buildExpandPrompt,
@@ -730,37 +731,35 @@ export async function foldCoverageResults(
       // A document-coverage agent may legitimately conclude that the section
       // was already represented. It has no single focus node to mark.
       if (ops.length === 0) continue;
-      const applied = await applyAgentPatchOnce(ctx, result.agentId, async (tx) => {
-        await assertPlanPatchWithinBreadth(
-          ctx.db,
-          detected.repositoryId!,
-          ops,
-          self,
-          breadthCap(detected.buildFormValues),
-        );
-        return applyAgentPatch(
-          tx,
-          {
-            ...patch,
-            ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
-          },
-          {
-            repositoryId: detected.repositoryId!,
-            sourceTaskId: ctx.taskId,
-            ...(self ? { selfNodeId: self } : {}),
-          },
-        );
-      });
+      const applied = await applyAgentPatchOnce(
+        ctx,
+        result.agentId,
+        async (tx) => {
+          await assertPlanPatchWithinBreadth(
+            ctx.db,
+            detected.repositoryId!,
+            ops,
+            self,
+            breadthCap(detected.buildFormValues),
+          );
+          return applyAgentPatch(
+            tx,
+            {
+              ...patch,
+              ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
+            },
+            {
+              repositoryId: detected.repositoryId!,
+              sourceTaskId: ctx.taskId,
+              ...(self ? { selfNodeId: self } : {}),
+            },
+          );
+        },
+        (outcome) => partialApplyNote(outcome.dropped),
+      );
       // Folded by a pass running beside this one.
       if (!applied) continue;
-      if (applied.dropped.length > 0) {
-        hadFailure = true;
-        await stampMiningError(
-          ctx,
-          result.agentId,
-          `${PARTIAL_APPLY_PREFIX} ${applied.dropped.join('; ')}`,
-        );
-      }
+      if (applied.dropped.length > 0) hadFailure = true;
       if (applied.strippedCodeLinks.length > 0) {
         ctx.logger.warn(
           { agentId: result.agentId, strippedCodeLinks: applied.strippedCodeLinks },

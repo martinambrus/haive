@@ -1,4 +1,4 @@
-import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -14,6 +14,7 @@ import {
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { gitRun } from '../../../repo/git-push.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
@@ -314,6 +315,19 @@ const EMPTY_RESULT = (reason: string): RagSyncResult => ({
   embedFailureReason: null,
 });
 
+/** Why `repoPath` cannot be scanned, or null. The walker reads a missing or linked root as an
+ *  empty tree, and the orphan sweep would then delete every row it does not protect. */
+export async function scanRootRefusal(repoPath: string): Promise<string | null> {
+  const wa = workspaceAnchor(repoPath);
+  try {
+    const root = await lstatNoFollow(wa.anchor, wa.prefix, { strict: true });
+    if (root === null) return 'it does not exist';
+    return root.kind === 'directory' ? null : `it is a ${root.kind}`;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 /** Incremental, content-hash-deduped RAG index of `opts.repoPath`'s KB + code.
  *  Reconciles: inserts new chunks, re-embeds changed ones, and DELETES stale
  *  chunks/files (scoped by repository_id) so removals propagate to RAG. */
@@ -322,6 +336,13 @@ export async function runRagIndexSync(
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
   const { repoPath, prefs, projectName, ollamaReachable, codeCollect, sweepProtectedPaths } = opts;
+  const wa = workspaceAnchor(repoPath);
+
+  const refusal = await scanRootRefusal(repoPath);
+  if (refusal !== null) {
+    ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
+    return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
+  }
 
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -442,7 +463,7 @@ export async function runRagIndexSync(
 
       let text: string;
       try {
-        const read = await readTextNoFollow(repoPath, relPath);
+        const read = await readTextNoFollow(wa.anchor, `${wa.prefix}${relPath}`);
         if (read === null) continue;
         text = read;
       } catch {

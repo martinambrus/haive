@@ -325,14 +325,15 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     );
     const existingIds = new Set(idsByDir.flat());
 
+    const wa = workspaceAnchor(worktreePath);
     const readExcerpt = async (skillId: string): Promise<string | null> => {
       for (const dir of skillTargetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
-        // Capped at the excerpt length rather than read whole and sliced, and anchored at the
-        // worktree: these bytes go into the sync prompt, from a tree the agents write.
+        // Capped at the excerpt length rather than read whole and sliced: these bytes go into the
+        // sync prompt, from a tree the agents write.
         const text = await readTextNoFollow(
-          worktreePath,
-          [...parts, skillId, 'SKILL.md'].join('/'),
+          wa.anchor,
+          `${wa.prefix}${[...parts, skillId, 'SKILL.md'].join('/')}`,
           { maxBytes: 2000 },
         );
         if (text !== null) return text;
@@ -522,10 +523,13 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const hasGit = changed && (await requireUsableGit(worktree));
     if (hasGit) {
       const present: string[] = [];
+      const wa = workspaceAnchor(worktree);
       for (const dir of targetDirs) {
         // A DIRECTORY check, and a link is not one: `git add` on a linked skills dir would stage
         // whatever it points at, or fail, depending on where that lands.
-        if ((await lstatNoFollow(worktree, dir))?.kind === 'directory') present.push(dir);
+        if ((await lstatNoFollow(wa.anchor, `${wa.prefix}${dir}`))?.kind === 'directory') {
+          present.push(dir);
+        }
       }
       if (present.length > 0) {
         const add = await gitRun(worktree, ['add', '--', ...present]);

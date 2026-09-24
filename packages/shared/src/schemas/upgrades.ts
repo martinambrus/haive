@@ -36,6 +36,13 @@ export const upgradeStatusResponseSchema = z.object({
   /** Per-bundle drift breakdown. Optional for backwards compatibility; older
    *  servers may omit it entirely. */
   customChanges: z.array(upgradeStatusBundleChangeSchema).optional(),
+  /** Rules files (CLAUDE.md, GEMINI.md) of the enabled providers that do not import AGENTS.md.
+   *  An upgrade restores them, so they set `hasUpgradeAvailable`. Omitted when none is missing
+   *  or the repository root cannot be read. */
+  missingRulesImports: z.array(z.string()).optional(),
+  /** Rules files that link somewhere other than AGENTS.md. No upgrade writes through a link, so
+   *  these never set `hasUpgradeAvailable`. */
+  linkedRulesFiles: z.array(z.string()).optional(),
 });
 
 export type UpgradeStatusResponse = z.infer<typeof upgradeStatusResponseSchema>;

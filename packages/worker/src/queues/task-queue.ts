@@ -17,6 +17,7 @@ import {
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
   type ExecutionPath,
+  type FormSchema,
   type TaskJobPayload,
   type TaskStatus,
   type WorkflowType,
@@ -79,7 +80,11 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, findLiveSibling, isStaleSubmit } from './_advance-guards.js';
+import {
+  blockedByActiveStepMessage,
+  findLiveSibling,
+  staleSubmitAction,
+} from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1826,11 +1831,19 @@ async function handleAdvanceStep(
     return;
   }
 
-  if (isStaleSubmit(existing, payload.formValues != null, jobTimestamp)) {
+  const stale = staleSubmitAction(existing, payload.formValues != null, jobTimestamp, ctx.status);
+  if (stale !== 'proceed') {
     logger.warn(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId },
+      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, stale },
       'advance-step skipped: a submit sent before this form was reopened',
     );
+    if (stale === 'repark' && existing) {
+      await handleResult(db, ctx, payload.stepId, {
+        status: 'waiting_form',
+        row: existing,
+        formSchema: existing.formSchema as FormSchema,
+      });
+    }
     return;
   }
 
