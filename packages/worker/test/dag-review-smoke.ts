@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   configService,
@@ -137,6 +137,18 @@ async function main(): Promise<void> {
       })
       .returning();
     state.taskId = task!.id;
+
+    // One attached file, so every reviewer and fix coder prompt must carry the attachments notice.
+    const uploadsDir = path.join(repoPath, '.haive', 'task-uploads', task!.id);
+    await mkdir(uploadsDir, { recursive: true });
+    await writeFile(path.join(uploadsDir, 'brief.md'), '# brief\n');
+    await db.insert(schema.taskAttachments).values({
+      taskId: task!.id,
+      userId,
+      filename: 'brief.md',
+      storedPath: path.join(uploadsDir, 'brief.md'),
+      sizeBytes: 8,
+    });
 
     await db.insert(schema.taskSteps).values({
       taskId: task!.id,
@@ -325,6 +337,22 @@ async function main(): Promise<void> {
     // 2 issues x (reviewer iter0 + fix coder + reviewer iter1) = 4 reviewers + 2 fixers.
     if (reviewers !== 4 || fixers !== 2) {
       throw new Error(`expected 4 reviewer + 2 fix runs, got ${reviewers} + ${fixers}`);
+    }
+
+    // Every reviewer and fix coder was told what the task has attached, as the coders were.
+    const invocationIds = runs.flatMap((r) => (r.cliInvocationId ? [r.cliInvocationId] : []));
+    const sent = await db
+      .select({ prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(inArray(schema.cliInvocations.id, invocationIds));
+    if (sent.length !== runs.length) {
+      throw new Error(`expected ${runs.length} review-loop prompts, found ${sent.length}`);
+    }
+    const uninformed = sent.filter(
+      ({ prompt }) => !prompt.includes('[User-attached files]') || !prompt.includes('brief.md'),
+    );
+    if (uninformed.length > 0) {
+      throw new Error(`${uninformed.length} review-loop prompt(s) carry no attachments notice`);
     }
 
     console.log(

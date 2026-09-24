@@ -819,8 +819,10 @@ dot-directory survives anywhere. De-dupe is per DIRECTORY: two folders' `README.
 documents. It keeps an archive's two-part extension whole (`splitAttachmentExtension`): a second
 `spec.tar.gz` is `spec (2).tar.gz`, never `spec.tar (2).gz`, which no archive rule recognises.
 
-`ensureArchivesExpanded` (`worker/src/attachments/expand-archives.ts`) runs lazily, at
-`00-plan-inputs.detect` and again before `augmentPromptWithAttachments` in `step-runner`, so
+`ensureArchivesExpanded` (`worker/src/attachments/expand-archives.ts`) runs lazily wherever the
+attachments are read for an agent: `00-plan-inputs.detect`, `loadLiveAttachments` (so the live plan
+inputs see an archive's members, not a `binary` zip), and before `augmentPromptWithAttachments` in
+`step-runner` and in `dag-executor`, each time either builds an agent's prompt, so
 every task type gets it and the notice never names a `.zip` no agent can open. It reuses
 `repo/clone.ts`'s `extractArchive` (`unzip` and `tar` are in the WORKER image, not the api's;
 its `flattenSingleTopLevel` is what stops `spec.zip` becoming `spec/spec/`), then walks the
@@ -918,7 +920,15 @@ bounded line (`expansionErrorLine`, `describePathDrops`) and collapsed and cappe
 it meets a prompt (`safeNote`), because rows written before that exist.
 
 Three caps exist because a folder is not a handful of files. `augmentPromptWithAttachments`
-rides EVERY step's prompt, so past `ATTACHMENT_PROMPT_FILE_LIMIT` (40) it collapses to one
+rides every agent that works from the task's content: the LLM phase, each agent of a mining
+fan-out (built once per fan-out, joined ahead of the ledger and terseness in `resolveLlmPhase`'s
+order), and each DAG coder, reviewer, fix coder and issue advisor. The DAG replanner and merge-fix
+agent go without it: the first is handed the issue graph and no specification, the second resolves
+a git conflict. A RECOVERED mining agent is not augmented again. It is dispatched with the prompt
+its last run stored, notice included, verbatim, because that text is already the effective prompt,
+and augmenting it again duplicated the terseness block and could duplicate the ledger. So past
+`ATTACHMENT_PROMPT_FILE_LIMIT` (40)
+the notice collapses to one
 counted line per top-level folder and states the elision the way `changedFilesBlock` does —
 under the limit the output is byte-identical to what it always was. `00-plan-inputs` bounds
 sidecar EXTRACTIONS (a subprocess each) at 50, and a document past that is

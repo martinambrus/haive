@@ -1426,6 +1426,12 @@ type MiningRetryTargets = Map<
   }
 >;
 
+/** A dispatch as the runner handles it. `replayVerbatim` marks an agent recovered from its prior
+ *  invocation's stored prompt, which is the text that run already SENT — augmented and adapted — so
+ *  it goes out as it stands: augmenting it again would repeat every block. Runner-internal; a step
+ *  never sets it, which is why it is not on `AgentMiningDispatch`. */
+type RunnerMiningDispatch = AgentMiningDispatch & { replayVerbatim?: true };
+
 /** Enqueue one cli invocation per dispatch.
  *
  *  Shared by the initial fan-out (`existing` = null, one INSERT per agent) and the
@@ -1438,7 +1444,7 @@ async function dispatchMiningAgents(
   current: TaskStepRow,
   ctx: StepContext,
   params: AdvanceStepParams,
-  dispatches: AgentMiningDispatch[],
+  dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<number> {
   const spec = stepDef.agentMining!;
@@ -1474,6 +1480,12 @@ async function dispatchMiningAgents(
   // Cross-round memory is a property of the STEP, not of one agent, so resolve it once for the
   // whole fan-out instead of per agent.
   const learnedMs = await learnedTimeoutMs(db, params.taskId, stepDef.metadata.id, current.id);
+  // What the task has attached, told to every agent of the fan-out: the notice `resolveLlmPhase`
+  // prepends to a single dispatch, after the same archive expansion, so a mining agent sees the
+  // files — and any archive that did not fully expand — exactly as that one would. Once per call:
+  // the notice is a property of the task, not of an agent. `''` when nothing is attached.
+  await ensureArchivesExpanded(db, params.taskId);
+  const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
   let enqueued = 0;
 
   for (const dispatch of dispatches) {
@@ -1492,18 +1504,18 @@ async function dispatchMiningAgents(
         dispatch.agentId,
         current.id,
       ));
-    // Close the mining terseness gap: the main dispatch gets the admin terseness level
-    // at resolveLlmPhase, but fan-out sub-prompts are built per step and bypass it.
-    // Apply the same directive so the level reaches mining output (skill-gen, discovery,
-    // review). Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
-    // runtime directive is appended last and governs at prompt scope.
-    //
-    // The task ledger has the same gap and it matters more here: a fan-out is N fresh
-    // processes that would each re-derive what 07/07b/08/08a already established. No-op
-    // while the ledger is empty.
-    const prompt = await augmentPromptWithTerseness(
-      await augmentPromptWithLedger(db, params.taskId, dispatch.prompt),
-    );
+    // The same augmentation `resolveLlmPhase` gives a single dispatch, in its order — the
+    // attachments notice, the task ledger, then the admin terseness level — less learned guidance,
+    // which is recorded per STEP and has no per-agent form. Fan-out sub-prompts are built per step
+    // and would otherwise bypass all three: a fan-out is N fresh processes that would each
+    // re-derive what 07/07b/08/08a already established, and could not see what the user attached.
+    // Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the runtime directive is
+    // appended last and governs at prompt scope.
+    const prompt = dispatch.replayVerbatim
+      ? dispatch.prompt
+      : await augmentPromptWithTerseness(
+          await augmentPromptWithLedger(db, params.taskId, attachmentsNotice + dispatch.prompt),
+        );
     const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } = await resolveSeat(
       dispatch.roleKey ?? 'default',
     );
@@ -3130,7 +3142,7 @@ async function retryMiningAgents(
     return 0;
   }
 
-  const dispatches = (
+  const dispatches: RunnerMiningDispatch[] = (
     await stepDef.agentMining!.selectAgents({
       ctx,
       detected,
@@ -3192,7 +3204,12 @@ async function retryMiningAgents(
       // inventing one would silently route the retry to a different CLI than the
       // run it is repeating. Unset resolves as the step's own preference then the
       // task provider — the same path the fan-out took before per-seat selection.
-      dispatches.push({ agentId, agentTitle: titleByAgentId.get(agentId) ?? null, prompt });
+      dispatches.push({
+        agentId,
+        agentTitle: titleByAgentId.get(agentId) ?? null,
+        prompt,
+        replayVerbatim: true,
+      });
     }
     ctx.logger.info(
       {
