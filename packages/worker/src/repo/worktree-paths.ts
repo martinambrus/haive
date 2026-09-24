@@ -61,28 +61,27 @@ export function splitRepoSubpath(
  *
  * Null rather than a guess when the shape does not match — a legacy row, or a path written by
  * something else — as `splitWorktreePath` and `splitAttachmentStoredPath` both do. The api applies
- * the same rule with the userId in hand (`uploadArchiveRel`, `routes/repos.ts`); a row reaching the
- * worker carries no userId, so the SHAPE is the whole check.
+ * the same rule with the userId in hand (`uploadFileRel`, `api/src/lib/uploads.ts`); a row reaching
+ * the worker carries no userId, so the SHAPE is the whole check.
  */
 export function splitUploadPath(
   storageRoot: string,
   stored: string,
 ): { anchor: string; rel: string } | null {
-  // The api joins its paths with `path.join`, so a root configured with a trailing slash is stored
-  // without one.
-  const root = path.resolve(storageRoot);
-  const prefix = `${root}/_uploads/`;
-  if (!stored.startsWith(prefix)) return null;
-  const segs = stored.slice(prefix.length).split('/');
-  if (segs.length !== 2) return null;
-  const [owner, name] = segs;
-  if (!owner || !name) return null;
+  const name = path.basename(stored);
+  const owner = path.basename(path.dirname(stored));
   // A traversal segment is refused HERE rather than left to the primitive. `toSafeRel` would throw
   // `invalid-path` on it, which the refusal rule defines as a caller bug — and both callers wrap
   // their primitive in a `.catch`, so the throw would be swallowed and read as "nothing to do".
   // A guard that answers null is the honest shape, as `safeDiskRel` concluded in #137.
-  if (owner === '.' || owner === '..' || name === '.' || name === '..') return null;
-  return { anchor: root, rel: `_uploads/${owner}/${name}` };
+  if (!owner || !name || owner === '.' || owner === '..' || name === '.' || name === '..') {
+    return null;
+  }
+  // The api writes the path as `path.join(root, '_uploads', owner, name)`, so rebuilding it the
+  // same way compares like with like whatever form the root was configured in: relative, with a
+  // trailing slash, or `/`. Anything else names a different file or a segment the api never writes.
+  if (path.join(storageRoot, '_uploads', owner, name) !== stored) return null;
+  return { anchor: storageRoot, rel: `_uploads/${owner}/${name}` };
 }
 
 /**
