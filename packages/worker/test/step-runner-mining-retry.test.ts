@@ -1976,6 +1976,26 @@ describe('a fan-out reserved before any agent is sent', () => {
     ).toMatchObject({ status: 'done', output: { fromTheOtherPass: true } });
   });
 
+  it('counts an agent another pass linked before this one could record no provider for it', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    // No provider here, so the only write is the refusal, and it finds the row already taken.
+    state.miningCasLost = (set) => set.status === 'failed';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), [], []);
+
+    expect(result.status).toBe('done');
+    expect(
+      applyCalls[0]!.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer'),
+    ).toMatchObject({ status: 'done', output: { fromTheOtherPass: true } });
+  });
+
   it('hands apply the re-run another pass finished, not the failure a person asked to redo', async () => {
     const state = freshState([
       miningRow('peer-reviewer', 1, {

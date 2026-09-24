@@ -1765,7 +1765,7 @@ async function dispatchMiningAgents(
       });
 
       if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-        await db
+        const [refused] = await db
           .update(schema.taskStepAgentMinings)
           .set({
             status: 'failed',
@@ -1774,8 +1774,10 @@ async function dispatchMiningAgents(
             ...requirements,
             updatedAt: new Date(),
           })
-          .where(sameMiningState(target));
+          .where(sameMiningState(target))
+          .returning({ id: schema.taskStepAgentMinings.id });
         targets.delete(dispatch.agentId);
+        if (!refused) lost++;
         continue;
       }
 
