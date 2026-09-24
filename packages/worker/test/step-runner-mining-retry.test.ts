@@ -72,6 +72,8 @@ interface MockState {
   miningInsertStatements?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
+  afterStepWrite?: (set: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -131,16 +133,25 @@ function makeMockDb(state: MockState): Database {
         const rows = rowsFor(tableNameOf(table));
         // .where() and .orderBy() are each awaited directly by some reads and chained
         // further by others, so both must be thenable AND chainable.
-        const thenable = () => ({
+        const thenable = (found: unknown[] = rows) => ({
           then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) =>
-            Promise.resolve(rows).then(res, rej),
-          limit: async () => rows,
-          orderBy: () => thenable(),
+            Promise.resolve(found).then(res, rej),
+          limit: async () => found,
+          orderBy: () => thenable(found),
         });
+        // A read that asks for the step row as finished finds nothing once it is not.
+        const where = (cond?: unknown) =>
+          thenable(
+            tableNameOf(table) === 'task_steps' &&
+              conditionValues(cond).includes('done') &&
+              state.taskStepRow.status !== 'done'
+              ? []
+              : rows,
+          );
         // A joined read (priorRoundTimeoutAttempts, which asks earlier rounds what rung this
         // agent reached) projects from the base table and uses task_steps only to scope the
         // task/step; the mock ignores the join condition and returns the base rows unchanged.
-        return { where: thenable, innerJoin: () => ({ where: thenable }) };
+        return { where, innerJoin: () => ({ where }) };
       },
     }),
     insert: (table: unknown) => {
@@ -181,7 +192,10 @@ function makeMockDb(state: MockState): Database {
         set: (v: Record<string, unknown>) => {
           const record = (where: unknown) => {
             state.updates.push({ table: tableName, ...v });
-            if (tableName === 'task_steps') state.taskStepRow = { ...state.taskStepRow, ...v };
+            if (tableName === 'task_steps') {
+              state.taskStepRow = { ...state.taskStepRow, ...v };
+              state.afterStepWrite?.(v);
+            }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
             }
@@ -2194,5 +2208,54 @@ describe('a fan-out reserved before any agent is sent', () => {
     const enqueued: CliExecJobPayload[] = [];
     await run(makeMockDb(raced), terminalFailureRetryStep([]), enqueued);
     expect(enqueued).toEqual([]);
+  });
+});
+
+describe('advanceStep recap run after a Retry reset the finished row', () => {
+  const finishWith = async (state: MockState) => {
+    const recaps: CliExecJobPayload[] = [];
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: miningStep([], []),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          if (payload.purpose === 'step_summary') recaps.push(payload);
+        },
+      },
+    });
+    return recaps;
+  };
+  const agents = () => [miningRow('peer-reviewer', 1), miningRow('security-code-reviewer', 1)];
+
+  it('ends a recap run the reset would not reach instead of queuing it', async () => {
+    const state = freshState(agents());
+    // The Retry lands right after the step's done write: its reset leaves the row pending, and
+    // supersedes only the recap runs that already exist.
+    state.afterStepWrite = (set) => {
+      if (set.status === 'done') state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    };
+
+    expect(await finishWith(state)).toEqual([]);
+    expect(
+      state.inserts.some((i) => i.table === 'cli_invocations' && i.row.summaryForStepId === 'ts-1'),
+    ).toBe(true);
+    expect(state.updates).toContainEqual(
+      expect.objectContaining({
+        table: 'cli_invocations',
+        supersededAt: expect.any(Date),
+        endedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('queues the recap run while the row is still the finished one', async () => {
+    const recaps = await finishWith(freshState(agents()));
+    expect(recaps).toHaveLength(1);
   });
 });

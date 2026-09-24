@@ -2175,7 +2175,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
-        const updated = await updateRow(db, row.id, {
+        const updated = await openRow(db, row.id, {
           status: 'skipped',
           endedAt: new Date(),
         });
@@ -2191,7 +2191,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // the totals the moment the step started; without clearing it, `pending` + marker (the
       // park's signature) would keep reading as queued. No-op when nothing was parked.
       await foldCliParkOnResume(db, current.id);
-      current = await updateRow(db, current.id, {
+      current = await openRow(db, current.id, {
         status: 'running',
         startedAt: new Date(),
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
@@ -2931,7 +2931,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
       const verdict = stepDef.fixLoop.evaluate(output);
       if (verdict?.blocking) {
-        const finished = await finishRow(db, current.id, {
+        const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -2940,7 +2940,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
-        if (!finished) return supersededPass(current);
         await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, round },
@@ -2963,7 +2962,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.restartLoop) {
       const restart = stepDef.restartLoop.evaluate(output);
       if (restart) {
-        const finished = await finishRow(db, current.id, {
+        const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -2972,7 +2971,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
-        if (!finished) return supersededPass(current);
         await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, round },
@@ -2996,7 +2994,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.reviseLoop) {
       const target = stepDef.reviseLoop.evaluate(output);
       if (target) {
-        const finished = await finishRow(db, current.id, {
+        const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
           summary: curatedSummary,
@@ -3005,7 +3003,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           errorMessage: null,
           endedAt: new Date(),
         });
-        if (!finished) return supersededPass(current);
         await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, targetStepId: target.targetStepId },
@@ -3026,7 +3023,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // advance. Long deterministic steps (RAG sync) also poll the signal internally;
     // this closes the return-race generically for every step.
     throwIfCancelled();
-    const done = await finishRow(db, current.id, {
+    const done = await updateRow(db, current.id, {
       status: 'done',
       output,
       summary: curatedSummary,
@@ -3040,7 +3037,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage: null,
       endedAt: new Date(),
     });
-    if (!done) return supersededPass(current);
     await recordRecap();
 
     // Surface B: freeze context-window usage on the finished step (best-effort; never
@@ -3059,7 +3055,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     return { status: 'done', row: done, output };
   } catch (err) {
-    if (superseded) return supersededPass(row);
+    if (superseded || err instanceof StepSupersededError) return supersededPass(row);
     const cancelled = err instanceof TaskCancelledError;
     const errorMessage = cancelled
       ? 'task cancelled by user'
@@ -3082,12 +3078,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ? stepDef.fixLoopOnError(errorMessage)
         : stepDef.fixLoopOnError === true;
     if (!cancelled && routeErrorToFixLoop) {
-      const finished = await finishRow(db, row.id, {
+      const finished = await updateRow(db, row.id, {
         status: 'done',
         statusMessage: null,
         errorMessage,
         endedAt: new Date(),
-      }).catch(() => row);
+      }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
       if (!finished) return supersededPass(row);
       log.info(
         { stepId: meta.id, taskId, round },
@@ -3095,12 +3091,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       );
       return { status: 'loop_back', row: finished, diagnosis: errorMessage, sourceStepId: meta.id };
     }
-    const failed = await finishRow(db, row.id, {
+    const failed = await updateRow(db, row.id, {
       status: 'failed',
       statusMessage: null,
       errorMessage,
       endedAt: new Date(),
-    }).catch(() => row);
+    }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
     if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };
   } finally {
@@ -3172,14 +3168,18 @@ export async function upsertRow(
   return row;
 }
 
-/** updateRow for a pass's outcome. It lands only while the row is still the pass's own: a Retry
- *  or a Skip that arrived meanwhile left it `pending` or `skipped`, and writing over that would
- *  swallow the Retry. Null when one had. */
-async function finishRow(
-  db: Database,
-  id: string,
-  patch: UpdatePatch,
-): Promise<TaskStepRow | null> {
+/** A pass lost its row: a Retry or a Skip that arrived meanwhile left it `pending` or `skipped`. */
+class StepSupersededError extends Error {
+  constructor(id: string) {
+    super(`task step ${id} was reset or skipped while this pass ran`);
+    this.name = 'StepSupersededError';
+  }
+}
+
+/** Every write a pass makes to its row. It lands only while the row is still the pass's own, not
+ *  `pending` (a Retry reset it) or `skipped` (a Skip took it); otherwise it throws
+ *  StepSupersededError and the pass stops without touching the row. */
+async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
   const rows = await db
     .update(schema.taskSteps)
     .set({ ...patch, updatedAt: new Date() })
@@ -3187,10 +3187,13 @@ async function finishRow(
       and(eq(schema.taskSteps.id, id), notInArray(schema.taskSteps.status, ['pending', 'skipped'])),
     )
     .returning();
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) throw new StepSupersededError(id);
+  return row;
 }
 
-async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
+/** The writes that open a pass on its `pending` row: claiming it, or skipping it outright. */
+async function openRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
   const rows = await db
     .update(schema.taskSteps)
     .set({ ...patch, updatedAt: new Date() })
@@ -3332,6 +3335,24 @@ async function maybeEnqueueStepSummary(
       .returning({ id: schema.cliInvocations.id });
     if (!invRow) return;
     summaryInvocationId = invRow.id;
+
+    // A Retry that lands after the step finished resets the row and supersedes its recap runs in
+    // one transaction, so a run inserted after that would escape it. It is queued only while the
+    // row is still the one this pass finished, which the step's hold keeps from being re-run in
+    // between; otherwise it is ended here, never queued.
+    const [stillFinished] = await db
+      .select({ id: schema.taskSteps.id })
+      .from(schema.taskSteps)
+      .where(and(eq(schema.taskSteps.id, current.id), eq(schema.taskSteps.status, 'done')))
+      .limit(1);
+    if (!stillFinished) {
+      const now = new Date();
+      await db
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now, endedAt: now })
+        .where(eq(schema.cliInvocations.id, invRow.id));
+      return;
+    }
 
     await deps.enqueueCliInvocation({
       invocationId: invRow.id,

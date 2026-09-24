@@ -537,6 +537,27 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect(doneWrites(state)).toEqual([]);
   });
 
+  it('stops at its next write, whatever it is, once a Retry reset the row', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const applied: unknown[] = [];
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.detect = async () => {
+      state.taskStepRow.status = 'pending';
+      return { ok: true };
+    };
+    def.apply = async () => {
+      applied.push(1);
+      return { applied: true };
+    };
+
+    expect((await run(state, def)).status).toBe('superseded');
+    expect(applied).toEqual([]);
+    expect(state.taskStepRow.status).toBe('pending');
+    // The pass's own write that opened it is the last one that landed.
+    expect(state.updates.map((u) => u.patch.status).filter(Boolean)).toEqual(['running']);
+  });
+
   it('writes no failure over a row a Skip took while apply failed', async () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
