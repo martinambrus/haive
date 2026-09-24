@@ -192,6 +192,11 @@ describe('advanceStep auto-continue', () => {
     const result = await run(state, makeStep({ form: () => QUESTION_FORM }));
     expect(result.status).toBe('waiting_form');
     expect(state.taskStepRow.status).toBe('waiting_form');
+    // Stamped by the write that parks, so no instant exists where the form is parked unstamped.
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.patch.status === 'waiting_form')
+        ?.patch,
+    ).toMatchObject({ waitingStartedAt: expect.any(Date) });
   });
 
   it('auto mode never auto-passes submitAction retry forms', async () => {
@@ -367,16 +372,34 @@ describe('advanceStep auto-continue', () => {
     expect(result.status).toBe('waiting_form');
   });
 
+  it('pauseFormOnRetry parks the form instead of applying values a job carries', async () => {
+    // A reopen held the form and the worker died before parking it; the submit that led there is
+    // redelivered still carrying the answers typed into the old form.
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    state.taskStepRow = { ...state.taskStepRow, status: 'running', pauseFormOnRetry: true };
+    const applied: unknown[] = [];
+    const def = makeStep({ form: () => QUESTION_FORM });
+    def.apply = async (_ctx, args) => {
+      applied.push(args.formValues);
+      return { applied: true };
+    };
+    const result = await run(state, def, { action: 'skip', flag: false });
+
+    expect(result.status).toBe('waiting_form');
+    expect(applied).toEqual([]);
+    expect(state.taskStepRow.formValues).toBeNull();
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+  });
+
   it('pauseFormOnRetry does not block the submit that follows the pause', async () => {
-    // The guard lives only in the pre-submit branch, so submitting the parked form
-    // (params.formValues present) runs straight to apply regardless of the flag.
+    // The pause parks the form and releases the hold, so the submit that answers it runs.
     const state = freshState();
     state.taskStepRow.pauseFormOnRetry = true;
     state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
-    const result = await run(state, makeStep({ form: () => QUESTION_FORM }), {
-      action: 'update',
-      flag: true,
-    });
+    const step = makeStep({ form: () => QUESTION_FORM });
+    expect((await run(state, step)).status).toBe('waiting_form');
+    const result = await run(state, step, { action: 'update', flag: true });
     expect(result.status).toBe('done');
   });
 });

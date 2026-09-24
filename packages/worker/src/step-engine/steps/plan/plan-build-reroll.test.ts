@@ -48,9 +48,18 @@ describe('plan build wave re-roll', () => {
   // Records what the fold writes: stamps go through update(), the dropped-link
   // event through insert().
   const writes: { stamps: number; events: Record<string, unknown>[] } = { stamps: 0, events: [] };
+  const writes2 = { claimedElsewhere: false };
   const db = {
     update: () => ({
-      set: () => {
+      set: (values: Record<string, unknown>) => {
+        // The fold's claim on the reply, taken with its patch; every other write is a stamp.
+        if ('consumedAt' in values) {
+          return {
+            where: () => ({
+              returning: async () => (writes2.claimedElsewhere ? [] : [{ id: 'row' }]),
+            }),
+          };
+        }
         writes.stamps += 1;
         return { where: () => Promise.resolve() };
       },
@@ -60,11 +69,15 @@ describe('plan build wave re-roll', () => {
         writes.events.push(row);
       },
     }),
+    transaction: async (fn: (tx: unknown) => unknown): Promise<unknown> =>
+      fn({ ...db, inTransaction: true }),
   };
 
   beforeEach(() => {
     writes.stamps = 0;
     writes.events = [];
+    writes2.claimedElsewhere = false;
+    vi.mocked(applyAgentPatch).mockReset();
   });
 
   const foldOneAgentWave = () =>
@@ -102,8 +115,20 @@ describe('plan build wave re-roll', () => {
     });
     const err = await foldOneAgentWave();
     expect(err).not.toBeInstanceOf(MiningRetryError);
+    // Written through the transaction that claimed the reply.
+    expect(
+      (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
+    ).toBe(true);
     // Past the re-roll: the fixture's empty plan is what stops it next.
     expect((err as Error).message).toContain('did not produce a root node');
+  });
+
+  it('does not re-roll a one-agent wave another pass already folded, nor fold it again', async () => {
+    writes2.claimedElsewhere = true;
+    const err = await foldOneAgentWave();
+    expect(vi.mocked(applyAgentPatch)).not.toHaveBeenCalled();
+    expect(err).not.toBeInstanceOf(MiningRetryError);
+    expect(writes.stamps).toBe(0);
   });
 
   it('records dropped code links as a task event, and stamps nothing', async () => {

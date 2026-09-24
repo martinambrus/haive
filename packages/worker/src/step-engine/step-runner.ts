@@ -277,6 +277,7 @@ type UpdatePatch = Partial<{
   degradedNote: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
   pauseFormOnRetry: boolean;
+  waitingStartedAt: Date | null;
   startedAt: Date;
   endedAt: Date;
 }>;
@@ -2293,17 +2294,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
+    // set, so values a job carries can only be a submit sent before it: the form parks instead.
+    const submitted = current.pauseFormOnRetry ? undefined : params.formValues;
+
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
     // (submit endpoint, events, idle bookkeeping, web renderer) works
     // unchanged; submitting it posts {} which validates against zero fields.
-    if (!persistedSchema && !autoContinue && !current.formValues && !params.formValues) {
+    if (!persistedSchema && !autoContinue && !current.formValues && !submitted) {
       persistedSchema = synthesizeConfirmSchema(meta.title, meta.description);
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 
     let formValues = current.formValues as FormValues | null;
-    if (persistedSchema && !formValues && !params.formValues) {
+    if (persistedSchema && !formValues && !submitted) {
       // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
       // zero-field info forms → try to auto-submit. A validation failure falls
       // through to waiting_form (never fails the step) — e.g. a pre-answered
@@ -2388,6 +2393,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (!formValues) {
         current = await updateRow(db, current.id, {
           status: 'waiting_form',
+          // Stamped with the park rather than after it, so a submit redelivered before the task is
+          // marked waiting is still older than the park (isStaleSubmit).
+          waitingStartedAt: new Date(),
           // One-shot: a manual Retry set pauseFormOnRetry to force this park instead
           // of auto-submitting. Clear it here so the pause never leaks into a later
           // automatic re-run (fix-loop / revise / gate loop-back) of this same step.
@@ -2401,8 +2409,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
-    if (persistedSchema && params.formValues) {
-      const validation = validateFormValues(persistedSchema, params.formValues);
+    if (persistedSchema && submitted) {
+      const validation = validateFormValues(persistedSchema, submitted);
       if (!validation.success) {
         const failed = await updateRow(db, current.id, {
           status: 'failed',
@@ -2588,10 +2596,25 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           stepDef.form &&
           !stepDef.loop
         ) {
-          await db
-            .update(schema.taskStepAgentMinings)
-            .set({ consumedAt: new Date(), updatedAt: new Date() })
-            .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+          // Consumed and cleared together, with the form held: a worker that dies before the park
+          // below re-detects and stops at the form rather than re-sending the answered items.
+          const reopenedAt = new Date();
+          await db.transaction(async (tx) => {
+            await tx
+              .update(schema.taskStepAgentMinings)
+              .set({ consumedAt: reopenedAt, updatedAt: reopenedAt })
+              .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+            await tx
+              .update(schema.taskSteps)
+              .set({
+                detectOutput: null,
+                formSchema: null,
+                formValues: null,
+                pauseFormOnRetry: true,
+                updatedAt: reopenedAt,
+              })
+              .where(eq(schema.taskSteps.id, current.id));
+          });
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
@@ -2607,6 +2630,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             detectOutput: refreshedDetected,
             formSchema: refreshedSchema,
             formValues: null,
+            pauseFormOnRetry: false,
+            waitingStartedAt: new Date(),
             statusMessage: null,
             errorMessage: null,
           });

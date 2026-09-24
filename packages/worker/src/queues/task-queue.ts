@@ -17,6 +17,7 @@ import {
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
   type ExecutionPath,
+  type FormSchema,
   type TaskJobPayload,
   type TaskStatus,
   type WorkflowType,
@@ -79,7 +80,11 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
+import {
+  blockedByActiveStepMessage,
+  findLiveSibling,
+  staleSubmitAction,
+} from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1649,6 +1654,7 @@ async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
   jobId?: string,
+  jobTimestamp?: number,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
   if (!ctx) {
@@ -1820,6 +1826,22 @@ async function handleAdvanceStep(
         status: 'done',
         row: existing,
         output: existing.output,
+      });
+    }
+    return;
+  }
+
+  const stale = staleSubmitAction(existing, payload.formValues != null, jobTimestamp, ctx.status);
+  if (stale !== 'proceed') {
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, stale },
+      'advance-step skipped: a submit sent before this form was reopened',
+    );
+    if (stale === 'repark' && existing) {
+      await handleResult(db, ctx, payload.stepId, {
+        status: 'waiting_form',
+        row: existing,
+        formSchema: existing.formSchema as FormSchema,
       });
     }
     return;
@@ -2786,7 +2808,7 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
         if (job.name === TASK_JOB_NAMES.START) {
           await handleStartTask(db, payload);
         } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload, job.id);
+          await handleAdvanceStep(db, payload, job.id, job.timestamp);
         } else if (job.name === TASK_JOB_NAMES.CANCEL) {
           await handleCancelTask(db, payload);
         } else {
