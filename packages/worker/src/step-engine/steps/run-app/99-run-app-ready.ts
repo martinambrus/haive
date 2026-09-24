@@ -157,7 +157,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
       hasOrigin = await detectOrigin(workspacePath);
-      const status = await gitRun(workspacePath, ['status', '--porcelain']);
+      const status = await gitRun(workspacePath, ['--no-optional-locks', 'status', '--porcelain']);
       dirtyFiles = status.stdout.split('\n').filter((l) => l.trim().length > 0).length;
       if (dirtyFiles > 0) {
         // Never fail the gate on a diff-build error — the viewer is simply hidden.

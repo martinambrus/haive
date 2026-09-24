@@ -127,7 +127,11 @@ interface DirtyScan {
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
 async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
-    const { stdout } = await exec('git', ['status', '--porcelain', '-uall'], { cwd: worktreePath });
+    const { stdout } = await exec(
+      'git',
+      ['--no-optional-locks', 'status', '--porcelain', '-uall'],
+      { cwd: worktreePath },
+    );
     const files: string[] = [];
     const untracked: string[] = [];
     for (const line of stdout.toString().split('\n')) {

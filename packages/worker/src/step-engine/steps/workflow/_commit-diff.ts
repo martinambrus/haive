@@ -192,7 +192,12 @@ export async function buildCommitDiffArtifact(
   workspacePath: string,
   gitRun: GitRun,
 ): Promise<CommitDiffResult> {
-  const statusRes = await gitRun(workspacePath, ['status', '--porcelain', '-z']);
+  const statusRes = await gitRun(workspacePath, [
+    '--no-optional-locks',
+    'status',
+    '--porcelain',
+    '-z',
+  ]);
   const entries = parsePorcelainZ(statusRes.stdout);
 
   const headShaRes = await gitRun(workspacePath, ['rev-parse', 'HEAD']);

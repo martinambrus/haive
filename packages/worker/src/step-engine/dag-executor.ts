@@ -427,7 +427,7 @@ async function commitIssueWork(
   gitEnv: Record<string, string>,
 ): Promise<void> {
   await gitRun(worktreePath, ['add', '-A']);
-  const status = await gitRun(worktreePath, ['status', '--porcelain']);
+  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
   if (status.code === 0 && status.stdout.trim().length === 0) return;
   const res = await gitRun(
     worktreePath,

@@ -94,7 +94,13 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
     // Porcelain over the KB pathspecs surfaces both modified (` M`) and untracked
     // (`??`) files — a first-time investigation file is untracked, so `git diff`
     // would miss it. The 3-char status prefix is stripped for the display path.
-    const status = await gitRun(workspacePath, ['status', '--porcelain', '--', ...KB_PATHSPECS]);
+    const status = await gitRun(workspacePath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--',
+      ...KB_PATHSPECS,
+    ]);
     if (status.code !== 0) {
       throw new Error(`git status failed in ${workspacePath}: ${status.stderr || status.stdout}`);
     }

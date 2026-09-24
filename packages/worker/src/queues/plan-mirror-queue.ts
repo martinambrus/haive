@@ -311,7 +311,12 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     // Untracked files are fine — the sandbox leaves plenty. A MODIFIED tracked
     // file is what a fast-forward would refuse to touch, and the message it gives
     // is worse than this one.
-    const dirty = await gitRun(repoPath, ['status', '--porcelain', '--untracked-files=no']);
+    const dirty = await gitRun(repoPath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+    ]);
     if (dirty.code === 0 && dirty.stdout.trim().length > 0) {
       throw new Error('this checkout has uncommitted changes; commit or discard them first');
     }
