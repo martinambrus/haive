@@ -42,6 +42,10 @@ describe('LSP capability matrix', () => {
       // sub-agents that the adapter refuses, so the emulator emitted a
       // sequential script while the UI promised parallel agents.
       expect(adapter.supportsSubagents, metadata.name).toBe(metadata.supportsSubagents);
+      // Onboarding writes the rules files from the adapter; the api's upgrade status reads the
+      // catalog to say which ones are missing.
+      expect(adapter.rulesFile, metadata.name).toBe(metadata.rulesFile);
+      expect(adapter.rulesFileMode, metadata.name).toBe(metadata.rulesFileMode);
     }
   });
 

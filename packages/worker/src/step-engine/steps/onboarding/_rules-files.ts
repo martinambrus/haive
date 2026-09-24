@@ -12,15 +12,16 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { readFileNoFollow, updateFileNoFollow } from '@haive/shared/fs-safe';
 import {
-  lstatNoFollow,
-  readFileNoFollow,
-  readLinkNoFollow,
-  readTextNoFollow,
-  updateFileNoFollow,
-} from '@haive/shared/fs-safe';
-import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
-import type { CliProviderName } from '../../../cli-adapters/types.js';
+  importRulesFiles,
+  importRulesFilesFor,
+  isLinkToAgentsMd,
+  RULES_IMPORT_LINE,
+  rulesImportState,
+} from '@haive/shared/rules-files';
+
+export { isLinkToAgentsMd, RULES_IMPORT_LINE };
 
 const execFileAsync = promisify(execFile);
 
@@ -49,18 +50,12 @@ export function planRulesFiles(
   }>,
 ): RulesPlan {
   const agentsRulesBlock = buildCliRulesBlock(providers.map((p) => p.rulesContent));
-  const importFiles = new Set<string>();
   const copyFiles = new Set<string>();
   for (const p of providers) {
-    if (p.rulesFile === 'AGENTS.md') continue;
-    if (p.rulesFileMode === 'import') importFiles.add(p.rulesFile);
-    else if (p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
+    if (p.rulesFile !== 'AGENTS.md' && p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
   }
-  return { agentsRulesBlock, importFiles: [...importFiles], copyFiles: [...copyFiles] };
+  return { agentsRulesBlock, importFiles: importRulesFiles(providers), copyFiles: [...copyFiles] };
 }
-
-/** The line an import-mode rules file carries so its CLI loads AGENTS.md. */
-export const RULES_IMPORT_LINE = '@AGENTS.md';
 
 export type RulesImportStubResult = 'created' | 'appended' | 'unchanged' | 'skipped-link';
 
@@ -68,14 +63,6 @@ export interface RulesImportStubOutcome {
   file: string;
   result: RulesImportStubResult | 'refused';
   error?: string;
-}
-
-/** A repo may carry `CLAUDE.md -> AGENTS.md`: the convention predates Haive, and AGENTS.md is
- *  written at its own path, so such a link already delivers the rules and is left alone. */
-export async function isLinkToAgentsMd(repoPath: string, rel: string): Promise<boolean> {
-  if ((await lstatNoFollow(repoPath, rel))?.kind !== 'symlink') return false;
-  const target = await readLinkNoFollow(repoPath, rel);
-  return target === 'AGENTS.md' || target === './AGENTS.md';
 }
 
 /** Make `rel` import AGENTS.md: create it holding the import line alone, or append the line to a
@@ -130,13 +117,7 @@ export async function missingRulesImportStubs(
 ): Promise<string[]> {
   const missing: string[] = [];
   for (const file of files) {
-    try {
-      if (await isLinkToAgentsMd(repoPath, file)) continue;
-      const text = await readTextNoFollow(repoPath, file);
-      if (text === null || !text.includes(RULES_IMPORT_LINE)) missing.push(file);
-    } catch {
-      missing.push(file);
-    }
+    if ((await rulesImportState(repoPath, file)) !== 'present') missing.push(file);
   }
   return missing;
 }
@@ -146,20 +127,10 @@ export async function missingRulesImportStubs(
  *  what today's providers need. */
 export async function enabledImportRulesFiles(db: Database, userId: string): Promise<string[]> {
   const rows = await db
-    .select({ name: schema.cliProviders.name, rulesContent: schema.cliProviders.rulesContent })
+    .select({ name: schema.cliProviders.name })
     .from(schema.cliProviders)
     .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
-  const joined = rows
-    .filter((r) => cliAdapterRegistry.has(r.name as CliProviderName))
-    .map((r) => {
-      const adapter = cliAdapterRegistry.get(r.name as CliProviderName);
-      return {
-        rulesContent: r.rulesContent,
-        rulesFile: adapter.rulesFile,
-        rulesFileMode: adapter.rulesFileMode,
-      };
-    });
-  return planRulesFiles(joined).importFiles;
+  return importRulesFilesFor(rows.map((r) => r.name));
 }
 
 /** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of a

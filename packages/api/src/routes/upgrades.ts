@@ -15,6 +15,8 @@ import {
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { importRulesFilesFor, rulesImportState } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -32,6 +34,29 @@ function isPerRepoTemplateId(id: string): boolean {
   return id.startsWith('custom.') || id === CLI_RULES_TEMPLATE_ID;
 }
 
+/** The providers' import-mode rules files that do not import AGENTS.md, and those that link
+ *  elsewhere, which no upgrade writes through. Null when the root is not a readable directory,
+ *  since that says nothing about the files in it. */
+export async function rulesImportGaps(
+  root: string | null,
+  providerNames: readonly string[],
+): Promise<{ missing: string[]; linked: string[] } | null> {
+  if (!root) return null;
+  try {
+    if ((await lstatNoFollow(root, '', { strict: true }))?.kind !== 'directory') return null;
+  } catch {
+    return null;
+  }
+  const missing: string[] = [];
+  const linked: string[] = [];
+  for (const file of importRulesFilesFor(providerNames)) {
+    const state = await rulesImportState(root, file);
+    if (state === 'missing') missing.push(file);
+    else if (state === 'linked-elsewhere') linked.push(file);
+  }
+  return { missing, linked };
+}
+
 /**
  * Report whether an upgrade is available for a repository by comparing the
  * installed artifact fingerprints against the worker-synced manifest cache.
@@ -43,7 +68,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, applicableTemplateIds: true },
+    columns: { id: true, applicableTemplateIds: true, storagePath: true, localPath: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
@@ -312,8 +337,17 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
+  // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
+  const rulesImports = await rulesImportGaps(
+    repo.storagePath ?? repo.localPath,
+    ruleProviderRows.filter((p) => p.enabled).map((p) => p.name),
+  );
+  const missingRulesImports = rulesImports?.missing ?? [];
+  const linkedRulesFiles = rulesImports?.linked ?? [];
+
   const hasUpgradeAvailable =
-    installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0;
+    (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
+    missingRulesImports.length > 0;
 
   // Group `custom.<bundleId>.*` changes by bundle so the banner can render
   // "Bundle X: N changed items" alongside Haive template counts. Bundles with
@@ -356,6 +390,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
     ...(customChanges.length > 0 ? { customChanges } : {}),
+    ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
+    ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
   };
   return c.json(res);
 });
