@@ -272,7 +272,10 @@ both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and 
 at a time in the worker and defers a second with `moveToDelayed` rather than dropping it: the
 advance already running may be a barrier check that parks without seeing what the second was
 queued for. It replaced a guard that let a second advance skip only while the row read `running`,
-which no continuation does any more. The hold is taken outside the job's own catch, since that
+which no continuation does any more. An advance that cannot be deferred (no job token, or the move
+failed) waits for the holder in this process instead: running beside it is what the hold prevents,
+and failing the attempt could lose it, since a continuation is queued with no retries. The hold is
+taken outside the job's own catch, since that
 catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
 then run after the pass it waited behind failed the step, so an advance on a `failed` task is
 dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the

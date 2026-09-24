@@ -51,16 +51,43 @@ describe('holdStepAdvance', () => {
     for (const release of [held, ...others]) release!();
   });
 
-  it('lets an advance run beside the holder when it cannot be deferred', async () => {
+  it('waits for the holder, rather than running beside it, when it cannot be deferred', async () => {
     const release = await holdStepAdvance(advance({ taskId: 't4', stepId: 's' }).job, 'tok');
-    const tokenless = advance({ taskId: 't4', stepId: 's' });
-    expect(await holdStepAdvance(tokenless.job, undefined)).toBeNull();
-    expect(tokenless.moveToDelayed).not.toHaveBeenCalled();
-
     const refused = advance({ taskId: 't4', stepId: 's' });
     refused.moveToDelayed.mockRejectedValueOnce(new Error('lock lost'));
-    expect(await holdStepAdvance(refused.job, 'tok')).toBeNull();
+    let taken = false;
+    const waiting = holdStepAdvance(refused.job, 'tok').then((r) => {
+      taken = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(taken).toBe(false);
     release!();
+    const next = await waiting;
+    expect(next).toBeTypeOf('function');
+    next!();
+  });
+
+  it('takes a held step for one waiter at a time', async () => {
+    const release = await holdStepAdvance(advance({ taskId: 't8', stepId: 's' }).job, 'tok');
+    // No token to defer with, so both wait here.
+    const taken: string[] = [];
+    const releases = new Map<string, () => void>();
+    for (const name of ['a', 'b']) {
+      const tokenless = advance({ taskId: 't8', stepId: 's' });
+      void holdStepAdvance(tokenless.job, undefined).then((r) => {
+        taken.push(name);
+        releases.set(name, r!);
+      });
+      expect(tokenless.moveToDelayed).not.toHaveBeenCalled();
+    }
+    release!();
+    await vi.waitFor(() => expect(taken).toHaveLength(1), { timeout: 3_000 });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(taken).toHaveLength(1);
+    releases.get(taken[0]!)!();
+    await vi.waitFor(() => expect(taken).toHaveLength(2), { timeout: 3_000 });
+    releases.get(taken[1]!)!();
   });
 
   it('holds nothing for a job with no step', async () => {

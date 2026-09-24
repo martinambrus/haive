@@ -3126,6 +3126,9 @@ const advancingSteps = new Set<string>();
 /** How long an advance waits before trying a step another advance holds again. */
 const ADVANCE_DEFER_MS = 5_000;
 
+/** How often an advance that could not be deferred checks whether the holder let go. */
+const ADVANCE_WAIT_MS = 500;
+
 /**
  * Hold a step's advances to one at a time in this process, or defer this job while another holds
  * them. A step parked on its CLI stays `waiting_cli` through apply, and a fan-out's agents each
@@ -3133,9 +3136,11 @@ const ADVANCE_DEFER_MS = 5_000;
  * one is deferred rather than dropped: the one running may be a barrier check that parks without
  * seeing what the later one was queued for.
  *
- * Answers the release, or null for a job with no step to hold, or when the defer itself failed and
- * the job runs beside the holder, as every advance did before. In-process, like the queue's
- * single worker: a worker that died holds nothing.
+ * A job that cannot be deferred (no token, or the move itself failed) waits here for the holder
+ * instead. Running beside it is what the hold exists to prevent, and failing the attempt could lose
+ * the advance, since a continuation is queued with no retries. Answers the release, or null for a
+ * job with no step to hold. In-process, like the queue's single worker: a worker that died holds
+ * nothing.
  */
 export async function holdStepAdvance(
   job: Pick<Job<TaskWorkerPayload>, 'id' | 'data' | 'moveToDelayed'>,
@@ -3144,19 +3149,28 @@ export async function holdStepAdvance(
   const { taskId, stepId, round } = job.data as TaskJobPayload;
   if (!stepId) return null;
   const key = `${taskId}:${stepId}:${round ?? 0}`;
-  if (!advancingSteps.has(key)) {
-    advancingSteps.add(key);
-    return () => advancingSteps.delete(key);
+  if (advancingSteps.has(key) && token) {
+    let deferred = false;
+    try {
+      await job.moveToDelayed(Date.now() + ADVANCE_DEFER_MS, token);
+      deferred = true;
+    } catch (err) {
+      logger.warn({ err, taskId, stepId, round }, 'advance defer failed; waiting for the holder');
+    }
+    if (deferred) {
+      logger.debug(
+        { taskId, stepId, round, jobId: job.id },
+        'step advance held elsewhere; deferring',
+      );
+      throw new DelayedError();
+    }
   }
-  if (!token) return null;
-  try {
-    await job.moveToDelayed(Date.now() + ADVANCE_DEFER_MS, token);
-  } catch (err) {
-    logger.warn({ err, taskId, stepId, round }, 'advance defer failed; running beside the holder');
-    return null;
+  // Nothing may await between the last check and the add, or two waiters could both take it.
+  while (advancingSteps.has(key)) {
+    await new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS));
   }
-  logger.debug({ taskId, stepId, round, jobId: job.id }, 'step advance held elsewhere; deferring');
-  throw new DelayedError();
+  advancingSteps.add(key);
+  return () => advancingSteps.delete(key);
 }
 
 /** One task-queue job. The hold is taken outside the job's own try: a deferral is not a failure,
