@@ -1,17 +1,18 @@
-import { execFile } from 'node:child_process';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { planInputSidecarName, taskUploadsRel } from '@haive/shared';
-
-const exec = promisify(execFile);
+import { openFileNoFollow } from '@haive/shared/fs-safe';
+import { FIRST_SLOT, childFd, letToolRead, runTool } from '../../../repo/tool-spawn.js';
 
 /** How long one extractor subprocess may run. Extraction also happens when a build dispatches, where
  *  a hung `pdftotext` would hold the whole wave. */
 const EXTRACT_TIMEOUT_MS = 120_000;
 
-const extractorLimits = () => ({
+/** Every extractor reads the one document it is handed, through its slot. */
+const extractorOptions = (doc: FileHandle, maxStdout: number) => ({
+  fds: [doc],
+  maxStdout,
   signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
-  killSignal: 'SIGKILL' as const,
 });
 
 /** An extractor stopped by the timeout above: node's documented abort code, never its message. */
@@ -149,17 +150,17 @@ function attribute(xml: string, tag: string, attr: string): string | null {
 /** One member of a zip, as text. `-p` writes it to stdout and nothing else, so
  *  no temp dir is needed. A member that is not there exits non-zero, which the
  *  callers below treat as "this document has no such part". */
-export async function unzipMember(archivePath: string, member: string): Promise<string> {
-  const { stdout } = await exec('unzip', ['-p', archivePath, member], {
-    maxBuffer: 64 * 1024 * 1024,
-    encoding: 'utf8',
-    ...extractorLimits(),
-  });
+export async function unzipMember(doc: FileHandle, member: string): Promise<string> {
+  const { stdout } = await runTool(
+    'unzip',
+    ['-p', childFd(FIRST_SLOT), member],
+    extractorOptions(doc, 64 * 1024 * 1024),
+  );
   return stdout;
 }
 
-async function unzipMemberOrNull(archivePath: string, member: string): Promise<string | null> {
-  return unzipMember(archivePath, member).catch((err: unknown) => {
+async function unzipMemberOrNull(doc: FileHandle, member: string): Promise<string | null> {
+  return unzipMember(doc, member).catch((err: unknown) => {
     // A part that took too long to read is there, so reporting it absent would mis-render the rest.
     if (timedOut(err)) throw err;
     return null;
@@ -168,12 +169,12 @@ async function unzipMemberOrNull(archivePath: string, member: string): Promise<s
 
 /** Member paths inside the archive, from `unzip -Z1`. Needed for XLSX, whose
  *  worksheet parts are numbered rather than named. */
-async function listZipMembers(archivePath: string): Promise<string[]> {
-  const { stdout } = await exec('unzip', ['-Z1', archivePath], {
-    maxBuffer: 8 * 1024 * 1024,
-    encoding: 'utf8',
-    ...extractorLimits(),
-  });
+async function listZipMembers(doc: FileHandle): Promise<string[]> {
+  const { stdout } = await runTool(
+    'unzip',
+    ['-Z1', childFd(FIRST_SLOT)],
+    extractorOptions(doc, 8 * 1024 * 1024),
+  );
   return stdout
     .split('\n')
     .map((line) => line.trim())
@@ -380,18 +381,18 @@ export interface ExtractionResult {
   error: string | null;
 }
 
-async function extractDocx(filePath: string): Promise<ExtractionResult> {
-  const xml = await unzipMember(filePath, 'word/document.xml');
+async function extractDocx(doc: FileHandle): Promise<ExtractionResult> {
+  const xml = await unzipMember(doc, 'word/document.xml');
   const markdown = docxToMarkdown(xml);
   // Nothing is added around a docx body, so the rendered string IS the content.
   return { markdown, hasContent: markdown.length > 0, error: null };
 }
 
-async function extractXlsx(filePath: string): Promise<ExtractionResult> {
+async function extractXlsx(doc: FileHandle): Promise<ExtractionResult> {
   const [workbook, strings, members] = await Promise.all([
-    unzipMemberOrNull(filePath, 'xl/workbook.xml'),
-    unzipMemberOrNull(filePath, 'xl/sharedStrings.xml'),
-    listZipMembers(filePath),
+    unzipMemberOrNull(doc, 'xl/workbook.xml'),
+    unzipMemberOrNull(doc, 'xl/sharedStrings.xml'),
+    listZipMembers(doc),
   ]);
   const sharedStrings = strings ? parseSharedStrings(strings) : [];
   // Sheet NAMES are in the workbook part, sheet CONTENT in numbered parts. They
@@ -414,7 +415,7 @@ async function extractXlsx(filePath: string): Promise<ExtractionResult> {
   // workbook of empty sheets renders several lines and carries no content.
   let populatedSheets = 0;
   for (const [i, part] of sheetParts.entries()) {
-    const sheetXml = await unzipMemberOrNull(filePath, part);
+    const sheetXml = await unzipMemberOrNull(doc, part);
     if (sheetXml === null) continue;
     const table = xlsxSheetToMarkdown(sheetXml, sharedStrings);
     if (table.length > 0) populatedSheets += 1;
@@ -425,18 +426,18 @@ async function extractXlsx(filePath: string): Promise<ExtractionResult> {
   return { markdown: out.join('\n').trim(), hasContent: populatedSheets > 0, error: null };
 }
 
-async function extractPdf(filePath: string): Promise<ExtractionResult> {
+async function extractPdf(doc: FileHandle): Promise<ExtractionResult> {
   // `-layout` keeps columns and tables roughly where they were; the default
   // reflows a two-column page into interleaved nonsense.
   //
   // 64 MiB of stdout is far past any real document's text — a large PDF is large
   // because of its images, and its text is a few labels — so the buffer is not
   // the binding constraint on how big an upload may be.
-  const { stdout } = await exec('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-'], {
-    maxBuffer: 64 * 1024 * 1024,
-    encoding: 'utf8',
-    ...extractorLimits(),
-  });
+  const { stdout } = await runTool(
+    'pdftotext',
+    ['-layout', '-enc', 'UTF-8', childFd(FIRST_SLOT), '-'],
+    extractorOptions(doc, 64 * 1024 * 1024),
+  );
   // Split on the form feed poppler writes between pages and drop the blank ones
   // BEFORE joining. Adding the rule first and trimming after is what made an
   // all-picture PDF extract to a lone `---` and read as having text.
@@ -457,13 +458,28 @@ async function extractPdf(filePath: string): Promise<ExtractionResult> {
  */
 export async function extractPlanInput(
   kind: PlanInputKind,
-  filePath: string,
+  doc: { anchor: string; rel: string },
 ): Promise<ExtractionResult> {
-  try {
-    if (kind === 'docx') return await extractDocx(filePath);
-    if (kind === 'xlsx') return await extractXlsx(filePath);
-    if (kind === 'pdf') return await extractPdf(filePath);
+  const extract =
+    kind === 'docx'
+      ? extractDocx
+      : kind === 'xlsx'
+        ? extractXlsx
+        : kind === 'pdf'
+          ? extractPdf
+          : null;
+  if (extract === null)
     return { markdown: '', hasContent: false, error: `no extractor for ${kind}` };
+  try {
+    // Held by the worker and handed to the extractor as a descriptor: the extractors run as the
+    // unprivileged extraction uid, which re-opens the document through its slot.
+    const held = (await openFileNoFollow(doc.anchor, doc.rel, 'read', { strict: true }))!;
+    try {
+      await letToolRead(held);
+      return await extract(held);
+    } finally {
+      await held.close();
+    }
   } catch (err) {
     if (timedOut(err)) {
       return {

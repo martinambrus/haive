@@ -1,10 +1,27 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
-import { describe, expect, it, afterEach, beforeEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 import { extractArchive } from '../src/repo/clone.js';
+
+/** Every argv a tool was started with, so a test can say what the child was told to resolve. */
+const toolCalls = vi.hoisted(() => [] as string[][]);
+vi.mock('../src/repo/tool-spawn.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/repo/tool-spawn.js')>();
+  return {
+    ...actual,
+    runTool: (
+      cmd: string,
+      args: readonly string[],
+      opts?: Parameters<typeof actual.runTool>[2],
+    ) => {
+      toolCalls.push([cmd, ...args]);
+      return actual.runTool(cmd, args, opts);
+    },
+  };
+});
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -32,15 +49,16 @@ async function buildFixtureSource(root: string, topDir: string): Promise<string>
 
 let tmpRoot: string;
 
+/** The anchored form of a name directly under the fixture root. */
+const at = (rel: string) => ({ anchor: tmpRoot, rel });
+
 beforeEach(async () => {
+  // Left at mkdtemp's 0700 on purpose. The tool is handed its directory and the archive as
+  // descriptors, so it never traverses this by name; in the in-image job, which runs as root and so
+  // drops to the unprivileged extraction uid, every case here passes through a parent that uid
+  // cannot enter.
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-extract-'));
-  // mkdtemp is ALWAYS 0700, which the unprivileged extraction uid cannot traverse — so when these
-  // run as root (the in-image CI job) every case fails on the fixture rather than on the code, and
-  // both the stage and the archive `unzip` has to open sit under here. MEASURED in the running
-  // worker: every level of every real anchor chain — the storage and bundle roots, each `<userId>`
-  // and `<repoId>`, `.haive` and the uploads dir — is 0755. So this matches production rather than
-  // relaxing anything: extraction requires the destination's parents to be traversable.
-  await chmod(tmpRoot, 0o711);
+  toolCalls.length = 0;
 });
 
 afterEach(async () => {
@@ -54,7 +72,7 @@ describe('extractArchive', () => {
     await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'my-project']);
 
     const dest = path.join(tmpRoot, 'out');
-    await extractArchive(archivePath, 'tar.gz', dest);
+    await extractArchive(at('fixture.tar.gz'), 'tar.gz', at('out'));
 
     const entries = await readdir(dest);
     expect(entries.sort()).toEqual(['README.md', 'package.json', 'sub'].sort());
@@ -70,7 +88,7 @@ describe('extractArchive', () => {
     await run('tar', ['-cf', archivePath, '-C', tmpRoot, 'proj']);
 
     const dest = path.join(tmpRoot, 'out-tar');
-    await extractArchive(archivePath, 'tar', dest);
+    await extractArchive(at('fixture.tar'), 'tar', at('out-tar'));
 
     const entries = await readdir(dest);
     expect(entries).toContain('README.md');
@@ -90,7 +108,7 @@ describe('extractArchive', () => {
     await writeFile(archivePath, zipBuffer);
 
     const dest = path.join(tmpRoot, 'out-zip');
-    await extractArchive(archivePath, 'zip', dest);
+    await extractArchive(at('fixture.zip'), 'zip', at('out-zip'));
 
     const entries = await readdir(dest);
     expect(entries.sort()).toEqual(['README.md', 'package.json', 'sub'].sort());
@@ -106,7 +124,7 @@ describe('extractArchive', () => {
     await run('tar', ['-czf', archivePath, '-C', src, 'dirA', 'dirB']);
 
     const dest = path.join(tmpRoot, 'out-multi');
-    await extractArchive(archivePath, 'tar.gz', dest);
+    await extractArchive(at('multi.tar.gz'), 'tar.gz', at('out-multi'));
 
     const entries = await readdir(dest);
     expect(entries.sort()).toEqual(['dirA', 'dirB']);
@@ -127,7 +145,7 @@ describe('extractArchive', () => {
     await run('tar', ['-czf', archivePath, '-C', staging, 'escape']);
 
     const dest = path.join(tmpRoot, 'out-link');
-    const report = await extractArchive(archivePath, 'tar.gz', dest);
+    const report = await extractArchive(at('link.tar.gz'), 'tar.gz', at('out-link'));
 
     // The link is DROPPED now, not merely left unfollowed — a symlink cannot safely live in an
     // extracted repository tree, and the flatten is no longer the only thing standing between
@@ -152,7 +170,7 @@ describe('extractArchive', () => {
     const archivePath = path.join(tmpRoot, 'clean.tar.gz');
     await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'clean']);
 
-    const report = await extractArchive(archivePath, 'tar.gz', path.join(tmpRoot, 'out-clean'));
+    const report = await extractArchive(at('clean.tar.gz'), 'tar.gz', at('out-clean'));
     expect(report.dropped).toEqual([]);
     expect(report.note).toBeNull();
   });
@@ -172,7 +190,7 @@ describe('extractArchive', () => {
     await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
 
     const dest = path.join(tmpRoot, 'out-zip-links');
-    const report = await extractArchive(archivePath, 'zip', dest);
+    const report = await extractArchive(at('links.zip'), 'zip', at('out-zip-links'));
 
     // Named by their path relative to the extracted root, so a member nested below the top level is
     // distinguishable from one beside it — a walk that only checked depth 1 would pass every other
@@ -205,7 +223,7 @@ describe('extractArchive', () => {
     await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
 
     const dest = path.join(tmpRoot, 'out-intree');
-    const report = await extractArchive(archivePath, 'zip', dest);
+    const report = await extractArchive(at('intree.zip'), 'zip', at('out-intree'));
 
     expect(report.dropped).toEqual([{ rel: 'alias.md', reason: 'symlink' }]);
     expect((await readdir(dest)).sort()).toEqual(['README.md', 'keep.txt']);
@@ -222,7 +240,7 @@ describe('extractArchive', () => {
     await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
 
     const dest = path.join(tmpRoot, 'out-zip-multi');
-    const report = await extractArchive(archivePath, 'zip', dest);
+    const report = await extractArchive(at('multi.zip'), 'zip', at('out-zip-multi'));
 
     expect((await readdir(dest)).sort()).toEqual(['dirA', 'dirB']);
     expect(report.dropped).toEqual([]);
@@ -239,7 +257,7 @@ describe('extractArchive', () => {
     await buildFixtureSource(tmpRoot, 'fresh');
     const archivePath = path.join(tmpRoot, 'fresh.tar.gz');
     await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'fresh']);
-    await extractArchive(archivePath, 'tar.gz', dest);
+    await extractArchive(at('fresh.tar.gz'), 'tar.gz', at('out-replace'));
 
     const entries = await readdir(dest);
     expect(entries).toContain('README.md');
@@ -251,8 +269,82 @@ describe('extractArchive', () => {
   it('rejects unsupported format', async () => {
     const archivePath = path.join(tmpRoot, 'fake.bin');
     await writeFile(archivePath, 'not an archive');
+    await expect(extractArchive(at('fake.bin'), 'rar' as never, at('out-bad'))).rejects.toThrow();
+  });
+
+  it.runIf(process.getuid?.() === 0)(
+    'extracts a zip only the worker could read, as the unprivileged extraction uid',
+    async () => {
+      const zip = new JSZip();
+      zip.file('private/README.md', '# owner only\n');
+      await writeFile(
+        path.join(tmpRoot, 'private.zip'),
+        await zip.generateAsync({ type: 'nodebuffer' }),
+        {
+          mode: 0o600,
+        },
+      );
+
+      await extractArchive(at('private.zip'), 'zip', at('out-private'));
+
+      expect(await readFile(path.join(tmpRoot, 'out-private', 'README.md'), 'utf8')).toBe(
+        '# owner only\n',
+      );
+    },
+  );
+
+  it('refuses an archive reached through a link, and creates nothing', async () => {
+    // The archive is opened before anything else happens, without following a link anywhere on
+    // its way: a link planted at an upload's path could otherwise stream any file the worker reads.
+    await buildFixtureSource(tmpRoot, 'real');
+    await run('tar', ['-czf', path.join(tmpRoot, 'real.tar.gz'), '-C', tmpRoot, 'real']);
+    await symlink('real.tar.gz', path.join(tmpRoot, 'planted.tar.gz'));
+
     await expect(
-      extractArchive(archivePath, 'rar' as never, path.join(tmpRoot, 'out-bad')),
+      extractArchive(at('planted.tar.gz'), 'tar.gz', at('out-planted')),
     ).rejects.toThrow();
+    const left = await readdir(tmpRoot);
+    expect(left).not.toContain('out-planted');
+    expect(left.filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
+    expect(toolCalls).toEqual([]);
+  });
+
+  it('refuses a destination whose parent chain holds a link, and writes nothing through it', async () => {
+    // The shape an attachment has: an uploads dir under `.haive/`, which the sandbox can write.
+    const anchor = path.join(tmpRoot, 'repo');
+    const outside = path.join(tmpRoot, 'outside');
+    await mkdir(anchor);
+    await mkdir(outside);
+    await symlink('../outside', path.join(anchor, '.haive'));
+    await buildFixtureSource(anchor, 'src');
+    await run('tar', ['-czf', path.join(anchor, 'a.tar.gz'), '-C', anchor, 'src']);
+
+    await expect(
+      extractArchive({ anchor, rel: 'a.tar.gz' }, 'tar.gz', {
+        anchor,
+        rel: '.haive/task-uploads/t/raw',
+      }),
+    ).rejects.toThrow();
+    expect(await readdir(outside)).toEqual([]);
+    expect(toolCalls).toEqual([]);
+  });
+
+  it('names no host path to the tool, only the descriptors it was handed', async () => {
+    await buildFixtureSource(tmpRoot, 'both');
+    await run('tar', ['-czf', path.join(tmpRoot, 'both.tar.gz'), '-C', tmpRoot, 'both']);
+    const zip = new JSZip();
+    zip.file('both/README.md', '# fixture\n');
+    await writeFile(
+      path.join(tmpRoot, 'both.zip'),
+      await zip.generateAsync({ type: 'nodebuffer' }),
+    );
+
+    await extractArchive(at('both.tar.gz'), 'tar.gz', at('out-both-tar'));
+    await extractArchive(at('both.zip'), 'zip', at('out-both-zip'));
+
+    expect(toolCalls.map((argv) => argv[0])).toEqual(['tar', 'unzip']);
+    const paths = toolCalls.flat().filter((arg) => arg.includes('/'));
+    expect(paths.length).toBeGreaterThan(0);
+    for (const arg of paths) expect(arg).toMatch(/^\/proc\/self\/fd\/\d+$/);
   });
 });

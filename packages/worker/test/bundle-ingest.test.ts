@@ -5,7 +5,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import { extractArchive, gitClone } from '../src/repo/clone.js';
-import { gitRevParseHead } from '../src/repo/bundle-ingest.js';
+import { bundleArchiveRel, gitRevParseHead } from '../src/repo/bundle-ingest.js';
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -51,7 +51,10 @@ describe('bundle-ingest: zip extraction', () => {
     await writeFile(archivePath, buf);
 
     const dest = path.join(tmpRoot, 'user-id', 'bundle-id', 'extracted');
-    await extractArchive(archivePath, 'zip', dest);
+    await extractArchive({ anchor: tmpRoot, rel: 'bundle.zip' }, 'zip', {
+      anchor: tmpRoot,
+      rel: 'user-id/bundle-id/extracted',
+    });
 
     expect(await readdir(dest)).toEqual(expect.arrayContaining(['agents', 'skills']));
     const agent = await readFile(path.join(dest, 'agents', 'code-reviewer.md'), 'utf8');
@@ -69,10 +72,32 @@ describe('bundle-ingest: zip extraction', () => {
     await run('tar', ['-czf', archivePath, '-C', src, 'agents', 'skills']);
 
     const dest = path.join(tmpRoot, 'out');
-    await extractArchive(archivePath, 'tar.gz', dest);
+    await extractArchive({ anchor: tmpRoot, rel: 'bundle.tar.gz' }, 'tar.gz', {
+      anchor: tmpRoot,
+      rel: 'out',
+    });
 
     expect((await readdir(dest)).sort()).toEqual(['agents', 'skills']);
     expect(await readdir(path.join(dest, 'agents'))).toContain('foo.md');
+  });
+});
+
+describe('bundleArchiveRel', () => {
+  const root = '/var/lib/haive/bundles';
+
+  it('answers the one file the api moves into the bundle directory', () => {
+    expect(bundleArchiveRel(root, `${root}/u1/b1/source.zip`, 'u1', 'b1')).toBe('u1/b1/source.zip');
+    expect(bundleArchiveRel(`${root}/`, `${root}/u1/b1/source.tar.gz`, 'u1', 'b1')).toBe(
+      'u1/b1/source.tar.gz',
+    );
+  });
+
+  it('refuses a path anywhere else, rather than reading it', () => {
+    expect(bundleArchiveRel(root, `${root}/u1/b2/source.zip`, 'u1', 'b1')).toBeNull();
+    expect(bundleArchiveRel(root, `${root}/u2/b1/source.zip`, 'u1', 'b1')).toBeNull();
+    expect(bundleArchiveRel(root, `${root}/u1/b1/extracted/source.zip`, 'u1', 'b1')).toBeNull();
+    expect(bundleArchiveRel(root, `${root}/u1/b1/other.zip`, 'u1', 'b1')).toBeNull();
+    expect(bundleArchiveRel(root, '/etc/source.zip', 'u1', 'b1')).toBeNull();
   });
 });
 

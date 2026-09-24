@@ -254,7 +254,7 @@ export async function preparePlanInput(
   const kind = classifyPlanInput(attachment.filename, attachment.contentType);
   const split = splitAttachmentStoredPath(attachment, ctx.taskId);
   const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
-  if (info === null || info.kind !== 'file') {
+  if (split === null || info === null || info.kind !== 'file') {
     return (await stillAttachedUnderLock(ctx, attachment))
       ? { status: 'missing' }
       : { status: 'deleted' };
@@ -278,10 +278,7 @@ export async function preparePlanInput(
     return { status: 'prepared', row, extracted: false, unreadable: false };
   }
   await ctx.emitProgress(`Extracting text from ${attachment.filename}...`);
-  // Still the absolute path: the extractors are `unzip`/`pdftotext` subprocesses,
-  // which resolve a path of their own by name, so containing them is a separate
-  // change from anchoring this module's own reads.
-  const result = await extractPlanInput(kind, attachment.storedPath);
+  const result = await extractPlanInput(kind, split);
   if (result.error) {
     // Reported, not thrown. The original is still mounted, so an agent that
     // can open it is not blocked by our inability to read it.
