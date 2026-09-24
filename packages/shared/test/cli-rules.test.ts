@@ -6,9 +6,11 @@ import {
   buildCliRulesBlock,
   buildCliRulesBlockFromProviders,
   resolveEffectiveRules,
+  inheritsDefaultRules,
   extractRegion,
   upsertRegion,
 } from '../src/templates/cli-rules.js';
+import { promptNamesAgentPath } from '../src/cli-providers/catalog.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
 import {
   DEFAULT_AGENT_RULES,
@@ -35,6 +37,36 @@ describe('dedupLines', () => {
   it('dedupes on trimmed content, first occurrence wins', () => {
     const out = dedupLines(['- a\n- b', '  - a  \n- c']);
     expect(out).toBe('- a\n- b\n- c\n');
+  });
+
+  it('keeps every paragraph break, rule and code fence', () => {
+    const block = '# A\n\none\n\ntwo\n\n---\n\n```\nx\n```\n\nthree';
+    expect(dedupLines([block])).toBe(`${block}\n`);
+  });
+
+  it('keeps a repeated fence that carries a language tag', () => {
+    const block = '```json\n{"a":1}\n```\n\n```json\n{"b":2}\n```';
+    expect(dedupLines([block])).toBe(`${block}\n`);
+  });
+
+  it('keeps a fenced example whole when an earlier block shares one of its lines', () => {
+    const a = 'Schema A:\n```json\n{\n  "type": "object",\n  "a": 1\n}\n```';
+    const b = 'Schema B:\n```json\n{\n  "type": "object",\n  "b": 2\n}\n```';
+    expect(dedupLines([a, b])).toBe(`${a}\n${b}\n`);
+  });
+
+  it('drops a fence identical to one already emitted, delimiters and all', () => {
+    const fence = '```\nreport\n```';
+    expect(dedupLines([`one\n${fence}`, `two\n${fence}`])).toBe(`one\n${fence}\ntwo\n`);
+  });
+
+  it('adds nothing for a block identical to an earlier one', () => {
+    const block = 'one\n\n```\nx\n```\n';
+    expect(dedupLines([block, block, `  ${block}`])).toBe(dedupLines([block]));
+  });
+
+  it('renders the shipped default without losing a line', () => {
+    expect(dedupLines([DEFAULT_AGENT_RULES])).toBe(`${DEFAULT_AGENT_RULES.trim()}\n`);
   });
 });
 
@@ -71,10 +103,27 @@ describe('resolveEffectiveRules', () => {
     expect(resolveEffectiveRules('- my custom rule')).toBe('- my custom rule');
   });
 
+  it('names no agent directory, which would end agent isolation wherever it is read', () => {
+    expect(promptNamesAgentPath(DEFAULT_AGENT_RULES, '/haive/workdir')).toBe(false);
+  });
+
   it("keeps the shipped default's own hash in KNOWN_DEFAULT_RULES_HASHES", () => {
     // The test above cannot catch a missing hash: an unknown hash returns the
     // input, which there IS the default. Editing the rules needs this to fail.
     expect(KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(DEFAULT_AGENT_RULES))).toBe(true);
+  });
+});
+
+describe('inheritsDefaultRules', () => {
+  it('reads empty rules and a copy of a shipped default as inheriting', () => {
+    expect(inheritsDefaultRules('')).toBe(true);
+    expect(inheritsDefaultRules('  \n')).toBe(true);
+    expect(inheritsDefaultRules(DEFAULT_AGENT_RULES)).toBe(true);
+  });
+
+  it('reads anything else as an override, a one-character edit of the default included', () => {
+    expect(inheritsDefaultRules('- my custom rule')).toBe(false);
+    expect(inheritsDefaultRules(`${DEFAULT_AGENT_RULES}x`)).toBe(false);
   });
 });
 

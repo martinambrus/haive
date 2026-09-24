@@ -236,7 +236,11 @@ export function CliProviderForm({
     envVarsText: envVarsToText(provider?.envVars),
     secretsText: '',
     cliArgsText: (provider?.cliArgs ?? []).join('\n'),
-    rulesContent: provider?.rulesContent ?? DEFAULT_AGENT_RULES,
+    // An inheriting provider may store an older default; show the live one it actually follows.
+    rulesContent:
+      provider?.rulesInherited === true
+        ? DEFAULT_AGENT_RULES
+        : (provider?.rulesContent ?? DEFAULT_AGENT_RULES),
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
     cliVersion:
       provider?.cliVersion ??
@@ -1193,12 +1197,15 @@ export function CliProviderForm({
           placeholder="- Behavioural rule one..."
         />
         <p className="mt-1 text-xs text-neutral-500">
-          Rewritten into this CLI&apos;s native rules file on every task onboarding. Target file
-          depends on the adapter: <code className="font-mono text-neutral-300">AGENTS.md</code>{' '}
-          (codex, amp), <code className="font-mono text-neutral-300">CLAUDE.md</code> (claude-code,
-          zai), or <code className="font-mono text-neutral-300">GEMINI.md</code> (gemini). When
-          multiple enabled providers share the same file, their rules are merged line-by-line and
-          deduplicated under a single marker block. Leave empty to skip this CLI.
+          {state.rulesContent.trim() === '' || state.rulesContent === DEFAULT_AGENT_RULES
+            ? 'This CLI inherits the Haive default rules and follows their updates; any other text here makes it a custom override.'
+            : 'Custom rules: they replace the Haive default for this CLI and no longer follow its updates. Clear the field to inherit the default again.'}
+        </p>
+        <p className="mt-1 text-xs text-neutral-500">
+          Onboarding writes the rules of every enabled CLI into one merged block in the
+          repository&apos;s <code className="font-mono text-neutral-300">AGENTS.md</code>. CLIs that
+          read <code className="font-mono text-neutral-300">CLAUDE.md</code> or{' '}
+          <code className="font-mono text-neutral-300">GEMINI.md</code> import it from there.
         </p>
       </div>
 

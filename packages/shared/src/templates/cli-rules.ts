@@ -29,19 +29,49 @@ export const CLI_RULES_SCHEMA_VERSION = 1;
  *  (import-mode CLIs point at it via `@AGENTS.md`). */
 export const CLI_RULES_DISK_PATH = 'AGENTS.md';
 
+/** CommonMark: a closing fence repeats the opener's character at least as often, and nothing else. */
+const closesFence = (line: string, opener: string): boolean => {
+  const t = line.trim();
+  return t.length >= opener.length && [...t].every((c) => c === opener[0]);
+};
+
 /** Merge rule blocks line-by-line, deduplicating on trimmed content so the
- *  first-seen capitalization and leading whitespace win. Runs of 3+ blank lines
- *  collapse to 2. Output is trimmed and ends with exactly one newline. Copied
- *  verbatim from the worker's original onboarding generator to keep the rendered
- *  block byte-identical across the relocation. */
+ *  first-seen capitalization and leading whitespace win. A block identical to an
+ *  earlier one adds nothing. Structure is never deduplicated line by line: a line
+ *  with no letter or digit (a blank line, a rule) always stays, and a fenced code
+ *  block, a language tag included, is kept or dropped WHOLE, dropped only when an
+ *  identical fence was already emitted, since removing lines inside one leaves a
+ *  different example incomplete. Runs of 3+ blank lines collapse to 2. Output is
+ *  trimmed and ends with exactly one newline. */
 export function dedupLines(blocks: string[]): string {
   const seen = new Set<string>();
+  const seenFences = new Set<string>();
   const out: string[] = [];
+  const seenBlocks = new Set<string>();
   for (const block of blocks) {
-    for (const line of block.split('\n')) {
+    if (seenBlocks.has(block.trim())) continue;
+    seenBlocks.add(block.trim());
+    const lines = block.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? '';
       const key = line.trim();
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const opener = /^(`{3,}|~{3,})/.exec(key)?.[1];
+      if (opener) {
+        let end = i + 1;
+        while (end < lines.length && !closesFence(lines[end] ?? '', opener)) end++;
+        const fence = lines.slice(i, end + 1);
+        const fenceKey = fence.map((l) => l.trim()).join('\n');
+        if (!seenFences.has(fenceKey)) {
+          seenFences.add(fenceKey);
+          out.push(...fence);
+        }
+        i = end;
+        continue;
+      }
+      if (/[\p{L}\p{N}]/u.test(key)) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
       out.push(line);
     }
   }
@@ -71,9 +101,14 @@ export function buildCliRulesBlock(rulesContents: readonly string[]): string | n
  *  it inherits the live DEFAULT_AGENT_RULES — letting template edits propagate.
  *  Anything else is an explicit override and is used as-is. */
 export function resolveEffectiveRules(rulesContent: string): string {
-  if (rulesContent.trim().length === 0) return DEFAULT_AGENT_RULES;
-  if (KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))) return DEFAULT_AGENT_RULES;
-  return rulesContent;
+  return inheritsDefaultRules(rulesContent) ? DEFAULT_AGENT_RULES : rulesContent;
+}
+
+/** Whether a provider's stored rules inherit the live default rather than override it. */
+export function inheritsDefaultRules(rulesContent: string): boolean {
+  return (
+    rulesContent.trim().length === 0 || KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))
+  );
 }
 
 /** Convenience over buildCliRulesBlock for the common call shape: take every
