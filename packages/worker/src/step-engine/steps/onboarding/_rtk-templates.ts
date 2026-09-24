@@ -1,8 +1,10 @@
 import type { CliProviderName, TemplateItem, TemplateRendering } from '@haive/shared';
+import { RTK_REF_MARKER_END, RTK_REF_MARKER_START } from '@haive/shared';
 
-/** Slim RTK awareness body written to `.claude/RTK.md`, `.gemini/RTK.md`, and
- *  the repo-root `RTK.md` for codex/amp. Vendored from rtk-ai/rtk@v0.37.2
- *  `src/hooks/init.rs` (RTK_SLIM constant). Re-vendor on rtk version bump. */
+export { RTK_REF_MARKER_END, RTK_REF_MARKER_START };
+
+/** Slim RTK awareness body, inlined into AGENTS.md by `buildRtkAwarenessBlock`. Vendored from
+ *  rtk-ai/rtk@v0.37.2 `src/hooks/init.rs` (RTK_SLIM constant). Re-vendor on rtk version bump. */
 export const RTK_SLIM = `# RTK (Rust Token Killer)
 
 RTK is installed in this sandbox and proxies common dev commands so their
@@ -22,13 +24,6 @@ Trust the hook. If a command output looks unexpectedly compact, that is RTK
 working as intended — re-run with \`rtk proxy <cmd>\` only when you suspect
 filtering is hiding a real signal.
 `;
-
-/** Marker pair wrapping the RTK awareness block inlined into AGENTS.md by
- *  step 07. Lets `stripHaiveContent` (onboarding reset) and a re-run strip or
- *  refresh the block cleanly. The `rtk-ref` slug is retained for backwards
- *  compatibility with blocks written by earlier Haive versions. */
-export const RTK_REF_MARKER_START = '<!-- haive:rtk-ref -->';
-export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
 
 /** Hook commands invoked by each CLI's runtime when an RTK-managed event
  *  fires. Mirrors rtk's own `CLAUDE_HOOK_COMMAND` / gemini hook command. */

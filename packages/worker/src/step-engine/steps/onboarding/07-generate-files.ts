@@ -12,6 +12,8 @@ import {
 import {
   CLI_RULES_START,
   CLI_RULES_END,
+  PROJECT_INFO_START,
+  PROJECT_INFO_END,
   getCliProviderMetadata,
   normalizeContent,
   resolveEffectiveRules,
@@ -179,11 +181,9 @@ function extractProjectInfo(
   };
 }
 
-export const PROJECT_INFO_START = '<!-- haive:project-info -->';
-export const PROJECT_INFO_END = '<!-- /haive:project-info -->';
-// CLI rules markers now live in @haive/shared so the API can recompute the same
-// block; re-exported here for back-compat with existing importers.
-export { CLI_RULES_START, CLI_RULES_END };
+// The region markers live in @haive/shared so the API can recompute and strip the same
+// blocks; re-exported here for back-compat with existing importers.
+export { CLI_RULES_START, CLI_RULES_END, PROJECT_INFO_START, PROJECT_INFO_END };
 
 export function projectInfoMarkdown(info: ProjectInfo): string {
   const lines: string[] = [
