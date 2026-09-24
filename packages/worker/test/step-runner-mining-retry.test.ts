@@ -608,18 +608,21 @@ describe('advanceStep apply-to-form continuation', () => {
     // A form that auto-submits its defaults, so only the hold keeps it from going straight back
     // into apply with the items it had already answered.
     const autoSubmitting = (applyCalls: unknown[]): StepDefinition => {
-      const step = reopeningFormStep();
-      step.metadata = { ...step.metadata, autoSubmitDefaults: true };
-      const form = step.form!;
-      step.form = (ctx, detected, llmOutput) => {
-        const schema = form(ctx, detected, llmOutput)!;
-        return { ...schema, fields: schema.fields.map((f) => ({ ...f, default: 'continue' })) };
-      };
-      step.apply = async () => {
-        applyCalls.push(1);
-        throw new ReopenStepFormError('bounded batch finished');
-      };
-      return step;
+      const base = reopeningFormStep();
+      const form = base.form!;
+      return {
+        ...base,
+        metadata: { ...base.metadata, autoSubmitDefaults: true },
+        form: (ctx, detected, llmOutput) => {
+          const schema = form(ctx, detected, llmOutput)!;
+          const fields = schema.fields.map((f) => ({ ...f, default: 'continue' }));
+          return { ...schema, fields: fields as typeof schema.fields };
+        },
+        apply: async () => {
+          applyCalls.push(1);
+          throw new ReopenStepFormError('bounded batch finished');
+        },
+      } as StepDefinition;
     };
     const crashed = (pauseFormOnRetry: boolean) => {
       const state = freshState([miningRow('prior-batch-agent', 1)]);
