@@ -244,9 +244,13 @@ test.describe('sidebar task tree', () => {
       // on every move — so this is one drag rather than a stream of writes.
       const handle = page.getByRole('separator', { name: 'Resize sidebar' });
       const box = (await handle.boundingBox())!;
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      // The divider is as tall as the page, so its centre can sit below the fold. Aim at the
+      // middle of the part on screen.
+      const top = Math.max(box.y, 0);
+      const y = (top + Math.min(box.y + box.height, page.viewportSize()!.height)) / 2;
+      await page.mouse.move(box.x + box.width / 2, y);
       await page.mouse.down();
-      await page.mouse.move(before + 80, box.y + box.height / 2, { steps: 10 });
+      await page.mouse.move(before + 80, y, { steps: 10 });
       await page.mouse.up();
 
       await expect

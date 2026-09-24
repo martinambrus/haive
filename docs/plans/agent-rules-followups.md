@@ -356,7 +356,10 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   `SidebarNav`, since the page beside the sidebar can hydrate later. `waitForShellHydration`
   (`tests/e2e/helpers/shell.ts`) also covers the two reloads in `tree.spec.ts` that a click follows,
   and the Sign out click in `nav/app-layout.spec.ts`. The mining-retry stub took the `docker exec`
-  time out of 23 cases that had spent 100 ms or more each on it.
+  time out of 23 cases that had spent 100 ms or more each on it. Waiting for hydration also lets the
+  dashboard render in full before the drag, and the divider is as tall as the page, so the drag now
+  aims at the middle of its on-screen part: aimed at the centre of its box, it pressed at y=1022 in a
+  720 px viewport and failed on every attempt.
 
 ## PR 12 — Stale docs
 
