@@ -972,9 +972,9 @@ adminRoutes.put('/config/cli-pricing', async (c) => {
 const tersenessSchema = z.object({ level: z.enum(TERSENESS_LEVELS) });
 
 // Global output terseness level (off | lite | full | ultra; default full). Appended as a
-// prose-only style directive to each CLI step's main prompt — structured output, code,
-// and specs are carved out, and reasoning is untouched. The worker reads it per cli
-// dispatch (~30s config cache); a change needs no redeploy.
+// reply-only style directive to each CLI step's main prompt — what an agent writes into files
+// and every required format are scoped out, and reasoning is untouched. The worker reads it
+// per cli dispatch (~30s config cache); a change needs no redeploy.
 adminRoutes.get('/config/terseness', async (c) => {
   const level = (await configService.get(CONFIG_KEYS.TERSENESS_LEVEL)) ?? 'full';
   return c.json({ level });

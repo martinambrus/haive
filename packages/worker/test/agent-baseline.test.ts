@@ -114,8 +114,12 @@ describe('ported baseline agents', () => {
         },
       );
 
-    // Working agent → terseness directive present.
-    expect(render('code-reviewer')).toContain('## Response Style');
+    // Working agent → terseness directive present, scoped to its replies before any style ask.
+    const block = render('code-reviewer').split('## Response Style\n\n')[1] ?? '';
+    expect(block).toMatch(/^This governs only how you word your replies/);
+    expect(block.indexOf('never shortens or restyles what you write into files')).toBeLessThan(
+      block.indexOf('Be concise.'),
+    );
 
     // Document-producing agents → directive must be absent so deliverables stay thorough.
     for (const id of [

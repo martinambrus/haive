@@ -38,11 +38,17 @@ function searchOrderBlock(supportsLsp: boolean): string {
 }
 
 // Complements searchOrderBlock (which trims READ tokens): a WRITE-side
-// directive that keeps agent output concise to save subscription token
-// allowance. Injected into every working agent except the document-producing
-// ones in RESPONSE_STYLE_EXEMPT_IDS, whose deliverables must stay thorough.
+// directive that keeps an agent's replies concise to save subscription token
+// allowance, and never what it writes into files. Injected into every working
+// agent except the document-producing ones in RESPONSE_STYLE_EXEMPT_IDS, whose
+// deliverables must stay thorough.
 const RESPONSE_STYLE_BLOCK = [
   '## Response Style',
+  '',
+  'This governs only how you word your replies and the prose you return (summaries, notes,',
+  'explanations). It never shortens or restyles what you write into files — code, comments,',
+  'documentation, knowledge-base articles, skills — nor code, diffs, JSON or any other required',
+  'format in a reply: those stay complete and follow their own conventions.',
   '',
   'Be concise. Lead with the answer, then only the reasoning that matters. Drop filler and',
   'do not restate the question. Prefer fragments and lists over prose paragraphs.',
@@ -50,9 +56,6 @@ const RESPONSE_STYLE_BLOCK = [
   'Exceptions — be as thorough as the task needs when writing a specification, requirements,',
   'a migration, or a security finding; when explaining a multi-step plan; or when producing',
   'user-facing documentation.',
-  '',
-  'Never compress structured output: emit JSON, code, diffs, and any required format exactly',
-  'as specified.',
 ].join('\n');
 
 // Agents whose entire job is to produce thorough, descriptive deliverables.

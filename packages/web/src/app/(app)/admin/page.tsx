@@ -2147,10 +2147,11 @@ function AdminPageInner() {
             <CardTitle>Output terseness</CardTitle>
             <CardDescription>
               Global style directive appended to every CLI step&apos;s main prompt, controlling how
-              terse the model&apos;s PROSE output is. Structured output (JSON, code, diffs, specs)
-              and the reasoning channel are always left exact and untouched. off = inject nothing
-              (for models already terse by default), lite = lightest, full = default, ultra = most
-              aggressive. Takes effect within ~30s; persists across restarts.
+              tersely the model words its REPLY. What it writes into files (code, comments, docs,
+              knowledge base, skills), structured output (JSON, diffs, specs) and the reasoning
+              channel are always left complete and untouched. off = inject nothing (for models
+              already terse by default), lite = lightest, full = default, ultra = most aggressive.
+              Takes effect within ~30s; persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">

@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
   configService,
   secretsService,
   userSecretsService,
@@ -418,6 +419,19 @@ async function main(): Promise<void> {
     const reReviewPrompt = sent.find((x) => x.id === reReview?.cliInvocationId)?.prompt ?? '';
     if (!reReviewPrompt.includes(FIXER_CONCERN)) {
       throw new Error('the re-review does not carry the fix coder concerns');
+    }
+
+    // Every agent this task ran was given the terseness directive exactly once.
+    const tersenessOff = (await configService.get(CONFIG_KEYS.TERSENESS_LEVEL)) === 'off';
+    const allPrompts = await db
+      .select({ prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.taskId, task!.id));
+    const misstyled = allPrompts.filter(
+      ({ prompt }) => prompt.split('## Response style').length - 1 !== (tersenessOff ? 0 : 1),
+    );
+    if (allPrompts.length < 8 || misstyled.length > 0) {
+      throw new Error(`${misstyled.length} of ${allPrompts.length} prompts misstate the directive`);
     }
 
     console.log(

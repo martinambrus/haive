@@ -392,13 +392,13 @@ export const CONFIG_KEYS = {
   // inferred from prose, and no install with real anchor history has settled which wins.
   ESTIMATE_PLAN_ANCHORS_ENABLED: 'config:estimate:planAnchorsEnabled',
 
-  // Global terseness level for agent OUTPUT prose, applied as a directive appended to
-  // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
-  // prose is affected — the directive carves out JSON/code/diffs/specs so structured
-  // output stays exact, and reasoning (extended thinking) is a separate channel left
-  // untouched. The manifest-hashed agent .md files keep the fixed 'full' block; this
-  // level governs only the runtime step-prompt injection. Read per cli dispatch (~30s
-  // config cache); a change needs no redeploy.
+  // Global terseness level for how agents WORD their replies, applied as a directive appended
+  // to each CLI step's main prompt (lite | full | ultra; default full). Only the reply is
+  // affected — the directive scopes out everything written into files (code, comments, docs,
+  // knowledge base, skills) and every required format, and reasoning (extended thinking) is a
+  // separate channel left untouched. The manifest-hashed agent .md files keep the fixed 'full'
+  // block; this level governs only the runtime step-prompt injection. Read per cli dispatch
+  // (~30s config cache); a change needs no redeploy.
   TERSENESS_LEVEL: 'config:output:tersenessLevel',
 
   // How much of the approved spec post-implementation agents get in their prompt.
