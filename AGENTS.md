@@ -1219,7 +1219,7 @@ time is a DAG that serialised, and that is worth looking at before blaming the m
 code or defect it finds outside the task alone and to list it instead: 07 as `similarSites`, the
 DAG level coder and the DAG fix coder as `similar_sites`. `ingestReviewRun` reads the fix coder's
 JSON for this field and its `concerns`, which reach the ledger. Gate 2 shows the union of every 07
-round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
+round and every DAG issue as a status row after its checks, and the person acts on an entry by rejecting
 with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
 its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
 for something else, and dropping the site would then hide one still left unchanged. The mark reads
@@ -1239,6 +1239,15 @@ hostile repository text travels. `task_dag_issues.similar_sites` (migration 0165
 pass rather than written, because an advisor retry re-runs the coder into the same row. The DAG
 schema reads a malformed list as `[]` (`.catch`), since a strict field there would turn a finished
 coder into `failed_unrecoverable` over a list only a person reads.
+
+**Out-of-scope findings reach gate 2 too.** 08e offers the `## INSIGHTS` lines agents wrote for
+this task to act on, but auto-continue pre-answers 08e with an empty pick (`06-run-config`),
+`plan_tasklist` runs gate 2 without 08e, and `quick_bugfix` runs neither. So gate 2 lists every
+insight nobody picked at 08e in its own row after the similar-sites row (`_gate-insights.ts`), and
+gate 3 shows it when no gate-2 decision exists. 08e's picks are subtracted by title and location
+across every round, since its `i-N` ids are positions. The row is display copy under the same rules
+as similar sites: each field collapsed to one line of at most 200 chars and escaped, the list cut
+at 30 with the rest counted, and nothing of it entering a prompt.
 
 ## Review findings and waivers
 
