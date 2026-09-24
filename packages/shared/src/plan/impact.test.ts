@@ -115,6 +115,18 @@ describe('renderImpactMermaid', () => {
     expect(source.split('\n').filter((l) => l.trim().startsWith('flowchart'))).toHaveLength(1);
   });
 
+  it('writes percent signs and angle brackets in titles as mermaid entities', () => {
+    // `%%{` anywhere in a source is read as a directive, whatever it sits inside.
+    const hostile = new Map([
+      [A, '%%{init: {}}%% <b>x</b>'],
+      [B, 'ok'],
+    ]);
+    const { source } = renderImpactMermaid(computeImpact([A], [edge(A, B)]), hostile);
+    expect(/\["([^"]*)"\]:::origin/.exec(source)?.[1]).toBe(
+      '#37;#37;{init: {}}#37;#37; #60;b#62;x#60;/b#62;',
+    );
+  });
+
   it('renders a reversed hop with a dotted arrow', () => {
     const { source } = renderImpactMermaid(computeImpact([B], [edge(A, B)]), titles);
     expect(source).toContain('-.->');
