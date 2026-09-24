@@ -9,6 +9,7 @@ describe('looksLikeMarkdown', () => {
 
   it('detects fenced code, inline code, bold and links', () => {
     expect(looksLikeMarkdown('```\ncode\n```')).toBe(true);
+    expect(looksLikeMarkdown('~~~\ncode\n~~~')).toBe(true);
     expect(looksLikeMarkdown('run `make build` now')).toBe(true);
     expect(looksLikeMarkdown('a **bold** run')).toBe(true);
     expect(looksLikeMarkdown('see [docs](https://example.com) here')).toBe(true);

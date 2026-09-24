@@ -12,6 +12,7 @@
  * best-effort: anything malformed degrades to plain markdown — the quiz must
  * never break the spec page.
  */
+import { fencedLines } from '@haive/shared/markdown-fences';
 
 export interface QuizOption {
   text: string;
@@ -28,7 +29,6 @@ export interface ParsedQuiz {
   questions: QuizQuestion[];
 }
 
-const FENCE_RE = /^\s*```/;
 const QUIZ_HEADING_RE = /^##\s+comprehension quiz\b/i;
 const SECTION_HEADING_RE = /^##\s+/;
 const OPTION_RE = /^[-*]\s+\[([ xX])\]\s+(.+)$/;
@@ -44,16 +44,12 @@ export function extractQuizSection(
   body: string,
 ): { before: string; quizMarkdown: string; after: string } | null {
   const lines = body.split('\n');
-  let inFence = false;
+  const fenced = fencedLines(lines);
   let start = -1;
   let end = lines.length;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (fenced[i]) continue;
     if (start === -1) {
       if (QUIZ_HEADING_RE.test(line)) start = i;
     } else if (SECTION_HEADING_RE.test(line)) {
@@ -81,7 +77,7 @@ export function parseQuiz(quizMarkdown: string): ParsedQuiz | null {
   let options: QuizOption[] = [];
   let explanation: string | null = null;
   let inExplanation = false;
-  let inFence = false;
+  const fenced = fencedLines(lines);
 
   const flush = (): void => {
     if (prompt === null) return;
@@ -95,14 +91,12 @@ export function parseQuiz(quizMarkdown: string): ParsedQuiz | null {
     inExplanation = false;
   };
 
-  for (const raw of lines) {
+  for (const [i, raw] of lines.entries()) {
     const line = raw.trimEnd();
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
+    if (fenced[i]) {
       inExplanation = false;
       continue;
     }
-    if (inFence) continue;
 
     const heading = QUESTION_HEADING_RE.exec(line);
     if (heading) {

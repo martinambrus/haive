@@ -6,7 +6,12 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import type { Element, ElementContent } from 'hast';
 import { cn } from '@/lib/cn';
-import { segmentMarkdownBody, type Segment } from './markdown-segments';
+import {
+  COLLAPSE_LINES,
+  hasCollapsibleContent,
+  segmentMarkdownBody,
+  type Segment,
+} from './markdown-segments';
 import { remarkSoftBreaks } from './remark-soft-breaks';
 import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
@@ -15,9 +20,6 @@ import { JsonTreeBlock } from './json-tree-block';
 import { downloadMarkdownHtml } from './export-html';
 import { looksLikeMarkdown } from './looks-like-markdown';
 import { Markdown } from './markdown';
-
-/** Fenced code blocks longer than this render collapsed inside <details>. */
-const COLLAPSE_LINES = 12;
 
 function textOf(nodes: ElementContent[] | undefined): string {
   if (!nodes) return '';
@@ -103,34 +105,6 @@ const MD_COMPONENTS: Components = {
     );
   },
 };
-
-function hasCollapsibleContent(segments: Segment[]): boolean {
-  return segments.some((segment) => {
-    if (segment.kind !== 'markdown') return false;
-    // Cheap line-count scan over fences in the raw text — mirrors PreBlock.
-    const lines = segment.text.split('\n');
-    let inFence = false;
-    let count = 0;
-    let lang = '';
-    for (const line of lines) {
-      const open = /^\s*```(\S*)\s*$/.exec(line);
-      if (!inFence && open) {
-        inFence = true;
-        count = 0;
-        lang = open[1] ?? '';
-        continue;
-      }
-      if (inFence && /^\s*```\s*$/.test(line)) {
-        inFence = false;
-        if (count > COLLAPSE_LINES && lang !== 'mermaid' && lang !== 'before' && lang !== 'after')
-          return true;
-        continue;
-      }
-      if (inFence) count += 1;
-    }
-    return false;
-  });
-}
 
 /** Markdown renderer for infoSection bodies. `enhanced` (default) upgrades
  *  the spec's authoring conventions: interactive comprehension quiz, mermaid

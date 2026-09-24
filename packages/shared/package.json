@@ -91,6 +91,10 @@
       "types": "./dist/knowledge-paths.d.ts",
       "import": "./dist/knowledge-paths.js"
     },
+    "./markdown-fences": {
+      "types": "./dist/markdown-fences.d.ts",
+      "import": "./dist/markdown-fences.js"
+    },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"

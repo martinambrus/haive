@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { segmentMarkdownBody } from './markdown-segments';
+import { COLLAPSE_LINES, hasCollapsibleContent, segmentMarkdownBody } from './markdown-segments';
 
 const PAIR = ['```before', 'old line', '```', '', '```after', 'new line', '```'].join('\n');
 
@@ -88,5 +88,54 @@ describe('segmentMarkdownBody', () => {
     const segments = segmentMarkdownBody(body);
     expect(segments).toHaveLength(1);
     expect(segments[0]!.kind).toBe('markdown');
+  });
+});
+
+describe('fences read by CommonMark rules', () => {
+  it('leaves a before/after pair written inside a four-backtick fence in that fence', () => {
+    const body = [
+      '````md',
+      '```',
+      '```before',
+      'old',
+      '```',
+      '```after',
+      'new',
+      '```',
+      '````',
+    ].join('\n');
+    expect(segmentMarkdownBody(body)).toEqual([{ kind: 'markdown', text: body }]);
+  });
+
+  it('pairs tilde fences and fences whose info string goes on past the language', () => {
+    const body = ['~~~before', 'old', '~~~', '', '```after title="new"', 'new', '```'].join('\n');
+    expect(segmentMarkdownBody(body)).toEqual([
+      { kind: 'before-after', before: 'old', after: 'new' },
+    ]);
+  });
+
+  it('does not pair indented code', () => {
+    const body = PAIR.split('\n')
+      .map((line) => `    ${line}`)
+      .join('\n');
+    expect(segmentMarkdownBody(body)).toEqual([{ kind: 'markdown', text: body }]);
+  });
+});
+
+describe('hasCollapsibleContent', () => {
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`);
+  const collapsible = (body: string) => hasCollapsibleContent(segmentMarkdownBody(body));
+
+  it('counts a four-backtick fence as one block, the fences it quotes included', () => {
+    expect(collapsible(['````md', ...lines(6), '```', ...lines(7), '````'].join('\n'))).toBe(true);
+  });
+
+  it('counts a long fence that never closes', () => {
+    expect(collapsible(['```ts', ...lines(COLLAPSE_LINES + 1)].join('\n'))).toBe(true);
+  });
+
+  it('leaves out a long mermaid fence and a short one', () => {
+    expect(collapsible(['```mermaid', ...lines(20), '```'].join('\n'))).toBe(false);
+    expect(collapsible(['```', ...lines(COLLAPSE_LINES), '```'].join('\n'))).toBe(false);
   });
 });

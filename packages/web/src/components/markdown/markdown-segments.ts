@@ -13,6 +13,7 @@
  *  reference-style links spanning a segment boundary would break — not a
  *  realistic shape for LLM-authored specs.
  */
+import { scanFences, type Fence } from '@haive/shared/markdown-fences';
 import { extractQuizSection, parseQuiz, type ParsedQuiz } from './quiz-parser';
 
 export type Segment =
@@ -20,41 +21,22 @@ export type Segment =
   | { kind: 'before-after'; before: string; after: string }
   | { kind: 'quiz'; quiz: ParsedQuiz };
 
-const FENCE_OPEN_RE = /^\s*```(\S*)\s*$/;
-const FENCE_CLOSE_RE = /^\s*```\s*$/;
+/** PreBlock collapses a code block longer than this. */
+export const COLLAPSE_LINES = 12;
 
-interface Fence {
-  lang: string;
-  startLine: number;
-  endLine: number;
-  content: string;
-}
-
-/** Scans for complete top-level fences. An unterminated trailing fence is
- *  simply not collected, so it can never participate in a pair. */
-function scanFences(lines: string[]): Fence[] {
-  const fences: Fence[] = [];
-  let open: { lang: string; startLine: number; content: string[] } | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (open === null) {
-      const m = FENCE_OPEN_RE.exec(line);
-      if (m) open = { lang: m[1] ?? '', startLine: i, content: [] };
-      continue;
-    }
-    if (FENCE_CLOSE_RE.test(line)) {
-      fences.push({
-        lang: open.lang,
-        startLine: open.startLine,
-        endLine: i,
-        content: open.content.join('\n'),
-      });
-      open = null;
-    } else {
-      open.content.push(line);
-    }
-  }
-  return fences;
+/** Whether PreBlock will collapse any block here, so the expand/collapse-all toolbar has work. */
+export function hasCollapsibleContent(segments: Segment[]): boolean {
+  return segments.some(
+    (segment) =>
+      segment.kind === 'markdown' &&
+      scanFences(segment.text.split('\n')).some(
+        (f) =>
+          f.content.length > COLLAPSE_LINES &&
+          f.lang !== 'mermaid' &&
+          f.lang !== 'before' &&
+          f.lang !== 'after',
+      ),
+  );
 }
 
 function onlyBlankBetween(lines: string[], from: number, to: number): boolean {
@@ -75,7 +57,9 @@ function splitBeforeAfter(text: string): Segment[] {
     if (
       a.lang === 'before' &&
       b.lang === 'after' &&
-      onlyBlankBetween(lines, a.endLine + 1, b.startLine)
+      a.close !== null &&
+      b.close !== null &&
+      onlyBlankBetween(lines, a.close + 1, b.open)
     ) {
       pairs.push({ before: a, after: b });
       i += 1; // consume both fences
@@ -86,10 +70,14 @@ function splitBeforeAfter(text: string): Segment[] {
   const segments: Segment[] = [];
   let cursor = 0;
   for (const pair of pairs) {
-    const head = lines.slice(cursor, pair.before.startLine).join('\n');
+    const head = lines.slice(cursor, pair.before.open).join('\n');
     if (head.trim().length > 0) segments.push({ kind: 'markdown', text: head });
-    segments.push({ kind: 'before-after', before: pair.before.content, after: pair.after.content });
-    cursor = pair.after.endLine + 1;
+    segments.push({
+      kind: 'before-after',
+      before: pair.before.content.join('\n'),
+      after: pair.after.content.join('\n'),
+    });
+    cursor = pair.after.close! + 1;
   }
   const tail = lines.slice(cursor).join('\n');
   if (tail.trim().length > 0) segments.push({ kind: 'markdown', text: tail });
