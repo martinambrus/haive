@@ -1192,6 +1192,61 @@ describe('a build dispatching on what is attached now', () => {
     ).rejects.toThrow(/nothing to build from/);
   });
 
+  it('counts a picture attached while an earlier addition was being prepared', async () => {
+    // The dispatch's attachments notice names what is attached once preparing is over, so what it
+    // requires has to be read from the same rows.
+    const f = await briefOnly();
+    await f.attach('late.docx', await docxBytes('Late requirements.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.attach('mid.png', 'png');
+    };
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    expect(await f.index()).toContain('`mid.png`');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'late.docx',
+      'mid.png',
+    ]);
+  });
+
+  it('drops an input deleted while another was being prepared', async () => {
+    const f = await standard();
+    await f.attach('late.docx', await docxBytes('Late requirements.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.remove(f.wire);
+    };
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(await f.index()).not.toContain('wire.png');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'spec.pdf',
+      'late.docx',
+    ]);
+  });
+
+  it('stops after three passes while files keep arriving, leaving the last for the next dispatch', async () => {
+    const f = await briefOnly();
+    await f.attach('a0.docx', await docxBytes('Zero.'));
+    let fired = 0;
+    f.fake.hooks.beforeLock = async () => {
+      fired += 1;
+      await f.attach(`a${fired}.docx`, await docxBytes(`Number ${fired}.`));
+    };
+    await withLiveInputs(f.ctx, f.d);
+    f.fake.hooks.beforeLock = null;
+    expect(fired).toBe(3);
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'a0.docx',
+      'a1.docx',
+      'a2.docx',
+    ]);
+  });
+
   it('records nothing over a 00-plan-inputs retry that reset its output', async () => {
     // The retry's own output is newer than anything computed from the one it replaced.
     const f = await standard();

@@ -57,6 +57,9 @@ export const PLAN_INPUTS_INDEX = PLAN_INPUTS_INDEX_NAME;
  *  is still mounted and the index says plainly that no text was pulled from it. */
 const PLAN_INPUT_EXTRACTION_LIMIT = 50;
 
+/** Passes `currentPlanInputs` makes while the attachments keep changing under its preparation. */
+const PLAN_INPUT_SETTLE_PASSES = 3;
+
 export interface PlanInputRow {
   filename: string;
   kind: PlanInputKind;
@@ -507,14 +510,38 @@ export interface CurrentPlanInputs {
  * is recorded over the output it was computed from, so the next dispatch neither extracts the same
  * document again nor loses what it found.
  *
+ * Preparing an addition can take minutes, and a person can attach or delete meanwhile. The notice a
+ * dispatch builds afterwards names what is attached then, so a pass that prepared anything reads the
+ * attachments again, and another pass brings the result up to rows that changed, up to
+ * `PLAN_INPUT_SETTLE_PASSES` in all.
+ *
  * Null when this step did not run for the task or the attachments cannot be read, which leaves a build
- * on the fields it had. `attachments` is a snapshot the caller already read; without one this reads
- * its own.
+ * on the fields it had. `attachments` is a snapshot the caller already read, which the first pass
+ * judges; without one this reads its own.
  */
 export async function currentPlanInputs(
   ctx: StepContext,
   attachments?: LiveAttachments | null,
 ): Promise<CurrentPlanInputs | null> {
+  let snapshot = attachments;
+  for (let pass = 1; ; pass += 1) {
+    const result = await planInputsPass(ctx, snapshot);
+    if (!result?.prepared || pass === PLAN_INPUT_SETTLE_PASSES) return result?.current ?? null;
+    const now = await loadLiveAttachments(ctx);
+    if (!now || sameAttachmentRows(now, result.live)) return result.current;
+    snapshot = now;
+  }
+}
+
+function sameAttachmentRows(a: LiveAttachments, b: LiveAttachments): boolean {
+  return a.ids.size === b.ids.size && [...a.ids].every((id) => b.ids.has(id));
+}
+
+/** One pass of `currentPlanInputs` over one snapshot, and whether it prepared anything. */
+async function planInputsPass(
+  ctx: StepContext,
+  attachments: LiveAttachments | null | undefined,
+): Promise<{ current: CurrentPlanInputs; live: LiveAttachments; prepared: boolean } | null> {
   const recorded = await loadPlanInputsRow(ctx);
   if (!recorded) return null;
   const live = attachments === undefined ? await loadLiveAttachments(ctx) : attachments;
@@ -528,7 +555,8 @@ export async function currentPlanInputs(
   const archiveNotes = [...(pruned.output.archiveNotes ?? [])];
   let extracted = pruned.output.extracted;
   const unprepared: LiveAttachmentRow[] = [];
-  for (const attachment of unpreparedAttachments(recorded.output, live)) {
+  const additions = unpreparedAttachments(recorded.output, live);
+  for (const attachment of additions) {
     const prepared = await preparePlanInput(
       ctx,
       attachment,
@@ -555,7 +583,8 @@ export async function currentPlanInputs(
     archiveNotes.push({ filename: row.filename, note: row.expansionNote });
     changed = true;
   }
-  if (!changed) return { output: recorded.output, unprepared };
+  const prepared = additions.length > 0;
+  if (!changed) return { current: { output: recorded.output, unprepared }, live, prepared };
 
   const output: PlanInputsApply = {
     ...pruned.output,
@@ -569,7 +598,7 @@ export async function currentPlanInputs(
     indexPath: await rewritePlanInputsIndex(ctx, inputs, archiveNotes),
   };
   await recordPlanInputs(ctx, recorded, output);
-  return { output, unprepared };
+  return { current: { output, unprepared }, live, prepared };
 }
 
 /** Rewrite the index for these inputs, or remove it once there are none, and answer the path a prompt

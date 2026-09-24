@@ -991,7 +991,10 @@ recomputes those fields at DISPATCH, the root and every wave, through `currentPl
 (`00-plan-inputs.ts`). A deletion drops the input with every verdict it carried, and a measured
 verdict never changes otherwise: a PDF that yielded no text stays visual-only. An addition is
 prepared exactly as 00 prepares one (`preparePlanInput`), inside the same 50-extraction budget, and
-the note of an archive expanded since joins it. Membership is by ROW, never by name: a file deleted
+the note of an archive expanded since joins it. Preparing can take minutes, and the attachments
+notice the dispatch builds afterwards names what is attached THEN, so a pass that prepared anything
+reads the rows again and another pass catches up with any that changed, up to three in all.
+Membership is by ROW, never by name: a file deleted
 and re-uploaded under the same name is a different document, prepared on its own, and never
 inherits the verdict of the one it replaced. When anything changed, the index is re-rendered, or
 removed once nothing in it is left, and the result is written back over 00's output by

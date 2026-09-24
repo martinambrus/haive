@@ -293,7 +293,8 @@ function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
  *
  * Returns `d` itself when 00 did not run for the task or the attachments cannot be read, which leaves
  * the build on the fields it had before this existed. `attachments` is a snapshot the caller already
- * read, so that its other decisions see the same rows; without one this reads its own.
+ * read; without one this reads its own, and rows that change while an addition is prepared are read
+ * again (`currentPlanInputs`).
  */
 export async function withLiveInputs(
   ctx: StepContext,
@@ -695,9 +696,9 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
-        // The capabilities are chosen from the rows read here, and the refusal is made again once
-        // the inputs are prepared: preparing a late document can take minutes, and deleting the
-        // only one meanwhile must still stop a root that would have nothing to build from.
+        // The refusal is made on the rows read here and again once the inputs are prepared:
+        // preparing a late document can take minutes, and deleting the only one meanwhile must
+        // still stop a root that would have nothing to build from.
         const attachments = await loadLiveAttachments(ctx);
         assertSomethingToBuildFrom(d, attachments);
         const live = await withLiveInputs(ctx, d, attachments);
