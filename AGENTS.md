@@ -1141,6 +1141,31 @@ deliberate convention-setter, the trailing ones are integrators. No rule here is
 from those five points — they vary by model and by effort — but a run whose wall time ~ its CLI
 time is a DAG that serialised, and that is worth looking at before blaming the model.
 
+**Similar code is reported, not changed.** Every implementing pass is told to leave the same
+code or defect it finds outside the task alone and to list it instead: 07 as `similarSites`, the
+DAG level coder and the DAG fix coder as `similar_sites`. The fix coder's JSON is otherwise never
+read, so `ingestReviewRun` parses it for this field alone. Gate 2 shows the union of every 07
+round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
+with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
+its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
+for something else, and dropping the site would then hide one still left unchanged. The mark reads
+07's `filesTouched`, the agent's own and possibly incomplete account, so it is a hint and never
+proof, and the row says the agent LEFT each site unchanged when it reported it rather than
+asserting the site is unchanged now. A manual retry of 07 replaces that round's pass, its reports
+included, exactly as it replaces the pass's summary and `filesTouched`: a retry means "redo this
+step", the edits the pass left stay visible to every reviewer through the dirty-worktree scan, and
+the rerun reads the same code. `quick_bugfix` runs no gate 2, so gate 3 shows the row whenever no
+gate-2 decision exists.
+
+The lists are display copy and are kept that way. They are sanitised on the way in and again on
+read (`_similar-sites.ts`): a path must be single-line, fence-safe and inside the repository, and
+a reason is collapsed to 200 chars. They never enter the task ledger, for the reason
+`REPO_IS_DATA_ACTING_LINES` gives: an editing agent's prose relayed into later prompts is how
+hostile repository text travels. `task_dag_issues.similar_sites` (migration 0165) is MERGED per
+pass rather than written, because an advisor retry re-runs the coder into the same row. The DAG
+schema reads a malformed list as `[]` (`.catch`), since a strict field there would turn a finished
+coder into `failed_unrecoverable` over a list only a person reads.
+
 ## Review findings and waivers
 
 `review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. It is WRITE-ONLY on purpose: `recordReviewFindings` (`_review-findings.ts`) is the only insert and nothing in worker or api SELECTs the table. No behaviour gates on it, which is why every write there is best-effort and never throws — telemetry must not fail the review that produced it.
