@@ -32,6 +32,7 @@ import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.
 import type { FileCoverage } from './_impl-changes.js';
 import { fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
+import { codeBlock } from './_plan-ops.js';
 
 /** Coverage as a step wrote it into `task_steps.output`. */
 interface CoverageOutput {
@@ -798,7 +799,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // carrying its evidence as an inline disclosure. Skipped checks are OMITTED (a
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
     // row and no "all passed" line when nothing actually ran.
-    const fenced = (s: string) => ['```', s || '(empty)', '```'].join('\n');
+    const fenced = (s: string) => codeBlock(s || '(empty)');
     // Whether ANY of the three checks actually executed. Derived from the slots this gate
     // already reads rather than a new payload field, so it answers the same on a gate parked
     // before it existed. `allPassed` cannot stand in: 08 computes it as "nothing that ran

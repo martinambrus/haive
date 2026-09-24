@@ -3,6 +3,7 @@ import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
+import { codeBlock } from './_plan-ops.js';
 
 /**
  * Pre-flight for 08b: can the runner load this repo's EXISTING tests at all, before a tester
@@ -151,10 +152,7 @@ export function preflightGateSchema(block: TestPreflightBlock): FormSchema {
       '',
       '**Enumerate command**',
       '',
-      '```',
-      block.command,
-      block.output.trim(),
-      '```',
+      codeBlock(`${block.command}\n${block.output.trim()}`),
       '',
       'Skip this step instead to continue without test management.',
     ].join('\n'),
