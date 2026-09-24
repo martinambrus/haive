@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { getTableColumns } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
   type CliExecJobPayload,
   type StepCapability,
 } from '@haive/shared';
-import { advanceStep } from '../src/step-engine/step-runner.js';
+import { MINING_ROW_COLUMNS, advanceStep } from '../src/step-engine/step-runner.js';
+import { agentDefinitionGuidance } from '../src/step-engine/steps/_retrieval-guidance.js';
+import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
+import { MCP_SURFACE_MARKER } from '../src/sandbox/mcp-surface.js';
 import {
   MiningRetryError,
   MiningWaveError,
@@ -31,6 +35,8 @@ interface MiningRow {
   roleKey?: string | null;
   capabilities?: string[] | null;
   preferVision?: boolean | null;
+  /** The prompt the step wrote for the agent's last dispatch, before any augmentation. */
+  dispatchPrompt?: string | null;
 }
 
 interface MockState {
@@ -45,6 +51,8 @@ interface MockState {
    *  wave-dispatch recovery path, which repeats an agent by the prompt its last
    *  run actually used. */
   invocationRows?: { id: string; prompt: string; errorMessage?: string | null }[];
+  /** Every projection a read of the mining table asked for, in order. */
+  miningProjections?: unknown[];
 }
 
 function tableNameOf(table: unknown): string {
@@ -68,8 +76,11 @@ function makeMockDb(state: MockState): Database {
     return [];
   };
   const db = {
-    select: (_projection?: unknown) => ({
+    select: (projection?: unknown) => ({
       from: (table: unknown) => {
+        if (tableNameOf(table) === 'task_step_agent_minings') {
+          (state.miningProjections ??= []).push(projection);
+        }
         const rows = rowsFor(tableNameOf(table));
         // .where() and .orderBy() are each awaited directly by some reads and chained
         // further by others, so both must be thenable AND chainable.
@@ -1067,7 +1078,66 @@ describe('what a mining agent is told about the task', () => {
     }
   });
 
-  it('sends a recovered agent the prompt its last run sent, without augmenting it again', async () => {
+  it('records the prompt its step wrote, not the one it sent', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(withAttachments(state), waveStep([], ['refute-abc']), []);
+
+    const [sent] = sentPrompts(state);
+    expect(sent).toContain('[User-attached files]');
+    expect(sent).toContain('## Response style');
+    const recorded = state.inserts.find(
+      (i) => i.table === 'task_step_agent_minings' && i.row.agentId === 'refute-abc',
+    );
+    expect(recorded?.row.dispatchPrompt).toBe('refute refute-abc');
+  });
+
+  it('tells a recovered agent what is attached, and the style directive, once each', async () => {
+    // Built from the step's own prompt, so it goes through the augmenters exactly once — with the
+    // attachments as they are now, not as the run it repeats saw them.
+    const recovering = {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+        dispatchPrompt: 'expand node abc',
+      }),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-plan-expand-abc-p3',
+        prompt:
+          '[User-attached files]\n  - deleted-since.pdf\n\nexpand node abc\n\n## Response style\nBe concise.',
+      },
+    ];
+    await run(withAttachments(state), recovering, []);
+
+    const [prompt] = sentPrompts(state);
+    expect(prompt).toContain('expand node abc');
+    expect(prompt).toContain('brief.pdf');
+    expect(prompt).not.toContain('deleted-since.pdf');
+    expect(count(prompt!, '[User-attached files]')).toBe(1);
+    expect(count(prompt!, '## Response style')).toBe(1);
+  });
+
+  it('sends a recovered agent that recorded no prompt the one its last run sent, unaugmented', async () => {
     // The stored prompt is the text that run SENT, so it already carries every block; putting it
     // through the augmenters again doubles the notice and the style directive.
     const recovering = {
@@ -1189,18 +1259,25 @@ describe('the dispatch a mining row records', () => {
     await run(makeMockDb(state), overridingWave(), []);
 
     const rows = miningWrites(state);
-    expect(rows.find((r) => r.agentId === 'refute-abc')).toMatchObject(asked);
+    expect(rows.find((r) => r.agentId === 'refute-abc')).toMatchObject({
+      ...asked,
+      dispatchPrompt: 'refute abc',
+    });
     expect(rows.find((r) => r.agentId === 'refute-def')).toMatchObject({
       roleKey: null,
       capabilities: null,
       preferVision: null,
+      dispatchPrompt: 'refute def',
     });
   });
 
   it('records it again on a re-roll', async () => {
     const state = reRequested();
     await run(makeMockDb(state), overridingRetry(), []);
-    expect(miningWrites(state).find((r) => r.status === 'pending')).toMatchObject(asked);
+    expect(miningWrites(state).find((r) => r.status === 'pending')).toMatchObject({
+      ...asked,
+      dispatchPrompt: 'review',
+    });
   });
 
   it('records it for an agent no provider could take', async () => {
@@ -1210,11 +1287,14 @@ describe('the dispatch a mining row records', () => {
     await run(makeMockDb(fresh), overridingWave(), [], [blindProvider('prov-1')]);
     expect(
       miningWrites(fresh).find((r) => r.agentId === 'refute-abc' && r.status === 'failed'),
-    ).toMatchObject(asked);
+    ).toMatchObject({ ...asked, dispatchPrompt: 'refute abc' });
 
     const reroll = reRequested();
     await run(makeMockDb(reroll), overridingRetry(), [], [blindProvider('prov-1')]);
-    expect(miningWrites(reroll).find((r) => r.status === 'failed')).toMatchObject(asked);
+    expect(miningWrites(reroll).find((r) => r.status === 'failed')).toMatchObject({
+      ...asked,
+      dispatchPrompt: 'review',
+    });
   });
 });
 
@@ -1304,5 +1384,172 @@ describe('a recovered wave agent', () => {
       [blindProvider('prov-1'), makeProvider({ id: 'prov-2' })],
     );
     expect(dispatchedTo(state)).toBe('prov-1');
+  });
+});
+
+describe('a wave agent recovered from the prompt its step wrote', () => {
+  // `cli_invocations.prompt` is what a run SENT: the step's text plus the attachments notice, the
+  // ledger, the style directive and the adaptations for the provider it ran on. The row's own
+  // `dispatch_prompt` is the step's text alone, so a retry built from it is augmented and adapted
+  // once, for today and for the provider that takes it.
+  function recoveringStep(retry?: { maxAttempts: number }): StepDefinition {
+    return {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        ...(retry ? { retry } : {}),
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply(_ctx: unknown, args: StepApplyArgs) {
+        // Asks for its wave agent again while the runner says the attempt is not final — the
+        // automatic re-roll a person never requested.
+        if (retry && args.isFinalMiningAttempt === false) {
+          throw new MiningRetryError(['plan-expand-abc-p3']);
+        }
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+  const count = (text: string, needle: string): number => text.split(needle).length - 1;
+  const sentPrompts = (state: MockState): string[] =>
+    state.inserts.filter((i) => i.table === 'cli_invocations').map((i) => String(i.row.prompt));
+  const miningWrites = (state: MockState): Record<string, unknown>[] => [
+    ...state.inserts.filter((i) => i.table === 'task_step_agent_minings').map((i) => i.row),
+    ...state.updates.filter((u) => u.table === 'task_step_agent_minings'),
+  ];
+  /** What provider A was sent: its surface and its no-vision boundary around the step's text. */
+  const SENT_TO_A = `${MCP_SURFACE_MARKER}\nA's surface\n\n${MODEL_CAPABILITY_BOUNDARY_MARKER}\nA's boundary\n\nexpand node abc`;
+  const failedWave = (overrides: Partial<MiningRow>): MockState => {
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+        dispatchPrompt: 'expand node abc',
+        ...overrides,
+      }),
+    ]);
+    state.invocationRows = [{ id: 'inv-plan-expand-abc-p3', prompt: SENT_TO_A }];
+    return state;
+  };
+  /** An agent no provider could take: it never reached a CLI, so it has no invocation. */
+  const neverDispatched = (overrides: Partial<MiningRow>): MockState =>
+    freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'no cli provider available: every provider is disabled',
+        cliInvocationId: null,
+        dispatchPrompt: 'expand node abc',
+        ...overrides,
+      }),
+    ]);
+
+  it('is adapted for the provider that takes it, not the one that ran it', async () => {
+    const state = failedWave({});
+    await run(makeMockDb(state), recoveringStep(), []);
+    const [prompt] = sentPrompts(state);
+    expect(prompt).toContain('expand node abc');
+    expect(prompt).not.toContain("A's surface");
+    expect(prompt).not.toContain("A's boundary");
+    expect(count(prompt!, MCP_SURFACE_MARKER)).toBe(1);
+    expect(count(prompt!, MODEL_CAPABILITY_BOUNDARY_MARKER)).toBe(0);
+  });
+
+  it("carries a blind provider's boundary once, its own and not the last run's", async () => {
+    const state = failedWave({});
+    await run(makeMockDb(state), recoveringStep(), [], [blindProvider('prov-1')]);
+    const [prompt] = sentPrompts(state);
+    expect(prompt).not.toContain("A's boundary");
+    expect(count(prompt!, MODEL_CAPABILITY_BOUNDARY_MARKER)).toBe(1);
+  });
+
+  it('is assigned the persona its step named', async () => {
+    // A sent prompt no longer carries the marker (the dispatcher rewrote it), so a verbatim replay
+    // could never record which persona the agent was.
+    const state = failedWave({
+      dispatchPrompt: agentDefinitionGuidance(
+        'code-reviewer',
+        'Follow .claude/agents/code-reviewer.md to review node abc.',
+      ),
+    });
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), recoveringStep(), enqueued);
+    const spec = enqueued[0]?.spec as { assignedAgentIds?: string[] } | undefined;
+    expect(spec?.assignedAgentIds).toContain('code-reviewer');
+  });
+
+  it('records the prompt it recovered from again, so the next retry has it too', async () => {
+    const state = failedWave({});
+    await run(makeMockDb(state), recoveringStep(), []);
+    expect(miningWrites(state).find((w) => w.status === 'pending')).toMatchObject({
+      dispatchPrompt: 'expand node abc',
+    });
+  });
+
+  it('replays the last run verbatim, and records none, when its row recorded no prompt', async () => {
+    const state = failedWave({ dispatchPrompt: null });
+    state.invocationRows = [{ id: 'inv-plan-expand-abc-p3', prompt: 'expand node abc' }];
+    await run(makeMockDb(state), recoveringStep(), []);
+    expect(sentPrompts(state)).toHaveLength(1);
+    // Recording that prompt would hand the next retry a sent prompt to augment a second time.
+    expect(miningWrites(state).find((w) => w.status === 'pending')).toMatchObject({
+      dispatchPrompt: null,
+    });
+  });
+
+  it('re-dispatches an agent no provider could take, when a person asks', async () => {
+    const state = neverDispatched({ userRetryRequestedAt: new Date() });
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), recoveringStep(), enqueued);
+    expect(enqueued).toHaveLength(1);
+    expect(sentPrompts(state)[0]).toContain('expand node abc');
+  });
+
+  it('leaves it failed, charging nothing, while there is still no provider', async () => {
+    const state = neverDispatched({ userRetryRequestedAt: new Date(), capabilities: ['vision'] });
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), recoveringStep(), enqueued, [blindProvider('prov-1')]);
+    expect(enqueued).toHaveLength(0);
+    const failed = miningWrites(state).find((w) => w.status === 'failed');
+    expect(String(failed?.errorMessage)).toContain('no cli provider available');
+    expect(failed).not.toHaveProperty('attempts');
+  });
+
+  it('does not re-run an agent that never reached a CLI on an automatic re-roll', async () => {
+    // Nobody asked: an automatic re-roll would meet the same missing provider, and no attempt is
+    // charged for that, so only a person's Resume brings such an agent back.
+    const state = neverDispatched({});
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), recoveringStep({ maxAttempts: 2 }), enqueued);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  it('reads a prompt-sized column only for the rows it recovers', async () => {
+    const state = failedWave({});
+    await run(makeMockDb(state), recoveringStep(), []);
+    const projections = state.miningProjections ?? [];
+    expect(projections.length).toBeGreaterThan(0);
+    for (const projection of projections) {
+      // A bare select() reads every column of every row on every advance.
+      expect(projection).toBeDefined();
+      const keys = Object.keys(projection as object);
+      if (keys.includes('dispatchPrompt')) expect(keys.sort()).toEqual(['dispatchPrompt', 'id']);
+    }
+  });
+
+  it('leaves exactly the dispatch prompt out of the columns the hot reads select', () => {
+    expect(Object.keys(MINING_ROW_COLUMNS).sort()).toEqual(
+      Object.keys(getTableColumns(schema.taskStepAgentMinings))
+        .filter((key) => key !== 'dispatchPrompt')
+        .sort(),
+    );
   });
 });

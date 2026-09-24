@@ -3,6 +3,7 @@ import {
   asc,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -1132,7 +1133,7 @@ async function resolveAgentMiningPhase(
   const spec = stepDef.agentMining!;
 
   let existing = await db
-    .select()
+    .select(MINING_ROW_COLUMNS)
     .from(schema.taskStepAgentMinings)
     .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
 
@@ -1156,7 +1157,7 @@ async function resolveAgentMiningPhase(
       )
     ) {
       existing = await db
-        .select()
+        .select(MINING_ROW_COLUMNS)
         .from(schema.taskStepAgentMinings)
         .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
     }
@@ -1437,19 +1438,27 @@ type MiningRetryTargets = Map<
 >;
 
 /** A dispatch as the runner handles it. `replayVerbatim` marks an agent recovered from its prior
- *  invocation's stored prompt, which is the text that run already SENT — augmented and adapted — so
- *  it goes out as it stands: augmenting it again would repeat every block. Runner-internal; a step
- *  never sets it, which is why it is not on `AgentMiningDispatch`. */
+ *  invocation's stored prompt — only a row that recorded no `dispatch_prompt` — which is the text
+ *  that run already SENT, augmented and adapted, so it goes out as it stands: augmenting it again
+ *  would repeat every block. Runner-internal; a step never sets it, which is why it is not on
+ *  `AgentMiningDispatch`. */
 type RunnerMiningDispatch = AgentMiningDispatch & { replayVerbatim?: true };
 
 type DispatchRequirements = Pick<AgentMiningDispatch, 'roleKey' | 'capabilities' | 'preferVision'>;
 
+/** Every mining-row column but `dispatch_prompt`. The fan-out barrier and the retry path read
+ *  every row of a step on every advance, and that column holds a whole prompt per row, so they
+ *  select this; the one reader that needs the prompt fetches it for the rows it recovers. */
+const { dispatchPrompt: _dispatchPrompt, ...MINING_ROW_COLUMNS } = getTableColumns(
+  schema.taskStepAgentMinings,
+);
+export { MINING_ROW_COLUMNS };
+type MiningRow = Omit<typeof schema.taskStepAgentMinings.$inferSelect, 'dispatchPrompt'>;
+
 /** The seat and requirements a mining row recorded at its last dispatch, as dispatch fields. A NULL
  *  column stays unset, which resolves as a dispatch that never set it; a capability that is no
  *  longer a `StepCapability` is dropped. */
-function recordedRequirements(
-  row: typeof schema.taskStepAgentMinings.$inferSelect | undefined,
-): DispatchRequirements {
+function recordedRequirements(row: MiningRow | undefined): DispatchRequirements {
   const out: DispatchRequirements = {};
   if (row?.roleKey != null) out.roleKey = row.roleKey;
   if (row?.capabilities != null) out.capabilities = row.capabilities.filter(isStepCapability);
@@ -1548,12 +1557,14 @@ async function dispatchMiningAgents(
       dispatch.roleKey ?? 'default',
     );
     // Recorded on the row at every write below, so a retry that cannot rebuild this dispatch — a
-    // wave agent recovered from its stored prompt — runs in the same seat under the same
-    // requirements. The OVERRIDES only: NULL means "the step's own", as it does here.
+    // wave agent — re-runs the step's own prompt in the same seat under the same requirements. The
+    // OVERRIDES only: NULL means "the step's own", as it does here. A verbatim replay's prompt is
+    // an earlier run's effective prompt, so it records none rather than one augmented twice later.
     const requirements = {
       roleKey: dispatch.roleKey ?? null,
       capabilities: dispatch.capabilities ?? null,
       preferVision: dispatch.preferVision ?? null,
+      dispatchPrompt: dispatch.replayVerbatim ? null : dispatch.prompt,
     };
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers: params.providers!,
@@ -1669,7 +1680,7 @@ async function dispatchMiningAgents(
         .onConflictDoNothing({
           target: [schema.taskStepAgentMinings.taskStepId, schema.taskStepAgentMinings.agentId],
         })
-        .returning();
+        .returning({ id: schema.taskStepAgentMinings.id });
       const miningRow = mining[0];
       if (!miningRow) {
         await db
@@ -3116,7 +3127,7 @@ async function retryMiningAgents(
   if (agentIds.length === 0 || !params.providers || !params.deps) return 0;
 
   const rows = await db
-    .select()
+    .select(MINING_ROW_COLUMNS)
     .from(schema.taskStepAgentMinings)
     .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
 
@@ -3191,8 +3202,7 @@ async function retryMiningAgents(
     })
   ).filter((d) => targets.has(d.agentId));
 
-  // Agents `selectAgents` cannot re-offer, recovered from the prompt their last
-  // run actually used.
+  // Agents `selectAgents` cannot re-offer, recovered from what their rows recorded.
   //
   // A WAVE-DISPATCHING step throws its later waves from apply() as a
   // MiningWaveError, so `selectAgents` never authored those agents and cannot
@@ -3205,44 +3215,80 @@ async function retryMiningAgents(
   // text, because nothing was ever dispatched. The task looked permanently
   // quota-blocked long after the quota came back.
   //
-  // Safe because it only fills gaps: an agent `selectAgents` DID offer keeps
-  // that fresh prompt, so this can never shadow a newer one. `cli_invocations.prompt`
-  // is not null, so a row with a prior invocation always has one.
+  // The step's own prompt (`dispatch_prompt`) is sent through the same augmentation and provider
+  // adaptation as a fresh dispatch, so a retry on another provider gets that provider's surface and
+  // the attachments notice names what is attached now. It also covers an agent that never reached
+  // a CLI because no provider could take it, but only when a person asked: an automatic re-roll
+  // would meet the same missing provider, and no attempt is charged for that. A row written before
+  // the column existed replays its last run's stored prompt verbatim, as it always did.
+  //
+  // Safe because it only fills gaps: an agent `selectAgents` DID offer keeps that fresh prompt, so
+  // this can never shadow a newer one.
   const offered = new Set(dispatches.map((d) => d.agentId));
-  const unofferedWithPrior = [...targets.entries()].filter(
-    ([agentId, t]) => !offered.has(agentId) && t.cliInvocationId,
-  );
-  if (unofferedWithPrior.length > 0) {
-    const priorPrompts = await db
-      .select({ id: schema.cliInvocations.id, prompt: schema.cliInvocations.prompt })
-      .from(schema.cliInvocations)
+  const unoffered = [...targets.entries()].filter(([agentId]) => !offered.has(agentId));
+  if (unoffered.length > 0) {
+    const stored = await db
+      .select({
+        id: schema.taskStepAgentMinings.id,
+        dispatchPrompt: schema.taskStepAgentMinings.dispatchPrompt,
+      })
+      .from(schema.taskStepAgentMinings)
       .where(
         inArray(
-          schema.cliInvocations.id,
-          unofferedWithPrior.map(([, t]) => t.cliInvocationId!),
+          schema.taskStepAgentMinings.id,
+          unoffered.map(([, t]) => t.id),
         ),
       );
+    const dispatchPromptById = new Map(stored.map((r) => [r.id, r.dispatchPrompt]));
+    const legacy = unoffered.filter(([, t]) => !dispatchPromptById.get(t.id) && t.cliInvocationId);
+    const priorPrompts =
+      legacy.length === 0
+        ? []
+        : await db
+            .select({ id: schema.cliInvocations.id, prompt: schema.cliInvocations.prompt })
+            .from(schema.cliInvocations)
+            .where(
+              inArray(
+                schema.cliInvocations.id,
+                legacy.map(([, t]) => t.cliInvocationId!),
+              ),
+            );
     const promptById = new Map(priorPrompts.map((r) => [r.id, r.prompt]));
     const rowByAgentId = new Map(wantedRows.map((r) => [r.agentId, r]));
+    const neverDispatched: string[] = [];
     const skippedPastedPersona: string[] = [];
-    for (const [agentId, t] of unofferedWithPrior) {
-      const prompt = promptById.get(t.cliInvocationId!);
+    for (const [agentId, t] of unoffered) {
+      const row = rowByAgentId.get(agentId);
+      const dispatchPrompt = dispatchPromptById.get(t.id);
+      if (dispatchPrompt) {
+        if (!t.cliInvocationId && !row?.userRetryRequestedAt) {
+          neverDispatched.push(agentId);
+          continue;
+        }
+        dispatches.push({
+          agentId,
+          agentTitle: row?.agentTitle ?? null,
+          prompt: dispatchPrompt,
+          ...recordedRequirements(row),
+        });
+        continue;
+      }
+      const prompt = t.cliInvocationId ? promptById.get(t.cliInvocationId) : undefined;
       if (!prompt) continue;
       // A stored prompt carrying a PASTED persona body cannot be re-sent. Those bytes were read
       // under the ORIGINAL dispatch's secret-mask policy, which may since have changed, and a
-      // recovered dispatch records no `pastedPersonaPaths` for `assertPastedPersonasStillAllowed`
-      // (queues/cli-exec/secret-mask.ts) to recheck at exec — so re-sending
-      // would hand the provider a body nothing rechecks. Skipping leaves the agent exactly where it
-      // was before recovery existed, and the configuration that stopped offering it no longer asks
-      // for it. A stored prompt carrying today's POINTER instead is fine: it pasted nothing, and
-      // the pointer names its own agent file, so the path scan leaves that retry unisolated.
+      // verbatim replay records no `pastedPersonaPaths` for `assertPastedPersonasStillAllowed`
+      // (queues/cli-exec/secret-mask.ts) to recheck at exec — so re-sending would hand the
+      // provider a body nothing rechecks. Skipping leaves the agent exactly where it was before
+      // recovery existed. A stored prompt carrying today's POINTER instead is fine: it pasted
+      // nothing, and the pointer names its own agent file, so the path scan leaves that retry
+      // unisolated.
       if (promptCarriesPastedPersona(prompt)) {
         skippedPastedPersona.push(agentId);
         continue;
       }
       // In the seat and under the requirements its last dispatch recorded, so the retry runs
       // where the run it repeats did — and still demands `vision` if a wireframe did then.
-      const row = rowByAgentId.get(agentId);
       dispatches.push({
         agentId,
         agentTitle: row?.agentTitle ?? null,
@@ -3255,8 +3301,10 @@ async function retryMiningAgents(
       {
         stepId: stepDef.metadata.id,
         recovered: dispatches.filter((d) => !offered.has(d.agentId)).map((d) => d.agentId),
+        neverDispatched,
+        skippedPastedPersona,
       },
-      'mining retry recovered agents from their prior prompt',
+      'mining retry recovered agents the step no longer offers',
     );
   }
 
@@ -3301,7 +3349,7 @@ async function reconcileOrphanedMiningAgents(
   formValues: FormValues | null,
   llmOutput: unknown,
   params: AdvanceStepParams,
-  existing: (typeof schema.taskStepAgentMinings.$inferSelect)[],
+  existing: MiningRow[],
 ): Promise<boolean> {
   const stuck = existing.filter(
     (r) => (r.status === 'pending' || r.status === 'running') && r.cliInvocationId,

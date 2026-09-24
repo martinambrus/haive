@@ -964,9 +964,11 @@ rides every agent that works from the task's content: the LLM phase, each agent 
 fan-out (built once per fan-out, joined ahead of the ledger and terseness in `resolveLlmPhase`'s
 order), and each DAG coder, reviewer, fix coder and issue advisor. The DAG replanner and merge-fix
 agent go without it: the first is handed the issue graph and no specification, the second resolves
-a git conflict. A RECOVERED mining agent is not augmented again. It is dispatched with the prompt
-its last run stored, notice included, verbatim, because that text is already the effective prompt,
-and augmenting it again duplicated the terseness block and could duplicate the ledger. So past
+a git conflict. A RECOVERED mining agent, a wave agent `selectAgents` never authored, is sent the
+prompt its step wrote (`task_step_agent_minings.dispatch_prompt`), which is augmented once with what
+the task knows now and adapted once for the provider that takes it. A row written before that column
+has only its last run's stored prompt, already the effective one, so it is replayed verbatim:
+augmenting it again duplicated the terseness block and could duplicate the ledger. So past
 `ATTACHMENT_PROMPT_FILE_LIMIT` (40)
 the notice collapses to one
 counted line per top-level folder and states the elision the way `changedFilesBlock` does —

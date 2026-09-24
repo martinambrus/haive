@@ -17,15 +17,18 @@ import {
   FormError,
 } from '@/components/ui';
 
-/** What the two sweepable CLI text columns currently occupy. Shown beside the retention
+/** What the sweepable CLI text columns currently occupy. Shown beside the retention
  *  windows because both default to "keep forever" — the size is the half of that decision
- *  the settings could not previously answer. */
+ *  the settings could not previously answer. The mining agents' own prompts share the
+ *  prompt window. */
 type CliRetentionUsage = {
   invocations: number;
   withStreamLog: number;
   withPrompt: number;
   streamLogBytes: number;
   promptBytes: number;
+  withDispatchPrompt: number;
+  dispatchPromptBytes: number;
 };
 
 /** Runtime governor settings. Every number is 0 = auto-derive from this host. */
@@ -1580,6 +1583,15 @@ function AdminPageInner() {
                   across {retentionUsage.withPrompt.toLocaleString()}
                 </span>
               </span>
+              <span className="text-neutral-400">
+                Agent prompts{' '}
+                <span className="font-mono text-neutral-200">
+                  {formatBytes(retentionUsage.dispatchPromptBytes)}
+                </span>{' '}
+                <span className="text-neutral-600">
+                  across {retentionUsage.withDispatchPrompt.toLocaleString()} agents
+                </span>
+              </span>
             </div>
           )}
           <div className="flex flex-col gap-4">
@@ -1634,10 +1646,11 @@ function AdminPageInner() {
                   </Button>
                 </div>
                 <p className="mt-1 text-[11px] text-neutral-500">
-                  The prompt each invocation was dispatched with. It has no UI; its only reader
-                  re-dispatches a fan-out agent when a finished task is retried or auto-resumed
-                  after a rate limit. Dropping it means those agents cannot be re-run for tasks
-                  older than the window — a separate window from transcripts for that reason.
+                  The prompt each invocation was dispatched with, and the one each fan-out
+                  agent&apos;s step wrote for it. Neither has a UI; their only reader re-dispatches
+                  a fan-out agent when a finished task is retried or auto-resumed after a rate
+                  limit. Dropping them means those agents cannot be re-run for tasks older than the
+                  window — a separate window from transcripts for that reason.
                 </p>
               </div>
             )}
