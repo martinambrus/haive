@@ -140,6 +140,16 @@ describe('findDdevSpecBreakage', () => {
     expect(reason).not.toContain(DDEV_BUILD_INPUT_PREFIX);
   });
 
+  it('flags the command in a tilde fence and in an indented one', () => {
+    for (const fence of [
+      ['~~~dockerfile', '~~~'],
+      ['  ```dockerfile', '  ```'],
+    ]) {
+      const spec = [fence[0], 'RUN docker-php-ext-install mysql', fence[1]].join('\n');
+      expect(findDdevSpecBreakage(spec)).toContain('docker-php-ext-install');
+    }
+  });
+
   it('does NOT flag a spec that only warns against the command', () => {
     expect(findDdevSpecBreakage(WARNING_SPEC)).toBeNull();
   });

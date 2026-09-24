@@ -7,6 +7,7 @@ import { recordSpecDecision } from './_spec-feedback.js';
 import { resolveTaskWorktreePath, writeSpecArtifact } from './_spec-artifact.js';
 import { codeBlock } from './_plan-ops.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import { fencedLines, scanFences } from '@haive/shared/markdown-fences';
 import {
   resolveAffectedComponentsForIds,
   type AffectedComponents,
@@ -175,18 +176,13 @@ export function buildSpecSummary(body: string): string {
   const trimmed = body.trim();
   if (trimmed.length === 0) return '';
   const lines = trimmed.split('\n');
+  const fenced = fencedLines(lines);
   const out: string[] = [];
-  let inFence = false;
   let kept = 0;
   let chars = 0;
-  for (const raw of lines) {
+  for (const [i, raw] of lines.entries()) {
     const line = raw.trimEnd();
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      // Skip fence boundaries themselves so the summary stays readable.
-      continue;
-    }
-    if (inFence) continue;
+    if (fenced[i]) continue;
     if (line.trim() === '') {
       if (kept >= 6) break;
       out.push('');
@@ -204,37 +200,16 @@ export function buildSpecSummary(body: string): string {
 
 /** Pull the ```mermaid fenced blocks out of a spec body, in document order.
  *  The summary disclosure re-emits them so the architecture diagram the spec
- *  draws is visible without expanding the full spec. Tracks the opening
- *  fence's backtick run so a mermaid fence nested inside a longer fence is
- *  not mistaken for a top-level one; an unterminated fence is dropped. */
+ *  draws is visible without expanding the full spec. An unterminated fence is dropped. */
 export function extractMermaidBlocks(body: string): string[] {
-  const blocks: string[] = [];
-  let fence: string | null = null;
-  let lang = '';
-  let current: string[] = [];
-  for (const raw of body.split('\n')) {
-    const marker = /^\s*(`{3,})(.*)$/.exec(raw);
-    const ticks = marker?.[1] ?? '';
-    const info = marker?.[2] ?? '';
-    if (fence === null) {
-      if (marker) {
-        fence = ticks;
-        lang = info.trim().toLowerCase();
-        current = [];
-      }
-      continue;
-    }
-    // A closing fence is a bare run of at least as many backticks as the opener.
-    if (marker && ticks.length >= fence.length && info.trim() === '') {
-      if (lang === 'mermaid' && current.join('\n').trim().length > 0) {
-        blocks.push(codeBlock(current.join('\n'), 'mermaid'));
-      }
-      fence = null;
-      continue;
-    }
-    current.push(raw);
-  }
-  return blocks;
+  return scanFences(body.split('\n'))
+    .filter(
+      (f) =>
+        f.close !== null &&
+        f.lang.toLowerCase() === 'mermaid' &&
+        f.content.join('\n').trim().length > 0,
+    )
+    .map((f) => codeBlock(f.content.join('\n'), 'mermaid'));
 }
 
 /** Compose the markdown body for the "Specification summary" disclosure.

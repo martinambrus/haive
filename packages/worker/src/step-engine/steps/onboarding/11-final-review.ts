@@ -162,14 +162,15 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
 }
 
 function stripOuterFence(raw: string): string {
-  // Unwrap only when the ENTIRE payload is a single ```/```markdown/```md fenced
-  // block. The old non-greedy inner match truncated a review that legitimately
-  // contains its own ``` code samples at the first inner fence; stripping just the
-  // outer wrapper leaves inner code blocks intact.
+  // Unwrap only when the ENTIRE payload is one fenced block, closed by a run at least as long as its
+  // opener: the scanner cannot, since a model's wrapper holds inner ``` samples that close it early.
   const trimmed = raw.trim();
-  const open = /^```(?:markdown|md)?[ \t]*\n/.exec(trimmed);
-  if (!open || !trimmed.endsWith('```')) return trimmed;
-  return trimmed.slice(open[0].length, -3).trim();
+  const open = /^(`{3,}|~{3,})(?:markdown|md)?[ \t]*\n/.exec(trimmed);
+  if (!open) return trimmed;
+  const run = open[1]!;
+  const close = new RegExp(`${run[0]}{${run.length},}$`).exec(trimmed.slice(open[0].length));
+  if (!close) return trimmed;
+  return trimmed.slice(open[0].length, trimmed.length - close[0].length).trim();
 }
 
 export function llmReviewMarkdown(raw: unknown, fallback: string): string {
