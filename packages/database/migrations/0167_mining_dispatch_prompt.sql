@@ -1,0 +1,16 @@
+-- The prompt a mining agent's step wrote for it, before any augmentation or provider adaptation.
+--
+-- A wave agent cannot be rebuilt by its step's `selectAgents`, so a retry recovers it. It used
+-- to recover from `cli_invocations.prompt`, which is the prompt AFTER the attachments notice, the
+-- ledger, the terseness directive and every per-provider adaptation (the MCP surface, the no-vision
+-- boundary, a pasted persona). Replayed verbatim, a retry on another provider kept the first
+-- provider's blocks, and a notice for files since deleted. Recovered from this column instead, the
+-- prompt is augmented once with what the task knows now and adapted once for the provider that
+-- takes it. It also lets an agent that failed before reaching any CLI ("no cli provider") be
+-- re-dispatched, which had no stored prompt at all.
+--
+-- NULL is "not recorded": every row written before this column, and a legacy verbatim replay.
+-- Recovery then falls back to `cli_invocations.prompt` exactly as before, so there is no backfill.
+--
+-- Reverts with DROP COLUMN, and a code revert alone leaves the column unused and harmless.
+ALTER TABLE task_step_agent_minings ADD COLUMN IF NOT EXISTS dispatch_prompt text;
