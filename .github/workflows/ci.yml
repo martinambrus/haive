@@ -19,8 +19,10 @@ on:
 permissions:
   contents: read
 
+# One group per pull request, one per main commit: a late push event for an older merge must not
+# cancel a newer one's run, and a shared group replaces a pending run even without cancel-in-progress.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
