@@ -79,7 +79,7 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
+import { blockedByActiveStepMessage, findLiveSibling, isStaleSubmit } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1649,6 +1649,7 @@ async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
   jobId?: string,
+  jobTimestamp?: number,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
   if (!ctx) {
@@ -1822,6 +1823,14 @@ async function handleAdvanceStep(
         output: existing.output,
       });
     }
+    return;
+  }
+
+  if (isStaleSubmit(existing, payload.formValues != null, jobTimestamp)) {
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId },
+      'advance-step skipped: a submit sent before this form was reopened',
+    );
     return;
   }
 
@@ -2786,7 +2795,7 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
         if (job.name === TASK_JOB_NAMES.START) {
           await handleStartTask(db, payload);
         } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload, job.id);
+          await handleAdvanceStep(db, payload, job.id, job.timestamp);
         } else if (job.name === TASK_JOB_NAMES.CANCEL) {
           await handleCancelTask(db, payload);
         } else {

@@ -2293,17 +2293,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
+    // set, so values a job carries can only be a submit sent before it: the form parks instead.
+    const submitted = current.pauseFormOnRetry ? undefined : params.formValues;
+
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
     // (submit endpoint, events, idle bookkeeping, web renderer) works
     // unchanged; submitting it posts {} which validates against zero fields.
-    if (!persistedSchema && !autoContinue && !current.formValues && !params.formValues) {
+    if (!persistedSchema && !autoContinue && !current.formValues && !submitted) {
       persistedSchema = synthesizeConfirmSchema(meta.title, meta.description);
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 
     let formValues = current.formValues as FormValues | null;
-    if (persistedSchema && !formValues && !params.formValues) {
+    if (persistedSchema && !formValues && !submitted) {
       // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
       // zero-field info forms → try to auto-submit. A validation failure falls
       // through to waiting_form (never fails the step) — e.g. a pre-answered
@@ -2401,8 +2405,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
-    if (persistedSchema && params.formValues) {
-      const validation = validateFormValues(persistedSchema, params.formValues);
+    if (persistedSchema && submitted) {
+      const validation = validateFormValues(persistedSchema, submitted);
       if (!validation.success) {
         const failed = await updateRow(db, current.id, {
           status: 'failed',

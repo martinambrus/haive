@@ -14,6 +14,25 @@ export function blockedByActiveStepMessage(blockedStepId: string): string {
   );
 }
 
+/** A submit that reached a form reopened after it was sent: the step parks at a fresh form with no
+ *  answers, and the job predates that park. Applying it would answer the new form with what was
+ *  typed into the old one. A form submit carries no epoch, so this is the guard that drops one
+ *  redelivered after its step moved on. */
+export function isStaleSubmit(
+  row: { status: string; formValues: unknown; waitingStartedAt: Date | null } | undefined,
+  carriesFormValues: boolean,
+  jobTimestamp: number | undefined,
+): boolean {
+  return (
+    carriesFormValues &&
+    row?.status === 'waiting_form' &&
+    row.formValues == null &&
+    row.waitingStartedAt != null &&
+    jobTimestamp !== undefined &&
+    jobTimestamp < row.waitingStartedAt.getTime()
+  );
+}
+
 /** The slice of a BullMQ job the guard reads. */
 export interface AdvanceJobRef {
   id?: string | null;
