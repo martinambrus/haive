@@ -436,21 +436,21 @@ export default function DashboardPage() {
               </table>
             </div>
           </Card>
-
-          <div className="flex gap-3">
-            <Link href="/stats">
-              <Button variant="secondary" size="sm">
-                Advanced statistics
-              </Button>
-            </Link>
-            <Link href="/tasks">
-              <Button variant="secondary" size="sm">
-                All tasks
-              </Button>
-            </Link>
-          </div>
         </>
       )}
+
+      <div className="flex gap-3">
+        <Link href="/stats">
+          <Button variant="secondary" size="sm">
+            Advanced statistics
+          </Button>
+        </Link>
+        <Link href="/tasks">
+          <Button variant="secondary" size="sm">
+            All tasks
+          </Button>
+        </Link>
+      </div>
     </div>
   );
 }
