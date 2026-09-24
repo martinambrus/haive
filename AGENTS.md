@@ -1077,7 +1077,8 @@ removes the intent inside the section, so no later settle acts on it twice — a
 an upload can take, and that upload's file has no row until its bytes are in. An upload's claim
 settles every attempt that wrote its intent before it takes a name (`settleExpansionIntents`): a
 dead attempt's intent can still name a path free on disk, and settling it once the upload held that
-name would take the upload's file before its row existed. The staging dirs
+name would take the upload's file before its row existed. Their staging dirs go after its section,
+as a delete's do. The staging dirs
 themselves are removed AFTER the section (`removeExpansionStagings`), never inside it: one can hold
 a whole extracted archive, and removing it there would hold the lock and a pooled connection for as
 long as that takes.

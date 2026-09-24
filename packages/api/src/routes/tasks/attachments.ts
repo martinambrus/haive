@@ -252,9 +252,10 @@ async function claimAttachmentName(
   relPath: string,
 ): Promise<{ rel: string; fh: FileHandle }> {
   let claim = null as Promise<{ rel: string; fh: FileHandle }> | null;
+  let settled: string[] = [];
   try {
     await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
-      await settleExpansionIntents(tx, taskId, anchor, uploadsRel);
+      settled = await settleExpansionIntents(tx, taskId, anchor, uploadsRel);
       claim = createUniqueAttachment(anchor, uploadsRel, relPath);
       await claim;
     });
@@ -266,6 +267,9 @@ async function claimAttachmentName(
       await removeNoFollow(anchor, `${uploadsRel}/${claimed.rel}`).catch(() => {});
     }
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
+  } finally {
+    // Outside the section: a staging dir can hold a whole extracted archive.
+    await removeExpansionStagings(anchor, uploadsRel, settled);
   }
 }
 

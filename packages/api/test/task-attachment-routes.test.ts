@@ -334,9 +334,9 @@ describe('task attachment routes', () => {
       expect(res.status).toBe(201);
       expect((res.body?.attachment as Row).filename).toBe('spec/a.md');
       expect(await readFile(up('spec/a.md'), 'utf8')).toBe('mine');
-      // No intent is left to name the upload's path, so no later settle can take its file.
-      const staging = (await listing(up())).find((n) => n.startsWith('.expanding-'))!;
-      expect(await listing(up(staging))).not.toContain('placed-as');
+      // No intent is left to name the upload's path, so no later settle can take its file, and the
+      // settled attempt's staging dir is gone with it.
+      expect((await listing(up())).filter((n) => n.startsWith('.expanding-'))).toEqual([]);
       expect(await listing(up('spec'))).toEqual(['a.md']);
     });
 
