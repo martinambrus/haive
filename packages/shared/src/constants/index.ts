@@ -435,6 +435,9 @@ export interface CliExecJobPayload {
   /** Target task_steps.id for purpose='step_summary'. The invocation itself is
    *  unlinked (taskStepId=null) so it stays out of the step terminal and token totals. */
   summaryForStepId?: string;
+  /** That row's `ended_at` when the recap was queued, as ISO. The summary lands only on that
+   *  version: a Retry nulls it and a re-run writes a new one. */
+  summaryForStepEndedAt?: string;
 }
 
 export type CliProbeTargetMode = 'cli';
