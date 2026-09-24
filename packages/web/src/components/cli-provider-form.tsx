@@ -201,6 +201,9 @@ export function CliProviderForm({
   const networkIssues = (issues ?? []).filter((i) => i.path.startsWith('networkPolicy'));
   const [submitting, setSubmitting] = useState(false);
   const [existingSecrets, setExistingSecrets] = useState<CliProviderSecret[]>([]);
+  // The load rewrites the text when it answers, and a save deletes every secret the text does not
+  // list, so the field takes no typing until then.
+  const [secretsLoaded, setSecretsLoaded] = useState(mode !== 'edit');
   const [buildState, setBuildState] = useState<BuildState>({
     status: provider?.sandboxImageBuildStatus ?? 'idle',
     error: provider?.sandboxImageBuildError ?? null,
@@ -360,6 +363,7 @@ export function CliProviderForm({
   useEffect(() => {
     if (mode !== 'edit' || !provider?.id) return;
     let cancelled = false;
+    setSecretsLoaded(false);
     (async () => {
       try {
         const { secrets } = await api.get<{ secrets: CliProviderSecret[] }>(
@@ -375,6 +379,7 @@ export function CliProviderForm({
       } catch {
         // Leave empty; user will see no existing secrets.
       }
+      if (!cancelled) setSecretsLoaded(true);
     })();
     return () => {
       cancelled = true;
@@ -1128,8 +1133,10 @@ export function CliProviderForm({
         <textarea
           id="secrets"
           rows={5}
-          className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+          className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100 read-only:opacity-60"
           value={state.secretsText}
+          readOnly={!secretsLoaded}
+          aria-busy={!secretsLoaded}
           onChange={(e) => update('secretsText', e.target.value)}
           placeholder={metadata.apiKeyEnvName ? `${metadata.apiKeyEnvName}=sk-...` : 'KEY=VALUE'}
         />
