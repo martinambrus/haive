@@ -19,6 +19,17 @@ import {
 import type { StepApplyArgs, StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
+// The barrier's tab sweep runs `docker exec` into the task's runner, four calls per fan-out that
+// ends; nothing in this file may reach docker, so the two helpers that spawn it are stubbed.
+const browserCdp = vi.hoisted(() => ({
+  closeExtraBrowserTabs: vi.fn(async () => null),
+  restoreBrowserWindow: vi.fn(async () => null),
+}));
+vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...browserCdp,
+}));
+
 interface MiningRow {
   id: string;
   agentId: string;
@@ -820,6 +831,39 @@ describe('advanceStep agentMining retry', () => {
     expect(applyCalls).toHaveLength(1);
     expect(applyCalls[0]!.isFinalMiningAttempt).toBe(false);
     expect(enqueued).toHaveLength(0);
+  });
+});
+
+describe('the barrier a fan-out ends at', () => {
+  beforeEach(() => {
+    browserCdp.closeExtraBrowserTabs.mockClear();
+    browserCdp.restoreBrowserWindow.mockClear();
+  });
+
+  it('sweeps the browser tabs agents left once every agent has ended', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const result = await run(makeMockDb(state), miningStep([], []), []);
+
+    expect(result.status).toBe('done');
+    expect(browserCdp.closeExtraBrowserTabs).toHaveBeenCalled();
+    expect(browserCdp.restoreBrowserWindow).toHaveBeenCalled();
+  });
+
+  it('leaves them alone while an agent is still coming', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const result = await run(makeMockDb(state), terminalFailureRetryStep([]), []);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(browserCdp.closeExtraBrowserTabs).not.toHaveBeenCalled();
   });
 });
 

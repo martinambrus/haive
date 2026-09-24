@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { cleanupTaskFixture, cleanupUser, getSql, seedTaskFixture } from '../helpers/db.js';
 import { registerUser } from '../helpers/auth.js';
+import { waitForShellHydration } from '../helpers/shell.js';
 import type postgres from 'postgres';
 
 /**
@@ -39,6 +40,7 @@ async function readUiPrefs(sql: postgres.Sql, userId: string): Promise<UiPrefs> 
 async function gotoWithSidebar(page: Page): Promise<void> {
   await page.goto('/dashboard');
   await expect(page.locator('aside').getByText('ACTIVE TASKS')).toBeVisible();
+  await waitForShellHydration(page);
 }
 
 test.describe('sidebar task tree', () => {
@@ -92,6 +94,7 @@ test.describe('sidebar task tree', () => {
         .toEqual(['running']);
 
       await page.reload();
+      await waitForShellHydration(page);
       await expect(aside.getByRole('button', { name: 'running' })).toHaveAttribute(
         'aria-pressed',
         'true',
@@ -133,6 +136,7 @@ test.describe('sidebar task tree', () => {
         .toBe(1);
 
       await page.reload();
+      await waitForShellHydration(page);
       await expect(aside.getByRole('button', { name: /^Inbox/ })).toBeVisible();
 
       // Rename and Delete live in a `hidden … group-hover/folder:flex` span, so they are not in

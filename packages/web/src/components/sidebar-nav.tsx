@@ -61,6 +61,12 @@ export function SidebarNav({
     );
   }, [collapsed, width]);
 
+  // The e2e suite waits for this before it drags or clicks in the sidebar: the column's text
+  // is server-rendered, so it is visible before React has attached a single handler.
+  useEffect(() => {
+    document.documentElement.dataset.shellHydrated = 'true';
+  }, []);
+
   const persistTree = useCallback((next: SidebarTree) => {
     setTree(next);
     // A failed preference write must not break the page — the arrangement is still
