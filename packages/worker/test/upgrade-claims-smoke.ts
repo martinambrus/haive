@@ -93,11 +93,15 @@ async function main(): Promise<void> {
       { userId, repositoryId, repoName: 'upgrade-claims-smoke' },
       repoPath,
     );
-    const edited = seeded.find((p) => p.endsWith('.md'));
-    const untouched = seeded.find((p) => p !== edited);
-    if (!edited || !untouched) throw new Error(`scaffold wrote too little: ${seeded.join(', ')}`);
+    const [edited, overwritten] = seeded.filter((p) => p.endsWith('.md'));
+    const untouched = seeded.find((p) => p !== edited && p !== overwritten);
+    if (!edited || !overwritten || !untouched) {
+      throw new Error(`scaffold wrote too little: ${seeded.join(', ')}`);
+    }
     const editedBytes = `${await readFile(join(repoPath, edited), 'utf8')}\nEdited by hand.\n`;
     await writeFile(join(repoPath, edited), editedBytes);
+    const overwrittenBytes = `${await readFile(join(repoPath, overwritten), 'utf8')}\nAlso edited.\n`;
+    await writeFile(join(repoPath, overwritten), overwrittenBytes);
     const handRegion = `${CLI_RULES_START}\nOur own rule, written by hand.\n${CLI_RULES_END}`;
     await writeFile(join(repoPath, CLI_RULES_DISK_PATH), `# Project\n\n${handRegion}\n`);
 
@@ -209,6 +213,11 @@ async function main(): Promise<void> {
     );
     if (!rulesField) throw new Error('no conflict field for the rules region');
     values[rulesField.id] = 'apply_theirs';
+    const overwriteField = form?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${overwritten}`,
+    );
+    if (!overwriteField) throw new Error(`no conflict field for ${overwritten}`);
+    values[overwriteField.id] = 'apply_theirs';
     await upgradeApplyStep.apply(applyCtx, { detected: plan, formValues: values });
 
     check(
@@ -236,6 +245,31 @@ async function main(): Promise<void> {
       render: rulesEntry.newContentHash,
     });
     check("and marked as a person's", baseline?.userModified === true);
+
+    const overwrittenEntry = detected.entries.find((e) => e.diskPath === overwritten)!;
+    const [replaced] = await db
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, overwritten),
+          eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+          isNotNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    check(
+      'an overwritten file is kept for a rollback',
+      replaced?.writtenContent === overwrittenBytes,
+    );
+    check(
+      'but not claimed as a render',
+      replaced?.writtenHash === overwrittenEntry.newContentHash,
+      {
+        writtenHash: replaced?.writtenHash,
+        render: overwrittenEntry.newContentHash,
+      },
+    );
 
     // ---- the next template change -------------------------------------------------------
     await db

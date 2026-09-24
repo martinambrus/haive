@@ -2228,8 +2228,10 @@ bytes on disk as `writtenContent`, so a rollback restores them, and records the 
 `writtenHash`. It used to record the disk's hash, so an edited file became its own baseline and the
 next template change pre-selected overwriting it as a `clean_update`. A path with no row whose bytes
 no render accounts for (this render, or for the rules region one recorded earlier) is a `conflict`,
-not a pre-selected `new_artifact`, and on a repository's first upgrade that is every path. 02's
-captured rules baseline goes through `cliRulesRegionRecord` too. `unclaimBackfilledEdits`
+not a pre-selected `new_artifact`, and on a repository's first upgrade that is every path. 02
+keeps what such a path held as a superseded baseline before replacing it (the rules region through
+`cliRulesRegionRecord`, any other file through `backfillRecord`), so a rollback restores it rather
+than deleting the file. `unclaimBackfilledEdits`
 (`data-migrations.ts`) withdraws the claims written before: only such a row has `user_modified` with
 `written_hash` equal to `last_observed_disk_hash`, and it and its rollback copies get the reference
 render's hash, which claims nothing.
