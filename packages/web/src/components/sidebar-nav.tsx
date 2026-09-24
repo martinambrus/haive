@@ -52,10 +52,10 @@ export function SidebarNav({
 
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   // On a phone the column opens over the page and never touches the saved preference. Leaving
-  // the page it was opened on closes it, and coming back does not reopen it.
+  // the page it was opened on, or the phone layout, closes it, and coming back does not reopen it.
   const phone = useSyncExternalStore(subscribePhone, isPhone, notPhone);
   const [openedOn, setOpenedOn] = useState<string | null>(null);
-  if (openedOn !== null && openedOn !== pathname) setOpenedOn(null);
+  if (openedOn !== null && (openedOn !== pathname || !phone)) setOpenedOn(null);
   const phoneOpen = phone && openedOn !== null && openedOn === pathname;
   const effectiveCollapsed = phone ? !phoneOpen : collapsed;
   const [width, setWidth] = useState(() => clampSidebarWidth(initialWidthPx));
@@ -83,7 +83,13 @@ export function SidebarNav({
       if (e.key === 'Escape') setOpenedOn(null);
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // The backdrop keeps a pointer off the page; inert keeps the keyboard and screen readers off it.
+    const page = asideRef.current?.parentElement?.querySelector(':scope > main');
+    page?.setAttribute('inert', '');
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      page?.removeAttribute('inert');
+    };
   }, [phoneOpen]);
 
   // The e2e suite waits for this before it drags or clicks in the sidebar: the column's text

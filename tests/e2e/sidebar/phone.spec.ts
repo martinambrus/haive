@@ -55,12 +55,19 @@ test.describe('the sidebar at phone width', () => {
         // Over the page, not beside it: the page stays where the rail left it.
         expect((await page.locator('main').boundingBox())!.x).toBe(mainLeft);
 
+        // The page under the backdrop is out of the keyboard's reach too.
+        for (let i = 0; i < 30; i++) {
+          await page.keyboard.press('Tab');
+          expect(await page.evaluate(() => !!document.activeElement?.closest('main'))).toBe(false);
+        }
+
         // A tap outside the column closes it.
         await page
           .getByRole('button', { name: 'Close sidebar' })
           .click({ position: { x: PHONE.width - 10, y: PHONE.height / 2 } });
         await expect(aside.getByText('Active tasks', { exact: true })).toBeHidden();
         expect(await railWidth(page)).toBe(56);
+        await expect(page.locator('main')).not.toHaveAttribute('inert');
 
         const rows = await sql<{ settings_json: string }[]>`
           select settings_json from user_ui_prefs where user_id = ${userId}
@@ -90,6 +97,33 @@ test.describe('the sidebar at phone width', () => {
 
         await page.goBack();
         await expect(page.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeVisible();
+        await expect(aside.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+      } finally {
+        if (userId) await cleanupUser(sql, userId);
+        await sql.end({ timeout: 5 });
+      }
+    });
+
+    test('leaving the phone layout closes it, and coming back does not reopen it', async ({
+      page,
+    }) => {
+      const sql = getSql();
+      let userId = '';
+      try {
+        userId = (await registerUser(sql, page.request, { prefix: 'side-phone-rotate' })).userId;
+
+        await page.goto('/dashboard');
+        await waitForShellHydration(page);
+        const aside = page.locator('aside');
+
+        await aside.getByRole('button', { name: 'Expand sidebar' }).click();
+        await expect(page.getByRole('button', { name: 'Close sidebar' })).toBeVisible();
+
+        // The resizer exists only in the wide layout, so it proves that layout has rendered.
+        await page.setViewportSize({ width: 1024, height: PHONE.height });
+        await expect(page.getByRole('separator', { name: 'Resize sidebar' })).toBeVisible();
+
+        await page.setViewportSize(PHONE);
         await expect(aside.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
       } finally {
         if (userId) await cleanupUser(sql, userId);
