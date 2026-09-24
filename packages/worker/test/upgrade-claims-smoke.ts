@@ -151,7 +151,7 @@ async function main(): Promise<void> {
       sandboxWorkdir: '/haive/workdir',
       cliProviderId: null,
       db,
-      logger: log,
+      logger: log.child({ taskStepId }),
       signal: controller.signal,
       throwIfCancelled: () => {
         if (controller.signal.aborted) throw new TaskCancelledError();
@@ -161,7 +161,7 @@ async function main(): Promise<void> {
 
     // ---- 01: plan and backfill ----------------------------------------------------------
     const planCtx = ctxFor(planRow!.id);
-    const detected = await upgradePlanStep.detect(planCtx);
+    const detected = await upgradePlanStep.detect!(planCtx);
     const bucketOf = (path: string) => detected.entries.find((e) => e.diskPath === path)?.bucket;
     check('the plan ran the backfill', detected.ranBackfill === true);
     check('an edited file is offered, not pre-selected', bucketOf(edited) === 'conflict', {
@@ -178,7 +178,12 @@ async function main(): Promise<void> {
       },
     );
 
-    const planned = await upgradePlanStep.apply(planCtx, { detected, formValues: {} });
+    const planned = await upgradePlanStep.apply(planCtx, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
     await db
       .update(schema.taskSteps)
       .set({ output: planned as unknown as Record<string, unknown>, status: 'done' })
@@ -199,7 +204,7 @@ async function main(): Promise<void> {
 
     // ---- 02: defaults, plus "overwrite" on the rules region and one file ---------------
     const applyCtx = ctxFor(applyRow!.id);
-    const plan = await upgradeApplyStep.detect(applyCtx);
+    const plan = await upgradeApplyStep.detect!(applyCtx);
     const form = upgradeApplyStep.form!(applyCtx, plan) as FormSchema | null;
     const values = defaultValues(form);
     const rulesField = form?.fields.find(
@@ -212,7 +217,12 @@ async function main(): Promise<void> {
     );
     if (!overwriteField) throw new Error(`no conflict field for ${overwritten}`);
     values[overwriteField.id] = 'apply_theirs';
-    await upgradeApplyStep.apply(applyCtx, { detected: plan, formValues: values });
+    await upgradeApplyStep.apply(applyCtx, {
+      detected: plan,
+      formValues: values,
+      iteration: 0,
+      previousIterations: [],
+    });
 
     check(
       'the edited file is left as it was',
@@ -220,7 +230,7 @@ async function main(): Promise<void> {
     );
 
     // ---- the next upgrade, and a rollback of this one -----------------------------------
-    const again = await upgradePlanStep.detect(planCtx);
+    const again = await upgradePlanStep.detect!(planCtx);
     const againBucket = again.entries.find((e) => e.diskPath === edited)?.bucket;
     check('the next upgrade offers the skipped edit again', againBucket === 'conflict', {
       bucket: againBucket,
@@ -253,7 +263,7 @@ async function main(): Promise<void> {
         status: 'running',
       })
       .returning({ id: schema.taskSteps.id });
-    const rollback = await upgradeRollbackStep.detect(ctxFor(rollbackRow!.id, rollbackTask!.id));
+    const rollback = await upgradeRollbackStep.detect!(ctxFor(rollbackRow!.id, rollbackTask!.id));
     const restoreOf = (path: string) => rollback.targets.find((t) => t.diskPath === path);
     const deletes = (path: string) => rollback.newArtifactsToUndo.some((u) => u.diskPath === path);
 
