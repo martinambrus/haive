@@ -61,6 +61,13 @@ const DATA_MIGRATIONS: DataMigration[] = [
       await unclaimBackfilledEdits(db);
     },
   },
+  {
+    id: 'endAbandonedSupersededRuns',
+    kind: 'convergent',
+    run: async (db) => {
+      await endAbandonedSupersededRuns(db);
+    },
+  },
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'reconcileStrandedCloningRepos', kind: 'convergent', run: reconcileStrandedCloningRepos },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
@@ -670,6 +677,20 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
       ) > 0
       AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
   `);
+}
+
+/** End a run superseded while it ran whose worker then died. Boot's orphan reconcile ends only runs
+ *  that were not superseded, and at boot no handler is left to finish one. */
+export async function endAbandonedSupersededRuns(db: Database): Promise<string[]> {
+  const rows = await db.execute(sql`
+    UPDATE cli_invocations
+    SET ended_at = GREATEST(started_at, superseded_at)
+    WHERE started_at IS NOT NULL AND superseded_at IS NOT NULL AND ended_at IS NULL
+    RETURNING id
+  `);
+  const ids = (rows as unknown as { id: string }[]).map((r) => r.id);
+  if (ids.length > 0) log.info({ ids }, 'ended superseded runs a restart abandoned');
+  return ids;
 }
 
 /** Withdraw the claim an upgrade backfill made on an edited file, and the rollback copies carrying
