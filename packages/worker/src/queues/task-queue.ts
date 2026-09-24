@@ -2265,7 +2265,12 @@ async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise
       statusMessage: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(schema.taskSteps.id, taskStepId), eq(schema.taskSteps.status, 'waiting_cli')));
+    .where(
+      and(
+        eq(schema.taskSteps.id, taskStepId),
+        inArray(schema.taskSteps.status, ['waiting_cli', 'running']),
+      ),
+    );
 }
 
 /** What boot recovery needs from BullMQ, injectable so a test can drive the re-drive branch

@@ -174,6 +174,66 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
   } as unknown as Database;
 }
 
+/** Pass 1 finds nothing; pass 2 finds a `running` row the task has moved past. */
+function makeAbandonedRunningDb(recorded: RecordedUpdate[]): Database {
+  const abandoned = {
+    taskStepId: 'ts-2',
+    taskId: 'task-1',
+    stepId: '04-tooling-infrastructure',
+    round: 0,
+    userId: 'user-1',
+    currentStepId: '05-later-step',
+    currentRound: 0,
+  };
+  const stepRow = {
+    id: 'ts-2',
+    status: 'running',
+    startedAt: new Date(Date.now() - 60_000),
+    endedAt: null,
+    idleMs: 0,
+    userActiveMs: 0,
+    waitingStartedAt: null,
+    carriedWorkMs: 0,
+    carriedIdleMs: 0,
+    carriedUserActiveMs: 0,
+  };
+  let joinedReads = 0;
+  return {
+    select: (_fields?: unknown) => ({
+      from: (table: unknown) => {
+        const whereFn = (_cond: unknown) => ({
+          limit: async (_n: number) => (tableNameOf(table) === 'task_steps' ? [stepRow] : []),
+          then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+            Promise.resolve(joinedReads++ === 1 ? [abandoned] : []).then(onOk, onErr),
+        });
+        return { innerJoin: (_t: unknown, _c: unknown) => ({ where: whereFn }), where: whereFn };
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (v: Record<string, unknown>) => ({
+        where: async (cond: unknown) => {
+          recorded.push({ table: tableNameOf(table), set: v, where: cond });
+        },
+      }),
+    }),
+  } as unknown as Database;
+}
+
+describe('reconcileOrphanedSteps requeueing a running row the task moved past', () => {
+  it('requeues it, the requeue admitting a running row as well as a parked one', async () => {
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(makeAbandonedRunningDb(recorded), {
+      enqueueAdvance: async () => undefined,
+      queuedInvocationIds: async () => new Set(),
+    });
+    const requeue = recorded.find((u) => u.table === 'task_steps' && u.set.status === 'pending');
+    expect(requeue).toBeDefined();
+    expect(conditionValues(requeue!.where)).toEqual(
+      expect.arrayContaining(['waiting_cli', 'running']),
+    );
+  });
+});
+
 describe('reconcileOrphanedSteps re-driving the current step', () => {
   const advances: { stepId: string; epoch: number }[] = [];
   const deps = (queued: Set<string> | null) => ({
