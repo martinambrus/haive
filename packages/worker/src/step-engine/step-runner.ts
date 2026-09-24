@@ -2912,15 +2912,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // recap for the rerun's prompts, nor a recap run that writes onto the retried row.
     const recordRecap = async (): Promise<void> => {
       if (curatedSummary) {
-        await recordLedgerEntry(db, params.taskId, current.id, {
-          stepId: stepDef.metadata.id,
-          round: current.round,
-          // Capped: a curated summary field is not always short (discovery's is its whole
-          // findings document), and one oversized entry survives the drop loop and rides
-          // into every later prompt.
-          text: capSummaryForLedger(curatedSummary),
-          kind: 'summary',
-        });
+        await recordLedgerEntry(
+          db,
+          params.taskId,
+          current.id,
+          {
+            stepId: stepDef.metadata.id,
+            round: current.round,
+            // Capped: a curated summary field is not always short (discovery's is its whole
+            // findings document), and one oversized entry survives the drop loop and rides
+            // into every later prompt.
+            text: capSummaryForLedger(curatedSummary),
+            kind: 'summary',
+          },
+          { whileStepDone: true },
+        );
       } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
         await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
       }

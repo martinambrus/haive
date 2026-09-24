@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { fencedAgentBlock } from './steps/_untrusted-repo.js';
@@ -99,29 +99,44 @@ export interface LedgerEntry {
 }
 
 /** Record what one step established, so later steps do not re-derive it. Best-effort:
- *  the ledger is background context and must never fail the step that produced it. */
+ *  the ledger is background context and must never fail the step that produced it.
+ *  `whileStepDone` records it only while `taskStepId` still reads `done`, for a pass's own recap:
+ *  a Retry that reset the row since leaves no entry of the pass it replaced. */
 export async function recordLedgerEntry(
   db: Database,
   taskId: string,
   taskStepId: string | null,
   entry: LedgerEntry,
+  opts: { whileStepDone?: boolean } = {},
 ): Promise<void> {
   const text = entry.text.trim();
   if (text.length === 0) return;
+  const payload = {
+    ...entry,
+    text,
+    // Stamped at WRITE time so the column is always populated and the rows are
+    // queryable as they stand. loadLedgerEntries keeps coercing null for rows
+    // written before this.
+    kind: entry.kind ?? 'finding',
+    fingerprint: contentFingerprint(entry.stepId, text),
+  };
   try {
+    if (opts.whileStepDone && taskStepId) {
+      // One statement, so the check and the write read the same row.
+      await db.execute(sql`
+        insert into ${schema.taskEvents} (task_id, task_step_id, event_type, payload)
+        select ${taskId}::uuid, ${taskStepId}::uuid, ${LEDGER_EVENT}, ${JSON.stringify(payload)}::jsonb
+        where exists (
+          select 1 from ${schema.taskSteps}
+          where ${schema.taskSteps.id} = ${taskStepId} and ${schema.taskSteps.status} = 'done'
+        )`);
+      return;
+    }
     await db.insert(schema.taskEvents).values({
       taskId,
       taskStepId,
       eventType: LEDGER_EVENT,
-      payload: {
-        ...entry,
-        text,
-        // Stamped at WRITE time so the column is always populated and the rows are
-        // queryable as they stand. loadLedgerEntries keeps coercing null for rows
-        // written before this.
-        kind: entry.kind ?? 'finding',
-        fingerprint: contentFingerprint(entry.stepId, text),
-      },
+      payload,
     });
   } catch (err) {
     log.warn({ err, taskId, stepId: entry.stepId }, 'failed to record a task ledger entry');

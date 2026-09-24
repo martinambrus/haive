@@ -613,6 +613,8 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
       text: 'what the pass did',
       kind: 'summary',
     });
+    // Recorded only while the row still reads done, so a Retry that lands first leaves none.
+    expect(vi.mocked(recordLedgerEntry).mock.calls[0]![4]).toEqual({ whileStepDone: true });
   });
 
   it('stops a pass whose task a Retry moved to a newer epoch, writing nothing', async () => {

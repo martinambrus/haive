@@ -288,8 +288,9 @@ hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The
 a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
 `pending`, so a Skip stands. A Retry leaves the row `pending` too, so the claim then reads the task's
 epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
-only after the outcome has landed, and a recap run is queued only while the row is still the finished
-one, since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
+only after the outcome has landed and only while the row still reads `done`: the ledger entry is
+inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
+since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
 epoch the pass ran under: `handleResult` does nothing once the task has moved on, and completing or
 failing the task carries that epoch, since either one also reaps the task's containers.
 
