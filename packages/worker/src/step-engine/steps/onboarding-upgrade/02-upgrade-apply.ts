@@ -617,8 +617,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         skippedCount += 1;
         continue;
       }
-      // What a path with no row already holds is kept as a superseded baseline before it is
-      // replaced, so a rollback of this upgrade restores it rather than deleting the file.
+      // What a path holds that its row does not record (no row, or bytes edited since) is kept as
+      // a superseded baseline before it is replaced, so a rollback of this upgrade restores it.
       const baseline = (prior: {
         templateContentHash: string;
         writtenHash: string;
@@ -645,10 +645,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
         const existing = await readFileOrEmpty(ctx.repoPath, rel);
-        const priorRegion = entry.liveArtifactId
-          ? null
-          : extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
-        if (priorRegion) {
+        const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
+        if (
+          priorRegion &&
+          (entry.liveArtifactId === null ||
+            sha256Hex(normalizeContent(priorRegion)) !== entry.baselineWrittenHash)
+        ) {
           const prior = cliRulesRegionRecord(
             priorRegion,
             entry.newContent,
@@ -669,11 +671,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           { createParents: true },
         );
       } else {
-        const existing = entry.liveArtifactId ? null : await readTextNoFollow(ctx.repoPath, rel);
+        const existing = await readTextNoFollow(ctx.repoPath, rel);
         if (existing !== null) {
           const renderHash = sha256Hex(normalizeContent(entry.newContent));
           const existingHash = sha256Hex(normalizeContent(existing));
-          if (existingHash !== renderHash) {
+          const unrecorded =
+            entry.liveArtifactId === null
+              ? existingHash !== renderHash
+              : existingHash !== entry.baselineWrittenHash;
+          if (unrecorded) {
             baseline(
               backfillRecord(
                 {

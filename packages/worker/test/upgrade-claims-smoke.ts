@@ -402,8 +402,20 @@ async function main(): Promise<void> {
           ),
         );
     }
-    // A file Haive wrote and a person edited since, whose template then changed.
-    const editedTracked = seeded.find(
+    // Files Haive wrote and a person edited since, whose template then changed: one kept, one
+    // overwritten.
+    const moveTemplate = (path: string) =>
+      db
+        .update(schema.onboardingArtifacts)
+        .set({ templateContentHash: 'template-changed-since' })
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, path),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+    const [editedTracked, tracked] = seeded.filter(
       (p) =>
         p.endsWith('.md') &&
         ![
@@ -417,19 +429,15 @@ async function main(): Promise<void> {
           CLI_RULES_DISK_PATH,
         ].includes(p),
     );
-    if (!editedTracked) throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
+    if (!editedTracked || !tracked) {
+      throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
+    }
     const editedTrackedBytes = `${await readFile(join(repoPath, editedTracked), 'utf8')}\nOurs.\n`;
     await writeFile(join(repoPath, editedTracked), editedTrackedBytes);
-    await db
-      .update(schema.onboardingArtifacts)
-      .set({ templateContentHash: 'template-changed-since' })
-      .where(
-        and(
-          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-          eq(schema.onboardingArtifacts.diskPath, editedTracked),
-          isNull(schema.onboardingArtifacts.supersededAt),
-        ),
-      );
+    await moveTemplate(editedTracked);
+    const trackedBytes = `${await readFile(join(repoPath, tracked), 'utf8')}\nOur change.\n`;
+    await writeFile(join(repoPath, tracked), trackedBytes);
+    await moveTemplate(tracked);
     const retired = (name: string) => `.claude/agents/${name}.md`;
     const retiredBytes = '# Retired\n\nHaive wrote this.\n';
     const retiredEditedBytes = `${retiredBytes}Edited since.\n`;
@@ -535,6 +543,11 @@ async function main(): Promise<void> {
     );
     if (!keepEdited) throw new Error(`no conflict field for ${editedTracked}`);
     secondValues[keepEdited.id] = 'keep_ours';
+    const overwriteTracked = secondForm?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${tracked}`,
+    );
+    if (!overwriteTracked) throw new Error(`no conflict field for ${tracked}`);
+    secondValues[overwriteTracked.id] = 'apply_theirs';
     secondValues.selectedObsoleteRemovals = secondDetected.entries
       .filter((e) => e.bucket === 'obsolete')
       .map((e) => e.entryId);
@@ -622,6 +635,10 @@ async function main(): Promise<void> {
       previousIterations: [],
     });
     check('an unedited new file is removed', (await readOrNull(fresh)) === null);
+    check(
+      'an overwritten edit to a tracked file is put back',
+      (await readOrNull(tracked)) === trackedBytes,
+    );
     check(
       'a new file edited since is kept, and said so',
       (await readOrNull(freshEdited)) === freshEditedBytes &&

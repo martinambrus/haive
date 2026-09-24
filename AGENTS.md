@@ -2318,7 +2318,10 @@ render, or for the rules region one recorded earlier) is now a `conflict`, not a
 nothing for such a path: nothing there is Haive's until 02 writes it, and a row would belong to the
 upgrade with no prior, which a rollback reads as a file the upgrade introduced and deletes. 02
 records the path only when it replaces the file, keeping what it held as a superseded baseline (the
-rules region through `cliRulesRegionRecord`, any other file through `backfillRecord`). Both apply
+rules region through `cliRulesRegionRecord`, any other file through `backfillRecord`). It keeps one
+for a live row too when the bytes on disk are not what that row records, or a rollback of an
+Overwrite would restore Haive's old bytes over the person's edits; 02 retires the row and inserts
+the baseline in one instant, so 04 breaks the `superseded_at` tie by `generated_at`. Both apply
 one rule to bytes that are not a render: the bytes are `writtenContent`, so a rollback restores
 them; the render's hash is `writtenHash`, so they are never taken as Haive's; and their own hash is
 `templateContentHash`, so the template reads as not installed. A rollback copies both hashes, so a

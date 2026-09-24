@@ -1,7 +1,7 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-4 merged (#267-#270); PR 5 (upgrade delete guards) is in
-> review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-24. PRs 1-5 merged (#267-#271); PR 5c (rollback restores edits) is
+> in review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
@@ -116,13 +116,17 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
    - **Added** (Codex, #270 round 4): "Keep my edits" persists. On a live row it moves
      `templateContentHash` to the declined version in place. For an untracked path it records a
      non-claiming `backfill` row, which only the filter above makes safe from a rollback.
+   - **Added** (Codex, #271 round 3): `deleteRefusalAt` keeps a link or a directory at the path
+     the same way, so a rollback retires its row instead of retrying it on every later rollback.
+     Round 4's check-then-delete window was deferred with reason: closing it needs a
+     held-descriptor delete in `fs-safe`, which the reset's claim-then-remove should share.
    - Control: all three cases are deleted today. Live: smoke 4 adds a second upgrade with retired
      templates and a rollback of it.
 5c. **fix(worker): a rollback of an Overwrite restores the edits it replaced.** Found while building
    5. 02 captures a baseline only for a path with no row, so overwriting a live-row conflict
    leaves the old row as the rollback's prior, and it holds what Haive wrote, not the person's
    edits. Capture whenever the disk differs from `baselineWrittenHash`, and break 04's
-   `superseded_at` tie by `created_at`.
+   `superseded_at` tie by `generated_at` (the insert time; the table has no `created_at`).
 6. **fix(api): an onboarding reset takes back the legacy RTK.md files it can prove.**
    - `RTK_SLIM` moves to shared `templates/cli-rules.ts`. It gains `LEGACY_RTK_MD_PATHS` and a
      frozen literal `LEGACY_RTK_MD_SHA256`, pinned by a test with a comment to keep the literal if
