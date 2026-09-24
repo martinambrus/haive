@@ -3,6 +3,7 @@ import { TASK_JOB_NAMES } from '@haive/shared';
 import {
   blockedByActiveStepMessage,
   findLiveSibling,
+  isStaleSubmit,
   type AdvanceJobRef,
   type AdvanceStepKey,
 } from './_advance-guards.js';
@@ -79,5 +80,33 @@ describe('blockedByActiveStepMessage', () => {
     const msg = blockedByActiveStepMessage('00a-sync-base');
     expect(msg).toContain('00a-sync-base');
     expect(msg).toContain('finishes or is stopped');
+  });
+});
+
+describe('isStaleSubmit', () => {
+  const parkedAt = new Date('2026-09-24T10:00:00.000Z');
+  const reopened = { status: 'waiting_form', formValues: null, waitingStartedAt: parkedAt };
+  const before = parkedAt.getTime() - 1;
+  const after = parkedAt.getTime() + 1;
+
+  it('drops a submit sent before the form it lands on was parked', () => {
+    expect(isStaleSubmit(reopened, true, before)).toBe(true);
+  });
+
+  it('keeps a submit sent after the park', () => {
+    expect(isStaleSubmit(reopened, true, after)).toBe(false);
+  });
+
+  it('keeps a submit whose form the api already released for it', () => {
+    // The submit route clears waiting_started_at before it queues the job.
+    expect(isStaleSubmit({ ...reopened, waitingStartedAt: null }, true, before)).toBe(false);
+  });
+
+  it('only judges a job carrying answers, onto a form holding none', () => {
+    expect(isStaleSubmit(reopened, false, before)).toBe(false);
+    expect(isStaleSubmit({ ...reopened, formValues: { a: 1 } }, true, before)).toBe(false);
+    expect(isStaleSubmit({ ...reopened, status: 'waiting_cli' }, true, before)).toBe(false);
+    expect(isStaleSubmit(undefined, true, before)).toBe(false);
+    expect(isStaleSubmit(reopened, true, undefined)).toBe(false);
   });
 });

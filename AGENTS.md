@@ -241,6 +241,34 @@ sending, such as a `selectAgents` that refuses, fails every reservation still un
 (`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
 still running.
 
+### Worker restarts
+
+**A step keeps the status that says what it is waiting on, even while its apply runs.** A
+continuation (the advance an ended CLI run queues) re-enters a `waiting_cli` step. For a
+form-bearing step it used to re-validate the saved answers and flip the row to `running`. A worker
+that died from that point on left a `running` row, which boot reads as a pass that died before
+doing anything, so it reset the step: every agent row deleted and the answers cleared. Now a
+continuation that finds its answers saved uses them as they are, and the row stays `waiting_cli`.
+Values the job carries are ignored there, since a parked step's only source of them is a submit
+redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
+
+**Boot recovers a parked step and resets only a step that has nothing to lose.**
+`reconcileOrphanedSteps` runs before any queue starts:
+
+- A `waiting_cli` step the task is on has its orphaned runs ended, and unstarted runs no queued job
+  owes are ended too. The task's epoch is then fenced by a compare-and-swap on the state read, and
+  the step is re-driven at the new epoch, so every advance queued before the restart is stale. A
+  step the task has moved past is requeued rather than re-driven.
+- A `running` step the task is on is decided by `bootRecoveryAction`. With agent work behind it (a
+  finished loop pass, an agent row, or a run of its own nothing superseded), it is a parked step
+  whose park write was lost. It is demoted to `waiting_cli`, guarded on `running`, and recovered
+  like the parked ones. Without agent work it is reset and re-run, as a deterministic step always
+  was.
+
+A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
+lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
+which would otherwise answer the new form with what was typed into the old one.
+
 ## CLI adapter system
 
 `packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so do `amp` and `codex` — codex only through its app-server, and only once that is verified for the task (`steeringTransportReady`) — see Steering below.

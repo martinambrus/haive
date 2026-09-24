@@ -1,7 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { reconcileOrphanedSteps } from '../src/queues/task-queue.js';
+import { bootRecoveryAction, reconcileOrphanedSteps } from '../src/queues/task-queue.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+
+vi.mock('../src/queues/_step-reset.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/queues/_step-reset.js')>();
+  return { ...actual, resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 9 })) };
+});
 
 /** Every column referenced anywhere in a drizzle condition tree. Structural, so the test
  *  asserts what the query actually filters on rather than matching source text. */
@@ -426,5 +432,160 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
           String(u.set.errorMessage).includes('before it was queued'),
       ),
     ).toBe(false);
+  });
+});
+
+describe('bootRecoveryAction', () => {
+  it('requeues a row the task left, demotes one with agent work, and resets the rest', () => {
+    expect(bootRecoveryAction({ current: false, cliWork: true })).toBe('requeue');
+    expect(bootRecoveryAction({ current: false, cliWork: false })).toBe('requeue');
+    expect(bootRecoveryAction({ current: true, cliWork: true })).toBe('demote');
+    expect(bootRecoveryAction({ current: true, cliWork: false })).toBe('reset');
+  });
+});
+
+interface RunningScenario {
+  iterationCount: number;
+  agentRows: boolean;
+  ownRun: boolean;
+  /** Whether the guarded demote still finds the row `running`. */
+  demotes: boolean;
+}
+
+/** Pass 1 finds nothing; pass 2 finds the task's current step left `running`. */
+function makeRunningCurrentDb(
+  recorded: RecordedUpdate[],
+  scenario: RunningScenario,
+  cliWorkReads: unknown[],
+): Database {
+  const running = {
+    taskStepId: 'ts-3',
+    taskId: 'task-1',
+    stepId: '09_5-skill-generation',
+    round: 0,
+    userId: 'user-1',
+    epoch: 3,
+    currentStepId: '09_5-skill-generation',
+    currentRound: 0,
+    iterationCount: scenario.iterationCount,
+  };
+  let joinedReads = 0;
+  return {
+    select: (_fields?: unknown) => ({
+      from: (table: unknown) => {
+        const name = tableNameOf(table);
+        const whereFn = (cond: unknown) => ({
+          // hasCliWork's two probes.
+          limit: async (_n: number) => {
+            cliWorkReads.push({ table: name, where: cond });
+            if (name === 'task_step_agent_minings') return scenario.agentRows ? [{ id: 'm' }] : [];
+            if (name === 'cli_invocations') return scenario.ownRun ? [{ id: 'inv' }] : [];
+            return [];
+          },
+          then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+            Promise.resolve(
+              name === 'cli_invocations' ? [] : joinedReads++ === 1 ? [running] : [],
+            ).then(onOk, onErr),
+        });
+        return { innerJoin: (_t: unknown, _c: unknown) => ({ where: whereFn }), where: whereFn };
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (v: Record<string, unknown>) => ({
+        where: (cond: unknown) => {
+          recorded.push({ table: tableNameOf(table), set: v, where: cond });
+          const done = Promise.resolve(undefined);
+          return {
+            then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+              done.then(onOk, onErr),
+            returning: async () => {
+              const name = tableNameOf(table);
+              if (name === 'tasks') return [{ epoch: 4 }];
+              if (name === 'task_steps' && v.status === 'waiting_cli') {
+                return scenario.demotes ? [{ id: 'ts-3' }] : [];
+              }
+              return [];
+            },
+          };
+        },
+      }),
+    }),
+  } as unknown as Database;
+}
+
+describe('reconcileOrphanedSteps recovering the current step left running', () => {
+  const advances: { stepId: string; epoch: number }[] = [];
+  const deps = {
+    enqueueAdvance: async (
+      _taskId: string,
+      _userId: string,
+      stepId: string,
+      _round: number,
+      epoch: number,
+    ) => {
+      advances.push({ stepId, epoch });
+    },
+    queuedInvocationIds: async () => new Set<string>(),
+  };
+  const none: RunningScenario = {
+    iterationCount: 0,
+    agentRows: false,
+    ownRun: false,
+    demotes: true,
+  };
+
+  beforeEach(() => {
+    advances.length = 0;
+    vi.mocked(resetStepAndDownstream).mockClear();
+  });
+
+  const recover = async (scenario: RunningScenario) => {
+    const recorded: RecordedUpdate[] = [];
+    const cliWorkReads: unknown[] = [];
+    await reconcileOrphanedSteps(makeRunningCurrentDb(recorded, scenario, cliWorkReads), deps);
+    const demote = recorded.find((u) => u.table === 'task_steps' && u.set.status === 'waiting_cli');
+    return { recorded, cliWorkReads, demote };
+  };
+
+  it('demotes one with agent rows and re-drives it at a fenced epoch, keeping its work', async () => {
+    const { recorded, demote } = await recover({ ...none, agentRows: true });
+
+    expect(demote).toBeDefined();
+    expect(conditionValues(demote!.where)).toEqual(expect.arrayContaining(['ts-3', 'running']));
+    expect(recorded.find((u) => u.table === 'tasks')?.set).toHaveProperty('orchestrationEpoch');
+    expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 4 }]);
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+    expect(recorded.filter((u) => 'formValues' in u.set)).toEqual([]);
+  });
+
+  it('demotes one with a finished loop pass', async () => {
+    const { demote } = await recover({ ...none, iterationCount: 2 });
+    expect(demote).toBeDefined();
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+  });
+
+  it('demotes one with a run of its own that nothing superseded', async () => {
+    const { demote, cliWorkReads } = await recover({ ...none, ownRun: true });
+    expect(demote).toBeDefined();
+    const runProbe = cliWorkReads.find(
+      (r) => (r as { table: string }).table === 'cli_invocations',
+    ) as { where: unknown } | undefined;
+    expect(conditionColumns(runProbe?.where)).toEqual(
+      expect.arrayContaining(['task_step_id', 'superseded_at']),
+    );
+  });
+
+  it('resets one that ran nothing an agent did, as before', async () => {
+    const { demote } = await recover(none);
+    expect(demote).toBeUndefined();
+    expect(vi.mocked(resetStepAndDownstream)).toHaveBeenCalledTimes(1);
+    expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 9 }]);
+  });
+
+  it('leaves a row to whatever moved it before the demote', async () => {
+    const { recorded } = await recover({ ...none, agentRows: true, demotes: false });
+    expect(recorded.find((u) => u.table === 'tasks')).toBeUndefined();
+    expect(advances).toEqual([]);
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
   });
 });

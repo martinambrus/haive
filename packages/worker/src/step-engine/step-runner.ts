@@ -2401,7 +2401,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
-    if (persistedSchema && params.formValues) {
+    // A continuation re-enters a step parked on its CLI with its answers already saved: they were
+    // validated when they were saved, and the row stays `waiting_cli` while apply runs, so a worker
+    // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
+    // Values carried by the job can then only be a submit redelivered after it was applied.
+    const continuing = row.status === 'waiting_cli' && current.formValues != null;
+    if (persistedSchema && params.formValues && !continuing) {
       const validation = validateFormValues(persistedSchema, params.formValues);
       if (!validation.success) {
         const failed = await updateRow(db, current.id, {

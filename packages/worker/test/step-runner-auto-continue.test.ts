@@ -380,3 +380,74 @@ describe('advanceStep auto-continue', () => {
     expect(result.status).toBe('done');
   });
 });
+
+/** What a continuation finds: the step parked on its CLI, its form built and its answers saved. */
+function parkedWithAnswers(): MockState {
+  const state = freshState();
+  state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+  state.taskStepRow = {
+    ...state.taskStepRow,
+    status: 'waiting_cli',
+    detectOutput: { ok: true },
+    formSchema: QUESTION_FORM,
+    formValues: { action: 'update', flag: true },
+    startedAt: new Date(),
+  };
+  return state;
+}
+
+describe('advanceStep continuing a parked step with saved answers', () => {
+  const applied: unknown[] = [];
+  const step = (): StepDefinition => {
+    const def = makeStep({ form: () => QUESTION_FORM });
+    def.apply = async (_ctx, args) => {
+      applied.push(args.formValues);
+      return { applied: true };
+    };
+    return def;
+  };
+
+  it('keeps the step parked and its answers as saved, rather than re-submitting them', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    // What the task queue passes a continuation: the answers already on the row.
+    const result = await run(state, step(), { action: 'update', flag: true });
+
+    expect(result.status).toBe('done');
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
+    expect(state.updates.filter((u) => 'formValues' in u.patch)).toEqual([]);
+    expect(applied).toEqual([{ action: 'update', flag: true }]);
+  });
+
+  it('ignores the values a submit redelivered onto the parked step carries', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    await run(state, step(), { action: 'skip', flag: false });
+
+    expect(applied).toEqual([{ action: 'update', flag: true }]);
+    expect(state.updates.filter((u) => 'formValues' in u.patch)).toEqual([]);
+  });
+
+  it('still saves a submission and runs the step on it', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_form', formValues: null };
+    const result = await run(state, step(), { action: 'skip', flag: false });
+
+    expect(result.status).toBe('done');
+    const saved = state.updates.find((u) => 'formValues' in u.patch);
+    expect(saved?.patch).toMatchObject({
+      status: 'running',
+      formValues: { action: 'skip', flag: false },
+    });
+    expect(applied).toEqual([{ action: 'skip', flag: false }]);
+  });
+
+  it('still fails a submission that does not validate', async () => {
+    const state = parkedWithAnswers();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_form', formValues: null };
+    const result = await run(state, step(), { action: 'not-an-option' });
+
+    expect(result.status).toBe('failed');
+  });
+});

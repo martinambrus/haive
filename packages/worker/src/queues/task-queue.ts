@@ -79,7 +79,7 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
+import { blockedByActiveStepMessage, findLiveSibling, isStaleSubmit } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1099,10 +1099,10 @@ async function handleResult(
         .where(eq(schema.tasks.id, ctx.taskId));
       // Assert the parked status on the ROW first. It can still read `running` here, which makes
       // the park below a silent no-op (markCliParkBegin is guarded on status = waiting_cli): a
-      // CONTINUATION advance re-validates the persisted formValues and flips the row back to
-      // `running` (step-runner.ts), and the mining fan-out barrier then returns waiting_cli
-      // WITHOUT writing the row. So every wave after the first parked unmarked and billed its
-      // whole inter-wave queue wait as WORK instead of idle (observed 2026-08-19 on
+      // first run or a form submission flips the row to `running` (step-runner.ts), and the
+      // mining fan-out barrier then returns waiting_cli WITHOUT writing the row. Continuations
+      // used to flip it too, so every wave after the first parked unmarked and billed its whole
+      // inter-wave queue wait as WORK instead of idle (observed 2026-08-19 on
       // 09_5-skill-generation: three step.waiting_cli events, waiting_started_at still null).
       // The returned status is the authoritative outcome for the step, so write it; guarded to
       // `running` so a concurrent terminal write is never clobbered.
@@ -1649,6 +1649,7 @@ async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
   jobId?: string,
+  jobTimestamp?: number,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
   if (!ctx) {
@@ -1822,6 +1823,14 @@ async function handleAdvanceStep(
         output: existing.output,
       });
     }
+    return;
+  }
+
+  if (isStaleSubmit(existing, payload.formValues != null, jobTimestamp)) {
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId },
+      'advance-step skipped: a submit sent before this form was reopened',
+    );
     return;
   }
 
@@ -2201,6 +2210,45 @@ export function isCurrentStep(row: {
   return row.stepId === row.currentStepId && row.round === row.currentRound;
 }
 
+/** What boot recovery does with a step left `running`. One the task has moved past is requeued. One
+ *  with agent work behind it is a parked step whose park write was lost, a pass having sent work
+ *  and died before recording `waiting_cli`: it is demoted and recovered with the parked steps. The
+ *  rest ran nothing an agent did and are reset to run again. */
+export function bootRecoveryAction(row: {
+  current: boolean;
+  cliWork: boolean;
+}): 'requeue' | 'demote' | 'reset' {
+  if (!row.current) return 'requeue';
+  return row.cliWork ? 'demote' : 'reset';
+}
+
+/** Whether a step has agent work a reset would throw away: a finished loop pass, an agent row, or
+ *  a run of its own that nothing has superseded. */
+async function hasCliWork(
+  db: Database,
+  taskStepId: string,
+  iterationCount: number,
+): Promise<boolean> {
+  if (iterationCount > 0) return true;
+  const [agent] = await db
+    .select({ id: schema.taskStepAgentMinings.id })
+    .from(schema.taskStepAgentMinings)
+    .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId))
+    .limit(1);
+  if (agent) return true;
+  const [run] = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
+    .limit(1);
+  return run !== undefined;
+}
+
 /** Does this (step, round) row currently own the task's orchestration — actively working
  *  (running / waiting_cli / waiting_form) or holding a runtime-slot park (pending + marker)?
  *  A missing row answers false. Used as the EVIDENCE half of the duplicate-park rule: a
@@ -2331,6 +2379,175 @@ async function readQueuedInvocationIds(): Promise<Set<string> | null> {
   }
 }
 
+/** A step parked on its CLI that boot finds with no worker behind it. */
+interface ParkedOrphan {
+  taskStepId: string;
+  taskId: string;
+  stepId: string;
+  round: number;
+  userId: string;
+  epoch: number;
+  currentStepId: string | null;
+  currentRound: number;
+}
+
+/** Recover one parked step: end its orphaned runs, then requeue it when the task has moved past
+ *  it, or fence the task and re-drive it. `queued` is every invocation a cli-exec job still owes
+ *  a run, or null when the queue could not be read. */
+async function recoverParkedStep(
+  db: Database,
+  s: ParkedOrphan,
+  queued: Set<string> | null,
+  deps: ReconcileDeps,
+): Promise<void> {
+  // Mark EVERY live invocation for this step orphaned, not just the latest — a
+  // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
+  // crash, and leaving the siblings ended_at NULL makes the mining barrier count
+  // them as still-in-flight forever. Safe: sandbox containers are reaped before the
+  // workers start (index.ts), so none is genuinely running at reconcile time. The
+  // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
+  //
+  // STARTED runs only. A `started_at IS NULL` row is QUEUED, not orphaned: it spawned
+  // no container (so the boot reap killed nothing of its) and its BullMQ job survives
+  // the restart in Redis, so the queue still owes it a run — and handleCliExecJob
+  // no-ops a redelivered job whose row was already finalized, so ending it here only
+  // throws the run away. Under GLOBAL_PAUSE this is not an edge case: the pickup gate
+  // holds every invocation at started_at NULL by design, so without this filter each
+  // worker restart during a pause window invents one orphan per parked step and three
+  // of them spend MAX_ORPHAN_REDISPATCH on runs that never happened. Same invariant
+  // enforceTaskAgentCap and foldOrphanedCliParkOnBoot already use for "actually live".
+  await db
+    .update(schema.cliInvocations)
+    .set({
+      endedAt: new Date(),
+      errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+    })
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, s.taskStepId),
+        isNotNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  // A never-started run that no cli-exec job owes any more: the worker died between
+  // recording it and queueing it, so nothing will ever run it and the step would wait on it
+  // for good. Ended as an orphan like the started ones, so each step kind's own recovery
+  // takes it — and one that never started charges no LLM orphan budget. When the queue
+  // could not be read none is ended, which is how every such row was treated before.
+  if (queued) {
+    const unstarted = await db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, s.taskStepId),
+          isNull(schema.cliInvocations.startedAt),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    const neverQueued = unstarted.map((r) => r.id).filter((id) => !queued.has(id));
+    if (neverQueued.length > 0) {
+      await db
+        .update(schema.cliInvocations)
+        .set({ endedAt: new Date(), errorMessage: NEVER_QUEUED_ORPHAN_MESSAGE })
+        .where(
+          and(
+            inArray(schema.cliInvocations.id, neverQueued),
+            isNull(schema.cliInvocations.startedAt),
+            isNull(schema.cliInvocations.endedAt),
+          ),
+        );
+      logger.warn(
+        { taskId: s.taskId, stepId: s.stepId, invocationIds: neverQueued },
+        'ended cli invocations the worker recorded but never queued',
+      );
+    }
+  }
+  // Abandoned chain: this row is not what the task is working on, so re-driving it would
+  // add a second orchestration loop (see the pass note above). Requeue it instead.
+  if (!isCurrentStep(s)) {
+    await requeueAbandonedOrphan(db, s.taskStepId);
+    logger.info(
+      {
+        taskId: s.taskId,
+        stepId: s.stepId,
+        round: s.round,
+        currentStepId: s.currentStepId,
+        currentRound: s.currentRound,
+      },
+      'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
+    );
+    return;
+  }
+  // The step is now parked with NO invocation running — the state markCliParkBegin exists
+  // for — but the park did not start now, it started when the worker died. Fold that dead
+  // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
+  // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
+  // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
+  await foldOrphanedCliParkOnBoot(db, s.taskStepId);
+  // Compare-and-swap on the state this pass read: every older queued advance goes stale, and
+  // a retry or resume the api took during boot keeps the task instead of this re-drive.
+  const [fenced] = await db
+    .update(schema.tasks)
+    .set({
+      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.tasks.id, s.taskId),
+        eq(schema.tasks.status, 'running'),
+        eq(schema.tasks.orchestrationEpoch, s.epoch),
+        sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
+        eq(schema.tasks.currentRound, s.currentRound),
+      ),
+    )
+    .returning({ epoch: schema.tasks.orchestrationEpoch });
+  if (!fenced) {
+    // Lost to an api action taken during boot. One that moved the task to another step left
+    // this row abandoned like those requeued above, where it would block that step's advance.
+    const [task] = await db
+      .select({
+        status: schema.tasks.status,
+        currentStepId: schema.tasks.currentStepId,
+        currentRound: schema.tasks.currentRound,
+      })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, s.taskId))
+      .limit(1);
+    if (task?.status === 'running' && !isCurrentStep({ ...s, ...task })) {
+      await requeueAbandonedOrphan(db, s.taskStepId);
+      logger.info(
+        { taskId: s.taskId, stepId: s.stepId, currentStepId: task.currentStepId },
+        'requeued a waiting_cli orphan the task left during boot (not re-driven)',
+      );
+    }
+    return;
+  }
+  try {
+    // Retried, because nothing else drives the step once this pass has ended its runs: a
+    // redelivered cli-exec job exits on the finalized invocation before it can resume it.
+    await retrying(
+      () => deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch),
+      deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS,
+    );
+  } catch (err) {
+    // No job carries the new epoch, so hand the task back to the one the advances queued
+    // before the restart carry, rather than leave them stale with nothing to drive it.
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: s.epoch, updatedAt: new Date() })
+      .where(and(eq(schema.tasks.id, s.taskId), eq(schema.tasks.orchestrationEpoch, fenced.epoch)));
+    throw err;
+  }
+  logger.info(
+    { taskId: s.taskId, stepId: s.stepId, epoch: fenced.epoch },
+    'reconciled orphaned waiting_cli step',
+  );
+}
+
 export async function reconcileOrphanedSteps(
   db: Database,
   deps: ReconcileDeps = { enqueueAdvance, queuedInvocationIds: readQueuedInvocationIds },
@@ -2354,157 +2571,13 @@ export async function reconcileOrphanedSteps(
       { count: stuckCli.length },
       'reconciling waiting_cli steps orphaned by worker restart',
     );
-  const queued = stuckCli.length > 0 ? await deps.queuedInvocationIds() : null;
+  // Read once, and only when a parked step needs it: pass 2 can demote one too.
+  let queued: Set<string> | null | undefined;
+  const owed = async () =>
+    queued === undefined ? (queued = await deps.queuedInvocationIds()) : queued;
   for (const s of stuckCli) {
     try {
-      // Mark EVERY live invocation for this step orphaned, not just the latest — a
-      // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
-      // crash, and leaving the siblings ended_at NULL makes the mining barrier count
-      // them as still-in-flight forever. Safe: sandbox containers are reaped before the
-      // workers start (index.ts), so none is genuinely running at reconcile time. The
-      // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
-      //
-      // STARTED runs only. A `started_at IS NULL` row is QUEUED, not orphaned: it spawned
-      // no container (so the boot reap killed nothing of its) and its BullMQ job survives
-      // the restart in Redis, so the queue still owes it a run — and handleCliExecJob
-      // no-ops a redelivered job whose row was already finalized, so ending it here only
-      // throws the run away. Under GLOBAL_PAUSE this is not an edge case: the pickup gate
-      // holds every invocation at started_at NULL by design, so without this filter each
-      // worker restart during a pause window invents one orphan per parked step and three
-      // of them spend MAX_ORPHAN_REDISPATCH on runs that never happened. Same invariant
-      // enforceTaskAgentCap and foldOrphanedCliParkOnBoot already use for "actually live".
-      await db
-        .update(schema.cliInvocations)
-        .set({
-          endedAt: new Date(),
-          errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
-        })
-        .where(
-          and(
-            eq(schema.cliInvocations.taskStepId, s.taskStepId),
-            isNotNull(schema.cliInvocations.startedAt),
-            isNull(schema.cliInvocations.endedAt),
-            isNull(schema.cliInvocations.supersededAt),
-          ),
-        );
-      // A never-started run that no cli-exec job owes any more: the worker died between
-      // recording it and queueing it, so nothing will ever run it and the step would wait on it
-      // for good. Ended as an orphan like the started ones, so each step kind's own recovery
-      // takes it — and one that never started charges no LLM orphan budget. When the queue
-      // could not be read none is ended, which is how every such row was treated before.
-      if (queued) {
-        const unstarted = await db
-          .select({ id: schema.cliInvocations.id })
-          .from(schema.cliInvocations)
-          .where(
-            and(
-              eq(schema.cliInvocations.taskStepId, s.taskStepId),
-              isNull(schema.cliInvocations.startedAt),
-              isNull(schema.cliInvocations.endedAt),
-              isNull(schema.cliInvocations.supersededAt),
-            ),
-          );
-        const neverQueued = unstarted.map((r) => r.id).filter((id) => !queued.has(id));
-        if (neverQueued.length > 0) {
-          await db
-            .update(schema.cliInvocations)
-            .set({ endedAt: new Date(), errorMessage: NEVER_QUEUED_ORPHAN_MESSAGE })
-            .where(
-              and(
-                inArray(schema.cliInvocations.id, neverQueued),
-                isNull(schema.cliInvocations.startedAt),
-                isNull(schema.cliInvocations.endedAt),
-              ),
-            );
-          logger.warn(
-            { taskId: s.taskId, stepId: s.stepId, invocationIds: neverQueued },
-            'ended cli invocations the worker recorded but never queued',
-          );
-        }
-      }
-      // Abandoned chain: this row is not what the task is working on, so re-driving it would
-      // add a second orchestration loop (see the pass note above). Requeue it instead.
-      if (!isCurrentStep(s)) {
-        await requeueAbandonedOrphan(db, s.taskStepId);
-        logger.info(
-          {
-            taskId: s.taskId,
-            stepId: s.stepId,
-            round: s.round,
-            currentStepId: s.currentStepId,
-            currentRound: s.currentRound,
-          },
-          'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
-        );
-        continue;
-      }
-      // The step is now parked with NO invocation running — the state markCliParkBegin exists
-      // for — but the park did not start now, it started when the worker died. Fold that dead
-      // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
-      // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
-      // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
-      await foldOrphanedCliParkOnBoot(db, s.taskStepId);
-      // Compare-and-swap on the state this pass read: every older queued advance goes stale, and
-      // a retry or resume the api took during boot keeps the task instead of this re-drive.
-      const [fenced] = await db
-        .update(schema.tasks)
-        .set({
-          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.tasks.id, s.taskId),
-            eq(schema.tasks.status, 'running'),
-            eq(schema.tasks.orchestrationEpoch, s.epoch),
-            sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
-            eq(schema.tasks.currentRound, s.currentRound),
-          ),
-        )
-        .returning({ epoch: schema.tasks.orchestrationEpoch });
-      if (!fenced) {
-        // Lost to an api action taken during boot. One that moved the task to another step left
-        // this row abandoned like those requeued above, where it would block that step's advance.
-        const [task] = await db
-          .select({
-            status: schema.tasks.status,
-            currentStepId: schema.tasks.currentStepId,
-            currentRound: schema.tasks.currentRound,
-          })
-          .from(schema.tasks)
-          .where(eq(schema.tasks.id, s.taskId))
-          .limit(1);
-        if (task?.status === 'running' && !isCurrentStep({ ...s, ...task })) {
-          await requeueAbandonedOrphan(db, s.taskStepId);
-          logger.info(
-            { taskId: s.taskId, stepId: s.stepId, currentStepId: task.currentStepId },
-            'requeued a waiting_cli orphan the task left during boot (not re-driven)',
-          );
-        }
-        continue;
-      }
-      try {
-        // Retried, because nothing else drives the step once this pass has ended its runs: a
-        // redelivered cli-exec job exits on the finalized invocation before it can resume it.
-        await retrying(
-          () => deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch),
-          deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS,
-        );
-      } catch (err) {
-        // No job carries the new epoch, so hand the task back to the one the advances queued
-        // before the restart carry, rather than leave them stale with nothing to drive it.
-        await db
-          .update(schema.tasks)
-          .set({ orchestrationEpoch: s.epoch, updatedAt: new Date() })
-          .where(
-            and(eq(schema.tasks.id, s.taskId), eq(schema.tasks.orchestrationEpoch, fenced.epoch)),
-          );
-        throw err;
-      }
-      logger.info(
-        { taskId: s.taskId, stepId: s.stepId, epoch: fenced.epoch },
-        'reconciled orphaned waiting_cli step',
-      );
+      await recoverParkedStep(db, s, await owed(), deps);
     } catch (err) {
       logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');
     }
@@ -2518,8 +2591,10 @@ export async function reconcileOrphanedSteps(
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
+      epoch: schema.tasks.orchestrationEpoch,
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
+      iterationCount: schema.taskSteps.iterationCount,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -2531,11 +2606,16 @@ export async function reconcileOrphanedSteps(
     );
   for (const s of stuckRunning) {
     try {
+      const current = isCurrentStep(s);
+      const action = bootRecoveryAction({
+        current,
+        cliWork: current && (await hasCliWork(db, s.taskStepId, s.iterationCount)),
+      });
       // Abandoned chain: requeue the row so it stops blocking the other-step-active guard, but
       // do NOT reset its downstream or bump the epoch — this row is upstream of whatever the
       // task is really working on, so the cascade would wipe the live chain and the bump would
       // invalidate the real loop's queued advance.
-      if (!isCurrentStep(s)) {
+      if (action === 'requeue') {
         await requeueAbandonedOrphan(db, s.taskStepId);
         logger.info(
           {
@@ -2547,6 +2627,16 @@ export async function reconcileOrphanedSteps(
           },
           'requeued an abandoned running orphan (task has moved on; not re-driven)',
         );
+        continue;
+      }
+      // Guarded, so a row something else moved is left to it.
+      if (action === 'demote') {
+        const [demoted] = await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli', updatedAt: new Date() })
+          .where(and(eq(schema.taskSteps.id, s.taskStepId), eq(schema.taskSteps.status, 'running')))
+          .returning({ id: schema.taskSteps.id });
+        if (demoted) await recoverParkedStep(db, s, await owed(), deps);
         continue;
       }
       // resetStepAndDownstream supersedes the step's open invocations, resets it to
@@ -2786,7 +2876,7 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
         if (job.name === TASK_JOB_NAMES.START) {
           await handleStartTask(db, payload);
         } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload, job.id);
+          await handleAdvanceStep(db, payload, job.id, job.timestamp);
         } else if (job.name === TASK_JOB_NAMES.CANCEL) {
           await handleCancelTask(db, payload);
         } else {
