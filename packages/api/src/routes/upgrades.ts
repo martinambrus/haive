@@ -273,6 +273,22 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id),
     ),
   );
+  // One row stands for every rendering of a template, so a rendering that is not current (a
+  // skipped conflict, a restored edit) has to be the one that stands, or its siblings hide it.
+  for (const a of liveArtifacts) {
+    const current = currentByTemplate.get(a.templateId);
+    if (!current || !filteredInstalled.has(a.templateId)) continue;
+    if (
+      a.templateContentHash !== current.contentHash ||
+      a.templateSchemaVersion !== current.schemaVersion
+    ) {
+      filteredInstalled.set(a.templateId, {
+        id: a.templateId,
+        schemaVersion: a.templateSchemaVersion,
+        contentHash: a.templateContentHash,
+      });
+    }
+  }
 
   const installedTemplateSetHash =
     filteredInstalled.size > 0 ? computeSetHash(Array.from(filteredInstalled.values())) : null;

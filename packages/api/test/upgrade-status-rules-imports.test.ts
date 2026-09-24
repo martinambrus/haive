@@ -163,3 +163,43 @@ describe('upgrade-status and the rules import', () => {
     expect(body.missingRulesImports).toBeUndefined();
   });
 });
+
+describe('upgrade-status and a template rendered to several paths', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-paths-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+    };
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  /** agent.x rendered to two paths: one row current, one holding a restored edit's own hash. */
+  const rows = (order: 'current-first' | 'edited-first') => {
+    inSync([claude]);
+    const artifacts = state.rows.get(schema.onboardingArtifacts)!;
+    const edited = { ...(artifacts[0] as object), templateContentHash: 'h-edited' };
+    state.rows.set(
+      schema.onboardingArtifacts,
+      order === 'current-first' ? [...artifacts, edited] : [edited, ...artifacts],
+    );
+  };
+
+  it('offers an upgrade while any rendering is not current, whichever row comes first', async () => {
+    for (const order of ['current-first', 'edited-first'] as const) {
+      rows(order);
+      const body = await status();
+      expect(body.changedTemplateIds, order).toEqual(['agent.x']);
+      expect(body.hasUpgradeAvailable, order).toBe(true);
+    }
+  });
+});

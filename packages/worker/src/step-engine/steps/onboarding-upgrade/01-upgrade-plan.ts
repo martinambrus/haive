@@ -290,16 +290,49 @@ async function readDiskContent(
   }
 }
 
+/** What a backfill records for one rendering. The bytes on disk, edited or not, so a rollback
+ *  restores what was there; the render's hash, so an edited file is never taken as Haive's; and
+ *  for an edited file its own hash as the template's, so the template reads as not installed. */
+export function backfillRecord(
+  r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash' | 'content'>,
+  disk: { content: string | null; hash: string | null },
+): {
+  templateContentHash: string;
+  writtenHash: string;
+  writtenContent: string;
+  lastObservedDiskHash: string | null;
+  userModified: boolean;
+} {
+  const editedHash = disk.hash !== null && disk.hash !== r.writtenHash ? disk.hash : null;
+  return {
+    templateContentHash: editedHash ?? r.templateContentHash,
+    writtenHash: r.writtenHash,
+    writtenContent: disk.content ?? r.content,
+    lastObservedDiskHash: disk.hash,
+    userModified: editedHash !== null,
+  };
+}
+
 export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
   diskContent: string | null;
   diskHash: string | null;
+  /** Hashes of what Haive rendered at this path before; a file holding one is Haive's to replace. */
+  recordedRenderHashes?: ReadonlySet<string>;
 }): UpgradePlanBucket {
   const { live, current, diskContent, diskHash } = args;
 
   if (live && !current) return 'obsolete';
-  if (!live && current) return 'new_artifact';
+  if (!live && current) {
+    // A file already there that no render accounts for is somebody's, so it is offered, never
+    // pre-selected for overwriting.
+    const haiveBytes =
+      diskHash === null ||
+      diskHash === current.writtenHash ||
+      (args.recordedRenderHashes?.has(diskHash) ?? false);
+    return haiveBytes ? 'new_artifact' : 'conflict';
+  }
   if (!live || !current) throw new Error('classifyEntry: both live and current null');
 
   if (diskContent === null) return 'user_deleted';
@@ -361,6 +394,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const allPaths = new Set<string>([...byPath.keys(), ...liveByPath.keys()]);
     const entries: UpgradePlanEntry[] = [];
     let counterByBucket = 0;
+    const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
 
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;
@@ -383,7 +417,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         diskHash = diskContent ? sha256Hex(diskContent) : null;
       }
 
-      const bucket = classifyEntry({ live, current, diskContent, diskHash });
+      const bucket = classifyEntry({
+        live,
+        current,
+        diskContent,
+        diskHash,
+        recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
+      });
       let newContent = current?.content ?? null;
       if (isCliRules && newContent) newContent = normalizeContent(newContent);
       const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
@@ -449,10 +489,16 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
       const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
+      // An offered conflict stays unrecorded until 02 writes it: a row would belong to this upgrade
+      // with no prior, which a rollback takes for a file the upgrade introduced and deletes.
+      const offered = new Set(
+        detected.entries.filter((e) => e.bucket === 'conflict').map((e) => e.diskPath),
+      );
 
       const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
       const haiveVersion = getHaiveVersion();
       for (const r of expanded) {
+        if (offered.has(r.diskPath)) continue;
         let recorded;
         if (r.templateKind === CLI_RULES_TEMPLATE_KIND) {
           // The region, never the whole file: a rollback writes this row's content into the region.
@@ -471,20 +517,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
             userModified: !record.haiveWritten,
           };
         } else {
-          const { content: diskContent, hash: diskHash } = await readDiskContent(
-            ctx.repoPath,
-            r.diskPath,
-          );
-          recorded = {
-            templateContentHash: r.templateContentHash,
-            writtenHash: diskHash ?? r.writtenHash,
-            // Backfill stamps whatever bytes are on disk right now, even if the
-            // user has edited them. That captures the truth of the baseline at
-            // backfill time so a later rollback restores what the user had.
-            writtenContent: diskContent ?? r.content,
-            lastObservedDiskHash: diskHash,
-            userModified: diskHash !== null && diskHash !== r.writtenHash,
-          };
+          recorded = backfillRecord(r, await readDiskContent(ctx.repoPath, r.diskPath));
         }
         rowsToInsert.push({
           userId: ctx.userId,

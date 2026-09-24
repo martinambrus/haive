@@ -1,6 +1,6 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-2 merged (#267, #268); PR 3 (e2e sandbox warm-up) is in
+> **IN PROGRESS** since 2026-09-24. PRs 1-3 merged (#267-#269); PR 4 (upgrade backfill claims) is in
 > review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
@@ -74,27 +74,33 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
 ### Upgrade and reset data safety
 
 4. **fix(worker): an upgrade backfill claims only what Haive wrote.**
-   - **01's backfill** (`backfillRecord`, extracted from :474-487) records the render's hash as
-     `writtenHash`, keeping the disk bytes as content plus `userModified`. That is
-     `cliRulesRegionRecord`'s rule.
    - **`classifyEntry`**: a new path whose disk differs from the render (and, for cli-rules, is in
      no recorded render, `loadCliRulesRenderHashes`) is `conflict`, not the pre-selected
      `new_artifact`.
-   - **02's cli-rules baseline capture** (:482-500) builds through `cliRulesRegionRecord`.
+   - **01's backfill records nothing for an offered conflict**, so a skipped one is offered again
+     and a rollback never reads it as a file the upgrade introduced. 02 records the path only when
+     it writes there, keeping what it replaced as a superseded baseline.
+   - **One rule for bytes that are not a render**, `backfillRecord` for whole files and
+     `cliRulesRegionRecord` for the region: the bytes as content, so a rollback restores them; the
+     render's hash as `writtenHash`, so they are never taken as Haive's; and their own hash as
+     `templateContentHash`, so the template reads as not installed. A rollback copies both hashes,
+     so a restored file is offered again rather than classified `unchanged`.
    - **Data repair**, a convergent `DATA_MIGRATIONS` entry `unclaimBackfilledEdits`:
-     - Pre-fix `backfill` rows with `user_modified` and their `rollback` copies get
-       `written_hash = template_content_hash`. That is a no-claim sentinel, since that column
-       hashes the reference render.
+     - Pre-fix `backfill` rows with `user_modified` (their `written_hash` equals
+       `last_observed_disk_hash`) and their `rollback` copies get `written_hash` and
+       `template_content_hash` swapped, which is the shape above.
      - cli-rules rows are excluded (there the column is the region hash).
      - Returned ids are logged. The bug shipped 2026-04-27, so v0.1.6/v0.2.0 installs may carry
        such rows; this install has none.
    - **Controls**: `backfillRecord` returns the disk hash today, and an existing edited file
-     classifies `new_artifact` today. A migration test fails when the cli-rules exclusion is
-     dropped.
+     classifies `new_artifact` today.
    - **Live**: a new `upgrade-claims-smoke.ts` (in `smoke:ci`) on a blank fixture repo runs the
-     real 01/02. The edited file ends `conflict`, its row carries the render hash, and its bytes are
-     unchanged. The repair updates 2 rows, then 0, and leaves cli-rules alone.
-   - **Undo**: `SET written_hash = last_observed_disk_hash WHERE id IN (logged ids)`.
+     real 01, 02 and a 04 rollback. A skipped edit gets no row and is offered again, an overwritten
+     one is restored by the rollback and offered again, and the repair swaps 2 rows, then 0,
+     leaving cli-rules alone.
+   - **Undo**: swap the two columns back,
+     `SET written_hash = template_content_hash, template_content_hash = written_hash WHERE id IN
+     (logged ids)`.
 5. **fix(worker): an upgrade or rollback deletes a file only while it still holds what Haive
    wrote.**
    - 02's obsolete delete (:425-453) calls `removeNoFollow` with no hash check, and 12 records a

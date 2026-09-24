@@ -29,11 +29,17 @@ import {
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
+  cliRulesRegionRecord,
   enabledImportRulesFiles,
+  loadCliRulesRenderHashes,
   restoreRulesImportStubs,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
-import type { UpgradePlanOutput, UpgradePlanEntry } from './01-upgrade-plan.js';
+import {
+  backfillRecord,
+  type UpgradePlanOutput,
+  type UpgradePlanEntry,
+} from './01-upgrade-plan.js';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
@@ -294,8 +300,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         type: 'radio',
         id: conflictFieldId(c.entryId),
         label: `Conflict: ${c.diskPath}`,
-        description:
-          'Your copy differs from the prior baseline AND the template changed. Pick one.',
+        description: c.liveArtifactId
+          ? 'Your copy differs from the prior baseline AND the template changed. Pick one.'
+          : 'Haive has no record of writing this file, and it differs from the template. Pick one.',
         details:
           c.newContent !== null
             ? {
@@ -378,9 +385,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
-    // Superseded baseline rows captured for cli-rules new_artifacts whose region
-    // already exists on disk (pre-feature onboarding), so rollback restores the
-    // prior region instead of deleting it.
+    // Superseded baselines for what a written path with no row already held.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
@@ -466,39 +471,50 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         skippedCount += 1;
         continue;
       }
+      // What a path with no row already holds is kept as a superseded baseline before it is
+      // replaced, so a rollback of this upgrade restores it rather than deleting the file.
+      const baseline = (prior: {
+        templateContentHash: string;
+        writtenHash: string;
+        writtenContent: string;
+        lastObservedDiskHash: string | null;
+        userModified: boolean;
+      }) =>
+        baselineRows.push({
+          userId: ctx.userId,
+          repositoryId: plan.repositoryId,
+          taskId: ctx.taskId,
+          diskPath: entry.diskPath,
+          templateId: entry.templateId,
+          templateKind: entry.templateKind,
+          templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+          ...prior,
+          formValuesSnapshot: plan.renderCtxSnapshot,
+          sourceStepId: '02-upgrade-apply',
+          source: 'backfill' as const,
+          haiveVersion,
+          bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+        });
       if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
         const existing = await readFileOrEmpty(ctx.repoPath, rel);
-        // A region already on disk with no live tracking row (new_artifact) is
-        // an untracked onboarding baseline. Capture it as a superseded backfill
-        // row before overwriting so a rollback of this upgrade restores the
-        // prior region rather than deleting it.
-        if (!entry.liveArtifactId) {
-          const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
-          if (priorRegion) {
-            const priorNorm = normalizeContent(priorRegion);
-            const priorHash = sha256Hex(priorNorm);
-            baselineRows.push({
-              userId: ctx.userId,
-              repositoryId: plan.repositoryId,
-              taskId: ctx.taskId,
-              diskPath: entry.diskPath,
-              templateId: entry.templateId,
-              templateKind: entry.templateKind,
-              templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-              templateContentHash: priorHash,
-              writtenHash: priorHash,
-              writtenContent: priorNorm,
-              lastObservedDiskHash: priorHash,
-              userModified: false,
-              formValuesSnapshot: plan.renderCtxSnapshot,
-              sourceStepId: '02-upgrade-apply',
-              source: 'backfill' as const,
-              haiveVersion,
-              bundleItemId: null,
-            });
-          }
+        const priorRegion = entry.liveArtifactId
+          ? null
+          : extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
+        if (priorRegion) {
+          const prior = cliRulesRegionRecord(
+            priorRegion,
+            entry.newContent,
+            await loadCliRulesRenderHashes(ctx.db, plan.repositoryId),
+          );
+          baseline({
+            templateContentHash: prior.templateContentHash,
+            writtenHash: prior.writtenHash,
+            writtenContent: prior.content,
+            lastObservedDiskHash: prior.templateContentHash,
+            userModified: !prior.haiveWritten,
+          });
         }
         await writeFileNoFollow(
           ctx.repoPath,
@@ -507,6 +523,23 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           { createParents: true },
         );
       } else {
+        const existing = entry.liveArtifactId ? null : await readTextNoFollow(ctx.repoPath, rel);
+        if (existing !== null) {
+          const renderHash = sha256Hex(normalizeContent(entry.newContent));
+          const existingHash = sha256Hex(normalizeContent(existing));
+          if (existingHash !== renderHash) {
+            baseline(
+              backfillRecord(
+                {
+                  templateContentHash: entry.currentTemplateContentHash ?? '',
+                  writtenHash: renderHash,
+                  content: entry.newContent,
+                },
+                { content: existing, hash: existingHash },
+              ),
+            );
+          }
+        }
         await writeFileNoFollow(ctx.repoPath, rel, entry.newContent, { createParents: true });
       }
       writtenPaths.push(rel);

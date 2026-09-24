@@ -12,6 +12,7 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import {
+  backfillRecord,
   classifyEntry,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
@@ -57,6 +58,35 @@ describe('classifyEntry', () => {
   it('current without live → new_artifact', () => {
     expect(
       classifyEntry({ live: null, current: current(), diskContent: null, diskHash: null }),
+    ).toBe('new_artifact');
+  });
+
+  it('current without live, and the render already on disk → new_artifact', () => {
+    expect(
+      classifyEntry({ live: null, current: current(), diskContent: 'BODY', diskHash: 'wh-A' }),
+    ).toBe('new_artifact');
+  });
+
+  it('current without live, and some other file already on disk → conflict', () => {
+    expect(
+      classifyEntry({
+        live: null,
+        current: current(),
+        diskContent: 'USER_FILE',
+        diskHash: 'wh-USER',
+      }),
+    ).toBe('conflict');
+  });
+
+  it('current without live, and an earlier recorded render on disk → new_artifact', () => {
+    expect(
+      classifyEntry({
+        live: null,
+        current: current(),
+        diskContent: 'OLD_RENDER',
+        diskHash: 'wh-OLD',
+        recordedRenderHashes: new Set(['wh-OLD']),
+      }),
     ).toBe('new_artifact');
   });
 
@@ -218,5 +248,86 @@ describe('classifyEntry on the cli-rules row, recorded from the region on disk',
 
   it('a region edited after it was recorded is a conflict once the rules change', () => {
     expect(plan({ recorded: a, render: a, onDisk: edited, now: b })).toBe('conflict');
+  });
+
+  /** No row at all: the plan reads `onDisk` against the render `now` and the renders recorded. */
+  const untracked = (args: { onDisk: string; now: string; earlier?: string[] }) => {
+    const diskContent = normalizeContent(regionOf(args.onDisk));
+    return classifyEntry({
+      live: null,
+      current: current({ ...cliRules, content: args.now, writtenHash: hashOf(args.now) }),
+      diskContent,
+      diskHash: sha256Hex(diskContent),
+      recordedRenderHashes: new Set((args.earlier ?? []).map(hashOf)),
+    });
+  };
+
+  it('an untracked region an earlier render wrote is replaced by default', () => {
+    expect(untracked({ onDisk: b, now: a, earlier: [b] })).toBe('new_artifact');
+  });
+
+  it('an untracked region nobody rendered is a conflict', () => {
+    expect(untracked({ onDisk: edited, now: a, earlier: [b] })).toBe('conflict');
+  });
+});
+
+describe('backfillRecord', () => {
+  const render = current({
+    content: 'RENDER',
+    writtenHash: 'wh-RENDER',
+    templateContentHash: 'h1',
+  });
+
+  it("keeps an edited file's bytes but claims neither them nor the template", () => {
+    expect(backfillRecord(render, { content: 'EDITED', hash: 'wh-EDITED' })).toEqual({
+      templateContentHash: 'wh-EDITED',
+      writtenHash: 'wh-RENDER',
+      writtenContent: 'EDITED',
+      lastObservedDiskHash: 'wh-EDITED',
+      userModified: true,
+    });
+  });
+
+  it('records an untouched file as the render it is', () => {
+    expect(backfillRecord(render, { content: 'RENDER', hash: 'wh-RENDER' })).toMatchObject({
+      templateContentHash: 'h1',
+      writtenHash: 'wh-RENDER',
+      writtenContent: 'RENDER',
+      userModified: false,
+    });
+  });
+
+  it('records the render for a file missing from disk', () => {
+    expect(backfillRecord(render, { content: null, hash: null })).toEqual({
+      templateContentHash: 'h1',
+      writtenHash: 'wh-RENDER',
+      writtenContent: 'RENDER',
+      lastObservedDiskHash: null,
+      userModified: false,
+    });
+  });
+
+  /** The next plan over a row holding `row`, with the edit still on disk and the template at `now`. */
+  const next = (row: { templateContentHash: string; writtenHash: string }, now: string) =>
+    classifyEntry({
+      live: live(row),
+      current: current({
+        templateContentHash: now,
+        content: `RENDER-${now}`,
+        writtenHash: `wh-RENDER-${now}`,
+      }),
+      diskContent: 'EDITED',
+      diskHash: 'wh-EDITED',
+    });
+
+  it('leaves an edited file a conflict, whether or not the template changes', () => {
+    const record = backfillRecord(render, { content: 'EDITED', hash: 'wh-EDITED' });
+    expect(next(record, 'h1')).toBe('conflict');
+    expect(next(record, 'h2')).toBe('conflict');
+  });
+
+  it('offers a claim the boot repair swapped while the template is unchanged', () => {
+    // A pre-fix row held the disk hash as writtenHash; the repair swaps it with the template's.
+    expect(next({ templateContentHash: 'wh-EDITED', writtenHash: 'h1' }, 'h1')).toBe('conflict');
   });
 });

@@ -2222,3 +2222,23 @@ on disk. Anything else keeps the render's hash, so the upgrade plan offers the r
 conflict, whose default is skip. No region on disk means no row, and a live one is retired, since
 it would read as the person's deletion. `01-upgrade-plan`'s backfill applies the same rule to the
 region: it used to store the whole file, which a rollback could paste into the region.
+
+**Every backfill row claims only a render, whatever its kind.** The backfill used to record the
+disk's hash, so an edited file became its own baseline and the next template change pre-selected
+overwriting it as a `clean_update`. A path with no row whose bytes no render accounts for (this
+render, or for the rules region one recorded earlier) is now a `conflict`, not a pre-selected
+`new_artifact`, and on a repository's first upgrade every path has no row. 01's backfill records
+nothing for such a path: nothing there is Haive's until 02 writes it, and a row would belong to the
+upgrade with no prior, which a rollback reads as a file the upgrade introduced and deletes. 02
+records the path only when it replaces the file, keeping what it held as a superseded baseline (the
+rules region through `cliRulesRegionRecord`, any other file through `backfillRecord`). Both apply
+one rule to bytes that are not a render: the bytes are `writtenContent`, so a rollback restores
+them; the render's hash is `writtenHash`, so they are never taken as Haive's; and their own hash is
+`templateContentHash`, so the template reads as not installed. A rollback copies both hashes, so a
+restored file is offered again at the next upgrade rather than classified `unchanged`.
+`GET /repos/:id/upgrade-status` keeps one row per template, and a rendering that is not current
+stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
+is invisible there once a sibling rendering has one; the next upgrade still offers it.
+`unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
+such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
+rollback copies get the two hashes swapped.
