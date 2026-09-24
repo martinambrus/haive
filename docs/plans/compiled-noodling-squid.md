@@ -1,6 +1,6 @@
 # Agent rules: global rewrite, per-dispatch delivery in Haive, upgrade and review-gate fixes
 
-> **IN PROGRESS.** Part 1 (global instruction files) done 2026-09-23. PR B (upgrade stubs and staging) is this change; C, D, the repo commits and A follow in that order. Migrations 0165 (C) and 0166 (A) are reserved.
+> **SHIPPED 2026-09-24.** Part 1 (global instruction files) 2026-09-23; PR B #229; PR C #231 with its follow-up #242; PR D #232; Part 5 as 12 local repository commits (not pushed) plus one re-render of a repository with no git; PR A #235. Migrations 0165 (C) and 0166 (A). Departures from this plan are marked **As built** in Parts 3 to 6. Still owed: Part 2's end-to-end upgrade check (no repository has finished onboarding yet) and the `agent_rules` stamp on the first real invocation.
 
 ## Context
 
@@ -215,6 +215,17 @@ feedback writes human text, which stays unfenced by design.
 **Verify:** unit tests, plus the zero-token UI check. Render gates 2 and 3 from a temp tsx on a
 dev-user fixture task, then view them at `localhost:3000` through Chrome MCP (desktop and narrow).
 
+**As built** (#231, #242):
+- No cap per output or per source: every well-formed site is kept, and only the gate caps its
+  display at 50 and counts the rest. The plan's 30-per-output cap dropped sites silently.
+- A site whose file a later implementation round edited is marked (`editedInRound`), not dropped,
+  since that round may have edited the file for something else. The mark reads the agent's own
+  `filesTouched`, so it is a hint.
+- A manual retry of 07 replaces its round's reports, as it replaces the rest of that pass.
+- The reason is backslash-escaped where the row is built (#242). `MarkdownView` renders images and a
+  collapsed status row still mounts its body, so an image in a reason was fetched on every gate
+  render (verified live with a control fixture). A bare URL still becomes a link.
+
 ## Part 4 — PR D: `DEFAULT_AGENT_RULES` rewrite
 
 `packages/shared/src/constants/default-agent-rules.ts` follows Part 1, adapted to a headless sandbox.
@@ -279,6 +290,14 @@ meantime would read as custom.
 - The upgrade-status endpoint reports cli-rules changed for an onboarded repo.
 - The provider form shows the inherit note, checked in Chrome MCP.
 
+**As built** (#232):
+- `dedupLines` never deduplicates structure (a line with no letter or digit), skips a block identical
+  to an earlier one, and treats a fenced code block as one unit, dropped only when an identical fence
+  was already emitted. Deduplicating lines inside a fence left a different example incomplete.
+- The new default is 9,198 characters (hash `7a41e8a7…`), and all 15 dev providers read as inheriting
+  it; the form shows it with the inherit note.
+- The upgrade-status check could not run: no repository on the install has finished onboarding.
+
 ## Part 5 — Commit the repos' rules files (right after D)
 
 No repo has `onboarding_artifacts` rows.
@@ -305,6 +324,15 @@ every case, first check that no task is running and that `git diff` shows only H
 **Verify:**
 - `git show HEAD:AGENTS.md` has both markers and no "Agent Spawning Pattern".
 - A zero-token capture from a worktree-shaped mount of one elmont repo shows the block.
+
+**As built:** the seven repos parked at `09_2` were not committed as they were. D changed
+`dedupLines`, and step 12 hashes 07's stored rules with the new function, so a region written by the
+old one would read as a conflict at the first upgrade. Each one's region was re-rendered from its own
+07 detect with the fixed merge and then committed; its hash equals what step 12 will record (verified
+for all seven). Each commit touches only AGENTS.md and CLAUDE.md, and a gitignored CLAUDE.md is left
+out. `dogacars` has no git and was re-rendered only; `adminanything` carries no Haive markers and was
+left alone. `git revert` restores HEAD's legacy guide rather than the uncommitted render that stood in
+the working tree, so the pre-apply files were archived before the commits.
 
 ## Part 6 — PR A: rules injected at dispatch, and stamped per invocation
 
@@ -399,6 +427,14 @@ NULL means not recorded.
   - an opt-out step gets none.
 - After merge, run `migrate` then `libs` (no task running), arm a watcher, and SELECT `agent_rules` on
   the next real invocation.
+
+**As built** (#235):
+- A closing tag the operator's rules quote is escaped (`<\/haive_agent_rules>`), never removed.
+- A re-fed prompt's stored block is stripped before the other adapters run. Every one of them
+  prepends, so one that newly applies would otherwise bury the stored block and leave two. The
+  isolation scan reads the prompt without that block too.
+- The stamp's `reason` is `disabled`, `opt-out` or `prompt-too-large`. There is no `empty`, because
+  blank rules inherit the default.
 
 ## Part 7 — Docs and records
 
