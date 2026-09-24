@@ -2279,13 +2279,15 @@ export async function resolveDagPhase(
             updatedAt: new Date(),
           })
           .where(eq(schema.taskDagIssues.id, issue.id));
-        // A coder's concerns are what it learned the hard way about this workspace.
-        // Carry them to every later agent rather than leaving them on the issue row.
-        await recordLedgerEntry(db, ctx.taskId, current.id, {
-          stepId: `06c-dag-execute/${issue.issueKey}`,
-          round: current.round,
-          text: result.concerns,
-        });
+        // A coder's concerns are what it learned the hard way about this workspace, for every
+        // later agent. One that left no result reported nothing: that row's text is Haive's.
+        if (result.parsed) {
+          await recordLedgerEntry(db, ctx.taskId, current.id, {
+            stepId: `06c-dag-execute/${issue.issueKey}`,
+            round: current.round,
+            text: result.concerns,
+          });
+        }
         await db
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
