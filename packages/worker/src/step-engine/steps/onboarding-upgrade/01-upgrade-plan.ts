@@ -487,10 +487,16 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
       const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
+      // An offered conflict stays unrecorded until 02 writes it: a row would carry the current
+      // template's hash, so a skipped one would read as installed and never be offered again.
+      const offered = new Set(
+        detected.entries.filter((e) => e.bucket === 'conflict').map((e) => e.diskPath),
+      );
 
       const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
       const haiveVersion = getHaiveVersion();
       for (const r of expanded) {
+        if (offered.has(r.diskPath)) continue;
         let recorded;
         if (r.templateKind === CLI_RULES_TEMPLATE_KIND) {
           // The region, never the whole file: a rollback writes this row's content into the region.

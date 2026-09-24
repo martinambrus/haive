@@ -2223,15 +2223,16 @@ conflict, whose default is skip. No region on disk means no row, and a live one 
 it would read as the person's deletion. `01-upgrade-plan`'s backfill applies the same rule to the
 region: it used to store the whole file, which a rollback could paste into the region.
 
-**Every backfill row claims only a render, whatever its kind.** `backfillRecord` (01) keeps the
-bytes on disk as `writtenContent`, so a rollback restores them, and records the render's hash as
-`writtenHash`. It used to record the disk's hash, so an edited file became its own baseline and the
-next template change pre-selected overwriting it as a `clean_update`. A path with no row whose bytes
-no render accounts for (this render, or for the rules region one recorded earlier) is a `conflict`,
-not a pre-selected `new_artifact`, and on a repository's first upgrade that is every path. 02
-keeps what such a path held as a superseded baseline before replacing it (the rules region through
-`cliRulesRegionRecord`, any other file through `backfillRecord`), so a rollback restores it rather
-than deleting the file. `unclaimBackfilledEdits`
-(`data-migrations.ts`) withdraws the claims written before: only such a row has `user_modified` with
-`written_hash` equal to `last_observed_disk_hash`, and it and its rollback copies get the reference
-render's hash, which claims nothing.
+**Every backfill row claims only a render, whatever its kind.** The backfill used to record the
+disk's hash, so an edited file became its own baseline and the next template change pre-selected
+overwriting it as a `clean_update`. A path with no row whose bytes no render accounts for (this
+render, or for the rules region one recorded earlier) is now a `conflict`, not a pre-selected
+`new_artifact`, and on a repository's first upgrade every path has no row. 01's backfill records
+nothing for such a path: a row carries the current template's hash, so a skipped conflict would read
+as installed and never be offered again, where "Skip" promises it will be. 02 records the path only
+when it replaces the file, keeping what it held as a superseded baseline (the rules region through
+`cliRulesRegionRecord`, any other file through `backfillRecord`): the replaced bytes, so a rollback
+restores them rather than deleting the file, under the render's hash, so they are never taken as
+Haive's. `unclaimBackfilledEdits` (`data-migrations.ts`) withdraws the claims written before: only
+such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
+rollback copies get the reference render's hash, which claims nothing.

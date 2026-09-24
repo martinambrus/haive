@@ -1,12 +1,13 @@
 /**
- * The real 01/02 upgrade steps and the boot repair, against a database and a seeded blank repository
- * holding one edited file and one hand-written AGENTS.md region. One throwaway user, deleted after.
+ * The real 01/02 upgrade steps, the rollback's plan and the boot repair, against a database and a
+ * seeded blank repository holding two edited files and a hand-written AGENTS.md region. One throwaway
+ * user, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_DISK_PATH,
@@ -22,6 +23,7 @@ import { seedBlankScaffold } from '../src/repo/blank-scaffold.js';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
 import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 
 const log = logger.child({ module: 'upgrade-claims-smoke' });
 
@@ -139,9 +141,9 @@ async function main(): Promise<void> {
       .returning({ id: schema.taskSteps.id });
 
     const controller = new AbortController();
-    const ctxFor = (taskStepId: string): StepContext => ({
+    const ctxFor = (taskStepId: string, forTask = taskId): StepContext => ({
       round: 0,
-      taskId,
+      taskId: forTask,
       taskStepId,
       userId,
       repoPath,
@@ -181,29 +183,21 @@ async function main(): Promise<void> {
       .update(schema.taskSteps)
       .set({ output: planned as unknown as Record<string, unknown>, status: 'done' })
       .where(eq(schema.taskSteps.id, planRow!.id));
-    const editedEntry = detected.entries.find((e) => e.diskPath === edited)!;
-    const [editedRow] = await db
-      .select()
-      .from(schema.onboardingArtifacts)
-      .where(
-        and(
-          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-          eq(schema.onboardingArtifacts.diskPath, edited),
-        ),
-      );
-    check(
-      'the backfill claims the render, not the edit',
-      editedRow?.writtenHash === editedEntry.newContentHash,
-      {
-        writtenHash: editedRow?.writtenHash,
-        render: editedEntry.newContentHash,
-        disk: editedEntry.currentHash,
-      },
-    );
-    check('the backfill keeps the edited bytes', editedRow?.writtenContent === editedBytes);
-    check('the backfill marks the file edited', editedRow?.userModified === true);
+    const rowsAt = (path: string) =>
+      db
+        .select({ id: schema.onboardingArtifacts.id })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, path),
+          ),
+        );
+    check('the backfill records no row for an offered edit', (await rowsAt(edited)).length === 0);
+    check('nor for the hand-written region', (await rowsAt(CLI_RULES_DISK_PATH)).length === 0);
+    check('but adopts the untouched file', (await rowsAt(untouched)).length === 1);
 
-    // ---- 02: defaults, plus "overwrite" on the rules region ------------------------------
+    // ---- 02: defaults, plus "overwrite" on the rules region and one file ---------------
     const applyCtx = ctxFor(applyRow!.id);
     const plan = await upgradeApplyStep.detect(applyCtx);
     const form = upgradeApplyStep.form!(applyCtx, plan) as FormSchema | null;
@@ -224,63 +218,79 @@ async function main(): Promise<void> {
       'the edited file is left as it was',
       (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
     );
-    const [baseline] = await db
-      .select()
-      .from(schema.onboardingArtifacts)
-      .where(
-        and(
-          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-          eq(schema.onboardingArtifacts.diskPath, CLI_RULES_DISK_PATH),
-          eq(schema.onboardingArtifacts.source, 'backfill'),
-          isNotNull(schema.onboardingArtifacts.supersededAt),
-        ),
-      );
-    const rulesEntry = detected.entries.find((e) => e.diskPath === CLI_RULES_DISK_PATH)!;
-    check(
-      'the replaced region is kept for a rollback',
-      baseline?.writtenContent?.includes('written by hand') === true,
-    );
-    check('but not claimed as a render', baseline?.writtenHash === rulesEntry.newContentHash, {
-      writtenHash: baseline?.writtenHash,
-      render: rulesEntry.newContentHash,
+
+    // ---- the next upgrade, and a rollback of this one -----------------------------------
+    const again = await upgradePlanStep.detect(planCtx);
+    const againBucket = again.entries.find((e) => e.diskPath === edited)?.bucket;
+    check('the next upgrade offers the skipped edit again', againBucket === 'conflict', {
+      bucket: againBucket,
     });
-    check("and marked as a person's", baseline?.userModified === true);
+
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, taskId));
+    const [rollbackTask] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId,
+        type: 'onboarding_upgrade',
+        title: 'upgrade-claims-smoke rollback',
+        status: 'running',
+        metadata: { mode: 'rollback' },
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.tasks.id });
+    const [rollbackRow] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: rollbackTask!.id,
+        stepId: '04-upgrade-rollback',
+        stepIndex: 4,
+        title: 'Roll back upgrade',
+        status: 'running',
+      })
+      .returning({ id: schema.taskSteps.id });
+    const rollback = await upgradeRollbackStep.detect(ctxFor(rollbackRow!.id, rollbackTask!.id));
+    const restoreOf = (path: string) => rollback.targets.find((t) => t.diskPath === path);
+    const deletes = (path: string) => rollback.newArtifactsToUndo.some((u) => u.diskPath === path);
 
     const overwrittenEntry = detected.entries.find((e) => e.diskPath === overwritten)!;
-    const [replaced] = await db
-      .select()
-      .from(schema.onboardingArtifacts)
-      .where(
-        and(
-          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-          eq(schema.onboardingArtifacts.diskPath, overwritten),
-          eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
-          isNotNull(schema.onboardingArtifacts.supersededAt),
-        ),
-      );
+    const replaced = restoreOf(overwritten);
     check(
-      'an overwritten file is kept for a rollback',
-      replaced?.writtenContent === overwrittenBytes,
+      'a rollback restores the overwritten file',
+      replaced?.priorWrittenContent === overwrittenBytes && !deletes(overwritten),
+      { restore: replaced?.priorArtifactId ?? null, deletes: deletes(overwritten) },
     );
     check(
-      'but not claimed as a render',
-      replaced?.writtenHash === overwrittenEntry.newContentHash,
+      'without claiming the file',
+      replaced?.priorWrittenHash === overwrittenEntry.newContentHash,
       {
-        writtenHash: replaced?.writtenHash,
+        writtenHash: replaced?.priorWrittenHash,
         render: overwrittenEntry.newContentHash,
       },
     );
-
-    // ---- the next template change -------------------------------------------------------
-    await db
-      .update(schema.onboardingArtifacts)
-      .set({ templateContentHash: 'template-changed-since' })
-      .where(eq(schema.onboardingArtifacts.id, editedRow!.id));
-    const next = await upgradePlanStep.detect(planCtx);
-    const nextBucket = next.entries.find((e) => e.diskPath === edited)?.bucket;
-    check('a later template change leaves the edit a conflict', nextBucket === 'conflict', {
-      bucket: nextBucket,
+    const rulesEntry = detected.entries.find((e) => e.diskPath === CLI_RULES_DISK_PATH)!;
+    const region = restoreOf(CLI_RULES_DISK_PATH);
+    check(
+      'a rollback restores the replaced region',
+      region?.priorWrittenContent?.includes('written by hand') === true &&
+        !deletes(CLI_RULES_DISK_PATH),
+    );
+    check('without claiming the region', region?.priorWrittenHash === rulesEntry.newContentHash, {
+      writtenHash: region?.priorWrittenHash,
+      render: rulesEntry.newContentHash,
     });
+    const [regionPrior] = region
+      ? await db
+          .select({ userModified: schema.onboardingArtifacts.userModified })
+          .from(schema.onboardingArtifacts)
+          .where(eq(schema.onboardingArtifacts.id, region.priorArtifactId))
+      : [];
+    check("and marked as a person's", regionPrior?.userModified === true);
+    check('a rollback leaves the skipped edit alone', !restoreOf(edited) && !deletes(edited));
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = (c: string) => c.repeat(64);
@@ -333,7 +343,8 @@ async function main(): Promise<void> {
         }),
       ])
       .returning({ id: schema.onboardingArtifacts.id });
-    const ours = new Set([preFix!.id, copy!.id, rules!.id, postFix!.id, editedRow!.id]);
+    const ours = new Set([preFix!.id, copy!.id, rules!.id, postFix!.id]);
+    if (replaced) ours.add(replaced.priorArtifactId);
     const hashOf = async (id: string) =>
       (
         await db
@@ -355,8 +366,9 @@ async function main(): Promise<void> {
     check('a rules row is left alone', (await hashOf(rules!.id)) === h('c'));
     check('a row the fix wrote is left alone', (await hashOf(postFix!.id)) === h('e'));
     check(
-      'the live backfill row is left alone',
-      (await hashOf(editedRow!.id)) === editedEntry.newContentHash,
+      'the baseline 02 kept is left alone',
+      replaced !== undefined &&
+        (await hashOf(replaced.priorArtifactId)) === overwrittenEntry.newContentHash,
     );
     const second = (await unclaimBackfilledEdits(db)).filter((id) => ours.has(id));
     check('a second run changes nothing', second.length === 0, second);
