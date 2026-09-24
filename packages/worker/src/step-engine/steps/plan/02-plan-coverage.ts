@@ -16,8 +16,10 @@ import {
   buildExpandPrompt,
   computeFrontier,
   depthBudget,
+  planAgentCapabilities,
   type PlanBuildApply,
   type PlanBuildDetect,
+  withLiveInputs,
   withMinedStatus,
 } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
@@ -31,12 +33,13 @@ import {
   type StructuralGap,
 } from './plan-coverage-scan.js';
 import {
+  currentPlanInputs,
   loadLiveAttachments,
   loadPlanInputsOutput,
   stillAttachedInput,
   type PlanInputsApply,
 } from './00-plan-inputs.js';
-import { uploadsInputRel } from './_plan-inputs.js';
+import { classifyPlanInput, uploadsInputRel } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { renderBoundedPlanIndex } from './_plan-index.js';
@@ -194,18 +197,26 @@ export function unresolvedExpansionNodeIds(rows: MiningRow[]): Set<string> {
 
 /** One line per gap in the gate's list, and the value the multi-select stores. */
 const structuralKey = (g: StructuralGap): string => `node:${g.nodeId}`;
+/** The key every section had before sections carried their row. */
+const nameSectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`;
 /** Scoped by SOURCE as well as line: two documents' line 12 are two different
  *  gaps, and a key that conflated them would mark the second handled the moment
- *  the first was. */
-const sectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`;
+ *  the first was. By the attachment ROW when the section has one: a document
+ *  deleted and re-uploaded under the same name is a different document, and a
+ *  repair of the deleted one's line 12 does not answer for the new one's. The row
+ *  replaces the name rather than joining it, since the agent id this becomes is
+ *  128 characters at most and an attachment path can run to 400. */
+const sectionKey = (c: CoverageCandidate): string =>
+  c.sourceId ? `doc:${c.sourceId}:${c.line}` : nameSectionKey(c);
 
 /**
  * The picked items less any section whose document is no longer attached. A section is sent WITH
  * its body, which detect copied out when it drafted this gate, so a document deleted while the gate
- * waited would otherwise still reach an agent. The document is the ROW `00-plan-inputs` recorded
- * under the section's name, so one deleted and re-uploaded under the same name is gone too. The
- * attachments are read only when a section was picked, and a lookup that fails keeps every item,
- * which is what happened before this existed.
+ * waited would otherwise still reach an agent. The document is the ROW the section was read from,
+ * so one deleted and re-uploaded under the same name is gone too, even once the replacement has
+ * been recorded under that name. A gate drafted before sections carried their row falls back to the
+ * row `00-plan-inputs` recorded under the name. The attachments are read only when a section was
+ * picked, and a lookup that fails keeps every item, which is what happened before this existed.
  */
 async function dropDeletedSources(
   ctx: StepContext,
@@ -219,7 +230,15 @@ async function dropDeletedSources(
   const recorded = new Map((prepared?.inputs ?? []).map((i) => [i.filename, i]));
   const gone = new Set(
     pickedSections
-      .filter((c) => !stillAttachedInput(recorded.get(c.source) ?? { filename: c.source }, live))
+      .filter(
+        (c) =>
+          !stillAttachedInput(
+            c.sourceId
+              ? { id: c.sourceId, filename: c.source }
+              : (recorded.get(c.source) ?? { filename: c.source }),
+            live,
+          ),
+      )
       .map(sectionKey),
   );
   if (gone.size === 0) return picked;
@@ -229,6 +248,11 @@ async function dropDeletedSources(
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+/** Whether a clean repair already answered this section: under its own key, or under the name-only
+ *  key a repair was recorded by before sections carried their row. Such a record cannot say which
+ *  row it covered, so it keeps the meaning it had. */
+const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
+  handled.has(sectionAgentId(sectionKey(c))) || handled.has(sectionAgentId(nameSectionKey(c)));
 
 /**
  * The gate can offer the SAME gap twice, so its agent id has to say which round
@@ -369,15 +393,16 @@ function coverageNeedsUserInput(detected: CoverageDetect): boolean {
 async function loadInputSections(
   ctx: StepContext,
 ): Promise<{ sections: DocSection[]; hasVisualInputs: boolean }> {
-  const [row] = await ctx.db
-    .select({ output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .where(
-      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
-    )
-    .limit(1);
-  const prepared = (row?.output ?? null) as PlanInputsApply | null;
-  if (!prepared || prepared.inputs.length === 0) return { sections: [], hasVisualInputs: false };
+  // What is attached NOW, as the build's dispatch sees it. When that cannot be worked out, 00's own
+  // record, read strictly: a failed read fails detect rather than persisting a gate with no gaps.
+  const current = await currentPlanInputs(ctx);
+  const prepared = current?.output ?? (await loadRecordedPlanInputs(ctx));
+  const unpreparedPicture = (current?.unprepared ?? []).some(
+    (r) => classifyPlanInput(r.filename, r.contentType) === 'image',
+  );
+  if (!prepared || prepared.inputs.length === 0) {
+    return { sections: [], hasVisualInputs: unpreparedPicture };
+  }
 
   const out: DocSection[] = [];
   for (const input of prepared.inputs) {
@@ -405,14 +430,35 @@ async function loadInputSections(
     }
     // Attributed to the ORIGINAL, never the sidecar: the reader is going to open
     // `requirements.docx`, not `requirements.docx.extracted.md`.
-    if (text) out.push(...parseDocSections(text, input.filename));
+    if (text) {
+      out.push(
+        ...parseDocSections(text, input.filename).map((section) => ({
+          ...section,
+          sourceId: input.id,
+        })),
+      );
+    }
   }
   // Images, plus any document nothing readable came out of — a wireframe PDF is
   // as invisible to a term scan as a PNG is.
   return {
     sections: out,
-    hasVisualInputs: prepared.hasImageInputs === true || (prepared.visualOnly?.length ?? 0) > 0,
+    hasVisualInputs:
+      prepared.hasImageInputs === true ||
+      (prepared.visualOnly?.length ?? 0) > 0 ||
+      unpreparedPicture,
   };
+}
+
+async function loadRecordedPlanInputs(ctx: StepContext): Promise<PlanInputsApply | null> {
+  const [row] = await ctx.db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .where(
+      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
+    )
+    .limit(1);
+  return (row?.output ?? null) as PlanInputsApply | null;
 }
 
 async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
@@ -511,7 +557,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     sections = findCoverageGaps(
       parsedSections,
       skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
-    ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
+    ).filter((candidate) => !sectionHandled(handledSections, candidate));
     // Every candidate carries its body into `detect_output` and becomes a
     // checkbox on the gate form, so an attached FOLDER of specifications used to
     // put thousands of both in front of one person. Capped and disclosed rather
@@ -730,16 +776,8 @@ async function refreshPlanMirror(ctx: StepContext, repositoryId: string): Promis
   }
 }
 
-function buildAutomaticConvergenceWave(
-  detected: CoverageDetect,
-  nodes: PlanNodeSkeleton[],
-  frontier: PlanNodeSkeleton[],
-  agentsUsed: number,
-  wave: number,
-) {
-  const count = continuationDispatchCount(frontier.length, agentsUsed);
-  const slice = frontier.slice(0, count);
-  const buildDetect =
+function buildDetectOf(detected: CoverageDetect): PlanBuildDetect {
+  return (
     detected.buildDetect ??
     ({
       mode: 'from_md',
@@ -749,11 +787,33 @@ function buildAutomaticConvergenceWave(
       kbFiles: [],
       brief: '',
       repoName: 'this project',
-    } satisfies PlanBuildDetect);
+    } satisfies PlanBuildDetect)
+  );
+}
+
+/** What every agent this gate dispatches needs from the inputs attached NOW, by the build's own
+ *  rule: a picture, or a document nothing readable came out of, requires `vision`; a PDF prefers it. */
+async function inputRequirements(ctx: StepContext, detected: CoverageDetect) {
+  const live = await withLiveInputs(ctx, buildDetectOf(detected));
+  return { capabilities: planAgentCapabilities(live), preferVision: live.hasPdfInputs === true };
+}
+
+function buildAutomaticConvergenceWave(
+  detected: CoverageDetect,
+  nodes: PlanNodeSkeleton[],
+  frontier: PlanNodeSkeleton[],
+  agentsUsed: number,
+  wave: number,
+  requirements: Awaited<ReturnType<typeof inputRequirements>>,
+) {
+  const count = continuationDispatchCount(frontier.length, agentsUsed);
+  const slice = frontier.slice(0, count);
+  const buildDetect = buildDetectOf(detected);
   return slice.map((node) => ({
     agentId: continuationAgentId(detected.continuationBatch, node.id, wave),
     agentTitle: `Assess: ${node.title}`,
     roleKey: 'expand',
+    ...requirements,
     prompt: buildExpandPrompt(
       buildDetect,
       detected.buildFormValues,
@@ -943,7 +1003,14 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       const state = continuationState(coverageRows);
       const agentsUsed = state.agentsByBatch.get(d.continuationBatch) ?? 0;
       const wave = (state.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;
-      return buildAutomaticConvergenceWave(d, nodes, frontier, agentsUsed, wave);
+      return buildAutomaticConvergenceWave(
+        d,
+        nodes,
+        frontier,
+        agentsUsed,
+        wave,
+        await inputRequirements(ctx, d),
+      );
     },
   },
 
@@ -1020,6 +1087,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             frontier,
             agentsUsed,
             wave,
+            await inputRequirements(ctx, automaticDetected),
           );
           if (dispatches.length > 0) {
             throw new MiningWaveError(
@@ -1072,6 +1140,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       )
         ? await renderBoundedPlanIndex(ctx.db, d.repositoryId, COVERAGE_PLAN_INDEX_MAX_CHARS)
         : '';
+      const requirements = await inputRequirements(ctx, d);
       const dispatches = picked.map((key) => {
         const structural = d.structural.find((gap) => structuralKey(gap) === key);
         const section = d.sections.find((candidate) => sectionKey(candidate) === key);
@@ -1091,6 +1160,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           agentId: manualAgentId(base, nextManualRound(base, d.manualRounds)),
           agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
           roleKey: 'expand',
+          ...requirements,
           prompt: buildCoverageRepairPrompt({
             subject,
             repairInstruction: structural
@@ -1158,7 +1228,14 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     // Every assessor derives a bounded view from the same live node snapshot.
     // It first decides whether the leaf is already taskable and only then
     // decomposes it; compaction and breadth enforcement are provider-neutral.
-    const dispatches = buildAutomaticConvergenceWave(d, nodes, frontier, agentsUsed, nextWave);
+    const dispatches = buildAutomaticConvergenceWave(
+      d,
+      nodes,
+      frontier,
+      agentsUsed,
+      nextWave,
+      await inputRequirements(ctx, d),
+    );
     if (dispatches.length === 0) {
       throw new Error('Automatic plan convergence found a frontier but could not build a wave.');
     }
