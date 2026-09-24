@@ -1933,6 +1933,32 @@ async function releaseUnsentAgents(
   }
 }
 
+/** Fail the agents a fan-out reserved and nothing sent, for a pass leaving its step finished or
+ *  failed: once the pass is gone nothing would send them, and Resume refuses a step whose agents
+ *  read as pending. Best effort, so the step's own error is what is reported. */
+async function failReservedAgents(db: Database, taskStepId: string, reason: string): Promise<void> {
+  const now = new Date();
+  try {
+    await db
+      .update(schema.taskStepAgentMinings)
+      .set({
+        status: 'failed',
+        errorMessage: `the step ended before the agent was sent: ${reason}`.slice(0, 2000),
+        endedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
+          eq(schema.taskStepAgentMinings.status, 'pending'),
+          isNull(schema.taskStepAgentMinings.cliInvocationId),
+        ),
+      );
+  } catch (err) {
+    log.error({ err, taskStepId }, 'could not fail the mining agents a failed step left unsent');
+  }
+}
+
 /** Send the agents a fan-out reserved and never linked, the worker having died between the two,
  *  from the prompt their step wrote and without charging an attempt. A row whose prompt is no
  *  longer recorded cannot be sent, so it is failed rather than left for the barrier to wait on. */
@@ -2980,6 +3006,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
+    if (stepDef.agentMining) await failReservedAgents(db, row.id, errorMessage);
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form

@@ -2021,6 +2021,29 @@ describe('a fan-out reserved before any agent is sent', () => {
     ]);
   });
 
+  it('fails an agent it reserved and never sent when the step fails first', async () => {
+    const state = freshState([
+      miningRow('refute-a', 1, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'refute refute-a',
+      }),
+    ]);
+    const step = waveStep([], []);
+    step.agentMining!.selectAgents = async () => {
+      throw new Error('the change set is empty');
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('failed');
+    const released = (state.miningUpdateLog ?? []).filter((u) => u.set.status === 'failed');
+    expect(released).toHaveLength(1);
+    expect(String(released[0]!.set.errorMessage)).toContain('the change set is empty');
+    expect(conditionValues(released[0]!.where)).toEqual(
+      expect.arrayContaining(['ts-1', 'pending']),
+    );
+  });
+
   it('leaves an orphan another pass already re-rolled to that pass', async () => {
     const stuck = () => {
       const state = freshState([

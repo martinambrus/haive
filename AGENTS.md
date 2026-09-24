@@ -236,8 +236,10 @@ loop). Once is the bound: a pass that loses a second race settles on its second 
 sent nothing still parks while any row is live (`hasLiveMiningAgents`).
 
 A dispatch that throws part-way fails what it reserved or linked and did not queue
-(`releaseUnsentAgents`), and ends the one run it had recorded. Left `pending`, such a row would
-make the api's Resume refuse the step as still running.
+(`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step before
+sending, such as a `selectAgents` that refuses, fails every reservation still unsent
+(`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
+still running.
 
 ## CLI adapter system
 
