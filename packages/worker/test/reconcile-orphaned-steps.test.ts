@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import { reconcileOrphanedSteps } from '../src/queues/task-queue.js';
 
 /** Every column referenced anywhere in a drizzle condition tree. Structural, so the test
@@ -87,7 +88,8 @@ describe('reconcileOrphanedSteps', () => {
   });
 });
 
-/** Every bound value in a drizzle condition tree, flattened. */
+/** Every bound value in a drizzle condition tree, flattened. A primitive interpolated into a raw
+ *  `sql` template sits in the chunks as itself, and is bound all the same. */
 function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   if (!node || typeof node !== 'object') return acc;
   if (Array.isArray(node)) {
@@ -100,7 +102,12 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
     else acc.push(obj.value);
   }
   const chunks = obj.queryChunks;
-  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  if (Array.isArray(chunks)) {
+    for (const c of chunks) {
+      if (c === null || typeof c !== 'object') acc.push(c);
+      else conditionValues(c, acc);
+    }
+  }
   return acc;
 }
 
@@ -117,10 +124,11 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
     taskStepId: 'ts-1',
     taskId: 'task-1',
     stepId: '09_5-skill-generation',
-    round: 0,
+    round: 2,
     userId: 'user-1',
+    epoch: 3,
     currentStepId: '09_5-skill-generation',
-    currentRound: 0,
+    currentRound: 2,
   };
   let joinedReads = 0;
   return {
@@ -180,18 +188,32 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
     );
     const fence = recorded.find((u) => u.table === 'tasks');
     expect(fence?.set).toHaveProperty('orchestrationEpoch');
-    // Guarded on the task still running, so a task cancelled meanwhile is not re-driven.
-    expect(conditionColumns(fence!.where)).toContain('status');
+    // A compare-and-swap on what the pass read: a task cancelled meanwhile, or one a step retry
+    // re-targeted (which moves the current step and bumps the epoch itself), is not re-driven.
+    const columns = conditionColumns(fence!.where);
+    for (const column of ['status', 'orchestration_epoch', 'current_step_id', 'current_round']) {
+      expect(columns).toContain(column);
+    }
+    expect(conditionValues(fence!.where)).toEqual(
+      expect.arrayContaining(['running', 3, '09_5-skill-generation', 2]),
+    );
     expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 4 }]);
   });
 
-  it('does not re-drive a task that stopped running before the fence', async () => {
+  it('does not re-drive a task the fence no longer matches', async () => {
     advances.length = 0;
-    await reconcileOrphanedSteps(
-      makeCurrentStepDb([], { unstarted: [], fenced: [] }),
-      deps(new Set()),
-    );
-    expect(advances).toEqual([]);
+    const errors = vi.spyOn(logger, 'error');
+    try {
+      await reconcileOrphanedSteps(
+        makeCurrentStepDb([], { unstarted: [], fenced: [] }),
+        deps(new Set()),
+      );
+      expect(advances).toEqual([]);
+      // Skipped as a result, not abandoned by a throw the pass then swallows.
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it('ends a never-started run that no job owes, and leaves a queued one alone', async () => {

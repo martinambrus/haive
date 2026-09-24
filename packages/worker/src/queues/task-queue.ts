@@ -2319,6 +2319,7 @@ export async function reconcileOrphanedSteps(
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
+      epoch: schema.tasks.orchestrationEpoch,
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
     })
@@ -2420,16 +2421,23 @@ export async function reconcileOrphanedSteps(
       // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
       // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
       await foldOrphanedCliParkOnBoot(db, s.taskStepId);
-      // Fenced: every advance queued before this boot, and one BullMQ redelivers after the dead
-      // worker's lock lapses, carries the old epoch and is dropped as stale, so this re-drive is
-      // the only advance of the step.
+      // Compare-and-swap on the state this pass read: every older queued advance goes stale, and
+      // a retry or resume the api took during boot keeps the task instead of this re-drive.
       const [fenced] = await db
         .update(schema.tasks)
         .set({
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           updatedAt: new Date(),
         })
-        .where(and(eq(schema.tasks.id, s.taskId), eq(schema.tasks.status, 'running')))
+        .where(
+          and(
+            eq(schema.tasks.id, s.taskId),
+            eq(schema.tasks.status, 'running'),
+            eq(schema.tasks.orchestrationEpoch, s.epoch),
+            sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
+            eq(schema.tasks.currentRound, s.currentRound),
+          ),
+        )
         .returning({ epoch: schema.tasks.orchestrationEpoch });
       if (!fenced) continue;
       await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch);
