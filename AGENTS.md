@@ -1011,9 +1011,12 @@ or a file" rule re-checked against the live rows, before the inputs are prepared
 since preparing a late document can take minutes and deleting the only one meanwhile must still
 refuse. 02's manual repair drops a picked section whose document is gone, by the attachment ROW
 the section was read from (`sourceId`): the gate carries the section's BODY, and by name a
-same-named replacement recorded since would answer for it. Every lookup fails open, onto the fields
-the build had before. A failed index REWRITE is the exception: it drops the index from the prompt,
-and is recorded that way, since the file on disk no longer lists what is attached.
+same-named replacement recorded since would answer for it. A section's key is its row and line
+rather than its name, so a repair of the deleted document does not mark the replacement's section
+handled; a repair recorded before sections carried their row cannot say which one it covered and
+keeps its name-only meaning. Every lookup fails open, onto the fields the build had before. A failed index REWRITE is
+the exception: it drops the index from the prompt, and is recorded that way, since the file on disk
+no longer lists what is attached.
 
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 

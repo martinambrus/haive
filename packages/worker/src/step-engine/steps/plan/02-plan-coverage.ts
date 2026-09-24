@@ -197,10 +197,17 @@ export function unresolvedExpansionNodeIds(rows: MiningRow[]): Set<string> {
 
 /** One line per gap in the gate's list, and the value the multi-select stores. */
 const structuralKey = (g: StructuralGap): string => `node:${g.nodeId}`;
+/** The key every section had before sections carried their row. */
+const nameSectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`;
 /** Scoped by SOURCE as well as line: two documents' line 12 are two different
  *  gaps, and a key that conflated them would mark the second handled the moment
- *  the first was. */
-const sectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`;
+ *  the first was. By the attachment ROW when the section has one: a document
+ *  deleted and re-uploaded under the same name is a different document, and a
+ *  repair of the deleted one's line 12 does not answer for the new one's. The row
+ *  replaces the name rather than joining it, since the agent id this becomes is
+ *  128 characters at most and an attachment path can run to 400. */
+const sectionKey = (c: CoverageCandidate): string =>
+  c.sourceId ? `doc:${c.sourceId}:${c.line}` : nameSectionKey(c);
 
 /**
  * The picked items less any section whose document is no longer attached. A section is sent WITH
@@ -241,6 +248,11 @@ async function dropDeletedSources(
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+/** Whether a clean repair already answered this section: under its own key, or under the name-only
+ *  key a repair was recorded by before sections carried their row. Such a record cannot say which
+ *  row it covered, so it keeps the meaning it had. */
+const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
+  handled.has(sectionAgentId(sectionKey(c))) || handled.has(sectionAgentId(nameSectionKey(c)));
 
 /**
  * The gate can offer the SAME gap twice, so its agent id has to say which round
@@ -545,7 +557,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     sections = findCoverageGaps(
       parsedSections,
       skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
-    ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
+    ).filter((candidate) => !sectionHandled(handledSections, candidate));
     // Every candidate carries its body into `detect_output` and becomes a
     // checkbox on the gate form, so an attached FOLDER of specifications used to
     // put thousands of both in front of one person. Capped and disclosed rather

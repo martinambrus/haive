@@ -374,11 +374,15 @@ const idOf = (name: string): string => {
 /** A step context on the in-memory database whose task has exactly these attachments, and whose
  *  `00-plan-inputs` recorded `recorded`. The rows have no files behind them, so none of them is
  *  prepared again and each counts by its kind alone. The mining-row read is a join the fake cannot
- *  run, so it answers that no agent has run yet. */
+ *  run, so it answers `miningRows` (no agent has run, by default) whichever step it is asked about. */
 const attachedCtx = (
   rows: (string | { id: string; filename: string })[],
   recorded: (Partial<PlanInputRow> & { filename: string })[] = [],
-  opts: { repoPath?: string; attachmentsUnreadable?: boolean } = {},
+  opts: {
+    repoPath?: string;
+    attachmentsUnreadable?: boolean;
+    miningRows?: { agentId: string; status: 'done' | 'failed'; errorMessage: string | null }[];
+  } = {},
 ) => {
   const repoPath = opts.repoPath ?? '/nowhere';
   const fake = createFakeDb({
@@ -436,7 +440,13 @@ const attachedCtx = (
     select: (fields?: never) => ({
       from: (table: never) => {
         if (table === schema.taskStepAgentMinings) {
-          return { innerJoin: () => ({ leftJoin: () => ({ where: async () => [] }) }) };
+          const answer = (opts.miningRows ?? []).map((row) => ({
+            ...row,
+            invocationExitCode: null,
+            invocationEndedAt: null,
+            invocationErrorMessage: null,
+          }));
+          return { innerJoin: () => ({ leftJoin: () => ({ where: async () => answer }) }) };
         }
         if (table === schema.taskAttachments && opts.attachmentsUnreadable) {
           throw new Error('connection lost');
@@ -637,12 +647,14 @@ describe('a repair picked from a document deleted since the gate drafted it', ()
     // body the gate still holds would go to an agent.
     const first = idOf('first spec.md');
     const replacement = idOf('new spec.md');
+    const specKey = `doc:${first}:12`;
+    const oldKey = `doc:${idOf('old.md')}:4`;
     const drafted = detected({
       sections: [
         { ...section('spec.md', 12), sourceId: first },
         { ...section('old.md', 4), sourceId: idOf('old.md') },
       ],
-      sectionBodies: d.sectionBodies,
+      sectionBodies: { [specKey]: 'Billing runs monthly.', [oldKey]: 'Retired text.' },
       docNames: d.docNames,
     });
     const error = await planCoverageStep.apply!(
@@ -655,13 +667,32 @@ describe('a repair picked from a document deleted since the gate drafted it', ()
       ),
       {
         detected: drafted,
-        formValues: { decision: 'redecompose', items: ['doc:spec.md:12', 'doc:old.md:4'] },
+        formValues: { decision: 'redecompose', items: [specKey, oldKey] },
       } as never,
     ).catch((err: unknown) => err);
-    const prompts = (error as MiningWaveError).dispatches.map((x) => x.prompt);
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('Retired text.');
-    expect(prompts.join('\n')).not.toContain('Billing runs monthly.');
+    const dispatches = (error as MiningWaveError).dispatches;
+    expect(dispatches.map((x) => x.prompt)).toHaveLength(1);
+    expect(dispatches[0]!.prompt).toContain('Retired text.');
+    expect(dispatches.map((x) => x.prompt).join('\n')).not.toContain('Billing runs monthly.');
+    // The repair is recorded under its row, which is what the handled filter reads back.
+    expect(dispatches.map((x) => x.agentId)).toEqual([`cover-doc-${idOf('old.md')}-4-r1`]);
+  });
+
+  it('keeps the agent id of a section from a long path within its varchar(128) column', async () => {
+    const long = `${'deep/'.repeat(70)}spec.md`;
+    const key = `doc:${idOf(long)}:12`;
+    const drafted = detected({
+      structural: [],
+      sections: [{ ...section(long, 12), sourceId: idOf(long) }],
+      sectionBodies: { [key]: 'Body.' },
+      docNames: [long],
+    });
+    const error = await planCoverageStep.apply!(attachedCtx([long]), {
+      detected: drafted,
+      formValues: { decision: 'redecompose', items: [key] },
+    } as never).catch((err: unknown) => err);
+    const [dispatch] = (error as MiningWaveError).dispatches;
+    expect(dispatch!.agentId.length).toBeLessThanOrEqual(128);
   });
 
   it('keeps every picked section when the attachments cannot be read', async () => {
@@ -745,6 +776,50 @@ describe('the sections the gate drafts', () => {
       attachedCtx(['late.md', 'shot.png'], [], { repoPath: repo }),
     );
     expect(d.hasVisualInputs).toBe(true);
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  /** A clean repair of a section, recorded under this agent id. */
+  const repaired = (agentId: string) => ({ agentId, status: 'done' as const, errorMessage: null });
+
+  it('leaves out a section a clean repair of its own row already answered', async () => {
+    const repo = await repoWith({ 'spec.md': '## Billing\nMonthly invoices.\n' });
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce([privacy]);
+    const d = await planCoverageStep.detect!(
+      attachedCtx(['spec.md'], [], {
+        repoPath: repo,
+        miningRows: [repaired(`cover-doc-${idOf('spec.md')}-1-r1`)],
+      }),
+    );
+    expect(d.sections).toEqual([]);
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('offers a same-named replacement the section its predecessor had repaired', async () => {
+    // The repair answered the deleted row; the replacement's line 1 belongs to another document.
+    const repo = await repoWith({ 'spec.md': '## Billing\nMonthly invoices.\n' });
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce([privacy]);
+    const d = await planCoverageStep.detect!(
+      attachedCtx(['spec.md'], [], {
+        repoPath: repo,
+        miningRows: [repaired(`cover-doc-${idOf('first spec.md')}-1-r1`)],
+      }),
+    );
+    expect(d.sections).toMatchObject([{ title: 'Billing', sourceId: idOf('spec.md') }]);
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('still honours a repair recorded before sections carried their row', async () => {
+    // Such a record cannot say which row it covered, so it keeps the meaning it had.
+    const repo = await repoWith({ 'spec.md': '## Billing\nMonthly invoices.\n' });
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce([privacy]);
+    const d = await planCoverageStep.detect!(
+      attachedCtx(['spec.md'], [], {
+        repoPath: repo,
+        miningRows: [repaired('cover-doc-spec-md-1-r2')],
+      }),
+    );
+    expect(d.sections).toEqual([]);
     await rm(repo, { recursive: true, force: true });
   });
 
