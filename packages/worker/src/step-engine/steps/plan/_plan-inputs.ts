@@ -2,7 +2,7 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { planInputSidecarName, taskUploadsRel } from '@haive/shared';
 import { openFileNoFollow } from '@haive/shared/fs-safe';
-import { FIRST_SLOT, childFd, letToolRead, runTool } from '../../../repo/tool-spawn.js';
+import { FIRST_SLOT, childFd, runTool, toolReadable } from '../../../repo/tool-spawn.js';
 
 /** How long one extractor subprocess may run. Extraction also happens when a build dispatches, where
  *  a hung `pdftotext` would hold the whole wave. */
@@ -475,11 +475,11 @@ export async function extractPlanInput(
     // unprivileged extraction uid, which re-opens the document through its slot.
     const held = (await openFileNoFollow(doc.anchor, doc.rel, 'read', { strict: true }))!;
     try {
-      const restore = await letToolRead(held);
+      const readable = await toolReadable(held);
       try {
-        return await extract(held);
+        return await extract(readable.fh);
       } finally {
-        await restore?.();
+        await readable.close();
       }
     } finally {
       await held.close();

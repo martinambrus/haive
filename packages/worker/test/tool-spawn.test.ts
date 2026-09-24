@@ -1,10 +1,10 @@
-import { link, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, open, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import JSZip from 'jszip';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EXTRACT_UID, FIRST_SLOT, childFd, letToolRead, runTool } from '../src/repo/tool-spawn.js';
+import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from '../src/repo/tool-spawn.js';
 
 const have = (tool: string): boolean => {
   try {
@@ -126,33 +126,68 @@ describe('runTool', () => {
     }
   });
 
-  describe.runIf(process.getuid?.() === 0)('letToolRead', () => {
-    it('opens a file only the worker could read to the extraction uid while it needs it', async () => {
+  it.runIf(process.getuid?.() !== 0)(
+    'hands back the file itself when the worker is not root',
+    async () => {
+      const fh = await held('mine.txt', 'mine');
+      try {
+        await fh.chmod(0o600);
+        expect((await toolReadable(fh)).fh).toBe(fh);
+      } finally {
+        await fh.close();
+      }
+    },
+  );
+
+  describe.runIf(process.getuid?.() === 0)('toolReadable', () => {
+    it('hands the extraction uid a private copy of a file only the worker can read', async () => {
       const fh = await held('private.txt', 'owner only');
       try {
         await fh.chmod(0o600);
-        const restore = await letToolRead(fh);
-        expect((await stat(path.join(dir, 'private.txt'))).mode & 0o777).toBe(0o604);
-        const { stdout } = await runTool('cat', [childFd(FIRST_SLOT)], {
-          fds: [fh],
-          maxStdout: 64,
-        });
-        expect(stdout).toBe('owner only');
-        // Opened up only while the tool runs: the restore puts the file's own mode back.
-        await restore!();
-        expect((await stat(path.join(dir, 'private.txt'))).mode & 0o777).toBe(0o600);
+        const readable = await toolReadable(fh);
+        try {
+          expect(readable.fh).not.toBe(fh);
+          const { stdout } = await runTool('cat', [childFd(FIRST_SLOT)], {
+            fds: [readable.fh],
+            maxStdout: 64,
+          });
+          expect(stdout).toBe('owner only');
+          // The copy has no name left, and the original never changed mode.
+          expect(await readlink(`/proc/self/fd/${readable.fh.fd}`)).toMatch(/ \(deleted\)$/);
+          expect((await stat(path.join(dir, 'private.txt'))).mode & 0o777).toBe(0o600);
+        } finally {
+          await readable.close();
+        }
       } finally {
         await fh.close();
       }
     });
 
-    it('refuses a file with another name rather than opening that name up too', async () => {
+    it('copies a file with a second name without touching either name', async () => {
       const fh = await held('shared.txt', 'two names');
       try {
         await fh.chmod(0o600);
         await link(path.join(dir, 'shared.txt'), path.join(dir, 'other-name.txt'));
-        await expect(letToolRead(fh)).rejects.toThrow(/other links/);
-        expect((await stat(path.join(dir, 'other-name.txt'))).mode & 0o777).toBe(0o600);
+        const readable = await toolReadable(fh);
+        try {
+          const { stdout } = await runTool('cat', [childFd(FIRST_SLOT)], {
+            fds: [readable.fh],
+            maxStdout: 64,
+          });
+          expect(stdout).toBe('two names');
+          expect((await stat(path.join(dir, 'other-name.txt'))).mode & 0o777).toBe(0o600);
+        } finally {
+          await readable.close();
+        }
+      } finally {
+        await fh.close();
+      }
+    });
+
+    it('hands back a file the extraction uid can already read', async () => {
+      const fh = await held('open.txt', 'anyone');
+      try {
+        expect((await toolReadable(fh)).fh).toBe(fh);
       } finally {
         await fh.close();
       }

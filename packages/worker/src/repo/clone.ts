@@ -32,7 +32,7 @@ import { detectFromDirectory } from './framework-detect.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
-import { EXTRACT_UID, FIRST_SLOT, childFd, letToolRead, runTool } from './tool-spawn.js';
+import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
@@ -466,14 +466,14 @@ export async function extractArchive(
       try {
         if (format === 'zip') {
           // unzip seeks, so it re-opens the archive through its slot instead of reading a stream.
-          const restore = await letToolRead(held);
+          const readable = await toolReadable(held);
           try {
             // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still
             // extracted.
             const { exitCode, stderr } = await runTool(
               'unzip',
               ['-q', '-o', childFd(FIRST_SLOT + 1), '-d', childFd(FIRST_SLOT)],
-              { fds: [inner, held], okExits: [0, 1] },
+              { fds: [inner, readable.fh], okExits: [0, 1] },
             );
             if (exitCode !== 0) {
               logger.warn(
@@ -482,7 +482,7 @@ export async function extractArchive(
               );
             }
           } finally {
-            await restore?.();
+            await readable.close();
           }
         } else {
           const flags = format === 'tar.gz' ? ['-xz'] : ['-x'];

@@ -273,7 +273,7 @@ describe('extractArchive', () => {
   });
 
   it.runIf(process.getuid?.() === 0)(
-    'extracts a zip only the worker could read, as the unprivileged extraction uid',
+    'extracts a zip only the worker could read, as the unprivileged uid, twice at once',
     async () => {
       const zip = new JSZip();
       zip.file('private/README.md', '# owner only\n');
@@ -285,12 +285,16 @@ describe('extractArchive', () => {
         },
       );
 
-      await extractArchive(at('private.zip'), 'zip', at('out-private'));
+      // Twice at once, as two overlapping expansions of one attachment do.
+      await Promise.all([
+        extractArchive(at('private.zip'), 'zip', at('out-private')),
+        extractArchive(at('private.zip'), 'zip', at('out-private-2')),
+      ]);
 
-      expect(await readFile(path.join(tmpRoot, 'out-private', 'README.md'), 'utf8')).toBe(
-        '# owner only\n',
-      );
-      // Readable to that uid only while unzip ran.
+      for (const out of ['out-private', 'out-private-2']) {
+        expect(await readFile(path.join(tmpRoot, out, 'README.md'), 'utf8')).toBe('# owner only\n');
+      }
+      // Read through a private copy, so the archive itself never changed mode.
       expect((await stat(path.join(tmpRoot, 'private.zip'))).mode & 0o777).toBe(0o600);
     },
   );

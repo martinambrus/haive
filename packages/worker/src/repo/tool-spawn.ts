@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
-import { logger } from '@haive/shared';
+import os from 'node:os';
+import { openFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 
 /** uid/gid an extraction or document tool runs as. NOT 1000: that uid owns every repository on the
  *  volume, so a tool escaping its destination would be writing as the owner of everything it could
@@ -107,25 +109,41 @@ export function runTool(
 }
 
 /**
- * Let the extraction uid open a held file through its slot, for as long as the caller needs it. A
- * tool that re-opens `/proc/self/fd/N` rather than reading the descriptor (unzip does, since it
- * seeks) is checked against the file's own mode as that uid. The api writes every upload 0644, so
- * this is normally a no-op. A file the uid cannot read is opened up through the descriptor, never
- * by name, and only while it has one name: re-moding a hard link would open up its other names
- * too, so such a file is refused instead. Answers the restore to call once the tool is done, or
- * null when nothing was changed.
+ * A descriptor on a held file that the extraction uid can open through its slot. A tool that
+ * re-opens `/proc/self/fd/N` rather than reading the descriptor (unzip does, since it seeks) is
+ * checked against the file's own mode as that uid. The api writes every upload 0644, so this is
+ * normally the file itself. One that uid cannot read is copied through the descriptor into a
+ * private file it can, whose name is gone before the tool starts, so the original's mode is never
+ * changed and two extractions of one file share nothing. Close what it answers once the tool is
+ * done.
  */
-export async function letToolRead(fh: FileHandle): Promise<(() => Promise<void>) | null> {
-  if (process.getuid?.() !== 0) return null;
-  const st = await fh.stat();
-  if ((st.mode & 0o004) !== 0) return null;
-  if (st.nlink !== 1) {
-    throw new Error('the file has other links and is not readable by the extraction user');
+export async function toolReadable(
+  fh: FileHandle,
+): Promise<{ fh: FileHandle; close: () => Promise<void> }> {
+  if (process.getuid?.() !== 0 || ((await fh.stat()).mode & 0o004) !== 0) {
+    return { fh, close: async () => {} };
   }
-  const mode = st.mode & 0o7777;
-  await fh.chmod(mode | 0o004);
-  return () =>
-    fh.chmod(mode).catch((err: unknown) => {
-      logger.warn({ err }, 'could not restore the mode of a file opened to the extraction user');
-    });
+  const rel = `.haive-tool-${randomUUID()}`;
+  const copy = (await openFileNoFollow(os.tmpdir(), rel, 'create-exclusive', {
+    fileMode: 0o604,
+  }))!;
+  try {
+    await removeNoFollow(os.tmpdir(), rel);
+    // Positional reads and writes on the two handles: neither stream would own its handle, and a
+    // stream that does not emits no close for a pipeline to wait on.
+    const buf = Buffer.allocUnsafe(1 << 20);
+    for (let pos = 0; ;) {
+      const { bytesRead } = await fh.read(buf, 0, buf.length, pos);
+      if (bytesRead === 0) break;
+      for (let done = 0; done < bytesRead;) {
+        const { bytesWritten } = await copy.write(buf, done, bytesRead - done, pos + done);
+        done += bytesWritten;
+      }
+      pos += bytesRead;
+    }
+    return { fh: copy, close: () => copy.close() };
+  } catch (err) {
+    await copy.close();
+    throw err;
+  }
 }
