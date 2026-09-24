@@ -39,6 +39,8 @@ import {
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
   HAIVE_REGION_MARKERS,
+  LEGACY_RTK_MD_PATHS,
+  LEGACY_RTK_MD_SHA256,
   normalizeContent,
   sha256Hex,
   unmanagedAgentsDir,
@@ -1260,6 +1262,8 @@ export function collectWrittenCliContent(
    *  `<dir>/<id>/SKILL.md`) claims the directory it lives in rather than nothing. */
   const claimPath = (value: unknown, hash: string | null = null): void => {
     if (typeof value !== 'string') return;
+    // 07 recorded no hash for a legacy RTK.md; the body it wrote then stands in for one.
+    const claimed = hash ?? (LEGACY_RTK_MD_PATHS.includes(value) ? LEGACY_RTK_MD_SHA256 : null);
     for (const spec of catalog) {
       if (!value.startsWith(`${spec.dir}/`)) continue;
       dirs.add(spec.dir);
@@ -1279,7 +1283,9 @@ export function collectWrittenCliContent(
     // The WHOLE path, never its head segment: `.claude/plugins/drupal-php-lsp/<file>` collapsed
     // to `.claude/plugins` claims a directory that also holds plugins the user installed, and
     // the sweep then removes all of them. The sweep walks instead, on `hasDeeperClaims`.
-    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.set(value, hash);
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`) || LEGACY_RTK_MD_PATHS.includes(value)) {
+      entries.set(value, claimed);
+    }
   };
 
   // A worktree write takes effect when the MERGE lands, not when the step ended. Replaying an
@@ -2134,6 +2140,18 @@ export async function resetOnboardingArtifacts(
     // so a sweep that did not finish must report a survivor rather than its unfinished zero.
     return sweepSurvivors(outcome, left);
   };
+
+  // The legacy RTK.md files outside `.claude`, which no directory pass reaches.
+  for (const rel of LEGACY_RTK_MD_PATHS) {
+    if (rel.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) continue;
+    await guard(rel, async () => {
+      const info = await lstatNoFollow(root, rel, { strict: true });
+      if (info === null) return;
+      const verdict = info.kind === 'file' ? await claimSatisfied(rel) : 'unrecorded';
+      if (verdict === 'ours') await remove(rel, false);
+      else skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
+    });
+  }
 
   const dirs = onboardingResetDirs(haiveDirs);
   for (const rel of dirs.remove) {

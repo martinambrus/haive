@@ -2121,6 +2121,14 @@ those provenance reads: rows naming deleted files must not stay live, and `12-po
 inserts without conflict handling, so a re-onboarding would otherwise collide with the
 `(repository_id, disk_path) WHERE superseded_at IS NULL` unique index.
 
+**The legacy RTK.md files are taken back on the same evidence.** From e4ea9a61 to bd9b94c0, 07
+wrote the RTK body to `RTK.md`, `.gemini/RTK.md` and `.claude/RTK.md` and recorded no hash for
+them. A claim for one therefore carries `LEGACY_RTK_MD_SHA256` (`@haive/shared`), the body as it
+was written, frozen so a re-vendored `RTK_SLIM` cannot move it. The two outside `.claude` get a
+pass of their own, since no directory pass reaches them. Content alone never claims: a file
+holding the same bytes with no 07 record is kept and reported, and one edited since is kept as
+edited. An edited `.claude/RTK.md` used to be deleted on the path-only claim.
+
 Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
 one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the
 same scope list, so it is a corruption path rather than a queue. Everything else stays the
