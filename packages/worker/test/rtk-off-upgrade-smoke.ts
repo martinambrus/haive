@@ -97,13 +97,13 @@ async function main(): Promise<void> {
     if (!seeded.includes(SETTINGS)) throw new Error(`scaffold wrote no ${SETTINGS}`);
 
     const controller = new AbortController();
-    const ctxFor = (taskId: string, taskStepId: string): StepContext => ({
+    const ctxFor = (taskId: string, taskStepId: string, path = repoPath): StepContext => ({
       round: 0,
       taskId,
       taskStepId,
       userId,
-      repoPath,
-      workspacePath: repoPath,
+      repoPath: path,
+      workspacePath: path,
       sandboxWorkdir: '/haive/workdir',
       cliProviderId: null,
       db,
@@ -132,12 +132,12 @@ async function main(): Promise<void> {
         );
 
     /** One upgrade task: 01 plans, its output stored where 02 reads it. */
-    async function upgrade(title: string) {
+    async function upgrade(title: string, repo = { id: repositoryId, path: repoPath }) {
       const [task] = await db
         .insert(schema.tasks)
         .values({
           userId,
-          repositoryId,
+          repositoryId: repo.id,
           type: 'onboarding_upgrade',
           title,
           status: 'running',
@@ -152,7 +152,7 @@ async function main(): Promise<void> {
           { taskId: task!.id, stepId: '02-upgrade-apply', stepIndex: 2, title, status: 'pending' },
         ])
         .returning({ id: schema.taskSteps.id });
-      const planCtx = ctxFor(task!.id, planRow!.id);
+      const planCtx = ctxFor(task!.id, planRow!.id, repo.path);
       const detected = await upgradePlanStep.detect!(planCtx);
       const planned = await upgradePlanStep.apply(planCtx, {
         detected,
@@ -164,7 +164,7 @@ async function main(): Promise<void> {
         .update(schema.taskSteps)
         .set({ output: planned as unknown as Record<string, unknown>, status: 'done' })
         .where(eq(schema.taskSteps.id, planRow!.id));
-      const applyCtx = ctxFor(task!.id, applyRow!.id);
+      const applyCtx = ctxFor(task!.id, applyRow!.id, repo.path);
       const plan = await upgradeApplyStep.detect!(applyCtx);
       const form = upgradeApplyStep.form!(applyCtx, plan) as FormSchema | null;
       return { detected, form, applyCtx, plan };
@@ -325,6 +325,68 @@ async function main(): Promise<void> {
         !againApplied.writtenPaths?.includes('AGENTS.md'),
       againApplied.writtenPaths,
     );
+
+    // ---- a repository onboarded before RTK: its plan's "off" was never anyone's choice ------------
+    const legacyId = randomUUID();
+    const legacyPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-legacy-'));
+    try {
+      await db.insert(schema.repositories).values({
+        id: legacyId,
+        userId,
+        name: 'rtk-off-upgrade-smoke legacy',
+        source: 'local_path',
+        localPath: legacyPath,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const [onboarded] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: legacyId,
+          type: 'onboarding',
+          title: 'rtk-off-upgrade-smoke legacy onboarding',
+          status: 'completed',
+          completedAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: schema.tasks.id });
+      await db.insert(schema.taskSteps).values({
+        taskId: onboarded!.id,
+        stepId: '07-generate-files',
+        stepIndex: 7,
+        title: 'Generate files',
+        status: 'done',
+        detectOutput: {},
+      });
+      const legacy = await upgrade('rtk-off-upgrade-smoke legacy', {
+        id: legacyId,
+        path: legacyPath,
+      });
+      check(
+        'a plan from before RTK is off, but not by a choice the repository recorded',
+        legacy.detected.renderCtxSnapshot.rtkEnabled === false &&
+          legacy.detected.rtkFollowsLive === false,
+        { rtkFollowsLive: legacy.detected.rtkFollowsLive },
+      );
+      const legacyValues = defaultValues(legacy.form);
+      legacyValues.selectedNew = [];
+      const legacyRefusal = await upgradeApplyStep
+        .apply(legacy.applyCtx, {
+          detected: legacy.plan,
+          formValues: legacyValues,
+          iteration: 0,
+          previousIterations: [],
+        })
+        .then(
+          () => null,
+          (err: unknown) => (err instanceof Error ? err.message : String(err)),
+        );
+      check('so it applies with the column at its default', legacyRefusal === null, legacyRefusal);
+    } finally {
+      await rm(legacyPath, { recursive: true, force: true });
+    }
 
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');

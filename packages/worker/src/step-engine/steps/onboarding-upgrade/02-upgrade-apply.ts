@@ -466,7 +466,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // The form parks between the plan and this apply, and RTK switched meanwhile leaves the plan's
     // RTK actions pointing the wrong way.
     const plannedRtk = plan.renderCtxSnapshot.rtkEnabled;
-    if (typeof plannedRtk === 'boolean') {
+    if (plan.rtkFollowsLive === true && typeof plannedRtk === 'boolean') {
       const [repo] = await ctx.db
         .select({ rtkEnabled: schema.repositories.rtkEnabled })
         .from(schema.repositories)

@@ -86,6 +86,10 @@ export interface UpgradePlanDetect {
    *  onto every new onboarding_artifacts row the upgrade-apply step writes so
    *  future upgrades/rollbacks can reconstruct rendering without this task. */
   renderCtxSnapshot: Record<string, unknown>;
+  /** Whether `renderCtxSnapshot.rtkEnabled` is the repository's live choice, which 02 checks again
+   *  before it applies. A value synthesized for a context from before RTK is not. Optional:
+   *  persisted plans predate it. */
+  rtkFollowsLive?: boolean;
   /** Import-mode rules files lacking `@AGENTS.md`, which 02 restores. Optional: persisted plans
    *  predate it. */
   missingRulesImports?: string[];
@@ -167,7 +171,7 @@ async function resolveRenderContext(
   ctx: StepContext,
   repositoryId: string,
   liveRows: LiveArtifactRow[],
-): Promise<TemplateRenderContext | null> {
+): Promise<ResolvedRenderContext | null> {
   const snapshot = liveRows.find((r) => r.formValuesSnapshot)?.formValuesSnapshot ?? null;
   if (snapshot) {
     return withLiveRtk(
@@ -208,11 +212,12 @@ async function resolveRenderContext(
       .where(eq(schema.repositories.id, repositoryId))
       .limit(1);
     if (repo?.source !== 'blank') return null;
-    return buildBlankRenderContext(ctx.db, {
+    const renderCtx = await buildBlankRenderContext(ctx.db, {
       userId: ctx.userId,
       repositoryId,
       repoName: repo.name ?? null,
     });
+    return { renderCtx, rtkLive: true };
   }
 
   const stepRow = await ctx.db
@@ -278,6 +283,12 @@ async function resolveRenderContext(
   return withLiveRtk(ctx, repositoryId, recorded, detect.rtkEnabled !== undefined);
 }
 
+/** A render context, and whether its RTK choice is the repository's live one. */
+interface ResolvedRenderContext {
+  renderCtx: TemplateRenderContext;
+  rtkLive: boolean;
+}
+
 /** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
  *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
 async function withLiveRtk(
@@ -285,14 +296,16 @@ async function withLiveRtk(
   repositoryId: string,
   recorded: TemplateRenderContext,
   recordedChoice: boolean,
-): Promise<TemplateRenderContext> {
-  if (!recordedChoice) return recorded;
+): Promise<ResolvedRenderContext> {
+  if (!recordedChoice) return { renderCtx: recorded, rtkLive: false };
   const [repo] = await ctx.db
     .select({ rtkEnabled: schema.repositories.rtkEnabled })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  return repo ? { ...recorded, rtkEnabled: repo.rtkEnabled } : recorded;
+  return repo
+    ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
+    : { renderCtx: recorded, rtkLive: false };
 }
 
 async function readDiskContent(
@@ -399,12 +412,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const repositoryId = await requireRepositoryId(ctx);
     const manifest = getTemplateManifest();
     const liveRows = await loadLiveArtifacts(ctx, repositoryId);
-    const renderCtx = await resolveRenderContext(ctx, repositoryId, liveRows);
-    if (!renderCtx) {
+    const resolved = await resolveRenderContext(ctx, repositoryId, liveRows);
+    if (!resolved) {
       throw new Error(
         'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
       );
     }
+    const { renderCtx } = resolved;
 
     const expanded = await unionExpandedFor(ctx, renderCtx, repositoryId);
     const installedTemplateSetHash =
@@ -500,6 +514,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       installedTemplateSetHash,
       currentTemplateSetHash: manifest.setHash,
       renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
+      rtkFollowsLive: resolved.rtkLive,
       missingRulesImports,
       rtkBlockLeftovers,
     };
@@ -511,10 +526,11 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
 
     if (detected.ranBackfill) {
       const liveRows = await loadLiveArtifacts(ctx, detected.repositoryId);
-      const renderCtx = await resolveRenderContext(ctx, detected.repositoryId, liveRows);
-      if (!renderCtx) {
+      const resolved = await resolveRenderContext(ctx, detected.repositoryId, liveRows);
+      if (!resolved) {
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
+      const { renderCtx } = resolved;
       const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
       // An offered conflict stays unrecorded until 02 writes it: a row would belong to this upgrade
       // with no prior, which a rollback takes for a file the upgrade introduced and deletes.
