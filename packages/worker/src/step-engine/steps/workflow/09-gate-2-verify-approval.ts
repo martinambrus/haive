@@ -32,6 +32,8 @@ import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.
 import type { FileCoverage } from './_impl-changes.js';
 import { fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
+import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import type { Insight } from './08e-insights-triage.js';
 import { codeBlock } from './_plan-ops.js';
 
 /** Coverage as a step wrote it into `task_steps.output`. */
@@ -178,6 +180,10 @@ interface VerifyGateDetect {
    *  payload is persisted: a gate parked before the field existed replays without it. */
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
+  /** Optional improvements agents noted outside the task that nobody picked at 08e. Optional for
+   *  the same reason as `similarSites`. */
+  outOfScopeInsights?: Insight[];
+  outOfScopeInsightsOmitted?: number;
 }
 
 interface Phase8dOutput {
@@ -724,6 +730,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ? screenshotsManifest
       : null;
     const similar = await loadTaskSimilarSites(ctx.db, ctx.taskId);
+    const insights = await loadUnactedInsights(ctx.db, ctx.taskId);
 
     return {
       verify: {
@@ -745,6 +752,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       runtimeSmoke,
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
+      outOfScopeInsights: insights.insights,
+      outOfScopeInsightsOmitted: insights.omitted,
     };
   },
 
@@ -1137,6 +1146,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       'To have this task fix one, reject with feedback that names it; otherwise consider a follow-up task.',
     );
     if (similarRow) rows.push(similarRow);
+    const insightRow = insightsRow(
+      detected.outOfScopeInsights ?? [],
+      detected.outOfScopeInsightsOmitted ?? 0,
+      'To have this task act on one, reject with feedback that names it; otherwise consider a follow-up task.',
+    );
+    if (insightRow) rows.push(insightRow);
 
     return {
       title: 'Gate 2: Verification approval',

@@ -23,13 +23,14 @@ async function git(dir: string, args: string[]): Promise<string> {
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 /** A db that answers each query with the next queued row set, in the order detect issues them:
- *  01-worktree-setup, 09-gate-2, then the DAG issues and 07's rounds. Unqueued queries answer
- *  no rows. */
+ *  01-worktree-setup, 09-gate-2, the DAG issues and 07's rounds, then the invocations' raw output
+ *  and 08e's rows. Unqueued queries answer no rows. */
 function queuedDb(results: unknown[][]) {
   const next = () => Promise.resolve(results.shift() ?? []);
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
     from: () => chain,
+    innerJoin: () => chain,
     where: () => chain,
     orderBy: () => chain,
     limit: () => next(),
@@ -115,6 +116,37 @@ describe('10-gate-3-commit detect', () => {
     const detected = await gate3CommitStep.detect!(mkCtx(nested));
     expect(detected.hasGit).toBe(false);
     expect(detected.dirtyFiles).toBe(0);
+  });
+});
+
+describe('10-gate-3-commit out-of-scope insights', () => {
+  const noted = {
+    stepId: '07-phase-2-implement',
+    raw: '## INSIGHTS\n- INSIGHT: Cache lookup | x.ts:1 | hot path\n',
+  };
+
+  it('lists them when no gate 2 decided on them (quick_bugfix has none)', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(mkCtx(repo, [[], [], [], [], [noted], []]));
+    expect(detected.outOfScopeInsights?.map((i) => i.title)).toEqual(['Cache lookup']);
+    const rows = gate3CommitStep.form!({} as never, detected)!.statusSummary ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.label).toBe('Out-of-scope findings — not acted on');
+    expect(rows[0]!.body).toContain('Anything listed here needs a follow-up task.');
+  });
+
+  it('leaves them to gate 2 when gate 2 recorded a decision', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, [
+        [],
+        [{ detectOutput: null, output: { decision: 'approve' }, iterations: [] }],
+        [noted],
+        [],
+      ]),
+    );
+    expect(detected.outOfScopeInsights).toEqual([]);
+    expect(gate3CommitStep.form!({} as never, detected)!.statusSummary).toBeUndefined();
   });
 });
 

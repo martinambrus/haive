@@ -7,6 +7,8 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { buildCommitDiffArtifact } from './_commit-diff.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
+import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 
@@ -39,6 +41,8 @@ interface CommitGateDetect {
    *  because this payload is persisted. */
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
+  outOfScopeInsights?: Insight[];
+  outOfScopeInsightsOmitted?: number;
 }
 
 interface CommitGateApply {
@@ -124,6 +128,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const similar = gate2?.output
       ? { sites: [], omitted: 0 }
       : await loadTaskSimilarSites(ctx.db, ctx.taskId);
+    const insights = gate2?.output
+      ? { insights: [], omitted: 0 }
+      : await loadUnactedInsights(ctx.db, ctx.taskId);
     // Throws on a present-but-unusable `.git`: reporting corruption as "0 dirty
     // files" defaults the commit checkbox off and drops the whole changeset.
     if (!(await requireUsableGit(workspacePath))) {
@@ -137,6 +144,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactTruncated: false,
         similarSites: similar.sites,
         similarSitesOmitted: similar.omitted,
+        outOfScopeInsights: insights.insights,
+        outOfScopeInsightsOmitted: insights.omitted,
       };
     }
     const status = await gitRun(workspacePath, ['status', '--porcelain']);
@@ -178,6 +187,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       diffArtifactTruncated,
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
+      outOfScopeInsights: insights.insights,
+      outOfScopeInsightsOmitted: insights.omitted,
     };
   },
 
@@ -187,6 +198,12 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       detected.similarSitesOmitted ?? 0,
       'Anything listed here needs a follow-up task to be fixed.',
     );
+    const insightRow = insightsRow(
+      detected.outOfScopeInsights ?? [],
+      detected.outOfScopeInsightsOmitted ?? 0,
+      'Anything listed here needs a follow-up task.',
+    );
+    const statusRows = [similarRow, insightRow].filter((r) => r !== null);
     return {
       title: 'Gate 3: Commit',
       description: [
@@ -196,7 +213,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         'Diff summary:',
         detected.diffSummary,
       ].join('\n'),
-      ...(similarRow ? { statusSummary: [similarRow] } : {}),
+      ...(statusRows.length > 0 ? { statusSummary: statusRows } : {}),
       fields: [
         {
           type: 'checkbox',

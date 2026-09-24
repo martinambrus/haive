@@ -30,6 +30,13 @@ describe('parseInsights', () => {
     expect(ins[0]!.location).toBe('');
   });
 
+  it('stops at the limit it is given, 30 by default', () => {
+    const lines = Array.from({ length: 35 }, (_, n) => `- INSIGHT: Idea ${n} | f${n}.ts:1`);
+    const raw = ['## INSIGHTS', ...lines].join('\n');
+    expect(parseInsights([{ stepId: 's', raw }])).toHaveLength(30);
+    expect(parseInsights([{ stepId: 's', raw }], Number.POSITIVE_INFINITY)).toHaveLength(35);
+  });
+
   it('returns empty when there is no INSIGHTS section', () => {
     expect(parseInsights([{ stepId: 's', raw: 'just output, no insights' }])).toEqual([]);
     expect(parseInsights([{ stepId: 's', raw: '' }])).toEqual([]);
