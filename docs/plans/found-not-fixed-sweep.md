@@ -1,6 +1,6 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-3 merged (#267-#269); PR 4 (upgrade backfill claims) is in
+> **IN PROGRESS** since 2026-09-24. PRs 1-4 merged (#267-#270); PR 5 (upgrade delete guards) is in
 > review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
@@ -105,9 +105,24 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
    wrote.**
    - 02's obsolete delete (:425-453) calls `removeNoFollow` with no hash check, and 12 records a
      row even for a file 07 skipped. So a user's own file can be offered for deletion.
-   - A pure `obsoleteDeleteRefusal` keeps an edited or foreign file, warns and leaves the row live.
-   - 04's undo (:396-421) gets the same test (add `writtenHash` to its select).
-   - Control: all three cases are deleted today. Live: the obsolete case is added to smoke 4.
+   - **As built**: a pure `deleteRefusal` over the bytes on disk at APPLY time
+     (`pathContentHash`, whole file or rules region), since the form parks between plan and apply.
+     02 keeps an edited or foreign file, warns and leaves the row live.
+   - 04's undo (:396-421) gets the same test (add `writtenHash` to its select). A refused undo
+     still retires the upgrade's row.
+   - **Added**: 04 reads only `source = 'upgrade'` rows. The upgrade task's live backfill rows
+     record what was already there, and its rollback deleted every adopted file the person had
+     declined.
+   - **Added** (Codex, #270 round 4): "Keep my edits" persists. On a live row it moves
+     `templateContentHash` to the declined version in place. For an untracked path it records a
+     non-claiming `backfill` row, which only the filter above makes safe from a rollback.
+   - Control: all three cases are deleted today. Live: smoke 4 adds a second upgrade with retired
+     templates and a rollback of it.
+5c. **fix(worker): a rollback of an Overwrite restores the edits it replaced.** Found while building
+   5. 02 captures a baseline only for a path with no row, so overwriting a live-row conflict
+   leaves the old row as the rollback's prior, and it holds what Haive wrote, not the person's
+   edits. Capture whenever the disk differs from `baselineWrittenHash`, and break 04's
+   `superseded_at` tie by `created_at`.
 6. **fix(api): an onboarding reset takes back the legacy RTK.md files it can prove.**
    - `RTK_SLIM` moves to shared `templates/cli-rules.ts`. It gains `LEGACY_RTK_MD_PATHS` and a
      frozen literal `LEGACY_RTK_MD_SHA256`, pinned by a test with a comment to keep the literal if

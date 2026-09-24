@@ -4,10 +4,10 @@
  * user, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_DISK_PATH,
@@ -15,6 +15,8 @@ import {
   CLI_RULES_START,
   CLI_RULES_TEMPLATE_KIND,
   logger,
+  normalizeContent,
+  sha256Hex,
   type FormSchema,
 } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
     await writeFile(join(repoPath, edited), editedBytes);
     const overwrittenBytes = `${await readFile(join(repoPath, overwritten), 'utf8')}\nAlso edited.\n`;
     await writeFile(join(repoPath, overwritten), overwrittenBytes);
+    const untouchedBytes = await readFile(join(repoPath, untouched), 'utf8');
     const handRegion = `${CLI_RULES_START}\nOur own rule, written by hand.\n${CLI_RULES_END}`;
     await writeFile(join(repoPath, CLI_RULES_DISK_PATH), `# Project\n\n${handRegion}\n`);
 
@@ -139,6 +142,23 @@ async function main(): Promise<void> {
         },
       ])
       .returning({ id: schema.taskSteps.id });
+
+    const readOrNull = (rel: string) =>
+      readFile(join(repoPath, rel), 'utf8').then(
+        (text) => text,
+        () => null,
+      );
+    const liveRowsAt = (rel: string) =>
+      db
+        .select({ id: schema.onboardingArtifacts.id })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, rel),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
 
     const controller = new AbortController();
     const ctxFor = (taskStepId: string, forTask = taskId): StepContext => ({
@@ -202,7 +222,7 @@ async function main(): Promise<void> {
     check('nor for the hand-written region', (await rowsAt(CLI_RULES_DISK_PATH)).length === 0);
     check('but adopts the untouched file', (await rowsAt(untouched)).length === 1);
 
-    // ---- 02: defaults, plus "overwrite" on the rules region and one file ---------------
+    // ---- 02: defaults, "overwrite" on the rules region and one file, one adoption declined -
     const applyCtx = ctxFor(applyRow!.id);
     const plan = await upgradeApplyStep.detect!(applyCtx);
     const form = upgradeApplyStep.form!(applyCtx, plan) as FormSchema | null;
@@ -217,6 +237,9 @@ async function main(): Promise<void> {
     );
     if (!overwriteField) throw new Error(`no conflict field for ${overwritten}`);
     values[overwriteField.id] = 'apply_theirs';
+    // Its backfill row stays live under this task, and a rollback must not read it as a new file.
+    const untouchedId = detected.entries.find((e) => e.diskPath === untouched)!.entryId;
+    values.selectedNew = (values.selectedNew as string[]).filter((id) => id !== untouchedId);
     await upgradeApplyStep.apply(applyCtx, {
       detected: plan,
       formValues: values,
@@ -317,6 +340,13 @@ async function main(): Promise<void> {
       'and leaves the skipped edit as it was',
       (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
     );
+    check(
+      'and a file the upgrade was told not to write',
+      !restoreOf(untouched) &&
+        !deletes(untouched) &&
+        (await readOrNull(untouched)) === untouchedBytes,
+      { restore: restoreOf(untouched)?.priorArtifactId ?? null, deletes: deletes(untouched) },
+    );
     const restored = await upgradePlanStep.detect!(planCtx);
     const bucketAfter = (path: string) => restored.entries.find((e) => e.diskPath === path)?.bucket;
     check(
@@ -329,6 +359,188 @@ async function main(): Promise<void> {
     check('and the restored region', bucketAfter(CLI_RULES_DISK_PATH) === 'conflict', {
       bucket: bucketAfter(CLI_RULES_DISK_PATH),
     });
+
+    // ---- a second upgrade: two retired templates, and two files new to it ------------------
+    const [fresh, freshEdited] = seeded.filter(
+      (p) =>
+        p.endsWith('.md') && ![edited, overwritten, untouched, CLI_RULES_DISK_PATH].includes(p),
+    );
+    if (!fresh || !freshEdited)
+      throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
+    for (const path of [fresh, freshEdited]) {
+      await rm(join(repoPath, path));
+      await db
+        .delete(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, path),
+          ),
+        );
+    }
+    const retired = (name: string) => `.claude/agents/${name}.md`;
+    const retiredBytes = '# Retired\n\nHaive wrote this.\n';
+    const retiredEditedBytes = `${retiredBytes}Edited since.\n`;
+    const retiredHash = sha256Hex(normalizeContent(retiredBytes));
+    await mkdir(join(repoPath, '.claude/agents'), { recursive: true });
+    await writeFile(join(repoPath, retired('retired-gone')), retiredBytes);
+    await writeFile(join(repoPath, retired('retired-kept')), retiredEditedBytes);
+    await db.insert(schema.onboardingArtifacts).values(
+      ['retired-gone', 'retired-kept'].map((name) => ({
+        userId,
+        repositoryId,
+        taskId,
+        diskPath: retired(name),
+        templateId: `agent.${name}`,
+        templateKind: 'agent',
+        templateSchemaVersion: 1,
+        templateContentHash: retiredHash,
+        writtenHash: retiredHash,
+        writtenContent: retiredBytes,
+        lastObservedDiskHash: retiredHash,
+        userModified: false,
+        sourceStepId: '12-post-onboarding',
+        source: 'onboarding' as const,
+      })),
+    );
+
+    const [secondTask] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId,
+        type: 'onboarding_upgrade',
+        title: 'upgrade-claims-smoke second',
+        status: 'running',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.tasks.id });
+    const [secondPlanRow, secondApplyRow] = await db
+      .insert(schema.taskSteps)
+      .values([
+        {
+          taskId: secondTask!.id,
+          stepId: '01-upgrade-plan',
+          stepIndex: 1,
+          title: 'Plan upgrade',
+          status: 'running',
+        },
+        {
+          taskId: secondTask!.id,
+          stepId: '02-upgrade-apply',
+          stepIndex: 2,
+          title: 'Apply upgrade',
+          status: 'pending',
+        },
+      ])
+      .returning({ id: schema.taskSteps.id });
+    const secondPlanCtx = ctxFor(secondPlanRow!.id, secondTask!.id);
+    const secondDetected = await upgradePlanStep.detect!(secondPlanCtx);
+    const secondPlanned = await upgradePlanStep.apply(secondPlanCtx, {
+      detected: secondDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: secondPlanned as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, secondPlanRow!.id));
+    const secondBucket = (path: string) =>
+      secondDetected.entries.find((e) => e.diskPath === path)?.bucket;
+    const buckets = {
+      gone: secondBucket(retired('retired-gone')),
+      kept: secondBucket(retired('retired-kept')),
+      fresh: secondBucket(fresh),
+      freshEdited: secondBucket(freshEdited),
+    };
+    check(
+      'the second plan retires both old files and adds both missing ones',
+      buckets.gone === 'obsolete' &&
+        buckets.kept === 'obsolete' &&
+        buckets.fresh === 'new_artifact' &&
+        buckets.freshEdited === 'new_artifact',
+      buckets,
+    );
+
+    const secondApplyCtx = ctxFor(secondApplyRow!.id, secondTask!.id);
+    const secondPlan = await upgradeApplyStep.detect!(secondApplyCtx);
+    const secondValues = defaultValues(
+      upgradeApplyStep.form!(secondApplyCtx, secondPlan) as FormSchema | null,
+    );
+    secondValues.selectedObsoleteRemovals = secondDetected.entries
+      .filter((e) => e.bucket === 'obsolete')
+      .map((e) => e.entryId);
+    const secondApplied = await upgradeApplyStep.apply(secondApplyCtx, {
+      detected: secondPlan,
+      formValues: secondValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'an obsolete file still holding what Haive wrote is deleted',
+      (await readOrNull(retired('retired-gone'))) === null,
+    );
+    check(
+      'an obsolete file edited since is kept, and said so',
+      (await readOrNull(retired('retired-kept'))) === retiredEditedBytes &&
+        secondApplied.warnings.some((w) => w.startsWith(`kept ${retired('retired-kept')}:`)),
+      secondApplied.warnings,
+    );
+    check('and its row stays live', (await liveRowsAt(retired('retired-kept'))).length === 1);
+
+    // ---- a rollback of the second upgrade, one new file edited since -----------------------
+    const freshEditedBytes = `${await readFile(join(repoPath, freshEdited), 'utf8')}Edited after.\n`;
+    await writeFile(join(repoPath, freshEdited), freshEditedBytes);
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, secondTask!.id));
+    const [secondRollbackTask] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId,
+        type: 'onboarding_upgrade',
+        title: 'upgrade-claims-smoke second rollback',
+        status: 'running',
+        metadata: { mode: 'rollback' },
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.tasks.id });
+    const [secondRollbackRow] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: secondRollbackTask!.id,
+        stepId: '04-upgrade-rollback',
+        stepIndex: 4,
+        title: 'Roll back upgrade',
+        status: 'running',
+      })
+      .returning({ id: schema.taskSteps.id });
+    const secondRollbackCtx = ctxFor(secondRollbackRow!.id, secondRollbackTask!.id);
+    const secondRollback = await upgradeRollbackStep.detect!(secondRollbackCtx);
+    const undoes = secondRollback.newArtifactsToUndo.map((u) => u.diskPath);
+    check(
+      'the rollback plans to undo both new files',
+      undoes.includes(fresh) && undoes.includes(freshEdited),
+      undoes,
+    );
+    const secondRolledBack = await upgradeRollbackStep.apply(secondRollbackCtx, {
+      detected: secondRollback,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    check('an unedited new file is removed', (await readOrNull(fresh)) === null);
+    check(
+      'a new file edited since is kept, and said so',
+      (await readOrNull(freshEdited)) === freshEditedBytes &&
+        secondRolledBack.warnings.some((w) => w.startsWith(`kept ${freshEdited}:`)),
+      secondRolledBack.warnings,
+    );
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = (c: string) => c.repeat(64);

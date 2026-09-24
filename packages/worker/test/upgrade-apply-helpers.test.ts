@@ -1,6 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import {
   classifyApplyAction,
+  deleteRefusal,
+  pathContentHash,
   resolveBundleItemId,
   safeDiskRel,
   type ApplyAction,
@@ -264,5 +276,63 @@ describe('resolveBundleItemId', () => {
     // 'foo.bar' would round-trip. (UUIDs don't contain dots, but the helper
     // is dot-tolerant by design.)
     expect(resolveBundleItemId('custom.bundle.foo.bar', new Set(['foo.bar']))).toBe('foo.bar');
+  });
+});
+
+describe('deleteRefusal', () => {
+  const hash = (text: string) => sha256Hex(normalizeContent(text));
+
+  it('allows a delete while the path holds what Haive wrote, or nothing', () => {
+    expect(deleteRefusal('a.md', hash('HAIVE'), hash('HAIVE'))).toBeNull();
+    expect(deleteRefusal('a.md', null, hash('HAIVE'))).toBeNull();
+  });
+
+  it('keeps a file edited since Haive wrote it', () => {
+    expect(deleteRefusal('a.md', hash('EDITED'), hash('HAIVE'))).toMatch(/^kept a\.md: /);
+  });
+
+  it('keeps a file Haive never wrote, whose row holds only the render', () => {
+    expect(deleteRefusal('a.md', hash('THEIRS'), hash('RENDER'))).toMatch(/^kept a\.md: /);
+  });
+
+  it('keeps a file when nothing records what Haive wrote', () => {
+    expect(deleteRefusal('a.md', hash('ANY'), undefined)).toMatch(/^kept a\.md: /);
+  });
+});
+
+describe('pathContentHash', () => {
+  const dirs: string[] = [];
+  const repo = async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'upgrade-path-hash-'));
+    dirs.push(dir);
+    return dir;
+  };
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  const region = `${CLI_RULES_START}\nKeep every change small.\n${CLI_RULES_END}`;
+
+  it('hashes a whole file as the plan does', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'a.md'), 'body\r\n', 'utf8');
+    expect(await pathContentHash(root, 'a.md', 'agent')).toBe(
+      sha256Hex(normalizeContent('body\r\n')),
+    );
+  });
+
+  it('hashes only the rules region, so an edit around it changes nothing', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'AGENTS.md'), `# One\n\n${region}\n`, 'utf8');
+    const before = await pathContentHash(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND);
+    await writeFile(join(root, 'AGENTS.md'), `# Two, edited\n\n${region}\n\nMore.\n`, 'utf8');
+    expect(before).toBe(sha256Hex(normalizeContent(region)));
+    expect(await pathContentHash(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toBe(before);
+  });
+
+  it('answers null for a missing file or a file with no region', async () => {
+    const root = await repo();
+    expect(await pathContentHash(root, 'gone.md', 'agent')).toBeNull();
+    await writeFile(join(root, 'AGENTS.md'), '# No region\n', 'utf8');
+    expect(await pathContentHash(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toBeNull();
   });
 });

@@ -110,6 +110,31 @@ export function resolveBundleItemId(
   return id && liveBundleItemIds.has(id) ? id : null;
 }
 
+/** What sits at a path, hashed the way the plan compares it: the whole file, or the rules region
+ *  alone. Null when there is nothing there to compare. */
+export async function pathContentHash(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+): Promise<string | null> {
+  const content = await readTextNoFollow(repoPath, rel);
+  if (content === null) return null;
+  if (templateKind !== CLI_RULES_TEMPLATE_KIND) return sha256Hex(normalizeContent(content));
+  const region = extractRegion(content, CLI_RULES_START, CLI_RULES_END);
+  return region === null ? null : sha256Hex(normalizeContent(region));
+}
+
+/** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
+ *  recorded writing there. A row alone proves nothing: 12 records one for a file 07 skipped. */
+export function deleteRefusal(
+  diskPath: string,
+  diskHash: string | null,
+  writtenHash: string | null | undefined,
+): string | null {
+  if (diskHash === null || diskHash === writtenHash) return null;
+  return `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
+}
+
 function conflictFieldId(entryId: string): string {
   // radio field ids must not contain characters the renderer treats specially;
   // entryId already embeds disk path so we hash it for a stable short key.
@@ -435,6 +460,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         try {
+          const refusal = deleteRefusal(
+            entry.diskPath,
+            await pathContentHash(ctx.repoPath, rel, entry.templateKind),
+            entry.baselineWrittenHash,
+          );
+          if (refusal !== null) {
+            warnings.push(refusal);
+            skippedCount += 1;
+            continue;
+          }
           if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
             // Region-scoped artifact: strip just the cli-rules block, leaving
             // the rest of AGENTS.md (project-info, RTK, user content) intact.
