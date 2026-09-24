@@ -261,6 +261,12 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - a worktree-shaped fixture (`.haive/worktrees/<name>/CLAUDE.md` with an import);
   - a link at the worktree directory ends isolation, which is the scan's fail-open direction;
   - the existing cases stay as they are.
+- **As built:** the survey missed seven reads, found by tracing every function a worktree path is
+  passed to: 11d's excerpt read, 11c's RAG file read and the directory walker behind
+  `listFilesMatching`, plus `listKbFiles`, `listSkillDirs` and `readDiskSkillSummaries`, which 11d and
+  11 hand a worktree. Helpers shared with onboarding take `workspaceAnchor` themselves, so a root
+  caller reads exactly as before. Each helper is tested through a real worktree and a linked one,
+  and every link case fails against the previous code.
 
 ## PR 8 — Out-of-scope findings reach gate 2
 
