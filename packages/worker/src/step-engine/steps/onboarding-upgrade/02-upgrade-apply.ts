@@ -143,12 +143,12 @@ export async function pathContentHash(
   return (await pathContent(repoPath, rel, templateKind))?.hash ?? null;
 }
 
-/** What a "Keep my edits" answer writes over a live row: the version declined, under the identity
- *  that version carries, since a custom item re-ingested under a new id is otherwise offered again. */
+/** What "Keep my edits" writes over a live row: the version declined, under that version's identity,
+ *  and the bytes kept, for a later rollback to restore. `writtenHash` stays, claiming none of them. */
 export function keptRowUpdate(
   entry: Pick<UpgradePlanEntry, 'templateId' | 'templateSchemaVersion'>,
   declinedTemplateContentHash: string,
-  keptHash: string,
+  kept: { content: string; hash: string },
   liveBundleItemIds: ReadonlySet<string>,
 ) {
   return {
@@ -156,7 +156,8 @@ export function keptRowUpdate(
     bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
     templateContentHash: declinedTemplateContentHash,
     templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-    lastObservedDiskHash: keptHash,
+    writtenContent: kept.content,
+    lastObservedDiskHash: kept.hash,
     userModified: true,
   };
 }
@@ -502,12 +503,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         if (entry.liveArtifactId) {
           keptInPlace.push({
             id: entry.liveArtifactId,
-            update: keptRowUpdate(
-              entry,
-              entry.currentTemplateContentHash,
-              kept.hash,
-              liveBundleItemIds,
-            ),
+            update: keptRowUpdate(entry, entry.currentTemplateContentHash, kept, liveBundleItemIds),
           });
           continue;
         }

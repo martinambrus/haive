@@ -350,8 +350,12 @@ describe('keptRowUpdate', () => {
     const disk = { current: next, diskContent: 'EDITED', diskHash: 'wh-EDITED' };
     expect(classifyEntry({ live: row, ...disk })).toBe('conflict');
 
-    const update = keptRowUpdate(next, next.templateContentHash, 'wh-EDITED', new Set(['new']));
+    const kept = { content: 'EDITED', hash: 'wh-EDITED' };
+    const update = keptRowUpdate(next, next.templateContentHash, kept, new Set(['new']));
     expect(update.bundleItemId).toBe('new');
+    // What a later rollback restores is the bytes kept, never the older render the row held.
+    expect(update.writtenContent).toBe('EDITED');
+    expect(update).not.toHaveProperty('writtenHash');
     expect(classifyEntry({ live: { ...row, ...update }, ...disk })).toBe('unchanged');
   });
 });

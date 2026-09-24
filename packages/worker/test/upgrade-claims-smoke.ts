@@ -402,6 +402,33 @@ async function main(): Promise<void> {
           ),
         );
     }
+    // A file Haive wrote and a person edited since, whose template then changed.
+    const editedTracked = seeded.find(
+      (p) =>
+        p.endsWith('.md') &&
+        ![
+          edited,
+          overwritten,
+          keptEdit,
+          untouched,
+          fresh,
+          freshEdited,
+          CLI_RULES_DISK_PATH,
+        ].includes(p),
+    );
+    if (!editedTracked) throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
+    const editedTrackedBytes = `${await readFile(join(repoPath, editedTracked), 'utf8')}\nOurs.\n`;
+    await writeFile(join(repoPath, editedTracked), editedTrackedBytes);
+    await db
+      .update(schema.onboardingArtifacts)
+      .set({ templateContentHash: 'template-changed-since' })
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, editedTracked),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
     const retired = (name: string) => `.claude/agents/${name}.md`;
     const retiredBytes = '# Retired\n\nHaive wrote this.\n';
     const retiredEditedBytes = `${retiredBytes}Edited since.\n`;
@@ -497,6 +524,11 @@ async function main(): Promise<void> {
     );
     if (!keepTracked) throw new Error(`no conflict field for ${overwritten} in the second upgrade`);
     secondValues[keepTracked.id] = 'keep_ours';
+    const keepEdited = secondForm?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${editedTracked}`,
+    );
+    if (!keepEdited) throw new Error(`no conflict field for ${editedTracked}`);
+    secondValues[keepEdited.id] = 'keep_ours';
     secondValues.selectedObsoleteRemovals = secondDetected.entries
       .filter((e) => e.bucket === 'obsolete')
       .map((e) => e.entryId);
@@ -517,6 +549,13 @@ async function main(): Promise<void> {
       secondApplied.warnings,
     );
     check('and its row stays live', (await liveRowsAt(retired('retired-kept'))).length === 1);
+    const [editedTrackedRow] = await liveRowsAt(editedTracked);
+    check(
+      'a tracked file kept holds the bytes kept, for a later rollback',
+      editedTrackedRow?.writtenContent === editedTrackedBytes &&
+        editedTrackedRow?.writtenHash !== sha256Hex(normalizeContent(editedTrackedBytes)),
+      { writtenContent: editedTrackedRow?.writtenContent?.slice(-40) ?? null },
+    );
     const third = await upgradePlanStep.detect!(secondPlanCtx);
     const keptTracked = third.entries.find((e) => e.diskPath === overwritten)?.bucket;
     check('"Keep my edits" on a tracked file stops the offer too', keptTracked === 'unchanged', {
