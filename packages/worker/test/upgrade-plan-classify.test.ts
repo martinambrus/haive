@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildCliRulesBlock,
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_END,
+  CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_ID,
+  CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
+import {
   classifyEntry,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import { cliRulesRegionRecord } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import type { ExpandedRendering } from '../src/step-engine/template-manifest.js';
 
 function live(partial: Partial<LiveArtifactRow> = {}): LiveArtifactRow {
@@ -138,5 +151,72 @@ describe('classifyEntry', () => {
         diskHash: 'wh-USER',
       }),
     ).toBe('conflict');
+  });
+});
+
+describe('classifyEntry on the cli-rules row, recorded from the region on disk', () => {
+  const a = buildCliRulesBlock(['Rule A.']) as string;
+  const b = buildCliRulesBlock(['Rule B.']) as string;
+  const edited = a.replace('Rule A.', 'Rule A, reworded by hand.');
+  const regionOf = (block: string): string =>
+    extractRegion(`# Project\n\n${block}`, CLI_RULES_START, CLI_RULES_END) ?? '';
+  const hashOf = (block: string): string => sha256Hex(normalizeContent(block));
+  const cliRules = {
+    diskPath: CLI_RULES_DISK_PATH,
+    templateId: CLI_RULES_TEMPLATE_ID,
+    templateKind: CLI_RULES_TEMPLATE_KIND,
+    templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+  };
+
+  /** The row records `recorded` against `render`; the plan then reads `onDisk` and renders `now`. */
+  const plan = (args: {
+    recorded: string;
+    render: string;
+    earlier?: string[];
+    onDisk: string;
+    now: string;
+  }) => {
+    const record = cliRulesRegionRecord(
+      regionOf(args.recorded),
+      args.render,
+      new Set((args.earlier ?? []).map(hashOf)),
+    );
+    const diskContent = normalizeContent(regionOf(args.onDisk));
+    return classifyEntry({
+      live: live({
+        ...cliRules,
+        templateContentHash: record.templateContentHash,
+        writtenHash: record.writtenHash,
+      }),
+      current: current({
+        ...cliRules,
+        templateContentHash: hashOf(args.now),
+        content: args.now,
+        writtenHash: hashOf(args.now),
+      }),
+      diskContent,
+      diskHash: sha256Hex(diskContent),
+    });
+  };
+
+  it('an untouched region with unchanged rules is unchanged', () => {
+    expect(plan({ recorded: a, render: a, onDisk: a, now: a })).toBe('unchanged');
+  });
+
+  it('an untouched region is updated when the rules change', () => {
+    expect(plan({ recorded: a, render: a, onDisk: a, now: b })).toBe('clean_update');
+  });
+
+  it('a stale region an earlier onboarding rendered is offered and updated', () => {
+    expect(plan({ recorded: b, render: a, earlier: [b], onDisk: b, now: a })).toBe('clean_update');
+  });
+
+  it('a region nobody rendered is a conflict, never an overwrite', () => {
+    expect(edited).not.toBe(a);
+    expect(plan({ recorded: edited, render: a, onDisk: edited, now: a })).toBe('conflict');
+  });
+
+  it('a region edited after it was recorded is a conflict once the rules change', () => {
+    expect(plan({ recorded: a, render: a, onDisk: edited, now: b })).toBe('conflict');
   });
 });
