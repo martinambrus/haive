@@ -2147,7 +2147,10 @@ claude-family CLI never loads AGENTS.md, rules block included, and nothing else 
 `03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
-(`headLacksImport`), and a `CLAUDE.md -> AGENTS.md` link 02 left alone. A write list alone misses
+(`headLacksImport`), and a `CLAUDE.md -> AGENTS.md` link 02 left alone. It stages AGENTS.md itself when
+its cli-rules region on disk is missing from HEAD or differs from HEAD's (`agentsRulesVerdict`):
+only the region is compared, so an edit elsewhere in the file never triggers it, and a file it
+cannot compare (a link, one past 1 MiB) is reported rather than guessed. A write list alone misses
 two cases: 02 reports `unchanged` for a stub an earlier attempt of the step wrote before failing,
 and for one onboarding wrote with its commit off, so both stayed out of HEAD for good. The HEAD
 check greps the blob rather than reading it back, since a read-back is capped by the child
@@ -2155,7 +2158,8 @@ process's output buffer and a file past it would read as "missing"; a check that
 reason other than a missing HEAD stages nothing. It never stages rules files by name beyond that, so a person's uncommitted edits
 elsewhere stay out of the upgrade commit; a stub that IS staged goes in whole, the same file-level
 granularity AGENTS.md already had. A link is staged through its own check (`isLinkToAgentsMd`),
-since `hasWorkspaceEntry` refuses every link. A rules file git ignores is left out on every route
-and reported (`isGitIgnored`): the stage runs `git add -f` for `.haive/install.json`'s sake, which
+since `hasWorkspaceEntry` refuses every link. A rules file git ignores is left out on every route,
+AGENTS.md included, and reported (`dropIgnoredRulesFiles`), and `12-post-onboarding` applies the
+same filter to the rules files it stages by name: the stage runs `git add -f` for `.haive/install.json`'s sake, which
 would otherwise commit a personal CLAUDE.md the repository deliberately keeps out of history. The
 check runs after any `git init`, since before it there is no repository to ask.
