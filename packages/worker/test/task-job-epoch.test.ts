@@ -8,6 +8,8 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { advanceStep } from '../src/step-engine/index.js';
+import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -57,9 +59,32 @@ const h = vi.hoisted(() => {
     maxFixRounds: undefined as number | undefined,
     /** What a read of the task's recorded fix requests answers. */
     requestedEvents: [] as unknown[],
+    /** The task's status: a Stop fails it without moving the epoch. */
+    taskStatus: 'running',
+    /** Set to hold the task on a pause. */
+    pausedAt: null as Date | null,
+    /** The step row an advance reads before it runs the step. */
+    existingRow: null as Record<string, unknown> | null,
+    /** The row a park writes to, as upsertRow answers it. */
+    parkRow: {} as Record<string, unknown>,
+    /** What the runtime-admission gate answers. */
+    admission: { decision: 'admit' } as Record<string, unknown>,
+    /** Reads that confirm the job still holds the task. */
+    taskHolds: [] as { epochs: unknown[]; landed: boolean }[],
+    /** Every patch written to a step row. */
+    stepPatches: [] as Record<string, unknown>[],
   };
   return { state };
 });
+
+/** Whether a fenced task write or read matches the task: at its epoch, and not refusing the
+ *  status it is at (every task condition here names statuses only to refuse them). */
+function taskMatches(values: unknown[]): { epochs: unknown[]; landed: boolean } {
+  const epochs = values.filter((v) => typeof v === 'number');
+  const refused = values.includes(h.state.taskStatus);
+  const landed = (epochs.length === 0 || epochs.includes(h.state.taskEpoch)) && !refused;
+  return { epochs, landed };
+}
 
 const db = {
   query: {
@@ -70,7 +95,7 @@ const db = {
           userId: 'user-1',
           type: 'workflow',
           repositoryId: 'repo-1',
-          status: 'running',
+          status: h.state.taskStatus,
           orchestrationEpoch: h.state.taskEpoch,
           metadata: null,
           cliProviderId: null,
@@ -86,16 +111,38 @@ const db = {
     },
     repositories: { findFirst: async () => ({ storagePath: '/tmp/repo', localPath: null }) },
   },
-  select: () => {
+  select: (fields?: Record<string, unknown>) => {
     h.state.onSelect();
     if (!h.state.readsAnswer) throw new Error('the job went no further');
-    // Awaited directly by some reads, cut with .limit() by others, and locked by the hand-off.
-    const rows = Object.assign(Promise.resolve([]), {
-      limit: async () => [],
-      for: async () => (h.state.sourceOwned ? [{ id: 'ts-1' }] : []),
-      orderBy: async () => h.state.requestedEvents,
-    });
-    return { from: () => ({ where: () => rows }) };
+    return {
+      from: (table: unknown) => ({
+        where: (cond: unknown) => {
+          const name = tableNameOf(table);
+          // Awaited directly by some reads, cut with .limit() by others, and locked by the
+          // hand-off and the park.
+          return Object.assign(Promise.resolve([]), {
+            limit: async () => {
+              if (fields && 'pausedAt' in fields) {
+                return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
+              }
+              if (!fields && name === 'task_steps' && h.state.existingRow) {
+                return [h.state.existingRow];
+              }
+              return [];
+            },
+            for: async () => {
+              if (name === 'tasks') {
+                const held = taskMatches(conditionValues(cond));
+                h.state.taskHolds.push(held);
+                return held.landed ? [{ id: 'task-1' }] : [];
+              }
+              return h.state.sourceOwned ? [{ id: 'ts-1' }] : [];
+            },
+            orderBy: async () => h.state.requestedEvents,
+          });
+        },
+      }),
+    };
   },
   insert: () => ({
     values: async (v: { eventType?: unknown }) => {
@@ -103,22 +150,24 @@ const db = {
     },
   }),
   update: (table: unknown) => ({
-    set: () => ({
-      where: (cond: unknown) => ({
-        returning: async () => {
-          const values = conditionValues(cond);
-          // A step row written under the ownership guard lands only while the pass still owns it.
-          if (tableNameOf(table) === 'task_steps') {
-            const guarded = values.includes('pending') && values.includes('skipped');
-            return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
-          }
-          const epochs = values.filter((v) => typeof v === 'number');
-          const landed = epochs.length === 0 || epochs.includes(h.state.taskEpoch);
-          h.state.taskWrites.push({ epochs, landed });
-          return landed ? [{ id: 'task-1' }] : [];
-        },
-      }),
-    }),
+    set: (patch: Record<string, unknown>) => {
+      if (tableNameOf(table) === 'task_steps') h.state.stepPatches.push(patch);
+      return {
+        where: (cond: unknown) => ({
+          returning: async () => {
+            const values = conditionValues(cond);
+            // A step row written under the ownership guard lands only while the pass still owns it.
+            if (tableNameOf(table) === 'task_steps') {
+              const guarded = values.includes('pending') && values.includes('skipped');
+              return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
+            }
+            const write = taskMatches(values);
+            h.state.taskWrites.push(write);
+            return write.landed ? [{ id: 'task-1' }] : [];
+          },
+        }),
+      };
+    },
   }),
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
 };
@@ -132,6 +181,15 @@ vi.mock('bullmq', async (importOriginal) => ({
       return h.state.add(...args);
     }
   },
+}));
+vi.mock('../src/step-engine/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/step-engine/index.js')>()),
+  upsertRow: vi.fn(async () => h.state.parkRow),
+  advanceStep: vi.fn(async () => ({ status: 'superseded', row: h.state.parkRow })),
+}));
+vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/runtime-admission.js')>()),
+  runtimeAdmission: vi.fn(async () => h.state.admission),
 }));
 vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/queues/_step-reset.js')>()),
@@ -162,6 +220,7 @@ for (const id of ['epoch-job-step', 'epoch-job-target', '07-phase-2-implement'])
 for (const [id, index] of [
   ['epoch-chain-first', 0],
   ['epoch-chain-next', 1],
+  ['epoch-chain-runtime', 2],
 ] as const) {
   stepRegistry.register({
     metadata: {
@@ -172,6 +231,7 @@ for (const [id, index] of [
       description: 'a step whose successor is handed off',
       requiresCli: false,
     },
+    ...(id === 'epoch-chain-runtime' ? { needsRuntime: 'ddev' } : {}),
     async detect() {
       return {};
     },
@@ -192,6 +252,14 @@ afterEach(() => {
   h.state.sourceOwned = true;
   h.state.maxFixRounds = undefined;
   h.state.requestedEvents = [];
+  h.state.taskStatus = 'running';
+  h.state.pausedAt = null;
+  h.state.existingRow = null;
+  h.state.parkRow = {};
+  h.state.admission = { decision: 'admit' };
+  h.state.taskHolds = [];
+  h.state.stepPatches = [];
+  vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
 });
 
@@ -399,6 +467,57 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
+  it('hands no successor off once a Stop failed the task', async () => {
+    h.state.readsAnswer = true;
+    // A Stop fails the task without moving the epoch.
+    h.state.onSelect = () => {
+      h.state.taskStatus = 'failed';
+    };
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'done',
+      row,
+      output: null,
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('marks a stopped task running on no parked run', async () => {
+    h.state.readsAnswer = true;
+    h.state.onRead = () => {
+      h.state.taskStatus = 'failed';
+    };
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'waiting_cli',
+      row,
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.events).not.toContain('step.waiting_cli');
+  });
+
+  it('releases what a task a Stop failed holds once the pass it stopped lets go', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskStatus = 'failed';
+    const cleanup = vi.fn(async () => 0);
+    setContainerCleanupRunner(cleanup);
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'superseded',
+      row,
+    } as never);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases nothing for a pass a Retry or a Skip replaced', async () => {
+    h.state.readsAnswer = true;
+    const cleanup = vi.fn(async () => 0);
+    setContainerCleanupRunner(cleanup);
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'superseded',
+      row,
+    } as never);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
   it('parks the task on no form once a Retry moved it on', async () => {
     h.state.readsAnswer = true;
     h.state.onSelect = retryLands;
@@ -495,6 +614,181 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
         round: 2,
         epoch: 5,
       });
+    });
+  });
+});
+
+describe('a park or a step start that a Retry or a Stop overtakes', () => {
+  const job = (stepId: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id: 'job-park',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId, round: 0, epoch: 5, ...extra },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    }) as unknown as Job;
+  const unparked = {
+    id: 'ts-1',
+    status: 'pending',
+    waitingStartedAt: null,
+    startedAt: null,
+    endedAt: null,
+    idleMs: 0,
+    userActiveMs: 0,
+    carriedWorkMs: 0,
+    carriedIdleMs: 0,
+    carriedUserActiveMs: 0,
+  };
+  // The first read after the job picked the task up, so the job's own epoch check has passed.
+  const retryLands = () => {
+    h.state.taskEpoch = 6;
+  };
+  const stopLands = () => {
+    h.state.taskStatus = 'failed';
+  };
+  const parkQueued = (delay: number) => {
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: expect.any(String), epoch: 5 });
+    expect(h.state.add.mock.lastCall?.[2]).toMatchObject({ delay });
+  };
+
+  describe('on a pause', () => {
+    afterEach(() => {
+      // Every case here wrote its park, so none of them passes by never parking at all.
+      expect(
+        h.state.stepPatches.some((p) => String(p.statusMessage ?? '').startsWith('Paused')),
+      ).toBe(true);
+    });
+    it('parks the step and keeps polling while the job holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      h.state.parkRow = unparked;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      parkQueued(30_000);
+    });
+
+    it('parks nothing once a Retry moved the task on', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      h.state.parkRow = unparked;
+      h.state.onSelect = retryLands;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('parks nothing once a Stop failed the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      h.state.parkRow = unparked;
+      h.state.onSelect = stopLands;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('re-parks a step already parked only while the job still holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      // Already parked, and the task points at it, so the tick only confirms its hold.
+      h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
+      h.state.onSelect = retryLands;
+      await processTaskJob(job('epoch-job-step'), 'tok');
+      expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('keeps a parked step polling while the job holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
+      await processTaskJob(job('epoch-job-step'), 'tok');
+      expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: true }]);
+      parkQueued(30_000);
+    });
+  });
+
+  describe('on the runtime pool', () => {
+    afterEach(() => {
+      // Every case here reached the gate, so none of them passes by never parking at all.
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalled();
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+
+    it('parks the step and keeps polling while the job holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      await processTaskJob(job('epoch-chain-runtime'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      parkQueued(15_000);
+    });
+
+    it('parks nothing once a Retry moved the task on', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.onSelect = retryLands;
+      await processTaskJob(job('epoch-chain-runtime'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('re-parks a step already parked only while the job still holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
+      h.state.onSelect = retryLands;
+      await processTaskJob(job('epoch-chain-runtime'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('when the step is about to run', () => {
+    it('runs it while the job holds the task', async () => {
+      h.state.readsAnswer = true;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not run it once a Stop failed the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.onSelect = stopLands;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    });
+
+    it('does not run it once a Retry moved the task on', async () => {
+      h.state.readsAnswer = true;
+      h.state.onSelect = retryLands;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    });
+
+    it('runs an answer to a form still parked on a failed task, which reopens it', async () => {
+      h.state.readsAnswer = true;
+      h.state.taskStatus = 'failed';
+      h.state.existingRow = {
+        ...unparked,
+        stepId: 'epoch-chain-first',
+        round: 0,
+        status: 'waiting_form',
+        formValues: null,
+      };
+      await processTaskJob(job('epoch-chain-first', { formValues: { answer: 'yes' } }), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
     });
   });
 });

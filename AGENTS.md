@@ -284,7 +284,10 @@ job, so its route sets a failed task `running` itself before it queues the advan
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
 merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
-while the row is still the pass's own, not `pending` or `skipped`. The cancel poll also stops a
+while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
+Stop, which fails the row without moving the task's epoch). A pass a Stop cut off mid-apply then
+releases what the failed task holds (`settleFailedTask`), as its own failure would have. The cancel
+poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
 hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
 a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
@@ -292,12 +295,20 @@ a pass on its `pending` row, claiming or skipping it (`openRow`), land only whil
 epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
 only after the outcome has landed and only while the row still reads `done`: the ledger entry is
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
-since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
+since a Retry's reset supersedes only the runs that already exist. That check narrows the window
+without closing it: a Retry supersedes a step's runs before it writes the rows, so a recap inserted in
+between still reads the row as `done`, and only a summary write that lands on the row version it
+summarized can refuse it. The handoff is fenced on the
 epoch the pass ran under: `handleResult` does nothing once the task has moved on, and every write it
-makes to the task carries that epoch, so a Retry landing after that check keeps its pointer: pointing
-the task at the next step, parking it on a form, a run or a fix-loop gate, and completing or failing
-it, the last two also reaping the task's containers. Answering a fix-loop gate does the same, and
-closes the gate only while its row is still the pass's own. That holds
+makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
+landing after that check stands: pointing the task at the next step, parking it on a form, a run or a
+fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
+Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
+own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
+points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
+first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
+signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
+while the fence holds, and only an answer to a form still parked may revive a failed task. That holds
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
 read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the

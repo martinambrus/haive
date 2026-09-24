@@ -39,12 +39,13 @@ function mockDb(returned: unknown[]) {
 }
 
 describe('updateOwnedStep', () => {
-  it('writes the row only while it is not pending or skipped', async () => {
+  it('writes the row only while it is not pending, skipped or failed', async () => {
     const { db, seen } = mockDb([{ id: 'step1', status: 'failed' }]);
     const row = await updateOwnedStep(db, 'step1', { status: 'failed' });
     expect(row).toEqual({ id: 'step1', status: 'failed' });
+    // A Stop fails the row without moving the task's epoch, so a pass must not finish over it.
     expect(conditionValues(seen.where)).toEqual(
-      expect.arrayContaining(['step1', 'pending', 'skipped']),
+      expect.arrayContaining(['step1', 'pending', 'skipped', 'failed']),
     );
     expect(seen.set).toMatchObject({ status: 'failed' });
     expect(seen.set?.updatedAt).toBeInstanceOf(Date);
@@ -79,12 +80,12 @@ function lockDb(returned: unknown[]) {
 }
 
 describe('lockOwnedStep', () => {
-  it('locks the row for update only while it is not pending or skipped', async () => {
+  it('locks the row for update only while it is not pending, skipped or failed', async () => {
     const { db, seen } = lockDb([{ id: 'step1' }]);
     expect(await lockOwnedStep(db, 'step1')).toBe(true);
     expect(seen.strength).toBe('update');
     expect(conditionValues(seen.where)).toEqual(
-      expect.arrayContaining(['step1', 'pending', 'skipped']),
+      expect.arrayContaining(['step1', 'pending', 'skipped', 'failed']),
     );
   });
 

@@ -105,11 +105,12 @@ function taskDb(
       statements.push('select');
       if (!opts.selectRows) throw new Error('this test reads nothing but the epoch');
       const rows = opts.selectRows;
-      // Awaited directly by some reads and cut with .limit() by others.
+      // Awaited directly by some reads and cut with .limit() by others, ordered or not.
       const result = {
         then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
           Promise.resolve(rows).then(res, rej),
         limit: async () => rows,
+        orderBy: () => ({ limit: async () => rows }),
       };
       return { from: () => ({ where: () => result }) };
     },
@@ -140,6 +141,14 @@ describe('a result handed off after a Retry moved the task on', () => {
     await handleResult(db, ctx, STEP_ID, { status: 'failed', row, error: 'boom' } as never);
     expect(statements).toEqual(['update tasks']);
     expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it('fails the task, and releases what it holds, while it is still at its epoch', async () => {
+    setContainerCleanupRunner(cleanup);
+    const { db, statements } = taskDb(5, 5, { selectRows: [] });
+    await handleResult(db, ctx, STEP_ID, { status: 'failed', row, error: 'boom' } as never);
+    expect(statements[0]).toBe('update tasks');
+    expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('stamps a parked form and marks the task waiting while the pass owns the row', async () => {

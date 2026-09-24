@@ -6,19 +6,24 @@ type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 const owned = (id: string) =>
-  and(eq(schema.taskSteps.id, id), notInArray(schema.taskSteps.status, ['pending', 'skipped']));
+  and(
+    eq(schema.taskSteps.id, id),
+    notInArray(schema.taskSteps.status, ['pending', 'skipped', 'failed']),
+  );
 
-/** A pass lost its row: a Retry or a Skip that arrived meanwhile left it `pending` or `skipped`. */
+/** A pass lost its row: a Retry, a Skip or a Stop that arrived meanwhile left it `pending`,
+ *  `skipped` or `failed`. */
 export class StepSupersededError extends Error {
   constructor(id: string) {
-    super(`task step ${id} was reset or skipped while this pass ran`);
+    super(`task step ${id} was reset, skipped or stopped while this pass ran`);
     this.name = 'StepSupersededError';
   }
 }
 
 /** Every write a pass makes to its row. It lands only while the row is still the pass's own, not
- *  `pending` (a Retry reset it) or `skipped` (a Skip took it); otherwise it throws
- *  StepSupersededError, which `advanceStep` turns into `superseded`. */
+ *  `pending` (a Retry reset it), `skipped` (a Skip took it) or `failed` (a Stop or a cancel ended
+ *  it, or the pass already failed it); otherwise it throws StepSupersededError, which
+ *  `advanceStep` turns into `superseded`. */
 export async function updateOwnedStep(
   db: Database | DbHandle,
   id: string,
@@ -35,8 +40,8 @@ export async function updateOwnedStep(
 }
 
 /** Hold a pass's row for the rest of a transaction while it is still the pass's own; false once a
- *  Retry or a Skip took it. A Retry writes the steps before the task's epoch, so a hand-off fenced
- *  on the epoch alone can land inside one. */
+ *  Retry, a Skip or a Stop took it. A Retry writes the steps before the task's epoch, so a hand-off
+ *  fenced on the epoch alone can land inside one. */
 export async function lockOwnedStep(db: Database | DbHandle, id: string): Promise<boolean> {
   const rows = await db
     .select({ id: schema.taskSteps.id })
