@@ -80,6 +80,26 @@ test.describe('the sidebar at phone width', () => {
       }
     });
 
+    test('Escape closes it', async ({ page }) => {
+      const sql = getSql();
+      let userId = '';
+      try {
+        userId = (await registerUser(sql, page.request, { prefix: 'side-phone-esc' })).userId;
+
+        await page.goto('/dashboard');
+        await waitForShellHydration(page);
+        const aside = page.locator('aside');
+
+        await aside.getByRole('button', { name: 'Expand sidebar' }).click();
+        await expect(page.getByRole('button', { name: 'Close sidebar' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(aside.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+      } finally {
+        if (userId) await cleanupUser(sql, userId);
+        await sql.end({ timeout: 5 });
+      }
+    });
+
     test('a navigation closes it, and coming back does not reopen it', async ({ page }) => {
       const sql = getSql();
       let userId = '';
