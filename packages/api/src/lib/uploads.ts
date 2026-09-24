@@ -1,4 +1,5 @@
 import type { FileHandle } from 'node:fs/promises';
+import path from 'node:path';
 import { ensureDirNoFollow, openFileNoFollow } from '@haive/shared/fs-safe';
 import { HttpError } from '../context.js';
 
@@ -61,10 +62,11 @@ export function uploadFileRel(
   stored: string,
   root = uploadsStorageRoot(),
 ): string | null {
-  const prefix = `${root}/${uploadsRel(userId)}/`;
-  if (!stored.startsWith(prefix)) return null;
-  const name = stored.slice(prefix.length);
-  if (name === '' || name.includes('/') || name === '.' || name === '..') return null;
+  const name = path.basename(stored);
+  if (name === '' || name === '.' || name === '..') return null;
+  // Rebuilt the way the routes write it, with `path.join`, so the two agree whatever form the root
+  // was configured in: relative, with a trailing slash, or `/`.
+  if (path.join(root, uploadsRel(userId), name) !== stored) return null;
   return `${uploadsRel(userId)}/${name}`;
 }
 

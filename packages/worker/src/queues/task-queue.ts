@@ -1,8 +1,9 @@
 import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
-import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
+import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
 import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -17,6 +18,7 @@ import {
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
   type ExecutionPath,
+  type FormSchema,
   type TaskJobPayload,
   type TaskStatus,
   type WorkflowType,
@@ -79,7 +81,11 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
+import {
+  blockedByActiveStepMessage,
+  failedTaskRefusesAdvance,
+  staleSubmitAction,
+} from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -97,6 +103,11 @@ import {
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import {
+  StepSupersededError,
+  lockOwnedStep,
+  updateOwnedStep,
+} from '../step-engine/step-ownership.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -129,6 +140,13 @@ export async function closeTaskQueue(): Promise<void> {
     await taskQueueInstance.close();
     taskQueueInstance = null;
   }
+}
+
+type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
+interface HeldTask {
+  ctx?: ResolvedTaskContext;
 }
 
 interface ResolvedTaskContext {
@@ -288,7 +306,7 @@ async function resolveTaskContext(
 }
 
 async function appendEvent(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   taskStepId: string | null,
   eventType: string,
@@ -330,7 +348,7 @@ async function markTaskRunning(db: Database, taskId: string): Promise<void> {
  *  index only when the row is not yet materialized (advancing to a not-yet-run next step,
  *  whose run_seq is stamped a moment later when it parks — the label is read while parked). */
 async function resolveCurrentStepIndex(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   stepId: string,
   round: number,
@@ -355,6 +373,28 @@ async function resolveCurrentStepIndex(
  *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
 const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
 
+/** A job's write to the task under the epoch the job holds. It lands only while the task is still
+ *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. A job may
+ *  revive a task that was already failed when it picked it up (`reviveFailed`), which the pickup
+ *  guard allows only for an answer to a form still parked, since answering it reopens the task. */
+interface TaskFence {
+  epoch: number;
+  reviveFailed?: boolean;
+}
+
+function taskWriteTarget(taskId: string, fence?: TaskFence) {
+  const refused = fence !== undefined && !fence.reviveFailed;
+  return and(
+    eq(schema.tasks.id, taskId),
+    notInArray(schema.tasks.status, [
+      ...TERMINAL_TASK_STATUSES,
+      ...(refused ? (['failed'] as const) : []),
+    ]),
+    ...(fence ? [eq(schema.tasks.orchestrationEpoch, fence.epoch)] : []),
+  );
+}
+
+/** Park the task on a step. With a fence, only while it holds, as for markTaskRunningWithStep. */
 async function markTaskWaiting(
   db: Database,
   taskId: string,
@@ -362,9 +402,10 @@ async function markTaskWaiting(
   stepIndex: number,
   round = 0,
   status: TaskStatus = 'waiting_user',
-): Promise<void> {
+  fence?: TaskFence,
+): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  await db
+  const [parked] = await db
     .update(schema.tasks)
     .set({
       status,
@@ -373,23 +414,23 @@ async function markTaskWaiting(
       currentRound: round,
       updatedAt: new Date(),
     })
-    .where(
-      and(
-        eq(schema.tasks.id, taskId),
-        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
-      ),
-    );
+    .where(taskWriteTarget(taskId, fence))
+    .returning({ id: schema.tasks.id });
+  return parked !== undefined;
 }
 
+/** Point the running task at a step. With a fence, only while it holds: false when a Retry moved
+ *  the task on or a Stop failed it, and nothing was written. */
 async function markTaskRunningWithStep(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   stepId: string,
   stepIndex: number,
   round = 0,
-): Promise<void> {
+  fence?: TaskFence,
+): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  await db
+  const [pointed] = await db
     .update(schema.tasks)
     .set({
       status: 'running',
@@ -410,23 +451,77 @@ async function markTaskRunningWithStep(
     // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
     // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
     // the allowance auto-resume legitimately revives a failed task through here.
-    .where(
-      and(
-        eq(schema.tasks.id, taskId),
-        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
-      ),
-    );
+    .where(taskWriteTarget(taskId, fence))
+    .returning({ id: schema.tasks.id });
+  return pointed !== undefined;
 }
 
-async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
-  await db
+class ParkOvertaken extends Error {}
+
+/** Write a park onto its step row, then point the task at it (or only confirm the job still holds
+ *  the task, for a tick whose pointer is right), both under the job's fence and rolled back
+ *  together when it no longer holds. A stale advance that parked a row a Retry reset would leave
+ *  the park signature the Retry's own advance reads as a live loop, and drops itself behind.
+ *  The row first, as a Retry takes rows before the task. */
+async function writeFencedPark(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  rowId: string,
+  patch: PgUpdateSetSource<typeof schema.taskSteps>,
+  pointer: { stepId: string; stepIndex: number; round: number } | null,
+): Promise<boolean> {
+  const fence = { epoch: ctx.orchestrationEpoch };
+  try {
+    await db.transaction(async (tx) => {
+      await tx.update(schema.taskSteps).set(patch).where(eq(schema.taskSteps.id, rowId));
+      const holds = pointer
+        ? await markTaskRunningWithStep(
+            tx,
+            ctx.taskId,
+            pointer.stepId,
+            pointer.stepIndex,
+            pointer.round,
+            fence,
+          )
+        : (
+            await tx
+              .select({ id: schema.tasks.id })
+              .from(schema.tasks)
+              .where(taskWriteTarget(ctx.taskId, fence))
+              .for('share')
+          ).length > 0;
+      if (!holds) throw new ParkOvertaken();
+    });
+    return true;
+  } catch (err) {
+    if (err instanceof ParkOvertaken) return false;
+    throw err;
+  }
+}
+
+/** Complete the task, only while the fence of the pass that finished it holds: a Retry that moved
+ *  it on owns it, a Stop that failed it stands, and completing it would also reap its workspace. */
+export async function markTaskCompleted(
+  db: Database,
+  taskId: string,
+  fence: TaskFence,
+): Promise<void> {
+  const [completed] = await db
     .update(schema.tasks)
     .set({
       status: 'completed',
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(taskWriteTarget(taskId, fence))
+    .returning({ id: schema.tasks.id });
+  if (!completed) {
+    logger.info(
+      { taskId, epoch: fence.epoch },
+      'task not completed: a Retry moved it on or a Stop failed it',
+    );
+    return;
+  }
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
@@ -473,8 +568,15 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   }
 }
 
-async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
-  await db
+/** Fail the task. With `epoch`, only while the task is still at it, as a step's own failure is;
+ *  false when it had moved on and nothing was written. */
+async function markTaskFailed(
+  db: Database,
+  taskId: string,
+  message: string,
+  epoch?: number,
+): Promise<boolean> {
+  const [failed] = await db
     .update(schema.tasks)
     .set({
       status: 'failed',
@@ -482,7 +584,19 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(
+      epoch === undefined
+        ? eq(schema.tasks.id, taskId)
+        : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)),
+    )
+    .returning({ id: schema.tasks.id });
+  if (!failed) return false;
+  await settleFailedTask(db, taskId);
+  return true;
+}
+
+/** What a task that ended failed releases. */
+async function settleFailedTask(db: Database, taskId: string): Promise<void> {
   await cleanupTaskContainers(db, taskId, 'failed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
@@ -992,14 +1106,59 @@ const workerDeps: WorkerDeps = {
   },
 };
 
-async function handleResult(
+/** A write handleResult makes to the row a pass left, through the pass's own ownership check:
+ *  false, having written nothing, once a Retry or a Skip took the row. */
+async function writeOwnedRow(
+  db: Database,
+  rowId: string,
+  patch: Parameters<typeof updateOwnedStep>[2],
+): Promise<boolean> {
+  try {
+    await updateOwnedStep(db, rowId, patch);
+    return true;
+  } catch (err) {
+    if (err instanceof StepSupersededError) return false;
+    throw err;
+  }
+}
+
+async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<boolean> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { orchestrationEpoch: true },
+  });
+  return task !== undefined && task.orchestrationEpoch !== ctx.orchestrationEpoch;
+}
+
+export async function handleResult(
   db: Database,
   ctx: ResolvedTaskContext,
   stepId: string,
   result: AdvanceStepResult,
 ): Promise<void> {
   const stepDef = stepRegistry.require(stepId);
+  // The pass ran under the epoch its job was picked up at. A Retry, a reset or a cancel that moved
+  // the task on while it ran owns the task now, so this result hands nothing off.
+  if (result.status !== 'superseded' && (await taskEpochMoved(db, ctx))) {
+    logger.info(
+      { taskId: ctx.taskId, stepId, status: result.status },
+      'step result dropped: the task moved to a newer epoch while the pass ran',
+    );
+    return;
+  }
   switch (result.status) {
+    case 'superseded': {
+      // A Retry or Skip took the row over; the pass that replaced this one carries the task. A Stop
+      // took it by failing the task, which moves no epoch, and a pass it stopped mid-apply is the
+      // only one left to release what the failed task holds.
+      const task = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { status: true },
+      });
+      if (task?.status === 'failed') await settleFailedTask(db, ctx.taskId);
+      logger.info({ taskId: ctx.taskId, stepId }, 'step pass superseded; nothing to hand off');
+      return;
+    }
     case 'done':
     case 'skipped': {
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
@@ -1046,13 +1205,21 @@ async function handleResult(
       if (next) {
         // Forward walk stays in the same round as the step that just finished.
         const nextRound = result.row.round;
-        await markTaskRunningWithStep(
+        const pointed = await markTaskRunningWithStep(
           db,
           ctx.taskId,
           next.metadata.id,
           computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
           nextRound,
+          { epoch: ctx.orchestrationEpoch },
         );
+        if (!pointed) {
+          logger.info(
+            { taskId: ctx.taskId, stepId, nextStepId: next.metadata.id },
+            'successor not handed off: the task moved to a newer epoch',
+          );
+          return;
+        }
         await enqueueAdvance(
           ctx.taskId,
           ctx.userId,
@@ -1061,30 +1228,29 @@ async function handleResult(
           ctx.orchestrationEpoch,
         );
       } else {
-        await markTaskCompleted(db, ctx.taskId);
+        await markTaskCompleted(db, ctx.taskId, { epoch: ctx.orchestrationEpoch });
       }
       return;
     }
     case 'waiting_form': {
-      await markTaskWaiting(
+      // Stamp the start of the idle (waiting-for-input) period so the step's
+      // active-work timer can exclude it. Folded into idle_ms on form submit.
+      if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) return;
+      const parked = await markTaskWaiting(
         db,
         ctx.taskId,
         stepId,
         computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
         result.row.round,
         stepDef.parkTaskStatus,
+        { epoch: ctx.orchestrationEpoch },
       );
-      // Stamp the start of the idle (waiting-for-input) period so the step's
-      // active-work timer can exclude it. Folded into idle_ms on form submit.
-      await db
-        .update(schema.taskSteps)
-        .set({ waitingStartedAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.taskSteps.id, result.row.id));
+      if (!parked) return;
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
     case 'waiting_cli': {
-      await db
+      const [marked] = await db
         .update(schema.tasks)
         .set({
           status: 'running',
@@ -1096,13 +1262,15 @@ async function handleResult(
           currentRound: result.row.round,
           updatedAt: new Date(),
         })
-        .where(eq(schema.tasks.id, ctx.taskId));
+        .where(taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }))
+        .returning({ id: schema.tasks.id });
+      if (!marked) return;
       // Assert the parked status on the ROW first. It can still read `running` here, which makes
       // the park below a silent no-op (markCliParkBegin is guarded on status = waiting_cli): a
-      // CONTINUATION advance re-validates the persisted formValues and flips the row back to
-      // `running` (step-runner.ts), and the mining fan-out barrier then returns waiting_cli
-      // WITHOUT writing the row. So every wave after the first parked unmarked and billed its
-      // whole inter-wave queue wait as WORK instead of idle (observed 2026-08-19 on
+      // first run or a form submission flips the row to `running` (step-runner.ts), and the
+      // mining fan-out barrier then returns waiting_cli WITHOUT writing the row. Continuations
+      // used to flip it too, so every wave after the first parked unmarked and billed its whole
+      // inter-wave queue wait as WORK instead of idle (observed 2026-08-19 on
       // 09_5-skill-generation: three step.waiting_cli events, waiting_started_at still null).
       // The returned status is the authoritative outcome for the step, so write it; guarded to
       // `running` so a concurrent terminal write is never clobbered.
@@ -1146,34 +1314,34 @@ async function handleResult(
           nextRound,
         );
         if (osc.tripped && osc.conflictingDiagnoses) {
+          const parked = await writeOwnedRow(db, result.row.id, {
+            status: 'waiting_form',
+            formSchema: buildOscillationEscalationSchema(
+              result.sourceStepId,
+              osc.conflictingStepId ?? 'another step',
+              osc.conflictingDiagnoses[0],
+              osc.conflictingDiagnoses[1],
+            ),
+            formValues: null,
+            endedAt: null,
+            waitingStartedAt: new Date(),
+          });
+          if (!parked) return;
           await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
             diagnosis: result.diagnosis,
             sourceStepId: result.sourceStepId,
             round: nextRound,
           });
-          await db
-            .update(schema.taskSteps)
-            .set({
-              status: 'waiting_form',
-              formSchema: buildOscillationEscalationSchema(
-                result.sourceStepId,
-                osc.conflictingStepId ?? 'another step',
-                osc.conflictingDiagnoses[0],
-                osc.conflictingDiagnoses[1],
-              ),
-              formValues: null,
-              endedAt: null,
-              waitingStartedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.taskSteps.id, result.row.id));
-          await markTaskWaiting(
+          const waiting = await markTaskWaiting(
             db,
             ctx.taskId,
             stepId,
             computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
             result.row.round,
+            'waiting_user',
+            { epoch: ctx.orchestrationEpoch },
           );
+          if (!waiting) return;
           await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.oscillation_detected', {
             sourceStepId: result.sourceStepId,
             conflictingStepId: osc.conflictingStepId,
@@ -1200,31 +1368,32 @@ async function handleResult(
       if (!result.uncapped && priorFixRounds + 1 > cap) {
         // Cap reached → escalate to an interactive gate (Continue / Accept / Abort)
         // parked on the source step, instead of failing. Record the fix request for the
-        // next round up front so "Continue" can re-enter implementation immediately; it
-        // is simply never read if the user accepts or aborts.
+        // next round once the gate is parked (an answer to it waits behind this job) so
+        // "Continue" can re-enter implementation immediately; it is simply never read if
+        // the user accepts or aborts.
+        const parked = await writeOwnedRow(db, result.row.id, {
+          status: 'waiting_form',
+          formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
+          formValues: null,
+          endedAt: null,
+          waitingStartedAt: new Date(),
+        });
+        if (!parked) return;
         await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
           diagnosis: result.diagnosis,
           sourceStepId: result.sourceStepId,
           round: nextRound,
         });
-        await db
-          .update(schema.taskSteps)
-          .set({
-            status: 'waiting_form',
-            formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
-            formValues: null,
-            endedAt: null,
-            waitingStartedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.taskSteps.id, result.row.id));
-        await markTaskWaiting(
+        const waiting = await markTaskWaiting(
           db,
           ctx.taskId,
           stepId,
           computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
           result.row.round,
+          'waiting_user',
+          { epoch: ctx.orchestrationEpoch },
         );
+        if (!waiting) return;
         await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.escalated', {
           sourceStepId: result.sourceStepId,
           rounds: cap,
@@ -1233,15 +1402,6 @@ async function handleResult(
         return;
       }
       const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
-      await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-        diagnosis: result.diagnosis,
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-      });
-      await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.started', {
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-      });
       // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
       // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
       // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
@@ -1251,16 +1411,56 @@ async function handleResult(
         ctx.taskId,
         target.metadata.id,
         nextRound,
+        ctx.orchestrationEpoch,
       );
-      const reentryEpoch = reentryReset?.newEpoch ?? ctx.orchestrationEpoch;
-      await markTaskRunningWithStep(
-        db,
+      if (reentryReset === 'superseded') {
+        logger.info(
+          { taskId: ctx.taskId, stepId },
+          'fix loop not entered: the task moved to a newer epoch before its reset',
+        );
+        return;
+      }
+      if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
+      // The round is recorded with the pointer write that hands the task to it, and only while the
+      // source row is still this pass's and the task is still at the epoch this job holds: a round
+      // a Retry overtook would leave a `started` that counts toward the cap, and a diagnosis nobody
+      // was sent. The row is taken first, as a Retry takes the steps before the task.
+      const entered = await db.transaction(async (tx) => {
+        if (!(await lockOwnedStep(tx, result.row.id))) return false;
+        const pointed = await markTaskRunningWithStep(
+          tx,
+          ctx.taskId,
+          target.metadata.id,
+          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+          nextRound,
+          { epoch: ctx.orchestrationEpoch },
+        );
+        if (!pointed) return false;
+        await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
+          diagnosis: result.diagnosis,
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+        });
+        await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+        });
+        return true;
+      });
+      if (!entered) {
+        logger.info(
+          { taskId: ctx.taskId, stepId },
+          'fix loop not entered: a Retry overtook its hand-off',
+        );
+        return;
+      }
+      await enqueueAdvance(
         ctx.taskId,
+        ctx.userId,
         target.metadata.id,
-        computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         nextRound,
+        ctx.orchestrationEpoch,
       );
-      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound, reentryEpoch);
       return;
     }
     case 'revise': {
@@ -1281,7 +1481,22 @@ async function handleResult(
         targetStepId: result.targetStepId,
         round: targetRound,
       });
-      const reset = await resetStepAndDownstream(db, ctx.taskId, result.targetStepId, targetRound);
+      const reset = await resetStepAndDownstream(
+        db,
+        ctx.taskId,
+        result.targetStepId,
+        targetRound,
+        ctx.orchestrationEpoch,
+      );
+      if (reset === 'superseded') {
+        logger.info(
+          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          'revise not entered: the task moved to a newer epoch before its reset',
+        );
+        return;
+      }
+      // The reset moved the task to a new epoch, and this job holds it there from now on.
+      if (reset) ctx.orchestrationEpoch = reset.newEpoch;
       // An in-place self-revise REQUIRES the existing row. A forked round legitimately has
       // no row yet — reset is then a crash-safety no-op (only resets a stale terminal row),
       // exactly as in loop_back; upsertRow materializes the fresh round-N rows.
@@ -1290,27 +1505,36 @@ async function handleResult(
           db,
           ctx.taskId,
           `revise: target step ${result.targetStepId} not found at round ${result.row.round}`,
+          ctx.orchestrationEpoch,
         );
         return;
       }
-      await markTaskRunningWithStep(
+      const pointed = await markTaskRunningWithStep(
         db,
         ctx.taskId,
         target.metadata.id,
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         targetRound,
+        { epoch: ctx.orchestrationEpoch },
       );
+      if (!pointed) {
+        logger.info(
+          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          'revise not entered: the task moved to a newer epoch before its hand-off',
+        );
+        return;
+      }
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,
         target.metadata.id,
         targetRound,
-        reset?.newEpoch ?? ctx.orchestrationEpoch,
+        ctx.orchestrationEpoch,
       );
       return;
     }
     case 'failed': {
-      await markTaskFailed(db, ctx.taskId, result.error);
+      if (!(await markTaskFailed(db, ctx.taskId, result.error, ctx.orchestrationEpoch))) return;
       // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
       // server failure, attach a structured errorHint so the UI shows an
       // "outage — retry when the provider recovers" banner instead of implying a code
@@ -1467,7 +1691,7 @@ async function handleResult(
 /** Resolve a fix-loop escalation gate decision parked on the source step (the step that
  *  found the defect at the round cap): continue (one more round), accept (stand down the
  *  loop + advance), or abort (fail). Mirrors the revise route's submit-driven routing. */
-async function resolveFixLoopGate(
+export async function resolveFixLoopGate(
   db: Database,
   ctx: ResolvedTaskContext,
   gateRow: typeof schema.taskSteps.$inferSelect,
@@ -1477,16 +1701,22 @@ async function resolveFixLoopGate(
    *  implementation step and 'abort' fails the task, so there is nothing for it to reach. */
   instruction: string,
 ): Promise<void> {
-  await db
-    .update(schema.taskSteps)
-    .set({ status: 'done', endedAt: new Date(), updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, gateRow.id));
+  // A Retry that reset the gate took it over, and its own pass decides what runs next.
+  if (!(await writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() }))) return;
 
   if (action === 'abort') {
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
-    await markTaskFailed(db, ctx.taskId, `Fix loop aborted by the user at round ${round}.`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `Fix loop aborted by the user at round ${round}.`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
+
+  // The answer reopens a task that failed while its gate waited (failedTaskRefusesAdvance).
+  const fence = { epoch: ctx.orchestrationEpoch, reviveFailed: ctx.status === 'failed' };
 
   if (action === 'accept') {
     // Stand down every later fix-loop check + advance forward from the source step so the
@@ -1500,16 +1730,18 @@ async function resolveFixLoopGate(
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
     const next = idx >= 0 ? steps[idx + 1] : undefined;
     if (next) {
-      await markTaskRunningWithStep(
+      const pointed = await markTaskRunningWithStep(
         db,
         ctx.taskId,
         next.metadata.id,
         computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
         round,
+        fence,
       );
+      if (!pointed) return;
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
-      await markTaskCompleted(db, ctx.taskId);
+      await markTaskCompleted(db, ctx.taskId, fence);
     }
     return;
   }
@@ -1536,13 +1768,15 @@ async function resolveFixLoopGate(
     round: nextRound,
     directed: directive.length > 0,
   });
-  await markTaskRunningWithStep(
+  const pointed = await markTaskRunningWithStep(
     db,
     ctx.taskId,
     target.metadata.id,
     computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
     nextRound,
+    fence,
   );
+  if (!pointed) return;
   await enqueueAdvance(
     ctx.taskId,
     ctx.userId,
@@ -1552,8 +1786,13 @@ async function resolveFixLoopGate(
   );
 }
 
-async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<void> {
+async function handleStartTask(
+  db: Database,
+  payload: TaskJobPayload,
+  held?: HeldTask,
+): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
+  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
@@ -1564,7 +1803,12 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   const steps = await buildRunList(ctx, db);
   const first = steps[0];
   if (!first) {
-    await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `no steps registered for workflow ${ctx.workflowType}`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
@@ -1589,6 +1833,7 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
     runSeq: 0,
     providers,
     deps: workerDeps,
+    epoch: ctx.orchestrationEpoch,
   });
   await handleResult(db, ctx, first.metadata.id, result);
 }
@@ -1649,8 +1894,11 @@ async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
   jobId?: string,
+  jobTimestamp?: number,
+  held?: HeldTask,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
+  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'advance-step: task not found');
     return;
@@ -1673,7 +1921,12 @@ async function handleAdvanceStep(
   }
   const stepDef = stepRegistry.get(payload.stepId);
   if (!stepDef) {
-    await markTaskFailed(db, ctx.taskId, `unknown step id ${payload.stepId}`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `unknown step id ${payload.stepId}`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
 
@@ -1763,45 +2016,24 @@ async function handleAdvanceStep(
     .limit(1);
   const existing = existingRows[0];
 
-  // Same-step duplicate guard: only meaningful once an apply() is ACTUALLY
-  // running (step status 'running'). The task worker's concurrency (5) lets a
-  // second advance-step job for the same step+round+epoch start a parallel
-  // apply() — observed as two RAG-populate embed loops (double CPU) after a
-  // worker reload. If the step is already 'running', another delivery set it so;
-  // yield to the live sibling (tiebreak on job id, lower wins, so two can't both
-  // yield). Gating on 'running' is what keeps this from skipping a legit
-  // waiting_form submit / pending first run — with no apply in flight there is
-  // nothing to duplicate. "Live" means a job THIS process is executing
-  // (inFlightJobIds): BullMQ's active set also holds the jobs of a worker that
-  // died, whose 30-min lock has not expired, and yielding to one of those froze
-  // the step for that whole window. See findLiveSibling for the full reasoning.
-  // A genuinely orphaned 'running' step recovers via its own job's same-id
-  // stalled re-delivery (excluded by the self check in findLiveSibling).
-  if (existing?.status === 'running' && jobId != null) {
-    const sibling = findLiveSibling(await getTaskQueue().getActive(), inFlightJobIds, {
-      jobId,
-      taskId: ctx.taskId,
-      stepId: payload.stepId,
-      round,
-      epoch: payload.epoch ?? null,
-    });
-    if (sibling) {
-      logger.warn(
-        { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, siblingJobId: sibling.id },
-        'advance-step skipped: same step already running in another job (duplicate)',
-      );
-      return;
-    }
+  // An advance queued before the task failed, such as one a fan-out's agent queued and the step's
+  // hold deferred behind the pass that then failed the step, would otherwise revive the task and run
+  // the step again.
+  if (failedTaskRefusesAdvance(ctx.status, existing?.status, payload.formValues != null)) {
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
+      'advance-step skipped: the task failed and nothing has reopened it',
+    );
+    return;
   }
 
   // Already finalized at this round — a duplicate delivery must NOT re-run apply().
-  // The same-step guard above only covers a row still 'running', so a second job that
-  // arrives AFTER the first finished matched nothing and re-executed the whole step.
-  // MEASURED on 08-phase-5-verify: two step.done events 0.63s apart with no retry
-  // between, so its verify commands ran twice. Free on a repo with no test runner, a
-  // duplicated test suite on one that has them. It slipped the other-active guard by a
-  // hair too — that read ran in the same instant the successor's row was being created,
-  // so it saw nothing active.
+  // A second job that arrives after the first finished, or was deferred behind it
+  // (holdStepAdvance), finds the row done here. MEASURED on 08-phase-5-verify before
+  // this guard: two step.done events 0.63s apart with no retry between, so its verify
+  // commands ran twice. Free on a repo with no test runner, a duplicated test suite on
+  // one that has them. It slipped the other-active guard by a hair too — that read ran
+  // in the same instant the successor's row was being created, so it saw nothing active.
   //
   // Re-drive the hand-off ONLY on evidence the chain has not moved (the task still
   // points at this step + round). Re-driving unconditionally would enqueue an advance
@@ -1820,6 +2052,22 @@ async function handleAdvanceStep(
         status: 'done',
         row: existing,
         output: existing.output,
+      });
+    }
+    return;
+  }
+
+  const stale = staleSubmitAction(existing, payload.formValues != null, jobTimestamp, ctx.status);
+  if (stale !== 'proceed') {
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, stale },
+      'advance-step skipped: a submit sent before this form was reopened',
+    );
+    if (stale === 'repark' && existing) {
+      await handleResult(db, ctx, payload.stepId, {
+        status: 'waiting_form',
+        row: existing,
+        formSchema: existing.formSchema as FormSchema,
       });
     }
     return;
@@ -1897,31 +2145,33 @@ async function handleAdvanceStep(
     // as IDLE, so a hold costs the task no phantom work. deriveSlotWait reads the same shape as
     // a runtime-slot wait, which is why it takes an explicit `paused` flag and returns null.
     const alreadyParked = row.status === 'pending' && row.waitingStartedAt !== null;
+    const pointer = {
+      stepId: payload.stepId,
+      stepIndex: computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+      round,
+    };
+    let holds: boolean;
     if (alreadyParked) {
       // Re-park tick: refresh the copy + the updated_at heartbeat only. Re-stamping the marker
       // would restart the wait clock every poll, and re-folding would double-count the open park.
-      await db
-        .update(schema.taskSteps)
-        .set({ statusMessage: message, updatedAt: new Date() })
-        .where(eq(schema.taskSteps.id, row.id));
-      if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
-        await markTaskRunningWithStep(
-          db,
-          ctx.taskId,
-          payload.stepId,
-          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-          round,
-        );
-      }
+      holds = await writeFencedPark(
+        db,
+        ctx,
+        row.id,
+        { statusMessage: message, updatedAt: new Date() },
+        payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+      );
     } else {
       // First park: fold whatever the row carried into carried_* (an OPEN span reclassifies to
       // idle, so a step interrupted mid-run cannot bill the hold as work), reset the live timing
       // and open the marker. iterations/output/detect are PRESERVED — a pause is a hold, not a
       // reset, so the step resumes rather than re-running from scratch.
       const fold = computeFoldContribution(row, Date.now());
-      await db
-        .update(schema.taskSteps)
-        .set({
+      holds = await writeFencedPark(
+        db,
+        ctx,
+        row.id,
+        {
           status: 'pending',
           startedAt: null,
           endedAt: null,
@@ -1933,15 +2183,16 @@ async function handleAdvanceStep(
           carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
           statusMessage: message,
           updatedAt: new Date(),
-        })
-        .where(eq(schema.taskSteps.id, row.id));
-      await markTaskRunningWithStep(
-        db,
-        ctx.taskId,
-        payload.stepId,
-        computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-        round,
+        },
+        pointer,
       );
+    }
+    if (!holds) {
+      logger.info(
+        { taskId: ctx.taskId, stepId: payload.stepId, round },
+        'pause: park dropped (a Retry or a Stop overtook this advance)',
+      );
+      return;
     }
     await foldOtherTaskParks(db, ctx.taskId, row.id);
     // The poll loop IS the resume mechanism: clearing paused_at (or flipping the admin switch
@@ -2021,6 +2272,12 @@ async function handleAdvanceStep(
       // row as "queued for a runtime slot" and computeStepContribution bills the open wait as
       // idle. The re-park below must therefore keep the SAME marker instead of re-stamping it.
       const alreadyParked = row.status === 'pending' && row.waitingStartedAt !== null;
+      const pointer = {
+        stepId: payload.stepId,
+        stepIndex: computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+        round,
+      };
+      let holds: boolean;
       if (alreadyParked) {
         // Re-park (once per RUNTIME_PARK_POLL_MS): refresh the queue-position copy and the
         // updated_at heartbeat only — that heartbeat is what distinguishes "still queued" from
@@ -2028,23 +2285,17 @@ async function handleAdvanceStep(
         // NOT the fold+reset below: re-running it would fold the open park into carried_idle
         // while the marker kept ticking (double count), and re-stamping the marker would
         // restart the wait clock every poll so the reported wait never grew past 15s.
-        await db
-          .update(schema.taskSteps)
-          .set({ statusMessage: parkMessage, updatedAt: new Date() })
-          .where(eq(schema.taskSteps.id, row.id));
         // Re-assert the pointer if it drifted while this step stayed parked. The stamp below runs
         // on the FIRST park only, so a pointer left addressing some other step (a `done` row, say
         // — nothing re-points it back) would keep deriveSlotWait from finding this park at all and
         // the queued badge would silently vanish. Guarded, so a matching pointer writes nothing.
-        if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
-          await markTaskRunningWithStep(
-            db,
-            ctx.taskId,
-            payload.stepId,
-            computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-            round,
-          );
-        }
+        holds = await writeFencedPark(
+          db,
+          ctx,
+          row.id,
+          { statusMessage: parkMessage, updatedAt: new Date() },
+          payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+        );
       } else {
         // First park: re-queue the step to a clean PENDING state, not just a message. A step
         // parked after an interrupted run is still `running` with an open started_at, which
@@ -2056,9 +2307,17 @@ async function handleAdvanceStep(
         // park is a transient resource wait, not a reset (the pending->running re-run folds the
         // park into idle_ms and stamps a fresh started_at, step-runner.ts).
         const fold = computeFoldContribution(row, Date.now());
-        await db
-          .update(schema.taskSteps)
-          .set({
+        // A parked step IS what the task is working on, so point current_step_id/current_round at
+        // it. Only a step that RUNS stamped them before, which left the pointer addressing an
+        // earlier step for the whole park — that stale pointer is what the drop rule above and
+        // deriveSlotWait (@haive/shared) both read, so a parked step showed no queued badge and
+        // could have its own loop mistaken for a duplicate. First park only: a re-park must not
+        // rewrite the task row every 15s, and by then the pointer is already correct.
+        holds = await writeFencedPark(
+          db,
+          ctx,
+          row.id,
+          {
             status: 'pending',
             startedAt: null,
             endedAt: null,
@@ -2070,21 +2329,16 @@ async function handleAdvanceStep(
             carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
             statusMessage: parkMessage,
             updatedAt: new Date(),
-          })
-          .where(eq(schema.taskSteps.id, row.id));
-        // A parked step IS what the task is working on, so point current_step_id/current_round at
-        // it. Only a step that RUNS stamped them before, which left the pointer addressing an
-        // earlier step for the whole park — that stale pointer is what the drop rule above and
-        // deriveSlotWait (@haive/shared) both read, so a parked step showed no queued badge and
-        // could have its own loop mistaken for a duplicate. First park only: a re-park must not
-        // rewrite the task row every 15s, and by then the pointer is already correct.
-        await markTaskRunningWithStep(
-          db,
-          ctx.taskId,
-          payload.stepId,
-          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-          round,
+          },
+          pointer,
         );
+      }
+      if (!holds) {
+        logger.info(
+          { taskId: ctx.taskId, stepId: payload.stepId, round },
+          'runtime admission: park dropped (a Retry or a Stop overtook this advance)',
+        );
+        return;
       }
       // Exactly one open park marker per task: close any left by a loop that vanished without
       // folding (a park chain ends whenever its advance is skipped or dropped, and a dead loop
@@ -2122,13 +2376,24 @@ async function handleAdvanceStep(
   // every re-entry (submit / clarify / resume / retry) in one place and re-asserts the
   // current_step pointer. Idempotent on the forward walk (handleResult already stamped it), and
   // a step that parks straight into waiting_form/waiting_pr is re-marked by handleResult after.
-  await markTaskRunningWithStep(
+  const running = await markTaskRunningWithStep(
     db,
     ctx.taskId,
     payload.stepId,
     computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
     round,
+    {
+      epoch: ctx.orchestrationEpoch,
+      reviveFailed: ctx.status === 'failed',
+    },
   );
+  if (!running) {
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId, round },
+      'advance-step skipped: a Retry or a Stop overtook it before the step ran',
+    );
+    return;
+  }
 
   const providers = await loadProviders(db, ctx.userId);
   try {
@@ -2146,6 +2411,7 @@ async function handleAdvanceStep(
       formValues,
       providers,
       deps: workerDeps,
+      epoch: ctx.orchestrationEpoch,
     });
     await handleResult(db, ctx, payload.stepId, result);
   } finally {
@@ -2166,13 +2432,13 @@ async function handleAdvanceStep(
  *     re-delivered cli-exec job a no-op — handlers skip ended invocations) and
  *     re-drive: a step whose CLI DID finish + record resumes (exit 0 → apply →
  *     advance), an orphaned one fails (retryable).
- *  2. `running`: the advance-step JOB itself died mid-execution. Its zombie sits in
- *     BullMQ's active list under a 30-min lock, so the same-step duplicate guard
- *     blocks any retry until that lock expires. Reset the step (resetStepAndDownstream
- *     also bumps the task's orchestration epoch) and re-drive at the NEW epoch: the
- *     duplicate guard matches siblings by epoch so the new advance is not blocked, and
- *     the zombie is skipped by the epoch guard when BullMQ eventually redelivers it. No
- *     BullMQ/redis surgery, so it is safe regardless of worker count.
+ *  2. `running`: the advance-step JOB itself died mid-execution. `bootRecoveryAction`
+ *     decides: a step with agent work behind it is demoted to `waiting_cli` and recovered as
+ *     pass 1 recovers a parked step; one without is reset (resetStepAndDownstream also bumps
+ *     the task's orchestration epoch) and re-driven at the NEW epoch. Either way the zombie
+ *     job, sitting in BullMQ's active list under a 30-min lock, is skipped by the epoch guard
+ *     when BullMQ eventually redelivers it. No BullMQ/redis surgery, so it is safe regardless
+ *     of worker count.
  *
  *  `waiting_form` user gates are durable (no in-flight job) and left untouched.
  *
@@ -2199,6 +2465,45 @@ export function isCurrentStep(row: {
 }): boolean {
   if (row.currentStepId === null) return true;
   return row.stepId === row.currentStepId && row.round === row.currentRound;
+}
+
+/** What boot recovery does with a step left `running`. One the task has moved past is requeued. One
+ *  with agent work behind it is a parked step whose park write was lost, a pass having sent work
+ *  and died before recording `waiting_cli`: it is demoted and recovered with the parked steps. The
+ *  rest ran nothing an agent did and are reset to run again. */
+export function bootRecoveryAction(row: {
+  current: boolean;
+  cliWork: boolean;
+}): 'requeue' | 'demote' | 'reset' {
+  if (!row.current) return 'requeue';
+  return row.cliWork ? 'demote' : 'reset';
+}
+
+/** Whether a step has agent work a reset would throw away: a finished loop pass, an agent row, or
+ *  a run of its own that nothing has superseded. */
+async function hasCliWork(
+  db: Database,
+  taskStepId: string,
+  iterationCount: number,
+): Promise<boolean> {
+  if (iterationCount > 0) return true;
+  const [agent] = await db
+    .select({ id: schema.taskStepAgentMinings.id })
+    .from(schema.taskStepAgentMinings)
+    .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId))
+    .limit(1);
+  if (agent) return true;
+  const [run] = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
+    .limit(1);
+  return run !== undefined;
 }
 
 /** Does this (step, round) row currently own the task's orchestration — actively working
@@ -2234,6 +2539,9 @@ async function isStepLive(
   return row.status === 'pending' && row.waitingStartedAt !== null;
 }
 
+const ABANDONED_RUN_MESSAGE =
+  'CLI invocation superseded by a worker restart (the task had moved past its step)';
+
 /** Requeue an orphan the task has moved past: fold its dead run into carried_* and put the row
  *  back to a clean `pending`. It must not stay in running/waiting_cli, because the
  *  other-step-active guard refuses every advance while a sibling sits there — the task would
@@ -2250,25 +2558,277 @@ async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise
   const row = rows[0];
   if (!row) return;
   const fold = computeFoldContribution(row, Date.now());
-  await db
-    .update(schema.taskSteps)
-    .set({
-      status: 'pending',
-      startedAt: null,
-      endedAt: null,
-      idleMs: 0,
-      waitingStartedAt: null,
-      userActiveMs: 0,
-      carriedWorkMs: row.carriedWorkMs + fold.workMs,
-      carriedIdleMs: row.carriedIdleMs + fold.idleMs,
-      carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
-      statusMessage: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.taskSteps.id, taskStepId));
+  await db.transaction(async (tx) => {
+    const [requeued] = await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'pending',
+        startedAt: null,
+        endedAt: null,
+        idleMs: 0,
+        waitingStartedAt: null,
+        userActiveMs: 0,
+        carriedWorkMs: row.carriedWorkMs + fold.workMs,
+        carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+        carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
+        statusMessage: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.taskSteps.id, taskStepId),
+          inArray(schema.taskSteps.status, ['waiting_cli', 'running']),
+        ),
+      )
+      .returning({ id: schema.taskSteps.id });
+    if (!requeued) return;
+    // A run the row still has would resume it once it ends, stamped with the task's epoch at that
+    // moment, and the other-step guard cannot refuse that while the current step is still pending.
+    const now = new Date();
+    await tx
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now, endedAt: now, errorMessage: ABANDONED_RUN_MESSAGE })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, taskStepId),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+  });
 }
 
-export async function reconcileOrphanedSteps(db: Database): Promise<void> {
+/** What boot recovery needs from BullMQ, injectable so a test can drive the re-drive branch
+ *  without Redis. */
+export interface ReconcileDeps {
+  enqueueAdvance: (
+    taskId: string,
+    userId: string,
+    stepId: string,
+    round: number,
+    epoch: number,
+  ) => Promise<void>;
+  /** Every invocation a cli-exec job still owes a run, or null when the queue could not be read. */
+  queuedInvocationIds: () => Promise<Set<string> | null>;
+  /** Waits before each further attempt at queueing a re-drive. */
+  redriveRetryDelaysMs?: number[];
+}
+
+const REDRIVE_RETRY_DELAYS_MS = [1_000, 3_000];
+
+/** Run `attempt`, waiting each delay in turn before trying again; the last failure is thrown. */
+async function retrying(attempt: () => Promise<void>, delaysMs: number[]): Promise<void> {
+  for (let tried = 0; ; tried++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const delay = delaysMs[tried];
+      if (delay === undefined) throw err;
+      logger.warn({ err }, 'boot re-drive could not be queued; retrying');
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+const NEVER_QUEUED_ORPHAN_MESSAGE =
+  'CLI invocation orphaned by a worker restart (the worker exited before it was queued)';
+
+/** Every state in which a cli-exec job may still run: a stalled `active` one is redelivered, and
+ *  GLOBAL_PAUSE holds its jobs as `delayed`. */
+async function readQueuedInvocationIds(): Promise<Set<string> | null> {
+  try {
+    const jobs = await getCliExecQueue().getJobs([
+      'active',
+      'waiting',
+      'waiting-children',
+      'delayed',
+      'prioritized',
+    ]);
+    const ids = new Set<string>();
+    for (const job of jobs) {
+      const id = (job?.data as { invocationId?: unknown } | undefined)?.invocationId;
+      if (typeof id === 'string') ids.add(id);
+    }
+    return ids;
+  } catch (err) {
+    logger.warn({ err }, 'cli-exec queue unreadable at boot; leaving never-started runs alone');
+    return null;
+  }
+}
+
+/** A step parked on its CLI that boot finds with no worker behind it. */
+interface ParkedOrphan {
+  taskStepId: string;
+  taskId: string;
+  stepId: string;
+  round: number;
+  userId: string;
+  epoch: number;
+  currentStepId: string | null;
+  currentRound: number;
+}
+
+/** Recover one parked step: end its orphaned runs, then requeue it when the task has moved past
+ *  it, or fence the task and re-drive it. `queued` is every invocation a cli-exec job still owes
+ *  a run, or null when the queue could not be read. */
+async function recoverParkedStep(
+  db: Database,
+  s: ParkedOrphan,
+  queued: Set<string> | null,
+  deps: ReconcileDeps,
+): Promise<void> {
+  // Mark EVERY live invocation for this step orphaned, not just the latest — a
+  // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
+  // crash, and leaving the siblings ended_at NULL makes the mining barrier count
+  // them as still-in-flight forever. Safe: sandbox containers are reaped before the
+  // workers start (index.ts), so none is genuinely running at reconcile time. The
+  // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
+  //
+  // STARTED runs only. A `started_at IS NULL` row is QUEUED, not orphaned: it spawned
+  // no container (so the boot reap killed nothing of its) and its BullMQ job survives
+  // the restart in Redis, so the queue still owes it a run — and handleCliExecJob
+  // no-ops a redelivered job whose row was already finalized, so ending it here only
+  // throws the run away. Under GLOBAL_PAUSE this is not an edge case: the pickup gate
+  // holds every invocation at started_at NULL by design, so without this filter each
+  // worker restart during a pause window invents one orphan per parked step and three
+  // of them spend MAX_ORPHAN_REDISPATCH on runs that never happened. Same invariant
+  // enforceTaskAgentCap and foldOrphanedCliParkOnBoot already use for "actually live".
+  await db
+    .update(schema.cliInvocations)
+    .set({
+      endedAt: new Date(),
+      errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+    })
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, s.taskStepId),
+        isNotNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  // A never-started run that no cli-exec job owes any more: the worker died between
+  // recording it and queueing it, so nothing will ever run it and the step would wait on it
+  // for good. Ended as an orphan like the started ones, so each step kind's own recovery
+  // takes it — and one that never started charges no LLM orphan budget. When the queue
+  // could not be read none is ended, which is how every such row was treated before.
+  if (queued) {
+    const unstarted = await db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, s.taskStepId),
+          isNull(schema.cliInvocations.startedAt),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    const neverQueued = unstarted.map((r) => r.id).filter((id) => !queued.has(id));
+    if (neverQueued.length > 0) {
+      await db
+        .update(schema.cliInvocations)
+        .set({ endedAt: new Date(), errorMessage: NEVER_QUEUED_ORPHAN_MESSAGE })
+        .where(
+          and(
+            inArray(schema.cliInvocations.id, neverQueued),
+            isNull(schema.cliInvocations.startedAt),
+            isNull(schema.cliInvocations.endedAt),
+          ),
+        );
+      logger.warn(
+        { taskId: s.taskId, stepId: s.stepId, invocationIds: neverQueued },
+        'ended cli invocations the worker recorded but never queued',
+      );
+    }
+  }
+  // Abandoned chain: this row is not what the task is working on, so re-driving it would
+  // add a second orchestration loop (see the pass note above). Requeue it instead.
+  if (!isCurrentStep(s)) {
+    await requeueAbandonedOrphan(db, s.taskStepId);
+    logger.info(
+      {
+        taskId: s.taskId,
+        stepId: s.stepId,
+        round: s.round,
+        currentStepId: s.currentStepId,
+        currentRound: s.currentRound,
+      },
+      'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
+    );
+    return;
+  }
+  // The step is now parked with NO invocation running — the state markCliParkBegin exists
+  // for — but the park did not start now, it started when the worker died. Fold that dead
+  // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
+  // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
+  // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
+  await foldOrphanedCliParkOnBoot(db, s.taskStepId);
+  // Compare-and-swap on the state this pass read: every older queued advance goes stale, and
+  // a retry or resume the api took during boot keeps the task instead of this re-drive.
+  const [fenced] = await db
+    .update(schema.tasks)
+    .set({
+      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.tasks.id, s.taskId),
+        eq(schema.tasks.status, 'running'),
+        eq(schema.tasks.orchestrationEpoch, s.epoch),
+        sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
+        eq(schema.tasks.currentRound, s.currentRound),
+      ),
+    )
+    .returning({ epoch: schema.tasks.orchestrationEpoch });
+  if (!fenced) {
+    // Lost to an api action taken during boot. One that moved the task to another step left
+    // this row abandoned like those requeued above, where it would block that step's advance.
+    const [task] = await db
+      .select({
+        status: schema.tasks.status,
+        currentStepId: schema.tasks.currentStepId,
+        currentRound: schema.tasks.currentRound,
+      })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, s.taskId))
+      .limit(1);
+    if (task?.status === 'running' && !isCurrentStep({ ...s, ...task })) {
+      await requeueAbandonedOrphan(db, s.taskStepId);
+      logger.info(
+        { taskId: s.taskId, stepId: s.stepId, currentStepId: task.currentStepId },
+        'requeued a waiting_cli orphan the task left during boot (not re-driven)',
+      );
+    }
+    return;
+  }
+  try {
+    // Retried, because nothing else drives the step once this pass has ended its runs: a
+    // redelivered cli-exec job exits on the finalized invocation before it can resume it.
+    await retrying(
+      () => deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch),
+      deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS,
+    );
+  } catch (err) {
+    // No job carries the new epoch, so hand the task back to the one the advances queued
+    // before the restart carry, rather than leave them stale with nothing to drive it.
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: s.epoch, updatedAt: new Date() })
+      .where(and(eq(schema.tasks.id, s.taskId), eq(schema.tasks.orchestrationEpoch, fenced.epoch)));
+    throw err;
+  }
+  logger.info(
+    { taskId: s.taskId, stepId: s.stepId, epoch: fenced.epoch },
+    'reconciled orphaned waiting_cli step',
+  );
+}
+
+export async function reconcileOrphanedSteps(
+  db: Database,
+  deps: ReconcileDeps = { enqueueAdvance, queuedInvocationIds: readQueuedInvocationIds },
+): Promise<void> {
   const stuckCli = await db
     .select({
       taskStepId: schema.taskSteps.id,
@@ -2288,62 +2848,13 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
       { count: stuckCli.length },
       'reconciling waiting_cli steps orphaned by worker restart',
     );
+  // Read once, and only when a parked step needs it: pass 2 can demote one too.
+  let queued: Set<string> | null | undefined;
+  const owed = async () =>
+    queued === undefined ? (queued = await deps.queuedInvocationIds()) : queued;
   for (const s of stuckCli) {
     try {
-      // Mark EVERY live invocation for this step orphaned, not just the latest — a
-      // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
-      // crash, and leaving the siblings ended_at NULL makes the mining barrier count
-      // them as still-in-flight forever. Safe: sandbox containers are reaped before the
-      // workers start (index.ts), so none is genuinely running at reconcile time. The
-      // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
-      //
-      // STARTED runs only. A `started_at IS NULL` row is QUEUED, not orphaned: it spawned
-      // no container (so the boot reap killed nothing of its) and its BullMQ job survives
-      // the restart in Redis, so the queue still owes it a run — and handleCliExecJob
-      // no-ops a redelivered job whose row was already finalized, so ending it here only
-      // throws the run away. Under GLOBAL_PAUSE this is not an edge case: the pickup gate
-      // holds every invocation at started_at NULL by design, so without this filter each
-      // worker restart during a pause window invents one orphan per parked step and three
-      // of them spend MAX_ORPHAN_REDISPATCH on runs that never happened. Same invariant
-      // enforceTaskAgentCap and foldOrphanedCliParkOnBoot already use for "actually live".
-      await db
-        .update(schema.cliInvocations)
-        .set({
-          endedAt: new Date(),
-          errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
-        })
-        .where(
-          and(
-            eq(schema.cliInvocations.taskStepId, s.taskStepId),
-            isNotNull(schema.cliInvocations.startedAt),
-            isNull(schema.cliInvocations.endedAt),
-            isNull(schema.cliInvocations.supersededAt),
-          ),
-        );
-      // Abandoned chain: this row is not what the task is working on, so re-driving it would
-      // add a second orchestration loop (see the pass note above). Requeue it instead.
-      if (!isCurrentStep(s)) {
-        await requeueAbandonedOrphan(db, s.taskStepId);
-        logger.info(
-          {
-            taskId: s.taskId,
-            stepId: s.stepId,
-            round: s.round,
-            currentStepId: s.currentStepId,
-            currentRound: s.currentRound,
-          },
-          'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
-        );
-        continue;
-      }
-      // The step is now parked with NO invocation running — the state markCliParkBegin exists
-      // for — but the park did not start now, it started when the worker died. Fold that dead
-      // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
-      // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
-      // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
-      await foldOrphanedCliParkOnBoot(db, s.taskStepId);
-      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, s.epoch);
-      logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
+      await recoverParkedStep(db, s, await owed(), deps);
     } catch (err) {
       logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');
     }
@@ -2357,8 +2868,10 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
+      epoch: schema.tasks.orchestrationEpoch,
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
+      iterationCount: schema.taskSteps.iterationCount,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -2370,11 +2883,16 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
     );
   for (const s of stuckRunning) {
     try {
+      const current = isCurrentStep(s);
+      const action = bootRecoveryAction({
+        current,
+        cliWork: current && (await hasCliWork(db, s.taskStepId, s.iterationCount)),
+      });
       // Abandoned chain: requeue the row so it stops blocking the other-step-active guard, but
       // do NOT reset its downstream or bump the epoch — this row is upstream of whatever the
       // task is really working on, so the cascade would wipe the live chain and the bump would
       // invalidate the real loop's queued advance.
-      if (!isCurrentStep(s)) {
+      if (action === 'requeue') {
         await requeueAbandonedOrphan(db, s.taskStepId);
         logger.info(
           {
@@ -2388,12 +2906,24 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
         );
         continue;
       }
+      // Guarded, so a row something else moved is left to it.
+      if (action === 'demote') {
+        const [demoted] = await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli', updatedAt: new Date() })
+          .where(and(eq(schema.taskSteps.id, s.taskStepId), eq(schema.taskSteps.status, 'running')))
+          .returning({ id: schema.taskSteps.id });
+        if (demoted) await recoverParkedStep(db, s, await owed(), deps);
+        continue;
+      }
       // resetStepAndDownstream supersedes the step's open invocations, resets it to
-      // pending, and bumps the task epoch so the orphaned zombie advance job no longer
-      // matches the same-step duplicate guard; re-drive at that new epoch.
-      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round);
-      if (!reset) continue;
-      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
+      // pending, and bumps the task epoch, so the orphaned zombie advance job is dropped as
+      // stale when it is redelivered; re-drive at that new epoch.
+      // At the epoch this pass read, like the fence above: a Retry the api took during boot keeps
+      // the task.
+      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round, s.epoch);
+      if (!reset || reset === 'superseded') continue;
+      await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
       logger.info(
         { taskId: s.taskId, stepId: s.stepId, epoch: reset.newEpoch },
         'reconciled orphaned running step',
@@ -2597,68 +3127,124 @@ async function handleCleanupRepoResources(
 
 type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
 
-/** Job ids this process is executing right now, maintained by the worker's processor below.
- *  The duplicate guard needs it because BullMQ's `active` set is not proof of life: with a
- *  30-minute lockDuration, a worker killed mid-job leaves its jobs there for up to half an
- *  hour, and yielding to one of those corpses froze the step for that whole window. Dies with
- *  the process, which is exactly right — a restarted worker is running none of them. */
-const inFlightJobIds = new Set<string>();
+/** Steps whose advance this process is running, by task, step and round. */
+const advancingSteps = new Set<string>();
+
+/** How long an advance waits before trying a step another advance holds again. */
+const ADVANCE_DEFER_MS = 5_000;
+
+/** How often an advance that could not be deferred checks whether the holder let go. */
+const ADVANCE_WAIT_MS = 500;
+
+/**
+ * Hold a step's advances to one at a time in this process, or defer this job while another holds
+ * them. A step parked on its CLI stays `waiting_cli` through apply, and a fan-out's agents each
+ * queue an advance as they finish, so two advances of one step can reach apply together. The later
+ * one is deferred rather than dropped: the one running may be a barrier check that parks without
+ * seeing what the later one was queued for.
+ *
+ * A job that cannot be deferred (no token, or the move itself failed) waits here for the holder
+ * instead. Running beside it is what the hold exists to prevent, and failing the attempt could lose
+ * the advance, since a continuation is queued with no retries. Answers the release, or null for a
+ * job with no step to hold. In-process, like the queue's single worker: a worker that died holds
+ * nothing.
+ */
+export async function holdStepAdvance(
+  job: Pick<Job<TaskWorkerPayload>, 'id' | 'data' | 'moveToDelayed'>,
+  token: string | undefined,
+): Promise<(() => void) | null> {
+  const { taskId, stepId, round } = job.data as TaskJobPayload;
+  if (!stepId) return null;
+  const key = `${taskId}:${stepId}:${round ?? 0}`;
+  if (advancingSteps.has(key) && token) {
+    let deferred = false;
+    try {
+      await job.moveToDelayed(Date.now() + ADVANCE_DEFER_MS, token);
+      deferred = true;
+    } catch (err) {
+      logger.warn({ err, taskId, stepId, round }, 'advance defer failed; waiting for the holder');
+    }
+    if (deferred) {
+      logger.debug(
+        { taskId, stepId, round, jobId: job.id },
+        'step advance held elsewhere; deferring',
+      );
+      throw new DelayedError();
+    }
+  }
+  // Nothing may await between the last check and the add, or two waiters could both take it.
+  while (advancingSteps.has(key)) {
+    await new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS));
+  }
+  advancingSteps.add(key);
+  return () => advancingSteps.delete(key);
+}
+
+/** One task-queue job. The hold is taken outside the job's own try: a deferral is not a failure,
+ *  and that catch fails the task. */
+export async function processTaskJob(job: Job<TaskWorkerPayload>, token?: string): Promise<void> {
+  const release =
+    job.name === TASK_JOB_NAMES.ADVANCE_STEP ? await holdStepAdvance(job, token) : null;
+  try {
+    await runTaskJob(job);
+  } finally {
+    release?.();
+  }
+}
+
+async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
+  const db = getDb();
+  const held: HeldTask = {};
+  try {
+    if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
+      await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
+      return;
+    }
+    if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES) {
+      await handleCleanupRepoResources(db, job.data as RepoResourceCleanupPayload);
+      return;
+    }
+
+    const payload = job.data as TaskJobPayload;
+    if (job.name === TASK_JOB_NAMES.START) {
+      await handleStartTask(db, payload, held);
+    } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
+      await handleAdvanceStep(db, payload, job.id, job.timestamp, held);
+    } else if (job.name === TASK_JOB_NAMES.CANCEL) {
+      await handleCancelTask(db, payload);
+    } else {
+      throw new Error(`unknown task job ${job.name}`);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const taskId = (job.data as TaskJobPayload).taskId;
+    logger.error({ taskId, jobName: job.name, err }, 'task job failed');
+    if (
+      taskId &&
+      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
+      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
+    ) {
+      // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
+      const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
+      await markTaskFailed(db, taskId, message, epoch).catch((cleanupErr) => {
+        logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
+      });
+    }
+    throw err;
+  }
+}
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
   ensureRegistered();
-  const worker = new Worker<TaskWorkerPayload>(
-    QUEUE_NAMES.TASK,
-    async (job: Job<TaskWorkerPayload>) => {
-      const db = getDb();
-      if (job.id) inFlightJobIds.add(job.id);
-      try {
-        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
-          await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
-          return;
-        }
-        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES) {
-          await handleCleanupRepoResources(db, job.data as RepoResourceCleanupPayload);
-          return;
-        }
-
-        const payload = job.data as TaskJobPayload;
-        if (job.name === TASK_JOB_NAMES.START) {
-          await handleStartTask(db, payload);
-        } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload, job.id);
-        } else if (job.name === TASK_JOB_NAMES.CANCEL) {
-          await handleCancelTask(db, payload);
-        } else {
-          throw new Error(`unknown task job ${job.name}`);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const taskId = (job.data as TaskJobPayload).taskId;
-        logger.error({ taskId, jobName: job.name, err }, 'task job failed');
-        if (
-          taskId &&
-          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
-          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
-        ) {
-          await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
-            logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
-          });
-        }
-        throw err;
-      } finally {
-        if (job.id) inFlightJobIds.delete(job.id);
-      }
-    },
-    {
-      connection: getBullRedis(),
-      concurrency: 5,
-      // Task jobs orchestrate step runs which can wait minutes on CLI execs.
-      // Match cli-exec lockDuration so a worker restart doesn't cause job
-      // redelivery + duplicate step processing.
-      lockDuration: 30 * 60 * 1000,
-      maxStalledCount: 10,
-    },
-  );
+  const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, processTaskJob, {
+    connection: getBullRedis(),
+    concurrency: 5,
+    // Task jobs orchestrate step runs which can wait minutes on CLI execs.
+    // Match cli-exec lockDuration so a worker restart doesn't cause job
+    // redelivery + duplicate step processing.
+    lockDuration: 30 * 60 * 1000,
+    maxStalledCount: 10,
+  });
 
   worker.on('completed', (job) => {
     logger.info({ jobId: job.id, name: job.name }, 'task job completed');

@@ -7,6 +7,7 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { normalizeContent, sha256Hex, skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { yamlScalar } from '../_yaml-scalar.js';
 import { jsonrepair } from 'jsonrepair';
@@ -218,7 +219,7 @@ function parseKbSectionBodies(text: string): Record<string, string> {
 
 export async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
   const out: KbFileSummary[] = [];
-  await collectKbDir(repoRoot, '', out);
+  await collectKbDir(workspaceAnchor(repoRoot), '', out);
   out.sort((a, b) => a.relPath.localeCompare(b.relPath));
   return out;
 }
@@ -284,17 +285,24 @@ async function loadCapabilitySections(
 
 /** Walks the KB tree anchored at the REPOSITORY, carrying `KB_DIR` in the rel: a linked directory
  *  below it is refused rather than descended, and a linked `.md` is never read. */
-async function collectKbDir(repoRoot: string, dirRel: string, out: KbFileSummary[]): Promise<void> {
-  const entries = await readdirNoFollow(repoRoot, dirRel ? `${KB_DIR}/${dirRel}` : KB_DIR);
+async function collectKbDir(
+  wa: { anchor: string; prefix: string },
+  dirRel: string,
+  out: KbFileSummary[],
+): Promise<void> {
+  const entries = await readdirNoFollow(
+    wa.anchor,
+    `${wa.prefix}${dirRel ? `${KB_DIR}/${dirRel}` : KB_DIR}`,
+  );
   if (entries === null) return;
   for (const entry of entries) {
     const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      await collectKbDir(repoRoot, childRel, out);
+      await collectKbDir(wa, childRel, out);
       continue;
     }
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    const text = await readTextNoFollow(repoRoot, `${KB_DIR}/${childRel}`);
+    const text = await readTextNoFollow(wa.anchor, `${wa.prefix}${KB_DIR}/${childRel}`);
     if (text === null) continue;
     const parsed = parseKbFile(text);
     const relInsideKb = childRel;

@@ -148,7 +148,7 @@ interface NodeRow {
  * subtree, then link into it" is worse than none of it.
  */
 export async function applyPlanPatch(
-  db: Database,
+  db: DbOrTx,
   patchInput: unknown,
   opts: ApplyPlanPatchOptions,
 ): Promise<ApplyPlanPatchResult> {

@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } fr
 import { Queue } from 'bullmq';
 import { schema, type Database } from '@haive/database';
 import {
+  CLI_RULES_TEMPLATE_KIND,
   CONFIG_KEYS,
   configService,
   logger,
@@ -53,6 +54,20 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
+  {
+    id: 'unclaimBackfilledEdits',
+    kind: 'convergent',
+    run: async (db) => {
+      await unclaimBackfilledEdits(db);
+    },
+  },
+  {
+    id: 'endAbandonedSupersededRuns',
+    kind: 'convergent',
+    run: async (db) => {
+      await endAbandonedSupersededRuns(db);
+    },
+  },
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'reconcileStrandedCloningRepos', kind: 'convergent', run: reconcileStrandedCloningRepos },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
@@ -662,6 +677,50 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
       ) > 0
       AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
   `);
+}
+
+/** End a run superseded while it ran whose worker then died. Boot's orphan reconcile ends only runs
+ *  that were not superseded, and at boot no handler is left to finish one. */
+export async function endAbandonedSupersededRuns(db: Database): Promise<string[]> {
+  const rows = await db.execute(sql`
+    UPDATE cli_invocations
+    SET ended_at = GREATEST(started_at, superseded_at)
+    WHERE started_at IS NOT NULL AND superseded_at IS NOT NULL AND ended_at IS NULL
+    RETURNING id
+  `);
+  const ids = (rows as unknown as { id: string }[]).map((r) => r.id);
+  if (ids.length > 0) log.info({ ids }, 'ended superseded runs a restart abandoned');
+  return ids;
+}
+
+/** Withdraw the claim an upgrade backfill made on an edited file, and the rollback copies carrying
+ *  it. Only such a row holds its disk hash as `written_hash`. Swapped with `template_content_hash`
+ *  it claims nothing and reads the template as not installed, which is what a backfill now records. */
+export async function unclaimBackfilledEdits(db: Database): Promise<string[]> {
+  const rows = await db.execute(sql`
+    UPDATE onboarding_artifacts a
+    SET written_hash = a.template_content_hash, template_content_hash = a.written_hash, updated_at = now()
+    WHERE a.source IN ('backfill', 'rollback')
+      AND a.template_kind <> ${CLI_RULES_TEMPLATE_KIND}
+      AND a.written_hash <> a.template_content_hash
+      AND EXISTS (
+        SELECT 1 FROM onboarding_artifacts b
+        WHERE b.source = 'backfill'
+          AND b.user_modified
+          AND b.template_kind <> ${CLI_RULES_TEMPLATE_KIND}
+          AND b.written_hash = b.last_observed_disk_hash
+          AND b.written_hash <> b.template_content_hash
+          AND b.repository_id = a.repository_id
+          AND b.disk_path = a.disk_path
+          AND b.written_hash = a.written_hash
+      )
+    RETURNING a.id
+  `);
+  const ids = (rows as unknown as { id: string }[]).map((r) => r.id);
+  if (ids.length > 0) {
+    log.info({ ids }, 'withdrew backfill claims on files edited before the backfill');
+  }
+  return ids;
 }
 
 /** Cheap SQL prefilter before the real predicate runs in TS. A heading-only

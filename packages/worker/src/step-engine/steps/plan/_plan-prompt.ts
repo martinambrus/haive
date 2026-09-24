@@ -1,6 +1,13 @@
 import { PLAN_PATCH_MAX_OPS, planTaskProposalSchema, type PlanTaskProposal } from '@haive/shared';
-import { applyPlanPatch, stripNodeRefPrefix, type ApplyPlanPatchResult } from '@haive/shared/plan';
-import type { Database } from '@haive/database';
+import {
+  applyPlanPatch,
+  stripNodeRefPrefix,
+  type ApplyPlanPatchResult,
+  type DbOrTx,
+} from '@haive/shared/plan';
+import { schema } from '@haive/database';
+import { and, eq, isNull } from 'drizzle-orm';
+import type { StepContext } from '../../step-definition.js';
 import { parseAgentJson } from '../workflow/_agent-json.js';
 
 /**
@@ -273,7 +280,7 @@ export function conversationalReply(raw: unknown): string | null {
  * A step that wants a re-roll has MiningRetryError, which the runner does honor.
  */
 export async function applyAgentPatch(
-  db: Database,
+  db: DbOrTx,
   patch: { ops: unknown[]; summary?: string },
   opts: {
     repositoryId: string;
@@ -302,5 +309,44 @@ export async function applyAgentPatch(
     // about: "has anyone looked at this since the code changed?".
     marksReviewed: true,
     ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
+  });
+}
+
+/**
+ * Fold an agent's reply at most once. The claim on its mining row (`consumed_at`) commits with
+ * the patch, so two apply passes over one wave cannot both write it, and a crash between the two
+ * loses neither. Null when another pass already claimed the reply, which counts as applied.
+ *
+ * `note` is what the row records about the outcome, written in the same transaction: every later
+ * pass skips a claimed reply, so a note written after the commit could be lost for good.
+ */
+export async function applyAgentPatchOnce(
+  ctx: Pick<StepContext, 'db' | 'taskStepId'>,
+  agentId: string,
+  write: (tx: DbOrTx) => Promise<ApplyPlanPatchResult>,
+  note: (applied: ApplyPlanPatchResult) => string | null,
+): Promise<ApplyPlanPatchResult | null> {
+  return ctx.db.transaction(async (tx) => {
+    const [claimed] = await tx
+      .update(schema.taskStepAgentMinings)
+      .set({ consumedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+          eq(schema.taskStepAgentMinings.agentId, agentId),
+          isNull(schema.taskStepAgentMinings.consumedAt),
+        ),
+      )
+      .returning({ id: schema.taskStepAgentMinings.id });
+    if (!claimed) return null;
+    const applied = await write(tx);
+    const message = note(applied);
+    if (message) {
+      await tx
+        .update(schema.taskStepAgentMinings)
+        .set({ errorMessage: message.slice(0, 2000) })
+        .where(eq(schema.taskStepAgentMinings.id, claimed.id));
+    }
+    return applied;
   });
 }

@@ -74,12 +74,7 @@ export interface EffortScale {
   max: string;
 }
 
-/** How step 07 surfaces the merged rules block (which lives in AGENTS.md) to this CLI:
- *   - 'native': CLI auto-reads AGENTS.md.
- *   - 'import': CLI reads its own file, which holds only an `@AGENTS.md` line.
- *   - 'copy': CLI reads its own file and has no import syntax, so the file carries
- *     AGENTS.md's project-info and rules blocks itself. */
-export type CliRulesFileMode = 'native' | 'import' | 'copy';
+export type { CliRulesFileMode } from '@haive/shared';
 
 /** How exec-core / the sequential sub-agent runner should interpret the CLI's
  *  stdout. Undefined = legacy heuristic (claude NDJSON collector probe). */

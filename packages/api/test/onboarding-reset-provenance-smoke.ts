@@ -11,19 +11,28 @@
  *   - `tasks.created_at > onboarding_reset_at`, because a reset supersedes artifact rows but
  *     CANNOT touch `task_steps`, so a pre-reset run's record still names paths the reset deleted.
  *
+ * It then runs the reset itself over a temporary tree, from a real record of the legacy RTK.md
+ * files 07 wrote, through the same provenance chain the route uses.
+ *
  * Safe against a populated install: it creates ONE throwaway user with its own repository and
  * asserts only about that repository, then deletes the user in a `finally` — the cascade takes
  * its repository, tasks and steps with it. Nothing else in the database is read or written.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger } from '@haive/shared';
+import { LEGACY_RTK_MD_PATHS, RTK_SLIM, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { loadOnboardingTaskFacts } from '../src/lib/onboarding-state.js';
 import {
+  collectWrittenCliContent,
   loadLiveRootWriters,
   loadProvenanceSteps,
+  resetOnboardingArtifacts,
+  resolveMergedTasks,
   supersedeResetArtifacts,
 } from '../src/routes/repos.js';
 
@@ -55,7 +64,9 @@ async function main(): Promise<void> {
   const userId = randomUUID();
   const repoId = randomUUID();
   const otherRepoId = randomUUID();
+  const rtkRepoId = randomUUID();
   const now = new Date();
+  const rtkRoot = await mkdtemp(join(tmpdir(), 'reset-provenance-rtk-'));
 
   try {
     await db.insert(schema.users).values({
@@ -69,7 +80,7 @@ async function main(): Promise<void> {
       createdAt: now,
       updatedAt: now,
     });
-    for (const id of [repoId, otherRepoId]) {
+    for (const id of [repoId, otherRepoId, rtkRepoId]) {
       await db.insert(schema.repositories).values({
         id,
         userId,
@@ -448,9 +459,67 @@ async function main(): Promise<void> {
       scopedLive.includes(duringWalkId),
       scopedLive,
     );
+
+    // ---- the legacy RTK.md files 07 wrote, reset from the run's own record --------------------
+    const rtkTaskId = randomUUID();
+    await db.insert(schema.tasks).values({
+      id: rtkTaskId,
+      userId,
+      repositoryId: rtkRepoId,
+      type: 'onboarding',
+      title: 'smoke legacy RTK.md',
+      status: 'completed',
+      createdAt: AFTER_RESET,
+      updatedAt: AFTER_RESET,
+    });
+    await db.insert(schema.taskSteps).values({
+      id: randomUUID(),
+      taskId: rtkTaskId,
+      stepId: '07-generate-files',
+      stepIndex: 7,
+      title: 'legacy RTK.md',
+      status: 'done',
+      output: { wroteFiles: [...LEGACY_RTK_MD_PATHS] },
+      createdAt: AFTER_RESET,
+      updatedAt: AFTER_RESET,
+      endedAt: AFTER_RESET,
+    });
+    await mkdir(join(rtkRoot, '.gemini'), { recursive: true });
+    await mkdir(join(rtkRoot, '.claude'), { recursive: true });
+    await writeFile(join(rtkRoot, 'RTK.md'), RTK_SLIM, 'utf8');
+    await writeFile(join(rtkRoot, '.gemini/RTK.md'), RTK_SLIM, 'utf8');
+    const editedRtk = `${RTK_SLIM}\nOur own note.\n`;
+    await writeFile(join(rtkRoot, '.claude/RTK.md'), editedRtk, 'utf8');
+
+    const rtkSteps = await loadProvenanceSteps(db, rtkRepoId, null);
+    const rtkWritten = collectWrittenCliContent(rtkSteps, [], resolveMergedTasks(rtkSteps, null));
+    const rtkReset = await resetOnboardingArtifacts(rtkRoot, {
+      writtenHashes: new Map(),
+      haiveDirs: rtkWritten.dirs,
+      haiveEntries: rtkWritten.entries,
+    });
+    const present = async (rel: string) =>
+      readFile(join(rtkRoot, rel), 'utf8').then(
+        (text) => text,
+        () => null,
+      );
+    check(
+      'a legacy RTK.md still holding what 07 wrote is taken back',
+      (await present('RTK.md')) === null && (await present('.gemini/RTK.md')) === null,
+      rtkReset.removed,
+    );
+    check(
+      'one edited since is kept and reported',
+      (await present('.claude/RTK.md')) === editedRtk &&
+        rtkReset.skipped.some(
+          (s) => s.path === '.claude/RTK.md' && s.reason === 'edited since Haive wrote it',
+        ),
+      rtkReset.skipped,
+    );
   } finally {
     // Cascade takes the repositories, tasks and steps with it.
     await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await rm(rtkRoot, { recursive: true, force: true });
   }
 
   if (failures > 0) {

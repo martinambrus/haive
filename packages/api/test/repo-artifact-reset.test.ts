@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  LEGACY_RTK_MD_PATHS,
+  LEGACY_RTK_MD_SHA256,
+  RTK_SLIM,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
@@ -798,6 +804,12 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/commands')).toBe(false);
   });
 
+  it('claims a legacy RTK.md with the body 07 wrote there, for want of a recorded hash', async () => {
+    const { entries } = collectWrittenCliContent(wrote(...LEGACY_RTK_MD_PATHS), []);
+
+    for (const rel of LEGACY_RTK_MD_PATHS) expect(entries.get(rel)).toBe(LEGACY_RTK_MD_SHA256);
+  });
+
   it('lets an artifact row put a directory in scope without claiming its contents', async () => {
     // `recordOnboardingArtifacts` inserts a row per manifest RENDERING without consulting
     // `wroteFiles`, so a pre-existing user file that apply SKIPPED has a row too. The entry-level
@@ -827,6 +839,65 @@ describe('collectWrittenCliContent', () => {
 });
 
 describe('resetOnboardingArtifacts', () => {
+  /** A run whose 07 wrote the legacy RTK.md files, as the route reads its record. */
+  const withLegacyRtk = () => {
+    const base = provenance();
+    const { entries } = collectWrittenCliContent(
+      [{ stepId: '07-generate-files', output: { wroteFiles: [...LEGACY_RTK_MD_PATHS] } }],
+      [],
+    );
+    return { ...base, haiveEntries: new Map([...base.haiveEntries, ...entries]) };
+  };
+  const writeRtk = async (root: string, content: string) => {
+    await mkdir(path.join(root, '.gemini'), { recursive: true });
+    for (const rel of LEGACY_RTK_MD_PATHS) await writeFile(path.join(root, rel), content, 'utf8');
+  };
+
+  it('takes back the legacy RTK.md files while they hold what 07 wrote', async () => {
+    const root = await repo('reset-legacy-rtk-');
+    await installArtifacts(root);
+    await writeRtk(root, RTK_SLIM);
+
+    const { removed, vacatedPaths } = await resetOnboardingArtifacts(root, withLegacyRtk());
+
+    for (const rel of LEGACY_RTK_MD_PATHS) {
+      expect(await exists(root, rel)).toBe(false);
+      expect(removed).toContain(rel);
+    }
+    expect(vacatedPaths.has('RTK.md')).toBe(true);
+    expect(vacatedPaths.has('.gemini/RTK.md')).toBe(true);
+  });
+
+  it('keeps a legacy RTK.md edited since 07 wrote it, and says so', async () => {
+    const root = await repo('reset-legacy-rtk-edited-');
+    await installArtifacts(root);
+    await writeRtk(root, `${RTK_SLIM}\nOur own note.\n`);
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, withLegacyRtk());
+
+    for (const rel of LEGACY_RTK_MD_PATHS) {
+      expect(await exists(root, rel)).toBe(true);
+      expect(removed).not.toContain(rel);
+      expect(skipped).toContainEqual({ path: rel, reason: 'edited since Haive wrote it' });
+    }
+  });
+
+  it('keeps an RTK.md no run claims, even one holding the same bytes', async () => {
+    const root = await repo('reset-legacy-rtk-unclaimed-');
+    await installArtifacts(root);
+    await writeRtk(root, RTK_SLIM);
+
+    const { skipped } = await resetOnboardingArtifacts(root, provenance());
+
+    expect(await exists(root, 'RTK.md')).toBe(true);
+    expect(await exists(root, '.gemini/RTK.md')).toBe(true);
+    expect(skipped).toContainEqual({ path: 'RTK.md', reason: 'no record that Haive wrote it' });
+    expect(skipped).toContainEqual({
+      path: '.gemini/RTK.md',
+      reason: 'no record that Haive wrote it',
+    });
+  });
+
   it('removes every CLI agents and skills directory, not just claude’s', async () => {
     // The list was `['.claude', KB_DIR, LEARNINGS_DIR]`, so the previous run's agents and skills
     // stayed on disk for every other CLI and the next run wrote on top of them.

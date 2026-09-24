@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Database } from '@haive/database';
 import {
   augmentPromptWithLedger,
@@ -89,6 +91,36 @@ describe('recordLedgerEntry', () => {
     await expect(
       recordLedgerEntry(db, 't1', 's1', { stepId: '07', round: 0, text: 'x' }),
     ).resolves.toBeUndefined();
+  });
+
+  it('records a recap only while its step row still reads done, in one statement', async () => {
+    const executed: SQL[] = [];
+    const { db, inserted } = mockDb([]);
+    (db as unknown as { execute: (q: SQL) => Promise<unknown> }).execute = async (q) => {
+      executed.push(q);
+      return [];
+    };
+    await recordLedgerEntry(
+      db,
+      't1',
+      's1',
+      { stepId: '07', round: 0, text: 'what the pass did', kind: 'summary' },
+      { whileStepDone: true },
+    );
+    expect(inserted).toEqual([]);
+    expect(executed).toHaveLength(1);
+    const { sql, params } = new PgDialect().sqlToQuery(executed[0]!);
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toContain('insert into "task_events"');
+    expect(flat).toMatch(
+      /where exists \( select 1 from "task_steps" where "task_steps"\."id" = \$\d+ and "task_steps"\."status" = 'done' \)/,
+    );
+    expect(params).toEqual(expect.arrayContaining(['t1', 's1', 'ledger.entry']));
+    const payload = JSON.parse(
+      params.find((p) => typeof p === 'string' && p.startsWith('{')) as string,
+    );
+    expect(payload).toMatchObject({ text: 'what the pass did', kind: 'summary' });
+    expect(payload.fingerprint).toBe(contentFingerprint('07', 'what the pass did'));
   });
 });
 

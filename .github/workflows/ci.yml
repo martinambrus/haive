@@ -19,8 +19,10 @@ on:
 permissions:
   contents: read
 
+# One group per pull request, one per main commit: a late push event for an older merge must not
+# cancel a newer one's run, and a shared group replaces a pending run even without cancel-in-progress.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -350,15 +352,15 @@ jobs:
             sleep 2
           done
 
-      # Extraction is the one path whose behaviour differs between this runner and production, so it
-      # is the one test file that runs in BOTH. The host job above runs it against GNU tar as a
-      # non-root user; here it runs inside the worker image as root, which is the combination that
-      # actually ships — and the only place the unprivileged-spawn branch (uid 65534) executes at all,
-      # since a non-root process cannot setuid and silently keeps its own identity instead.
+      # Extraction is the one path whose behaviour differs between this runner and production, so its
+      # test files run in BOTH. The host job above runs them against GNU tar as a non-root user; here
+      # they run inside the worker image as root, which is the combination that actually ships — and
+      # the only place the unprivileged-spawn branch (uid 65534) executes at all, since a non-root
+      # process cannot setuid and silently keeps its own identity instead.
       - name: Extraction tests inside the worker image
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
-            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts'
+            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
 
       - name: Dump service status
         if: always()

@@ -12,6 +12,7 @@ import {
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -260,12 +261,16 @@ export async function readDiskSkillSummaries(
   dir: string,
 ): Promise<{ id: string; title: string; description: string }[]> {
   const ids = await listSkillDirs(repoPath, dir);
+  const wa = workspaceAnchor(repoPath);
   const parts = dir.split('/').filter((p) => p.length > 0);
   const out: { id: string; title: string; description: string }[] = [];
   for (const id of ids) {
     // One anchored read: null covers absent, unreadable and reached-through-a-link alike, which is
     // what the guard-plus-catch pair it replaces already treated as "skip this skill".
-    const text = await readTextNoFollow(repoPath, [...parts, id, 'SKILL.md'].join('/'));
+    const text = await readTextNoFollow(
+      wa.anchor,
+      `${wa.prefix}${[...parts, id, 'SKILL.md'].join('/')}`,
+    );
     if (text === null) continue;
     const parsed = parseSkillMarkdown(text);
     out.push({ id, title: id, description: parsed.description ?? id });

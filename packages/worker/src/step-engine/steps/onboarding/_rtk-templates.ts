@@ -1,29 +1,7 @@
 import type { CliProviderName, TemplateItem, TemplateRendering } from '@haive/shared';
-import { RTK_REF_MARKER_END, RTK_REF_MARKER_START } from '@haive/shared';
+import { RTK_REF_MARKER_END, RTK_REF_MARKER_START, RTK_SLIM } from '@haive/shared';
 
-export { RTK_REF_MARKER_END, RTK_REF_MARKER_START };
-
-/** Slim RTK awareness body, inlined into AGENTS.md by `buildRtkAwarenessBlock`. Vendored from
- *  rtk-ai/rtk@v0.37.2 `src/hooks/init.rs` (RTK_SLIM constant). Re-vendor on rtk version bump. */
-export const RTK_SLIM = `# RTK (Rust Token Killer)
-
-RTK is installed in this sandbox and proxies common dev commands so their
-output is compressed before it lands in your context. Most git, npm, pnpm,
-docker, kubectl, pytest, jest, eslint, tsc, curl, and log-tail invocations
-are auto-routed via the configured PreToolUse / BeforeTool hook — you do
-not need to invoke \`rtk\` explicitly.
-
-Meta commands you can run directly:
-
-- \`rtk gain\` — show cumulative token savings for this session
-- \`rtk gain --history\` — per-command savings history
-- \`rtk discover\` — analyze recent runs for missed opportunities
-- \`rtk proxy <cmd>\` — bypass filters (debugging only)
-
-Trust the hook. If a command output looks unexpectedly compact, that is RTK
-working as intended — re-run with \`rtk proxy <cmd>\` only when you suspect
-filtering is hiding a real signal.
-`;
+export { RTK_REF_MARKER_END, RTK_REF_MARKER_START, RTK_SLIM };
 
 /** Hook commands invoked by each CLI's runtime when an RTK-managed event
  *  fires. Mirrors rtk's own `CLAUDE_HOOK_COMMAND` / gemini hook command. */
@@ -67,8 +45,8 @@ export function hasGemini(ctx: RtkRenderInputs): boolean {
 
 /** Hook block written to `.claude/settings.json` (claude-code, zai). Shape
  *  pulled verbatim from rtk's `insert_hook_entry` (PreToolUse → Bash matcher
- *  → command). When rtk is later disabled the upgrade flow surfaces this
- *  file as `obsolete` and removes it on apply. */
+ *  → command). Once rtk is disabled the next upgrade offers this file for
+ *  removal as `obsolete`, and keeps it when it no longer holds these bytes. */
 export function buildClaudeSettingsJson(): string {
   const obj = {
     hooks: {

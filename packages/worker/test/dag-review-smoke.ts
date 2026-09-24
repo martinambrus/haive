@@ -28,7 +28,9 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 // runs the inner loop — reviewer says fix_required once, a fix coder runs, then
 // the reviewer approves — before the (non-conflicting) merge. Validates the
 // coder<->reviewer loop, dag_agent_runs tracking, the review-gated merge, and the
-// task ledger each review-loop agent reads and a fix coder writes.
+// task ledger each review-loop agent reads and a fix coder writes. Each issue's first
+// reviewer dies, ISSUE-001's before its run starts and ISSUE-002's after, so both re-run
+// and only the second spends a reviewer infrastructure retry.
 
 const SEEDED_FACT = 'the fixture has no build step, so nothing needs running before a review';
 const FIXER_CONCERN = 'the fixture keeps every issue file at the worktree root';
@@ -230,6 +232,7 @@ async function main(): Promise<void> {
     // Fake spawner: initial coder writes the issue file; reviewer says
     // fix_required on its first pass (iteration 0) then approve; fix coder is a
     // no-op that reports completed for ISSUE-001 and leaves no result for ISSUE-002.
+    const reviewerRuns = new Map<string, number>();
     const enqueueCliInvocation = async (payload: CliExecJobPayload): Promise<void> => {
       const finish = (out: unknown) =>
         db
@@ -263,6 +266,22 @@ async function main(): Promise<void> {
         where: eq(schema.dagAgentRuns.cliInvocationId, payload.invocationId),
       });
       if (run?.role === 'reviewer') {
+        const seen = reviewerRuns.get(run.dagIssueId) ?? 0;
+        reviewerRuns.set(run.dagIssueId, seen + 1);
+        if (seen === 0) {
+          const reviewed = await db.query.taskDagIssues.findFirst({
+            where: eq(schema.taskDagIssues.id, run.dagIssueId),
+          });
+          await db
+            .update(schema.cliInvocations)
+            .set(
+              reviewed?.issueKey === 'ISSUE-001'
+                ? { exitCode: null, endedAt: new Date() }
+                : { startedAt: new Date(), exitCode: 137, endedAt: new Date() },
+            )
+            .where(eq(schema.cliInvocations.id, payload.invocationId));
+          return;
+        }
         await finish(
           run.iteration === 0
             ? {
@@ -359,9 +378,13 @@ async function main(): Promise<void> {
       .where(eq(schema.dagAgentRuns.taskId, task!.id));
     const reviewers = runs.filter((r) => r.role === 'reviewer').length;
     const fixers = runs.filter((r) => r.role === 'coder').length;
-    // 2 issues x (reviewer iter0 + fix coder + reviewer iter1) = 4 reviewers + 2 fixers.
-    if (reviewers !== 4 || fixers !== 2) {
-      throw new Error(`expected 4 reviewer + 2 fix runs, got ${reviewers} + ${fixers}`);
+    // 2 issues x (dead reviewer + reviewer iter0 + fix coder + reviewer iter1) = 6 + 2.
+    if (reviewers !== 6 || fixers !== 2) {
+      throw new Error(`expected 6 reviewer + 2 fix runs, got ${reviewers} + ${fixers}`);
+    }
+    const retries = Object.fromEntries(issues.map((i) => [i.issueKey, i.reviewInfraRetries]));
+    if (retries['ISSUE-001'] !== 0 || retries['ISSUE-002'] !== 1) {
+      throw new Error(`a reviewer that never started must re-run free: ${JSON.stringify(retries)}`);
     }
     // Every pass that reports similar sites adds to the issue's list; none overwrites it.
     // Compared as tuples because jsonb does not keep an object's key order.

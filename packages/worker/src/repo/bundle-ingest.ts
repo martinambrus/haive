@@ -22,6 +22,23 @@ function bundleDirRel(userId: string, bundleId: string): string {
   return `${userId}/${bundleId}`;
 }
 
+/** The bundle archive's rel under the bundle volume, or null for anything but the one file the api
+ *  moves there, `<userId>/<bundleId>/source.<ext>`: a row naming another path is refused rather
+ *  than read. */
+export function bundleArchiveRel(
+  bundleStorageRoot: string,
+  stored: string,
+  userId: string,
+  bundleId: string,
+): string | null {
+  const dir = bundleDirRel(userId, bundleId);
+  const prefix = `${path.join(bundleStorageRoot, dir)}/`;
+  if (!stored.startsWith(prefix)) return null;
+  const name = stored.slice(prefix.length);
+  if (!name.startsWith('source.') || name.includes('/')) return null;
+  return `${dir}/${name}`;
+}
+
 export function gitRevParseHead(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', ['rev-parse', 'HEAD'], { cwd });
@@ -118,10 +135,17 @@ export async function handleIngestZip(
   }
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
   try {
-    const report = await extractArchive(
+    const archiveRel = bundleArchiveRel(
+      bundleStorageRoot,
       bundle.archivePath,
+      payload.userId,
+      bundle.id,
+    );
+    if (!archiveRel) throw new Error('bundle archive is not the file this bundle uploaded');
+    const report = await extractArchive(
+      { anchor: bundleStorageRoot, rel: archiveRel },
       bundle.archiveFormat as ArchiveFormat,
-      dest,
+      { anchor: bundleStorageRoot, rel: `${bundleDirRel(payload.userId, bundle.id)}/extracted` },
     );
     if (report.note) {
       logger.warn({ bundleId: bundle.id, dropped: report.dropped }, report.note);

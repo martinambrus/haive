@@ -594,6 +594,18 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     .where(eq(schema.taskSteps.id, step.id));
 
   await appendTaskEvent(db, id, step.id, 'step.clarified', { stepId });
+  // Answering reopens a task that failed while this form waited. The answer rides task_events
+  // rather than the job, so the worker cannot tell this advance from one queued before the failure.
+  await db
+    .update(schema.tasks)
+    .set({
+      status: 'running',
+      errorMessage: null,
+      completedAt: null,
+      ...CLEAR_ALLOWANCE_WATCH,
+      updatedAt: now,
+    })
+    .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')));
 
   const queue = getTaskQueue();
   const payload: TaskJobPayload = { taskId: id, userId, stepId, round: step.round };

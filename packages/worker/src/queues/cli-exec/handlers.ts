@@ -123,6 +123,45 @@ function authVolumeFor(
   );
 }
 
+/** A run writes only the mining row still linked to it: a re-roll moves the row to a new run. */
+export function ownMiningRow(agentMiningId: string, invocationId: string) {
+  return and(
+    eq(schema.taskStepAgentMinings.id, agentMiningId),
+    eq(schema.taskStepAgentMinings.cliInvocationId, invocationId),
+  );
+}
+
+/** A recap lands only while its run stands, and only on the row version it summarized: a Retry
+ *  supersedes a step's runs before it resets the row, so a run queued in between stands. */
+export async function writeStepSummary(
+  db: Database,
+  invocationId: string,
+  stepId: string,
+  summarizedEndedAt: string | undefined,
+  text: string,
+): Promise<{ stepId: string; round: number } | null> {
+  return db.transaction(async (tx) => {
+    const [run] = await tx
+      .select({ supersededAt: schema.cliInvocations.supersededAt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, invocationId))
+      .for('update');
+    if (!run || run.supersededAt) return null;
+    const [step] = await tx
+      .update(schema.taskSteps)
+      .set({ summary: text, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.taskSteps.id, stepId),
+          eq(schema.taskSteps.status, 'done'),
+          summarizedEndedAt ? eq(schema.taskSteps.endedAt, new Date(summarizedEndedAt)) : undefined,
+        ),
+      )
+      .returning({ stepId: schema.taskSteps.stepId, round: schema.taskSteps.round });
+    return step ?? null;
+  });
+}
+
 export async function handleCliExecJob(
   db: Database,
   payload: CliExecJobPayload,
@@ -172,13 +211,8 @@ export async function handleCliExecJob(
   if (payload.agentMiningId) {
     await db
       .update(schema.taskStepAgentMinings)
-      .set({
-        status: 'running',
-        startedAt: new Date(),
-        cliInvocationId: row.id,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
+      .set({ status: 'running', startedAt: new Date(), updatedAt: new Date() })
+      .where(ownMiningRow(payload.agentMiningId, row.id));
   }
 
   const providerSecrets = payload.cliProviderId
@@ -191,6 +225,7 @@ export async function handleCliExecJob(
   const assignedAgentIds = assignedAgentIdsOf(payload.spec);
 
   const startedAt = Date.now();
+  let outcome: { exitCode: number | null; errorMessage: string | null; rawOutput: string | null };
   try {
     const result = await executeByKind(db, payload, deps, secrets);
     const durationMs = Date.now() - startedAt;
@@ -274,147 +309,94 @@ export async function handleCliExecJob(
       log.warn({ err, invocationId: row.id }, 'invocation cost resolution failed');
     }
 
-    await db
-      .update(schema.cliInvocations)
-      .set({
-        exitCode: result.exitCode,
-        rawOutput: result.rawOutput,
-        streamLog: result.streamLog ?? null,
-        cleanTranscript: result.cleanTranscript ?? null,
-        parsedOutput: result.parsedOutput as unknown,
-        tokenUsage: result.tokenUsage ?? null,
-        modelIdentity: result.modelIdentity ?? null,
-        compaction: result.compaction ?? null,
-        // A provider whose stream carries no tool events (amp) would otherwise record "used
-        // nothing"; the rule lives beside the tally so the backfill applies the same one. The
-        // assigned personas ride every path: the observability rule keeps them on purpose.
-        toolUsage: applyProviderObservability(
-          withAssignedAgents(result.toolUsage ?? unobservedToolUsage('stream'), assignedAgentIds),
-          providerName,
-        ),
-        cost,
-        durationMs,
-        errorMessage: finalErrorMessage,
-        // The structural verdict behind that message, so the UI can gate a persistent
-        // "refused by the provider, not a CLI failure" banner on the class rather than the
-        // copy (the step-banners.ts rule). fatalClassFromMessage reverses the stable internal
-        // headline interpretCliFailure wrote — the same round-trip mining-failure already
-        // relies on — so it costs no extra classification. NULL for a success or a genuine
-        // code error, which is the truth about them.
-        providerFatalClass: fatalClassFromMessage(finalErrorMessage),
-        endedAt: new Date(),
-      })
-      .where(eq(schema.cliInvocations.id, row.id));
-
-    // Record what a model-capability failure (no vision, output-token ceiling) taught us
-    // about this provider's model, so the NEXT dispatch carries the remedy. Deliberately
-    // here rather than in the step runner: every invocation kind passes through this path,
-    // so a mining agent or a DAG coder that discovers the limitation fixes it for the whole
-    // task even though only the single-CLI step path auto-retries. Best-effort — a learn
-    // must never fail the invocation it was observing.
-    if (payload.cliProviderId) {
-      try {
-        const learnt = await learnModelLimitFromFailure(
-          db,
-          payload.cliProviderId,
-          finalErrorMessage,
-        );
-        if (learnt) {
-          log.info(
-            { invocationId: row.id, providerId: payload.cliProviderId, limits: learnt },
-            'learned a model limitation from a failed invocation',
-          );
-        }
-      } catch (err) {
-        log.warn(
-          { err, invocationId: row.id, providerId: payload.cliProviderId },
-          'failed to record model limitation',
-        );
-      }
-    }
-
-    // Best-effort per-step summarizer: write task_steps.summary and stop. This
-    // invocation is unlinked (taskStepId=null) so it must not resume the step.
-    if (payload.purpose === 'step_summary') {
-      const summaryText = (result.rawOutput ?? '').trim().slice(0, LEDGER_SUMMARY_MAX_CHARS);
-      if (payload.summaryForStepId && result.exitCode === 0 && summaryText) {
-        const [step] = await db
-          .update(schema.taskSteps)
-          .set({ summary: summaryText, updatedAt: new Date() })
-          .where(eq(schema.taskSteps.id, payload.summaryForStepId))
-          .returning({ stepId: schema.taskSteps.stepId, round: schema.taskSteps.round });
-        // Mirror it into the task ledger so later steps inherit the recap. This pass
-        // already ran and is unlinked from token totals, so compaction for the ledger
-        // costs no extra call, prompt or tokens.
-        if (step) {
-          await recordLedgerEntry(db, payload.taskId, payload.summaryForStepId, {
-            stepId: step.stepId,
-            round: step.round,
-            text: summaryText,
-            kind: 'summary',
-          });
-        }
-      }
-      await cleanupAuthAfterTerminalSummary(db, payload.taskId);
-      return;
-    }
-
-    if (payload.agentMiningId) {
-      const failed = result.exitCode !== 0 || (finalErrorMessage?.trim().length ?? 0) > 0;
-      await db
-        .update(schema.taskStepAgentMinings)
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.cliInvocations)
         .set({
-          status: failed ? 'failed' : 'done',
-          output: result.parsedOutput as unknown,
+          exitCode: result.exitCode,
           rawOutput: result.rawOutput,
+          streamLog: result.streamLog ?? null,
+          cleanTranscript: result.cleanTranscript ?? null,
+          parsedOutput: result.parsedOutput as unknown,
+          tokenUsage: result.tokenUsage ?? null,
+          modelIdentity: result.modelIdentity ?? null,
+          compaction: result.compaction ?? null,
+          // A provider whose stream carries no tool events (amp) would otherwise record "used
+          // nothing"; the rule lives beside the tally so the backfill applies the same one. The
+          // assigned personas ride every path: the observability rule keeps them on purpose.
+          toolUsage: applyProviderObservability(
+            withAssignedAgents(result.toolUsage ?? unobservedToolUsage('stream'), assignedAgentIds),
+            providerName,
+          ),
+          cost,
+          durationMs,
           errorMessage: finalErrorMessage,
+          // The structural verdict behind that message, so the UI can gate a persistent
+          // "refused by the provider, not a CLI failure" banner on the class rather than the
+          // copy (the step-banners.ts rule). fatalClassFromMessage reverses the stable internal
+          // headline interpretCliFailure wrote — the same round-trip mining-failure already
+          // relies on — so it costs no extra classification. NULL for a success or a genuine
+          // code error, which is the truth about them.
+          providerFatalClass: fatalClassFromMessage(finalErrorMessage),
           endedAt: new Date(),
-          updatedAt: new Date(),
         })
-        .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
-    }
-
-    // Park-begin candidate: this invocation just ended. If it was the last one running for
-    // the step and the step is still waiting_cli (didn't advance — a rate-limit/allowance
-    // failure, or more agents still queued), stamp the wait so the ensuing gap bills as idle,
-    // not work. Guarded/atomic — no-ops while any sibling invocation is still running.
-    if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
-
-    await resumeStepIfLinked(payload, result.exitCode === 0, finalErrorMessage);
+        .where(eq(schema.cliInvocations.id, row.id));
+      if (payload.agentMiningId) {
+        const failed = result.exitCode !== 0 || (finalErrorMessage?.trim().length ?? 0) > 0;
+        await tx
+          .update(schema.taskStepAgentMinings)
+          .set({
+            status: failed ? 'failed' : 'done',
+            output: result.parsedOutput as unknown,
+            rawOutput: result.rawOutput,
+            errorMessage: finalErrorMessage,
+            endedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(ownMiningRow(payload.agentMiningId, row.id));
+      }
+    });
+    outcome = {
+      exitCode: result.exitCode,
+      errorMessage: finalErrorMessage,
+      rawOutput: result.rawOutput,
+    };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
     const message = err instanceof Error ? err.message : String(err);
     log.error({ err, invocationId: payload.invocationId }, 'cli exec failed');
     await publishCliExit(payload.invocationId, -1);
-    await db
-      .update(schema.cliInvocations)
-      .set({
-        exitCode: -1,
-        errorMessage: message,
-        durationMs,
-        // No transcript reaches this path, so this is exactly the record the boot backfill
-        // would have written from a null stream_log — plus the assignment, which only the
-        // dispatch knows and the backfill never could.
-        toolUsage: withAssignedAgents(unobservedToolUsage('stream'), assignedAgentIds),
-        endedAt: new Date(),
-      })
-      .where(eq(schema.cliInvocations.id, row.id));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.cliInvocations)
+        .set({
+          exitCode: -1,
+          errorMessage: message,
+          durationMs,
+          // No transcript reaches this path, so this is exactly the record the boot backfill
+          // would have written from a null stream_log — plus the assignment, which only the
+          // dispatch knows and the backfill never could.
+          toolUsage: withAssignedAgents(unobservedToolUsage('stream'), assignedAgentIds),
+          endedAt: new Date(),
+        })
+        .where(eq(schema.cliInvocations.id, row.id));
+      if (payload.agentMiningId) {
+        await tx
+          .update(schema.taskStepAgentMinings)
+          .set({
+            status: 'failed',
+            errorMessage: message,
+            endedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(ownMiningRow(payload.agentMiningId, row.id));
+      }
+    });
     // Summarizer is best-effort: on failure leave summary null and do not resume or
     // retry (taskStepId is null so resumeStepIfLinked is a no-op anyway).
     if (payload.purpose === 'step_summary') {
       await cleanupAuthAfterTerminalSummary(db, payload.taskId);
       return;
-    }
-    if (payload.agentMiningId) {
-      await db
-        .update(schema.taskStepAgentMinings)
-        .set({
-          status: 'failed',
-          errorMessage: message,
-          endedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
     }
     if (err instanceof CliLoginRequiredError && payload.taskStepId) {
       await db
@@ -429,6 +411,77 @@ export async function handleCliExecJob(
     await resumeStepIfLinked(payload, false, message);
     throw err;
   }
+
+  // The run is recorded as it ended, so nothing below may rewrite it: an error from here on
+  // leaves the step to recovery instead of turning a finished run into a failed one.
+
+  // Record what a model-capability failure (no vision, output-token ceiling) taught us
+  // about this provider's model, so the NEXT dispatch carries the remedy. Deliberately
+  // here rather than in the step runner: every invocation kind passes through this path,
+  // so a mining agent or a DAG coder that discovers the limitation fixes it for the whole
+  // task even though only the single-CLI step path auto-retries. Best-effort — a learn
+  // must never fail the invocation it was observing.
+  if (payload.cliProviderId) {
+    try {
+      const learnt = await learnModelLimitFromFailure(
+        db,
+        payload.cliProviderId,
+        outcome.errorMessage,
+      );
+      if (learnt) {
+        log.info(
+          { invocationId: row.id, providerId: payload.cliProviderId, limits: learnt },
+          'learned a model limitation from a failed invocation',
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { err, invocationId: row.id, providerId: payload.cliProviderId },
+        'failed to record model limitation',
+      );
+    }
+  }
+
+  // Best-effort per-step summarizer: write task_steps.summary and stop. This
+  // invocation is unlinked (taskStepId=null) so it must not resume the step.
+  if (payload.purpose === 'step_summary') {
+    const summaryText = (outcome.rawOutput ?? '').trim().slice(0, LEDGER_SUMMARY_MAX_CHARS);
+    if (payload.summaryForStepId && outcome.exitCode === 0 && summaryText) {
+      try {
+        const step = await writeStepSummary(
+          db,
+          row.id,
+          payload.summaryForStepId,
+          payload.summaryForStepEndedAt,
+          summaryText,
+        );
+        // Mirror it into the task ledger so later steps inherit the recap. This pass
+        // already ran and is unlinked from token totals, so compaction for the ledger
+        // costs no extra call, prompt or tokens.
+        if (step) {
+          await recordLedgerEntry(
+            db,
+            payload.taskId,
+            payload.summaryForStepId,
+            { stepId: step.stepId, round: step.round, text: summaryText, kind: 'summary' },
+            { whileStepDone: true },
+          );
+        }
+      } catch (err) {
+        log.warn({ err, invocationId: row.id }, 'step summary write failed (best-effort)');
+      }
+    }
+    await cleanupAuthAfterTerminalSummary(db, payload.taskId);
+    return;
+  }
+
+  // Park-begin candidate: this invocation just ended. If it was the last one running for
+  // the step and the step is still waiting_cli (didn't advance — a rate-limit/allowance
+  // failure, or more agents still queued), stamp the wait so the ensuing gap bills as idle,
+  // not work. Guarded/atomic — no-ops while any sibling invocation is still running.
+  if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
+
+  await resumeStepIfLinked(payload, outcome.exitCode === 0, outcome.errorMessage);
 }
 
 /** Task completion deliberately does not wait for its best-effort summary invocation. That

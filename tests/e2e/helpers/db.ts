@@ -110,6 +110,30 @@ export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<vo
   await sql`delete from users where id = ${userId}`;
 }
 
+export interface ProviderImageState {
+  status: string | null;
+  error: string | null;
+}
+
+/** Poll until the worker moves a provider's image off `building`, and return the last state read.
+ *  Asserting `ready` on it makes a failed build fail with its own error rather than a timeout. */
+export async function waitForProviderImage(
+  sql: postgres.Sql,
+  providerId: string,
+  timeoutMs: number,
+): Promise<ProviderImageState> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await sql<{ status: string; error: string | null }[]>`
+      select sandbox_image_build_status as status, sandbox_image_build_error as error
+      from cli_providers where id = ${providerId}
+    `;
+    const state = { status: rows[0]?.status ?? null, error: rows[0]?.error ?? null };
+    if (state.status !== 'building' || Date.now() >= deadline) return state;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
 export async function readStepStatus(sql: postgres.Sql, stepPkId: string): Promise<string | null> {
   const rows = await sql<{ status: string }[]>`
     select status from task_steps where id = ${stepPkId}

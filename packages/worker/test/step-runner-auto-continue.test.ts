@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
+import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/task-ledger.js')>();
+  return { ...actual, recordLedgerEntry: vi.fn(async () => undefined) };
+});
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -20,6 +26,30 @@ function tableNameOf(table: unknown): string {
     }
   }
   return '';
+}
+
+/** Values a drizzle condition binds, in order. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) conditionValues(item, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) acc.push(obj.value);
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
+}
+
+/** The row guards, evaluated against the mock row: a pass's write lands only while the row is not
+ *  `pending` or `skipped`, and the claim that opens a pass only while it is still `pending`. */
+function refusedByRowGuard(cond: unknown, status: unknown): boolean {
+  const values = conditionValues(cond);
+  if (values.includes('pending') && values.includes('skipped')) {
+    return status === 'pending' || status === 'skipped';
+  }
+  return values.includes('pending') && status !== 'pending';
 }
 
 function makeMockDb(state: MockState): Database {
@@ -60,16 +90,29 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         set: (v: Record<string, unknown>) => ({
-          where: () => ({
-            returning: async () => {
+          where: (cond: unknown) => {
+            const write = (): unknown[] => {
+              if (tableName === 'task_steps' && refusedByRowGuard(cond, state.taskStepRow.status)) {
+                return [];
+              }
               state.updates.push({ table: tableName, patch: v });
               if (tableName === 'task_steps') {
                 state.taskStepRow = { ...state.taskStepRow, ...v };
                 return [state.taskStepRow];
               }
               return [];
-            },
-          }),
+            };
+            return {
+              returning: async () => write(),
+              // Awaited directly by a write that needs no row back.
+              then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+                Promise.resolve()
+                  .then(() => {
+                    write();
+                  })
+                  .then(res, rej),
+            };
+          },
         }),
       };
     },
@@ -192,6 +235,11 @@ describe('advanceStep auto-continue', () => {
     const result = await run(state, makeStep({ form: () => QUESTION_FORM }));
     expect(result.status).toBe('waiting_form');
     expect(state.taskStepRow.status).toBe('waiting_form');
+    // Stamped by the write that parks, so no instant exists where the form is parked unstamped.
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.patch.status === 'waiting_form')
+        ?.patch,
+    ).toMatchObject({ waitingStartedAt: expect.any(Date) });
   });
 
   it('auto mode never auto-passes submitAction retry forms', async () => {
@@ -367,16 +415,360 @@ describe('advanceStep auto-continue', () => {
     expect(result.status).toBe('waiting_form');
   });
 
+  it('pauseFormOnRetry parks the form instead of applying values a job carries', async () => {
+    // A reopen held the form and the worker died before parking it; the submit that led there is
+    // redelivered still carrying the answers typed into the old form.
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    state.taskStepRow = { ...state.taskStepRow, status: 'running', pauseFormOnRetry: true };
+    const applied: unknown[] = [];
+    const def = makeStep({ form: () => QUESTION_FORM });
+    def.apply = async (_ctx, args) => {
+      applied.push(args.formValues);
+      return { applied: true };
+    };
+    const result = await run(state, def, { action: 'skip', flag: false });
+
+    expect(result.status).toBe('waiting_form');
+    expect(applied).toEqual([]);
+    expect(state.taskStepRow.formValues).toBeNull();
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+  });
+
   it('pauseFormOnRetry does not block the submit that follows the pause', async () => {
-    // The guard lives only in the pre-submit branch, so submitting the parked form
-    // (params.formValues present) runs straight to apply regardless of the flag.
+    // The pause parks the form and releases the hold, so the submit that answers it runs.
     const state = freshState();
     state.taskStepRow.pauseFormOnRetry = true;
     state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
-    const result = await run(state, makeStep({ form: () => QUESTION_FORM }), {
-      action: 'update',
-      flag: true,
-    });
+    const step = makeStep({ form: () => QUESTION_FORM });
+    expect((await run(state, step)).status).toBe('waiting_form');
+    const result = await run(state, step, { action: 'update', flag: true });
     expect(result.status).toBe('done');
+  });
+});
+
+/** What a continuation finds: the step parked on its CLI, its form built and its answers saved. */
+function parkedWithAnswers(): MockState {
+  const state = freshState();
+  state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+  state.taskStepRow = {
+    ...state.taskStepRow,
+    status: 'waiting_cli',
+    detectOutput: { ok: true },
+    formSchema: QUESTION_FORM,
+    formValues: { action: 'update', flag: true },
+    startedAt: new Date(),
+  };
+  return state;
+}
+
+describe('advanceStep continuing a parked step with saved answers', () => {
+  const applied: unknown[] = [];
+  const step = (): StepDefinition => {
+    const def = makeStep({ form: () => QUESTION_FORM });
+    def.apply = async (_ctx, args) => {
+      applied.push(args.formValues);
+      return { applied: true };
+    };
+    return def;
+  };
+
+  it('keeps the step parked and its answers as saved, rather than re-submitting them', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    // What the task queue passes a continuation: the answers already on the row.
+    const result = await run(state, step(), { action: 'update', flag: true });
+
+    expect(result.status).toBe('done');
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
+    expect(state.updates.filter((u) => 'formValues' in u.patch)).toEqual([]);
+    expect(applied).toEqual([{ action: 'update', flag: true }]);
+  });
+
+  it('ignores the values a submit redelivered onto the parked step carries', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    await run(state, step(), { action: 'skip', flag: false });
+
+    expect(applied).toEqual([{ action: 'update', flag: true }]);
+    expect(state.updates.filter((u) => 'formValues' in u.patch)).toEqual([]);
+  });
+
+  it('still saves a submission and runs the step on it', async () => {
+    applied.length = 0;
+    const state = parkedWithAnswers();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_form', formValues: null };
+    const result = await run(state, step(), { action: 'skip', flag: false });
+
+    expect(result.status).toBe('done');
+    const saved = state.updates.find((u) => 'formValues' in u.patch);
+    expect(saved?.patch).toMatchObject({
+      status: 'running',
+      formValues: { action: 'skip', flag: false },
+    });
+    expect(applied).toEqual([{ action: 'skip', flag: false }]);
+  });
+
+  it('still fails a submission that does not validate', async () => {
+    const state = parkedWithAnswers();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_form', formValues: null };
+    const result = await run(state, step(), { action: 'not-an-option' });
+
+    expect(result.status).toBe('failed');
+  });
+});
+
+describe('advanceStep outcome after a Retry or Skip took the row over', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const doneWrites = (state: MockState) =>
+    state.updates.filter((u) => u.table === 'task_steps' && u.patch.status === 'done');
+
+  it('writes no outcome over a row a Retry reset while apply ran', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async () => {
+      // The api's Retry resets the row to pending while this pass is still applying.
+      state.taskStepRow.status = 'pending';
+      return { applied: true };
+    };
+
+    const result = await run(state, def);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(doneWrites(state)).toEqual([]);
+  });
+
+  it('stops at its next write, whatever it is, once a Retry reset the row', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const applied: unknown[] = [];
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.detect = async () => {
+      state.taskStepRow.status = 'pending';
+      return { ok: true };
+    };
+    def.apply = async () => {
+      applied.push(1);
+      return { applied: true };
+    };
+
+    expect((await run(state, def)).status).toBe('superseded');
+    expect(applied).toEqual([]);
+    expect(state.taskStepRow.status).toBe('pending');
+    // The pass's own write that opened it is the last one that landed.
+    expect(state.updates.map((u) => u.patch.status).filter(Boolean)).toEqual(['running']);
+  });
+
+  it('writes no failure over a row a Skip took while apply failed', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async () => {
+      state.taskStepRow.status = 'skipped';
+      throw new Error('apply lost its workspace');
+    };
+
+    const result = await run(state, def);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('skipped');
+    expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
+  });
+
+  /** An agent step whose own phase has nothing to do here, so apply's recap is what is tested. */
+  const recappingStep = (apply: () => Promise<unknown>) => {
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.llm = { skipIf: () => true } as never;
+    def.apply = apply as never;
+    return def;
+  };
+
+  it('leaves no recap behind for a pass a Retry replaced', async () => {
+    vi.mocked(recordLedgerEntry).mockClear();
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = recappingStep(async () => {
+      state.taskStepRow.status = 'pending';
+      return { summary: 'what the replaced pass did' };
+    });
+
+    expect((await run(state, def)).status).toBe('superseded');
+    expect(vi.mocked(recordLedgerEntry)).not.toHaveBeenCalled();
+  });
+
+  it('records the recap once the outcome has landed', async () => {
+    vi.mocked(recordLedgerEntry).mockClear();
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = recappingStep(async () => ({ summary: 'what the pass did' }));
+
+    expect((await run(state, def)).status).toBe('done');
+    expect(vi.mocked(recordLedgerEntry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordLedgerEntry).mock.calls[0]![3]).toMatchObject({
+      text: 'what the pass did',
+      kind: 'summary',
+    });
+    // Recorded only while the row still reads done, so a Retry that lands first leaves none.
+    expect(vi.mocked(recordLedgerEntry).mock.calls[0]![4]).toEqual({ whileStepDone: true });
+  });
+
+  it('stops a pass whose task a Retry moved to a newer epoch, writing nothing', async () => {
+    vi.useFakeTimers();
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: null,
+      status: 'running',
+      orchestrationEpoch: 5,
+    };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async (ctx) => {
+      state.taskRow!.orchestrationEpoch = 6;
+      // A long deterministic apply that checks for cancellation, as RAG sync does.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      ctx.throwIfCancelled();
+      return { applied: true };
+    };
+
+    const pass = advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: def,
+      epoch: 5,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await pass;
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('running');
+    expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
+    expect(doneWrites(state)).toEqual([]);
+  });
+
+  /** A step whose shouldRun is where a Retry or a Skip lands, and whose detect says it ran. */
+  const guardedStep = (onShouldRun: () => void, should = true) => {
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    const detected: unknown[] = [];
+    def.shouldRun = async () => {
+      onShouldRun();
+      return should;
+    };
+    def.detect = async () => {
+      detected.push(1);
+      return { ok: true };
+    };
+    return { def, detected };
+  };
+
+  const runAtEpoch = (state: MockState, stepDef: StepDefinition, epoch: number) =>
+    advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef,
+      epoch,
+    });
+
+  const atEpoch = (epoch: number) => ({
+    id: 'task-1',
+    autoContinue: true,
+    preAnswers: null,
+    status: 'running',
+    orchestrationEpoch: epoch,
+  });
+
+  it('gives the row back when a Retry landed while shouldRun ran', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    // The Retry's reset leaves the row `pending`, so only the epoch says it happened.
+    const { def, detected } = guardedStep(() => {
+      state.taskRow!.orchestrationEpoch = 6;
+    });
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(detected).toEqual([]);
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(state.taskStepRow.startedAt).toBeNull();
+  });
+
+  it('gives back the skip shouldRun chose when a Retry landed meanwhile', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def } = guardedStep(() => {
+      state.taskRow!.orchestrationEpoch = 6;
+    }, false);
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(state.taskStepRow.endedAt).toBeNull();
+  });
+
+  it('leaves a Skip that landed while shouldRun ran in place', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def, detected } = guardedStep(() => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'skipped' };
+    });
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(detected).toEqual([]);
+    expect(state.taskStepRow.status).toBe('skipped');
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
+  });
+
+  it('claims the row as before when nothing landed during shouldRun', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def, detected } = guardedStep(() => {});
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('done');
+    expect(detected).toHaveLength(1);
+    expect(state.taskStepRow.status).toBe('done');
+  });
+
+  it('lets a pass at the task epoch finish as before', async () => {
+    vi.useFakeTimers();
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: null,
+      status: 'running',
+      orchestrationEpoch: 6,
+    };
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.apply = async (ctx) => {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      ctx.throwIfCancelled();
+      return { applied: true };
+    };
+
+    const pass = advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: def,
+      epoch: 6,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect((await pass).status).toBe('done');
+    expect(doneWrites(state)).toHaveLength(1);
   });
 });

@@ -395,6 +395,60 @@ describe('gate-2 similar sites', () => {
   });
 });
 
+describe('gate-2 out-of-scope insights', () => {
+  const ran = { ran: true, passed: true, output: '' };
+  const base = {
+    verify: { test: ran, lint: ran, typecheck: ran },
+    allPassed: true,
+    validation: null,
+    testManagement: null,
+    browser: null,
+    codeReview: null,
+    codeAudit: null,
+    adversarial: null,
+    liveBrowser: null,
+    runtimeSmoke: { ran: true, passed: true, httpStatus: 200, url: 'u', errorExcerpt: '' },
+  };
+  const insight = {
+    id: 'i-1',
+    sourceStep: '08c-code-review',
+    title: 'Cache lookup',
+    location: 'x.ts:1',
+    description: 'hot path',
+  };
+  const form = (detected: unknown) =>
+    gate2VerifyApprovalStep.form!({} as never, detected as never)!;
+
+  it('lists them after the similar-sites row, with the way to act on them', () => {
+    const rows =
+      form({
+        ...base,
+        similarSites: [{ path: 'b.ts', reason: 'same', source: 'implementation round 0' }],
+        outOfScopeInsights: [insight],
+        outOfScopeInsightsOmitted: 0,
+      }).statusSummary ?? [];
+    expect(rows[rows.length - 2]!.label).toBe('Similar code elsewhere — not changed');
+    const last = rows[rows.length - 1]!;
+    expect(last.label).toBe('Out-of-scope findings — not acted on');
+    expect(last.body).toContain('reject with feedback that names it');
+    expect(last.body).toContain('- Cache lookup (`x.ts:1`) — hot path (from 08c-code-review)');
+  });
+
+  it('renders a payload persisted before the field existed exactly as before', () => {
+    const before = form(base);
+    expect((before.statusSummary ?? []).some((r) => r.label.startsWith('Out-of-scope'))).toBe(
+      false,
+    );
+    expect(form({ ...base, outOfScopeInsights: [], outOfScopeInsightsOmitted: 0 })).toEqual(before);
+  });
+
+  it('never moves the decision default', () => {
+    const decision = (d: unknown) =>
+      (form(d).fields.find((f) => f.id === 'decision') as { default?: string }).default;
+    expect(decision({ ...base, outOfScopeInsights: [insight] })).toBe('approve');
+  });
+});
+
 describe('recurrenceTag', () => {
   const map = new Map<string, number[]>([
     [recurrenceKey('peer-reviewer', 'src/a.ts'), [0, 2]],

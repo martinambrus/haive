@@ -13,6 +13,8 @@ import {
   normalizeContent,
 } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import { RTK_BLOCK_FILES } from '@haive/shared/rules-files';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
@@ -76,7 +78,15 @@ async function resolveStagePaths(db: Database, userId: string): Promise<string[]
 /** The paths 02 reports writing, as repository-relative ones. They come from a persisted step
  *  output — one written before the field existed has none — so each is validated again. */
 export function appliedWrittenPaths(applyOutput: unknown): string[] {
-  const raw = (applyOutput as { writtenPaths?: unknown } | null)?.writtenPaths;
+  return repoPathsOf((applyOutput as { writtenPaths?: unknown } | null)?.writtenPaths);
+}
+
+/** The paths 02 reports removing, validated the same way. */
+export function appliedDeletedPaths(applyOutput: unknown): string[] {
+  return repoPathsOf((applyOutput as { deletedPaths?: unknown } | null)?.deletedPaths);
+}
+
+function repoPathsOf(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((p): p is string => typeof p === 'string')
@@ -322,7 +332,13 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       if (await hasWorkspaceEntry(ctx.repoPath, rel)) existingPaths.push(rel);
     }
     existingPaths.push(...linkPaths);
-    if (existingPaths.length === 0) {
+    // A removal has nothing on disk to name; `git rm --cached` records it, and skips what git never
+    // tracked. Only while the path is still absent, since something may have been put there since.
+    const removedPaths: string[] = [];
+    for (const rel of appliedDeletedPaths(applied?.output)) {
+      if ((await lstatNoFollow(ctx.repoPath, rel)) === null) removedPaths.push(rel);
+    }
+    if (existingPaths.length === 0 && removedPaths.length === 0) {
       warnings.push('no upgrade files found to stage');
       return { commitPerformed, commitSha, stagedPaths, warnings };
     }
@@ -349,7 +365,8 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       const { keep: toStage, warnings: ignored } = await dropIgnoredRulesFiles(
         ctx.repoPath,
         existingPaths,
-        new Set([CLI_RULES_DISK_PATH, ...stubs.map((s) => s.file)]),
+        // 02's RTK strip can write a disabled provider's rules file, which no stub names.
+        new Set([CLI_RULES_DISK_PATH, ...RTK_BLOCK_FILES, ...stubs.map((s) => s.file)]),
       );
       warnings.push(...ignored);
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
@@ -357,6 +374,15 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       // aborts the whole stage. Same fix as 12-post-onboarding.
       if (toStage.length > 0) {
         await execFileAsync('git', ['add', '-f', '--', ...toStage], { cwd: ctx.repoPath });
+      }
+      if (removedPaths.length > 0) {
+        await execFileAsync(
+          'git',
+          ['rm', '--cached', '--ignore-unmatch', '-q', '--', ...removedPaths],
+          {
+            cwd: ctx.repoPath,
+          },
+        );
       }
       const { stdout: stagedOut } = await execFileAsync(
         'git',

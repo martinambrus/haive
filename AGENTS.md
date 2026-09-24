@@ -209,6 +209,135 @@ agent definition) and is deliberately NOT converted — MEASURED across every ru
 install it emits ZERO custom agents, so the path is dead and the large output is its
 `skipped`/`declined` reasoning instead.
 
+### Fan-out dispatch
+
+**A fan-out reserves every agent before it sends any.** `dispatchMiningAgents` first inserts one
+`pending` row per agent, carrying the step's own prompt, its requirements and its timeout rung,
+in one transaction, and only then sends them one at a time. A worker that died part-way used to
+leave the agents it had not reached with no row at all, so the barrier concluded the step without
+them. They now wait `pending` with no invocation, and the barrier sends them from the recorded
+prompt without charging an attempt (`dispatchReservedAgents`). A reserved row whose prompt has
+aged out of retention is failed rather than waited on.
+
+**Every write that links or fails a row is a compare-and-swap on the state read**
+(`sameMiningState`: id, status, invocation link). Two passes over one step, such as a duplicate
+advance or a completion racing a retry, used to both re-roll an agent, each superseding the
+other's run. Now the loser supersedes only its own new invocation and sends nothing, and only the
+winner supersedes the run it replaced. The orphan reconcile's fail write swaps on the link it read
+for the same reason: a pass beside it may already have re-rolled the row onto a live run.
+
+**A pass that lost agents to another pass reads the barrier again before it settles.** A first
+fan-out, a wave, a re-roll or a user-requested re-run can find its agents taken by a pass running
+beside it, and that pass's run may already have finished, so every row the loser read can be
+stale: settling on them applied the old failure in place of the new result, or finished a wave
+without folding it. `dispatchMiningAgents` therefore reports what it `lost` beside what it sent,
+and the loser reads the rows again, once, and settles on those (`rereadMiningBarrier` in the apply
+loop). Once is the bound: a pass that loses a second race settles on its second read. A pass that
+sent nothing still parks while any row is live (`hasLiveMiningAgents`).
+
+A dispatch that throws part-way fails what it reserved or linked and did not queue
+(`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step before
+sending, such as a `selectAgents` that refuses, fails every reservation still unsent
+(`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
+still running.
+
+**A run's end and its mining result land together, on the row still linked to it.**
+`handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no
+crash can leave a run ended beside an agent row still `running`. Every write it makes to a mining
+row matches the run the row is linked to (`ownMiningRow`): a re-roll moves the row to a new run, and
+a late completion of the old one used to overwrite it. What follows that transaction (learning a
+model limit, the recap, `markCliParkBegin` and handing the step back) sits outside the `try` whose
+catch records a failed run, so a queue error there no longer rewrites a finished run as exit -1.
+
+### Worker restarts
+
+**A step keeps the status that says what it is waiting on, even while its apply runs.** A
+continuation (the advance an ended CLI run queues) re-enters a `waiting_cli` step. For a
+form-bearing step it used to re-validate the saved answers and flip the row to `running`. A worker
+that died from that point on left a `running` row, which boot reads as a pass that died before
+doing anything, so it reset the step: every agent row deleted and the answers cleared. Now a
+continuation that finds its answers saved uses them as they are, and the row stays `waiting_cli`.
+Values the job carries are ignored there, since a parked step's only source of them is a submit
+redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
+
+**Boot recovers a parked step and resets only a step that has nothing to lose.**
+`reconcileOrphanedSteps` runs before any queue starts:
+
+- A `waiting_cli` step the task is on has its orphaned runs ended, and unstarted runs no queued job
+  owes are ended too. The task's epoch is then fenced by a compare-and-swap on the state read, and
+  the step is re-driven at the new epoch, so every advance queued before the restart is stale. A
+  step the task has moved past is requeued rather than re-driven, and every run it still has is
+  superseded: one that ended later would resume it at whatever epoch the task was at by then.
+- A `running` step the task is on is decided by `bootRecoveryAction`. With agent work behind it (a
+  finished loop pass, an agent row, or a run of its own nothing superseded), it is a parked step
+  whose park write was lost. It is demoted to `waiting_cli`, guarded on `running`, and recovered
+  like the parked ones. Without agent work it is reset and re-run, as a deterministic step always
+  was.
+
+**A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
+apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
+both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
+at a time in the worker and defers a second with `moveToDelayed` rather than dropping it: the
+advance already running may be a barrier check that parks without seeing what the second was
+queued for. It replaced a guard that let a second advance skip only while the row read `running`,
+which no continuation does any more. An advance that cannot be deferred (no job token, or the move
+failed) waits for the holder in this process instead: running beside it is what the hold prevents,
+and failing the attempt could lose it, since a continuation is queued with no retries. The hold is
+taken outside the job's own catch, since that
+catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
+then run after the pass it waited behind failed the step, so an advance on a `failed` task is
+dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
+task `running` first. An answer submitted to a form still parked is the one exception, since
+answering it is what reopens the task; an advance onto that form that carries no answer is dropped
+like any other. A clarification answer is one of those, since it rides `task_events` rather than the
+job, so its route sets a failed task `running` itself before it queues the advance.
+
+A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
+reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
+while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
+Stop, which fails the row without moving the task's epoch). A pass a Stop cut off mid-apply then
+releases what the failed task holds (`settleFailedTask`), as its own failure would have. The cancel
+poll also stops a
+pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
+hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
+a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
+`pending`, so a Skip stands. A Retry leaves the row `pending` too, so the claim then reads the task's
+epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
+only after the outcome has landed and only while the row still reads `done`: the ledger entry is
+inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
+since a Retry's reset supersedes only the runs that already exist. That check narrows the window
+without closing it: a Retry supersedes a step's runs before it writes the rows, so a recap inserted in
+between still reads the row as `done`. The summary write closes it (`writeStepSummary`): it lands only
+on the row version it summarized, keyed on the row's `ended_at`, which a Retry nulls and a re-run
+rewrites, and only while its own run stands, read under a lock that waits out a supersede in flight.
+Its ledger entry follows only a write that landed. The handoff is fenced on the
+epoch the pass ran under: `handleResult` does nothing once the task has moved on, and every write it
+makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
+landing after that check stands: pointing the task at the next step, parking it on a form, a run or a
+fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
+Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
+own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
+points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
+first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
+signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
+while the fence holds. A job revives a failed task only when the task was already failed at pickup,
+which the pickup guard allows only for an answer to a form still parked, so a Stop landing after
+pickup stands; the answer to a fix-loop gate hands off under the same rule. That holds
+for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
+read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
+revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
+api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
+hand-off after it points the task at the target only while the task is still at that epoch, and a
+fix round's request and `started` event are written in the same transaction: a new round has no row
+to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
+cap. That transaction first locks the source row while it is still the pass's own
+(`lockOwnedStep`), since a Retry writes the steps before it moves the epoch.
+
+A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
+lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
+which would otherwise answer the new form with what was typed into the old one.
+
 ## CLI adapter system
 
 `packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so do `amp` and `codex` — codex only through its app-server, and only once that is verified for the task (`steeringTransportReady`) — see Steering below.
@@ -816,7 +945,7 @@ the previous ranking exactly.
 
 **Completion greens the node** from the worker's `markTaskCompleted` (the only completion write; cancel and fail have their own functions, which is the point). Only `todo`/`in_progress` advance — `blocked_human` and `not_applicable` are verdicts a person entered, and a task finishing is weaker evidence than that. Status roll-up is DERIVED at read time (`rollUpStatus` in shared, one source for every view) and never stored: a `blocked_human` descendant makes every ancestor render blocked; green requires every descendant `done` or `not_applicable` — `not_applicable` must not prevent green, but must never render green itself either.
 
-**Two triggers, one builder.** `createPlanBuildStep` (steps/plan/01-plan-build.ts) serves both the standalone `plan_build` task and the onboarding wrapper `10_8-plan-build` (index 14.5, after the KB and RAG exist, before the mirror is staged), because `onboarding_upgrade` reconciles template artifacts only and never re-runs onboarding steps — an already-onboarded repo can reach the builder no other way. The build is LEVEL-BY-LEVEL (wave 0 drafts root + level 1 via `selectAgents`; each later wave is thrown from apply() as a `MiningWaveError`, one agent per frontier node) because one pass cannot emit 400 nodes without truncating. Do NOT move it to `loop`: the runner's loop re-entry calls `resolveLlmPhase`, which asserts `stepDef.llm` exists — a mining-only loop step dies on its second pass with "reading 'prepare'" (measured, on a real repo). The frontier is recomputed from the DB every wave, and excludes `research`/`external` nodes (a blocker waiting on a person is not a system to decompose) and `taskable` leaves; per-wave agent ids (`plan-expand-<nodeId>-p<N>`) double as the asked-set, so a node is never re-asked even though apply passes are independent calls. Because a wave re-runs apply() with the CUMULATIVE result set and temp-ref creation is not idempotent, the fold is over `newAgentMiningResults` — `task_step_agent_minings.consumed_at` (migration 0132) is stamped on every row apply has folded right before the next wave dispatches and cleared on a re-roll; for steps that never throw MiningWaveError the new field equals the cumulative set, so existing steps are unchanged.
+**Two triggers, one builder.** `createPlanBuildStep` (steps/plan/01-plan-build.ts) serves both the standalone `plan_build` task and the onboarding wrapper `10_8-plan-build` (index 14.5, after the KB and RAG exist, before the mirror is staged), because `onboarding_upgrade` reconciles template artifacts only and never re-runs onboarding steps — an already-onboarded repo can reach the builder no other way. The build is LEVEL-BY-LEVEL (wave 0 drafts root + level 1 via `selectAgents`; each later wave is thrown from apply() as a `MiningWaveError`, one agent per frontier node) because one pass cannot emit 400 nodes without truncating. Do NOT move it to `loop`: the runner's loop re-entry calls `resolveLlmPhase`, which asserts `stepDef.llm` exists — a mining-only loop step dies on its second pass with "reading 'prepare'" (measured, on a real repo). The frontier is recomputed from the DB every wave, and excludes `research`/`external` nodes (a blocker waiting on a person is not a system to decompose) and `taskable` leaves; per-wave agent ids (`plan-expand-<nodeId>-p<N>`) double as the asked-set, so a node is never re-asked even though apply passes are independent calls. Because a wave re-runs apply() with the CUMULATIVE result set and temp-ref creation is not idempotent, the fold is over `newAgentMiningResults` — `task_step_agent_minings.consumed_at` (migration 0132) is stamped on every row apply has folded right before the next wave dispatches and cleared on a re-roll; for steps that never throw MiningWaveError the new field equals the cumulative set, so existing steps are unchanged. That set is decided once per pass, so each reply is also CLAIMED as it is folded (`applyAgentPatchOnce`, `_plan-prompt.ts`): its row's `consumed_at` is set, only while unset, in the same transaction as its patch, and so is the row's partial-apply note, since every later pass skips a claimed reply and a note written after the commit could be lost for good. Two apply passes over one wave, or one pass that re-runs apply in place after a wave that sent nothing, then write a reply once, and a reply another pass claimed counts as applied, so the builder's whole-wave re-roll does not fire on a wave that did land. 01, 02 and 03 all fold this way. A `ReopenStepFormError` consumes the step's rows and clears its detect output, form and answers in ONE transaction with `pause_form_on_retry` set, before it detects afresh, and writes the row only while the pass still owns it, since a Retry's reset keeps its own hold; a worker that dies before the new form is parked re-detects and stops at the form instead of re-sending the answered items with the old answers. The submit that led there can be redelivered, still carrying those answers, and a form submit carries no epoch to drop it by. While the hold is set, values a job carries are ignored, since the form has not been offered since. Once the form is parked, `isStaleSubmit` drops a submit older than the park. Every form park is stamped (`waiting_started_at`) in the write that parks it, not after, so there is no moment when a parked form has no park to be older than. A pass that dies between that write and marking the task waiting leaves the task `running`, and a stale submit landing on one parks the form again (`staleSubmitAction`) rather than only being dropped.
 
 **Two modes, and the difference is the node status.** `from_repo` mines the KB and its nodes
 arrive `done` because they describe code that exists; `greenfield` takes a written brief plus
@@ -921,8 +1050,9 @@ finds no row, since answering 500 for a stored upload sends the client's retry t
 
 **The expansion is the lock's longest section, and a crash anywhere in it leaves something the
 next call can settle.** Each attempt extracts OUTSIDE the lock into its own
-`.expanding-<archiveId>-<nonce>` staging dir and builds the finished tree there. The dir is 0711,
-because the unprivileged extraction uid has to traverse it; the nonce is what stops a second call
+`.expanding-<archiveId>-<nonce>` staging dir and builds the finished tree there. The dir is 0700:
+the extraction tool is handed its directory as a descriptor and never resolves it by name, so only
+the worker enters it. The nonce is what stops a second call
 moving the first's tree aside, which `extractArchive` does to any existing destination. One locked
 section then re-checks that the archive is still unstamped, settles earlier attempts at it, claims
 the first free folder by moving the tree WHOLE (`renameNoFollow` with `noReplace`), and writes every
@@ -1187,7 +1317,7 @@ time is a DAG that serialised, and that is worth looking at before blaming the m
 code or defect it finds outside the task alone and to list it instead: 07 as `similarSites`, the
 DAG level coder and the DAG fix coder as `similar_sites`. `ingestReviewRun` reads the fix coder's
 JSON for this field and its `concerns`, which reach the ledger. Gate 2 shows the union of every 07
-round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
+round and every DAG issue as a status row after its checks, and the person acts on an entry by rejecting
 with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
 its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
 for something else, and dropping the site would then hide one still left unchanged. The mark reads
@@ -1207,6 +1337,15 @@ hostile repository text travels. `task_dag_issues.similar_sites` (migration 0165
 pass rather than written, because an advisor retry re-runs the coder into the same row. The DAG
 schema reads a malformed list as `[]` (`.catch`), since a strict field there would turn a finished
 coder into `failed_unrecoverable` over a list only a person reads.
+
+**Out-of-scope findings reach gate 2 too.** 08e offers the `## INSIGHTS` lines agents wrote for
+this task to act on, but auto-continue pre-answers 08e with an empty pick (`06-run-config`),
+`plan_tasklist` runs gate 2 without 08e, and `quick_bugfix` runs neither. So gate 2 lists every
+insight nobody picked at 08e in its own row after the similar-sites row (`_gate-insights.ts`), and
+gate 3 shows it when no gate-2 decision exists. 08e's picks are subtracted by title and location
+across every round, since its `i-N` ids are positions. The row is display copy under the same rules
+as similar sites: each field collapsed to one line of at most 200 chars and escaped, the list cut
+at 30 with the rest counted, and nothing of it entering a prompt.
 
 ## Review findings and waivers
 
@@ -1727,7 +1866,7 @@ in-progress task steps.
 - All modules are `"type": "module"`. Use `.js` extensions in import paths even for TypeScript sources because of `NodeNext` module resolution.
 - Zod is used for both validation and for generating `FormSchema` field metadata where possible.
 - Logger is `pino` from `@haive/shared/logger`. Never `console.log` from server code. ONE exception, and it is structural rather than a lapse: `packages/database/src/migrate/` is a CLI and `@haive/shared` DEPENDS ON `@haive/database`, so importing the logger back would be a dependency cycle. It emits one JSON line per event through its own `emit()`.
-- Host-side IO on a repository path goes through `@haive/shared/fs-safe`, never through a path-based `node:fs` call. The worker and the api run as root over trees that repositories and sandboxed agents write, so a path resolved by name is a path they can redirect; the primitives take `(anchor, rel)`, resolve `rel` one held directory descriptor at a time, refuse a link in any component, and verify the held inode through `/proc/self/fd` (Node-only, Linux-only, out of the root barrel and of every subpath web imports). Anchors are `<storage>/<userId>/<repoId>` or a repository's `localPath` — never `.haive`, a worktree or an uploads dir, since the sandbox mounts the whole repository root read-write. `packages/shared/test/fs-ratchet.test.ts` pins the remaining path-based calls per file (`fs-ratchet.json`, exact counts): a conversion lowers its entry, and a new call needs a reason in the PR.
+- Host-side IO on a repository path goes through `@haive/shared/fs-safe`, never through a path-based `node:fs` call. The worker and the api run as root over trees that repositories and sandboxed agents write, so a path resolved by name is a path they can redirect; the primitives take `(anchor, rel)`, resolve `rel` one held directory descriptor at a time, refuse a link in any component, and verify the held inode through `/proc/self/fd` (Node-only, Linux-only, out of the root barrel and of every subpath web imports). Anchors are `<storage>/<userId>/<repoId>` or a repository's `localPath` — never `.haive`, a worktree or an uploads dir, since the sandbox mounts the whole repository root read-write. `packages/shared/test/fs-ratchet.test.ts` pins the remaining path-based calls per file (`fs-ratchet.json`, exact counts): a conversion lowers its entry, and a new call needs a reason in the PR. A child process follows the same rule: `runTool` (`worker/src/repo/tool-spawn.ts`) hands `tar`, `unzip` and `pdftotext` what they read and write as held descriptors, named `/proc/self/fd/N` in the child, never a path they would resolve by name, and runs them with PATH and LANG only, as uid 65534 under a root worker. A tool that re-opens its input (unzip seeks) needs that uid to be able to read it. Every upload is written 0644, and a file that is not is copied through the descriptor into a private, already unlinked file the uid can read (`toolReadable`), so the original's mode is never changed.
 - Secrets are stored via envelope encryption: per-user DEK encrypts the secret, master KEK from `CONFIG_ENCRYPTION_KEY` encrypts the DEK. AES-256-GCM throughout.
 - Drizzle schema lives in `packages/database/src/schema/`. Migrations are hand-written SQL in `packages/database/migrations/`, applied in filename order by the runner in `packages/database/src/migrate/`, one transaction per file with its `schema_migrations` row written inside it. **To add one:** iterate with `pnpm db:push`, then write `NNNN_name.sql` in that directory, keeping the guarded idempotent style (`ADD COLUMN IF NOT EXISTS`, `DO $$ … EXCEPTION WHEN duplicate_object`) — a developer's database is often legitimately AHEAD of the baseline and must survive your file. Declare a new column LAST in its Drizzle table: `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes the two schemas differ by column ORDER and turns `schema-parity` red — a failure no migration can fix. Never edit an applied migration: its sha256 is recorded, and a change hard-fails every install that ran it. `0000_baseline.sql` is generated and FROZEN; re-cutting the schema means a later numbered baseline, never an edit to that one. `pre-baseline/` is the record written before the directory was executable and is NEVER run — see its README: 19 of those files are unsafe to replay and one is destructive.
 - Hono routes group by domain in `packages/api/src/routes/`. Auth middleware mounts globally.
@@ -1992,6 +2131,14 @@ those provenance reads: rows naming deleted files must not stay live, and `12-po
 inserts without conflict handling, so a re-onboarding would otherwise collide with the
 `(repository_id, disk_path) WHERE superseded_at IS NULL` unique index.
 
+**The legacy RTK.md files are taken back on the same evidence.** From e4ea9a61 to bd9b94c0, 07
+wrote the RTK body to `RTK.md`, `.gemini/RTK.md` and `.claude/RTK.md` and recorded no hash for
+them. A claim for one therefore carries `LEGACY_RTK_MD_SHA256` (`@haive/shared`), the body as it
+was written, frozen so a re-vendored `RTK_SLIM` cannot move it. The two outside `.claude` get a
+pass of their own, since no directory pass reaches them. Content alone never claims: a file
+holding the same bytes with no 07 record is kept and reported, and one edited since is kept as
+edited. An edited `.claude/RTK.md` used to be deleted on the path-only claim.
+
 Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
 one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the
 same scope list, so it is a corruption path rather than a queue. Everything else stays the
@@ -2144,6 +2291,11 @@ re-creates each currently enabled import-mode provider's `@AGENTS.md` stub (`CLA
 itself calls), and records a refused link per file instead of throwing, since a throw there would
 skip the applicable-template and install-manifest writes after it. Without the stub a
 claude-family CLI never loads AGENTS.md, rules block included, and nothing else ever wrote it back.
+`GET /repos/:id/upgrade-status` checks the same files through the same module
+(`@haive/shared/rules-files`, with each provider's `rulesFile` in the catalog), so a repository
+whose only gap is a missing import still gets the upgrade banner. A rules file linked anywhere but
+AGENTS.md is reported apart (`linkedRulesFiles`) and never offers an upgrade, since the restore
+refuses to write through a link, and a repository root the api cannot read claims nothing.
 `03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
@@ -2175,3 +2327,64 @@ on disk. Anything else keeps the render's hash, so the upgrade plan offers the r
 conflict, whose default is skip. No region on disk means no row, and a live one is retired, since
 it would read as the person's deletion. `01-upgrade-plan`'s backfill applies the same rule to the
 region: it used to store the whole file, which a rollback could paste into the region.
+
+**Every backfill row claims only a render, whatever its kind.** The backfill used to record the
+disk's hash, so an edited file became its own baseline and the next template change pre-selected
+overwriting it as a `clean_update`. A path with no row whose bytes no render accounts for (this
+render, or for the rules region one recorded earlier) is now a `conflict`, not a pre-selected
+`new_artifact`, and on a repository's first upgrade every path has no row. 01's backfill records
+nothing for such a path: nothing there is Haive's until 02 writes it, and a row would belong to the
+upgrade with no prior, which a rollback reads as a file the upgrade introduced and deletes. 02
+records the path only when it replaces the file, keeping what it held as a superseded baseline (the
+rules region through `cliRulesRegionRecord`, any other file through `backfillRecord`). It keeps one
+for a live row too when the bytes on disk are not what that row records, or a rollback of an
+Overwrite would restore Haive's old bytes over the person's edits; 02 retires the row and inserts
+the baseline in one instant, so 04 breaks the `superseded_at` tie by `generated_at`. Both apply
+one rule to bytes that are not a render: the bytes are `writtenContent`, so a rollback restores
+them; the render's hash is `writtenHash`, so they are never taken as Haive's; and their own hash is
+`templateContentHash`, so the template reads as not installed. A rollback copies both hashes, so a
+restored file is offered again at the next upgrade rather than classified `unchanged`.
+`GET /repos/:id/upgrade-status` keeps one row per template, and a rendering that is not current
+stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
+is invisible there once a sibling rendering has one; the next upgrade still offers it.
+
+**An upgrade or a rollback deletes a file only while it holds what Haive wrote there.**
+`deleteRefusalAt` (02) compares the bytes on disk at APPLY time, hashed the way the plan compares
+them (`pathContentHash`: the whole file, or the rules region alone), with the row's `writtenHash`.
+Apply time, because the form parks between the plan and the apply. A link or a directory standing
+there is kept the same way, since neither is what Haive wrote; only a read that could not run
+fails, which leaves the row for the next attempt. A row alone proves nothing:
+`12-post-onboarding` records one even for a file 07 skipped. 02's obsolete removal keeps such a file,
+warns, and leaves its row live. 04's undo of a file the upgrade introduced keeps one edited or replaced
+since, warns, and retires the upgrade's row all the same. 04 also reads only the rows the upgrade WROTE
+(`source = 'upgrade'`). 01's backfill rows belong to the same task, but they record what was already
+there, and read as new files they were deleted: on a first upgrade's rollback, that took every
+adopted file the person had declined.
+
+**Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
+`rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
+off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
+`obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
+--cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
+out from it would restore it. A plan whose RTK choice was the repository's live one
+(`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
+two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
+RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it
+out
+of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
+after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
+plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
+stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
+holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
+repository and reports the files still holding a block (`rtkBlockLeftovers`), so the banner offers
+the upgrade. Switching RTK back on is one-sided: the next upgrade offers the settings files again,
+but nothing prompts it, and only a re-onboarding writes the block.
+
+**"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
+version declined, so the next upgrade offers only a newer one. On a live row it moves
+`templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
+render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
+for one it introduced. Skip records nothing, so the path is offered again.
+`unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
+such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
+rollback copies get the two hashes swapped.

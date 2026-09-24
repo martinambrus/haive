@@ -1,4 +1,5 @@
 import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { rtkBlockFiles } from '@haive/shared/rules-files';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -85,9 +86,16 @@ export interface UpgradePlanDetect {
    *  onto every new onboarding_artifacts row the upgrade-apply step writes so
    *  future upgrades/rollbacks can reconstruct rendering without this task. */
   renderCtxSnapshot: Record<string, unknown>;
+  /** Whether `renderCtxSnapshot.rtkEnabled` is the repository's live choice, which 02 checks again
+   *  before it applies. A value synthesized for a context from before RTK is not. Optional:
+   *  persisted plans predate it. */
+  rtkFollowsLive?: boolean;
   /** Import-mode rules files lacking `@AGENTS.md`, which 02 restores. Optional: persisted plans
    *  predate it. */
   missingRulesImports?: string[];
+  /** Rules files holding the RTK block of a repository that switched RTK off, which 02 takes it
+   *  out of. Optional: persisted plans predate it. */
+  rtkBlockLeftovers?: string[];
 }
 
 export interface UpgradePlanOutput extends UpgradePlanDetect {
@@ -163,9 +171,16 @@ async function resolveRenderContext(
   ctx: StepContext,
   repositoryId: string,
   liveRows: LiveArtifactRow[],
-): Promise<TemplateRenderContext | null> {
+): Promise<ResolvedRenderContext | null> {
   const snapshot = liveRows.find((r) => r.formValuesSnapshot)?.formValuesSnapshot ?? null;
-  if (snapshot) return snapshot as unknown as TemplateRenderContext;
+  if (snapshot) {
+    return withLiveRtk(
+      ctx,
+      repositoryId,
+      snapshot as unknown as TemplateRenderContext,
+      typeof snapshot.rtkEnabled === 'boolean',
+    );
+  }
 
   const priorOnboarding = await ctx.db
     .select({ id: schema.tasks.id })
@@ -197,11 +212,12 @@ async function resolveRenderContext(
       .where(eq(schema.repositories.id, repositoryId))
       .limit(1);
     if (repo?.source !== 'blank') return null;
-    return buildBlankRenderContext(ctx.db, {
+    const renderCtx = await buildBlankRenderContext(ctx.db, {
       userId: ctx.userId,
       repositoryId,
       repoName: repo.name ?? null,
     });
+    return { renderCtx, rtkLive: true };
   }
 
   const stepRow = await ctx.db
@@ -237,7 +253,7 @@ async function resolveRenderContext(
       (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
   }));
 
-  return {
+  const recorded: TemplateRenderContext = {
     projectInfo: detect.projectInfo ?? {
       name: null,
       framework: null,
@@ -260,15 +276,36 @@ async function resolveRenderContext(
     customAgentSpecs: detect.customAgentSpecs ?? [],
     agentTargets,
     lspLanguages,
-    // Legacy detect outputs (pre-rtk) didn't snapshot these fields; default
-    // to "rtk off, no providers" so backfilled renders don't accidentally
-    // surface rtk artifacts the user never opted into. The live
-    // upgrade-plan path uses the current `repositories.rtk_enabled` value
-    // via step 04 / 07 detect; this fallback is only hit during artifact
-    // reconstruction for repos onboarded before rtk shipped.
+    // A detect output from before rtk shipped recorded no choice: off, not the column's default.
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
   };
+  return withLiveRtk(ctx, repositoryId, recorded, detect.rtkEnabled !== undefined);
+}
+
+/** A render context, and whether its RTK choice is the repository's live one. */
+interface ResolvedRenderContext {
+  renderCtx: TemplateRenderContext;
+  rtkLive: boolean;
+}
+
+/** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
+ *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
+async function withLiveRtk(
+  ctx: StepContext,
+  repositoryId: string,
+  recorded: TemplateRenderContext,
+  recordedChoice: boolean,
+): Promise<ResolvedRenderContext> {
+  if (!recordedChoice) return { renderCtx: recorded, rtkLive: false };
+  const [repo] = await ctx.db
+    .select({ rtkEnabled: schema.repositories.rtkEnabled })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  return repo
+    ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
+    : { renderCtx: recorded, rtkLive: false };
 }
 
 async function readDiskContent(
@@ -290,16 +327,49 @@ async function readDiskContent(
   }
 }
 
+/** What a backfill records for one rendering. The bytes on disk, edited or not, so a rollback
+ *  restores what was there; the render's hash, so an edited file is never taken as Haive's; and
+ *  for an edited file its own hash as the template's, so the template reads as not installed. */
+export function backfillRecord(
+  r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash' | 'content'>,
+  disk: { content: string | null; hash: string | null },
+): {
+  templateContentHash: string;
+  writtenHash: string;
+  writtenContent: string;
+  lastObservedDiskHash: string | null;
+  userModified: boolean;
+} {
+  const editedHash = disk.hash !== null && disk.hash !== r.writtenHash ? disk.hash : null;
+  return {
+    templateContentHash: editedHash ?? r.templateContentHash,
+    writtenHash: r.writtenHash,
+    writtenContent: disk.content ?? r.content,
+    lastObservedDiskHash: disk.hash,
+    userModified: editedHash !== null,
+  };
+}
+
 export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
   diskContent: string | null;
   diskHash: string | null;
+  /** Hashes of what Haive rendered at this path before; a file holding one is Haive's to replace. */
+  recordedRenderHashes?: ReadonlySet<string>;
 }): UpgradePlanBucket {
   const { live, current, diskContent, diskHash } = args;
 
   if (live && !current) return 'obsolete';
-  if (!live && current) return 'new_artifact';
+  if (!live && current) {
+    // A file already there that no render accounts for is somebody's, so it is offered, never
+    // pre-selected for overwriting.
+    const haiveBytes =
+      diskHash === null ||
+      diskHash === current.writtenHash ||
+      (args.recordedRenderHashes?.has(diskHash) ?? false);
+    return haiveBytes ? 'new_artifact' : 'conflict';
+  }
   if (!live || !current) throw new Error('classifyEntry: both live and current null');
 
   if (diskContent === null) return 'user_deleted';
@@ -342,12 +412,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const repositoryId = await requireRepositoryId(ctx);
     const manifest = getTemplateManifest();
     const liveRows = await loadLiveArtifacts(ctx, repositoryId);
-    const renderCtx = await resolveRenderContext(ctx, repositoryId, liveRows);
-    if (!renderCtx) {
+    const resolved = await resolveRenderContext(ctx, repositoryId, liveRows);
+    if (!resolved) {
       throw new Error(
         'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
       );
     }
+    const { renderCtx } = resolved;
 
     const expanded = await unionExpandedFor(ctx, renderCtx, repositoryId);
     const installedTemplateSetHash =
@@ -361,6 +432,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const allPaths = new Set<string>([...byPath.keys(), ...liveByPath.keys()]);
     const entries: UpgradePlanEntry[] = [];
     let counterByBucket = 0;
+    const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
 
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;
@@ -383,7 +455,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         diskHash = diskContent ? sha256Hex(diskContent) : null;
       }
 
-      const bucket = classifyEntry({ live, current, diskContent, diskHash });
+      const bucket = classifyEntry({
+        live,
+        current,
+        diskContent,
+        diskHash,
+        recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
+      });
       let newContent = current?.content ?? null;
       if (isCliRules && newContent) newContent = normalizeContent(newContent);
       const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
@@ -425,6 +503,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       ctx.repoPath,
       await enabledImportRulesFiles(ctx.db, ctx.userId),
     );
+    const rtkBlockLeftovers =
+      renderCtx.rtkEnabled === false ? await rtkBlockFiles(ctx.repoPath) : [];
 
     return {
       repositoryId,
@@ -434,7 +514,9 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       installedTemplateSetHash,
       currentTemplateSetHash: manifest.setHash,
       renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
+      rtkFollowsLive: resolved.rtkLive,
       missingRulesImports,
+      rtkBlockLeftovers,
     };
   },
 
@@ -444,15 +526,22 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
 
     if (detected.ranBackfill) {
       const liveRows = await loadLiveArtifacts(ctx, detected.repositoryId);
-      const renderCtx = await resolveRenderContext(ctx, detected.repositoryId, liveRows);
-      if (!renderCtx) {
+      const resolved = await resolveRenderContext(ctx, detected.repositoryId, liveRows);
+      if (!resolved) {
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
+      const { renderCtx } = resolved;
       const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
+      // An offered conflict stays unrecorded until 02 writes it: a row would belong to this upgrade
+      // with no prior, which a rollback takes for a file the upgrade introduced and deletes.
+      const offered = new Set(
+        detected.entries.filter((e) => e.bucket === 'conflict').map((e) => e.diskPath),
+      );
 
       const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
       const haiveVersion = getHaiveVersion();
       for (const r of expanded) {
+        if (offered.has(r.diskPath)) continue;
         let recorded;
         if (r.templateKind === CLI_RULES_TEMPLATE_KIND) {
           // The region, never the whole file: a rollback writes this row's content into the region.
@@ -471,20 +560,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
             userModified: !record.haiveWritten,
           };
         } else {
-          const { content: diskContent, hash: diskHash } = await readDiskContent(
-            ctx.repoPath,
-            r.diskPath,
-          );
-          recorded = {
-            templateContentHash: r.templateContentHash,
-            writtenHash: diskHash ?? r.writtenHash,
-            // Backfill stamps whatever bytes are on disk right now, even if the
-            // user has edited them. That captures the truth of the baseline at
-            // backfill time so a later rollback restores what the user had.
-            writtenContent: diskContent ?? r.content,
-            lastObservedDiskHash: diskHash,
-            userModified: diskHash !== null && diskHash !== r.writtenHash,
-          };
+          recorded = backfillRecord(r, await readDiskContent(ctx.repoPath, r.diskPath));
         }
         rowsToInsert.push({
           userId: ctx.userId,

@@ -8,6 +8,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
 import { resolveSkillTargetDirs } from './_helpers.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
  *  resolveSkillTargetDirs so verification always has somewhere to look. */
@@ -135,7 +136,11 @@ export function parseSkillMarkdown(text: string): ParsedSkill {
 }
 
 export async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]> {
-  const entries = await readdirNoFollow(repo, skillsDirParts(skillsDir).join('/'));
+  const wa = workspaceAnchor(repo);
+  const entries = await readdirNoFollow(
+    wa.anchor,
+    `${wa.prefix}${skillsDirParts(skillsDir).join('/')}`,
+  );
   if (entries === null) return [];
   return entries
     .filter((e) => e.isDirectory())

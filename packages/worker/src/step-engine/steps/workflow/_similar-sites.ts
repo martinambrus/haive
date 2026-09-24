@@ -137,7 +137,7 @@ export async function loadTaskSimilarSites(
 
 /** Every ASCII punctuation character escaped, so agent text forms no markup: an image in it would be
  *  fetched the moment the gate renders, collapsed or not. A bare URL still autolinks (GFM). */
-const asPlainText = (text: string): string => text.replace(/[!-/:-@[-`{-~]/g, '\\$&');
+export const asPlainText = (text: string): string => text.replace(/[!-/:-@[-`{-~]/g, '\\$&');
 
 /** The gate row listing them, or null when there are none. `nextStep` says what this gate lets
  *  the person do about them. */

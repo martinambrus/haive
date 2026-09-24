@@ -396,6 +396,8 @@ export function CliAuthBannerModal({
   // synchronously on a discrete event, so a page-level handler behind the modal
   // would otherwise act on the same keypress.
   useEffect(() => {
+    // The provider mounts this closed on every page, so an unguarded listener swallows Escape app-wide.
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
@@ -403,7 +405,7 @@ export function CliAuthBannerModal({
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [handleClose]);
+  }, [open, handleClose]);
 
   /** Re-run ONLY the connection test, for a sign-in that saved its credentials and then lost
    *  its verification. Same probe the provider page's "Test connection" runs, so the result the

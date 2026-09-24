@@ -27,6 +27,12 @@ interface UpgradeStatusResponse {
   /** Optional per-bundle drift breakdown from the server. Older API versions
    *  omit it entirely; treat undefined as zero custom drift. */
   customChanges?: UpgradeStatusBundleChange[];
+  /** Rules files that do not import AGENTS.md; an upgrade restores the import. */
+  missingRulesImports?: string[];
+  /** Rules files that link somewhere other than AGENTS.md; no upgrade writes through them. */
+  linkedRulesFiles?: string[];
+  /** Rules files still holding the RTK block after RTK was switched off; an upgrade takes it out. */
+  rtkBlockLeftovers?: string[];
 }
 
 export interface UpgradeAvailableBannerProps {
@@ -118,12 +124,28 @@ export function UpgradeAvailableBanner({
         ? `On v${status.installedHaiveVersion}${runningDevBuild ? ' (dev build)' : ''}`
         : null;
 
+  const linkedFiles = status.linkedRulesFiles ?? [];
+  const linkedNote =
+    linkedFiles.length > 0 ? (
+      <span className="text-xs text-neutral-500">
+        <span className="font-mono">{linkedFiles.join(', ')}</span>{' '}
+        {linkedFiles.length === 1 ? 'links' : 'link'} elsewhere, so no upgrade adds the AGENTS.md
+        import there
+      </span>
+    ) : null;
+
   if (status.hasUpgradeAvailable) {
     const primaryLabel = status.hasInProgressUpgradeSession ? 'Continue upgrade' : 'Review & apply';
     const bundleChanges = status.customChanges ?? [];
     const haiveChangedCount = status.changedTemplateIds.filter(
       (id) => !id.startsWith('custom.'),
     ).length;
+    const missingImports = status.missingRulesImports ?? [];
+    const rtkBlocks = status.rtkBlockLeftovers ?? [];
+    const showTemplateCount =
+      haiveChangedCount > 0 ||
+      bundleChanges.length > 0 ||
+      (missingImports.length === 0 && rtkBlocks.length === 0);
     return (
       <div className="flex flex-col gap-1 rounded border border-indigo-900 bg-indigo-950/40 px-3 py-2 text-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -131,15 +153,34 @@ export function UpgradeAvailableBanner({
             {status.hasInProgressUpgradeSession ? 'Upgrade in progress' : 'Upgrade available'}
           </Badge>
           <span className="text-neutral-300">
-            {haiveChangedCount} template(s) changed
-            {bundleChanges.length > 0 && (
+            {showTemplateCount && (
               <>
-                ; {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)
-                across {bundleChanges.length} bundle(s)
+                {haiveChangedCount} template(s) changed
+                {bundleChanges.length > 0 && (
+                  <>
+                    ; {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)
+                    across {bundleChanges.length} bundle(s)
+                  </>
+                )}
+              </>
+            )}
+            {missingImports.length > 0 && (
+              <>
+                {showTemplateCount && '; '}
+                AGENTS.md import missing from{' '}
+                <span className="font-mono text-neutral-200">{missingImports.join(', ')}</span>
+              </>
+            )}
+            {rtkBlocks.length > 0 && (
+              <>
+                {(showTemplateCount || missingImports.length > 0) && '; '}
+                RTK is off, but its block is still in{' '}
+                <span className="font-mono text-neutral-200">{rtkBlocks.join(', ')}</span>
               </>
             )}
           </span>
           {versionLine && <span className="text-xs text-neutral-500">{versionLine}</span>}
+          {linkedNote}
           <div className="ml-auto flex items-center gap-2">
             <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
               {submitting ? 'Starting...' : primaryLabel}
@@ -176,6 +217,7 @@ export function UpgradeAvailableBanner({
       <Badge variant="success">Up to date</Badge>
       <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
       {versionLine && <span>{versionLine}</span>}
+      {linkedNote}
       <div className="ml-auto flex items-center gap-3">
         <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
           Manage bundles

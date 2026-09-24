@@ -10,17 +10,22 @@ import {
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
   normalizeContent,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
+import { readFileNoFollow, updateFileNoFollow } from '@haive/shared/fs-safe';
 import {
-  lstatNoFollow,
-  readFileNoFollow,
-  readLinkNoFollow,
-  readTextNoFollow,
-  updateFileNoFollow,
-} from '@haive/shared/fs-safe';
-import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
-import type { CliProviderName } from '../../../cli-adapters/types.js';
+  importRulesFiles,
+  importRulesFilesFor,
+  isLinkToAgentsMd,
+  RTK_BLOCK_FILES,
+  RULES_FILE_READ_CAP,
+  RULES_IMPORT_LINE,
+  rulesImportState,
+} from '@haive/shared/rules-files';
+
+export { isLinkToAgentsMd, RULES_IMPORT_LINE };
 
 const execFileAsync = promisify(execFile);
 
@@ -49,18 +54,12 @@ export function planRulesFiles(
   }>,
 ): RulesPlan {
   const agentsRulesBlock = buildCliRulesBlock(providers.map((p) => p.rulesContent));
-  const importFiles = new Set<string>();
   const copyFiles = new Set<string>();
   for (const p of providers) {
-    if (p.rulesFile === 'AGENTS.md') continue;
-    if (p.rulesFileMode === 'import') importFiles.add(p.rulesFile);
-    else if (p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
+    if (p.rulesFile !== 'AGENTS.md' && p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
   }
-  return { agentsRulesBlock, importFiles: [...importFiles], copyFiles: [...copyFiles] };
+  return { agentsRulesBlock, importFiles: importRulesFiles(providers), copyFiles: [...copyFiles] };
 }
-
-/** The line an import-mode rules file carries so its CLI loads AGENTS.md. */
-export const RULES_IMPORT_LINE = '@AGENTS.md';
 
 export type RulesImportStubResult = 'created' | 'appended' | 'unchanged' | 'skipped-link';
 
@@ -68,14 +67,6 @@ export interface RulesImportStubOutcome {
   file: string;
   result: RulesImportStubResult | 'refused';
   error?: string;
-}
-
-/** A repo may carry `CLAUDE.md -> AGENTS.md`: the convention predates Haive, and AGENTS.md is
- *  written at its own path, so such a link already delivers the rules and is left alone. */
-export async function isLinkToAgentsMd(repoPath: string, rel: string): Promise<boolean> {
-  if ((await lstatNoFollow(repoPath, rel))?.kind !== 'symlink') return false;
-  const target = await readLinkNoFollow(repoPath, rel);
-  return target === 'AGENTS.md' || target === './AGENTS.md';
 }
 
 /** Make `rel` import AGENTS.md: create it holding the import line alone, or append the line to a
@@ -122,6 +113,57 @@ export async function restoreRulesImportStubs(
   return outcomes;
 }
 
+/** `content` without its RTK blocks, each taken with the newline 07 wrote after it, or null when
+ *  it holds none. */
+export function withoutRtkBlocks(content: string): string | null {
+  let next = content;
+  for (;;) {
+    const start = next.indexOf(RTK_REF_MARKER_START);
+    if (start === -1) break;
+    const endAt = next.indexOf(RTK_REF_MARKER_END, start);
+    if (endAt === -1) break;
+    const end = endAt + RTK_REF_MARKER_END.length;
+    next = next.slice(0, start) + next.slice(next[end] === '\n' ? end + 1 : end);
+  }
+  return next === content ? null : next;
+}
+
+export interface RtkBlockStripOutcome {
+  file: string;
+  result: 'stripped' | 'none' | 'skipped-link' | 'refused';
+  error?: string;
+}
+
+/** Take the RTK block out of each rules file that holds one. A `CLAUDE.md -> AGENTS.md` link is
+ *  AGENTS.md's own pass, and any other link is refused, as is a file past the read cap, which the
+ *  plan could not report. A refusal or an I/O error is recorded per file and never thrown. */
+export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOutcome[]> {
+  const outcomes: RtkBlockStripOutcome[] = [];
+  for (const file of RTK_BLOCK_FILES) {
+    try {
+      if (await isLinkToAgentsMd(repoPath, file)) {
+        outcomes.push({ file, result: 'skipped-link' });
+        continue;
+      }
+      // `create` only makes an absent file answer 'unchanged': `update` returns null for it.
+      const result = await updateFileNoFollow(
+        repoPath,
+        file,
+        (current) => (current === null ? null : withoutRtkBlocks(current)),
+        { create: true, maxBytes: RULES_FILE_READ_CAP },
+      );
+      outcomes.push({ file, result: result === 'updated' ? 'stripped' : 'none' });
+    } catch (err) {
+      outcomes.push({
+        file,
+        result: 'refused',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return outcomes;
+}
+
 /** Which of `files` does not import AGENTS.md right now. A file that cannot be read counts as
  *  missing; the apply step records what then happened to it. */
 export async function missingRulesImportStubs(
@@ -130,13 +172,7 @@ export async function missingRulesImportStubs(
 ): Promise<string[]> {
   const missing: string[] = [];
   for (const file of files) {
-    try {
-      if (await isLinkToAgentsMd(repoPath, file)) continue;
-      const text = await readTextNoFollow(repoPath, file);
-      if (text === null || !text.includes(RULES_IMPORT_LINE)) missing.push(file);
-    } catch {
-      missing.push(file);
-    }
+    if ((await rulesImportState(repoPath, file)) !== 'present') missing.push(file);
   }
   return missing;
 }
@@ -146,20 +182,10 @@ export async function missingRulesImportStubs(
  *  what today's providers need. */
 export async function enabledImportRulesFiles(db: Database, userId: string): Promise<string[]> {
   const rows = await db
-    .select({ name: schema.cliProviders.name, rulesContent: schema.cliProviders.rulesContent })
+    .select({ name: schema.cliProviders.name })
     .from(schema.cliProviders)
     .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
-  const joined = rows
-    .filter((r) => cliAdapterRegistry.has(r.name as CliProviderName))
-    .map((r) => {
-      const adapter = cliAdapterRegistry.get(r.name as CliProviderName);
-      return {
-        rulesContent: r.rulesContent,
-        rulesFile: adapter.rulesFile,
-        rulesFileMode: adapter.rulesFileMode,
-      };
-    });
-  return planRulesFiles(joined).importFiles;
+  return importRulesFilesFor(rows.map((r) => r.name));
 }
 
 /** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of a

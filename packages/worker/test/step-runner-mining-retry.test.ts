@@ -19,6 +19,17 @@ import {
 import type { StepApplyArgs, StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
+// The barrier's tab sweep runs `docker exec` into the task's runner, four calls per fan-out that
+// ends; nothing in this file may reach docker, so the two helpers that spawn it are stubbed.
+const browserCdp = vi.hoisted(() => ({
+  closeExtraBrowserTabs: vi.fn(async () => null),
+  restoreBrowserWindow: vi.fn(async () => null),
+}));
+vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...browserCdp,
+}));
+
 interface MiningRow {
   id: string;
   agentId: string;
@@ -50,9 +61,30 @@ interface MockState {
   /** Prior CLI runs, keyed by the id a mining row points at. Needed for the
    *  wave-dispatch recovery path, which repeats an agent by the prompt its last
    *  run actually used. */
-  invocationRows?: { id: string; prompt: string; errorMessage?: string | null }[];
+  invocationRows?: {
+    id: string;
+    prompt: string;
+    errorMessage?: string | null;
+    startedAt?: Date | null;
+    endedAt?: Date | null;
+    exitCode?: number | null;
+  }[];
   /** Every projection a read of the mining table asked for, in order. */
   miningProjections?: unknown[];
+  /** Simulate another pass changing a mining row after this one read it: every compare-and-swap
+   *  on the row matches nothing, or only those whose SET the predicate picks. */
+  miningCasLost?: boolean | ((set: Record<string, unknown>) => boolean);
+  /** What that other pass left behind, applied when a compare-and-swap is lost. */
+  onMiningCasLost?: () => void;
+  /** Make a read fail, picked by what it selects. */
+  failSelect?: (projection: unknown) => boolean;
+  /** Transactions opened, and INSERT statements sent to the mining table. */
+  transactions?: number;
+  miningInsertStatements?: number;
+  /** Every mining-row update that matched, with the WHERE that picked its row. */
+  miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
+  afterStepWrite?: (set: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -67,6 +99,44 @@ function tableNameOf(table: unknown): string {
   return '';
 }
 
+/** Every value a drizzle condition binds, flattened; a primitive in a raw `sql` template is
+ *  bound all the same. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const n of node) conditionValues(n, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) {
+    if (Array.isArray(obj.value)) acc.push(...obj.value);
+    else acc.push(obj.value);
+  }
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (const c of chunks) {
+      if (c === null || typeof c !== 'object') acc.push(c);
+      else conditionValues(c, acc);
+    }
+  }
+  return acc;
+}
+
+/** updateOwnedStep's guard, evaluated against the mock row: a write that carries it lands only
+ *  while the row is not `pending` or `skipped`. */
+function refusedByOwnershipGuard(cond: unknown, status: unknown): boolean {
+  const values = conditionValues(cond);
+  return (
+    values.includes('pending') &&
+    values.includes('skipped') &&
+    (status === 'pending' || status === 'skipped')
+  );
+}
+
+/** The mining-row writes whose WHERE names this row id. */
+const writesTo = (state: MockState, rowId: string) =>
+  (state.miningUpdateLog ?? []).filter((u) => conditionValues(u.where).includes(rowId));
+
 function makeMockDb(state: MockState): Database {
   let nextId = 1;
   const rowsFor = (table: string): unknown[] => {
@@ -78,33 +148,48 @@ function makeMockDb(state: MockState): Database {
   const db = {
     select: (projection?: unknown) => ({
       from: (table: unknown) => {
+        if (state.failSelect?.(projection)) throw new Error('read failed');
         if (tableNameOf(table) === 'task_step_agent_minings') {
           (state.miningProjections ??= []).push(projection);
         }
         const rows = rowsFor(tableNameOf(table));
         // .where() and .orderBy() are each awaited directly by some reads and chained
         // further by others, so both must be thenable AND chainable.
-        const thenable = () => ({
+        const thenable = (found: unknown[] = rows) => ({
           then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) =>
-            Promise.resolve(rows).then(res, rej),
-          limit: async () => rows,
-          orderBy: () => thenable(),
+            Promise.resolve(found).then(res, rej),
+          limit: async () => found,
+          orderBy: () => thenable(found),
         });
+        // A read that asks for the step row as finished finds nothing once it is not.
+        const where = (cond?: unknown) =>
+          thenable(
+            tableNameOf(table) === 'task_steps' &&
+              conditionValues(cond).includes('done') &&
+              state.taskStepRow.status !== 'done'
+              ? []
+              : rows,
+          );
         // A joined read (priorRoundTimeoutAttempts, which asks earlier rounds what rung this
         // agent reached) projects from the base table and uses task_steps only to scope the
         // task/step; the mock ignores the join condition and returns the base rows unchanged.
-        return { where: thenable, innerJoin: () => ({ where: thenable }) };
+        return { where, innerJoin: () => ({ where }) };
       },
     }),
     insert: (table: unknown) => {
       const tableName = tableNameOf(table);
-      const values = (v: Record<string, unknown>) => {
-        const commit = () => {
-          const id = `mock-${nextId++}`;
-          const row = { id, createdAt: new Date(), ...v };
-          state.inserts.push({ table: tableName, row });
-          return [row];
-        };
+      const values = (v: Record<string, unknown> | Record<string, unknown>[]) => {
+        if (tableName === 'task_step_agent_minings') {
+          state.miningInsertStatements = (state.miningInsertStatements ?? 0) + 1;
+        }
+        const commit = () =>
+          (Array.isArray(v) ? v : [v]).map((one) => {
+            const id = `mock-${nextId++}`;
+            const row = { id, createdAt: new Date(), ...one };
+            state.inserts.push({ table: tableName, row });
+            // A reserved mining row comes back with the column default it did not set.
+            return tableName === 'task_step_agent_minings' ? { attempts: 1, ...row } : row;
+          });
         return {
           // Awaited directly by a write that needs no row back (the no-provider failure).
           then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) =>
@@ -117,7 +202,7 @@ function makeMockDb(state: MockState): Database {
                 : commit(),
           }),
           onConflictDoUpdate: async () => {
-            state.inserts.push({ table: tableName, row: v });
+            state.inserts.push({ table: tableName, row: v as Record<string, unknown> });
           },
         };
       };
@@ -127,24 +212,50 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         set: (v: Record<string, unknown>) => {
-          const record = () => {
+          const record = (where: unknown) => {
             state.updates.push({ table: tableName, ...v });
-            if (tableName === 'task_steps') state.taskStepRow = { ...state.taskStepRow, ...v };
+            if (tableName === 'task_steps') {
+              state.taskStepRow = { ...state.taskStepRow, ...v };
+              state.afterStepWrite?.(v);
+            }
+            if (tableName === 'task_step_agent_minings') {
+              (state.miningUpdateLog ??= []).push({ set: v, where });
+            }
+          };
+          const lost = (): boolean => {
+            const rule = state.miningCasLost;
+            const isLost =
+              tableName === 'task_step_agent_minings' &&
+              (typeof rule === 'function' ? rule(v) : rule === true);
+            if (isLost) state.onMiningCasLost?.();
+            return isLost;
           };
           return {
-            where: () => ({
-              then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) => {
-                record();
-                return Promise.resolve([]).then(res, rej);
-              },
-              returning: async () => {
-                record();
-                return tableName === 'task_steps' ? [state.taskStepRow] : [];
-              },
-            }),
+            where: (cond: unknown) => {
+              const refused = () =>
+                tableName === 'task_steps' &&
+                refusedByOwnershipGuard(cond, state.taskStepRow.status);
+              return {
+                then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) => {
+                  if (!lost() && !refused()) record(cond);
+                  return Promise.resolve([]).then(res, rej);
+                },
+                returning: async () => {
+                  if (lost() || refused()) return [];
+                  record(cond);
+                  if (tableName === 'task_steps') return [state.taskStepRow];
+                  return tableName === 'task_step_agent_minings' ? [{ id: 'mock-updated' }] : [];
+                },
+              };
+            },
           };
         },
       };
+    },
+    // One statement's worth of atomicity is all a reservation asks of it.
+    transaction: async (fn: (tx: unknown) => unknown) => {
+      state.transactions = (state.transactions ?? 0) + 1;
+      return fn(db);
     },
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
@@ -523,6 +634,96 @@ describe('advanceStep apply-to-form continuation', () => {
         (update) => update.table === 'task_step_agent_minings' && update.consumedAt instanceof Date,
       ),
     ).toBe(true);
+    // The rows are consumed and the form cleared and held in one transaction; the park releases
+    // the hold.
+    expect(state.transactions).toBe(1);
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.pauseFormOnRetry === true),
+    ).toMatchObject({ detectOutput: null, formSchema: null, formValues: null });
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+    // The park that releases the hold is stamped in the same write, so a submit redelivered
+    // before the task is marked waiting is still older than the park.
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.status === 'waiting_form'),
+    ).toMatchObject({ pauseFormOnRetry: false, waitingStartedAt: expect.any(Date) });
+  });
+
+  it('leaves a row a Retry reset alone when the form would have reopened', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    state.taskStepRow.formSchema = { title: 'Old form', fields: [] };
+    state.taskStepRow.formValues = { decision: 'continue' };
+    const step = reopeningFormStep();
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The Retry resets the row, and leaves it unheld, while this pass is still in apply.
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        status: 'pending',
+        formValues: null,
+        pauseFormOnRetry: false,
+      };
+      return apply(ctx, args);
+    };
+
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    // The Retry's own hold stands, so a retried auto-continue step is not stopped at its form.
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(state.updates.some((u) => u.table === 'task_step_agent_minings' && u.consumedAt)).toBe(
+      false,
+    );
+    // Nothing of the reopen or its park reached the row.
+    expect(
+      state.updates.filter(
+        (u) => u.table === 'task_steps' && ('pauseFormOnRetry' in u || 'status' in u),
+      ),
+    ).toEqual([]);
+  });
+
+  it('holds the form after a crash between clearing it and parking, rather than resubmitting', async () => {
+    // A form that auto-submits its defaults, so only the hold keeps it from going straight back
+    // into apply with the items it had already answered.
+    const autoSubmitting = (applyCalls: unknown[]): StepDefinition => {
+      const base = reopeningFormStep();
+      const form = base.form!;
+      return {
+        ...base,
+        metadata: { ...base.metadata, autoSubmitDefaults: true },
+        form: (ctx, detected, llmOutput) => {
+          const schema = form(ctx, detected, llmOutput)!;
+          const fields = schema.fields.map((f) => ({ ...f, default: 'continue' }));
+          return { ...schema, fields: fields as typeof schema.fields };
+        },
+        apply: async () => {
+          applyCalls.push(1);
+          throw new ReopenStepFormError('bounded batch finished');
+        },
+      } as StepDefinition;
+    };
+    const crashed = (pauseFormOnRetry: boolean) => {
+      const state = freshState([miningRow('prior-batch-agent', 1)]);
+      Object.assign(state.taskStepRow, {
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        pauseFormOnRetry,
+      });
+      return state;
+    };
+
+    const held = crashed(true);
+    const applyCalls: unknown[] = [];
+    const result = await run(makeMockDb(held), autoSubmitting(applyCalls), []);
+    expect(result.status).toBe('waiting_form');
+    expect(applyCalls).toEqual([]);
+    expect(held.taskStepRow.detectOutput).toEqual({ remaining: 42 });
+    expect(held.taskStepRow.pauseFormOnRetry).toBe(false);
+
+    const unheld: unknown[] = [];
+    await run(makeMockDb(crashed(false)), autoSubmitting(unheld), []);
+    expect(unheld.length).toBeGreaterThan(0);
   });
 });
 
@@ -751,8 +952,83 @@ describe('advanceStep agentMining retry', () => {
   });
 });
 
+describe('the barrier a fan-out ends at', () => {
+  beforeEach(() => {
+    browserCdp.closeExtraBrowserTabs.mockClear();
+    browserCdp.restoreBrowserWindow.mockClear();
+  });
+
+  it('sweeps the browser tabs agents left once every agent has ended', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const result = await run(makeMockDb(state), miningStep([], []), []);
+
+    expect(result.status).toBe('done');
+    expect(browserCdp.closeExtraBrowserTabs).toHaveBeenCalled();
+    expect(browserCdp.restoreBrowserWindow).toHaveBeenCalled();
+  });
+
+  it('leaves them alone while an agent is still coming', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const result = await run(makeMockDb(state), terminalFailureRetryStep([]), []);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(browserCdp.closeExtraBrowserTabs).not.toHaveBeenCalled();
+  });
+});
+
 /** The fatal class a fan-out must never degrade past: the provider is gone for hours, so
  *  every downstream step re-hits it and the review that "passed" never happened. */
+describe('a mining agent orphaned by a worker restart', () => {
+  const ORPHAN =
+    'CLI invocation orphaned by a worker restart (the worker exited before queueing it)';
+  const stuck = (startedAt: Date | null) => {
+    const state = freshState([
+      miningRow('peer-reviewer', 3, { status: 'pending' }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-peer-reviewer',
+        prompt: 'review',
+        errorMessage: ORPHAN,
+        startedAt,
+        endedAt: new Date(),
+        exitCode: null,
+      },
+    ];
+    return state;
+  };
+
+  it('re-dispatches one that never started, uncharged, even at its attempt cap', async () => {
+    const state = stuck(null);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), terminalFailureRetryStep([]), enqueued);
+
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-peer-reviewer']);
+    const reroll = state.updates.find(
+      (u) => u.table === 'task_step_agent_minings' && u.status === 'pending',
+    );
+    expect(reroll?.attempts).toBe(3);
+  });
+
+  it('retires one that started and died once its attempts are spent', async () => {
+    const state = stuck(new Date());
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), terminalFailureRetryStep([]), enqueued);
+
+    expect(enqueued).toEqual([]);
+  });
+});
+
 const RATE_LIMIT_ERR =
   "Provider rate limit or quota exhausted — the provider's usage limit or quota is exhausted; " +
   'retry this task once it resets. (LLM run reported a failure (terminal_reason "api_error"): ' +
@@ -829,17 +1105,19 @@ describe('advanceStep agentMining second wave', () => {
     const miningInserts = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
     expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
     expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
-    // The first wave's rows are never re-rolled or reset by a wave dispatch. The
-    // one update allowed is the consumed_at stamp (a marker only — no status,
-    // output or budget touched) so a wave-aware apply() cannot re-fold them.
-    const miningUpdates = state.updates.filter((u) => u.table === 'task_step_agent_minings');
-    // The recorder spreads the set values onto the entry, so "marker-only" means
-    // no key beyond table/consumedAt/updatedAt.
+    // The first wave's rows are never re-rolled or reset by a wave dispatch. The one update
+    // they get is the consumed_at stamp, written for the whole step rather than by row id, so a
+    // wave-aware apply() cannot re-fold them; the wave's own rows are what gets linked.
+    expect(writesTo(state, 'mining-peer-reviewer')).toEqual([]);
+    const stamps = (state.miningUpdateLog ?? []).filter((u) => u.set.consumedAt instanceof Date);
     expect(
-      miningUpdates.filter((u) =>
-        Object.keys(u).some((k) => k !== 'table' && k !== 'consumedAt' && k !== 'updatedAt'),
+      stamps.every((u) => Object.keys(u.set).every((k) => k === 'consumedAt' || k === 'updatedAt')),
+    ).toBe(true);
+    expect(
+      (state.miningUpdateLog ?? []).filter(
+        (u) => u.set.status === 'pending' && u.set.cliInvocationId,
       ),
-    ).toHaveLength(0);
+    ).toHaveLength(2);
   });
 
   it('settles without asking again once the wave’s results are present', async () => {
@@ -865,14 +1143,13 @@ describe('advanceStep agentMining second wave', () => {
   });
 
   it('continues without the wave rather than parking on a barrier nothing will clear', async () => {
-    // Every insert loses the (task_step_id, agent_id) race, so no job is enqueued and no
-    // row goes pending. Parking here would hang the step forever; apply must be re-run
-    // and told the wave is not coming.
+    // No provider can take the wave's agent, so no job is enqueued and no row goes pending.
+    // Parking here would hang the step forever; apply must be re-run and told the wave is
+    // not coming.
     const state = freshState([miningRow('peer-reviewer', 1)]);
-    state.miningInsertConflicts = true;
     const applyCalls: StepApplyArgs[] = [];
     const enqueued: CliExecJobPayload[] = [];
-    const result = await run(makeMockDb(state), waveStep(applyCalls, ['refute-abc']), enqueued);
+    const result = await run(makeMockDb(state), waveStep(applyCalls, ['refute-abc']), enqueued, []);
 
     expect(result.status).toBe('done');
     expect(enqueued).toHaveLength(0);
@@ -914,26 +1191,22 @@ describe('advanceStep agentMining second wave', () => {
     expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
     expect(enqueued).toHaveLength(2);
     // No re-roll, no reset — at most the consumed_at stamp (see above).
-    const miningUpdates2 = state.updates.filter((u) => u.table === 'task_step_agent_minings');
-    expect(
-      miningUpdates2.filter((u) =>
-        Object.keys(u).some((k) => k !== 'table' && k !== 'consumedAt' && k !== 'updatedAt'),
-      ),
-    ).toHaveLength(0);
+    expect(writesTo(state, 'mining-peer-reviewer')).toEqual([]);
+    expect(writesTo(state, 'mining-security-code-reviewer')).toEqual([]);
   });
 
   it('fails rather than looping when the wave-exhausted pass asks again', async () => {
-    // Every insert loses the (task_step_id, agent_id) race, so the runner tells apply()
-    // the wave is not coming. A step that asks anyway is in breach of the contract: the
-    // loop must give up and surface the throw, not spin re-dispatching forever.
+    // No provider can take the wave's agent, so the runner tells apply() the wave is not
+    // coming. A step that asks anyway is in breach of the contract: the loop must give up
+    // and surface the throw, not spin re-dispatching forever.
     const state = freshState([miningRow('peer-reviewer', 1)]);
-    state.miningInsertConflicts = true;
     const applyCalls: StepApplyArgs[] = [];
     const enqueued: CliExecJobPayload[] = [];
     const result = await run(
       makeMockDb(state),
       waveStep(applyCalls, ['refute-abc'], true),
       enqueued,
+      [],
     );
 
     expect(result.status).toBe('failed');
@@ -1285,9 +1558,10 @@ describe('the dispatch a mining row records', () => {
     // still says what was asked, which is what a later retry has to repeat.
     const fresh = freshState([miningRow('peer-reviewer', 1)]);
     await run(makeMockDb(fresh), overridingWave(), [], [blindProvider('prov-1')]);
-    expect(
-      miningWrites(fresh).find((r) => r.agentId === 'refute-abc' && r.status === 'failed'),
-    ).toMatchObject({ ...asked, dispatchPrompt: 'refute abc' });
+    expect(miningWrites(fresh).find((r) => r.status === 'failed')).toMatchObject({
+      ...asked,
+      dispatchPrompt: 'refute abc',
+    });
 
     const reroll = reRequested();
     await run(makeMockDb(reroll), overridingRetry(), [], [blindProvider('prov-1')]);
@@ -1551,5 +1825,529 @@ describe('a wave agent recovered from the prompt its step wrote', () => {
         .filter((key) => key !== 'dispatchPrompt')
         .sort(),
     );
+  });
+});
+
+/** Another pass took the first row: a fresh read sees it pending, while a read taken before
+ *  still holds the row as it was, as a database snapshot would. */
+const takenByAnotherPass = (state: MockState) => () => {
+  state.miningRows = state.miningRows.map((r, i) => (i === 0 ? { ...r, status: 'pending' } : r));
+};
+
+/** Another pass took the first row and its run already finished: a fresh read sees it done. */
+const finishedByAnotherPass = (state: MockState) => () => {
+  state.miningRows = state.miningRows.map((r, i) =>
+    i === 0
+      ? {
+          ...r,
+          status: 'done',
+          output: { fromTheOtherPass: true },
+          errorMessage: null,
+          cliInvocationId: 'inv-other-pass',
+          userRetryRequestedAt: null,
+        }
+      : r,
+  );
+};
+
+describe('a fan-out reserved before any agent is sent', () => {
+  const miningLinks = (state: MockState) =>
+    (state.miningUpdateLog ?? []).filter(
+      (u) => u.set.status === 'pending' && u.set.cliInvocationId,
+    );
+
+  function runWith(
+    db: Database,
+    stepDef: StepDefinition,
+    enqueue: (payload: CliExecJobPayload) => Promise<void>,
+  ) {
+    return advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    });
+  }
+
+  it('reserves every agent in one transaction before the first run is recorded', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), waveStep([], ['refute-a', 'refute-b', 'refute-c']), enqueued);
+
+    expect(state.transactions).toBe(1);
+    expect(state.inserts.map((i) => i.table)).toEqual([
+      'task_step_agent_minings',
+      'task_step_agent_minings',
+      'task_step_agent_minings',
+      'cli_invocations',
+      'cli_invocations',
+      'cli_invocations',
+    ]);
+    const reserved = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
+    expect(
+      reserved.map((i) => [i.row.status, i.row.cliInvocationId, i.row.dispatchPrompt]),
+    ).toEqual([
+      ['pending', undefined, 'refute refute-a'],
+      ['pending', undefined, 'refute refute-b'],
+      ['pending', undefined, 'refute refute-c'],
+    ]);
+    // Each is linked by a swap on the reserved state: its own id, still pending, still unlinked.
+    const links = miningLinks(state);
+    expect(links).toHaveLength(3);
+    reserved.forEach((row, i) => {
+      expect(conditionValues(links[i]!.where)).toEqual(
+        expect.arrayContaining([row.row.id, 'pending']),
+      );
+    });
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(reserved.map((r) => r.row.id));
+  });
+
+  it('reserves a wave larger than one statement in chunks, inside the one transaction', async () => {
+    const ids = Array.from({ length: 51 }, (_, i) => `refute-${i}`);
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), waveStep([], ids), enqueued);
+
+    expect(state.transactions).toBe(1);
+    expect(state.miningInsertStatements).toBe(2);
+    expect(enqueued).toHaveLength(51);
+  });
+
+  it('fails what it reserved or linked and did not queue when a dispatch throws', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    let calls = 0;
+    const outcome = await runWith(
+      makeMockDb(state),
+      waveStep([], ['refute-a', 'refute-b', 'refute-c']),
+      async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('redis refused the job');
+      },
+    ).catch((err: unknown) => err);
+
+    const reserved = state.inserts
+      .filter((i) => i.table === 'task_step_agent_minings')
+      .map((i) => String(i.row.id));
+    const [sentId, linkedId, untouchedId] = reserved;
+    const failed = (id: string) =>
+      writesTo(state, id).filter(
+        (u) => u.set.status === 'failed' && String(u.set.errorMessage).includes('redis refused'),
+      );
+    // The first went out and is left alone; the second was linked and never queued; the third was
+    // never reached. Neither of the last two may stay pending on a run nothing will start.
+    expect(failed(sentId!)).toEqual([]);
+    expect(failed(linkedId!)).toHaveLength(1);
+    expect(failed(untouchedId!)).toHaveLength(1);
+    const ended = state.updates.filter(
+      (u) => u.table === 'cli_invocations' && String(u.errorMessage).includes('redis refused'),
+    );
+    expect(ended).toHaveLength(1);
+    expect(ended[0]!.endedAt).toBeInstanceOf(Date);
+    // The dispatch's own error is what reaches the step.
+    const message =
+      outcome instanceof Error ? outcome.message : String((outcome as { error?: unknown }).error);
+    expect(message).toContain('redis refused');
+  });
+
+  it('releases every reservation when the work after reserving throws before the first send', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    // The step's learned budget is read after the reservation and before anything is sent.
+    state.failSelect = (projection) =>
+      !!projection && typeof projection === 'object' && 'learnedMs' in projection;
+    await run(makeMockDb(state), waveStep([], ['refute-a', 'refute-b']), []).catch(() => undefined);
+
+    const reserved = state.inserts
+      .filter((i) => i.table === 'task_step_agent_minings')
+      .map((i) => String(i.row.id));
+    expect(reserved).toHaveLength(2);
+    for (const id of reserved) {
+      expect(writesTo(state, id).map((u) => u.set.status)).toEqual(['failed']);
+    }
+  });
+
+  it('releases the agent it was working on when that agent throws before it is linked', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliPreferences = {
+      findFirst: async () => {
+        throw new Error('preferences unreadable');
+      },
+    };
+    await run(db as unknown as Database, waveStep([], ['refute-a']), []).catch(() => undefined);
+
+    const [reserved] = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
+    expect(writesTo(state, String(reserved!.row.id)).map((u) => u.set.status)).toEqual(['failed']);
+  });
+
+  it('sends a reserved agent its step still offers as the step offers it, personas included', async () => {
+    const state = freshState([
+      miningRow('refute-a', 1, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'the prompt recorded at reservation',
+      }),
+    ]);
+    const step = waveStep([], []);
+    step.agentMining!.selectAgents = async () => [
+      {
+        agentId: 'refute-a',
+        agentTitle: 'refute-a',
+        prompt: 'the prompt the step offers now',
+        personaIds: ['security-auditor'],
+      },
+    ];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), step, enqueued);
+
+    const spec = enqueued[0]?.spec as { assignedAgentIds?: string[] } | undefined;
+    expect(spec?.assignedAgentIds).toContain('security-auditor');
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(String(sent?.row.prompt)).toContain('the prompt the step offers now');
+  });
+
+  it('sends an agent a fan-out reserved and never sent, from its recorded prompt, uncharged', async () => {
+    const state = freshState([
+      miningRow('refute-a', 2, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'refute refute-a',
+      }),
+    ]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), waveStep([], []), enqueued);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-refute-a']);
+    const [link] = miningLinks(state);
+    expect(link?.set.attempts).toBe(2);
+    expect(conditionValues(link!.where)).toEqual(
+      expect.arrayContaining(['mining-refute-a', 'pending']),
+    );
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(String(sent?.row.prompt)).toContain('refute refute-a');
+  });
+
+  it('fails a reserved agent whose prompt is no longer recorded, rather than waiting on it', async () => {
+    const state = freshState([
+      miningRow('refute-a', 1, { status: 'pending', cliInvocationId: null, dispatchPrompt: null }),
+    ]);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), waveStep([], []), enqueued);
+
+    expect(enqueued).toEqual([]);
+    expect(writesTo(state, 'mining-refute-a').map((u) => u.set.status)).toEqual(['failed']);
+  });
+
+  it('does not send an agent another pass took, and leaves the run it replaced to that pass', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = takenByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(enqueued).toEqual([]);
+    // Only this pass's own new run is superseded; the prior one is the winner's to replace.
+    expect(
+      state.updates.filter((u) => u.table === 'cli_invocations' && u.supersededAt),
+    ).toHaveLength(1);
+    // The agent is in flight on the other pass, so this one parks rather than settling.
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toEqual([]);
+  });
+
+  it('parks on a wave another pass already sent, instead of settling without it', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const step = waveStep(applyCalls, ['refute-a']);
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The other pass reserved and sent the wave while this one was applying.
+      state.miningRows.push(miningRow('refute-a', 1, { status: 'pending' }));
+      return apply(ctx, args);
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.miningWaveExhausted).not.toBe(true);
+  });
+
+  it('parks when another pass took the agents its unreadable output asked to re-roll', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = takenByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), miningStep(['peer-reviewer'], applyCalls), []);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(1);
+  });
+
+  it('parks when another pass took the agent a person asked to re-run', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = takenByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), noRetryMiningStep(applyCalls), []);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toEqual([]);
+  });
+
+  it('settles on the result another pass already finished, not on the failure it read', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(enqueued).toEqual([]);
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(
+      applyCalls[0]!.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer'),
+    ).toMatchObject({ status: 'done', output: { fromTheOtherPass: true } });
+  });
+
+  it('counts an agent another pass linked before this one could record no provider for it', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    // No provider here, so the only write is the refusal, and it finds the row already taken.
+    state.miningCasLost = (set) => set.status === 'failed';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), [], []);
+
+    expect(result.status).toBe('done');
+    expect(
+      applyCalls[0]!.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer'),
+    ).toMatchObject({ status: 'done', output: { fromTheOtherPass: true } });
+  });
+
+  it('hands apply the re-run another pass finished, not the failure a person asked to redo', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), noRetryMiningStep(applyCalls), []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.agentMiningResults).toEqual([
+      expect.objectContaining({
+        agentId: 'peer-reviewer',
+        status: 'done',
+        output: { fromTheOtherPass: true },
+      }),
+    ]);
+  });
+
+  it('re-runs apply on a re-roll another pass already finished, instead of degrading', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    await run(makeMockDb(state), miningStep(['peer-reviewer'], applyCalls), []);
+
+    // The pass after the lost re-roll reads the reply the other pass wrote, still on budget.
+    const second = applyCalls[1]!;
+    expect(second.isFinalMiningAttempt).toBe(false);
+    expect(second.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer')).toMatchObject({
+      output: { fromTheOtherPass: true },
+    });
+  });
+
+  it('folds a wave another pass already sent and finished, instead of settling without it', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const step = waveStep(applyCalls, ['refute-a']);
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The other pass sent the wave, and its agent finished, while this one was applying.
+      if (applyCalls.length === 0) {
+        state.miningRows = [...state.miningRows, miningRow('refute-a', 1, { output: 'refuted' })];
+      }
+      return apply(ctx, args);
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[1]!.miningWaveExhausted).not.toBe(true);
+    expect(applyCalls[1]!.agentMiningResults?.map((r) => r.agentId)).toContain('refute-a');
+  });
+
+  it('settles a first fan-out another pass reserved and finished, rather than failing it', async () => {
+    const state = freshState([]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const step = noRetryMiningStep(applyCalls);
+    const select = step.agentMining!.selectAgents;
+    step.agentMining!.selectAgents = async (args) => {
+      // The other pass reserved both agents after this one read none, and both finished.
+      state.miningRows = [
+        miningRow('peer-reviewer', 1, { output: 'reviewed' }),
+        miningRow('security-code-reviewer', 1, { output: 'audited' }),
+      ];
+      return select(args);
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.agentMiningResults?.map((r) => r.output)).toEqual([
+      'reviewed',
+      'audited',
+    ]);
+  });
+
+  it('fails an agent it reserved and never sent when the step fails first', async () => {
+    const state = freshState([
+      miningRow('refute-a', 1, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'refute refute-a',
+      }),
+    ]);
+    const step = waveStep([], []);
+    step.agentMining!.selectAgents = async () => {
+      throw new Error('the change set is empty');
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('failed');
+    const released = (state.miningUpdateLog ?? []).filter((u) => u.set.status === 'failed');
+    expect(released).toHaveLength(1);
+    expect(String(released[0]!.set.errorMessage)).toContain('the change set is empty');
+    expect(conditionValues(released[0]!.where)).toEqual(
+      expect.arrayContaining(['ts-1', 'pending']),
+    );
+  });
+
+  it('leaves an orphan another pass already re-rolled to that pass', async () => {
+    const stuck = () => {
+      const state = freshState([
+        miningRow('peer-reviewer', 1, { status: 'pending' }),
+        miningRow('security-code-reviewer', 1),
+      ]);
+      state.invocationRows = [
+        {
+          id: 'inv-peer-reviewer',
+          prompt: 'review',
+          errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+          endedAt: new Date(),
+          exitCode: null,
+        },
+      ];
+      return state;
+    };
+    // Its failure is written only while the row still points at the ended run, still in flight.
+    const settled = stuck();
+    await run(makeMockDb(settled), terminalFailureRetryStep([]), []);
+    const [failure] = writesTo(settled, 'mining-peer-reviewer').filter(
+      (u) => u.set.status === 'failed',
+    );
+    expect(conditionValues(failure!.where)).toEqual(
+      expect.arrayContaining(['inv-peer-reviewer', 'pending', 'running']),
+    );
+
+    const raced = stuck();
+    raced.miningCasLost = (set) => set.status === 'failed';
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(raced), terminalFailureRetryStep([]), enqueued);
+    expect(enqueued).toEqual([]);
+  });
+});
+
+describe('advanceStep recap run after a Retry reset the finished row', () => {
+  const finishWith = async (state: MockState) => {
+    const recaps: CliExecJobPayload[] = [];
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: miningStep([], []),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          if (payload.purpose === 'step_summary') recaps.push(payload);
+        },
+      },
+    });
+    return recaps;
+  };
+  const agents = () => [miningRow('peer-reviewer', 1), miningRow('security-code-reviewer', 1)];
+
+  it('ends a recap run the reset would not reach instead of queuing it', async () => {
+    const state = freshState(agents());
+    // The Retry lands right after the step's done write: its reset leaves the row pending, and
+    // supersedes only the recap runs that already exist.
+    state.afterStepWrite = (set) => {
+      if (set.status === 'done') state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    };
+
+    expect(await finishWith(state)).toEqual([]);
+    expect(
+      state.inserts.some((i) => i.table === 'cli_invocations' && i.row.summaryForStepId === 'ts-1'),
+    ).toBe(true);
+    expect(state.updates).toContainEqual(
+      expect.objectContaining({
+        table: 'cli_invocations',
+        supersededAt: expect.any(Date),
+        endedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('queues the recap run while the row is still the finished one', async () => {
+    const recaps = await finishWith(freshState(agents()));
+    expect(recaps).toHaveLength(1);
   });
 });

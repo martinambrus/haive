@@ -17,6 +17,7 @@ import { schema, type Database } from '@haive/database';
 import { readFileNoFollow, type ReadResult } from '@haive/shared/fs-safe';
 import { CONFIG_KEYS, configService, logger, promptNamesAgentPath } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseAgentFile } from '../step-engine/steps/workflow/_agent-loader.js';
 import {
   secretMaskDeniesPath,
@@ -70,6 +71,7 @@ export async function instructionsNameAgentPath(args: {
   rulesFile: string;
   rulesFileMode: 'import' | 'native';
 }): Promise<boolean> {
+  const wa = workspaceAnchor(args.workerTree);
   const seen = new Set<string>();
   const queue: string[] = [normaliseRel(args.rulesFile)];
   let budget = MAX_INSTRUCTION_BYTES;
@@ -90,7 +92,10 @@ export async function instructionsNameAgentPath(args: {
       // while the mask hid the definition it references. Absence stays `null` under strict
       // (fs-safe's `readResult` answers ABSENT before it consults the flag), so the common case of a
       // repository with no instruction file is unaffected.
-      read = await readFileNoFollow(args.workerTree, rel, { maxBytes: budget + 1, strict: true });
+      read = await readFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, {
+        maxBytes: budget + 1,
+        strict: true,
+      });
     } catch {
       // A refusal is indistinguishable from a file that names something, so it ends isolation.
       return true;
@@ -164,6 +169,7 @@ export async function readPersonaBodies(args: {
    *  needed to rescue a path the globs already denied. */
   loadTracked: () => Promise<Set<string> | null>;
 }): Promise<PersonaBodiesResult> {
+  const wa = workspaceAnchor(args.workerTree);
   const bodies: Record<string, string> = {};
   const oversized: PersonaBodiesResult['oversized'] = [];
   let remaining = MAX_PERSONA_BODY_BYTES;
@@ -186,7 +192,7 @@ export async function readPersonaBodies(args: {
     try {
       // One byte more than the budget, so a file that claims to fit and then reads longer is
       // caught rather than silently truncated.
-      read = await readFileNoFollow(args.workerTree, rel, { maxBytes: remaining + 1 });
+      read = await readFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, { maxBytes: remaining + 1 });
     } catch {
       continue;
     }

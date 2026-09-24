@@ -15,6 +15,8 @@ import {
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -32,6 +34,29 @@ function isPerRepoTemplateId(id: string): boolean {
   return id.startsWith('custom.') || id === CLI_RULES_TEMPLATE_ID;
 }
 
+/** The providers' import-mode rules files that do not import AGENTS.md, and those that link
+ *  elsewhere, which no upgrade writes through. Null when the root is not a readable directory,
+ *  since that says nothing about the files in it. */
+export async function rulesImportGaps(
+  root: string | null,
+  providerNames: readonly string[],
+): Promise<{ missing: string[]; linked: string[] } | null> {
+  if (!root) return null;
+  try {
+    if ((await lstatNoFollow(root, '', { strict: true }))?.kind !== 'directory') return null;
+  } catch {
+    return null;
+  }
+  const missing: string[] = [];
+  const linked: string[] = [];
+  for (const file of importRulesFilesFor(providerNames)) {
+    const state = await rulesImportState(root, file);
+    if (state === 'missing') missing.push(file);
+    else if (state === 'linked-elsewhere') linked.push(file);
+  }
+  return { missing, linked };
+}
+
 /**
  * Report whether an upgrade is available for a repository by comparing the
  * installed artifact fingerprints against the worker-synced manifest cache.
@@ -43,13 +68,20 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, applicableTemplateIds: true },
+    columns: {
+      id: true,
+      applicableTemplateIds: true,
+      storagePath: true,
+      localPath: true,
+      rtkEnabled: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
   const manifestCache = await db
     .select({
       templateId: schema.templateManifestCache.templateId,
+      templateKind: schema.templateManifestCache.templateKind,
       schemaVersion: schema.templateManifestCache.schemaVersion,
       contentHash: schema.templateManifestCache.contentHash,
       setHash: schema.templateManifestCache.setHash,
@@ -224,9 +256,13 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     schemaVersion: number;
     contentHash: string;
   }
+  // With RTK switched off no RTK settings file is current, so the ones installed read as changed.
   const currentByTemplate = new Map<string, CurrentTemplate>(
     manifestCache
-      .filter((m) => applicableSet.has(m.templateId))
+      .filter(
+        (m) =>
+          applicableSet.has(m.templateId) && (repo.rtkEnabled || m.templateKind !== 'rtk-config'),
+      )
       .map((m) => [
         m.templateId,
         { templateId: m.templateId, schemaVersion: m.schemaVersion, contentHash: m.contentHash },
@@ -248,6 +284,22 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id),
     ),
   );
+  // One row stands for every rendering of a template, so a rendering that is not current (a
+  // skipped conflict, a restored edit) has to be the one that stands, or its siblings hide it.
+  for (const a of liveArtifacts) {
+    const current = currentByTemplate.get(a.templateId);
+    if (!current || !filteredInstalled.has(a.templateId)) continue;
+    if (
+      a.templateContentHash !== current.contentHash ||
+      a.templateSchemaVersion !== current.schemaVersion
+    ) {
+      filteredInstalled.set(a.templateId, {
+        id: a.templateId,
+        schemaVersion: a.templateSchemaVersion,
+        contentHash: a.templateContentHash,
+      });
+    }
+  }
 
   const installedTemplateSetHash =
     filteredInstalled.size > 0 ? computeSetHash(Array.from(filteredInstalled.values())) : null;
@@ -312,8 +364,21 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
+  // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
+  const rulesImports = await rulesImportGaps(
+    repo.storagePath ?? repo.localPath,
+    ruleProviderRows.filter((p) => p.enabled).map((p) => p.name),
+  );
+  const missingRulesImports = rulesImports?.missing ?? [];
+  const linkedRulesFiles = rulesImports?.linked ?? [];
+  // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
+  const root = repo.storagePath ?? repo.localPath;
+  const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
+
   const hasUpgradeAvailable =
-    installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0;
+    (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
+    missingRulesImports.length > 0 ||
+    rtkBlockLeftovers.length > 0;
 
   // Group `custom.<bundleId>.*` changes by bundle so the banner can render
   // "Bundle X: N changed items" alongside Haive template counts. Bundles with
@@ -356,6 +421,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
     ...(customChanges.length > 0 ? { customChanges } : {}),
+    ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
+    ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
+    ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),
   };
   return c.json(res);
 });

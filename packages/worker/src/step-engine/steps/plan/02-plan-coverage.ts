@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -11,6 +12,7 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   APPLY_FAILURE_PREFIX,
   PARTIAL_APPLY_PREFIX,
+  partialApplyNote,
   PLAN_AGENT_TIMEOUT_MS,
   breadthCap,
   buildExpandPrompt,
@@ -22,7 +24,12 @@ import {
   withLiveInputs,
   withMinedStatus,
 } from './01-plan-build.js';
-import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import {
+  PLAN_PATCH_CONTRACT,
+  applyAgentPatch,
+  applyAgentPatchOnce,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 import {
   findCoverageGaps,
   findStructuralGaps,
@@ -245,14 +252,24 @@ async function dropDeletedSources(
   ctx.logger.info({ dropped: [...gone] }, 'coverage: skipping gaps from deleted documents');
   return picked.filter((key) => !gone.has(key));
 }
+const rawSectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
-const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+export const sectionAgentId = (key: string): string => {
+  const raw = rawSectionAgentId(key);
+  // `agent_id` is 128 characters with the `-r<round>` suffix, and an attachment path can run to 400.
+  return raw.length <= 120
+    ? raw
+    : `cover-${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+};
 /** Whether a clean repair already answered this section: under its own key, or under the name-only
  *  key a repair was recorded by before sections carried their row. Such a record cannot say which
  *  row it covered, so it keeps the meaning it had. */
-const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
-  handled.has(sectionAgentId(sectionKey(c))) || handled.has(sectionAgentId(nameSectionKey(c)));
+export const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
+  // A raw id past 120 characters that fit once its round was appended may already be stored.
+  [sectionKey(c), nameSectionKey(c)].some(
+    (key) => handled.has(sectionAgentId(key)) || handled.has(rawSectionAgentId(key)),
+  );
 
 /**
  * The gate can offer the SAME gap twice, so its agent id has to say which round
@@ -696,7 +713,8 @@ async function stampMiningError(ctx: StepContext, agentId: string, errorMessage:
     .catch(() => undefined);
 }
 
-async function foldCoverageResults(
+/** Exported for the unit test; apply() is the only caller. */
+export async function foldCoverageResults(
   ctx: StepContext,
   detected: CoverageDetect,
   results: AgentMiningResult[],
@@ -724,33 +742,35 @@ async function foldCoverageResults(
       // A document-coverage agent may legitimately conclude that the section
       // was already represented. It has no single focus node to mark.
       if (ops.length === 0) continue;
-      await assertPlanPatchWithinBreadth(
-        ctx.db,
-        detected.repositoryId!,
-        ops,
-        self,
-        breadthCap(detected.buildFormValues),
-      );
-      const applied = await applyAgentPatch(
-        ctx.db,
-        {
-          ...patch,
-          ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
+      const applied = await applyAgentPatchOnce(
+        ctx,
+        result.agentId,
+        async (tx) => {
+          await assertPlanPatchWithinBreadth(
+            ctx.db,
+            detected.repositoryId!,
+            ops,
+            self,
+            breadthCap(detected.buildFormValues),
+          );
+          return applyAgentPatch(
+            tx,
+            {
+              ...patch,
+              ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
+            },
+            {
+              repositoryId: detected.repositoryId!,
+              sourceTaskId: ctx.taskId,
+              ...(self ? { selfNodeId: self } : {}),
+            },
+          );
         },
-        {
-          repositoryId: detected.repositoryId!,
-          sourceTaskId: ctx.taskId,
-          ...(self ? { selfNodeId: self } : {}),
-        },
+        (outcome) => partialApplyNote(outcome.dropped),
       );
-      if (applied.dropped.length > 0) {
-        hadFailure = true;
-        await stampMiningError(
-          ctx,
-          result.agentId,
-          `${PARTIAL_APPLY_PREFIX} ${applied.dropped.join('; ')}`,
-        );
-      }
+      // Folded by a pass running beside this one.
+      if (!applied) continue;
+      if (applied.dropped.length > 0) hadFailure = true;
       if (applied.strippedCodeLinks.length > 0) {
         ctx.logger.warn(
           { agentId: result.agentId, strippedCodeLinks: applied.strippedCodeLinks },

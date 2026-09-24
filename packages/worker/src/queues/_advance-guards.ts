@@ -1,6 +1,5 @@
-/** Pure decision helper for the advance-step duplicate guard. Kept out of task-queue.ts so it
- *  unit-tests without pulling in BullMQ, the db, or the step registry. */
-import { TASK_JOB_NAMES } from '@haive/shared';
+/** Pure decision helpers for the advance-step guards. Kept out of task-queue.ts so they
+ *  unit-test without pulling in BullMQ, the db, or the step registry. */
 
 /** Banner text for the step that is holding a task up. The other-step guard refuses to advance
  *  any step while one is still running/waiting_cli/waiting_form, and used to do it silently — the
@@ -14,55 +13,45 @@ export function blockedByActiveStepMessage(blockedStepId: string): string {
   );
 }
 
-/** The slice of a BullMQ job the guard reads. */
-export interface AdvanceJobRef {
-  id?: string | null;
-  name: string;
-  data: { taskId?: string; stepId?: string; round?: number; epoch?: number | null };
+/** A submit that reached a form reopened after it was sent: the step parks at a fresh form with no
+ *  answers, and the job predates that park. Applying it would answer the new form with what was
+ *  typed into the old one. A form submit carries no epoch, so this is the guard that drops one
+ *  redelivered after its step moved on. */
+export function isStaleSubmit(
+  row: { status: string; formValues: unknown; waitingStartedAt: Date | null } | undefined,
+  carriesFormValues: boolean,
+  jobTimestamp: number | undefined,
+): boolean {
+  return (
+    carriesFormValues &&
+    row?.status === 'waiting_form' &&
+    row.formValues == null &&
+    row.waitingStartedAt != null &&
+    jobTimestamp !== undefined &&
+    jobTimestamp < row.waitingStartedAt.getTime()
+  );
 }
 
-/** Identity of the advance-step job asking whether it should yield. */
-export interface AdvanceStepKey {
-  jobId: string;
-  taskId: string;
-  stepId: string;
-  round: number;
-  epoch?: number | null;
+/** What an advance does with a stale submit. It is dropped, and the form parked again when the task
+ *  still reads `running`: the pass that parked the form died before marking the task waiting. */
+export function staleSubmitAction(
+  row: { status: string; formValues: unknown; waitingStartedAt: Date | null } | undefined,
+  carriesFormValues: boolean,
+  jobTimestamp: number | undefined,
+  taskStatus: string,
+): 'proceed' | 'drop' | 'repark' {
+  if (!isStaleSubmit(row, carriesFormValues, jobTimestamp)) return 'proceed';
+  return taskStatus === 'running' ? 'repark' : 'drop';
 }
 
-/**
- * Find the advance-step job this one must yield to: same task + step + round + epoch, and a
- * LOWER job id so of two racing deliveries exactly one yields. Returns undefined when there is
- * nothing to yield to.
- *
- * `inFlightJobIds` is the set of job ids THIS worker process is currently executing, and it is
- * the load-bearing filter. BullMQ's `active` set is not proof of life: the task worker runs with
- * a 30-minute lockDuration (long step runs must survive a restart without redelivery), so a
- * worker killed mid-job leaves its jobs sitting in `active` for up to half an hour. Yielding to
- * one of those corpses froze the step for that whole window — every retry logged "same step
- * already running in another job" and did nothing. A job the local process is not running is
- * either dead or another replica's, and neither is a reason to stall.
- *
- * Single-replica assumption: docker-compose defines one `worker` service. If a second replica
- * ever runs, its jobs are invisible here, so the guard degrades to the pre-guard behaviour (two
- * concurrent applies) rather than to a freeze — the failure we actually hit, and the worse one.
- */
-export function findLiveSibling(
-  activeJobs: readonly AdvanceJobRef[],
-  inFlightJobIds: ReadonlySet<string>,
-  key: AdvanceStepKey,
-): AdvanceJobRef | undefined {
-  const epoch = key.epoch ?? null;
-  return activeJobs.find((j) => {
-    if (j.id == null || j.id === key.jobId) return false;
-    if (j.name !== TASK_JOB_NAMES.ADVANCE_STEP) return false;
-    if (!inFlightJobIds.has(j.id)) return false;
-    if (Number(key.jobId) <= Number(j.id)) return false;
-    return (
-      j.data.taskId === key.taskId &&
-      j.data.stepId === key.stepId &&
-      (j.data.round ?? 0) === key.round &&
-      (j.data.epoch ?? null) === epoch
-    );
-  });
+/** Whether a failed task keeps an advance out. A Retry, a Resume and the allowance auto-resume each
+ *  set the task `running` before their advance runs, so a task still `failed` has not been reopened.
+ *  An answer submitted to a form still parked is the exception: answering it is what reopens the
+ *  task. An advance that carries no answer is not one, whatever the row says. */
+export function failedTaskRefusesAdvance(
+  taskStatus: string,
+  rowStatus: string | null | undefined,
+  carriesFormValues: boolean,
+): boolean {
+  return taskStatus === 'failed' && !(rowStatus === 'waiting_form' && carriesFormValues);
 }

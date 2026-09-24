@@ -50,17 +50,21 @@ test.describe('gate form', () => {
       await page.getByLabel('Summary').fill('looks right to me');
       await page.getByLabel('Proceed').check();
       await page.getByLabel('Mode').selectOption('fast');
+      const submitPath = `/tasks/${gate.taskId}/steps/${gate.stepId}/submit`;
+      const submitted = page.waitForResponse(
+        (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === submitPath,
+      );
       await page.getByRole('button', { name: 'Submit gate' }).click();
+      // The route answers only after it has stored the values, closed the wait and recorded the
+      // event, so every read below sees settled rows.
+      expect((await submitted).ok()).toBe(true);
 
-      // The values land in the step's own row, which is what the next step reads. Polled because
-      // the write is followed by an enqueue and the page re-fetches.
-      await expect
-        .poll(async () => (await readFormValues(sql, gate!.stepRowId)) ?? {}, { timeout: 10_000 })
-        .toMatchObject({
-          [gate.fields.text]: 'looks right to me',
-          [gate.fields.checkbox]: true,
-          [gate.fields.select]: 'fast',
-        });
+      // The values land in the step's own row, which is what the next step reads.
+      expect((await readFormValues(sql, gate.stepRowId)) ?? {}).toMatchObject({
+        [gate.fields.text]: 'looks right to me',
+        [gate.fields.checkbox]: true,
+        [gate.fields.select]: 'fast',
+      });
 
       // The step's STATUS is deliberately not asserted. Submit writes the values, clears the
       // wait marker, records the event and enqueues ADVANCE_STEP — moving the step is the

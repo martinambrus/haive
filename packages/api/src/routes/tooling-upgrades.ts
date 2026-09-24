@@ -472,11 +472,6 @@ toolingUpgradeRoutes.post('/:id/step-guidance/:guidanceId/archive', async (c) =>
   return c.json({ id: guidanceId, status: 'archived' });
 });
 
-/** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
- *  Only writes repo columns; the env image rebuilds on the next task (via
- *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled — the
- *  .claude/settings.json hook is then reconciled by the existing onboarding
- *  upgrade flow (the workflow upgrade banner surfaces rtk-config as removable). */
 /** Accept an app-login config only if it is complete, else store null.
  *
  *  A half-filled config is worse than none: browser-login.js would fail on a missing
@@ -507,6 +502,11 @@ function normalizeAppAuth(raw: unknown): typeof schema.repositories.$inferInsert
     : null;
 }
 
+/** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
+ *  Only writes repo columns; the env image rebuilds on the next task (via
+ *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled; the upgrade
+ *  banner then offers an onboarding upgrade, which offers the RTK settings
+ *  files for removal and takes the RTK block out of the rules files. */
 toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.param('id');

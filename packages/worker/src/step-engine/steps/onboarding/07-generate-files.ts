@@ -978,8 +978,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // dedicated single-purpose files, so the upgrade path's whole-file
     // overwrite/delete is safe. They mirror the surviving rtk-config
     // TemplateItems in `_rtk-templates.ts` 1:1 so step 12 records them and
-    // toggling rtk off removes them on upgrade. The RTK awareness markdown is
-    // inlined into AGENTS.md (non-manifest, like project-info and cli-rules) so
+    // toggling rtk off makes the next upgrade offer them for removal. The RTK
+    // awareness markdown is inlined into AGENTS.md (non-manifest, like
+    // project-info and cli-rules; that upgrade strips it by its markers) so
     // every CLI reads it — native AGENTS.md readers do not expand `@` refs, and
     // CLAUDE.md/GEMINI.md stay a lone `@AGENTS.md` import.
     if (detected.rtkEnabled) {

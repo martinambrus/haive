@@ -12,6 +12,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
+import { updateOwnedStep } from './step-ownership.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -125,12 +126,7 @@ async function setStepStatusForm(
   formSchema: FormSchema,
   statusMessage: string,
 ): Promise<TaskStepRow> {
-  const rows = await db
-    .update(schema.taskSteps)
-    .set({ status: 'waiting_form', formSchema, statusMessage, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepRowId))
-    .returning();
-  return rows[0]!;
+  return updateOwnedStep(db, stepRowId, { status: 'waiting_form', formSchema, statusMessage });
 }
 
 async function parkForGuidance(
@@ -164,12 +160,7 @@ async function setStepStatus(
     endedAt?: Date;
   },
 ): Promise<TaskStepRow> {
-  const rows = await db
-    .update(schema.taskSteps)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepRowId))
-    .returning();
-  return rows[0]!;
+  return updateOwnedStep(db, stepRowId, patch);
 }
 
 async function saveMergeState(

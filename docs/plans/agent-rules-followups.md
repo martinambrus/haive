@@ -1,7 +1,7 @@
 # Found-not-fixed follow-ups from the agent-rules series
 
-> **IN PROGRESS.** PR 1 shipped as #249 (`5223d7b3`). PR 2 is in review (branch `csp-mermaid`).
-> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **SHIPPED** 2026-09-24. PRs 1-12 in order: #249, #250, #252, #256, #254, #260, #258, #261, #265,
+> #255, #262, #253. Tracked in the status table of `docs/plans/README.md`.
 
 ## Context
 
@@ -245,6 +245,13 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - a stub linked elsewhere;
   - the shared helper tests, which move with the helpers.
 - **Verify:** remove the stub on a scratch copy and check the endpoint and the banner in the browser.
+- **As built:** the check moved rather than the worker functions around it. `@haive/shared/rules-files`
+  holds `RULES_IMPORT_LINE`, `isLinkToAgentsMd`, the one rule for which files need the import
+  (`importRulesFiles`, and `importRulesFilesFor` over the catalog) and `rulesImportState` (`present`,
+  `missing`, `linked-elsewhere` or `unreadable`, read capped at 1 MiB). The worker's `planRulesFiles`,
+  `enabledImportRulesFiles` and `missingRulesImportStubs` stay where they were and call it, so 01, 02
+  and the api name the same files. A stub linked elsewhere is `linkedRulesFiles`, a muted line in both
+  banner states.
 
 ## PR 7 — Reads inside a worktree go through the repository anchor
 
@@ -261,6 +268,15 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - a worktree-shaped fixture (`.haive/worktrees/<name>/CLAUDE.md` with an import);
   - a link at the worktree directory ends isolation, which is the scan's fail-open direction;
   - the existing cases stay as they are.
+- **As built:** the survey missed seven reads, found by tracing every function a worktree path is
+  passed to: 11d's excerpt read, 11c's RAG file read and the directory walker behind
+  `listFilesMatching`, plus `listKbFiles`, `listSkillDirs` and `readDiskSkillSummaries`, which 11d and
+  11 hand a worktree. Helpers shared with onboarding take `workspaceAnchor` themselves, so a root
+  caller reads exactly as before. Each helper is tested through a real worktree and a linked one,
+  and every link case fails against the previous code. Review found that the walker read a linked
+  worktree as an EMPTY tree, which 11c's orphan sweep would take for every file deleted, so
+  `scanRootRefusal` (`workflow/_rag-index.ts`) makes the sync return before indexing or sweeping when
+  its root is missing or not a directory; the linked and missing cases fail without it.
 
 ## PR 8 — Out-of-scope findings reach gate 2
 
@@ -280,6 +296,13 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Tests:** gate 2 with insights, with none, with a partial manual selection, and with a legacy
   payload; gate 3 fallback.
 - **Verify:** a fixture gate in the browser.
+- **As built:** `_gate-insights.ts` beside `_similar-sites.ts`. The raw-output read moved into 08e as
+  `loadInsightOutputs`, shared by both steps (the gate importing 08e and 08e importing the gate would
+  be a cycle); it filters with `ILIKE '%INSIGHTS%'` and reads in run order. `parseInsights` takes a
+  limit, 30 by default and none for the gate, so the gate's own cap of 30 counts what it cuts. 08e's
+  picks are subtracted across every round. Verified live with the real loader against the dev
+  database and the real gate-2 `form()`: the picked insight was subtracted, the row rendered after
+  similar sites, and an image in a title rendered as text with no request to its host.
 
 ## PR 9 — Phone-width sidebar, CSS first
 
@@ -303,6 +326,12 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - an e2e case at 375px with JavaScript on (open overlay, preference unchanged in the database).
 - **Verify:** Chrome MCP at 375, 768 and 1280 on the dashboard, a task page and the repositories page.
   Check that there is no horizontal page scroll and the title strip is aligned.
+- **As built (#265):** as planned, with two corrections. The formula above could never open the
+  column for a user whose saved state is collapsed, the dev user's included, so on a phone the column
+  is collapsed unless opened, whatever was saved. And the open state is dropped as soon as the page
+  changes: keyed on the page alone, it reopened the column on returning to the page it was opened on.
+  An e2e case pins that and fails 3 of 3 without the line. The breakpoint is `PHONE_MEDIA_QUERY`
+  (`sidebar-geometry.ts`), and the task title strip's horizontal padding narrows with `main`.
 
 ## PR 10 — Provider secrets survive a fast typist
 
@@ -329,6 +358,18 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - An app-shell effect sets `document.documentElement.dataset.hydrated`.
   - An e2e helper waits for it; `gotoWithSidebar` and the other interaction helpers use it.
   - The drag targets an absolute x, so the spec stays deterministic.
+- **As built:** as planned, with the marker named for what it proves: `data-shell-hydrated`, set by
+  `SidebarNav`, since the page beside the sidebar can hydrate later. `waitForShellHydration`
+  (`tests/e2e/helpers/shell.ts`) also covers the two reloads in `tree.spec.ts` that a click follows,
+  and the Sign out click in `nav/app-layout.spec.ts`. The mining-retry stub took the `docker exec`
+  time out of 23 cases that had spent 100 ms or more each on it. Waiting for hydration also lets the
+  dashboard render in full before the drag, and the divider is as tall as the page, so the drag now
+  aims at the middle of its on-screen part: aimed at the centre of its box, it pressed at y=1022 in a
+  720 px viewport and failed on every attempt. Found while checking this PR's CI: the step Retry spec
+  (`tasks/actions.spec.ts`) was flaky in 10 of the 53 CI runs since 2026-09-21 that reached the
+  end-to-end suite. Its wait for the task's current step returned at once, because the fixture
+  already sits on that step, so the event was read before the click's request landed. It now polls
+  for the event.
 
 ## PR 12 — Stale docs
 

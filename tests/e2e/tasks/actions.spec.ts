@@ -4,10 +4,8 @@ import {
   cleanupUser,
   getSql,
   readStepStatus,
-  readTaskStatus,
   seedTaskFixture,
   type TaskFixture,
-  FIXTURE_FAILED_STEP_ID,
 } from '../helpers/db.js';
 import { registerUser, uniqueEmail } from '../helpers/auth.js';
 
@@ -26,30 +24,6 @@ async function waitForStepStatus(
   }
   throw new Error(
     `step ${stepPkId} did not reach ${expected} within ${timeoutMs}ms (last: ${last})`,
-  );
-}
-
-async function waitForTaskState(
-  sql: ReturnType<typeof getSql>,
-  taskId: string,
-  expected: { status?: string; currentStepId?: string },
-  timeoutMs = 10_000,
-): Promise<{ status: string; currentStepId: string | null }> {
-  const deadline = Date.now() + timeoutMs;
-  let last: { status: string; currentStepId: string | null } | null = null;
-  while (Date.now() < deadline) {
-    last = await readTaskStatus(sql, taskId);
-    if (
-      last &&
-      (expected.status === undefined || last.status === expected.status) &&
-      (expected.currentStepId === undefined || last.currentStepId === expected.currentStepId)
-    ) {
-      return last;
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(
-    `task ${taskId} did not reach ${JSON.stringify(expected)} within ${timeoutMs}ms (last: ${JSON.stringify(last)})`,
   );
 }
 
@@ -94,19 +68,23 @@ test.describe('step retry/skip UI', () => {
       // so whether it catches that window is a coin flip: CI reported this test flaky on exactly
       // that race, passing on retry. The durable evidence is the event below, written in the same
       // transaction as the flip, which is what this test's own comment already says.
-      const taskState = await waitForTaskState(sql, fixture.taskId, {
-        currentStepId: FIXTURE_FAILED_STEP_ID,
-      });
-      expect(taskState.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
-
+      //
       // The step.retry event is inserted in the same transaction as the
       // step flip, so it is observable even if the worker has already
-      // re-processed and re-failed the task.
-      const events = await sql<{ event_type: string }[]>`
-        select event_type from task_events
-        where task_id = ${fixture.taskId} and event_type = 'step.retry'
-      `;
-      expect(events).toHaveLength(1);
+      // re-processed and re-failed the task. Polled, because the click only sends the request.
+      const { taskId } = fixture;
+      await expect
+        .poll(
+          async () => {
+            const events = await sql<{ event_type: string }[]>`
+              select event_type from task_events
+              where task_id = ${taskId} and event_type = 'step.retry'
+            `;
+            return events.length;
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(1);
       // Payload-shape assertions (priorStatus, cascadedSteps) are covered by
       // the API-level retry tests; the UI test only verifies that the button
       // wired up to the action endpoint.

@@ -58,6 +58,29 @@ describe('uploadFileRel', () => {
     expect(uploadFileRel('u1', `${ROOT}/_uploads/u1/..`)).toBeNull();
   });
 
+  it('splits a path written under a root configured with a trailing slash', () => {
+    // The routes write with `path.join`, which drops the slash; a prefix built by concatenation
+    // would have looked for `<root>//_uploads/`.
+    expect(uploadFileRel('u1', `${ROOT}/_uploads/u1/db.sql`, `${ROOT}/`)).toBe(
+      '_uploads/u1/db.sql',
+    );
+  });
+
+  it('splits a path written under the filesystem root', () => {
+    expect(uploadFileRel('u1', '/_uploads/u1/db.sql', '/')).toBe('_uploads/u1/db.sql');
+  });
+
+  it('splits a path written under a relative root', () => {
+    expect(uploadFileRel('u1', 'data/repos/_uploads/u1/db.sql', './data/repos')).toBe(
+      '_uploads/u1/db.sql',
+    );
+  });
+
+  it('refuses a path the routes would not have written, even one that resolves to it', () => {
+    expect(uploadFileRel('u1', `${ROOT}/_uploads/x/../u1/db.sql`)).toBeNull();
+    expect(uploadFileRel('u1', `${ROOT}/_uploads/u1/db.sql/`)).toBeNull();
+  });
+
   it('tracks the storage root at call time, not at import', () => {
     process.env.REPO_STORAGE_ROOT = '/srv/moved';
     expect(uploadFileRel('u1', `/srv/moved/${uploadsRel('u1')}/db.sql`)).toBe('_uploads/u1/db.sql');

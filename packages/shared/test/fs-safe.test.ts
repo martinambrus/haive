@@ -1,5 +1,15 @@
-import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import {
+  mkdir,
+  mkdtemp,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -7,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   isPathContainmentError,
   lstatNoFollow,
+  openDirNoFollow,
   openFileNoFollow,
   PathContainmentError,
   readdirNoFollow,
@@ -222,5 +233,71 @@ describe('fs-safe reads', () => {
         PathContainmentError,
       );
     });
+  });
+});
+
+describe('openDirNoFollow', () => {
+  let root: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'fs-safe-dir-'));
+    outside = await mkdtemp(path.join(tmpdir(), 'fs-safe-dir-out-'));
+    await mkdir(path.join(root, 'a', 'dir'), { recursive: true });
+    await writeFile(path.join(root, 'a', 'b.md'), 'hello', 'utf8');
+    await symlink(outside, path.join(root, 'linkdir'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it('hands back the directory it walked to', async () => {
+    const fh = await openDirNoFollow(root, 'a/dir');
+    try {
+      expect(await readlink(`/proc/self/fd/${fh.fd}`)).toBe(
+        await realpath(path.join(root, 'a/dir')),
+      );
+    } finally {
+      await fh.close();
+    }
+  });
+
+  it('refuses absence, a link anywhere, a non-directory and the anchor itself', async () => {
+    await expect(openDirNoFollow(root, 'a/missing')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(openDirNoFollow(root, 'linkdir')).rejects.toSatisfy((err: unknown) =>
+      isPathContainmentError(err, 'link'),
+    );
+    await expect(openDirNoFollow(root, 'linkdir/x')).rejects.toSatisfy((err: unknown) =>
+      isPathContainmentError(err, 'link'),
+    );
+    await expect(openDirNoFollow(root, 'a/b.md')).rejects.toSatisfy((err: unknown) =>
+      isPathContainmentError(err, 'not-directory'),
+    );
+    await expect(openDirNoFollow(root, '')).rejects.toSatisfy((err: unknown) =>
+      isPathContainmentError(err, 'invalid-path'),
+    );
+  });
+
+  it('keeps a child writing through its slot in the held directory after the name is swapped', async () => {
+    // The point of handing a child a descriptor: once held, renaming the directory away and
+    // planting a link at its name redirects nothing.
+    const fh = await openDirNoFollow(root, 'a/dir');
+    try {
+      await rename(path.join(root, 'a/dir'), path.join(root, 'a/dir-moved'));
+      await symlink(outside, path.join(root, 'a/dir'));
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('sh', ['-c', 'echo hi > /proc/self/fd/3/written'], {
+          stdio: ['ignore', 'ignore', 'ignore', fh.fd],
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+      });
+    } finally {
+      await fh.close();
+    }
+    expect((await stat(path.join(root, 'a/dir-moved/written'))).isFile()).toBe(true);
+    await expect(stat(path.join(outside, 'written'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
