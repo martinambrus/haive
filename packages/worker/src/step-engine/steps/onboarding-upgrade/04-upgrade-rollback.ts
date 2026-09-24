@@ -19,8 +19,7 @@ import {
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import {
-  deleteRefusal,
-  pathContentHash,
+  deleteRefusalAt,
   readFileOrEmpty,
   resolveBundleItemId,
   safeDiskRel,
@@ -413,13 +412,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           warnings.push(`refusing to undo ${item.diskPath}: not a path inside the repository`);
           continue;
         }
-        const refusal = deleteRefusal(
-          item.diskPath,
-          await pathContentHash(ctx.repoPath, rel, item.templateKind),
-          item.writtenHash,
-        );
+        const refusal = await deleteRefusalAt(ctx.repoPath, rel, item, item.writtenHash);
         if (refusal !== null) {
-          // The upgrade's row is still undone; the file, edited since, stays.
+          // The upgrade's row is still undone; what stands there now stays.
           warnings.push(refusal);
           undoneNewArtifactIds.push(item.upgradeArtifactId);
           continue;

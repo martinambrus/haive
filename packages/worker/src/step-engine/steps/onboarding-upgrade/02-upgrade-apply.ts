@@ -1,4 +1,5 @@
 import {
+  isPathContainmentError,
   readTextNoFollow,
   removeNoFollow,
   toSafeRel,
@@ -162,6 +163,9 @@ export function keptRowUpdate(
   };
 }
 
+const keptRefusal = (diskPath: string) =>
+  `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
+
 /** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
  *  recorded writing there. A row alone proves nothing: 12 records one for a file 07 skipped. */
 export function deleteRefusal(
@@ -170,7 +174,30 @@ export function deleteRefusal(
   writtenHash: string | null | undefined,
 ): string | null {
   if (diskHash === null || diskHash === writtenHash) return null;
-  return `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
+  return keptRefusal(diskPath);
+}
+
+/** `deleteRefusal` for what stands at `rel` now. A link or a directory there is not what Haive wrote
+ *  either; only a read that could not run throws. */
+export async function deleteRefusalAt(
+  repoPath: string,
+  rel: string,
+  entry: { diskPath: string; templateKind: string },
+  writtenHash: string | null | undefined,
+): Promise<string | null> {
+  let diskHash: string | null;
+  try {
+    diskHash = await pathContentHash(repoPath, rel, entry.templateKind);
+  } catch (err) {
+    if (
+      !isPathContainmentError(err) ||
+      !['link', 'not-directory', 'not-regular-file'].includes(err.reason)
+    ) {
+      throw err;
+    }
+    return keptRefusal(entry.diskPath);
+  }
+  return deleteRefusal(entry.diskPath, diskHash, writtenHash);
 }
 
 function conflictFieldId(entryId: string): string {
@@ -543,9 +570,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         try {
-          const refusal = deleteRefusal(
-            entry.diskPath,
-            await pathContentHash(ctx.repoPath, rel, entry.templateKind),
+          const refusal = await deleteRefusalAt(
+            ctx.repoPath,
+            rel,
+            entry,
             entry.baselineWrittenHash,
           );
           if (refusal !== null) {

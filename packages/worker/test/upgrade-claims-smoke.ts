@@ -4,7 +4,7 @@
  * user, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -384,14 +384,14 @@ async function main(): Promise<void> {
     });
 
     // ---- a second upgrade: two retired templates, and two files new to it ------------------
-    const [fresh, freshEdited] = seeded.filter(
+    const [fresh, freshEdited, freshLinked] = seeded.filter(
       (p) =>
         p.endsWith('.md') &&
         ![edited, overwritten, keptEdit, untouched, CLI_RULES_DISK_PATH].includes(p),
     );
-    if (!fresh || !freshEdited)
+    if (!fresh || !freshEdited || !freshLinked)
       throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
-    for (const path of [fresh, freshEdited]) {
+    for (const path of [fresh, freshEdited, freshLinked]) {
       await rm(join(repoPath, path));
       await db
         .delete(schema.onboardingArtifacts)
@@ -413,6 +413,7 @@ async function main(): Promise<void> {
           untouched,
           fresh,
           freshEdited,
+          freshLinked,
           CLI_RULES_DISK_PATH,
         ].includes(p),
     );
@@ -436,8 +437,9 @@ async function main(): Promise<void> {
     await mkdir(join(repoPath, '.claude/agents'), { recursive: true });
     await writeFile(join(repoPath, retired('retired-gone')), retiredBytes);
     await writeFile(join(repoPath, retired('retired-kept')), retiredEditedBytes);
+    await symlink('elsewhere.md', join(repoPath, retired('retired-linked')));
     await db.insert(schema.onboardingArtifacts).values(
-      ['retired-gone', 'retired-kept'].map((name) => ({
+      ['retired-gone', 'retired-kept', 'retired-linked'].map((name) => ({
         userId,
         repositoryId,
         taskId,
@@ -503,15 +505,19 @@ async function main(): Promise<void> {
     const buckets = {
       gone: secondBucket(retired('retired-gone')),
       kept: secondBucket(retired('retired-kept')),
+      linked: secondBucket(retired('retired-linked')),
       fresh: secondBucket(fresh),
       freshEdited: secondBucket(freshEdited),
+      freshLinked: secondBucket(freshLinked),
     };
     check(
-      'the second plan retires both old files and adds both missing ones',
+      'the second plan retires the old files and adds the missing ones',
       buckets.gone === 'obsolete' &&
         buckets.kept === 'obsolete' &&
+        buckets.linked === 'obsolete' &&
         buckets.fresh === 'new_artifact' &&
-        buckets.freshEdited === 'new_artifact',
+        buckets.freshEdited === 'new_artifact' &&
+        buckets.freshLinked === 'new_artifact',
       buckets,
     );
 
@@ -549,6 +555,13 @@ async function main(): Promise<void> {
       secondApplied.warnings,
     );
     check('and its row stays live', (await liveRowsAt(retired('retired-kept'))).length === 1);
+    check(
+      'an obsolete path a link now stands at is kept, and said so',
+      (await lstat(join(repoPath, retired('retired-linked')))).isSymbolicLink() &&
+        secondApplied.warnings.some((w) => w.startsWith(`kept ${retired('retired-linked')}:`)),
+      secondApplied.warnings,
+    );
+    check('and its row stays live too', (await liveRowsAt(retired('retired-linked'))).length === 1);
     const [editedTrackedRow] = await liveRowsAt(editedTracked);
     check(
       'a tracked file kept holds the bytes kept, for a later rollback',
@@ -565,6 +578,8 @@ async function main(): Promise<void> {
     // ---- a rollback of the second upgrade, one new file edited since -----------------------
     const freshEditedBytes = `${await readFile(join(repoPath, freshEdited), 'utf8')}Edited after.\n`;
     await writeFile(join(repoPath, freshEdited), freshEditedBytes);
+    await rm(join(repoPath, freshLinked));
+    await symlink('elsewhere.md', join(repoPath, freshLinked));
     await db
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date() })
@@ -596,8 +611,8 @@ async function main(): Promise<void> {
     const secondRollback = await upgradeRollbackStep.detect!(secondRollbackCtx);
     const undoes = secondRollback.newArtifactsToUndo.map((u) => u.diskPath);
     check(
-      'the rollback plans to undo both new files',
-      undoes.includes(fresh) && undoes.includes(freshEdited),
+      'the rollback plans to undo every new file',
+      undoes.includes(fresh) && undoes.includes(freshEdited) && undoes.includes(freshLinked),
       undoes,
     );
     const secondRolledBack = await upgradeRollbackStep.apply(secondRollbackCtx, {
@@ -612,6 +627,18 @@ async function main(): Promise<void> {
       (await readOrNull(freshEdited)) === freshEditedBytes &&
         secondRolledBack.warnings.some((w) => w.startsWith(`kept ${freshEdited}:`)),
       secondRolledBack.warnings,
+    );
+    check(
+      'a link standing in for a new file is kept, and said so',
+      (await lstat(join(repoPath, freshLinked))).isSymbolicLink() &&
+        secondRolledBack.warnings.some((w) => w.startsWith(`kept ${freshLinked}:`)),
+      secondRolledBack.warnings,
+    );
+    const upgradeRowsLive = async (rel: string) =>
+      (await liveRowsAt(rel)).filter((r) => r.source === 'upgrade').length;
+    check(
+      "and the upgrade's rows at both are retired",
+      (await upgradeRowsLive(freshEdited)) === 0 && (await upgradeRowsLive(freshLinked)) === 0,
     );
 
     // ---- the boot repair ----------------------------------------------------------------

@@ -12,6 +12,7 @@ import {
 import {
   classifyApplyAction,
   deleteRefusal,
+  deleteRefusalAt,
   pathContentHash,
   resolveBundleItemId,
   safeDiskRel,
@@ -351,5 +352,41 @@ describe('pathContentHash', () => {
     expect(await pathContentHash(root, 'gone.md', 'agent')).toBeNull();
     await writeFile(join(root, 'AGENTS.md'), '# No region\n', 'utf8');
     expect(await pathContentHash(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toBeNull();
+  });
+});
+
+describe('deleteRefusalAt', () => {
+  const dirs: string[] = [];
+  const repo = async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'upgrade-delete-refusal-'));
+    dirs.push(dir);
+    return dir;
+  };
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  const written = sha256Hex(normalizeContent('HAIVE\n'));
+  const at = (root: string, rel: string) =>
+    deleteRefusalAt(root, rel, { diskPath: rel, templateKind: 'agent' }, written);
+
+  it('keeps a link, a directory, or a path through either, none of which Haive wrote', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'target.md'), 'HAIVE\n', 'utf8');
+    await symlink(join(root, 'target.md'), join(root, 'link.md'));
+    await mkdir(join(root, 'dir.md'));
+    await mkdir(join(root, 'real'));
+    await writeFile(join(root, 'real', 'a.md'), 'HAIVE\n', 'utf8');
+    await symlink(join(root, 'real'), join(root, 'via'));
+    await writeFile(join(root, 'flat'), 'HAIVE\n', 'utf8');
+    for (const rel of ['link.md', 'dir.md', 'via/a.md', 'flat/a.md']) {
+      expect(await at(root, rel), rel).toMatch(new RegExp(`^kept ${rel.replace('.', '\\.')}: `));
+    }
+  });
+
+  it('still allows the file Haive wrote, and a path holding nothing', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'a.md'), 'HAIVE\n', 'utf8');
+    expect(await at(root, 'a.md')).toBeNull();
+    expect(await at(root, 'gone.md')).toBeNull();
   });
 });
