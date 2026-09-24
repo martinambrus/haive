@@ -216,8 +216,9 @@ export function renderImpactMermaid(
       safe.length > DIAGRAM_LABEL_CHARS
         ? `${safe.slice(0, DIAGRAM_LABEL_CHARS - 1).trimEnd()}…`
         : safe;
-    // Mermaid entities, after the cut so none is split: `%%{` anywhere in a source is a directive.
-    return shown.replace(/[%<>]/g, (c) => `#${c.charCodeAt(0)};`);
+    // Mermaid entities, after the cut so none is split: `%%{` anywhere in a source is a directive,
+    // and `@{` is shape metadata the web refuses to render.
+    return shown.replace(/[%<>@]/g, (c) => `#${c.charCodeAt(0)};`);
   };
   // `pnode` + the hyphen-stripped uuid. The prefix is deliberately distinctive
   // because the browser has to recover the uuid from the RENDERED DOM id, and
