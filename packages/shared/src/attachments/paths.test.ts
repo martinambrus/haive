@@ -29,6 +29,20 @@ describe('sanitizeAttachmentPath', () => {
     expect(sanitizeAttachmentPath('e' + String.fromCharCode(0) + '.sh')).toBe('e_.sh');
   });
 
+  it('strips a leading dot that sits behind a space', () => {
+    expect(sanitizeAttachmentPath(' .claude/agents/x.md')).toBe('claude/agents/x.md');
+    expect(sanitizeAttachmentPath('spec/ .claude/agents/x.md')).toBe('spec/claude/agents/x.md');
+    expect(sanitizeAttachmentPath('. .ssh/k')).toBe('ssh/k');
+    expect(sanitizeAttachmentPath(' .htaccess')).toBe('htaccess');
+  });
+
+  it('gives back a sanitised path unchanged', () => {
+    for (const raw of [' .claude/agents/x.md', 'spec/ . .x', ' .htaccess', 'docs/api/spec.md']) {
+      const once = sanitizeAttachmentPath(raw);
+      expect(sanitizeAttachmentPath(once)).toBe(once);
+    }
+  });
+
   it('keeps spaces, parentheses, dots and hyphens', () => {
     expect(sanitizeAttachmentPath('my report (final)-v2.png')).toBe('my report (final)-v2.png');
     expect(sanitizeAttachmentPath('specs v2/my report (final).png')).toBe(
