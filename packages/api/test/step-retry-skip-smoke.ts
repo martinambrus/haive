@@ -195,6 +195,93 @@ async function main(): Promise<void> {
       );
     }
 
+    // 1b. A retry leaves no other row active. A later round's step still parked on its CLI is
+    //     work the task has left: kept active, the worker's other-step guard refuses every
+    //     advance the retry queues and the task stops with nothing running.
+    const [laterRound] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task.id,
+        stepId: 'later-round-step',
+        stepIndex: 3,
+        round: 1,
+        title: 'Later round',
+        status: 'waiting_cli',
+        startedAt: now,
+      })
+      .returning();
+    if (!laterRound) throw new Error('later-round step insert failed');
+    const [liveRun] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: task.id, taskStepId: laterRound.id, mode: 'cli', prompt: 'smoke' })
+      .returning();
+    if (!liveRun) throw new Error('live invocation insert failed');
+    const retryAgain = await app.request(
+      `/tasks/${task.id}/steps/03b-business-requirements/action`,
+      {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'retry', round: 0 }),
+      },
+    );
+    assertStatus('POST /retry with a later round active', retryAgain.status, 200);
+    const laterAfter = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, laterRound.id),
+    });
+    if (laterAfter?.status !== 'pending') {
+      throw new Error(
+        `expected the later round's step reset to pending, got ${laterAfter?.status}`,
+      );
+    }
+    const runAfter = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, liveRun.id),
+    });
+    if (!runAfter?.supersededAt) {
+      throw new Error("expected the later round's live invocation superseded");
+    }
+
+    // 1c. Re-running a fan-out's failed agents moves the task the same way, so it too leaves no
+    //     other row active.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'one agent failed', endedAt: now })
+      .where(eq(schema.taskSteps.id, failedStep.id));
+    await db
+      .insert(schema.taskStepAgentMinings)
+      .values({ taskStepId: failedStep.id, agentId: 'smoke-reviewer', status: 'failed' });
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'waiting_cli' })
+      .where(eq(schema.taskSteps.id, laterRound.id));
+    const [secondRun] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: task.id, taskStepId: laterRound.id, mode: 'cli', prompt: 'smoke' })
+      .returning();
+    if (!secondRun) throw new Error('second live invocation insert failed');
+    const resumeRes = await app.request(
+      `/tasks/${task.id}/steps/03b-business-requirements/action`,
+      {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'resume', round: 0 }),
+      },
+    );
+    assertStatus('POST /resume with a later round active', resumeRes.status, 200);
+    const laterAfterResume = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, laterRound.id),
+    });
+    if (laterAfterResume?.status !== 'pending') {
+      throw new Error(
+        `expected resume to reset the later round's step to pending, got ${laterAfterResume?.status}`,
+      );
+    }
+    const secondAfter = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, secondRun.id),
+    });
+    if (!secondAfter?.supersededAt) {
+      throw new Error("expected resume to supersede the later round's live invocation");
+    }
+
     // 2. Mark 03b-business-requirements failed again, then skip it
     await db
       .update(schema.taskSteps)
@@ -261,6 +348,13 @@ async function main(): Promise<void> {
       .from(schema.taskEvents)
       .where(eq(schema.taskEvents.taskId, task.id));
     const retryEvent = events.find((e) => e.eventType === 'step.retry');
+    // Compared by field: jsonb stores an object's keys in its own order, not the one written.
+    const leftActiveEvent = events.find((e) => {
+      if (e.eventType !== 'step.retry') return false;
+      const left = (e.payload as { leftActive?: { stepId?: string; round?: number }[] }).leftActive;
+      return left?.length === 1 && left[0]?.stepId === 'later-round-step' && left[0]?.round === 1;
+    });
+    if (!leftActiveEvent) throw new Error('step.retry did not record the row it left active');
     const skipEvent = events.find((e) => e.eventType === 'step.skip');
     if (!retryEvent) throw new Error('missing step.retry event');
     if (!skipEvent) throw new Error('missing step.skip event');
@@ -294,6 +388,9 @@ async function main(): Promise<void> {
           }
         }
         await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, state.taskId));
+        await db
+          .delete(schema.cliInvocations)
+          .where(eq(schema.cliInvocations.taskId, state.taskId));
         await db.delete(schema.taskSteps).where(eq(schema.taskSteps.taskId, state.taskId));
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
       }

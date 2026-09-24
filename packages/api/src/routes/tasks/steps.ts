@@ -168,6 +168,21 @@ async function resetRowsForRerun(
   }
 }
 
+/** The rows a retry or resume leaves active outside the set it resets, such as another round's
+ *  step. The action moves the task to its own step, so these are work the task has left; kept
+ *  active, each makes the worker's other-step guard refuse every advance the action queues, and
+ *  the task stops with nothing running. Exported for the unit test. */
+export function rowsLeftActive<T extends { id: string; status: string }>(
+  rows: T[],
+  kept: readonly string[],
+): T[] {
+  return rows.filter(
+    (r) =>
+      (r.status === 'running' || r.status === 'waiting_cli' || r.status === 'waiting_form') &&
+      !kept.includes(r.id),
+  );
+}
+
 /** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
  *
  *  The fan-out arm of `resume` marks the dead terminals and hands back to the worker — but
@@ -673,10 +688,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         ),
       );
 
+    const leftActive = rowsLeftActive(
+      await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+      [step.id, ...downstream.map((r) => r.id)],
+    );
     const cascadeIsActive =
       step.status === 'running' ||
       step.status === 'waiting_cli' ||
-      downstream.some((r) => r.status === 'running' || r.status === 'waiting_cli');
+      downstream.some((r) => r.status === 'running' || r.status === 'waiting_cli') ||
+      leftActive.some((r) => r.status === 'running' || r.status === 'waiting_cli');
     if (cascadeIsActive) {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
@@ -687,8 +707,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const now = new Date();
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
-      // reset blanks and why. Mirrors resetStepAndDownstream in the worker.
-      await resetRowsForRerun(tx, id, [step, ...downstreamToReset], now);
+      // reset blanks and why. Mirrors resetStepAndDownstream in the worker. A row still active
+      // outside that set is reset with it: the retry moves the task away from it.
+      await resetRowsForRerun(tx, id, [step, ...downstreamToReset, ...leftActive], now);
       // Per-step "Override and run": only the clicked step bypasses the
       // unsafe-for-local-models guard on re-run. A plain retry sets this false
       // (re-arming the guard); the override button sets it true. Scoped to
@@ -751,6 +772,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           note: body.note ?? null,
           priorStatus: step.status,
           cascadedSteps: downstreamToReset.length,
+          leftActive: leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
           overrideLocalModel: body.overrideLocalModel === true,
           timeoutMinutes: body.timeoutMinutes ?? null,
         },
@@ -855,6 +877,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
               )
           : [];
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
+      const leftActive = rowsLeftActive(
+        await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+        [step.id, ...downstream.map((r) => r.id)],
+      );
       // Same rule as Retry: if anything in the set being reset is in flight, its sandbox has to
       // go first, or the reset row's CLI keeps running against a step that no longer owns it.
       // The clicked step counts too — a fan-out step can be re-run while its own barrier is
@@ -864,7 +890,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const liveInCascade =
         step.status === 'running' ||
         step.status === 'waiting_cli' ||
-        downstreamToReset.some((r) => r.status === 'running' || r.status === 'waiting_cli');
+        downstreamToReset.some((r) => r.status === 'running' || r.status === 'waiting_cli') ||
+        leftActive.some((r) => r.status === 'running' || r.status === 'waiting_cli');
       if (liveInCascade) {
         const killed = await killTaskSandboxes(id);
         logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
@@ -885,8 +912,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         await supersedeBlockingInvocation(tx, step.id, now);
         // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
         // iterations / output and — the whole point — the `done` rows of the agents that
-        // succeeded, which resetRowsForRerun would have deleted.
-        await resetRowsForRerun(tx, id, downstreamToReset, now);
+        // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
+        // set is reset too, as Retry resets one: the resume moves the task away from it.
+        await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now);
         await tx
           .update(schema.taskSteps)
           .set({
@@ -927,6 +955,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             round: step.round,
             retriedAgents: failedAgents.length,
             cascadedSteps: downstreamToReset.length,
+            leftActive: leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
             note: body.note ?? null,
           },
         });
