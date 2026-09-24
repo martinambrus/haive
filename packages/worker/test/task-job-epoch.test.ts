@@ -4,11 +4,24 @@ import { TASK_JOB_NAMES } from '@haive/shared';
 import {
   handleResult,
   processTaskJob,
+  resolveFixLoopGate,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+function tableNameOf(table: unknown): string {
+  if (table && typeof table === 'object') {
+    const obj = table as Record<string, unknown>;
+    const sym = Object.getOwnPropertySymbols(obj).find((s) => s.description === 'drizzle:Name');
+    if (sym) {
+      const name = obj[sym as unknown as string];
+      if (typeof name === 'string') return name;
+    }
+  }
+  return '';
+}
 
 /** Values a drizzle condition binds, in order. */
 function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
@@ -32,12 +45,18 @@ const h = vi.hoisted(() => {
     /** Reads answer empty instead of stopping the job. */
     readsAnswer: false,
     onSelect: (() => {}) as () => void,
+    /** Runs once a read of the task row has answered, so a Retry can land right after one. */
+    onRead: (() => {}) as () => void,
     taskWrites: [] as { epochs: unknown[]; landed: boolean }[],
     events: [] as unknown[],
     /** What the task queue is asked to enqueue. */
     add: vi.fn(async (..._args: unknown[]) => undefined),
     /** The source row still reads as this pass's, not reset by a Retry. */
     sourceOwned: true,
+    /** The task's fix-round cap; unset means the default. */
+    maxFixRounds: undefined as number | undefined,
+    /** What a read of the task's recorded fix requests answers. */
+    requestedEvents: [] as unknown[],
   };
   return { state };
 });
@@ -45,20 +64,25 @@ const h = vi.hoisted(() => {
 const db = {
   query: {
     tasks: {
-      findFirst: async () => ({
-        id: 'task-1',
-        userId: 'user-1',
-        type: 'workflow',
-        repositoryId: 'repo-1',
-        status: 'running',
-        orchestrationEpoch: h.state.taskEpoch,
-        metadata: null,
-        cliProviderId: null,
-        ignoreSavedStepClis: false,
-        executionPath: null,
-        currentStepId: 'epoch-job-step',
-        currentRound: 0,
-      }),
+      findFirst: async () => {
+        const task = {
+          id: 'task-1',
+          userId: 'user-1',
+          type: 'workflow',
+          repositoryId: 'repo-1',
+          status: 'running',
+          orchestrationEpoch: h.state.taskEpoch,
+          metadata: null,
+          cliProviderId: null,
+          ignoreSavedStepClis: false,
+          executionPath: null,
+          currentStepId: 'epoch-job-step',
+          currentRound: 0,
+          maxFixRounds: h.state.maxFixRounds,
+        };
+        h.state.onRead();
+        return task;
+      },
     },
     repositories: { findFirst: async () => ({ storagePath: '/tmp/repo', localPath: null }) },
   },
@@ -69,6 +93,7 @@ const db = {
     const rows = Object.assign(Promise.resolve([]), {
       limit: async () => [],
       for: async () => (h.state.sourceOwned ? [{ id: 'ts-1' }] : []),
+      orderBy: async () => h.state.requestedEvents,
     });
     return { from: () => ({ where: () => rows }) };
   },
@@ -77,11 +102,17 @@ const db = {
       h.state.events.push(v.eventType);
     },
   }),
-  update: () => ({
+  update: (table: unknown) => ({
     set: () => ({
       where: (cond: unknown) => ({
         returning: async () => {
-          const epochs = conditionValues(cond).filter((v) => typeof v === 'number');
+          const values = conditionValues(cond);
+          // A step row written under the ownership guard lands only while the pass still owns it.
+          if (tableNameOf(table) === 'task_steps') {
+            const guarded = values.includes('pending') && values.includes('skipped');
+            return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
+          }
+          const epochs = values.filter((v) => typeof v === 'number');
           const landed = epochs.length === 0 || epochs.includes(h.state.taskEpoch);
           h.state.taskWrites.push({ epochs, landed });
           return landed ? [{ id: 'task-1' }] : [];
@@ -127,14 +158,40 @@ for (const id of ['epoch-job-step', 'epoch-job-target', '07-phase-2-implement'])
   } as StepDefinition);
 }
 
+// A two-step chain of a type no real step uses, so the forward walk has one successor to hand to.
+for (const [id, index] of [
+  ['epoch-chain-first', 0],
+  ['epoch-chain-next', 1],
+] as const) {
+  stepRegistry.register({
+    metadata: {
+      id,
+      workflowType: 'epoch_chain',
+      index,
+      title: id,
+      description: 'a step whose successor is handed off',
+      requiresCli: false,
+    },
+    async detect() {
+      return {};
+    },
+    async apply() {
+      return {};
+    },
+  } as unknown as StepDefinition);
+}
+
 afterEach(() => {
   h.state.taskEpoch = 5;
   h.state.readsAnswer = false;
   h.state.onSelect = () => {};
+  h.state.onRead = () => {};
   h.state.taskWrites = [];
   h.state.events = [];
   h.state.add.mockClear();
   h.state.sourceOwned = true;
+  h.state.maxFixRounds = undefined;
+  h.state.requestedEvents = [];
   setContainerCleanupRunner(null);
 });
 
@@ -300,5 +357,144 @@ describe('a job that resets steps itself', () => {
     // requested or started.
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
+  });
+});
+
+describe('a hand-off that a Retry overtakes after its epoch check', () => {
+  const ctx = () => ({
+    taskId: 'task-1',
+    userId: 'user-1',
+    orchestrationEpoch: 5,
+    workflowType: 'epoch_chain',
+  });
+  const row = { id: 'ts-1', round: 0 };
+  const retryLands = () => {
+    h.state.taskEpoch = 6;
+  };
+
+  it('hands the successor off at the epoch the job holds', async () => {
+    h.state.readsAnswer = true;
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'done',
+      row,
+      output: null,
+    } as never);
+    expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+      stepId: 'epoch-chain-next',
+      epoch: 5,
+    });
+  });
+
+  it('hands no successor off once a Retry moved the task on', async () => {
+    h.state.readsAnswer = true;
+    h.state.onSelect = retryLands;
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'done',
+      row,
+      output: null,
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('parks the task on no form once a Retry moved it on', async () => {
+    h.state.readsAnswer = true;
+    h.state.onSelect = retryLands;
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'waiting_form',
+      row,
+      formSchema: {},
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.events).not.toContain('step.waiting_form');
+  });
+
+  it('marks the task running on no parked run once a Retry moved it on', async () => {
+    h.state.readsAnswer = true;
+    // Straight after the hand-off's own epoch check, which is the task read it makes.
+    h.state.onRead = retryLands;
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', {
+      status: 'waiting_cli',
+      row,
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.events).not.toContain('step.waiting_cli');
+  });
+
+  it('raises no round-cap gate on a task a Retry moved on', async () => {
+    h.state.readsAnswer = true;
+    h.state.maxFixRounds = 0;
+    h.state.onSelect = retryLands;
+    const capped = {
+      status: 'loop_back',
+      row,
+      diagnosis: 'a defect',
+      sourceStepId: 'epoch-chain-first',
+    };
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', capped as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.events).not.toContain('fix_loop.escalated');
+  });
+
+  it('raises no oscillation gate on a task a Retry moved on', async () => {
+    h.state.readsAnswer = true;
+    h.state.onSelect = retryLands;
+    // The same complaint two rounds back, and another step's between them.
+    h.state.requestedEvents = [
+      { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-chain-first', round: 1 } },
+      { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
+    ];
+    const repeated = {
+      status: 'loop_back',
+      row: { id: 'ts-1', round: 2 },
+      diagnosis: 'a defect',
+      sourceStepId: 'epoch-chain-first',
+    };
+    await handleResult(db as never, ctx() as never, 'epoch-chain-first', repeated as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(h.state.events).not.toContain('fix_loop.oscillation_detected');
+    expect(h.state.events).toContain('fix_loop.requested');
+  });
+
+  describe('resolving the fix-loop gate', () => {
+    const gate = { id: 'ts-1', stepId: 'epoch-chain-first', round: 1 };
+
+    it('resolves nothing once a Retry reset the gate', async () => {
+      h.state.readsAnswer = true;
+      h.state.sourceOwned = false;
+      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'accept', 1, '');
+      expect(h.state.events).toEqual([]);
+      expect(h.state.taskWrites).toEqual([]);
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('hands an accepted chain off only at the epoch the job holds', async () => {
+      h.state.readsAnswer = true;
+      h.state.onSelect = retryLands;
+      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'accept', 1, '');
+      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('re-enters implementation only at the epoch the job holds', async () => {
+      h.state.readsAnswer = true;
+      h.state.onSelect = retryLands;
+      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('re-enters implementation at the next round while the task is still at its epoch', async () => {
+      h.state.readsAnswer = true;
+      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+        stepId: '07-phase-2-implement',
+        round: 2,
+        epoch: 5,
+      });
+    });
   });
 });

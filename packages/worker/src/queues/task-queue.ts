@@ -372,6 +372,8 @@ async function resolveCurrentStepIndex(
  *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
 const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
 
+/** Park the task on a step. With `epoch`, only while the task is still at it, as for
+ *  markTaskRunningWithStep. */
 async function markTaskWaiting(
   db: Database,
   taskId: string,
@@ -379,9 +381,10 @@ async function markTaskWaiting(
   stepIndex: number,
   round = 0,
   status: TaskStatus = 'waiting_user',
-): Promise<void> {
+  epoch?: number,
+): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  await db
+  const [parked] = await db
     .update(schema.tasks)
     .set({
       status,
@@ -394,8 +397,11 @@ async function markTaskWaiting(
       and(
         eq(schema.tasks.id, taskId),
         notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        ...(epoch === undefined ? [] : [eq(schema.tasks.orchestrationEpoch, epoch)]),
       ),
-    );
+    )
+    .returning({ id: schema.tasks.id });
+  return parked !== undefined;
 }
 
 /** Point the running task at a step. With `epoch`, only while the task is still at it: false when
@@ -1131,13 +1137,21 @@ export async function handleResult(
       if (next) {
         // Forward walk stays in the same round as the step that just finished.
         const nextRound = result.row.round;
-        await markTaskRunningWithStep(
+        const pointed = await markTaskRunningWithStep(
           db,
           ctx.taskId,
           next.metadata.id,
           computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
           nextRound,
+          ctx.orchestrationEpoch,
         );
+        if (!pointed) {
+          logger.info(
+            { taskId: ctx.taskId, stepId, nextStepId: next.metadata.id },
+            'successor not handed off: the task moved to a newer epoch',
+          );
+          return;
+        }
         await enqueueAdvance(
           ctx.taskId,
           ctx.userId,
@@ -1154,19 +1168,21 @@ export async function handleResult(
       // Stamp the start of the idle (waiting-for-input) period so the step's
       // active-work timer can exclude it. Folded into idle_ms on form submit.
       if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) return;
-      await markTaskWaiting(
+      const parked = await markTaskWaiting(
         db,
         ctx.taskId,
         stepId,
         computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
         result.row.round,
         stepDef.parkTaskStatus,
+        ctx.orchestrationEpoch,
       );
+      if (!parked) return;
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
     case 'waiting_cli': {
-      await db
+      const [marked] = await db
         .update(schema.tasks)
         .set({
           status: 'running',
@@ -1178,7 +1194,14 @@ export async function handleResult(
           currentRound: result.row.round,
           updatedAt: new Date(),
         })
-        .where(eq(schema.tasks.id, ctx.taskId));
+        .where(
+          and(
+            eq(schema.tasks.id, ctx.taskId),
+            eq(schema.tasks.orchestrationEpoch, ctx.orchestrationEpoch),
+          ),
+        )
+        .returning({ id: schema.tasks.id });
+      if (!marked) return;
       // Assert the parked status on the ROW first. It can still read `running` here, which makes
       // the park below a silent no-op (markCliParkBegin is guarded on status = waiting_cli): a
       // first run or a form submission flips the row to `running` (step-runner.ts), and the
@@ -1246,13 +1269,16 @@ export async function handleResult(
             sourceStepId: result.sourceStepId,
             round: nextRound,
           });
-          await markTaskWaiting(
+          const waiting = await markTaskWaiting(
             db,
             ctx.taskId,
             stepId,
             computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
             result.row.round,
+            'waiting_user',
+            ctx.orchestrationEpoch,
           );
+          if (!waiting) return;
           await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.oscillation_detected', {
             sourceStepId: result.sourceStepId,
             conflictingStepId: osc.conflictingStepId,
@@ -1295,13 +1321,16 @@ export async function handleResult(
           sourceStepId: result.sourceStepId,
           round: nextRound,
         });
-        await markTaskWaiting(
+        const waiting = await markTaskWaiting(
           db,
           ctx.taskId,
           stepId,
           computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
           result.row.round,
+          'waiting_user',
+          ctx.orchestrationEpoch,
         );
+        if (!waiting) return;
         await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.escalated', {
           sourceStepId: result.sourceStepId,
           rounds: cap,
@@ -1599,7 +1628,7 @@ export async function handleResult(
 /** Resolve a fix-loop escalation gate decision parked on the source step (the step that
  *  found the defect at the round cap): continue (one more round), accept (stand down the
  *  loop + advance), or abort (fail). Mirrors the revise route's submit-driven routing. */
-async function resolveFixLoopGate(
+export async function resolveFixLoopGate(
   db: Database,
   ctx: ResolvedTaskContext,
   gateRow: typeof schema.taskSteps.$inferSelect,
@@ -1609,10 +1638,8 @@ async function resolveFixLoopGate(
    *  implementation step and 'abort' fails the task, so there is nothing for it to reach. */
   instruction: string,
 ): Promise<void> {
-  await db
-    .update(schema.taskSteps)
-    .set({ status: 'done', endedAt: new Date(), updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, gateRow.id));
+  // A Retry that reset the gate took it over, and its own pass decides what runs next.
+  if (!(await writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() }))) return;
 
   if (action === 'abort') {
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
@@ -1637,13 +1664,15 @@ async function resolveFixLoopGate(
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
     const next = idx >= 0 ? steps[idx + 1] : undefined;
     if (next) {
-      await markTaskRunningWithStep(
+      const pointed = await markTaskRunningWithStep(
         db,
         ctx.taskId,
         next.metadata.id,
         computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
         round,
+        ctx.orchestrationEpoch,
       );
+      if (!pointed) return;
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
       await markTaskCompleted(db, ctx.taskId, ctx.orchestrationEpoch);
@@ -1673,13 +1702,15 @@ async function resolveFixLoopGate(
     round: nextRound,
     directed: directive.length > 0,
   });
-  await markTaskRunningWithStep(
+  const pointed = await markTaskRunningWithStep(
     db,
     ctx.taskId,
     target.metadata.id,
     computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
     nextRound,
+    ctx.orchestrationEpoch,
   );
+  if (!pointed) return;
   await enqueueAdvance(
     ctx.taskId,
     ctx.userId,

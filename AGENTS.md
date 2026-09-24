@@ -293,8 +293,11 @@ epoch and gives the row back if a Retry overtook it. The recap goes to the ledge
 only after the outcome has landed and only while the row still reads `done`: the ledger entry is
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
 since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
-epoch the pass ran under: `handleResult` does nothing once the task has moved on, and completing or
-failing the task carries that epoch, since either one also reaps the task's containers. That holds
+epoch the pass ran under: `handleResult` does nothing once the task has moved on, and every write it
+makes to the task carries that epoch, so a Retry landing after that check keeps its pointer: pointing
+the task at the next step, parking it on a form, a run or a fix-loop gate, and completing or failing
+it, the last two also reaping the task's containers. Answering a fix-loop gate does the same, and
+closes the gate only while its row is still the pass's own. That holds
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
 read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
