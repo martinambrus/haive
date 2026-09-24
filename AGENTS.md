@@ -275,13 +275,15 @@ which no continuation does any more. The hold is taken outside the job's own cat
 catch fails the task, and it is per process, like the queue's single worker.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
-reset. Every write a pass makes to its row (`updateRow`) lands only while the row is still its own,
-not `pending` or `skipped`, and the cancel poll stops a pass whose task moved to a newer epoch.
-Either way the pass stops there, records no recap and hands nothing off (`superseded`), and the
-Retry's pass runs once it lets go. Only the two writes that open a pass on its `pending` row,
-claiming or skipping it, go around the check (`openRow`). The recap goes to the ledger, or to a
-recap run, only after the outcome has landed, and a recap run is queued only while the row is still
-the finished one, since a Retry's reset supersedes only the runs that already exist.
+reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
+while the row is still the pass's own, not `pending` or `skipped`. The cancel poll also stops a
+pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
+hands nothing off (`superseded`), and the Retry's pass runs once it lets go. Only the two writes that
+open a pass on its `pending` row, claiming or skipping it, go around the check (`openRow`). The recap
+goes to the ledger, or to a recap run, only after the outcome has landed, and a recap run is queued
+only while the row is still the finished one, since a Retry's reset supersedes only the runs that
+already exist.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,

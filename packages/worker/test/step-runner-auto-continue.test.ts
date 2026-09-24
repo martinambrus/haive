@@ -42,9 +42,9 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
-/** finishRow's guard, evaluated against the mock row: an outcome lands only while the row is not
- *  `pending` or `skipped`. */
-function refusedByFinishGuard(cond: unknown, status: unknown): boolean {
+/** updateRow's ownership guard, evaluated against the mock row: a write lands only while the row
+ *  is not `pending` or `skipped`. */
+function refusedByOwnershipGuard(cond: unknown, status: unknown): boolean {
   const values = conditionValues(cond);
   return (
     values.includes('pending') &&
@@ -95,7 +95,7 @@ function makeMockDb(state: MockState): Database {
             returning: async () => {
               if (
                 tableName === 'task_steps' &&
-                refusedByFinishGuard(cond, state.taskStepRow.status)
+                refusedByOwnershipGuard(cond, state.taskStepRow.status)
               ) {
                 return [];
               }

@@ -26,6 +26,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
+import { updateOwnedStep } from './step-ownership.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
@@ -130,12 +131,7 @@ async function setStepStatus(
     endedAt?: Date;
   },
 ): Promise<TaskStepRow> {
-  const rows = await db
-    .update(schema.taskSteps)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepRowId))
-    .returning();
-  return rows[0]!;
+  return updateOwnedStep(db, stepRowId, patch);
 }
 
 interface IntegrationWorktree {

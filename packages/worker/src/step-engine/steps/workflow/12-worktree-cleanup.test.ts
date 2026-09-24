@@ -8,6 +8,7 @@ import type { MergeResolveState } from '@haive/database';
 import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
+import { StepSupersededError } from '../../step-ownership.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
 
 const exec = promisify(execFile);
@@ -119,10 +120,13 @@ function makeDb(
     worktreeSharer?: { id: string; title: string; status: string };
     /** Rows buildSquashCommitMessage lists in the squash commit's body. */
     dagIssues?: { issueKey: string; title: string }[];
+    /** A Retry reset the row while the pass ran: a write carrying the ownership guard matches
+     *  nothing. */
+    rowTaken?: boolean;
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
-  let status = 'running';
+  let status = opts.rowTaken ? 'pending' : 'running';
   let errorMessage: string | null = null;
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
@@ -140,8 +144,11 @@ function makeDb(
     },
     update: () => ({
       set: (patch: Record<string, unknown>) => ({
-        where: () => ({
+        where: (cond: unknown) => ({
           returning: async () => {
+            const values = conditionValues(cond);
+            const guarded = values.includes('pending') && values.includes('skipped');
+            if (guarded && (status === 'pending' || status === 'skipped')) return [];
             applyPatch(patch);
             return [{ id: 'step1', status, errorMessage }];
           },
@@ -167,7 +174,21 @@ function makeDb(
       }),
     }),
   };
-  return { db, getState: () => mergeState };
+  return { db, getState: () => mergeState, getStatus: () => status };
+}
+
+/** Values a drizzle condition binds, in order. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) conditionValues(item, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) acc.push(obj.value);
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -314,6 +335,28 @@ describe('12 merge phase + apply (real git)', () => {
       // The merge was aborted (no MERGE_HEAD) and the branch + worktree survive.
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
       expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('conflict on a row a Retry reset meanwhile: the merge is aborted and nothing is written', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      const h = makeDb({ rowTaken: true });
+      const ctx = mkCtx(parent, h.db);
+      await expect(
+        resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }),
+          ctx,
+          mkParams(h.db),
+        ),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      expect(h.getStatus()).toBe('pending');
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

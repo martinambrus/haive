@@ -16,11 +16,13 @@ import {
   parseReviewerOutput,
   parseAdvisor,
   parseReplanner,
+  resolveDagPhase,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
 import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
+import { StepSupersededError } from './step-ownership.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
 
@@ -30,6 +32,67 @@ type InvLike = Parameters<typeof parseCoderResult>[0];
 function inv(partial: Partial<InvLike>): InvLike {
   return { parsedOutput: null, rawOutput: null, exitCode: 0, ...partial } as InvLike;
 }
+
+/** Values a drizzle condition binds, in order. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) conditionValues(item, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) acc.push(obj.value);
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
+}
+
+/** A step row behind a db that honours the ownership guard: a write that carries it matches
+ *  nothing once the row is `pending` or `skipped`, and any other write lands. */
+function stepRowDb(status: string) {
+  const row = { id: 'step1', status, errorMessage: null as string | null };
+  const db = {
+    update: () => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: (cond: unknown) => ({
+          returning: async () => {
+            const values = conditionValues(cond);
+            const guarded = values.includes('pending') && values.includes('skipped');
+            if (guarded && (row.status === 'pending' || row.status === 'skipped')) return [];
+            Object.assign(row, patch);
+            return [{ ...row }];
+          },
+        }),
+      }),
+    }),
+  };
+  return { db, row };
+}
+
+describe('resolveDagPhase row ownership', () => {
+  // No providers is the first write the phase makes, so it stands for every one of them.
+  const run = (db: unknown) =>
+    resolveDagPhase(
+      db as never,
+      dagExecuteStep as never,
+      { id: 'step1' } as never,
+      {} as never,
+      {} as never,
+    );
+
+  it('stops without writing when a Retry reset the row while the pass ran', async () => {
+    const { db, row } = stepRowDb('pending');
+    await expect(run(db)).rejects.toBeInstanceOf(StepSupersededError);
+    expect(row.status).toBe('pending');
+  });
+
+  it('writes its outcome while the row is still its own', async () => {
+    const { db, row } = stepRowDb('running');
+    const result = await run(db);
+    expect(result.resolved).toBe(false);
+    expect(row.status).toBe('failed');
+  });
+});
 
 describe('parseCoderResult', () => {
   it('parses a fenced ISSUE_RESULT_JSON from rawOutput', () => {

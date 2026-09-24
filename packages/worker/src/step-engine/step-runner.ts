@@ -72,6 +72,7 @@ import {
 import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
+import { StepSupersededError, updateOwnedStep } from './step-ownership.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona } from './steps/_retrieval-guidance.js';
@@ -3168,28 +3169,9 @@ export async function upsertRow(
   return row;
 }
 
-/** A pass lost its row: a Retry or a Skip that arrived meanwhile left it `pending` or `skipped`. */
-class StepSupersededError extends Error {
-  constructor(id: string) {
-    super(`task step ${id} was reset or skipped while this pass ran`);
-    this.name = 'StepSupersededError';
-  }
-}
-
-/** Every write a pass makes to its row. It lands only while the row is still the pass's own, not
- *  `pending` (a Retry reset it) or `skipped` (a Skip took it); otherwise it throws
- *  StepSupersededError and the pass stops without touching the row. */
-async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
-  const rows = await db
-    .update(schema.taskSteps)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(
-      and(eq(schema.taskSteps.id, id), notInArray(schema.taskSteps.status, ['pending', 'skipped'])),
-    )
-    .returning();
-  const row = rows[0];
-  if (!row) throw new StepSupersededError(id);
-  return row;
+/** Every write a pass makes to its row, through the ownership check (`updateOwnedStep`). */
+function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
+  return updateOwnedStep(db, id, patch);
 }
 
 /** The writes that open a pass on its `pending` row: claiming it, or skipping it outright. */
