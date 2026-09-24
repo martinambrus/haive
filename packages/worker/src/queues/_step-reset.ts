@@ -14,19 +14,24 @@ import { isFatalProviderFailure } from './cli-exec/failure-class.js';
 // (packages/api/src/routes/tasks/steps.ts) but lives worker-side so the queue can drive
 // it without an HTTP round-trip. The two are intentional duplicates — keep them in sync.
 
+class EpochMovedOn extends Error {}
+
 /** Reset `targetStepId` and every non-pending downstream row (same round) to `pending`,
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
  *  Scoped to `round` so a concurrent fix-loop round's rows are never disturbed. Bumps the
  *  task's orchestration epoch (like the API retry) so stale advance-step jobs no-op.
+ *  With `expectedEpoch` it resets only while the task is still at that epoch, and answers
+ *  `superseded`, having changed nothing, once a Retry or another reset moved it on.
  *  Returns the downstream-reset count + the new epoch, or null when no target row exists. */
 export async function resetStepAndDownstream(
   db: Database,
   taskId: string,
   targetStepId: string,
   round: number,
-): Promise<{ downstreamReset: number; newEpoch: number } | null> {
+  expectedEpoch?: number,
+): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
     .from(schema.taskSteps)
@@ -62,90 +67,102 @@ export async function resetStepAndDownstream(
   const allStepIds = [target.id, ...downstreamToReset];
 
   let newEpoch = 0;
-  await db.transaction(async (tx) => {
-    const now = new Date();
-    // Both halves of the step's spend: its own invocations AND the recap pass, whose
-    // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
-    // recap's failure row live, and the step card keeps showing an error about a run that
-    // has been replaced. Keep in sync with the API retry site.
-    await tx
-      .update(schema.cliInvocations)
-      .set({ supersededAt: now })
-      .where(
-        and(
-          or(
-            inArray(schema.cliInvocations.taskStepId, allStepIds),
-            inArray(schema.cliInvocations.summaryForStepId, allStepIds),
-          ),
-          isNull(schema.cliInvocations.supersededAt),
-        ),
-      );
-    await tx
-      .delete(schema.taskStepAgentMinings)
-      .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
-    // When this reset cascades through 06c-dag-execute, task_steps alone leaves the DAG's
-    // task_dag_issues rows failed_unrecoverable, so resolveDagPhase re-derives the wedge and
-    // the step re-halts with the identical error. Reset the current level's stuck issues too.
-    // No-op when the task has no DAG / no stuck issue. Keep in sync with the API retry site.
-    await resetDagCurrentLevelForRetry(tx, taskId);
-    // Clearing formSchema is essential: the runner only re-renders the form when the
-    // persisted schema is null. formValues is cleared so the regenerated form re-decides.
-    // Zero the live timing per row, but first fold the finishing run's work/idle/user
-    // into carried_* so the step's timing survives the restart (a plain reset would
-    // discard the prior run, making the effort timer undercount). computeFoldContribution
-    // counts a failed step's fail->retry dead-wait as idle so wall reconciles, and
-    // reclassifies an orphaned still-open run's span as idle rather than inflating carried
-    // work with it. Per-row (not a blanket update) because each row's contribution differs.
-    const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
-    for (const r of resetRows) {
-      const c = computeFoldContribution(r, now.getTime());
+  try {
+    await db.transaction(async (tx) => {
+      const now = new Date();
+      // Both halves of the step's spend: its own invocations AND the recap pass, whose
+      // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
+      // recap's failure row live, and the step card keeps showing an error about a run that
+      // has been replaced. Keep in sync with the API retry site.
       await tx
-        .update(schema.taskSteps)
-        .set({
-          status: 'pending',
-          detectOutput: null,
-          formSchema: null,
-          formValues: null,
-          output: null,
-          // The recap describes the run being discarded; left behind it reads as the new
-          // run's recap the moment the step goes green again.
-          summary: null,
-          // Same for the degraded note, which describes the OUTPUT being cleared above. Its
-          // only writer is the done finalize, so it self-clears on a re-run that succeeds and
-          // lingers on one that does not — captioning a failed step with the fallback the
-          // PREVIOUS run took. Cleared wherever output is.
-          degradedNote: null,
-          iterations: [],
-          iterationCount: 0,
-          statusMessage: null,
-          // Describes attempts superseded above, and attemptCount (which gates the "re-ran
-          // automatically" card) goes back to 0 with them — so the note has to go too, or it
-          // explains runs the card no longer admits to. Keep in sync with the API retry site.
-          warningMessage: null,
-          errorMessage: null,
-          errorHint: null,
-          startedAt: null,
-          endedAt: null,
-          idleMs: 0,
-          waitingStartedAt: null,
-          userActiveMs: 0,
-          carriedWorkMs: r.carriedWorkMs + c.workMs,
-          carriedIdleMs: r.carriedIdleMs + c.idleMs,
-          carriedUserActiveMs: r.carriedUserActiveMs + c.userActiveMs,
-          updatedAt: now,
-        })
-        .where(eq(schema.taskSteps.id, r.id));
-    }
-    // Bump the task's orchestration epoch so any advance-step job queued under the
-    // prior epoch (a stale/duplicate job) is skipped by handleAdvanceStep — the
-    // worker-side equivalent of the API retry's epoch bump.
-    const bumped = await tx
-      .update(schema.tasks)
-      .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`, updatedAt: now })
-      .where(eq(schema.tasks.id, taskId))
-      .returning({ epoch: schema.tasks.orchestrationEpoch });
-    newEpoch = bumped[0]?.epoch ?? 0;
-  });
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(
+          and(
+            or(
+              inArray(schema.cliInvocations.taskStepId, allStepIds),
+              inArray(schema.cliInvocations.summaryForStepId, allStepIds),
+            ),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        );
+      await tx
+        .delete(schema.taskStepAgentMinings)
+        .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
+      // When this reset cascades through 06c-dag-execute, task_steps alone leaves the DAG's
+      // task_dag_issues rows failed_unrecoverable, so resolveDagPhase re-derives the wedge and
+      // the step re-halts with the identical error. Reset the current level's stuck issues too.
+      // No-op when the task has no DAG / no stuck issue. Keep in sync with the API retry site.
+      await resetDagCurrentLevelForRetry(tx, taskId);
+      // Clearing formSchema is essential: the runner only re-renders the form when the
+      // persisted schema is null. formValues is cleared so the regenerated form re-decides.
+      // Zero the live timing per row, but first fold the finishing run's work/idle/user
+      // into carried_* so the step's timing survives the restart (a plain reset would
+      // discard the prior run, making the effort timer undercount). computeFoldContribution
+      // counts a failed step's fail->retry dead-wait as idle so wall reconciles, and
+      // reclassifies an orphaned still-open run's span as idle rather than inflating carried
+      // work with it. Per-row (not a blanket update) because each row's contribution differs.
+      const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
+      for (const r of resetRows) {
+        const c = computeFoldContribution(r, now.getTime());
+        await tx
+          .update(schema.taskSteps)
+          .set({
+            status: 'pending',
+            detectOutput: null,
+            formSchema: null,
+            formValues: null,
+            output: null,
+            // The recap describes the run being discarded; left behind it reads as the new
+            // run's recap the moment the step goes green again.
+            summary: null,
+            // Same for the degraded note, which describes the OUTPUT being cleared above. Its
+            // only writer is the done finalize, so it self-clears on a re-run that succeeds and
+            // lingers on one that does not — captioning a failed step with the fallback the
+            // PREVIOUS run took. Cleared wherever output is.
+            degradedNote: null,
+            iterations: [],
+            iterationCount: 0,
+            statusMessage: null,
+            // Describes attempts superseded above, and attemptCount (which gates the "re-ran
+            // automatically" card) goes back to 0 with them — so the note has to go too, or it
+            // explains runs the card no longer admits to. Keep in sync with the API retry site.
+            warningMessage: null,
+            errorMessage: null,
+            errorHint: null,
+            startedAt: null,
+            endedAt: null,
+            idleMs: 0,
+            waitingStartedAt: null,
+            userActiveMs: 0,
+            carriedWorkMs: r.carriedWorkMs + c.workMs,
+            carriedIdleMs: r.carriedIdleMs + c.idleMs,
+            carriedUserActiveMs: r.carriedUserActiveMs + c.userActiveMs,
+            updatedAt: now,
+          })
+          .where(eq(schema.taskSteps.id, r.id));
+      }
+      // Bump the task's orchestration epoch so any advance-step job queued under the
+      // prior epoch (a stale/duplicate job) is skipped by handleAdvanceStep — the
+      // worker-side equivalent of the API retry's epoch bump.
+      // Last, as the api Retry takes the task row last, so the two never wait on each other. A
+      // task a Retry moved on since rolls the whole reset back.
+      const bumped = await tx
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`, updatedAt: now })
+        .where(
+          expectedEpoch === undefined
+            ? eq(schema.tasks.id, taskId)
+            : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, expectedEpoch)),
+        )
+        .returning({ epoch: schema.tasks.orchestrationEpoch });
+      if (!bumped[0] && expectedEpoch !== undefined) throw new EpochMovedOn();
+      newEpoch = bumped[0]?.epoch ?? 0;
+    });
+  } catch (err) {
+    if (err instanceof EpochMovedOn) return 'superseded';
+    throw err;
+  }
 
   return { downstreamReset: downstreamToReset.length, newEpoch };
 }

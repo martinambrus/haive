@@ -241,6 +241,93 @@ sending, such as a `selectAgents` that refuses, fails every reservation still un
 (`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
 still running.
 
+### Worker restarts
+
+**A step keeps the status that says what it is waiting on, even while its apply runs.** A
+continuation (the advance an ended CLI run queues) re-enters a `waiting_cli` step. For a
+form-bearing step it used to re-validate the saved answers and flip the row to `running`. A worker
+that died from that point on left a `running` row, which boot reads as a pass that died before
+doing anything, so it reset the step: every agent row deleted and the answers cleared. Now a
+continuation that finds its answers saved uses them as they are, and the row stays `waiting_cli`.
+Values the job carries are ignored there, since a parked step's only source of them is a submit
+redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
+
+**Boot recovers a parked step and resets only a step that has nothing to lose.**
+`reconcileOrphanedSteps` runs before any queue starts:
+
+- A `waiting_cli` step the task is on has its orphaned runs ended, and unstarted runs no queued job
+  owes are ended too. The task's epoch is then fenced by a compare-and-swap on the state read, and
+  the step is re-driven at the new epoch, so every advance queued before the restart is stale. A
+  step the task has moved past is requeued rather than re-driven, and every run it still has is
+  superseded: one that ended later would resume it at whatever epoch the task was at by then.
+- A `running` step the task is on is decided by `bootRecoveryAction`. With agent work behind it (a
+  finished loop pass, an agent row, or a run of its own nothing superseded), it is a parked step
+  whose park write was lost. It is demoted to `waiting_cli`, guarded on `running`, and recovered
+  like the parked ones. Without agent work it is reset and re-run, as a deterministic step always
+  was.
+
+**A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
+apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
+both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
+at a time in the worker and defers a second with `moveToDelayed` rather than dropping it: the
+advance already running may be a barrier check that parks without seeing what the second was
+queued for. It replaced a guard that let a second advance skip only while the row read `running`,
+which no continuation does any more. An advance that cannot be deferred (no job token, or the move
+failed) waits for the holder in this process instead: running beside it is what the hold prevents,
+and failing the attempt could lose it, since a continuation is queued with no retries. The hold is
+taken outside the job's own catch, since that
+catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
+then run after the pass it waited behind failed the step, so an advance on a `failed` task is
+dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
+task `running` first. An answer submitted to a form still parked is the one exception, since
+answering it is what reopens the task; an advance onto that form that carries no answer is dropped
+like any other. A clarification answer is one of those, since it rides `task_events` rather than the
+job, so its route sets a failed task `running` itself before it queues the advance.
+
+A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
+reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
+while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
+Stop, which fails the row without moving the task's epoch). A pass a Stop cut off mid-apply then
+releases what the failed task holds (`settleFailedTask`), as its own failure would have. The cancel
+poll also stops a
+pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
+hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
+a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
+`pending`, so a Skip stands. A Retry leaves the row `pending` too, so the claim then reads the task's
+epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
+only after the outcome has landed and only while the row still reads `done`: the ledger entry is
+inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
+since a Retry's reset supersedes only the runs that already exist. That check narrows the window
+without closing it: a Retry supersedes a step's runs before it writes the rows, so a recap inserted in
+between still reads the row as `done`, and only a summary write that lands on the row version it
+summarized can refuse it. The handoff is fenced on the
+epoch the pass ran under: `handleResult` does nothing once the task has moved on, and every write it
+makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
+landing after that check stands: pointing the task at the next step, parking it on a form, a run or a
+fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
+Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
+own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
+points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
+first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
+signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
+while the fence holds. A job revives a failed task only when the task was already failed at pickup,
+which the pickup guard allows only for an answer to a form still parked, so a Stop landing after
+pickup stands; the answer to a fix-loop gate hands off under the same rule. That holds
+for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
+read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
+revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
+api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
+hand-off after it points the task at the target only while the task is still at that epoch, and a
+fix round's request and `started` event are written in the same transaction: a new round has no row
+to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
+cap. That transaction first locks the source row while it is still the pass's own
+(`lockOwnedStep`), since a Retry writes the steps before it moves the epoch.
+
+A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
+lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
+which would otherwise answer the new form with what was typed into the old one.
+
 ## CLI adapter system
 
 `packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so do `amp` and `codex` — codex only through its app-server, and only once that is verified for the task (`steeringTransportReady`) — see Steering below.
@@ -848,7 +935,7 @@ the previous ranking exactly.
 
 **Completion greens the node** from the worker's `markTaskCompleted` (the only completion write; cancel and fail have their own functions, which is the point). Only `todo`/`in_progress` advance — `blocked_human` and `not_applicable` are verdicts a person entered, and a task finishing is weaker evidence than that. Status roll-up is DERIVED at read time (`rollUpStatus` in shared, one source for every view) and never stored: a `blocked_human` descendant makes every ancestor render blocked; green requires every descendant `done` or `not_applicable` — `not_applicable` must not prevent green, but must never render green itself either.
 
-**Two triggers, one builder.** `createPlanBuildStep` (steps/plan/01-plan-build.ts) serves both the standalone `plan_build` task and the onboarding wrapper `10_8-plan-build` (index 14.5, after the KB and RAG exist, before the mirror is staged), because `onboarding_upgrade` reconciles template artifacts only and never re-runs onboarding steps — an already-onboarded repo can reach the builder no other way. The build is LEVEL-BY-LEVEL (wave 0 drafts root + level 1 via `selectAgents`; each later wave is thrown from apply() as a `MiningWaveError`, one agent per frontier node) because one pass cannot emit 400 nodes without truncating. Do NOT move it to `loop`: the runner's loop re-entry calls `resolveLlmPhase`, which asserts `stepDef.llm` exists — a mining-only loop step dies on its second pass with "reading 'prepare'" (measured, on a real repo). The frontier is recomputed from the DB every wave, and excludes `research`/`external` nodes (a blocker waiting on a person is not a system to decompose) and `taskable` leaves; per-wave agent ids (`plan-expand-<nodeId>-p<N>`) double as the asked-set, so a node is never re-asked even though apply passes are independent calls. Because a wave re-runs apply() with the CUMULATIVE result set and temp-ref creation is not idempotent, the fold is over `newAgentMiningResults` — `task_step_agent_minings.consumed_at` (migration 0132) is stamped on every row apply has folded right before the next wave dispatches and cleared on a re-roll; for steps that never throw MiningWaveError the new field equals the cumulative set, so existing steps are unchanged. That set is decided once per pass, so each reply is also CLAIMED as it is folded (`applyAgentPatchOnce`, `_plan-prompt.ts`): its row's `consumed_at` is set, only while unset, in the same transaction as its patch, and so is the row's partial-apply note, since every later pass skips a claimed reply and a note written after the commit could be lost for good. Two apply passes over one wave, or one pass that re-runs apply in place after a wave that sent nothing, then write a reply once, and a reply another pass claimed counts as applied, so the builder's whole-wave re-roll does not fire on a wave that did land. 01, 02 and 03 all fold this way. A `ReopenStepFormError` consumes the step's rows and clears its detect output, form and answers in ONE transaction with `pause_form_on_retry` set, before it detects afresh; a worker that dies before the new form is parked re-detects and stops at the form instead of re-sending the answered items with the old answers. The submit that led there can be redelivered, still carrying those answers, and a form submit carries no epoch to drop it by. While the hold is set, values a job carries are ignored, since the form has not been offered since. Once the form is parked, `isStaleSubmit` drops a submit older than the park. Every form park is stamped (`waiting_started_at`) in the write that parks it, not after, so there is no moment when a parked form has no park to be older than. A pass that dies between that write and marking the task waiting leaves the task `running`, and a stale submit landing on one parks the form again (`staleSubmitAction`) rather than only being dropped.
+**Two triggers, one builder.** `createPlanBuildStep` (steps/plan/01-plan-build.ts) serves both the standalone `plan_build` task and the onboarding wrapper `10_8-plan-build` (index 14.5, after the KB and RAG exist, before the mirror is staged), because `onboarding_upgrade` reconciles template artifacts only and never re-runs onboarding steps — an already-onboarded repo can reach the builder no other way. The build is LEVEL-BY-LEVEL (wave 0 drafts root + level 1 via `selectAgents`; each later wave is thrown from apply() as a `MiningWaveError`, one agent per frontier node) because one pass cannot emit 400 nodes without truncating. Do NOT move it to `loop`: the runner's loop re-entry calls `resolveLlmPhase`, which asserts `stepDef.llm` exists — a mining-only loop step dies on its second pass with "reading 'prepare'" (measured, on a real repo). The frontier is recomputed from the DB every wave, and excludes `research`/`external` nodes (a blocker waiting on a person is not a system to decompose) and `taskable` leaves; per-wave agent ids (`plan-expand-<nodeId>-p<N>`) double as the asked-set, so a node is never re-asked even though apply passes are independent calls. Because a wave re-runs apply() with the CUMULATIVE result set and temp-ref creation is not idempotent, the fold is over `newAgentMiningResults` — `task_step_agent_minings.consumed_at` (migration 0132) is stamped on every row apply has folded right before the next wave dispatches and cleared on a re-roll; for steps that never throw MiningWaveError the new field equals the cumulative set, so existing steps are unchanged. That set is decided once per pass, so each reply is also CLAIMED as it is folded (`applyAgentPatchOnce`, `_plan-prompt.ts`): its row's `consumed_at` is set, only while unset, in the same transaction as its patch, and so is the row's partial-apply note, since every later pass skips a claimed reply and a note written after the commit could be lost for good. Two apply passes over one wave, or one pass that re-runs apply in place after a wave that sent nothing, then write a reply once, and a reply another pass claimed counts as applied, so the builder's whole-wave re-roll does not fire on a wave that did land. 01, 02 and 03 all fold this way. A `ReopenStepFormError` consumes the step's rows and clears its detect output, form and answers in ONE transaction with `pause_form_on_retry` set, before it detects afresh, and writes the row only while the pass still owns it, since a Retry's reset keeps its own hold; a worker that dies before the new form is parked re-detects and stops at the form instead of re-sending the answered items with the old answers. The submit that led there can be redelivered, still carrying those answers, and a form submit carries no epoch to drop it by. While the hold is set, values a job carries are ignored, since the form has not been offered since. Once the form is parked, `isStaleSubmit` drops a submit older than the park. Every form park is stamped (`waiting_started_at`) in the write that parks it, not after, so there is no moment when a parked form has no park to be older than. A pass that dies between that write and marking the task waiting leaves the task `running`, and a stale submit landing on one parks the form again (`staleSubmitAction`) rather than only being dropped.
 
 **Two modes, and the difference is the node status.** `from_repo` mines the KB and its nodes
 arrive `done` because they describe code that exists; `greenfield` takes a written brief plus

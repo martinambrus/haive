@@ -83,6 +83,8 @@ interface MockState {
   miningInsertStatements?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
+  afterStepWrite?: (set: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -120,6 +122,17 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+/** updateOwnedStep's guard, evaluated against the mock row: a write that carries it lands only
+ *  while the row is not `pending` or `skipped`. */
+function refusedByOwnershipGuard(cond: unknown, status: unknown): boolean {
+  const values = conditionValues(cond);
+  return (
+    values.includes('pending') &&
+    values.includes('skipped') &&
+    (status === 'pending' || status === 'skipped')
+  );
+}
+
 /** The mining-row writes whose WHERE names this row id. */
 const writesTo = (state: MockState, rowId: string) =>
   (state.miningUpdateLog ?? []).filter((u) => conditionValues(u.where).includes(rowId));
@@ -142,16 +155,25 @@ function makeMockDb(state: MockState): Database {
         const rows = rowsFor(tableNameOf(table));
         // .where() and .orderBy() are each awaited directly by some reads and chained
         // further by others, so both must be thenable AND chainable.
-        const thenable = () => ({
+        const thenable = (found: unknown[] = rows) => ({
           then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) =>
-            Promise.resolve(rows).then(res, rej),
-          limit: async () => rows,
-          orderBy: () => thenable(),
+            Promise.resolve(found).then(res, rej),
+          limit: async () => found,
+          orderBy: () => thenable(found),
         });
+        // A read that asks for the step row as finished finds nothing once it is not.
+        const where = (cond?: unknown) =>
+          thenable(
+            tableNameOf(table) === 'task_steps' &&
+              conditionValues(cond).includes('done') &&
+              state.taskStepRow.status !== 'done'
+              ? []
+              : rows,
+          );
         // A joined read (priorRoundTimeoutAttempts, which asks earlier rounds what rung this
         // agent reached) projects from the base table and uses task_steps only to scope the
         // task/step; the mock ignores the join condition and returns the base rows unchanged.
-        return { where: thenable, innerJoin: () => ({ where: thenable }) };
+        return { where, innerJoin: () => ({ where }) };
       },
     }),
     insert: (table: unknown) => {
@@ -192,7 +214,10 @@ function makeMockDb(state: MockState): Database {
         set: (v: Record<string, unknown>) => {
           const record = (where: unknown) => {
             state.updates.push({ table: tableName, ...v });
-            if (tableName === 'task_steps') state.taskStepRow = { ...state.taskStepRow, ...v };
+            if (tableName === 'task_steps') {
+              state.taskStepRow = { ...state.taskStepRow, ...v };
+              state.afterStepWrite?.(v);
+            }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
             }
@@ -207,13 +232,16 @@ function makeMockDb(state: MockState): Database {
           };
           return {
             where: (cond: unknown) => {
+              const refused = () =>
+                tableName === 'task_steps' &&
+                refusedByOwnershipGuard(cond, state.taskStepRow.status);
               return {
                 then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) => {
-                  if (!lost()) record(cond);
+                  if (!lost() && !refused()) record(cond);
                   return Promise.resolve([]).then(res, rej);
                 },
                 returning: async () => {
-                  if (lost()) return [];
+                  if (lost() || refused()) return [];
                   record(cond);
                   if (tableName === 'task_steps') return [state.taskStepRow];
                   return tableName === 'task_step_agent_minings' ? [{ id: 'mock-updated' }] : [];
@@ -618,6 +646,40 @@ describe('advanceStep apply-to-form continuation', () => {
     expect(
       state.updates.find((u) => u.table === 'task_steps' && u.status === 'waiting_form'),
     ).toMatchObject({ pauseFormOnRetry: false, waitingStartedAt: expect.any(Date) });
+  });
+
+  it('leaves a row a Retry reset alone when the form would have reopened', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    state.taskStepRow.formSchema = { title: 'Old form', fields: [] };
+    state.taskStepRow.formValues = { decision: 'continue' };
+    const step = reopeningFormStep();
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The Retry resets the row, and leaves it unheld, while this pass is still in apply.
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        status: 'pending',
+        formValues: null,
+        pauseFormOnRetry: false,
+      };
+      return apply(ctx, args);
+    };
+
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    // The Retry's own hold stands, so a retried auto-continue step is not stopped at its form.
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(state.updates.some((u) => u.table === 'task_step_agent_minings' && u.consumedAt)).toBe(
+      false,
+    );
+    // Nothing of the reopen or its park reached the row.
+    expect(
+      state.updates.filter(
+        (u) => u.table === 'task_steps' && ('pauseFormOnRetry' in u || 'status' in u),
+      ),
+    ).toEqual([]);
   });
 
   it('holds the form after a crash between clearing it and parking, rather than resubmitting', async () => {
@@ -2238,5 +2300,54 @@ describe('a fan-out reserved before any agent is sent', () => {
     const enqueued: CliExecJobPayload[] = [];
     await run(makeMockDb(raced), terminalFailureRetryStep([]), enqueued);
     expect(enqueued).toEqual([]);
+  });
+});
+
+describe('advanceStep recap run after a Retry reset the finished row', () => {
+  const finishWith = async (state: MockState) => {
+    const recaps: CliExecJobPayload[] = [];
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: miningStep([], []),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          if (payload.purpose === 'step_summary') recaps.push(payload);
+        },
+      },
+    });
+    return recaps;
+  };
+  const agents = () => [miningRow('peer-reviewer', 1), miningRow('security-code-reviewer', 1)];
+
+  it('ends a recap run the reset would not reach instead of queuing it', async () => {
+    const state = freshState(agents());
+    // The Retry lands right after the step's done write: its reset leaves the row pending, and
+    // supersedes only the recap runs that already exist.
+    state.afterStepWrite = (set) => {
+      if (set.status === 'done') state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    };
+
+    expect(await finishWith(state)).toEqual([]);
+    expect(
+      state.inserts.some((i) => i.table === 'cli_invocations' && i.row.summaryForStepId === 'ts-1'),
+    ).toBe(true);
+    expect(state.updates).toContainEqual(
+      expect.objectContaining({
+        table: 'cli_invocations',
+        supersededAt: expect.any(Date),
+        endedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('queues the recap run while the row is still the finished one', async () => {
+    const recaps = await finishWith(freshState(agents()));
+    expect(recaps).toHaveLength(1);
   });
 });
