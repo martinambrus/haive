@@ -49,6 +49,17 @@ describe('dedupLines', () => {
     expect(dedupLines([block])).toBe(`${block}\n`);
   });
 
+  it('keeps a fenced example whole when an earlier block shares one of its lines', () => {
+    const a = 'Schema A:\n```json\n{\n  "type": "object",\n  "a": 1\n}\n```';
+    const b = 'Schema B:\n```json\n{\n  "type": "object",\n  "b": 2\n}\n```';
+    expect(dedupLines([a, b])).toBe(`${a}\n${b}\n`);
+  });
+
+  it('drops a fence identical to one already emitted, delimiters and all', () => {
+    const fence = '```\nreport\n```';
+    expect(dedupLines([`one\n${fence}`, `two\n${fence}`])).toBe(`one\n${fence}\ntwo\n`);
+  });
+
   it('adds nothing for a block identical to an earlier one', () => {
     const block = 'one\n\n```\nx\n```\n';
     expect(dedupLines([block, block, `  ${block}`])).toBe(dedupLines([block]));
