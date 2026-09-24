@@ -60,8 +60,14 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
 
 /** A task behind a db that records every statement it is sent. The epoch a read returns and the
  *  one a write is matched against can differ: that is a Retry landing between the two. A write
- *  that names no epoch lands whatever the task's is. */
-function taskDb(readEpoch: number, writeEpoch = readEpoch) {
+ *  that names no epoch lands whatever the task's is. A step row write carrying the ownership
+ *  guard lands only while `rowStatus` is not `pending` or `skipped`; `selectRows` is what a read
+ *  of the task's events answers. */
+function taskDb(
+  readEpoch: number,
+  writeEpoch = readEpoch,
+  opts: { rowStatus?: string; selectRows?: unknown[] } = {},
+) {
   const statements: string[] = [];
   const db = {
     query: {
@@ -73,7 +79,13 @@ function taskDb(readEpoch: number, writeEpoch = readEpoch) {
         set: () => ({
           where: (cond: unknown) => ({
             returning: async () => {
-              const epochs = conditionValues(cond).filter((v) => typeof v === 'number');
+              const values = conditionValues(cond);
+              if (tableNameOf(table) === 'task_steps') {
+                const guarded = values.includes('pending') && values.includes('skipped');
+                const taken = opts.rowStatus === 'pending' || opts.rowStatus === 'skipped';
+                return guarded && taken ? [] : [{ id: 'ts-1' }];
+              }
+              const epochs = values.filter((v) => typeof v === 'number');
               return epochs.length > 0 && !epochs.includes(writeEpoch) ? [] : [{ id: 'task-1' }];
             },
           }),
@@ -86,7 +98,15 @@ function taskDb(readEpoch: number, writeEpoch = readEpoch) {
     },
     select: () => {
       statements.push('select');
-      throw new Error('this test reads nothing but the epoch');
+      if (!opts.selectRows) throw new Error('this test reads nothing but the epoch');
+      const rows = opts.selectRows;
+      // Awaited directly by some reads and cut with .limit() by others.
+      const result = {
+        then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+          Promise.resolve(rows).then(res, rej),
+        limit: async () => rows,
+      };
+      return { from: () => ({ where: () => result }) };
     },
   } as unknown as Database;
   return { db, statements };
@@ -115,6 +135,29 @@ describe('a result handed off after a Retry moved the task on', () => {
     await handleResult(db, ctx, STEP_ID, { status: 'failed', row, error: 'boom' } as never);
     expect(statements).toEqual(['update tasks']);
     expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it('stamps a parked form and marks the task waiting while the pass owns the row', async () => {
+    const { db, statements } = taskDb(5, 5, { rowStatus: 'waiting_form', selectRows: [] });
+    await handleResult(db, ctx, STEP_ID, { status: 'waiting_form', row, formSchema: {} } as never);
+    expect(statements[0]).toBe('update task_steps');
+    expect(statements).toContain('update tasks');
+    expect(statements.at(-1)).toBe('insert task_events');
+  });
+
+  it('marks nothing waiting once a Retry reset the parked row after the check', async () => {
+    const { db, statements } = taskDb(5, 5, { rowStatus: 'pending' });
+    await handleResult(db, ctx, STEP_ID, { status: 'waiting_form', row, formSchema: {} } as never);
+    expect(statements).toEqual(['update task_steps']);
+  });
+
+  it('raises no fix-loop gate on a row a Retry reset after the check', async () => {
+    // Past the fix-round cap, so the loop escalates to its gate on the source row.
+    const { db, statements } = taskDb(5, 5, { rowStatus: 'pending', selectRows: [{ n: 99 }] });
+    const loopBack = { status: 'loop_back', row, diagnosis: 'a defect', sourceStepId: STEP_ID };
+    await handleResult(db, ctx, STEP_ID, loopBack as never);
+    expect(statements.at(-1)).toBe('update task_steps');
+    expect(statements).not.toContain('update tasks');
   });
 
   it('completes nothing, and reaps nothing, once the task moved to a newer epoch', async () => {

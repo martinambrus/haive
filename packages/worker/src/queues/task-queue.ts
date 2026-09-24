@@ -102,6 +102,7 @@ import {
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import { StepSupersededError, updateOwnedStep } from '../step-engine/step-ownership.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -1027,6 +1028,22 @@ const workerDeps: WorkerDeps = {
   },
 };
 
+/** A write handleResult makes to the row a pass left, through the pass's own ownership check:
+ *  false, having written nothing, once a Retry or a Skip took the row. */
+async function writeOwnedRow(
+  db: Database,
+  rowId: string,
+  patch: Parameters<typeof updateOwnedStep>[2],
+): Promise<boolean> {
+  try {
+    await updateOwnedStep(db, rowId, patch);
+    return true;
+  } catch (err) {
+    if (err instanceof StepSupersededError) return false;
+    throw err;
+  }
+}
+
 async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<boolean> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
@@ -1122,6 +1139,9 @@ export async function handleResult(
       return;
     }
     case 'waiting_form': {
+      // Stamp the start of the idle (waiting-for-input) period so the step's
+      // active-work timer can exclude it. Folded into idle_ms on form submit.
+      if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) return;
       await markTaskWaiting(
         db,
         ctx.taskId,
@@ -1130,12 +1150,6 @@ export async function handleResult(
         result.row.round,
         stepDef.parkTaskStatus,
       );
-      // Stamp the start of the idle (waiting-for-input) period so the step's
-      // active-work timer can exclude it. Folded into idle_ms on form submit.
-      await db
-        .update(schema.taskSteps)
-        .set({ waitingStartedAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.taskSteps.id, result.row.id));
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
@@ -1207,22 +1221,19 @@ export async function handleResult(
             sourceStepId: result.sourceStepId,
             round: nextRound,
           });
-          await db
-            .update(schema.taskSteps)
-            .set({
-              status: 'waiting_form',
-              formSchema: buildOscillationEscalationSchema(
-                result.sourceStepId,
-                osc.conflictingStepId ?? 'another step',
-                osc.conflictingDiagnoses[0],
-                osc.conflictingDiagnoses[1],
-              ),
-              formValues: null,
-              endedAt: null,
-              waitingStartedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.taskSteps.id, result.row.id));
+          const parked = await writeOwnedRow(db, result.row.id, {
+            status: 'waiting_form',
+            formSchema: buildOscillationEscalationSchema(
+              result.sourceStepId,
+              osc.conflictingStepId ?? 'another step',
+              osc.conflictingDiagnoses[0],
+              osc.conflictingDiagnoses[1],
+            ),
+            formValues: null,
+            endedAt: null,
+            waitingStartedAt: new Date(),
+          });
+          if (!parked) return;
           await markTaskWaiting(
             db,
             ctx.taskId,
@@ -1263,17 +1274,14 @@ export async function handleResult(
           sourceStepId: result.sourceStepId,
           round: nextRound,
         });
-        await db
-          .update(schema.taskSteps)
-          .set({
-            status: 'waiting_form',
-            formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
-            formValues: null,
-            endedAt: null,
-            waitingStartedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.taskSteps.id, result.row.id));
+        const parked = await writeOwnedRow(db, result.row.id, {
+          status: 'waiting_form',
+          formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
+          formValues: null,
+          endedAt: null,
+          waitingStartedAt: new Date(),
+        });
+        if (!parked) return;
         await markTaskWaiting(
           db,
           ctx.taskId,
