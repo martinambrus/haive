@@ -216,6 +216,29 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
     }
   });
 
+  it('hands the epoch back when the re-drive cannot be queued', async () => {
+    const recorded: RecordedUpdate[] = [];
+    const errors = vi.spyOn(logger, 'error');
+    try {
+      await reconcileOrphanedSteps(
+        makeCurrentStepDb(recorded, { unstarted: [], fenced: [{ epoch: 4 }] }),
+        {
+          enqueueAdvance: async () => {
+            throw new Error('redis refused the job');
+          },
+          queuedInvocationIds: async () => new Set(),
+        },
+      );
+      const revert = recorded.find((u) => u.table === 'tasks' && u.set.orchestrationEpoch === 3);
+      expect(revert).toBeDefined();
+      expect(conditionColumns(revert!.where)).toContain('orchestration_epoch');
+      expect(conditionValues(revert!.where)).toContain(4);
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('ends a never-started run that no job owes, and leaves a queued one alone', async () => {
     const recorded: RecordedUpdate[] = [];
     await reconcileOrphanedSteps(

@@ -2440,7 +2440,19 @@ export async function reconcileOrphanedSteps(
         )
         .returning({ epoch: schema.tasks.orchestrationEpoch });
       if (!fenced) continue;
-      await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch);
+      try {
+        await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch);
+      } catch (err) {
+        // No job carries the new epoch, so hand the task back to the one the advances queued
+        // before the restart carry, rather than leave them stale with nothing to drive it.
+        await db
+          .update(schema.tasks)
+          .set({ orchestrationEpoch: s.epoch, updatedAt: new Date() })
+          .where(
+            and(eq(schema.tasks.id, s.taskId), eq(schema.tasks.orchestrationEpoch, fenced.epoch)),
+          );
+        throw err;
+      }
       logger.info(
         { taskId: s.taskId, stepId: s.stepId, epoch: fenced.epoch },
         'reconciled orphaned waiting_cli step',
