@@ -1,7 +1,7 @@
 # Found-not-fixed follow-ups from the agent-rules series
 
-> **IN PROGRESS.** PR 1 shipped as #249 (`5223d7b3`). PR 2 is in review (branch `csp-mermaid`).
-> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **SHIPPED** 2026-09-24. PRs 1-12 in order: #249, #250, #252, #256, #254, #260, #258, #261, #265,
+> #255, #262, #253. Tracked in the status table of `docs/plans/README.md`.
 
 ## Context
 
@@ -326,6 +326,12 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - an e2e case at 375px with JavaScript on (open overlay, preference unchanged in the database).
 - **Verify:** Chrome MCP at 375, 768 and 1280 on the dashboard, a task page and the repositories page.
   Check that there is no horizontal page scroll and the title strip is aligned.
+- **As built (#265):** as planned, with two corrections. The formula above could never open the
+  column for a user whose saved state is collapsed, the dev user's included, so on a phone the column
+  is collapsed unless opened, whatever was saved. And the open state is dropped as soon as the page
+  changes: keyed on the page alone, it reopened the column on returning to the page it was opened on.
+  An e2e case pins that and fails 3 of 3 without the line. The breakpoint is `PHONE_MEDIA_QUERY`
+  (`sidebar-geometry.ts`), and the task title strip's horizontal padding narrows with `main`.
 
 ## PR 10 — Provider secrets survive a fast typist
 

@@ -18,6 +18,10 @@ export const SIDEBAR_DEFAULT_PX = 256;
 /** Collapsed rail: one 48px icon column plus the aside's own padding. */
 export const SIDEBAR_RAIL_PX = 56;
 
+/** Below Tailwind's `md` the sidebar is a rail that opens over the page instead of beside it.
+ *  `globals.css` repeats the query for the first paint, and the geometry test pins the two. */
+export const PHONE_MEDIA_QUERY = '(width < 48rem)';
+
 export function clampSidebarWidth(px: number): number {
   if (!Number.isFinite(px)) return SIDEBAR_DEFAULT_PX;
   return Math.round(Math.min(Math.max(px, SIDEBAR_MIN_PX), SIDEBAR_MAX_PX));

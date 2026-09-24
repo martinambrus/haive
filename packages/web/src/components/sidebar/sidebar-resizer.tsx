@@ -74,7 +74,7 @@ export function SidebarResizer({
         onResize(SIDEBAR_DEFAULT_PX);
         onCommit(SIDEBAR_DEFAULT_PX);
       }}
-      className="w-1 shrink-0 cursor-col-resize touch-none bg-neutral-800 transition-colors hover:bg-indigo-500"
+      className="haive-sidebar-resizer w-1 shrink-0 cursor-col-resize touch-none bg-neutral-800 transition-colors hover:bg-indigo-500"
     />
   );
 }

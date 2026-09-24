@@ -137,7 +137,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           right on the first paint; SidebarNav rewrites it on this same element as the
           column is dragged or collapsed. */}
       <div
-        className="flex min-h-screen"
+        className="haive-shell flex min-h-screen"
         style={
           {
             [SIDEBAR_WIDTH_VAR]: `${sidebarOffsetPx(
@@ -157,7 +157,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
             Array.isArray(prefs.sidebarFilters) ? prefs.sidebarFilters.filter(isTaskToneFilter) : []
           }
         />
-        <main className="flex-1 overflow-y-auto p-8">
+        <main className="flex-1 overflow-y-auto p-4 md:p-8">
           {/* Renders nothing unless the admin global pause switch is on. Role comes from the
               /auth/me call this layout already makes, so the banner costs no extra request
               to decide whether to offer the admin link. */}
