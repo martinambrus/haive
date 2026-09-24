@@ -6,6 +6,7 @@ import {
   processTaskJob,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -28,6 +29,8 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
 const h = vi.hoisted(() => {
   const state = {
     taskEpoch: 5,
+    /** Reads answer empty instead of stopping the job. */
+    readsAnswer: false,
     onSelect: (() => {}) as () => void,
     taskWrites: [] as { epochs: unknown[]; landed: boolean }[],
   };
@@ -56,7 +59,8 @@ const db = {
   },
   select: () => {
     h.state.onSelect();
-    throw new Error('the job went no further');
+    if (!h.state.readsAnswer) throw new Error('the job went no further');
+    return { from: () => ({ where: async () => [] }) };
   },
   insert: () => ({ values: async () => undefined }),
   update: () => ({
@@ -79,7 +83,8 @@ vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 7 })),
 }));
 
-for (const id of ['epoch-job-step', 'epoch-job-target']) {
+// 07 is the fix loop's fixed re-entry target.
+for (const id of ['epoch-job-step', 'epoch-job-target', '07-phase-2-implement']) {
   stepRegistry.register({
     metadata: {
       id,
@@ -100,6 +105,7 @@ for (const id of ['epoch-job-step', 'epoch-job-target']) {
 
 afterEach(() => {
   h.state.taskEpoch = 5;
+  h.state.readsAnswer = false;
   h.state.onSelect = () => {};
   h.state.taskWrites = [];
   setContainerCleanupRunner(null);
@@ -160,5 +166,46 @@ describe('a job that resets steps itself', () => {
       handleResult(db as never, ctx as never, 'epoch-job-step', revise as never),
     ).rejects.toThrow('the job went no further');
     expect(ctx.orchestrationEpoch).toBe(7);
+  });
+
+  it('hands nothing off when its reset finds the task moved on', async () => {
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const revise = {
+      status: 'revise',
+      row: { id: 'ts-1', round: 0 },
+      sourceStepId: 'epoch-job-step',
+      targetStepId: 'epoch-job-target',
+    };
+    // Resolving at all shows it stopped before the task writes that follow a reset.
+    await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
+    expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(
+      db,
+      'task-1',
+      'epoch-job-target',
+      1,
+      5,
+    );
+    expect(ctx.orchestrationEpoch).toBe(5);
+  });
+
+  it('enters no fix round when its reset finds the task moved on', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const loopBack = {
+      status: 'loop_back',
+      row: { id: 'ts-1', round: 0 },
+      diagnosis: 'a defect',
+      sourceStepId: 'epoch-job-step',
+      uncapped: true,
+    };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    const call = vi.mocked(resetStepAndDownstream).mock.lastCall!;
+    expect(call[3]).toBe(1);
+    expect(call[4]).toBe(5);
+    expect(ctx.orchestrationEpoch).toBe(5);
+    // The reset refused, so neither the pointer nor the task moved.
+    expect(h.state.taskWrites).toEqual([]);
   });
 });

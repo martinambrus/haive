@@ -579,7 +579,15 @@ describe('reconcileOrphanedSteps recovering the current step left running', () =
     const { demote } = await recover(none);
     expect(demote).toBeUndefined();
     expect(vi.mocked(resetStepAndDownstream)).toHaveBeenCalledTimes(1);
+    // At the epoch the pass read, so a Retry the api took during boot keeps the task.
+    expect(vi.mocked(resetStepAndDownstream).mock.calls[0]![4]).toBe(3);
     expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 9 }]);
+  });
+
+  it('re-drives nothing once a Retry moved the task on before the reset', async () => {
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
+    await recover(none);
+    expect(advances).toEqual([]);
   });
 
   it('leaves a row to whatever moved it before the demote', async () => {

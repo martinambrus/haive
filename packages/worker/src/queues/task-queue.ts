@@ -1307,7 +1307,15 @@ export async function handleResult(
         ctx.taskId,
         target.metadata.id,
         nextRound,
+        ctx.orchestrationEpoch,
       );
+      if (reentryReset === 'superseded') {
+        logger.info(
+          { taskId: ctx.taskId, stepId },
+          'fix loop not entered: the task moved to a newer epoch before its reset',
+        );
+        return;
+      }
       if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
       await markTaskRunningWithStep(
         db,
@@ -1343,7 +1351,20 @@ export async function handleResult(
         targetStepId: result.targetStepId,
         round: targetRound,
       });
-      const reset = await resetStepAndDownstream(db, ctx.taskId, result.targetStepId, targetRound);
+      const reset = await resetStepAndDownstream(
+        db,
+        ctx.taskId,
+        result.targetStepId,
+        targetRound,
+        ctx.orchestrationEpoch,
+      );
+      if (reset === 'superseded') {
+        logger.info(
+          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          'revise not entered: the task moved to a newer epoch before its reset',
+        );
+        return;
+      }
       // The reset moved the task to a new epoch, and this job holds it there from now on.
       if (reset) ctx.orchestrationEpoch = reset.newEpoch;
       // An in-place self-revise REQUIRES the existing row. A forked round legitimately has
@@ -2718,8 +2739,10 @@ export async function reconcileOrphanedSteps(
       // resetStepAndDownstream supersedes the step's open invocations, resets it to
       // pending, and bumps the task epoch, so the orphaned zombie advance job is dropped as
       // stale when it is redelivered; re-drive at that new epoch.
-      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round);
-      if (!reset) continue;
+      // At the epoch this pass read, like the fence above: a Retry the api took during boot keeps
+      // the task.
+      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round, s.epoch);
+      if (!reset || reset === 'superseded') continue;
       await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
       logger.info(
         { taskId: s.taskId, stepId: s.stepId, epoch: reset.newEpoch },
