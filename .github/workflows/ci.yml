@@ -81,8 +81,9 @@ jobs:
       - name: Shellcheck the installer
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/mnt:ro" \
-            koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+          image=koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+          scripts/ci-retry.sh docker pull "$image"
+          docker run --rm -v "$PWD:/mnt:ro" "$image" \
             --shell=sh install/install.sh install/test/boot-failures.sh
 
       # The installer's BOOT block, which nothing else runs. `platform-checks.yml` installs with
@@ -233,7 +234,7 @@ jobs:
       # runner from exactly that image, with no source tree to fall back on.
       - name: Migration corpus reaches the production image
         run: |
-          docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
+          scripts/ci-retry.sh docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
           docker run --rm haive-api-prod-check \
             node -e "const {readdirSync}=require('fs');
                      const d='packages/database/migrations';
@@ -278,8 +279,11 @@ jobs:
               f.write(text)
           PY
 
+      - name: Pull registry images
+        run: scripts/ci-retry.sh docker compose -f docker-compose.yml -f docker-compose.dev.yml pull --ignore-buildable postgres redis mailpit db-migrate
+
       - name: Build compose images
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+        run: scripts/ci-retry.sh docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
       - name: Start infrastructure
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis mailpit
@@ -442,8 +446,11 @@ jobs:
           mkdir -p "$root/e2e-plain-dir" "$root/.e2e-hidden-dir"
           ls -a "$root"
 
+      - name: Pull registry images
+        run: scripts/ci-retry.sh docker compose -f docker-compose.yml -f docker-compose.dev.yml pull --ignore-buildable postgres redis mailpit db-migrate
+
       - name: Build compose images
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+        run: scripts/ci-retry.sh docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
       # Explicit service names, never a bare `up`: ollama and the two proxy sidecars carry no
       # `profiles:` gate, so `up` with no arguments would also pull ~9 GB of ollama that no spec
