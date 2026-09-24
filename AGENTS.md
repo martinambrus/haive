@@ -2239,6 +2239,25 @@ restored file is offered again at the next upgrade rather than classified `uncha
 `GET /repos/:id/upgrade-status` keeps one row per template, and a rendering that is not current
 stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
 is invisible there once a sibling rendering has one; the next upgrade still offers it.
+
+**An upgrade or a rollback deletes a file only while it holds what Haive wrote there.**
+`deleteRefusalAt` (02) compares the bytes on disk at APPLY time, hashed the way the plan compares
+them (`pathContentHash`: the whole file, or the rules region alone), with the row's `writtenHash`.
+Apply time, because the form parks between the plan and the apply. A link or a directory standing
+there is kept the same way, since neither is what Haive wrote; only a read that could not run
+fails, which leaves the row for the next attempt. A row alone proves nothing:
+`12-post-onboarding` records one even for a file 07 skipped. 02's obsolete removal keeps such a file,
+warns, and leaves its row live. 04's undo of a file the upgrade introduced keeps one edited or replaced
+since, warns, and retires the upgrade's row all the same. 04 also reads only the rows the upgrade WROTE
+(`source = 'upgrade'`). 01's backfill rows belong to the same task, but they record what was already
+there, and read as new files they were deleted: on a first upgrade's rollback, that took every
+adopted file the person had declined.
+
+**"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
+version declined, so the next upgrade offers only a newer one. On a live row it moves
+`templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
+render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
+for one it introduced. Skip records nothing, so the path is offered again.
 `unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
 such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
 rollback copies get the two hashes swapped.

@@ -18,7 +18,12 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { readFileOrEmpty, resolveBundleItemId, safeDiskRel } from './02-upgrade-apply.js';
+import {
+  deleteRefusalAt,
+  readFileOrEmpty,
+  resolveBundleItemId,
+  safeDiskRel,
+} from './02-upgrade-apply.js';
 
 function isRollback(ctx: StepContext): Promise<boolean> {
   return ctx.db
@@ -67,6 +72,9 @@ interface NewArtifactToUndo {
   diskPath: string;
   templateKind: string;
   upgradeArtifactId: string;
+  /** What the upgrade wrote. Absent on a payload detected before it was recorded, which then
+   *  deletes nothing. */
+  writtenHash?: string;
 }
 
 interface RollbackDetect {
@@ -204,19 +212,22 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       throw new Error('upgrade-rollback: no prior completed onboarding_upgrade task to revert');
     }
 
-    // Live rows written by that prior upgrade task.
+    // Live rows that prior upgrade task WROTE. Its backfill rows record what was already there,
+    // and read as files the upgrade introduced they would be deleted.
     const upgradeRows = await ctx.db
       .select({
         id: schema.onboardingArtifacts.id,
         diskPath: schema.onboardingArtifacts.diskPath,
         templateId: schema.onboardingArtifacts.templateId,
         templateKind: schema.onboardingArtifacts.templateKind,
+        writtenHash: schema.onboardingArtifacts.writtenHash,
       })
       .from(schema.onboardingArtifacts)
       .where(
         and(
           eq(schema.onboardingArtifacts.repositoryId, repositoryId),
           eq(schema.onboardingArtifacts.taskId, priorTaskId),
+          eq(schema.onboardingArtifacts.source, 'upgrade'),
           isNull(schema.onboardingArtifacts.supersededAt),
         ),
       );
@@ -256,6 +267,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           diskPath: upgradeRow.diskPath,
           templateKind: upgradeRow.templateKind,
           upgradeArtifactId: upgradeRow.id,
+          writtenHash: upgradeRow.writtenHash,
         });
         continue;
       }
@@ -398,6 +410,13 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         const rel = safeDiskRel(item.diskPath);
         if (rel === null) {
           warnings.push(`refusing to undo ${item.diskPath}: not a path inside the repository`);
+          continue;
+        }
+        const refusal = await deleteRefusalAt(ctx.repoPath, rel, item, item.writtenHash);
+        if (refusal !== null) {
+          // The upgrade's row is still undone; what stands there now stays.
+          warnings.push(refusal);
+          undoneNewArtifactIds.push(item.upgradeArtifactId);
           continue;
         }
         if (item.templateKind === CLI_RULES_TEMPLATE_KIND) {

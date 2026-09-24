@@ -1,4 +1,5 @@
 import {
+  isPathContainmentError,
   readTextNoFollow,
   removeNoFollow,
   toSafeRel,
@@ -45,7 +46,7 @@ const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
 
 /** Action the apply loop should take for a single plan entry. */
-export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'skip';
+export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'keep' | 'skip';
 
 export interface ApplySelections {
   selectedUpdates: ReadonlySet<string>;
@@ -56,8 +57,8 @@ export interface ApplySelections {
 }
 
 /** Pure classifier for the apply loop. Splits the per-entry decision out of
- *  the imperative loop so the four branches (`apply`, `delete`, `untrack`,
- *  `skip`) can be unit-tested without a DB or file system. The `untrack`
+ *  the imperative loop so the five branches (`apply`, `delete`, `untrack`,
+ *  `keep`, `skip`) can be unit-tested without a DB or file system. The `untrack`
  *  branch — supersede the artifact row without touching disk — fires when
  *  the user skipped an obsolete custom-bundle row whose source bundle item
  *  is gone AND no other entry in the plan rewrites the same diskPath; that
@@ -75,6 +76,12 @@ export function classifyApplyAction(
     (entry.bucket === 'conflict' &&
       selections.conflictChoices.get(entry.entryId) === 'apply_theirs');
   if (shouldApply) return 'apply';
+  if (
+    entry.bucket === 'conflict' &&
+    selections.conflictChoices.get(entry.entryId) === 'keep_ours'
+  ) {
+    return 'keep';
+  }
 
   const shouldDelete =
     entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
@@ -108,6 +115,89 @@ export function resolveBundleItemId(
 ): string | null {
   const id = extractBundleItemId(templateId);
   return id && liveBundleItemIds.has(id) ? id : null;
+}
+
+/** What sits at a path as its row records it, and hashed the way the plan compares it: the whole
+ *  file, or the rules region alone. Null only when nothing is there: a link or anything but a
+ *  regular file throws, so no caller mistakes it for absence and removes it. */
+export async function pathContent(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+): Promise<{ content: string; hash: string } | null> {
+  const raw = await readTextNoFollow(repoPath, rel, { strict: true });
+  if (raw === null) return null;
+  if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
+    return { content: raw, hash: sha256Hex(normalizeContent(raw)) };
+  }
+  const region = extractRegion(raw, CLI_RULES_START, CLI_RULES_END);
+  if (region === null) return null;
+  const content = normalizeContent(region);
+  return { content, hash: sha256Hex(content) };
+}
+
+export async function pathContentHash(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+): Promise<string | null> {
+  return (await pathContent(repoPath, rel, templateKind))?.hash ?? null;
+}
+
+/** What "Keep my edits" writes over a live row: the version declined, under that version's identity,
+ *  and the bytes kept, for a later rollback to restore. `writtenHash` stays, claiming none of them. */
+export function keptRowUpdate(
+  entry: Pick<UpgradePlanEntry, 'templateId' | 'templateSchemaVersion'>,
+  declinedTemplateContentHash: string,
+  kept: { content: string; hash: string },
+  liveBundleItemIds: ReadonlySet<string>,
+) {
+  return {
+    templateId: entry.templateId,
+    bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+    templateContentHash: declinedTemplateContentHash,
+    templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+    writtenContent: kept.content,
+    lastObservedDiskHash: kept.hash,
+    userModified: true,
+  };
+}
+
+const keptRefusal = (diskPath: string) =>
+  `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
+
+/** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
+ *  recorded writing there. A row alone proves nothing: 12 records one for a file 07 skipped. */
+export function deleteRefusal(
+  diskPath: string,
+  diskHash: string | null,
+  writtenHash: string | null | undefined,
+): string | null {
+  if (diskHash === null || diskHash === writtenHash) return null;
+  return keptRefusal(diskPath);
+}
+
+/** `deleteRefusal` for what stands at `rel` now. A link or a directory there is not what Haive wrote
+ *  either; only a read that could not run throws. */
+export async function deleteRefusalAt(
+  repoPath: string,
+  rel: string,
+  entry: { diskPath: string; templateKind: string },
+  writtenHash: string | null | undefined,
+): Promise<string | null> {
+  let diskHash: string | null;
+  try {
+    diskHash = await pathContentHash(repoPath, rel, entry.templateKind);
+  } catch (err) {
+    if (
+      !isPathContainmentError(err) ||
+      !['link', 'not-directory', 'not-regular-file'].includes(err.reason)
+    ) {
+      throw err;
+    }
+    return keptRefusal(entry.diskPath);
+  }
+  return deleteRefusal(entry.diskPath, diskHash, writtenHash);
 }
 
 function conflictFieldId(entryId: string): string {
@@ -387,6 +477,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Superseded baselines for what a written path with no row already held.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
+    // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
+    const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -421,6 +513,49 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         continue;
       }
 
+      if (action === 'keep') {
+        // A decision, not a write: the version declined is recorded against the bytes kept, so
+        // the next upgrade offers only a newer one. An untracked path gets a row claiming nothing.
+        skippedCount += 1;
+        const rel = safeDiskRel(entry.diskPath);
+        let kept: { content: string; hash: string } | null = null;
+        try {
+          kept = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
+          continue;
+        }
+        if (kept === null || !entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        if (entry.liveArtifactId) {
+          keptInPlace.push({
+            id: entry.liveArtifactId,
+            update: keptRowUpdate(entry, entry.currentTemplateContentHash, kept, liveBundleItemIds),
+          });
+          continue;
+        }
+        rowsToInsert.push({
+          userId: ctx.userId,
+          repositoryId: plan.repositoryId,
+          taskId: ctx.taskId,
+          diskPath: entry.diskPath,
+          templateId: entry.templateId,
+          templateKind: entry.templateKind,
+          templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+          templateContentHash: entry.currentTemplateContentHash,
+          writtenHash: entry.newContentHash,
+          writtenContent: kept.content,
+          lastObservedDiskHash: kept.hash,
+          userModified: true,
+          formValuesSnapshot: plan.renderCtxSnapshot,
+          sourceStepId: '02-upgrade-apply',
+          source: 'backfill' as const,
+          haiveVersion,
+          bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+        });
+        continue;
+      }
+
       if (action === 'untrack' && entry.liveArtifactId) {
         rowsToSupersede.push(entry.liveArtifactId);
         skippedCount += 1;
@@ -435,6 +570,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         try {
+          const refusal = await deleteRefusalAt(
+            ctx.repoPath,
+            rel,
+            entry,
+            entry.baselineWrittenHash,
+          );
+          if (refusal !== null) {
+            warnings.push(refusal);
+            skippedCount += 1;
+            continue;
+          }
           if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
             // Region-scoped artifact: strip just the cli-rules block, leaving
             // the rest of AGENTS.md (project-info, RTK, user content) intact.
@@ -591,7 +737,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // plan attached. Wrapped in a single transaction so a half-applied state
     // is impossible.
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
-    if (rowsToSupersede.length > 0 || insertPaths.length > 0 || baselineRows.length > 0) {
+    if (
+      rowsToSupersede.length > 0 ||
+      insertPaths.length > 0 ||
+      baselineRows.length > 0 ||
+      keptInPlace.length > 0
+    ) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
         if (rowsToSupersede.length > 0) {
@@ -613,6 +764,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               and(
                 eq(schema.onboardingArtifacts.repositoryId, plan.repositoryId),
                 inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        for (const k of keptInPlace) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ ...k.update, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.id, k.id),
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
             );
