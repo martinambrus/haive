@@ -56,6 +56,7 @@ import {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
+import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
 import { ensureArchivesExpanded } from '../attachments/expand-archives.js';
 import {
@@ -598,7 +599,9 @@ type MergeFixDispatch =
 
 async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
-  const prompt = buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined);
+  const prompt = await augmentPromptWithTerseness(
+    buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
+  );
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
@@ -938,7 +941,9 @@ async function spawnReviewAgent(
   );
   // Built as the level coder's prompt is: every agent this spawns works in the tree those coders
   // wrote, so it is told what is attached and what earlier agents already established about it.
-  const fullPrompt = await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + prompt);
+  const fullPrompt = await augmentPromptWithTerseness(
+    await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + prompt),
+  );
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
@@ -1653,7 +1658,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     .select()
     .from(schema.taskDagIssues)
     .where(eq(schema.taskDagIssues.dagPlanId, ea.plan.id))) as DagIssueRow[];
-  const prompt = replannerPrompt(ea.plan, failed, all);
+  const prompt = await augmentPromptWithTerseness(replannerPrompt(ea.plan, failed, all));
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
@@ -2066,16 +2071,17 @@ export async function resolveDagPhase(
       for (const issue of undispatched) {
         const issueSpec = await issueSpecText(specView, issue);
         // This path bypasses resolveLlmPhase's augmentation chain entirely, so the attachments
-        // notice and the ledger are applied here directly, in its order. Terseness is not: on the
-        // implementation path it would change what a coder writes, which is a decision of its own.
-        const prompt = await augmentPromptWithLedger(
-          db,
-          ctx.taskId,
-          attachmentsNotice +
-            spec.buildCoderPrompt(
-              coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
-              upstreamDebt,
-            ),
+        // notice, the ledger and the terseness directive are applied here directly, in its order.
+        const prompt = await augmentPromptWithTerseness(
+          await augmentPromptWithLedger(
+            db,
+            ctx.taskId,
+            attachmentsNotice +
+              spec.buildCoderPrompt(
+                coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
+                upstreamDebt,
+              ),
+          ),
         );
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {

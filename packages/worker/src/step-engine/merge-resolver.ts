@@ -16,6 +16,7 @@ import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
+import { augmentPromptWithTerseness } from './terseness-context.js';
 import { overrideOr } from './dispatch-timeout.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
 import { relUnder } from '@haive/shared/fs-safe';
@@ -481,12 +482,14 @@ async function dispatchFixAgent(
   // empty override is the repo root (real `.git` directory), while a transient
   // --base worktree receives the zero-byte gitfile boundary.
   const worktreeRel = path.relative(SANDBOX_WORKDIR, state.sandboxMergeDir);
-  const prompt = spec.buildFixPrompt({
-    baseBranch: state.baseBranch,
-    featureBranch: state.featureBranch,
-    conflictFiles: await conflictFiles(state.mergeDir),
-    guidance,
-  });
+  const prompt = await augmentPromptWithTerseness(
+    spec.buildFixPrompt({
+      baseBranch: state.baseBranch,
+      featureBranch: state.featureBranch,
+      conflictFiles: await conflictFiles(state.mergeDir),
+      guidance,
+    }),
+  );
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,

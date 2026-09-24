@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
   configService,
   secretsService,
   userSecretsService,
@@ -354,6 +355,19 @@ async function main(): Promise<void> {
       if (existsSync(path.join(repoPath, '.haive', 'worktrees', `${BRANCH}--${key}`))) {
         throw new Error(`worktree not cleaned: ${key}`);
       }
+    }
+
+    // Every agent this task ran was given the terseness directive exactly once.
+    const tersenessOff = (await configService.get(CONFIG_KEYS.TERSENESS_LEVEL)) === 'off';
+    const allPrompts = await db
+      .select({ prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.taskId, task!.id));
+    const misstyled = allPrompts.filter(
+      ({ prompt }) => prompt.split('## Response style').length - 1 !== (tersenessOff ? 0 : 1),
+    );
+    if (allPrompts.length < 3 || misstyled.length > 0) {
+      throw new Error(`${misstyled.length} of ${allPrompts.length} prompts misstate the directive`);
     }
 
     console.log(

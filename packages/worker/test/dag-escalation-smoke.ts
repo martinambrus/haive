@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
   configService,
   secretsService,
   userSecretsService,
@@ -437,6 +438,19 @@ async function main(): Promise<void> {
     const noLedger = sent.filter(({ prompt }) => !prompt.includes(SEEDED_FACT));
     if (noLedger.length > 0) {
       throw new Error(`${noLedger.length} escalation prompt(s) carry no task ledger`);
+    }
+
+    // Every agent this task ran was given the terseness directive exactly once.
+    const tersenessOff = (await configService.get(CONFIG_KEYS.TERSENESS_LEVEL)) === 'off';
+    const allPrompts = await db
+      .select({ prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.taskId, task!.id));
+    const misstyled = allPrompts.filter(
+      ({ prompt }) => prompt.split('## Response style').length - 1 !== (tersenessOff ? 0 : 1),
+    );
+    if (allPrompts.length < runs.length + 1 || misstyled.length > 0) {
+      throw new Error(`${misstyled.length} of ${allPrompts.length} prompts misstate the directive`);
     }
 
     console.log(

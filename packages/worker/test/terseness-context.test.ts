@@ -31,6 +31,22 @@ describe('augmentPromptWithTerseness', () => {
     }
   });
 
+  it('opens every directive with the scope, ahead of its style line', async () => {
+    // The scope is what keeps a style ask from reaching code, comments, documentation or a
+    // required format; below the style line it would read as an afterthought.
+    for (const level of TERSENESS_LEVELS.filter((l) => l !== 'off')) {
+      get.mockResolvedValue(level);
+      const lines = (await augmentPromptWithTerseness(PROMPT))
+        .slice(PROMPT.length)
+        .trim()
+        .split('\n');
+      expect(lines[0]).toBe('## Response style');
+      expect(lines[1]).toMatch(/^This governs only how you word your reply/);
+      expect(lines[1]).toContain('never shortens or restyles what you write into files');
+      expect(lines).toHaveLength(3);
+    }
+  });
+
   it('resolves every declared level to a defined directive', async () => {
     // Guards the next level added to TERSENESS_LEVELS: without a DIRECTIVES entry
     // it would silently render "undefined" into the prompt.

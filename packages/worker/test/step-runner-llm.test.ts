@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -354,6 +354,37 @@ describe('advanceStep LLM phase', () => {
     const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(invInsert!.row.prompt).toContain('Diagnose the root cause');
     expect(invInsert!.row.prompt).toContain(fact);
+  });
+
+  it('gives the retry_ai fix agent the terseness directive once', async () => {
+    const state = freshState();
+    state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'partial' };
+    const db = makeMockDb(state);
+    // Only the terseness key is answered; every other read behaves as an uninitialised config.
+    const realGet = configService.get.bind(configService);
+    const spy = vi
+      .spyOn(configService, 'get')
+      .mockImplementation(async (key) =>
+        key === CONFIG_KEYS.TERSENESS_LEVEL ? 'full' : realGet(key),
+      );
+    try {
+      await advanceStep({
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [makeProvider()],
+        deps: { async enqueueCliInvocation() {} },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const prompt = String(state.inserts.find((i) => i.table === 'cli_invocations')!.row.prompt);
+    expect(prompt).toContain('Diagnose the root cause');
+    expect(prompt.split('## Response style').length - 1).toBe(1);
   });
 
   it('routes api_key zai providers through the claude CLI binary', async () => {
