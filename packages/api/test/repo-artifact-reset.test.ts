@@ -58,6 +58,19 @@ describe('stripHaiveContent', () => {
     expect(left).not.toContain('haive:project-info');
   });
 
+  it('removes the RTK block too', async () => {
+    const root = await repo('reset-rtk-');
+    await writeFile(
+      path.join(root, 'AGENTS.md'),
+      '# Mine\n\n<!-- haive:rtk-ref -->\n# RTK (Rust Token Killer)\n<!-- /haive:rtk-ref -->\n',
+      'utf8',
+    );
+
+    expect(await stripHaiveContent(root, 'AGENTS.md')).toEqual({ changed: true, deleted: false });
+    const left = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
+    expect(left).toBe('# Mine\n');
+  });
+
   it('deletes a file that was nothing but Haive content', async () => {
     const root = await repo('reset-empty-');
     await writeFile(
