@@ -69,6 +69,7 @@ function taskDb(
   opts: { rowStatus?: string; selectRows?: unknown[] } = {},
 ) {
   const statements: string[] = [];
+  const events: unknown[] = [];
   const db = {
     query: {
       tasks: { findFirst: async () => ({ orchestrationEpoch: readEpoch }) },
@@ -94,7 +95,11 @@ function taskDb(
     },
     insert: (table: unknown) => {
       statements.push(`insert ${tableNameOf(table)}`);
-      return { values: async () => undefined };
+      return {
+        values: async (v: { eventType?: unknown }) => {
+          events.push(v.eventType);
+        },
+      };
     },
     select: () => {
       statements.push('select');
@@ -109,7 +114,7 @@ function taskDb(
       return { from: () => ({ where: () => result }) };
     },
   } as unknown as Database;
-  return { db, statements };
+  return { db, statements, events };
 }
 
 const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 } as never;
@@ -153,11 +158,16 @@ describe('a result handed off after a Retry moved the task on', () => {
 
   it('raises no fix-loop gate on a row a Retry reset after the check', async () => {
     // Past the fix-round cap, so the loop escalates to its gate on the source row.
-    const { db, statements } = taskDb(5, 5, { rowStatus: 'pending', selectRows: [{ n: 99 }] });
+    const { db, statements, events } = taskDb(5, 5, {
+      rowStatus: 'pending',
+      selectRows: [{ n: 99 }],
+    });
     const loopBack = { status: 'loop_back', row, diagnosis: 'a defect', sourceStepId: STEP_ID };
     await handleResult(db, ctx, STEP_ID, loopBack as never);
     expect(statements.at(-1)).toBe('update task_steps');
     expect(statements).not.toContain('update tasks');
+    // No request for a round the gate was never raised for.
+    expect(events).toEqual(['step.loop_back']);
   });
 
   it('completes nothing, and reaps nothing, once the task moved to a newer epoch', async () => {

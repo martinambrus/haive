@@ -1216,11 +1216,6 @@ export async function handleResult(
           nextRound,
         );
         if (osc.tripped && osc.conflictingDiagnoses) {
-          await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-            diagnosis: result.diagnosis,
-            sourceStepId: result.sourceStepId,
-            round: nextRound,
-          });
           const parked = await writeOwnedRow(db, result.row.id, {
             status: 'waiting_form',
             formSchema: buildOscillationEscalationSchema(
@@ -1234,6 +1229,11 @@ export async function handleResult(
             waitingStartedAt: new Date(),
           });
           if (!parked) return;
+          await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+            diagnosis: result.diagnosis,
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+          });
           await markTaskWaiting(
             db,
             ctx.taskId,
@@ -1267,13 +1267,9 @@ export async function handleResult(
       if (!result.uncapped && priorFixRounds + 1 > cap) {
         // Cap reached → escalate to an interactive gate (Continue / Accept / Abort)
         // parked on the source step, instead of failing. Record the fix request for the
-        // next round up front so "Continue" can re-enter implementation immediately; it
-        // is simply never read if the user accepts or aborts.
-        await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-          diagnosis: result.diagnosis,
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-        });
+        // next round once the gate is parked (an answer to it waits behind this job) so
+        // "Continue" can re-enter implementation immediately; it is simply never read if
+        // the user accepts or aborts.
         const parked = await writeOwnedRow(db, result.row.id, {
           status: 'waiting_form',
           formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
@@ -1282,6 +1278,11 @@ export async function handleResult(
           waitingStartedAt: new Date(),
         });
         if (!parked) return;
+        await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+          diagnosis: result.diagnosis,
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+        });
         await markTaskWaiting(
           db,
           ctx.taskId,
@@ -1297,15 +1298,6 @@ export async function handleResult(
         return;
       }
       const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
-      await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-        diagnosis: result.diagnosis,
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-      });
-      await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.started', {
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-      });
       // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
       // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
       // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
@@ -1325,6 +1317,17 @@ export async function handleResult(
         return;
       }
       if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
+      // Recorded once the round is certain to be entered: a round the reset refused would leave a
+      // `started` that counts toward the cap, and a diagnosis nobody was sent.
+      await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+        diagnosis: result.diagnosis,
+        sourceStepId: result.sourceStepId,
+        round: nextRound,
+      });
+      await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.started', {
+        sourceStepId: result.sourceStepId,
+        round: nextRound,
+      });
       await markTaskRunningWithStep(
         db,
         ctx.taskId,

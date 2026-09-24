@@ -33,6 +33,7 @@ const h = vi.hoisted(() => {
     readsAnswer: false,
     onSelect: (() => {}) as () => void,
     taskWrites: [] as { epochs: unknown[]; landed: boolean }[],
+    events: [] as unknown[],
   };
   return { state };
 });
@@ -62,7 +63,11 @@ const db = {
     if (!h.state.readsAnswer) throw new Error('the job went no further');
     return { from: () => ({ where: async () => [] }) };
   },
-  insert: () => ({ values: async () => undefined }),
+  insert: () => ({
+    values: async (v: { eventType?: unknown }) => {
+      h.state.events.push(v.eventType);
+    },
+  }),
   update: () => ({
     set: () => ({
       where: (cond: unknown) => ({
@@ -108,6 +113,7 @@ afterEach(() => {
   h.state.readsAnswer = false;
   h.state.onSelect = () => {};
   h.state.taskWrites = [];
+  h.state.events = [];
   setContainerCleanupRunner(null);
 });
 
@@ -205,7 +211,9 @@ describe('a job that resets steps itself', () => {
     expect(call[3]).toBe(1);
     expect(call[4]).toBe(5);
     expect(ctx.orchestrationEpoch).toBe(5);
-    // The reset refused, so neither the pointer nor the task moved.
+    // The reset refused, so neither the pointer nor the task moved, and no round was recorded as
+    // requested or started.
     expect(h.state.taskWrites).toEqual([]);
+    expect(h.state.events).toEqual(['step.loop_back']);
   });
 });
