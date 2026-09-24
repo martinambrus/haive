@@ -2903,19 +2903,24 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Otherwise fall back to the best-effort async summarizer, whose completion handler
     // mirrors its result. We are past the loop hook here, so this runs once per step
     // finalization (not per loop pass) and never blocks it.
-    if (curatedSummary) {
-      await recordLedgerEntry(db, params.taskId, current.id, {
-        stepId: stepDef.metadata.id,
-        round: current.round,
-        // Capped: a curated summary field is not always short (discovery's is its whole
-        // findings document), and one oversized entry survives the drop loop and rides
-        // into every later prompt.
-        text: capSummaryForLedger(curatedSummary),
-        kind: 'summary',
-      });
-    } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
-      await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
-    }
+    //
+    // Called only once the pass's outcome has landed: a pass a Retry replaced must leave no
+    // recap for the rerun's prompts, nor a recap run that writes onto the retried row.
+    const recordRecap = async (): Promise<void> => {
+      if (curatedSummary) {
+        await recordLedgerEntry(db, params.taskId, current.id, {
+          stepId: stepDef.metadata.id,
+          round: current.round,
+          // Capped: a curated summary field is not always short (discovery's is its whole
+          // findings document), and one oversized entry survives the drop loop and rides
+          // into every later prompt.
+          text: capSummaryForLedger(curatedSummary),
+          kind: 'summary',
+        });
+      } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
+        await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
+      }
+    };
 
     // --- Fix-loop hook: a downstream step that finds a BLOCKING defect routes back
     // to the implementation step for a new round instead of finishing the chain. The
@@ -2936,6 +2941,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           endedAt: new Date(),
         });
         if (!finished) return supersededPass(current);
+        await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, round },
           'fix-loop: blocking defect found; routing back to implementation',
@@ -2967,6 +2973,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           endedAt: new Date(),
         });
         if (!finished) return supersededPass(current);
+        await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, round },
           'restart-loop: human gate requested restart from implementation (uncapped)',
@@ -2999,6 +3006,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           endedAt: new Date(),
         });
         if (!finished) return supersededPass(current);
+        await recordRecap();
         ctx.logger.info(
           { stepId: meta.id, targetStepId: target.targetStepId },
           'revise-loop: apply requested revising an earlier step',
@@ -3033,6 +3041,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       endedAt: new Date(),
     });
     if (!done) return supersededPass(current);
+    await recordRecap();
 
     // Surface B: freeze context-window usage on the finished step (best-effort; never
     // blocks completion). No-op for deterministic steps (no CLI invocations). Returns

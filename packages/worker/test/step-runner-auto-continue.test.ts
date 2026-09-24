@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
+import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/task-ledger.js')>();
+  return { ...actual, recordLedgerEntry: vi.fn(async () => undefined) };
+});
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -545,6 +551,41 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect(result.status).toBe('superseded');
     expect(state.taskStepRow.status).toBe('skipped');
     expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
+  });
+
+  /** An agent step whose own phase has nothing to do here, so apply's recap is what is tested. */
+  const recappingStep = (apply: () => Promise<unknown>) => {
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.llm = { skipIf: () => true } as never;
+    def.apply = apply as never;
+    return def;
+  };
+
+  it('leaves no recap behind for a pass a Retry replaced', async () => {
+    vi.mocked(recordLedgerEntry).mockClear();
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = recappingStep(async () => {
+      state.taskStepRow.status = 'pending';
+      return { summary: 'what the replaced pass did' };
+    });
+
+    expect((await run(state, def)).status).toBe('superseded');
+    expect(vi.mocked(recordLedgerEntry)).not.toHaveBeenCalled();
+  });
+
+  it('records the recap once the outcome has landed', async () => {
+    vi.mocked(recordLedgerEntry).mockClear();
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const def = recappingStep(async () => ({ summary: 'what the pass did' }));
+
+    expect((await run(state, def)).status).toBe('done');
+    expect(vi.mocked(recordLedgerEntry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordLedgerEntry).mock.calls[0]![3]).toMatchObject({
+      text: 'what the pass did',
+      kind: 'summary',
+    });
   });
 
   it('stops a pass whose task a Retry moved to a newer epoch, writing nothing', async () => {
