@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { loadMermaid } from '@/components/markdown/mermaid-loader';
+import { renderMermaid } from '@/components/markdown/mermaid-loader';
 
 /**
  * The impact graph: a mermaid flowchart with pan, zoom and click-through.
@@ -40,14 +40,10 @@ export function PlanGraph({
     setSvg(null);
     setFailed(false);
     void (async () => {
-      try {
-        const mermaid = await loadMermaid();
-        await mermaid.parse(source);
-        const out = await mermaid.render(renderId, source);
-        if (!cancelled) setSvg(out.svg);
-      } catch {
-        if (!cancelled) setFailed(true);
-      }
+      const out = await renderMermaid(renderId, source);
+      if (cancelled) return;
+      if (out === null) setFailed(true);
+      else setSvg(out);
     })();
     return () => {
       cancelled = true;
