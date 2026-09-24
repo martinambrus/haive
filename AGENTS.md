@@ -1002,7 +1002,9 @@ picture is a recorded input rather than an addition. A file attached since whose
 read is left unprepared and counts by KIND alone, since the attachments notice names every live
 row: a picture requires `vision`, a PDF prefers it. A greenfield root with no brief refuses to
 dispatch once nothing at all is attached (`assertSomethingToBuildFrom`), which is 00's own "a brief
-or a file" rule re-checked against the live rows. 02's manual repair drops a picked section whose
+or a file" rule re-checked against the live rows, before the inputs are prepared and again after,
+since preparing a late document can take minutes and deleting the only one meanwhile must still
+refuse. 02's manual repair drops a picked section whose
 document is gone, because the gate carries its BODY. Every lookup fails open, onto the fields the
 build had before. A failed index REWRITE is the exception: it drops the index from the prompt, and
 is recorded that way, since the file on disk no longer lists what is attached.

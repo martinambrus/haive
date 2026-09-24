@@ -695,11 +695,13 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
-        // One read of the attachments for the whole root dispatch, so refusing and choosing the
-        // capabilities see the same rows.
+        // The capabilities are chosen from the rows read here, and the refusal is made again once
+        // the inputs are prepared: preparing a late document can take minutes, and deleting the
+        // only one meanwhile must still stop a root that would have nothing to build from.
         const attachments = await loadLiveAttachments(ctx);
         assertSomethingToBuildFrom(d, attachments);
         const live = await withLiveInputs(ctx, d, attachments);
+        assertSomethingToBuildFrom(d, await loadLiveAttachments(ctx));
         return [
           {
             agentId: 'plan-root',

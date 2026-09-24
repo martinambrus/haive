@@ -32,6 +32,7 @@ import {
   assertSomethingToBuildFrom,
   buildRootPrompt,
   planAgentCapabilities,
+  planBuildStep,
   withLiveInputs,
   type PlanBuildDetect,
 } from './01-plan-build.js';
@@ -832,6 +833,7 @@ describe('a build dispatching on what is attached now', () => {
       tasks: schema.tasks,
       taskAttachments: schema.taskAttachments,
       taskSteps: schema.taskSteps,
+      planNodes: schema.planNodes,
     });
     fake.insert(schema.tasks, {
       id: TASK_ID,
@@ -1164,6 +1166,30 @@ describe('a build dispatching on what is attached now', () => {
     await f.attach('brief.md', '# Brief');
     const d = detectedFrom(null);
     expect(await withLiveInputs(f.ctx, d)).toBe(d);
+  });
+
+  it('refuses the root when the only file is deleted while it is being prepared', async () => {
+    // Preparing a late document can take minutes, and a greenfield root with no brief must still have
+    // something to build from once that is over.
+    const f = await buildFixture();
+    f.record(recorded({ inputs: [], extracted: 0, hasImageInputs: false, hasPdfInputs: false }));
+    const doc = await f.attach('only.docx', await docxBytes('The whole brief.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.remove(doc);
+    };
+    const d = {
+      ...detectedFrom(null),
+      brief: '',
+      repositoryId: '00000000-0000-4000-8000-0000000000f1',
+    } as PlanBuildDetect;
+    await expect(
+      planBuildStep.agentMining!.selectAgents({
+        ctx: f.ctx,
+        detected: d,
+        formValues: {},
+      } as never),
+    ).rejects.toThrow(/nothing to build from/);
   });
 
   it('records nothing over a 00-plan-inputs retry that reset its output', async () => {
