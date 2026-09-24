@@ -137,6 +137,8 @@ export async function closeTaskQueue(): Promise<void> {
   }
 }
 
+type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
+
 /** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
 interface HeldTask {
   ctx?: ResolvedTaskContext;
@@ -299,7 +301,7 @@ async function resolveTaskContext(
 }
 
 async function appendEvent(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   taskStepId: string | null,
   eventType: string,
@@ -341,7 +343,7 @@ async function markTaskRunning(db: Database, taskId: string): Promise<void> {
  *  index only when the row is not yet materialized (advancing to a not-yet-run next step,
  *  whose run_seq is stamped a moment later when it parks — the label is read while parked). */
 async function resolveCurrentStepIndex(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   stepId: string,
   round: number,
@@ -392,15 +394,18 @@ async function markTaskWaiting(
     );
 }
 
+/** Point the running task at a step. With `epoch`, only while the task is still at it: false when
+ *  a Retry moved it on and nothing was written. */
 async function markTaskRunningWithStep(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   stepId: string,
   stepIndex: number,
   round = 0,
-): Promise<void> {
+  epoch?: number,
+): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  await db
+  const [pointed] = await db
     .update(schema.tasks)
     .set({
       status: 'running',
@@ -425,8 +430,11 @@ async function markTaskRunningWithStep(
       and(
         eq(schema.tasks.id, taskId),
         notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        ...(epoch === undefined ? [] : [eq(schema.tasks.orchestrationEpoch, epoch)]),
       ),
-    );
+    )
+    .returning({ id: schema.tasks.id });
+  return pointed !== undefined;
 }
 
 /** Complete the task, only while it is still at `epoch`, the one the finishing pass ran under: a
@@ -1317,24 +1325,37 @@ export async function handleResult(
         return;
       }
       if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
-      // Recorded once the round is certain to be entered: a round the reset refused would leave a
-      // `started` that counts toward the cap, and a diagnosis nobody was sent.
-      await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-        diagnosis: result.diagnosis,
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
+      // The round is recorded with the pointer write that hands the task to it, and only while the
+      // task is still at the epoch this job holds: a round a Retry overtook would leave a `started`
+      // that counts toward the cap, and a diagnosis nobody was sent.
+      const entered = await db.transaction(async (tx) => {
+        const pointed = await markTaskRunningWithStep(
+          tx,
+          ctx.taskId,
+          target.metadata.id,
+          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+          nextRound,
+          ctx.orchestrationEpoch,
+        );
+        if (!pointed) return false;
+        await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
+          diagnosis: result.diagnosis,
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+        });
+        await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+        });
+        return true;
       });
-      await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.started', {
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-      });
-      await markTaskRunningWithStep(
-        db,
-        ctx.taskId,
-        target.metadata.id,
-        computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-        nextRound,
-      );
+      if (!entered) {
+        logger.info(
+          { taskId: ctx.taskId, stepId },
+          'fix loop not entered: the task moved to a newer epoch before its hand-off',
+        );
+        return;
+      }
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,
@@ -1390,13 +1411,21 @@ export async function handleResult(
         );
         return;
       }
-      await markTaskRunningWithStep(
+      const pointed = await markTaskRunningWithStep(
         db,
         ctx.taskId,
         target.metadata.id,
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         targetRound,
+        ctx.orchestrationEpoch,
       );
+      if (!pointed) {
+        logger.info(
+          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          'revise not entered: the task moved to a newer epoch before its hand-off',
+        );
+        return;
+      }
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,

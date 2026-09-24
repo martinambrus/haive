@@ -277,7 +277,8 @@ then run after the pass it waited behind failed the step, so an advance on a `fa
 dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
 task `running` first. An answer submitted to a form still parked is the one exception, since
 answering it is what reopens the task; an advance onto that form that carries no answer is dropped
-like any other.
+like any other. A clarification answer is one of those, since it rides `task_events` rather than the
+job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
@@ -296,7 +297,11 @@ failing the task carries that epoch, since either one also reaps the task's cont
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
 read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
-api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off.
+api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
+hand-off after it points the task at the target only while the task is still at that epoch, and a
+fix round's request and `started` event are written in the same transaction: a new round has no row
+to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
+cap.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,

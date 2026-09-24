@@ -197,7 +197,7 @@ export function fixLoopFingerprint(sourceStepId: string, diagnosis: string): str
  *  diagnosis fingerprint is stored alongside so the oscillation guard compares rounds with
  *  a cheap equality check (it recomputes for legacy rows that predate the field). */
 export async function recordFixLoopRequest(
-  db: Database,
+  db: Database | Parameters<Parameters<Database['transaction']>[0]>[0],
   taskId: string,
   sourceTaskStepId: string,
   req: FixLoopRequest,

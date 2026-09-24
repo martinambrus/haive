@@ -34,6 +34,8 @@ const h = vi.hoisted(() => {
     onSelect: (() => {}) as () => void,
     taskWrites: [] as { epochs: unknown[]; landed: boolean }[],
     events: [] as unknown[],
+    /** What the task queue is asked to enqueue. */
+    add: vi.fn(async (..._args: unknown[]) => undefined),
   };
   return { state };
 });
@@ -61,7 +63,9 @@ const db = {
   select: () => {
     h.state.onSelect();
     if (!h.state.readsAnswer) throw new Error('the job went no further');
-    return { from: () => ({ where: async () => [] }) };
+    // Awaited directly by some reads and cut with .limit() by others.
+    const rows = Object.assign(Promise.resolve([]), { limit: async () => [] });
+    return { from: () => ({ where: () => rows }) };
   },
   insert: () => ({
     values: async (v: { eventType?: unknown }) => {
@@ -80,9 +84,19 @@ const db = {
       }),
     }),
   }),
+  transaction: async (fn: (tx: unknown) => unknown) => fn(db),
 };
 
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    add(...args: unknown[]) {
+      return h.state.add(...args);
+    }
+  },
+}));
 vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/queues/_step-reset.js')>()),
   resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 7 })),
@@ -114,6 +128,7 @@ afterEach(() => {
   h.state.onSelect = () => {};
   h.state.taskWrites = [];
   h.state.events = [];
+  h.state.add.mockClear();
   setContainerCleanupRunner(null);
 });
 
@@ -159,14 +174,23 @@ describe('a task job that fails', () => {
 });
 
 describe('a job that resets steps itself', () => {
+  const revise = {
+    status: 'revise',
+    row: { id: 'ts-1', round: 0 },
+    sourceStepId: 'epoch-job-step',
+    targetStepId: 'epoch-job-target',
+  };
+  // Uncapped, as a person's reject is, so no round cap or oscillation check stands in the way.
+  const loopBack = {
+    status: 'loop_back',
+    row: { id: 'ts-1', round: 0 },
+    diagnosis: 'a defect',
+    sourceStepId: 'epoch-job-step',
+    uncapped: true,
+  };
+
   it('holds the task at the epoch its own reset moved it to', async () => {
     const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
-    const revise = {
-      status: 'revise',
-      row: { id: 'ts-1', round: 0 },
-      sourceStepId: 'epoch-job-step',
-      targetStepId: 'epoch-job-target',
-    };
     // The reset is the job's own, so a failure after it must land at the new epoch.
     await expect(
       handleResult(db as never, ctx as never, 'epoch-job-step', revise as never),
@@ -177,12 +201,6 @@ describe('a job that resets steps itself', () => {
   it('hands nothing off when its reset finds the task moved on', async () => {
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
     const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
-    const revise = {
-      status: 'revise',
-      row: { id: 'ts-1', round: 0 },
-      sourceStepId: 'epoch-job-step',
-      targetStepId: 'epoch-job-target',
-    };
     // Resolving at all shows it stopped before the task writes that follow a reset.
     await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
     expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(
@@ -195,17 +213,66 @@ describe('a job that resets steps itself', () => {
     expect(ctx.orchestrationEpoch).toBe(5);
   });
 
+  it('enters no fix round when a Retry moved the task on after its reset', async () => {
+    h.state.readsAnswer = true;
+    // A new round has no row to reset, so the reset takes no swap; the Retry lands while the job
+    // counts the rounds already spent, after the hand-off's own epoch check.
+    h.state.onSelect = () => {
+      h.state.taskEpoch = 6;
+    };
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    // No round recorded as requested or started, and nothing queued for it.
+    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('enters and records the fix round while the task is still at its epoch', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+    expect(h.state.events).toEqual(['step.loop_back', 'fix_loop.requested', 'fix_loop.started']);
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ round: 1, epoch: 5 });
+  });
+
+  it('hands a revise nothing once a Retry moved the task on after its reset', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockImplementationOnce(async () => {
+      h.state.taskEpoch = 7;
+      return { downstreamReset: 0, newEpoch: 7 };
+    });
+    // The Retry lands after the job's own reset, while it reads where to point the task.
+    h.state.onSelect = () => {
+      h.state.taskEpoch = 8;
+    };
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [7], landed: false }]);
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('hands a revise off at the epoch its own reset moved the task to', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockImplementationOnce(async () => {
+      h.state.taskEpoch = 7;
+      return { downstreamReset: 0, newEpoch: 7 };
+    });
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [7], landed: true }]);
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ round: 1, epoch: 7 });
+  });
+
   it('enters no fix round when its reset finds the task moved on', async () => {
     h.state.readsAnswer = true;
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
     const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
-    const loopBack = {
-      status: 'loop_back',
-      row: { id: 'ts-1', round: 0 },
-      diagnosis: 'a defect',
-      sourceStepId: 'epoch-job-step',
-      uncapped: true,
-    };
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     const call = vi.mocked(resetStepAndDownstream).mock.lastCall!;
     expect(call[3]).toBe(1);
