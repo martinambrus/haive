@@ -50,3 +50,37 @@ describe('markdown editor lists', () => {
     ).toBe('- [ ] open task\n\n- [x] done task');
   });
 });
+
+describe('markdown editor images', () => {
+  const attrs = { src: 'http://example.test/wire.png', alt: 'wireframe' };
+
+  it('writes an image back as markdown', () => {
+    expect(
+      serialize([
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'see ' },
+            { type: 'image', attrs },
+            { type: 'text', text: ' here' },
+          ],
+        },
+      ]),
+    ).toBe('see ![wireframe](http://example.test/wire.png) here');
+  });
+
+  it('renders an image as its label, never as an img or a link', () => {
+    const editor = new Editor({
+      extensions: markdownEditorExtensions({}),
+      content: { type: 'doc', content: [{ type: 'paragraph' }] },
+    });
+    try {
+      const type = editor.schema.nodes.image!;
+      const dom = JSON.stringify(type.spec.toDOM!(type.create(attrs)));
+      expect(dom).toContain('image: wireframe');
+      expect(dom).not.toMatch(/"img"|href/);
+    } finally {
+      editor.destroy();
+    }
+  });
+});

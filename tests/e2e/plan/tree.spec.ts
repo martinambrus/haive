@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { cleanupRepoFixture, cleanupUser, getSql, seedRepoFixture } from '../helpers/db.js';
 import { API_BASE, registerUser } from '../helpers/auth.js';
@@ -47,6 +48,53 @@ test.describe('plan canvas', () => {
       expect(root.rolledStatus, 'a blocked descendant makes every ancestor render blocked').toBe(
         'blocked_human',
       );
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('an image in a node body survives an edit, and nothing fetches it', async ({ page }) => {
+    // The plan route is the heaviest in the app to compile, so every wait here is generous.
+    test.setTimeout(240_000);
+    const sql = getSql();
+    let userId = '';
+    let repo = null as Awaited<ReturnType<typeof seedRepoFixture>> | null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'plan-image' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'plan-image');
+      const plan = await seedPlan(sql, repo.repoId, 'image');
+      // On the api host, which the page's CSP admits, so a fetch of it would really be made.
+      const probe = `${API_BASE}/e2e-image-probe-${randomUUID()}.png`;
+      await sql`update plan_nodes set body = ${`Look: ![wireframe](${probe}) done`} where id = ${plan.todoId}`;
+      let fetched = 0;
+      page.on('request', (request) => {
+        if (request.url().startsWith(probe)) fetched += 1;
+      });
+
+      await page.goto(`/repos/${repo.repoId}/plan?node=${plan.todoId}`);
+      await page.getByRole('button', { name: 'Edit description' }).click({ timeout: 120_000 });
+      const editor = page.locator('.ProseMirror');
+      await expect(editor).toContainText('image: wireframe', { timeout: 30_000 });
+      await editor.click();
+      await page.keyboard.press('Control+End');
+      await page.keyboard.type('!');
+      const saved = page.waitForResponse(
+        (res) =>
+          res.request().method() === 'PATCH' &&
+          new URL(res.url()).pathname.endsWith(`/nodes/${plan.todoId}`),
+        { timeout: 30_000 },
+      );
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      expect((await saved).ok()).toBe(true);
+
+      const [row] = await sql<
+        { body: string }[]
+      >`select body from plan_nodes where id = ${plan.todoId}`;
+      expect(row!.body).toContain(`![wireframe](${probe})`);
+      expect(row!.body).toContain('done!');
+      expect(fetched, 'neither the viewer nor the editor fetches an image').toBe(0);
     } finally {
       if (repo) await cleanupRepoFixture(sql, repo.repoId);
       if (userId) await cleanupUser(sql, userId);
