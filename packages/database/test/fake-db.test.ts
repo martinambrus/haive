@@ -62,6 +62,31 @@ describe('the fake database', () => {
     );
   });
 
+  it('compares a json column by value, as Postgres compares jsonb, and never to NULL', () => {
+    // A compare-and-set on a stored document hands back an object read earlier, which is equal to
+    // the stored one without being it.
+    const { fake } = setup();
+    const doc = { a: 1, list: [1, 2], nested: { b: 'x' } };
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-000000000003',
+      userId: USER,
+      type: 'workflow',
+      title: 'with metadata',
+      metadata: doc,
+    });
+    const matches = (value: Record<string, unknown>): number =>
+      fake
+        .rows(schema.tasks)
+        .filter(fake.compileWhere(schema.tasks, eq(schema.tasks.metadata, value))).length;
+
+    expect(matches(structuredClone(doc))).toBe(1);
+    expect(matches({ nested: { b: 'x' }, list: [1, 2], a: 1 })).toBe(1);
+    expect(matches({ ...doc, list: [2, 1] })).toBe(0);
+    expect(matches({ ...doc, nested: { b: 'y' } })).toBe(0);
+    // The column's type rules a NULL argument out; a value read back from a NULL column is one.
+    expect(matches(null as unknown as Record<string, unknown>)).toBe(0);
+  });
+
   it('projects a select onto the columns it names', async () => {
     const { fake, row } = setup();
     fake.insert(t, row('b.md'));

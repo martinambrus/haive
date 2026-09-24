@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { filesToRemove, type RemovableAttachment } from '../src/lib/attachment-removal.js';
+import {
+  attachmentRemovalPlan,
+  filesToRemove,
+  type RemovableAttachment,
+} from '../src/lib/attachment-removal.js';
 
 const row = (id: string, filename: string, expandedFromId: string | null = null) =>
   ({ id, filename, expandedFromId }) satisfies RemovableAttachment;
@@ -23,7 +27,7 @@ describe('filesToRemove', () => {
   });
 
   it('leaves a file that only shares the sidecar name, when a surviving attachment owns it', () => {
-    // Sidecar names are not reserved, so this can be a real upload.
+    // New uploads refuse a sidecar name, but a row stored before they did can still hold one.
     expect(files(['a'], [row('a', 'x.docx'), row('b', 'x.docx.extracted.md')])).toEqual(['x.docx']);
   });
 
@@ -83,6 +87,11 @@ describe('filesToRemove', () => {
     ]);
   });
 
+  it('leaves a file, and its extracted text, that a surviving row still names', () => {
+    // Two rows can name one file: the upload claim reads the disk, not the rows.
+    expect(files(['a'], [row('a', 'x.pdf'), row('b', 'x.pdf')])).toEqual([]);
+  });
+
   it('lists a file once when a deleted attachment has another’s sidecar name', () => {
     const out = filesToRemove(new Set(['a', 'b']), [
       row('a', 'x.docx'),
@@ -94,5 +103,28 @@ describe('filesToRemove', () => {
       'x.docx.extracted.md',
       'x.docx.extracted.md.extracted.md',
     ]);
+  });
+});
+
+describe('attachmentRemovalPlan', () => {
+  const archive = [row('z', 'spec.zip'), row('c1', 'spec/a.md', 'z'), row('c2', 'spec/b.md', 'z')];
+
+  it('takes the archive with the last file extracted from it', () => {
+    const plan = attachmentRemovalPlan(new Set(['c1', 'c2']), archive);
+    expect([...plan.ids].sort()).toEqual(['c1', 'c2', 'z']);
+    expect([...plan.files].sort()).toEqual([
+      'spec.zip',
+      'spec.zip.extracted.md',
+      'spec/a.md',
+      'spec/a.md.extracted.md',
+      'spec/b.md',
+      'spec/b.md.extracted.md',
+    ]);
+  });
+
+  it('keeps the archive while a file of it survives', () => {
+    const plan = attachmentRemovalPlan(new Set(['c1']), archive);
+    expect(plan.ids).toEqual(['c1']);
+    expect([...plan.files].sort()).toEqual(['spec/a.md', 'spec/a.md.extracted.md']);
   });
 });

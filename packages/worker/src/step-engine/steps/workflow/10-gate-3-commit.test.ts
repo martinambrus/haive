@@ -22,13 +22,25 @@ async function git(dir: string, args: string[]): Promise<string> {
 
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
+/** A db that answers each query with the next queued row set, in the order detect issues them:
+ *  01-worktree-setup, 09-gate-2, then the DAG issues and 07's rounds. Unqueued queries answer
+ *  no rows. */
+function queuedDb(results: unknown[][]) {
+  const next = () => Promise.resolve(results.shift() ?? []);
+  const chain: Record<string, unknown> = {};
+  Object.assign(chain, {
+    from: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    limit: () => next(),
+    then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
+      next().then(resolve, reject),
+  });
+  return { select: () => chain };
+}
+
 /** ctx whose db returns no 01-worktree-setup row, so detect falls back to workspacePath. */
-function mkCtx(workspacePath: string): StepContext {
-  const noRows = {
-    from: () => ({
-      where: () => ({ orderBy: () => ({ limit: () => Promise.resolve([]) }) }),
-    }),
-  };
+function mkCtx(workspacePath: string, results: unknown[][] = []): StepContext {
   return {
     repoPath: workspacePath,
     workspacePath,
@@ -36,7 +48,7 @@ function mkCtx(workspacePath: string): StepContext {
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
-    db: { select: () => noRows },
+    db: queuedDb(results),
     logger,
   } as unknown as StepContext;
 }
@@ -103,5 +115,52 @@ describe('10-gate-3-commit detect', () => {
     const detected = await gate3CommitStep.detect!(mkCtx(nested));
     expect(detected.hasGit).toBe(false);
     expect(detected.dirtyFiles).toBe(0);
+  });
+});
+
+describe('10-gate-3-commit similar sites', () => {
+  const site = { path: 'src/other.ts', lines: '3-5', reason: 'same null check' };
+
+  it('lists them when no gate 2 decided on them (quick_bugfix has none)', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, [[], [], [], [{ round: 0, output: { summary: 's', similarSites: [site] } }]]),
+    );
+    expect(detected.similarSites).toEqual([{ ...site, source: 'implementation round 0' }]);
+    const rows = gate3CommitStep.form!({} as never, detected)!.statusSummary ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.label).toBe('Similar code elsewhere — not changed');
+    expect(rows[0]!.body).toContain('`src/other.ts` (lines 3-5) — same null check');
+    expect(rows[0]!.body).toContain('Anything listed here needs a follow-up task to be fixed.');
+  });
+
+  it('leaves them to gate 2 when gate 2 recorded a decision', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, [
+        [],
+        [{ detectOutput: null, output: { decision: 'approve' }, iterations: [] }],
+        [],
+        [{ round: 0, output: { summary: 's', similarSites: [site] } }],
+      ]),
+    );
+    expect(detected.similarSites).toEqual([]);
+    expect(gate3CommitStep.form!({} as never, detected)!.statusSummary).toBeUndefined();
+  });
+
+  it('renders a payload persisted before the field existed', () => {
+    const form = gate3CommitStep.form!(
+      {} as never,
+      {
+        hasGit: true,
+        workspacePath: '/w',
+        diffSummary: '',
+        dirtyFiles: 0,
+        diffArtifactPath: null,
+        changedFileCount: 0,
+        diffArtifactTruncated: false,
+      } as never,
+    )!;
+    expect(form.statusSummary).toBeUndefined();
   });
 });

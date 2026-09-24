@@ -161,6 +161,18 @@ describe('task attachment routes', () => {
     return archive;
   }
 
+  /** What a worker leaves when it dies after moving an archive's tree into place and before the
+   *  rows naming its files commit: the tree, and the staging dir's `placed-as` naming it. */
+  async function interruptedExpansion(archiveId: string, dir: string, files: string[]) {
+    const staging = up(`.expanding-${archiveId}-00000000-0000-4000-8000-000000000999`);
+    await mkdir(staging, { recursive: true });
+    await writeFile(path.join(staging, 'placed-as'), JSON.stringify({ dir, files }));
+    for (const file of files) {
+      await mkdir(path.dirname(up(`${dir}/${file}`)), { recursive: true });
+      await writeFile(up(`${dir}/${file}`), 'placed');
+    }
+  }
+
   /** A worker-written sidecar next to an original: a file with no row of its own. */
   async function plantSidecar(filename: string): Promise<void> {
     await writeFile(up(`${filename}.extracted.md`), `# ${filename}\n`);
@@ -870,6 +882,56 @@ describe('task attachment routes', () => {
       expect(await readFile(up('a.md'), 'utf8')).toBe('a');
     });
 
+    it('takes back what an interrupted expansion of the deleted archive placed', async () => {
+      // A worker that died after moving the tree into place and before its rows committed. With
+      // the archive's row gone, no later expansion call would know there was anything to take back
+      // — and with no row left at all, it could not even find the uploads dir.
+      const archive = await seedFile('spec.zip', 'PK');
+      await interruptedExpansion(archive.id as string, 'spec', ['a.md']);
+
+      // Its staging dir outlives the section: it can hold a whole extracted archive.
+      const atCommit: string[][] = [];
+      fake.hooks.beforeCommit = async () => {
+        atCommit.push((await listing(up())).filter((n) => n.startsWith('.expanding-')));
+      };
+
+      expect(await send('DELETE', `/${TASK}/attachments/${archive.id as string}`)).toEqual({
+        status: 200,
+        body: { ok: true },
+      });
+      expect(atCommit.at(-1)).toHaveLength(1);
+      expect(await exists(up('spec'))).toBe(false);
+      expect(await listing(up())).toEqual([]);
+    });
+
+    it('removes an archive with the last file extracted from it, and keeps it until then', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/b.md': 'b' });
+      await plantSidecar('spec.zip');
+      const idOf = (name: string) =>
+        fake.rows(schema.taskAttachments).find((r) => r.filename === name)!.id as string;
+
+      await send('DELETE', `/${TASK}/attachments/${idOf('spec/a.md')}`);
+      expect(filenames()).toEqual(['spec.zip', 'spec/b.md']);
+
+      expect(await send('DELETE', `/${TASK}/attachments/${idOf('spec/b.md')}`)).toEqual({
+        status: 200,
+        body: { ok: true },
+      });
+      expect(filenames()).toEqual([]);
+      expect(await exists(up('spec.zip'))).toBe(false);
+      expect(await exists(up('spec.zip.extracted.md'))).toBe(false);
+      expect(await indexed()).toBeNull();
+    });
+
+    it('keeps a file another row still names', async () => {
+      // Two rows can name one file: the upload claim reads the disk, not the rows.
+      const first = await seedFile('a.md', 'shared');
+      seedAttachment('a.md', 'shared');
+      await send('DELETE', `/${TASK}/attachments/${first.id as string}`);
+      expect(await readFile(up('a.md'), 'utf8')).toBe('shared');
+      expect(filenames()).toEqual(['a.md']);
+    });
+
     it('keeps an upload that merely has the sidecar’s name', async () => {
       const doc = await seedFile('x.docx', 'docx');
       await seedFile('x.docx.extracted.md', 'mine');
@@ -1003,6 +1065,51 @@ describe('task attachment routes', () => {
       expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual(busy);
       expect(filenames()).toEqual(['docs/a.md']);
       expect(await readFile(up('docs/a.md'), 'utf8')).toBe('a');
+    });
+
+    it('takes back what an interrupted expansion of an archive in the folder placed', async () => {
+      const archive = await seedFile('docs/x.zip', 'PK');
+      await seedFile('keep.md', 'keep');
+      await interruptedExpansion(archive.id as string, 'x', ['a.md']);
+      const atCommit: string[][] = [];
+      fake.hooks.beforeCommit = async () => {
+        atCommit.push((await listing(up())).filter((n) => n.startsWith('.expanding-')));
+      };
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=docs`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 1 },
+      });
+      expect(atCommit.at(-1)).toHaveLength(1);
+      expect(await exists(up('x'))).toBe(false);
+      expect(await listing(up())).toEqual(['_ATTACHMENTS.md', 'keep.md']);
+    });
+
+    it('removes the archive whose every extracted file was in the folder', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/sub/b.md': 'b' });
+      await plantSidecar('spec.zip');
+      await seedFile('keep.md', 'keep');
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=spec`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 3 },
+      });
+      expect(filenames()).toEqual(['keep.md']);
+      expect(await exists(up('spec.zip'))).toBe(false);
+      expect(await exists(up('spec.zip.extracted.md'))).toBe(false);
+      expect(await exists(up('spec'))).toBe(false);
+      expect(await indexed()).toEqual(['keep.md']);
+    });
+
+    it('keeps the archive when the folder held only some of its files', async () => {
+      await seedArchive('spec.zip', { 'spec/a.md': 'a', 'spec/sub/b.md': 'b' });
+
+      expect(await send('DELETE', `/${TASK}/attachments?prefix=spec/sub`)).toEqual({
+        status: 200,
+        body: { ok: true, removed: 1 },
+      });
+      expect(filenames()).toEqual(['spec.zip', 'spec/a.md']);
+      expect(await readFile(up('spec.zip'), 'utf8')).toBe('PK');
     });
 
     it('prunes a parent the folder leaves empty', async () => {

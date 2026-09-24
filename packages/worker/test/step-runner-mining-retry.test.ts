@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  type CliExecJobPayload,
+  type StepCapability,
+} from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import {
   MiningRetryError,
@@ -22,6 +27,10 @@ interface MiningRow {
   attempts: number;
   /** Set when a human asked for THIS terminal to be re-run (the fan-out half of Resume). */
   userRetryRequestedAt?: Date | null;
+  /** What the agent's last dispatch asked for beyond the step spec. */
+  roleKey?: string | null;
+  capabilities?: string[] | null;
+  preferVision?: boolean | null;
 }
 
 interface MockState {
@@ -86,6 +95,9 @@ function makeMockDb(state: MockState): Database {
           return [row];
         };
         return {
+          // Awaited directly by a write that needs no row back (the no-provider failure).
+          then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) =>
+            Promise.resolve(commit()).then(res, rej),
           returning: async () => commit(),
           onConflictDoNothing: () => ({
             returning: async () =>
@@ -125,12 +137,16 @@ function makeMockDb(state: MockState): Database {
     },
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
+      // Read only for a seat other than 'default'.
+      userStepCliRolePreferences: { findFirst: async () => undefined },
       tasks: { findFirst: async () => undefined },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
       taskSteps: { findFirst: async () => undefined },
       envTemplates: { findFirst: async () => undefined },
       repositories: { findFirst: async () => undefined },
+      // Every fan-out reads what is attached to the task; nothing is, unless a test says so.
+      taskAttachments: { findMany: async () => [] },
     },
   } as unknown as Database;
   return db;
@@ -178,7 +194,7 @@ function freshState(miningRows: MiningRow[]): MockState {
   };
 }
 
-function makeProvider(): CliProviderRecord {
+function makeProvider(overrides: Partial<CliProviderRecord> = {}): CliProviderRecord {
   return {
     id: 'prov-1',
     userId: 'user-1',
@@ -193,6 +209,7 @@ function makeProvider(): CliProviderRecord {
     enabled: true,
     createdAt: new Date(),
     updatedAt: new Date(),
+    ...overrides,
   } as CliProviderRecord;
 }
 
@@ -374,7 +391,12 @@ function degradeThenWaveStep(
   };
 }
 
-function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[]) {
+function run(
+  db: Database,
+  stepDef: StepDefinition,
+  enqueued: CliExecJobPayload[],
+  providers: CliProviderRecord[] = [makeProvider()],
+) {
   return advanceStep({
     db,
     taskId: 'task-1',
@@ -383,7 +405,7 @@ function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[
     workspacePath: '/tmp',
     cliProviderId: 'prov-1',
     stepDef,
-    providers: [makeProvider()],
+    providers,
     deps: {
       async enqueueCliInvocation(payload) {
         // maybeEnqueueStepSummary also enqueues (kind 'cli') on a done step; only the
@@ -394,8 +416,8 @@ function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[
   });
 }
 
-/** A fan-out step declaring NO retry spec at all — the shape of five of the seven mining steps
- *  (03, 09_5, 09_5b, 09_6_4, 11d). Both automatic re-roll paths are inert here, so this is what
+/** A fan-out step declaring NO retry spec at all — `09_5-skill-generation`'s shape, the one of
+ *  the ten mining steps without one. Both automatic re-roll paths are inert here, so this is what
  *  proves a user-requested re-run does not depend on per-step retry config. */
 function noRetryMiningStep(applyCalls: StepApplyArgs[]): StepDefinition {
   return {
@@ -991,5 +1013,296 @@ describe('advanceStep agentMining retry for a wave-dispatched step', () => {
     expect(enqueued).toHaveLength(1);
     const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(invocation?.row.prompt).toContain('review');
+  });
+});
+
+describe('what a mining agent is told about the task', () => {
+  // Every augmenter is a no-op in the other tests here (no attachments, no stored terseness
+  // level), which is exactly why nothing pinned whether a fan-out was augmented at all, or twice.
+  const attached = [
+    {
+      id: 'att-1',
+      taskId: 'task-1',
+      filename: 'brief.pdf',
+      description: null,
+      storedPath: '/elsewhere/brief.pdf',
+      contentType: null,
+      sizeBytes: 1,
+      expandedAt: null,
+      expansionNote: null,
+      expandedFromId: null,
+      createdAt: new Date(),
+    },
+  ];
+  const count = (text: string, needle: string): number => text.split(needle).length - 1;
+  const sentPrompts = (state: MockState): string[] =>
+    state.inserts.filter((i) => i.table === 'cli_invocations').map((i) => String(i.row.prompt));
+
+  beforeEach(() => {
+    const original = configService.get.bind(configService);
+    vi.spyOn(configService, 'get').mockImplementation(async (key) =>
+      key === CONFIG_KEYS.TERSENESS_LEVEL ? 'full' : original(key),
+    );
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function withAttachments(state: MockState): Database {
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.taskAttachments = { findMany: async () => attached };
+    return db as unknown as Database;
+  }
+
+  it('tells every agent of a fan-out what is attached, once', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(withAttachments(state), waveStep([], ['refute-abc', 'refute-def']), []);
+
+    const prompts = sentPrompts(state);
+    expect(prompts).toHaveLength(2);
+    for (const prompt of prompts) {
+      expect(count(prompt, '[User-attached files]')).toBe(1);
+      expect(prompt).toContain('brief.pdf');
+      expect(count(prompt, '## Response style')).toBe(1);
+    }
+  });
+
+  it('sends a recovered agent the prompt its last run sent, without augmenting it again', async () => {
+    // The stored prompt is the text that run SENT, so it already carries every block; putting it
+    // through the augmenters again doubles the notice and the style directive.
+    const recovering = {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-plan-expand-abc-p3',
+        prompt:
+          '[User-attached files]\n  - brief.pdf\n\nexpand node abc\n\n## Response style\nBe concise.',
+      },
+    ];
+    await run(withAttachments(state), recovering, []);
+
+    const [prompt] = sentPrompts(state);
+    expect(prompt).toContain('expand node abc');
+    expect(count(prompt!, '[User-attached files]')).toBe(1);
+    expect(count(prompt!, '## Response style')).toBe(1);
+  });
+});
+
+/** A provider whose current model has already rejected an image. */
+const blindProvider = (id: string): CliProviderRecord =>
+  makeProvider({
+    id,
+    model: null,
+    modelLimits: { model: '', vision: false, learnedAt: '2026-09-01T00:00:00.000Z' },
+  });
+
+describe('the dispatch a mining row records', () => {
+  const asked = {
+    roleKey: 'refuter:security',
+    capabilities: ['vision'] as StepCapability[],
+    preferVision: true,
+  };
+  const miningWrites = (state: MockState): Record<string, unknown>[] => [
+    ...state.inserts.filter((i) => i.table === 'task_step_agent_minings').map((i) => i.row),
+    ...state.updates.filter((u) => u.table === 'task_step_agent_minings'),
+  ];
+
+  /** Its second wave dispatches one agent carrying every override and one carrying none. */
+  function overridingWave(): StepDefinition {
+    return {
+      metadata: {
+        id: 'test-mining-step',
+        workflowType: 'workflow',
+        index: 0,
+        title: 'wave',
+        description: 'wave',
+        requiresCli: true,
+      },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [{ agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review' }];
+        },
+      },
+      async apply(_ctx, args) {
+        const present = new Set((args.agentMiningResults ?? []).map((r) => r.agentId));
+        if (!present.has('refute-abc') && !args.miningWaveExhausted) {
+          throw new MiningWaveError([
+            { agentId: 'refute-abc', agentTitle: 'refute-abc', prompt: 'refute abc', ...asked },
+            { agentId: 'refute-def', agentTitle: 'refute-def', prompt: 'refute def' },
+          ]);
+        }
+        return { settled: true };
+      },
+    };
+  }
+
+  /** It re-offers its one agent with every override, so a re-roll rebuilds the dispatch. */
+  function overridingRetry(): StepDefinition {
+    const step = noRetryMiningStep([]);
+    step.agentMining!.selectAgents = async () => [
+      { agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review', ...asked },
+    ];
+    return step;
+  }
+
+  const reRequested = () =>
+    freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+
+  it('records what a fresh dispatch asked for beyond the step spec, and NULL for none', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(makeMockDb(state), overridingWave(), []);
+
+    const rows = miningWrites(state);
+    expect(rows.find((r) => r.agentId === 'refute-abc')).toMatchObject(asked);
+    expect(rows.find((r) => r.agentId === 'refute-def')).toMatchObject({
+      roleKey: null,
+      capabilities: null,
+      preferVision: null,
+    });
+  });
+
+  it('records it again on a re-roll', async () => {
+    const state = reRequested();
+    await run(makeMockDb(state), overridingRetry(), []);
+    expect(miningWrites(state).find((r) => r.status === 'pending')).toMatchObject(asked);
+  });
+
+  it('records it for an agent no provider could take', async () => {
+    // Only a blind model is configured, so an agent that needs to SEE has no provider. The row
+    // still says what was asked, which is what a later retry has to repeat.
+    const fresh = freshState([miningRow('peer-reviewer', 1)]);
+    await run(makeMockDb(fresh), overridingWave(), [], [blindProvider('prov-1')]);
+    expect(
+      miningWrites(fresh).find((r) => r.agentId === 'refute-abc' && r.status === 'failed'),
+    ).toMatchObject(asked);
+
+    const reroll = reRequested();
+    await run(makeMockDb(reroll), overridingRetry(), [], [blindProvider('prov-1')]);
+    expect(miningWrites(reroll).find((r) => r.status === 'failed')).toMatchObject(asked);
+  });
+});
+
+describe('a recovered wave agent', () => {
+  // selectAgents never authored a wave agent, so the retry has only the row and the prompt its
+  // last run stored. Everything that run was dispatched WITH has to come off the row.
+  function recoveringStep(): StepDefinition {
+    return {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+  const failedWave = (overrides: Partial<MiningRow>): MockState => {
+    const state = freshState([
+      miningRow('refute-abc', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+        ...overrides,
+      }),
+    ]);
+    state.invocationRows = [{ id: 'inv-refute-abc', prompt: 'refute abc' }];
+    return state;
+  };
+  const dispatchedTo = (state: MockState): unknown =>
+    state.inserts.find((i) => i.table === 'cli_invocations')?.row.cliProviderId;
+
+  it('runs in the seat its last dispatch recorded', async () => {
+    // 08c's refuters are one agent per finding; the stable seat is the lens. A person who put the
+    // security lens on a second model gets that model on a retry too, not the task's default.
+    const state = failedWave({ roleKey: 'refuter:security' });
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliRolePreferences = {
+      findFirst: async () => ({ cliProviderId: 'prov-2', effortLevel: null }),
+    };
+    await run(
+      db as unknown as Database,
+      recoveringStep(),
+      [],
+      [makeProvider(), makeProvider({ id: 'prov-2' })],
+    );
+    expect(dispatchedTo(state)).toBe('prov-2');
+  });
+
+  it('still requires vision when its last dispatch did', async () => {
+    const state = failedWave({ capabilities: ['vision'] });
+    await run(
+      makeMockDb(state),
+      recoveringStep(),
+      [],
+      [blindProvider('prov-1'), makeProvider({ id: 'prov-2' })],
+    );
+    expect(dispatchedTo(state)).toBe('prov-2');
+  });
+
+  it('still prefers a model that can see when its last dispatch did', async () => {
+    const state = failedWave({ preferVision: true });
+    await run(
+      makeMockDb(state),
+      recoveringStep(),
+      [],
+      [blindProvider('prov-1'), makeProvider({ id: 'prov-2' })],
+    );
+    expect(dispatchedTo(state)).toBe('prov-2');
+  });
+
+  it('dispatches as before when its last dispatch recorded nothing', async () => {
+    const state = failedWave({});
+    await run(
+      makeMockDb(state),
+      recoveringStep(),
+      [],
+      [blindProvider('prov-1'), makeProvider({ id: 'prov-2' })],
+    );
+    expect(dispatchedTo(state)).toBe('prov-1');
   });
 });

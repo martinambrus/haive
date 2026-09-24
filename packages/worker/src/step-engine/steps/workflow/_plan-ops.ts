@@ -48,7 +48,7 @@ export function describeStrippedLinks(stripped: readonly string[]): string {
  *  apart from the prose around it. The fence is sized to the content because
  *  titles are written by people and agents: a one-backtick fence around a title
  *  that contains one ends the span early and spills markdown into the label. */
-function code(text: string): string {
+export function code(text: string): string {
   const fence = '`'.repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
   const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
   return `${fence}${pad}${text}${pad}${fence}`;

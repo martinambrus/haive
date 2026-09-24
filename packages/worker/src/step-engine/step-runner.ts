@@ -18,6 +18,7 @@ import {
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   IN_STACK_OLLAMA_HOSTS,
   IN_STACK_OLLAMA_URL,
+  STEP_CAPABILITIES,
   configService,
   escalatedFromDeclaredMs,
   escalatedTimeoutMs,
@@ -34,6 +35,7 @@ import type {
   FormSchema,
   FormValues,
   LeafFormField,
+  StepCapability,
   StepStatus,
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -715,8 +717,8 @@ async function resolveLlmPhase(
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
   // An uploaded archive becomes the tree it contains before anything describes
   // the attachments — otherwise the notice below names a `.zip` no agent can
-  // open. Idempotent, never throws, and one indexed query when there is no
-  // archive, which is the usual case.
+  // open. Idempotent, never throws, and one indexed query when the task has no
+  // attachments, which is the usual case.
   await ensureArchivesExpanded(db, params.taskId);
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
@@ -1426,6 +1428,30 @@ type MiningRetryTargets = Map<
   }
 >;
 
+/** A dispatch as the runner handles it. `replayVerbatim` marks an agent recovered from its prior
+ *  invocation's stored prompt, which is the text that run already SENT — augmented and adapted — so
+ *  it goes out as it stands: augmenting it again would repeat every block. Runner-internal; a step
+ *  never sets it, which is why it is not on `AgentMiningDispatch`. */
+type RunnerMiningDispatch = AgentMiningDispatch & { replayVerbatim?: true };
+
+type DispatchRequirements = Pick<AgentMiningDispatch, 'roleKey' | 'capabilities' | 'preferVision'>;
+
+/** The seat and requirements a mining row recorded at its last dispatch, as dispatch fields. A NULL
+ *  column stays unset, which resolves as a dispatch that never set it; a capability that is no
+ *  longer a `StepCapability` is dropped. */
+function recordedRequirements(
+  row: typeof schema.taskStepAgentMinings.$inferSelect | undefined,
+): DispatchRequirements {
+  const out: DispatchRequirements = {};
+  if (row?.roleKey != null) out.roleKey = row.roleKey;
+  if (row?.capabilities != null) out.capabilities = row.capabilities.filter(isStepCapability);
+  if (row?.preferVision != null) out.preferVision = row.preferVision;
+  return out;
+}
+
+const isStepCapability = (value: string): value is StepCapability =>
+  (STEP_CAPABILITIES as readonly string[]).includes(value);
+
 /** Enqueue one cli invocation per dispatch.
  *
  *  Shared by the initial fan-out (`existing` = null, one INSERT per agent) and the
@@ -1438,7 +1464,7 @@ async function dispatchMiningAgents(
   current: TaskStepRow,
   ctx: StepContext,
   params: AdvanceStepParams,
-  dispatches: AgentMiningDispatch[],
+  dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<number> {
   const spec = stepDef.agentMining!;
@@ -1474,6 +1500,12 @@ async function dispatchMiningAgents(
   // Cross-round memory is a property of the STEP, not of one agent, so resolve it once for the
   // whole fan-out instead of per agent.
   const learnedMs = await learnedTimeoutMs(db, params.taskId, stepDef.metadata.id, current.id);
+  // What the task has attached, told to every agent of the fan-out: the notice `resolveLlmPhase`
+  // prepends to a single dispatch, after the same archive expansion, so a mining agent sees the
+  // files — and any archive that did not fully expand — exactly as that one would. Once per call:
+  // the notice is a property of the task, not of an agent. `''` when nothing is attached.
+  await ensureArchivesExpanded(db, params.taskId);
+  const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
   let enqueued = 0;
 
   for (const dispatch of dispatches) {
@@ -1492,21 +1524,29 @@ async function dispatchMiningAgents(
         dispatch.agentId,
         current.id,
       ));
-    // Close the mining terseness gap: the main dispatch gets the admin terseness level
-    // at resolveLlmPhase, but fan-out sub-prompts are built per step and bypass it.
-    // Apply the same directive so the level reaches mining output (skill-gen, discovery,
-    // review). Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
-    // runtime directive is appended last and governs at prompt scope.
-    //
-    // The task ledger has the same gap and it matters more here: a fan-out is N fresh
-    // processes that would each re-derive what 07/07b/08/08a already established. No-op
-    // while the ledger is empty.
-    const prompt = await augmentPromptWithTerseness(
-      await augmentPromptWithLedger(db, params.taskId, dispatch.prompt),
-    );
+    // The same augmentation `resolveLlmPhase` gives a single dispatch, in its order — the
+    // attachments notice, the task ledger, then the admin terseness level — less learned guidance,
+    // which is recorded per STEP and has no per-agent form. Fan-out sub-prompts are built per step
+    // and would otherwise bypass all three: a fan-out is N fresh processes that would each
+    // re-derive what 07/07b/08/08a already established, and could not see what the user attached.
+    // Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the runtime directive is
+    // appended last and governs at prompt scope.
+    const prompt = dispatch.replayVerbatim
+      ? dispatch.prompt
+      : await augmentPromptWithTerseness(
+          await augmentPromptWithLedger(db, params.taskId, attachmentsNotice + dispatch.prompt),
+        );
     const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } = await resolveSeat(
       dispatch.roleKey ?? 'default',
     );
+    // Recorded on the row at every write below, so a retry that cannot rebuild this dispatch — a
+    // wave agent recovered from its stored prompt — runs in the same seat under the same
+    // requirements. The OVERRIDES only: NULL means "the step's own", as it does here.
+    const requirements = {
+      roleKey: dispatch.roleKey ?? null,
+      capabilities: dispatch.capabilities ?? null,
+      preferVision: dispatch.preferVision ?? null,
+    };
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers: params.providers!,
       preferredProviderId,
@@ -1540,7 +1580,7 @@ async function dispatchMiningAgents(
       if (prior) {
         await db
           .update(schema.taskStepAgentMinings)
-          .set({ ...failure, updatedAt: new Date() })
+          .set({ ...failure, ...requirements, updatedAt: new Date() })
           .where(eq(schema.taskStepAgentMinings.id, prior.id));
       } else {
         await db.insert(schema.taskStepAgentMinings).values({
@@ -1548,6 +1588,7 @@ async function dispatchMiningAgents(
           agentId: dispatch.agentId,
           agentTitle: dispatch.agentTitle,
           ...failure,
+          ...requirements,
         });
       }
       continue;
@@ -1596,6 +1637,7 @@ async function dispatchMiningAgents(
           // A preemption re-dispatch is free: see MiningRetryTargets.chargeAttempt.
           attempts: prior.attempts + (prior.chargeAttempt === false ? 0 : 1),
           timeoutAttempts: prior.timeoutAttempts,
+          ...requirements,
           updatedAt: new Date(),
         })
         .where(eq(schema.taskStepAgentMinings.id, prior.id));
@@ -1610,6 +1652,7 @@ async function dispatchMiningAgents(
           cliProviderId: plan.providerId,
           cliInvocationId: invRow.id,
           status: 'pending',
+          ...requirements,
         })
         // Idempotent fan-out: if a concurrent/duplicate execution already reserved this
         // (taskStepId, agentId) slot, skip rather than crash on the unique index. The epoch
@@ -3100,11 +3143,11 @@ async function retryMiningAgents(
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
-  // preemption case above: that budget bounds automatic thrash, and five of the seven fan-out
-  // steps declare no retry spec at all, so there is frequently no budget to be within. Without
-  // the bypass the one control a user has would silently do nothing on 03 / 09_5 / 09_5b /
-  // 09_6_4 / 11d, and on 08c/08d only until the automatic re-rolls had been spent — which is
-  // exactly when someone reaches for it.
+  // preemption case above: that budget bounds automatic thrash, and a person asking is not
+  // thrash. Without the bypass the one control a user has would silently do nothing once the
+  // automatic re-rolls had been spent — which is exactly when someone reaches for it — and
+  // nothing at all on `09_5-skill-generation`, the one fan-out step of ten that declares no
+  // retry spec and so has no budget to be within.
   const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
     r.userRetryRequestedAt != null;
   const candidates = wantedRows.filter(
@@ -3130,7 +3173,7 @@ async function retryMiningAgents(
     return 0;
   }
 
-  const dispatches = (
+  const dispatches: RunnerMiningDispatch[] = (
     await stepDef.agentMining!.selectAgents({
       ctx,
       detected,
@@ -3171,7 +3214,7 @@ async function retryMiningAgents(
         ),
       );
     const promptById = new Map(priorPrompts.map((r) => [r.id, r.prompt]));
-    const titleByAgentId = new Map(wantedRows.map((r) => [r.agentId, r.agentTitle]));
+    const rowByAgentId = new Map(wantedRows.map((r) => [r.agentId, r]));
     const skippedPastedPersona: string[] = [];
     for (const [agentId, t] of unofferedWithPrior) {
       const prompt = promptById.get(t.cliInvocationId!);
@@ -3188,11 +3231,16 @@ async function retryMiningAgents(
         skippedPastedPersona.push(agentId);
         continue;
       }
-      // No roleKey: the seat a wave agent occupied is not recorded anywhere, and
-      // inventing one would silently route the retry to a different CLI than the
-      // run it is repeating. Unset resolves as the step's own preference then the
-      // task provider — the same path the fan-out took before per-seat selection.
-      dispatches.push({ agentId, agentTitle: titleByAgentId.get(agentId) ?? null, prompt });
+      // In the seat and under the requirements its last dispatch recorded, so the retry runs
+      // where the run it repeats did — and still demands `vision` if a wireframe did then.
+      const row = rowByAgentId.get(agentId);
+      dispatches.push({
+        agentId,
+        agentTitle: row?.agentTitle ?? null,
+        prompt,
+        replayVerbatim: true,
+        ...recordedRequirements(row),
+      });
     }
     ctx.logger.info(
       {

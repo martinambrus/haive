@@ -22,6 +22,10 @@ export interface DocSection {
    *  original. A plan can be built from several documents at once, and "§4.2
    *  Reporting" means nothing to a reader who has three files open. */
   source: string;
+  /** The attachment row the section was read from. A document deleted and re-uploaded under the
+   *  same name is a different row, so this, not `source`, says whether the section's document is
+   *  still attached. Optional: absent for an input recorded before rows were. */
+  sourceId?: string;
 }
 
 export interface CoverageCandidate {
@@ -30,6 +34,8 @@ export interface CoverageCandidate {
   /** The input this heading is in. Carried through so the gate can attribute a
    *  gap, and so two files' line 12 are two different gaps. */
   source: string;
+  /** The attachment row the heading is in; see `DocSection.sourceId`. */
+  sourceId?: string;
   /** Distinctive terms from the heading that appear NOWHERE in the plan. */
   missingTerms: string[];
   /** How many plan nodes matched two or more of the heading's terms. */
@@ -107,6 +113,7 @@ export function findCoverageGaps(
       title: section.title,
       line: section.line,
       source: section.source,
+      sourceId: section.sourceId,
       missingTerms: terms.filter((t) => !best.includes(t)),
       matchedNodes,
       score: Number(score.toFixed(2)),

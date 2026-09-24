@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -150,6 +150,19 @@ async function main(): Promise<void> {
     if (!task) throw new Error('task insert failed');
     state.taskId = task.id;
 
+    // One attached file, so every coder prompt must carry the attachments notice: this path builds
+    // its prompts outside `resolveLlmPhase`, and used to hand coders nothing about what was attached.
+    const uploadsDir = path.join(repoPath, '.haive', 'task-uploads', task.id);
+    await mkdir(uploadsDir, { recursive: true });
+    await writeFile(path.join(uploadsDir, 'brief.md'), '# brief\n');
+    await db.insert(schema.taskAttachments).values({
+      taskId: task.id,
+      userId,
+      filename: 'brief.md',
+      storedPath: path.join(uploadsDir, 'brief.md'),
+      sizeBytes: 8,
+    });
+
     // Seed the prior steps the executor reads: 01-worktree-setup (integration
     // worktree) and 06b-sprint-planning (mode=dag + the plan).
     const [worktreeStep] = await db
@@ -241,7 +254,13 @@ async function main(): Promise<void> {
     // Fake coder: write a file in the issue's worktree (so the merge has real
     // content) + store an ISSUE_RESULT_JSON, completing the invocation
     // synchronously. The next resolveDagPhase pass ingests + merges it.
+    const coderPrompts: string[] = [];
     const enqueueCliInvocation = async (payload: CliExecJobPayload): Promise<void> => {
+      const sent = await db.query.cliInvocations.findFirst({
+        where: eq(schema.cliInvocations.id, payload.invocationId),
+        columns: { prompt: true },
+      });
+      coderPrompts.push(sent?.prompt ?? '');
       const issue = await db.query.taskDagIssues.findFirst({
         where: eq(schema.taskDagIssues.cliInvocationId, payload.invocationId),
       });
@@ -352,6 +371,17 @@ async function main(): Promise<void> {
     const mergeCommits = logOut.split('\n').filter((l) => /Merge/i.test(l)).length;
     if (mergeCommits < 3) {
       throw new Error(`expected >=3 merge commits, found ${mergeCommits}`);
+    }
+
+    // Every coder was told what the task has attached.
+    if (coderPrompts.length !== issueDefs.length) {
+      throw new Error(`expected ${issueDefs.length} coder prompts, saw ${coderPrompts.length}`);
+    }
+    const uninformed = coderPrompts.filter(
+      (prompt) => !prompt.includes('[User-attached files]') || !prompt.includes('brief.md'),
+    );
+    if (uninformed.length > 0) {
+      throw new Error(`${uninformed.length} coder prompt(s) carry no attachments notice`);
     }
 
     // Issue worktrees cleaned up.

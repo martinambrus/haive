@@ -64,6 +64,47 @@ describe('parseCoderResult', () => {
     expect(r.concerns).toContain('without a valid ISSUE_RESULT_JSON');
   });
 
+  it('returns the similar sites a coder left unchanged, sanitised', () => {
+    const r = parseCoderResult(
+      inv({
+        parsedOutput: {
+          issue_id: 'X',
+          outcome: 'completed',
+          files_modified: ['a.ts'],
+          similar_sites: [
+            { path: 'b.ts', lines: '2-3', reason: 'same' },
+            { path: '../out.ts', reason: 'escapes' },
+          ],
+        },
+      }),
+    );
+    expect(r.similarSites).toEqual([{ path: 'b.ts', lines: '2-3', reason: 'same' }]);
+  });
+
+  it('never fails a finished coder over a malformed similar_sites', () => {
+    const r = parseCoderResult(
+      inv({
+        parsedOutput: {
+          issue_id: 'X',
+          outcome: 'completed',
+          files_modified: ['a.ts'],
+          similar_sites: 'b.ts line 3',
+        },
+      }),
+    );
+    expect(r.outcome).toBe('completed');
+    expect(r.similarSites).toEqual([]);
+  });
+
+  it('asks every coder contract that is parsed for them', () => {
+    const issue = {
+      issueKey: 'ISSUE-1',
+      title: 't',
+      filesModified: [],
+    } as unknown as Parameters<typeof fixCoderPrompt>[0];
+    expect(fixCoderPrompt(issue, [], 'spec')).toContain('"similar_sites": [{ "path"');
+  });
+
   it('falls back to failed_unrecoverable on a non-zero exit with no json', () => {
     const r = parseCoderResult(inv({ rawOutput: 'crashed', exitCode: 1 }));
     expect(r.outcome).toBe('failed_unrecoverable');
@@ -341,6 +382,10 @@ describe('06c buildCoderPrompt spec directive', () => {
 
   it('stays silent when the planner assigned this issue no sections', () => {
     expect(build(ctx({ specSections: [] }), '')).not.toContain(DIRECTIVE);
+  });
+
+  it('asks the level coder for the similar sites it left unchanged', () => {
+    expect(build(ctx({}), '')).toContain('"similar_sites": [{ "path"');
   });
 });
 
