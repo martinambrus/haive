@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Response } from '@playwright/test';
-import { cleanupUser, getSql } from '../helpers/db.js';
+import { cleanupUser, getSql, waitForProviderImage } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 import { invokeAction } from '../helpers/actions.js';
 
@@ -205,6 +205,8 @@ test.describe('cli providers UI', () => {
   });
 
   test('Edit form: Test connection disabled by any unsaved form change', async ({ page }) => {
+    // Covers the image wait below; the default 30 s would cut it short.
+    test.setTimeout(90_000);
     const sql = getSql();
     let userId = '';
     try {
@@ -219,6 +221,10 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
+      // The button is also disabled while the image builds, so the clean baseline needs it built.
+      expect(await waitForProviderImage(sql, providerId, 45_000)).toMatchObject({
+        status: 'ready',
+      });
       await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Gate target' })).toBeVisible();
 
@@ -303,6 +309,8 @@ test.describe('cli providers UI', () => {
   test('Edit form: Rebuild persists form and keeps Test disabled through dirty->building handoff', async ({
     page,
   }) => {
+    // Covers the image wait below; the default 30 s would cut it short.
+    test.setTimeout(90_000);
     const sql = getSql();
     let userId = '';
     try {
@@ -317,14 +325,16 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
+      // Wait for the initial build kicked off by provider creation to settle
+      // so the baseline is the enabled state (not the building gate).
+      expect(await waitForProviderImage(sql, providerId, 45_000)).toMatchObject({
+        status: 'ready',
+      });
       await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Rebuild target' })).toBeVisible();
 
       const testButton = page.getByRole('button', { name: 'Test connection' });
-
-      // Wait for the initial build kicked off by provider creation to settle
-      // so the baseline is the enabled state (not the building gate).
-      await expect(testButton).toBeEnabled({ timeout: 30_000 });
+      await expect(testButton).toBeEnabled();
 
       // Non-image field (executablePath) plus image field (Dockerfile extra):
       // Rebuild must persist both and keep the button disabled throughout

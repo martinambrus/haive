@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { cleanupUser, getSql } from '../helpers/db.js';
+import { cleanupUser, getSql, waitForProviderImage } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('cli providers', () => {
@@ -339,6 +339,8 @@ test.describe('cli providers', () => {
   test('PATCH /cli-providers/:id only flips to building when image inputs change', async ({
     page,
   }) => {
+    // The default 30 s would end the test before the 45 s image wait below could.
+    test.setTimeout(90_000);
     const sql = getSql();
     let userId = '';
     try {
@@ -353,21 +355,13 @@ test.describe('cli providers', () => {
 
       // Wait for the worker to finish reusing the cached image so the DB row
       // settles on 'ready'. Without this the label-only PATCH below races.
-      await expect
-        .poll(
-          async () => {
-            const r = await sql<{ sandbox_image_build_status: string }[]>`
-              select sandbox_image_build_status from cli_providers where id = ${provider.id}
-            `;
-            return r[0]?.sandbox_image_build_status;
-          },
-          // 10s was not enough on a CI runner: this waits for the WORKER to finish reconciling a
-          // sandbox image — a cache hit, but one that queues behind whatever else the run is
-          // doing. Raised rather than removed, because the flip it waits for is exactly what the
-          // next assertion is about.
-          { timeout: 45_000 },
-        )
-        .toBe('ready');
+      // 10s was not enough on a CI runner: this waits for the WORKER to finish reconciling a
+      // sandbox image — a cache hit, but one that queues behind whatever else the run is
+      // doing. Raised rather than removed, because the flip it waits for is exactly what the
+      // next assertion is about.
+      expect(await waitForProviderImage(sql, provider.id, 45_000)).toMatchObject({
+        status: 'ready',
+      });
 
       // Label-only PATCH does not change any image inputs. Handler returns the
       // row as-is, so status stays 'ready'.
