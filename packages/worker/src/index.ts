@@ -88,6 +88,14 @@ async function main(): Promise<void> {
   await clearRuntimeReservations();
   // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
   await clearBrowserSurcharges();
+  // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
+  // above): resume waiting_cli steps and re-drive running steps whose advance-step
+  // job died mid-execution, so neither hangs after a restart/crash/power loss.
+  // Before any worker starts: a queued cli-exec job picked up first would read as an orphan
+  // here while it runs, and a queued advance could flip a step this pass then resets.
+  await reconcileOrphanedSteps(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphaned-step reconciliation on boot failed');
+  });
 
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);
@@ -110,12 +118,6 @@ async function main(): Promise<void> {
   // 13-pr-wait step (auto mode) or surfaces the state for a manual Finalize.
   const prPollWorker = startPrPollWorker();
   const planMirrorWorker = startPlanMirrorWorker();
-  // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
-  // above): resume waiting_cli steps and re-drive running steps whose advance-step
-  // job died mid-execution, so neither hangs after a restart/crash/power loss.
-  await reconcileOrphanedSteps(getDb()).catch((err) => {
-    logger.warn({ err }, 'orphaned-step reconciliation on boot failed');
-  });
   // Backfill run_seq (the run-order display key) on step rows created before it was
   // stamped, so already-in-flight task lists sort correctly without needing a re-advance.
   await backfillMissingRunSeq(getDb()).catch((err) => {

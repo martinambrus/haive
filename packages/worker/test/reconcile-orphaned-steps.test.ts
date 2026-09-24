@@ -86,3 +86,150 @@ describe('reconcileOrphanedSteps', () => {
     expect(conditionColumns(orphanUpdate!.where)).toContain('started_at');
   });
 });
+
+/** Every bound value in a drizzle condition tree, flattened. */
+function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const n of node) conditionValues(n, acc);
+    return acc;
+  }
+  const obj = node as Record<string, unknown>;
+  if ('value' in obj && 'encoder' in obj) {
+    if (Array.isArray(obj.value)) acc.push(...obj.value);
+    else acc.push(obj.value);
+  }
+  const chunks = obj.queryChunks;
+  if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
+}
+
+interface CurrentStepScenario {
+  /** Never-started, unended invocations of the stuck step. */
+  unstarted: string[];
+  /** What the epoch fence's UPDATE ... RETURNING yields: empty when the task stopped running. */
+  fenced: { epoch: number }[];
+}
+
+/** One `waiting_cli` step that IS the task's current step, so reconcile re-drives it. */
+function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScenario): Database {
+  const stuck = {
+    taskStepId: 'ts-1',
+    taskId: 'task-1',
+    stepId: '09_5-skill-generation',
+    round: 0,
+    userId: 'user-1',
+    currentStepId: '09_5-skill-generation',
+    currentRound: 0,
+  };
+  let joinedReads = 0;
+  return {
+    select: (_fields?: unknown) => ({
+      from: (table: unknown) => {
+        const rows = (): unknown[] =>
+          tableNameOf(table) === 'cli_invocations'
+            ? scenario.unstarted.map((id) => ({ id }))
+            : joinedReads++ === 0
+              ? [stuck]
+              : [];
+        const whereFn = (_cond: unknown) => ({
+          limit: async (_n: number) => [],
+          then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+            Promise.resolve(rows()).then(onOk, onErr),
+        });
+        return { innerJoin: (_t: unknown, _c: unknown) => ({ where: whereFn }), where: whereFn };
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (v: Record<string, unknown>) => ({
+        where: (cond: unknown) => {
+          recorded.push({ table: tableNameOf(table), set: v, where: cond });
+          const done = Promise.resolve(undefined);
+          return {
+            then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+              done.then(onOk, onErr),
+            returning: async () => (tableNameOf(table) === 'tasks' ? scenario.fenced : []),
+          };
+        },
+      }),
+    }),
+  } as unknown as Database;
+}
+
+describe('reconcileOrphanedSteps re-driving the current step', () => {
+  const advances: { stepId: string; epoch: number }[] = [];
+  const deps = (queued: Set<string> | null) => ({
+    enqueueAdvance: async (
+      _taskId: string,
+      _userId: string,
+      stepId: string,
+      _round: number,
+      epoch: number,
+    ) => {
+      advances.push({ stepId, epoch });
+    },
+    queuedInvocationIds: async () => queued,
+  });
+
+  it('re-drives at a freshly fenced epoch, so an advance queued before the restart is stale', async () => {
+    advances.length = 0;
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb(recorded, { unstarted: [], fenced: [{ epoch: 4 }] }),
+      deps(new Set()),
+    );
+    const fence = recorded.find((u) => u.table === 'tasks');
+    expect(fence?.set).toHaveProperty('orchestrationEpoch');
+    // Guarded on the task still running, so a task cancelled meanwhile is not re-driven.
+    expect(conditionColumns(fence!.where)).toContain('status');
+    expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 4 }]);
+  });
+
+  it('does not re-drive a task that stopped running before the fence', async () => {
+    advances.length = 0;
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb([], { unstarted: [], fenced: [] }),
+      deps(new Set()),
+    );
+    expect(advances).toEqual([]);
+  });
+
+  it('ends a never-started run that no job owes, and leaves a queued one alone', async () => {
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb(recorded, {
+        unstarted: ['inv-queued', 'inv-lost'],
+        fenced: [{ epoch: 4 }],
+      }),
+      deps(new Set(['inv-queued'])),
+    );
+    const released = recorded.filter(
+      (u) =>
+        u.table === 'cli_invocations' &&
+        String(u.set.errorMessage).includes('before it was queued'),
+    );
+    expect(released).toHaveLength(1);
+    // Still an orphan to every classifier that recovers one.
+    expect(String(released[0]!.set.errorMessage)).toMatch(/orphaned by a worker restart/);
+    const ids = conditionValues(released[0]!.where);
+    expect(ids).toContain('inv-lost');
+    expect(ids).not.toContain('inv-queued');
+    // Re-checked at the write, so a run that started meanwhile is never ended.
+    expect(conditionColumns(released[0]!.where)).toContain('started_at');
+  });
+
+  it('ends no never-started run when the queue cannot be read', async () => {
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb(recorded, { unstarted: ['inv-lost'], fenced: [{ epoch: 4 }] }),
+      deps(null),
+    );
+    expect(
+      recorded.some(
+        (u) =>
+          u.table === 'cli_invocations' &&
+          String(u.set.errorMessage).includes('before it was queued'),
+      ),
+    ).toBe(false);
+  });
+});
