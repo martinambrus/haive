@@ -245,6 +245,13 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - a stub linked elsewhere;
   - the shared helper tests, which move with the helpers.
 - **Verify:** remove the stub on a scratch copy and check the endpoint and the banner in the browser.
+- **As built:** the check moved rather than the worker functions around it. `@haive/shared/rules-files`
+  holds `RULES_IMPORT_LINE`, `isLinkToAgentsMd`, the one rule for which files need the import
+  (`importRulesFiles`, and `importRulesFilesFor` over the catalog) and `rulesImportState` (`present`,
+  `missing`, `linked-elsewhere` or `unreadable`, read capped at 1 MiB). The worker's `planRulesFiles`,
+  `enabledImportRulesFiles` and `missingRulesImportStubs` stay where they were and call it, so 01, 02
+  and the api name the same files. A stub linked elsewhere is `linkedRulesFiles`, a muted line in both
+  banner states.
 
 ## PR 7 — Reads inside a worktree go through the repository anchor
 
@@ -266,7 +273,10 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   `listFilesMatching`, plus `listKbFiles`, `listSkillDirs` and `readDiskSkillSummaries`, which 11d and
   11 hand a worktree. Helpers shared with onboarding take `workspaceAnchor` themselves, so a root
   caller reads exactly as before. Each helper is tested through a real worktree and a linked one,
-  and every link case fails against the previous code.
+  and every link case fails against the previous code. Review found that the walker read a linked
+  worktree as an EMPTY tree, which 11c's orphan sweep would take for every file deleted, so
+  `scanRootRefusal` (`workflow/_rag-index.ts`) makes the sync return before indexing or sweeping when
+  its root is missing or not a directory; the linked and missing cases fail without it.
 
 ## PR 8 — Out-of-scope findings reach gate 2
 
