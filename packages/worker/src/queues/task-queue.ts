@@ -374,8 +374,9 @@ async function resolveCurrentStepIndex(
 const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
 
 /** A job's write to the task under the epoch the job holds. It lands only while the task is still
- *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. Answering
- *  a form still parked is the one write that may revive a failed task (`reviveFailed`). */
+ *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. A job may
+ *  revive a task that was already failed when it picked it up (`reviveFailed`), which the pickup
+ *  guard allows only for an answer to a form still parked, since answering it reopens the task. */
 interface TaskFence {
   epoch: number;
   reviveFailed?: boolean;
@@ -1711,6 +1712,9 @@ export async function resolveFixLoopGate(
     return;
   }
 
+  // The answer reopens a task that failed while its gate waited (failedTaskRefusesAdvance).
+  const fence = { epoch: ctx.orchestrationEpoch, reviveFailed: ctx.status === 'failed' };
+
   if (action === 'accept') {
     // Stand down every later fix-loop check + advance forward from the source step so the
     // remaining chain runs to gate 2 with the issues recorded but unresolved.
@@ -1729,7 +1733,7 @@ export async function resolveFixLoopGate(
         next.metadata.id,
         computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
         round,
-        { epoch: ctx.orchestrationEpoch },
+        fence,
       );
       if (!pointed) return;
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
@@ -1767,7 +1771,7 @@ export async function resolveFixLoopGate(
     target.metadata.id,
     computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
     nextRound,
-    { epoch: ctx.orchestrationEpoch },
+    fence,
   );
   if (!pointed) return;
   await enqueueAdvance(
@@ -2377,7 +2381,7 @@ async function handleAdvanceStep(
     round,
     {
       epoch: ctx.orchestrationEpoch,
-      reviveFailed: payload.formValues != null && existing?.status === 'waiting_form',
+      reviveFailed: ctx.status === 'failed',
     },
   );
   if (!running) {

@@ -311,7 +311,9 @@ own. So does the advance that parks or starts a step. A pause or runtime park wr
 points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
 first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
 signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
-while the fence holds, and only an answer to a form still parked may revive a failed task. That holds
+while the fence holds. A job revives a failed task only when the task was already failed at pickup,
+which the pickup guard allows only for an answer to a form still parked, so a Stop landing after
+pickup stands; the answer to a fix-loop gate hands off under the same rule. That holds
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
 read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the

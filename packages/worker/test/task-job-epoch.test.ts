@@ -605,6 +605,35 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       expect(h.state.add).not.toHaveBeenCalled();
     });
 
+    it('reopens a task that failed while its gate waited, answering accept', async () => {
+      h.state.readsAnswer = true;
+      h.state.taskStatus = 'failed';
+      const failedCtx = { ...ctx(), status: 'failed' };
+      await resolveFixLoopGate(db as never, failedCtx as never, gate as never, 'accept', 1, '');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: 'epoch-chain-next' });
+    });
+
+    it('reopens a task that failed while its gate waited, answering continue', async () => {
+      h.state.readsAnswer = true;
+      h.state.taskStatus = 'failed';
+      const failedCtx = { ...ctx(), status: 'failed' };
+      await resolveFixLoopGate(db as never, failedCtx as never, gate as never, 'continue', 1, '');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: '07-phase-2-implement' });
+    });
+
+    it('leaves a task a Stop failed during the answer stopped', async () => {
+      h.state.readsAnswer = true;
+      // Running when the job picked it up, so the answer is not what reopens it.
+      h.state.onSelect = () => {
+        h.state.taskStatus = 'failed';
+      };
+      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
     it('re-enters implementation at the next round while the task is still at its epoch', async () => {
       h.state.readsAnswer = true;
       await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
@@ -773,6 +802,21 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       h.state.readsAnswer = true;
       h.state.onSelect = retryLands;
       await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    });
+
+    it('does not run a form answer once a Stop failed the task after the job picked it up', async () => {
+      h.state.readsAnswer = true;
+      h.state.existingRow = {
+        ...unparked,
+        stepId: 'epoch-chain-first',
+        round: 0,
+        status: 'waiting_form',
+        formValues: null,
+      };
+      h.state.onSelect = stopLands;
+      await processTaskJob(job('epoch-chain-first', { formValues: { answer: 'yes' } }), 'tok');
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
       expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
     });
 
