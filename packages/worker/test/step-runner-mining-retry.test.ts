@@ -602,6 +602,11 @@ describe('advanceStep apply-to-form continuation', () => {
       state.updates.find((u) => u.table === 'task_steps' && u.pauseFormOnRetry === true),
     ).toMatchObject({ detectOutput: null, formSchema: null, formValues: null });
     expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+    // The park that releases the hold is stamped in the same write, so a submit redelivered
+    // before the task is marked waiting is still older than the park.
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.status === 'waiting_form'),
+    ).toMatchObject({ pauseFormOnRetry: false, waitingStartedAt: expect.any(Date) });
   });
 
   it('holds the form after a crash between clearing it and parking, rather than resubmitting', async () => {

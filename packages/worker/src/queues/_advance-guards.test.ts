@@ -4,6 +4,7 @@ import {
   blockedByActiveStepMessage,
   findLiveSibling,
   isStaleSubmit,
+  staleSubmitAction,
   type AdvanceJobRef,
   type AdvanceStepKey,
 } from './_advance-guards.js';
@@ -108,5 +109,25 @@ describe('isStaleSubmit', () => {
     expect(isStaleSubmit({ ...reopened, status: 'waiting_cli' }, true, before)).toBe(false);
     expect(isStaleSubmit(undefined, true, before)).toBe(false);
     expect(isStaleSubmit(reopened, true, undefined)).toBe(false);
+  });
+});
+
+describe('staleSubmitAction', () => {
+  const parkedAt = new Date('2026-09-24T10:00:00.000Z');
+  const parked = { status: 'waiting_form', formValues: null, waitingStartedAt: parkedAt };
+  const before = parkedAt.getTime() - 1;
+
+  it('parks the form again when the pass that parked it died before marking the task waiting', () => {
+    expect(staleSubmitAction(parked, true, before, 'running')).toBe('repark');
+  });
+
+  it('only drops a stale submit on a task already parked, paused or otherwise not running', () => {
+    expect(staleSubmitAction(parked, true, before, 'waiting_user')).toBe('drop');
+    expect(staleSubmitAction(parked, true, before, 'paused')).toBe('drop');
+  });
+
+  it('lets anything that is not a stale submit proceed', () => {
+    expect(staleSubmitAction(parked, true, parkedAt.getTime() + 1, 'running')).toBe('proceed');
+    expect(staleSubmitAction(parked, false, before, 'running')).toBe('proceed');
   });
 });

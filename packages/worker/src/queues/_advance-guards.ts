@@ -33,6 +33,18 @@ export function isStaleSubmit(
   );
 }
 
+/** What an advance does with a stale submit. It is dropped, and the form parked again when the task
+ *  still reads `running`: the pass that parked the form died before marking the task waiting. */
+export function staleSubmitAction(
+  row: { status: string; formValues: unknown; waitingStartedAt: Date | null } | undefined,
+  carriesFormValues: boolean,
+  jobTimestamp: number | undefined,
+  taskStatus: string,
+): 'proceed' | 'drop' | 'repark' {
+  if (!isStaleSubmit(row, carriesFormValues, jobTimestamp)) return 'proceed';
+  return taskStatus === 'running' ? 'repark' : 'drop';
+}
+
 /** The slice of a BullMQ job the guard reads. */
 export interface AdvanceJobRef {
   id?: string | null;

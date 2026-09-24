@@ -316,11 +316,15 @@ export async function applyAgentPatch(
  * Fold an agent's reply at most once. The claim on its mining row (`consumed_at`) commits with
  * the patch, so two apply passes over one wave cannot both write it, and a crash between the two
  * loses neither. Null when another pass already claimed the reply, which counts as applied.
+ *
+ * `note` is what the row records about the outcome, written in the same transaction: every later
+ * pass skips a claimed reply, so a note written after the commit could be lost for good.
  */
 export async function applyAgentPatchOnce(
   ctx: Pick<StepContext, 'db' | 'taskStepId'>,
   agentId: string,
   write: (tx: DbOrTx) => Promise<ApplyPlanPatchResult>,
+  note: (applied: ApplyPlanPatchResult) => string | null,
 ): Promise<ApplyPlanPatchResult | null> {
   return ctx.db.transaction(async (tx) => {
     const [claimed] = await tx
@@ -334,6 +338,15 @@ export async function applyAgentPatchOnce(
         ),
       )
       .returning({ id: schema.taskStepAgentMinings.id });
-    return claimed ? write(tx) : null;
+    if (!claimed) return null;
+    const applied = await write(tx);
+    const message = note(applied);
+    if (message) {
+      await tx
+        .update(schema.taskStepAgentMinings)
+        .set({ errorMessage: message.slice(0, 2000) })
+        .where(eq(schema.taskStepAgentMinings.id, claimed.id));
+    }
+    return applied;
   });
 }

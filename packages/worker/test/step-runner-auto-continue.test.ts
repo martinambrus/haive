@@ -192,6 +192,11 @@ describe('advanceStep auto-continue', () => {
     const result = await run(state, makeStep({ form: () => QUESTION_FORM }));
     expect(result.status).toBe('waiting_form');
     expect(state.taskStepRow.status).toBe('waiting_form');
+    // Stamped by the write that parks, so no instant exists where the form is parked unstamped.
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.patch.status === 'waiting_form')
+        ?.patch,
+    ).toMatchObject({ waitingStartedAt: expect.any(Date) });
   });
 
   it('auto mode never auto-passes submitAction retry forms', async () => {

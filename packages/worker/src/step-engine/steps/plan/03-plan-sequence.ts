@@ -20,11 +20,7 @@ import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import {
-  APPLY_FAILURE_PREFIX,
-  PARTIAL_APPLY_PREFIX,
-  PLAN_AGENT_TIMEOUT_MS,
-} from './01-plan-build.js';
+import { APPLY_FAILURE_PREFIX, partialApplyNote, PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
 import {
   PLAN_PATCH_CONTRACT,
   applyAgentPatch,
@@ -554,25 +550,25 @@ export async function foldSequenceResults(
     }
     const self = sequenceSelfNodeId(result.agentId);
     try {
-      const outcome = await applyAgentPatchOnce(ctx, result.agentId, (tx) =>
-        applyAgentPatch(
-          tx,
-          { ...patch, ops },
-          {
-            repositoryId,
-            sourceTaskId: ctx.taskId,
-            ...(self ? { selfNodeId: self } : {}),
-          },
-        ),
+      const outcome = await applyAgentPatchOnce(
+        ctx,
+        result.agentId,
+        (tx) =>
+          applyAgentPatch(
+            tx,
+            { ...patch, ops },
+            {
+              repositoryId,
+              sourceTaskId: ctx.taskId,
+              ...(self ? { selfNodeId: self } : {}),
+            },
+          ),
+        // The partial note 01 and 02 record, so a thinner reply stays visible.
+        (landed) => partialApplyNote([...notes, ...landed.dropped]),
       );
       // Folded by a pass running beside this one.
       if (!outcome) continue;
       applied += outcome.updated.length;
-      notes.push(...outcome.dropped);
-      if (notes.length > 0) {
-        // The partial prefix 01 and 02 record, so a thinner reply stays visible.
-        await stampMiningError(ctx, result.agentId, `${PARTIAL_APPLY_PREFIX} ${notes.join('; ')}`);
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'plan sequencing patch failed');
