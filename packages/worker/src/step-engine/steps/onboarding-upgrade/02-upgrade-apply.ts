@@ -29,7 +29,9 @@ import {
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
+  cliRulesRegionRecord,
   enabledImportRulesFiles,
+  loadCliRulesRenderHashes,
   restoreRulesImportStubs,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
@@ -294,8 +296,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         type: 'radio',
         id: conflictFieldId(c.entryId),
         label: `Conflict: ${c.diskPath}`,
-        description:
-          'Your copy differs from the prior baseline AND the template changed. Pick one.',
+        description: c.liveArtifactId
+          ? 'Your copy differs from the prior baseline AND the template changed. Pick one.'
+          : 'Haive has no record of writing this file, and it differs from the template. Pick one.',
         details:
           c.newContent !== null
             ? {
@@ -477,8 +480,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         if (!entry.liveArtifactId) {
           const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
           if (priorRegion) {
-            const priorNorm = normalizeContent(priorRegion);
-            const priorHash = sha256Hex(priorNorm);
+            const prior = cliRulesRegionRecord(
+              priorRegion,
+              entry.newContent,
+              await loadCliRulesRenderHashes(ctx.db, plan.repositoryId),
+            );
             baselineRows.push({
               userId: ctx.userId,
               repositoryId: plan.repositoryId,
@@ -487,11 +493,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               templateId: entry.templateId,
               templateKind: entry.templateKind,
               templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-              templateContentHash: priorHash,
-              writtenHash: priorHash,
-              writtenContent: priorNorm,
-              lastObservedDiskHash: priorHash,
-              userModified: false,
+              templateContentHash: prior.templateContentHash,
+              writtenHash: prior.writtenHash,
+              writtenContent: prior.content,
+              lastObservedDiskHash: prior.templateContentHash,
+              userModified: !prior.haiveWritten,
               formValuesSnapshot: plan.renderCtxSnapshot,
               sourceStepId: '02-upgrade-apply',
               source: 'backfill' as const,

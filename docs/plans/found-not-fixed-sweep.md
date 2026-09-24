@@ -1,6 +1,6 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-2 merged (#267, #268); PR 3 (e2e sandbox warm-up) is in
+> **IN PROGRESS** since 2026-09-24. PRs 1-3 merged (#267-#269); PR 4 (upgrade backfill claims) is in
 > review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context

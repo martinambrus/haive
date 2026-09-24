@@ -290,16 +290,47 @@ async function readDiskContent(
   }
 }
 
+/** What a backfill records for one rendering. The bytes on disk, edited or not, so a rollback
+ *  restores what was there; the render's hash, so an edited file is never taken as Haive's. */
+export function backfillRecord(
+  r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash' | 'content'>,
+  disk: { content: string | null; hash: string | null },
+): {
+  templateContentHash: string;
+  writtenHash: string;
+  writtenContent: string;
+  lastObservedDiskHash: string | null;
+  userModified: boolean;
+} {
+  return {
+    templateContentHash: r.templateContentHash,
+    writtenHash: r.writtenHash,
+    writtenContent: disk.content ?? r.content,
+    lastObservedDiskHash: disk.hash,
+    userModified: disk.hash !== null && disk.hash !== r.writtenHash,
+  };
+}
+
 export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
   diskContent: string | null;
   diskHash: string | null;
+  /** Hashes of what Haive rendered at this path before; a file holding one is Haive's to replace. */
+  recordedRenderHashes?: ReadonlySet<string>;
 }): UpgradePlanBucket {
   const { live, current, diskContent, diskHash } = args;
 
   if (live && !current) return 'obsolete';
-  if (!live && current) return 'new_artifact';
+  if (!live && current) {
+    // A file already there that no render accounts for is somebody's, so it is offered, never
+    // pre-selected for overwriting.
+    const haiveBytes =
+      diskHash === null ||
+      diskHash === current.writtenHash ||
+      (args.recordedRenderHashes?.has(diskHash) ?? false);
+    return haiveBytes ? 'new_artifact' : 'conflict';
+  }
   if (!live || !current) throw new Error('classifyEntry: both live and current null');
 
   if (diskContent === null) return 'user_deleted';
@@ -361,6 +392,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const allPaths = new Set<string>([...byPath.keys(), ...liveByPath.keys()]);
     const entries: UpgradePlanEntry[] = [];
     let counterByBucket = 0;
+    const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
 
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;
@@ -383,7 +415,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         diskHash = diskContent ? sha256Hex(diskContent) : null;
       }
 
-      const bucket = classifyEntry({ live, current, diskContent, diskHash });
+      const bucket = classifyEntry({
+        live,
+        current,
+        diskContent,
+        diskHash,
+        recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
+      });
       let newContent = current?.content ?? null;
       if (isCliRules && newContent) newContent = normalizeContent(newContent);
       const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
@@ -471,20 +509,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
             userModified: !record.haiveWritten,
           };
         } else {
-          const { content: diskContent, hash: diskHash } = await readDiskContent(
-            ctx.repoPath,
-            r.diskPath,
-          );
-          recorded = {
-            templateContentHash: r.templateContentHash,
-            writtenHash: diskHash ?? r.writtenHash,
-            // Backfill stamps whatever bytes are on disk right now, even if the
-            // user has edited them. That captures the truth of the baseline at
-            // backfill time so a later rollback restores what the user had.
-            writtenContent: diskContent ?? r.content,
-            lastObservedDiskHash: diskHash,
-            userModified: diskHash !== null && diskHash !== r.writtenHash,
-          };
+          recorded = backfillRecord(r, await readDiskContent(ctx.repoPath, r.diskPath));
         }
         rowsToInsert.push({
           userId: ctx.userId,
