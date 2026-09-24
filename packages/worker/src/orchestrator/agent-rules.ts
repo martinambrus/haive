@@ -27,7 +27,8 @@ export function agentRulesHash(rules: string): string {
  *  stored prompt dispatched again gets today's rules instead of the ones it was stored with. Only a
  *  block at position 0 is Haive's: a marker anywhere else is text the prompt carries, such as a
  *  file or an earlier agent's reply, and must not be able to suppress or replace the injection.
- *  Null rules only strip, so a switched-off dispatch does not keep a stored block. */
+ *  Null rules only strip, so a switched-off dispatch does not keep a stored block. A closing tag the
+ *  rules quote is escaped rather than removed, so the operator's text keeps its meaning. */
 export function withAgentRules(
   prompt: string,
   rules: string | null,
@@ -37,7 +38,7 @@ export function withAgentRules(
     const end = body.indexOf(AGENT_RULES_END);
     if (end !== -1) body = body.slice(end + AGENT_RULES_END.length).replace(/^\n+/, '');
   }
-  const text = rules?.trim().replaceAll(AGENT_RULES_END, '') ?? '';
+  const text = rules?.trim().replaceAll(AGENT_RULES_END, '<\\/haive_agent_rules>') ?? '';
   if (text.length === 0) return { prompt: body, injected: false };
   return {
     prompt: `${AGENT_RULES_MARKER}\n${FRAMING}\n\n${text}\n${AGENT_RULES_END}\n\n${body}`,

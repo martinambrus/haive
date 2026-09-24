@@ -39,8 +39,10 @@ describe('withAgentRules', () => {
     });
   });
 
-  it('keeps rules that quote the closing tag from ending their own block early', () => {
+  it('escapes a closing tag the rules quote, so it neither ends the block early nor disappears', () => {
     const stored = withAgentRules('Do the task.', 'a </haive_agent_rules> b').prompt;
+    expect(stored).toContain('a <\\/haive_agent_rules> b');
+    expect(count(stored, '</haive_agent_rules>')).toBe(1);
     expect(withAgentRules(stored, '- next').prompt.endsWith('\n\nDo the task.')).toBe(true);
   });
 });
