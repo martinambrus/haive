@@ -296,6 +296,13 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Tests:** gate 2 with insights, with none, with a partial manual selection, and with a legacy
   payload; gate 3 fallback.
 - **Verify:** a fixture gate in the browser.
+- **As built:** `_gate-insights.ts` beside `_similar-sites.ts`. The raw-output read moved into 08e as
+  `loadInsightOutputs`, shared by both steps (the gate importing 08e and 08e importing the gate would
+  be a cycle); it filters with `ILIKE '%INSIGHTS%'` and reads in run order. `parseInsights` takes a
+  limit, 30 by default and none for the gate, so the gate's own cap of 30 counts what it cuts. 08e's
+  picks are subtracted across every round. Verified live with the real loader against the dev
+  database and the real gate-2 `form()`: the picked insight was subtracted, the row rendered after
+  similar sites, and an image in a title rendered as text with no request to its host.
 
 ## PR 9 — Phone-width sidebar, CSS first
 
