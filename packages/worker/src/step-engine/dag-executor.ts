@@ -348,6 +348,8 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
   debtItems: unknown[];
   concerns: string;
   similarSites: SimilarSite[];
+  /** False when the coder left no valid result and the fields above are the fallback. */
+  parsed: boolean;
 } {
   let candidate: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
@@ -363,6 +365,7 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
       debtItems: parsed.data.debt_items,
       concerns: parsed.data.concerns,
       similarSites: sanitizeSimilarSites(parsed.data.similar_sites),
+      parsed: true,
     };
   }
   const exit = inv.exitCode ?? 'unknown';
@@ -372,6 +375,7 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
     debtItems: [],
     concerns: `coder exited ${exit} without a valid ISSUE_RESULT_JSON; refusing to infer success`,
     similarSites: [],
+    parsed: false,
   };
 }
 
@@ -932,9 +936,9 @@ async function spawnReviewAgent(
     ra.params.taskId,
     ra.params.ignoreSavedStepClis ?? false,
   );
-  // A fix coder repairs against the specification the user attached, so every agent this spawns is
-  // told what is attached, as the coders it follows were.
-  const fullPrompt = ra.attachmentsNotice + prompt;
+  // Built as the level coder's prompt is: every agent this spawns works in the tree those coders
+  // wrote, so it is told what is attached and what earlier agents already established about it.
+  const fullPrompt = await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + prompt);
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
@@ -1127,7 +1131,8 @@ async function ingestReviewRun(
     if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
     return;
   }
-  // fix-coder finished → re-review. Only its similar sites are read; the review decides the rest.
+  // fix-coder finished → re-review. Its similar sites and concerns are kept as a level coder's are;
+  // the review decides the rest.
   const fixed = parseCoderResult(inv);
   if (fixed.similarSites.length > 0) {
     await ra.db
@@ -1137,6 +1142,13 @@ async function ingestReviewRun(
         updatedAt: new Date(),
       })
       .where(eq(schema.taskDagIssues.id, issue.id));
+  }
+  if (fixed.parsed) {
+    await recordLedgerEntry(ra.db, ra.taskId, ra.current.id, {
+      stepId: `06c-dag-execute/${issue.issueKey}`,
+      round: ra.current.round,
+      text: fixed.concerns,
+    });
   }
   const ok = await spawnReviewAgent(
     ra,

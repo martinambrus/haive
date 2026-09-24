@@ -1183,8 +1183,8 @@ time is a DAG that serialised, and that is worth looking at before blaming the m
 
 **Similar code is reported, not changed.** Every implementing pass is told to leave the same
 code or defect it finds outside the task alone and to list it instead: 07 as `similarSites`, the
-DAG level coder and the DAG fix coder as `similar_sites`. The fix coder's JSON is otherwise never
-read, so `ingestReviewRun` parses it for this field alone. Gate 2 shows the union of every 07
+DAG level coder and the DAG fix coder as `similar_sites`. `ingestReviewRun` reads the fix coder's
+JSON for this field and its `concerns`, which reach the ledger. Gate 2 shows the union of every 07
 round and every DAG issue as its LAST status row, and the person acts on an entry by rejecting
 with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
 its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
