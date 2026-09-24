@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
+import type { Components, ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import type { Element, ElementContent } from 'hast';
@@ -14,6 +14,7 @@ import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
 import { JsonTreeBlock } from './json-tree-block';
 import { downloadMarkdownHtml } from './export-html';
 import { looksLikeMarkdown } from './looks-like-markdown';
+import { Markdown } from './markdown';
 
 /** Fenced code blocks longer than this render collapsed inside <details>. */
 const COLLAPSE_LINES = 12;
@@ -211,14 +212,14 @@ function MarkdownViewImpl({
           return <BeforeAfterBlock key={i} before={segment.before} after={segment.after} />;
         }
         return (
-          <ReactMarkdown
+          <Markdown
             key={i}
             remarkPlugins={remarkPlugins}
             rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
             components={MD_COMPONENTS}
           >
             {segment.text}
-          </ReactMarkdown>
+          </Markdown>
         );
       })}
     </>

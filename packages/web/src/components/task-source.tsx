@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
+import { Markdown } from '@/components/markdown/markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import {
   api,
@@ -117,9 +117,7 @@ function HighlightedSource({ name, content }: { name: string; content: string })
   }, [name, content]);
   return (
     <div className="haive-md max-h-[600px] overflow-auto">
-      <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-        {fenced}
-      </ReactMarkdown>
+      <Markdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>{fenced}</Markdown>
     </div>
   );
 }

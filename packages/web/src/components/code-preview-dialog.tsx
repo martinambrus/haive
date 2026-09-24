@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import { getRepoFile } from '@/lib/api-client';
 import { Dialog, DialogContent } from '@/components/dialog';
 import { FormError } from '@/components/ui';
+import { Markdown } from '@/components/markdown/markdown';
 import { languageForPath, resolvePreviewLine } from './code-preview-source';
 
 export function CodePreviewDialog({
@@ -161,9 +161,9 @@ export function CodePreviewDialog({
                   style={{ top: `${lineBox.top}px`, height: `${lineBox.height}px` }}
                 />
               )}
-              <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+              <Markdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
                 {`\`\`\`${lang}\n${file.content}\n\`\`\``}
-              </ReactMarkdown>
+              </Markdown>
             </div>
           </div>
         )}
