@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RTK_REF_MARKER_END, RTK_REF_MARKER_START } from '@haive/shared';
-import { rtkBlockFiles } from '@haive/shared/rules-files';
+import { RULES_FILE_READ_CAP, rtkBlockFiles } from '@haive/shared/rules-files';
 import {
   stripRtkBlocks,
   withoutRtkBlocks,
@@ -69,6 +69,15 @@ describe('stripRtkBlocks', () => {
     expect(await read('CLAUDE.md')).toBe('@AGENTS.md\n');
     expect(await rtkBlockFiles(repo)).toEqual([]);
     expect((await stripRtkBlocks(repo)).map((o) => o.result)).toEqual(['none', 'none', 'none']);
+  });
+
+  it('refuses a file past the read cap, which the plan could not report either', async () => {
+    const big = appendBlock(`${'x'.repeat(RULES_FILE_READ_CAP)}\n`);
+    await writeFile(path.join(repo, 'AGENTS.md'), big);
+    expect(await rtkBlockFiles(repo)).toEqual([]);
+    const [agents] = await stripRtkBlocks(repo);
+    expect(agents).toMatchObject({ file: 'AGENTS.md', result: 'refused' });
+    expect(await read('AGENTS.md')).toBe(big);
   });
 
   it('leaves a link to AGENTS.md to AGENTS.md, and refuses any other link', async () => {

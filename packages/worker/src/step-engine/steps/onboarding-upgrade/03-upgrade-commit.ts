@@ -13,6 +13,7 @@ import {
   normalizeContent,
 } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import { RTK_BLOCK_FILES } from '@haive/shared/rules-files';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
@@ -349,7 +350,8 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       const { keep: toStage, warnings: ignored } = await dropIgnoredRulesFiles(
         ctx.repoPath,
         existingPaths,
-        new Set([CLI_RULES_DISK_PATH, ...stubs.map((s) => s.file)]),
+        // 02's RTK strip can write a disabled provider's rules file, which no stub names.
+        new Set([CLI_RULES_DISK_PATH, ...RTK_BLOCK_FILES, ...stubs.map((s) => s.file)]),
       );
       warnings.push(...ignored);
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via

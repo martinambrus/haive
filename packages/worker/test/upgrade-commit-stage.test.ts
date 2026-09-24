@@ -286,6 +286,17 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
     expect(await headTree()).not.toContain('CLAUDE.md');
   });
 
+  it('keeps out an ignored rules file of a provider no longer enabled, which the RTK strip wrote', async () => {
+    await writeFile(join(repo, '.gitignore'), 'GEMINI.md\n');
+    await run('git', ['-C', repo, 'add', '.gitignore']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'ignore']);
+    await writeFile(join(repo, 'GEMINI.md'), '# private\n');
+    const out = await applyWith({ writtenPaths: ['GEMINI.md'] });
+    expect(out.commitPerformed).toBe(false);
+    expect(out.warnings.join('\n')).toContain('GEMINI.md is ignored by git');
+    expect(await headTree()).not.toContain('GEMINI.md');
+  });
+
   it('commits an AGENTS.md whose rules block HEAD lacks', async () => {
     await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
     const out = await applyWith({ writtenPaths: [] });

@@ -20,6 +20,7 @@ import {
   importRulesFilesFor,
   isLinkToAgentsMd,
   RTK_BLOCK_FILES,
+  RULES_FILE_READ_CAP,
   RULES_IMPORT_LINE,
   rulesImportState,
 } from '@haive/shared/rules-files';
@@ -134,8 +135,8 @@ export interface RtkBlockStripOutcome {
 }
 
 /** Take the RTK block out of each rules file that holds one. A `CLAUDE.md -> AGENTS.md` link is
- *  AGENTS.md's own pass, and any other link is refused. A refusal or an I/O error is recorded per
- *  file and never thrown. */
+ *  AGENTS.md's own pass, and any other link is refused, as is a file past the read cap, which the
+ *  plan could not report. A refusal or an I/O error is recorded per file and never thrown. */
 export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOutcome[]> {
   const outcomes: RtkBlockStripOutcome[] = [];
   for (const file of RTK_BLOCK_FILES) {
@@ -149,7 +150,7 @@ export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOut
         repoPath,
         file,
         (current) => (current === null ? null : withoutRtkBlocks(current)),
-        { create: true },
+        { create: true, maxBytes: RULES_FILE_READ_CAP },
       );
       outcomes.push({ file, result: result === 'updated' ? 'stripped' : 'none' });
     } catch (err) {

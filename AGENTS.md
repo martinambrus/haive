@@ -2356,9 +2356,10 @@ adopted file the person had declined.
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above. The RTK block is no manifest item, so 02 takes it out
 of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
-after it (`stripRtkBlocks`). A link is refused and reported, and a `CLAUDE.md -> AGENTS.md` link is
-left to AGENTS.md's own pass. 01 names the files holding a block, so the form says what will
-change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
+after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
+plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
+stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
+holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
 repository and reports the files still holding a block (`rtkBlockLeftovers`), so the banner offers
 the upgrade. Switching RTK back on is one-sided: the next upgrade offers the settings files again,
 but nothing prompts it, and only a re-onboarding writes the block.
