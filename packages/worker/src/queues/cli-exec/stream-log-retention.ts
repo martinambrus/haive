@@ -73,9 +73,12 @@ export function expiredPromptFilter(db: Database, cutoff: Date): SQL | undefined
 /** The same window for `task_step_agent_minings.dispatch_prompt`, the step's own prompt a
  *  wave-agent retry recovers from first. It shares the prompt window because it has the same
  *  reader and the same consequence: a swept row falls back to its invocation's prompt, which the
- *  same window blanks too. The task's exit is its only clock — a mining row outlives no
- *  invocation that could still be using it, since the prompt went into that invocation when it
- *  was dispatched. */
+ *  same window blanks too.
+ *
+ *  Gated on the invocation the row links as well as on the task, so the two prompt forms age
+ *  together: an invocation can finish after its task exited, and a dispatch prompt gone while
+ *  that invocation's prompt remains would send a revived task's retry back to replaying the
+ *  sent prompt verbatim. A row that never reached a CLI has only this prompt. */
 export function expiredDispatchPromptFilter(db: Database, cutoff: Date): SQL | undefined {
   return and(
     isNotNull(schema.taskStepAgentMinings.dispatchPrompt),
@@ -86,6 +89,24 @@ export function expiredDispatchPromptFilter(db: Database, cutoff: Date): SQL | u
         .from(schema.taskSteps)
         .where(inArray(schema.taskSteps.taskId, exitedTaskIds(db, cutoff))),
     ),
+    or(
+      isNull(schema.taskStepAgentMinings.cliInvocationId),
+      inArray(
+        schema.taskStepAgentMinings.cliInvocationId,
+        db
+          .select({ id: schema.cliInvocations.id })
+          .from(schema.cliInvocations)
+          .where(finalizedBefore(cutoff)),
+      ),
+    ),
+  );
+}
+
+/** When an invocation was finalized: ended, or else superseded (see `expiredStreamLogFilter`). */
+function finalizedBefore(cutoff: Date): SQL | undefined {
+  return or(
+    lt(schema.cliInvocations.endedAt, cutoff),
+    and(isNull(schema.cliInvocations.endedAt), lt(schema.cliInvocations.supersededAt, cutoff)),
   );
 }
 
@@ -109,10 +130,7 @@ function exitedTaskIds(db: Database, cutoff: Date) {
  *  cleared on every hourly tick. */
 function agedInvocationFilter(db: Database, cutoff: Date, unswept: SQL): SQL | undefined {
   return and(
-    or(
-      lt(schema.cliInvocations.endedAt, cutoff),
-      and(isNull(schema.cliInvocations.endedAt), lt(schema.cliInvocations.supersededAt, cutoff)),
-    ),
+    finalizedBefore(cutoff),
     unswept,
     inArray(schema.cliInvocations.taskId, exitedTaskIds(db, cutoff)),
   );
@@ -216,8 +234,11 @@ export class CliStreamLogReaper {
     ]);
 
     const purged = await this.sweepStreamLogs(logDays);
-    const promptsPurged = await this.sweepPrompts(promptDays);
-    const dispatchPromptsPurged = await this.sweepDispatchPrompts(promptDays);
+    // One clock for both prompt forms, the invocations' first, so a dispatch prompt is never gone
+    // while the invocation prompt its recovery falls back to is still there.
+    const now = Date.now();
+    const promptsPurged = await this.sweepPrompts(promptDays, now);
+    const dispatchPromptsPurged = await this.sweepDispatchPrompts(promptDays, now);
     return { purged, promptsPurged, dispatchPromptsPurged };
   }
 
@@ -241,9 +262,9 @@ export class CliStreamLogReaper {
 
   /** Blanked to '' rather than NULL — the column is NOT NULL, so this needs no schema
    *  change, and the one reader already treats a falsy prompt as "no prior run to repeat". */
-  private async sweepPrompts(days: number): Promise<number> {
+  private async sweepPrompts(days: number, now: number): Promise<number> {
     if (!Number.isFinite(days) || days <= 0) return 0;
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
     const rows = await this.db
       .update(schema.cliInvocations)
       .set({ prompt: '' })
@@ -258,9 +279,9 @@ export class CliStreamLogReaper {
 
   /** NULLed, which is the column's own "not recorded": a retry then recovers from the
    *  invocation's prompt, the fallback every row written before the column already takes. */
-  private async sweepDispatchPrompts(days: number): Promise<number> {
+  private async sweepDispatchPrompts(days: number, now: number): Promise<number> {
     if (!Number.isFinite(days) || days <= 0) return 0;
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
     const rows = await this.db
       .update(schema.taskStepAgentMinings)
       .set({ dispatchPrompt: null })

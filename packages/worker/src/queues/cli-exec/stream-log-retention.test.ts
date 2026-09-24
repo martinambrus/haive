@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { createDatabase, schema } from '@haive/database';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { getTableName } from 'drizzle-orm';
+import { createDatabase, schema, type Database } from '@haive/database';
+import { configService } from '@haive/shared';
 import {
+  CliStreamLogReaper,
   expiredDispatchPromptFilter,
   expiredPromptFilter,
   expiredStreamLogFilter,
@@ -147,13 +150,79 @@ describe('expiredDispatchPromptFilter', () => {
     expect(sql).toContain('from "task_steps" where "task_steps"."task_id" in (select');
     expect(sql).toContain('"tasks"."completed_at" is not null');
     expect(sql).toContain('"tasks"."completed_at" < ');
-    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(1);
     for (const status of ['completed', 'failed', 'cancelled']) expect(params).toContain(status);
   });
 
-  it('leaves an already-swept row alone, and touches no invocation', () => {
+  it('never goes before the invocation prompt its recovery falls back to', () => {
+    // An invocation can finish after its task exited (measured up to +57m). Gated on the task
+    // alone, the dispatch prompt went first, and a task revived in between replayed the sent
+    // prompt verbatim — the behaviour the column exists to end. A row that never reached a CLI
+    // has only this prompt, so the task gate alone decides it.
+    const { sql, params } = renderDispatchPrompt();
+    expect(sql.replace(/\$\d+/g, '$')).toContain(
+      '("task_step_agent_minings"."cli_invocation_id" is null or "task_step_agent_minings"."cli_invocation_id" in (select "id" from "cli_invocations" where ("cli_invocations"."ended_at" < $ or ("cli_invocations"."ended_at" is null and "cli_invocations"."superseded_at" < $))))',
+    );
+    // One cutoff bounds all three clocks: the task's, and the invocation's ended or superseded.
+    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(3);
+  });
+
+  it('leaves an already-swept row alone, and writes only the mining row', () => {
     const { sql } = renderDispatchPrompt();
     expect(sql).toContain('"dispatch_prompt" is not null');
-    expect(sql).not.toContain('"cli_invocations"');
+    expect(sql).toMatch(/^update "task_step_agent_minings" set "dispatch_prompt" = /);
+  });
+});
+
+describe('the prompt sweeps', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Every Date bound in a drizzle condition tree. */
+  function datesIn(node: unknown, acc: Date[] = []): Date[] {
+    if (!node || typeof node !== 'object') return acc;
+    if (node instanceof Date) {
+      acc.push(node);
+      return acc;
+    }
+    if (Array.isArray(node)) return node.reduce((a: Date[], n) => datesIn(n, a), acc);
+    const obj = node as Record<string, unknown>;
+    // A bound value may itself be a subquery (the mock's stand-in below).
+    if ('value' in obj) datesIn(obj.value, acc);
+    const chunks = obj.queryChunks;
+    if (Array.isArray(chunks)) for (const c of chunks) datesIn(c, acc);
+    return acc;
+  }
+
+  it('age both prompt forms on one clock, the invocation prompts first', async () => {
+    // A dispatch prompt swept on a later clock, or before its invocation's prompt, would leave a
+    // revived task a window in which only the sent prompt remains. The clock ticks a second per
+    // read, so two separate reads would show up as two cutoffs.
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(30);
+    let clock = Date.parse('2026-09-01T00:00:00.000Z');
+    vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1000));
+    const writes: { table: string; dates: Date[] }[] = [];
+    const db = {
+      update: (table: Parameters<typeof getTableName>[0]) => ({
+        set: () => ({
+          where: (cond: unknown) => ({
+            returning: async () => {
+              writes.push({ table: getTableName(table), dates: datesIn(cond) });
+              return [];
+            },
+          }),
+        }),
+      }),
+      // Subqueries keep their condition, so the cutoffs nested in them are counted too.
+      select: () => ({ from: () => ({ where: (cond: unknown) => ({ queryChunks: [cond] }) }) }),
+    } as unknown as Database;
+    await new CliStreamLogReaper({ db }).sweep();
+
+    const [, invocationPrompts, dispatchPrompts] = writes;
+    expect(invocationPrompts?.table).toBe('cli_invocations');
+    expect(dispatchPrompts?.table).toBe('task_step_agent_minings');
+    expect(dispatchPrompts!.dates.length).toBeGreaterThan(0);
+    const cutoffs = new Set([...invocationPrompts!.dates, ...dispatchPrompts!.dates].map(Number));
+    expect(cutoffs.size).toBe(1);
   });
 });
