@@ -1,4 +1,4 @@
-import { and, inArray, isNotNull, lt, ne, type SQL } from 'drizzle-orm';
+import { and, inArray, isNotNull, isNull, lt, ne, or, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -30,10 +30,15 @@ export interface CliStreamLogReaperOptions {
  *
  *  BOTH clocks have to be past the cutoff, and neither is redundant:
  *
- *  - The invocation's `ended_at` keeps a LIVE invocation out of reach, and is still needed
+ *  - The invocation's own clock keeps a LIVE invocation out of reach, and is still needed
  *    once the task gate exists because 96 invocations on this instance ended AFTER their
  *    task's completed_at (max +57m): cancel stamps the task terminal immediately while
- *    in-flight sandboxes drain behind it.
+ *    in-flight sandboxes drain behind it. That clock is when the invocation was FINALIZED,
+ *    the codebase's own definition (`finalizedInvocationIds`): `ended_at`, or else
+ *    `superseded_at`. A step retry supersedes a queued or running invocation without
+ *    ending it, so keyed on `ended_at` alone such a row never aged at all — measured here,
+ *    every never-ended row (33) was superseded, on a completed task, and still held its
+ *    prompt.
  *  - The task's `completed_at` is what makes the window mean "since the work finished".
  *    Keying on the invocation alone evicted a STILL-RUNNING task's early rounds: a task
  *    parked on a form, a PR wait or a rate-limit hold outlives any day-scale window
@@ -42,10 +47,11 @@ export interface CliStreamLogReaperOptions {
  *    costs almost no reclaim — 99.6% of ended invocations holding a transcript belong to
  *    a task that has already exited.
  *
- *  A terminal task with a NULL completed_at is never swept. Every task-level terminal write
- *  stamps an exit time, so this should not arise — but a row that reads terminal while
- *  carrying none has no clock to age from, and falling back to created_at or updated_at would
- *  age it off something unrelated to the work. Not aging it loses disk, not history. */
+ *  A terminal task with a NULL completed_at is never swept, nor an invocation with neither
+ *  `ended_at` nor `superseded_at`. Every terminal write stamps one, so neither should arise —
+ *  but a row that carries none has no clock to age from, and falling back to created_at or
+ *  updated_at would age it off something unrelated to the work. Not aging it loses disk, not
+ *  history. */
 export function expiredStreamLogFilter(db: Database, cutoff: Date): SQL | undefined {
   // stream_log NOT NULL makes a repeat sweep a no-op rather than a rewrite of rows it
   // already cleared.
@@ -70,8 +76,10 @@ export function expiredPromptFilter(db: Database, cutoff: Date): SQL | undefined
  *  cleared on every hourly tick. */
 function agedInvocationFilter(db: Database, cutoff: Date, unswept: SQL): SQL | undefined {
   return and(
-    isNotNull(schema.cliInvocations.endedAt),
-    lt(schema.cliInvocations.endedAt, cutoff),
+    or(
+      lt(schema.cliInvocations.endedAt, cutoff),
+      and(isNull(schema.cliInvocations.endedAt), lt(schema.cliInvocations.supersededAt, cutoff)),
+    ),
     unswept,
     inArray(
       schema.cliInvocations.taskId,

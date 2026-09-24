@@ -60,8 +60,18 @@ describe('expiredStreamLogFilter', () => {
     const { sql, params } = render();
     expect(sql).toContain('"cli_invocations"."ended_at" < ');
     expect(sql).toContain('"tasks"."completed_at" < ');
-    // drizzle serializes the Date to the driver's ISO form; the same value must bound both.
-    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(2);
+    // drizzle serializes the Date to the driver's ISO form; the same value must bound every
+    // clock: the invocation's (ended, or else superseded) and the task's.
+    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(3);
+  });
+
+  it('ages an invocation from when it was finalized: ended, or else superseded', () => {
+    // A step retry supersedes a queued or running invocation without ending it, so keyed on
+    // ended_at alone such a row never aged. One carrying neither timestamp has no clock, and
+    // admitting every never-ended row would sweep it anyway.
+    expect(render().sql.replace(/\$\d+/g, '$')).toContain(
+      '("cli_invocations"."ended_at" < $ or ("cli_invocations"."ended_at" is null and "cli_invocations"."superseded_at" < $))',
+    );
   });
 
   it('leaves an already-swept row alone', () => {
@@ -93,9 +103,9 @@ describe('expiredPromptFilter', () => {
     const { sql, params } = renderPrompt();
     expect(sql).toContain('"cli_invocations"."task_id" in (select');
     expect(sql).toContain('"tasks"."completed_at" is not null');
-    expect(sql).toContain('"cli_invocations"."ended_at" < ');
+    expect(sql).toContain('"cli_invocations"."superseded_at" < ');
     expect(sql).toContain('"tasks"."completed_at" < ');
-    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(2);
+    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(3);
     for (const status of ['completed', 'failed', 'cancelled']) expect(params).toContain(status);
   });
 

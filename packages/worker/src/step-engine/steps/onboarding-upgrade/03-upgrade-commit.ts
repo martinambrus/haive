@@ -11,6 +11,9 @@ import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { RULES_IMPORT_LINE, isLinkToAgentsMd } from '../onboarding/_rules-files.js';
+import { safeDiskRel } from './02-upgrade-apply.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +58,69 @@ async function resolveStagePaths(db: Database, userId: string): Promise<string[]
     if (meta.projectSkillsDir) extra.add(`${meta.projectSkillsDir}/`);
   }
   return [...BASE_STAGE_PATHS, ...Array.from(extra)];
+}
+
+/** The paths 02 reports writing, as repository-relative ones. They come from a persisted step
+ *  output — one written before the field existed has none — so each is validated again. */
+export function appliedWrittenPaths(applyOutput: unknown): string[] {
+  const raw = (applyOutput as { writtenPaths?: unknown } | null)?.writtenPaths;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p): p is string => typeof p === 'string')
+    .map((p) => safeDiskRel(p))
+    .filter((p): p is string => p !== null);
+}
+
+/** The rules files 02 left delivering AGENTS.md: a stub holding the import, whether or not it
+ *  had to write it, or a link to AGENTS.md it left alone. */
+export function appliedImportStubs(applyOutput: unknown): { file: string; link: boolean }[] {
+  const raw = (applyOutput as { rulesImportStubs?: unknown } | null)?.rulesImportStubs;
+  if (!Array.isArray(raw)) return [];
+  const out: { file: string; link: boolean }[] = [];
+  for (const s of raw) {
+    const o = s as { file?: unknown; result?: unknown } | null;
+    if (typeof o?.file !== 'string') continue;
+    const file = safeDiskRel(o.file);
+    if (file === null) continue;
+    if (o.result === 'created' || o.result === 'appended' || o.result === 'unchanged') {
+      out.push({ file, link: false });
+    } else if (o.result === 'skipped-link') {
+      out.push({ file, link: true });
+    }
+  }
+  return out;
+}
+
+/** A worktree sees a stub only through HEAD. 02 reports `unchanged` for one an earlier attempt
+ *  wrote, or one onboarding left uncommitted, so its own write list cannot answer this. With no
+ *  HEAD the line is missing; a grep failing any other way proves nothing, so it answers false,
+ *  which leaves the file and any unrelated edits in it unstaged. */
+export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
+  } catch {
+    return true;
+  }
+  try {
+    await execFileAsync('git', ['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
+      cwd: repoPath,
+    });
+    return false;
+  } catch (err) {
+    return (err as { code?: unknown }).code === 1;
+  }
+}
+
+/** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of the
+ *  upgrade commit too: the `git add -f` that stages the rest would otherwise commit it. A tracked
+ *  file is never reported ignored, and a failed check answers false. */
+export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repoPath });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Used only when neither the repo's bound credential nor the user carries an identity,
@@ -174,11 +240,31 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       return { commitPerformed, commitSha, stagedPaths, warnings };
     }
 
-    const stagePaths = await resolveStagePaths(ctx.db, ctx.userId);
+    const applied = await loadPreviousStepOutput(ctx.db, ctx.taskId, '02-upgrade-apply');
+    const stubPaths: string[] = [];
+    // `hasWorkspaceEntry` refuses every link, so a link to AGENTS.md is re-checked and staged
+    // on its own; adding an already committed one changes nothing.
+    const linkPaths: string[] = [];
+    const stubs = appliedImportStubs(applied?.output);
+    for (const stub of stubs) {
+      if (stub.link) {
+        if (await isLinkToAgentsMd(ctx.repoPath, stub.file)) linkPaths.push(stub.file);
+      } else if (await headLacksImport(ctx.repoPath, stub.file)) {
+        stubPaths.push(stub.file);
+      }
+    }
+    const stagePaths = [
+      ...new Set([
+        ...(await resolveStagePaths(ctx.db, ctx.userId)),
+        ...appliedWrittenPaths(applied?.output),
+        ...stubPaths,
+      ]),
+    ];
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
       if (await hasWorkspaceEntry(ctx.repoPath, rel)) existingPaths.push(rel);
     }
+    existingPaths.push(...linkPaths);
     if (existingPaths.length === 0) {
       warnings.push('no upgrade files found to stage');
       return { commitPerformed, commitSha, stagedPaths, warnings };
@@ -202,10 +288,24 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath });
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }
+      // After any init, so a repository that had no git yet is checked against its .gitignore too.
+      const ruleFiles = new Set(stubs.map((s) => s.file));
+      const toStage: string[] = [];
+      for (const rel of existingPaths) {
+        if (ruleFiles.has(rel) && (await isGitIgnored(ctx.repoPath, rel))) {
+          warnings.push(
+            `${rel} is ignored by git, so it stays out of this commit and a workflow task will not load AGENTS.md through it`,
+          );
+        } else {
+          toStage.push(rel);
+        }
+      }
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
-      await execFileAsync('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
+      if (toStage.length > 0) {
+        await execFileAsync('git', ['add', '-f', '--', ...toStage], { cwd: ctx.repoPath });
+      }
       const { stdout: stagedOut } = await execFileAsync(
         'git',
         ['diff', '--cached', '--name-only'],

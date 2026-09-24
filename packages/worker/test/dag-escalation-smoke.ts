@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   configService,
@@ -138,6 +138,19 @@ async function main(): Promise<void> {
       })
       .returning();
     state.taskId = task!.id;
+
+    // One attached file, so every reviewer, advisor and fix coder prompt must carry the
+    // attachments notice.
+    const uploadsDir = path.join(repoPath, '.haive', 'task-uploads', task!.id);
+    await mkdir(uploadsDir, { recursive: true });
+    await writeFile(path.join(uploadsDir, 'brief.md'), '# brief\n');
+    await db.insert(schema.taskAttachments).values({
+      taskId: task!.id,
+      userId,
+      filename: 'brief.md',
+      storedPath: path.join(uploadsDir, 'brief.md'),
+      sizeBytes: 8,
+    });
 
     await db.insert(schema.taskSteps).values({
       taskId: task!.id,
@@ -388,6 +401,30 @@ async function main(): Promise<void> {
     }
     const debt = finalPlan!.debtAggregate as { total?: number };
     if (!debt || (debt.total ?? 0) < 1) throw new Error('expected debt aggregated from the accept');
+
+    // Every reviewer, advisor and fix coder was told what the task has attached.
+    const runs = await db
+      .select()
+      .from(schema.dagAgentRuns)
+      .where(eq(schema.dagAgentRuns.taskId, task!.id));
+    const roles = new Set(runs.map((r) => r.role));
+    for (const role of ['reviewer', 'issue_advisor', 'coder'] as const) {
+      if (!roles.has(role)) throw new Error(`expected a ${role} run, saw ${[...roles].join(', ')}`);
+    }
+    const invocationIds = runs.flatMap((r) => (r.cliInvocationId ? [r.cliInvocationId] : []));
+    const sent = await db
+      .select({ prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(inArray(schema.cliInvocations.id, invocationIds));
+    if (sent.length !== runs.length) {
+      throw new Error(`expected ${runs.length} escalation prompts, found ${sent.length}`);
+    }
+    const uninformed = sent.filter(
+      ({ prompt }) => !prompt.includes('[User-attached files]') || !prompt.includes('brief.md'),
+    );
+    if (uninformed.length > 0) {
+      throw new Error(`${uninformed.length} escalation prompt(s) carry no attachments notice`);
+    }
 
     console.log(
       JSON.stringify({

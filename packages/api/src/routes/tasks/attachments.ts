@@ -28,8 +28,14 @@ import {
   openFileNoFollow,
   removeNoFollow,
 } from '@haive/shared/fs-safe';
-import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
-import { filesToRemove } from '../../lib/attachment-removal.js';
+import {
+  pruneAfter,
+  removeExpansionStagings,
+  removeFiles,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempts,
+} from '@haive/shared/attachments-fs';
+import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -37,13 +43,12 @@ import { HttpError, type AppEnv } from '../../context.js';
 // User-supplied reference files attached to a task (docs, screenshots, sample
 // data). Stored on the haive_repos volume under
 // `<repoRoot>/.haive/task-uploads/<taskId>/` so the AI CLI agent reads them at
-// `/haive/workdir/.haive/task-uploads/<taskId>/`. `.haive/` is git-excluded, so
-// the files are durable and never show in the agent's git status. Auth + userId
-// come from the parent taskRoutes (requireAuth), mirroring files.ts / steps.ts.
+// `/haive/workdir/.haive/task-uploads/<taskId>/`. Auth + userId come from the
+// parent taskRoutes (requireAuth), mirroring files.ts / steps.ts.
 //
 // The api container runs as root; repo dirs are owned by `node` (uid 1000, the
-// sandbox user). We write the files then chown 1000:1000 + chmod 0644 so the
-// agent can read them.
+// sandbox user). We create the files 0644 and chown them 1000:1000 so the agent
+// can read them.
 
 export const attachmentRoutes = new Hono<AppEnv>();
 
@@ -262,44 +267,8 @@ async function claimAttachmentName(
   }
 }
 
-/** Remove the directories a deleted file left empty, stopping at the uploads root
- *  or at the first directory something else still lives in. */
-async function pruneEmptyDirs(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
-  let cursor = relDir;
-  while (cursor !== '' && cursor !== '.') {
-    try {
-      // Non-recursive on purpose: ENOTEMPTY is the signal to stop, so a directory something else
-      // still lives in is left exactly as it is.
-      await removeNoFollow(anchor, `${uploadsRel}/${cursor}`);
-    } catch {
-      return; // not empty, or already gone
-    }
-    cursor = splitAttachmentPath(cursor).dir;
-  }
-}
-
-/** Remove what `filesToRemove` lists. Walked under the repository root like every other removal
- *  here, so a link in a path is refused rather than followed, and a file already gone is fine. */
-async function removeFiles(anchor: string, uploadsRel: string, files: readonly string[]) {
-  for (const file of files) {
-    await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
-  }
-}
-
-/** Prune every folder the removed files may have emptied, deepest first so a parent is tried after
- *  the children that kept it alive. */
-async function pruneAfter(
-  anchor: string,
-  uploadsRel: string,
-  removed: readonly string[],
-): Promise<void> {
-  const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
-  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
-  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
-}
-
-/** Stream the request body to `destPath`, aborting + unlinking once the byte count
- *  exceeds `maxBytes` (413). Streaming keeps memory bounded regardless of the cap. */
+/** Stream the request body into `fh`, aborting once the byte count exceeds
+ *  `maxBytes` (413). Streaming keeps memory bounded regardless of the cap. */
 async function streamToFileWithCap(
   body: ReadableStream<Uint8Array>,
   fh: FileHandle,
@@ -354,14 +323,11 @@ function headerContentType(raw: string | undefined): string | null {
 }
 
 /**
- * Everything that happens AFTER an attachment's bytes are on disk: permissions,
- * the `task_attachments` row, and the manifest rewrite.
+ * Everything that happens AFTER an upload's bytes are on disk: the
+ * `task_attachments` row and the manifest rewrite.
  *
- * One tail for every write path, because two of the three things it does fail
- * invisibly. The api runs as root while the sandbox user is uid 1000, so a file
- * written without the chown reaches the agent as a permission error and only
- * inside a container. And `augmentPromptWithAttachments` tells EVERY agent to
- * read `_ATTACHMENTS.md` unconditionally — a write path that skips the manifest
+ * The manifest is not optional: `augmentPromptWithAttachments` tells EVERY agent
+ * to read `_ATTACHMENTS.md` unconditionally — a write path that skips the manifest
  * therefore hands the agent a prompt pointing at a file that does not exist.
  *
  * Returns the inserted row.
@@ -377,9 +343,8 @@ async function finalizeAttachment(args: {
   contentType: string | null;
   description: string | null;
 }) {
-  // No chmod/chown here any more: the file was created through `create-exclusive`, which applied
-  // the mode and owner to the descriptor before any bytes were written — so there is no window in
-  // which the agent's file exists with the wrong owner.
+  // No chmod/chown here: `createUniqueAttachment` created the file 0644 and chowned it to the
+  // sandbox uid (best-effort) before any bytes were written.
   // The id is chosen here so a failed insert can be told from one whose answer was lost.
   const id = randomUUID();
   let row: typeof schema.taskAttachments.$inferSelect | undefined;
@@ -413,57 +378,6 @@ async function finalizeAttachment(args: {
 
   await rewriteAttachmentsManifest(getDb(), args.taskId, args.anchor, args.uploadsRel);
   return row!;
-}
-
-/**
- * Write one attachment from bytes already in memory.
- *
- * Sibling of the streaming route below, sharing its tail. Kept separate because
- * the route streams with a byte cap and this takes a whole buffer.
- */
-export async function writeTaskAttachment(args: {
-  taskId: string;
-  userId: string;
-  filename: string;
-  content: string | Buffer;
-  contentType?: string | null;
-  description?: string | null;
-}) {
-  const { dir, anchor, rel: uploadsRel } = await resolveTaskUploadsDir(args.taskId, args.userId);
-  await ensureUploadsDir(anchor, uploadsRel);
-
-  const { rel: safeName, fh } = await claimAttachmentName(
-    args.taskId,
-    anchor,
-    uploadsRel,
-    safeUploadPath(args.filename),
-  );
-  const bytes = typeof args.content === 'string' ? Buffer.from(args.content, 'utf8') : args.content;
-  try {
-    let written = 0;
-    while (written < bytes.length) {
-      const res = await fh.write(bytes, written, bytes.length - written, written);
-      written += res.bytesWritten;
-    }
-  } catch (err) {
-    await fh.close().catch(() => {});
-    await removeNoFollow(anchor, `${uploadsRel}/${safeName}`).catch(() => {});
-    throw err;
-  }
-  await fh.close();
-  const destPath = join(dir, safeName);
-
-  return finalizeAttachment({
-    anchor,
-    uploadsRel,
-    destPath,
-    filename: safeName,
-    taskId: args.taskId,
-    userId: args.userId,
-    sizeBytes: bytes.length,
-    contentType: args.contentType ?? null,
-    description: args.description ?? null,
-  });
 }
 
 attachmentRoutes.post('/:id/attachments', async (c) => {
@@ -584,10 +498,11 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   // One section under the task's attachments lock, from reading the rows to rewriting the
   // manifest: the worker writes a sidecar only under the same lock and only while its row exists,
   // so no sidecar can land between the files going and the rows going and outlive both.
-  await withTaskAttachmentsLock(db, taskId, async (tx) => {
+  const settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
     // Besides its own file, what the FK cannot reach: an archive's members (their ROWS cascade on
     // the delete below) and the extracted-text sidecars. Both stay bind-mounted into the sandbox,
-    // so an agent would keep reading files the user believes they removed.
+    // so an agent would keep reading files the user believes they removed. And the archive itself,
+    // when this was the last file extracted from it.
     const rows = await tx.query.taskAttachments.findMany({
       where: and(
         eq(schema.taskAttachments.taskId, taskId),
@@ -595,12 +510,24 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
       ),
       columns: { id: true, filename: true, expandedFromId: true },
     });
-    const files = filesToRemove(new Set([attachmentId]), rows);
-    await removeFiles(anchor, uploadsRel, files);
-    await tx.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-    await pruneAfter(anchor, uploadsRel, files);
+    const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
+    await removeFiles(anchor, uploadsRel, plan.files);
+    await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
+    // An expansion of a removed archive the worker was interrupted in: with the archive's row gone,
+    // no later call would know it had anything to take back.
+    const attempts = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set(plan.ids),
+    );
+    await pruneAfter(anchor, uploadsRel, plan.files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    return attempts;
   }).catch(lockBusyError);
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(anchor, uploadsRel, settled);
   return c.json({ ok: true });
 });
 
@@ -615,7 +542,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const prefix = safeAttachmentPath(raw);
 
   // The same one section as the single delete, and for the same reason.
-  const removed = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
+  const done = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
     const rows = await tx.query.taskAttachments.findMany({
       where: and(
         eq(schema.taskAttachments.taskId, taskId),
@@ -634,17 +561,21 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
     // take a file uploaded into it after `rows` was read. The list includes the sidecars and the
     // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the
     // folder.
-    const files = filesToRemove(new Set(marked.map((r) => r.id)), rows);
-    await removeFiles(anchor, uploadsRel, files);
-    await tx.delete(schema.taskAttachments).where(
-      inArray(
-        schema.taskAttachments.id,
-        marked.map((r) => r.id),
-      ),
+    const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
+    await removeFiles(anchor, uploadsRel, plan.files);
+    await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
+    const settled = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set(plan.ids),
     );
-    await pruneAfter(anchor, uploadsRel, files);
+    await pruneAfter(anchor, uploadsRel, plan.files);
     await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
-    return marked.length;
+    return { removed: plan.ids.length, anchor, uploadsRel, settled };
   }).catch(lockBusyError);
-  return c.json({ ok: true, removed });
+  // Outside the section: a staging dir can hold a whole extracted archive.
+  await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled);
+  return c.json({ ok: true, removed: done.removed });
 });

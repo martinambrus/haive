@@ -23,7 +23,6 @@ const exec = promisify(execFile);
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
-import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
@@ -33,12 +32,9 @@ import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
 import {
-  livePlanInputs,
+  currentPlanInputs,
   loadLiveAttachments,
   loadPlanInputsOutput,
-  removePlanInputsIndex,
-  unpreparedAttachments,
-  writePlanInputsIndex,
   type LiveAttachments,
   type PlanInputsApply,
 } from './00-plan-inputs.js';
@@ -287,61 +283,38 @@ function visualOnlyInputsOf(inputs: PlanInputsApply | null): string[] {
 }
 
 /**
- * `d` as a dispatch should see it: the three input fields recomputed from what is attached NOW.
- * detect copied them from `00-plan-inputs`, and a person can delete an attachment while the build
- * runs, so a deleted image would otherwise still demand `vision` and the index the root prompt says
- * to read FIRST would still name a deleted file. The index is re-rendered, or removed once nothing
- * in it is left. A file attached since is neither extracted nor indexed, but the attachments notice
- * names every live row, so its KIND still counts: a picture requires `vision`, a PDF prefers it.
+ * `d` as a dispatch should see it: the three input fields recomputed from what is attached NOW, on
+ * every dispatch. detect copied them from `00-plan-inputs`, and a person can delete an attachment or
+ * add one while the build runs. `currentPlanInputs` drops a deletion and prepares an addition, and
+ * records both, so a later wave reads the addition as a recorded input rather than as an addition;
+ * that is why nothing here falls back to `d` once it has answered. A file attached since whose bytes
+ * cannot be read is not prepared, but the attachments notice names every live row, so its KIND still
+ * counts: a picture requires `vision`, a PDF prefers it.
  *
- * Returns `d` itself when nothing changed, and when either lookup fails, which leaves the build on
- * the fields it had before this existed. `attachments` is a snapshot the caller already read, so
- * that its other decisions see the same rows; without one this reads its own.
+ * Returns `d` itself when 00 did not run for the task or the attachments cannot be read, which leaves
+ * the build on the fields it had before this existed. `attachments` is a snapshot the caller already
+ * read; without one this reads its own, and rows that change while an addition is prepared are read
+ * again (`currentPlanInputs`).
  */
 export async function withLiveInputs(
   ctx: StepContext,
   d: PlanBuildDetect,
   attachments?: LiveAttachments | null,
 ): Promise<PlanBuildDetect> {
-  const prepared = await loadPlanInputsOutput(ctx);
-  if (!prepared) return d;
-  const live = attachments === undefined ? await loadLiveAttachments(ctx) : attachments;
-  if (!live) return d;
-  const { output, changed } = livePlanInputs(prepared, live);
-  const added = unpreparedAttachments(prepared, live).map((r) => ({
+  const current = await currentPlanInputs(ctx, attachments);
+  if (!current) return d;
+  const added = current.unprepared.map((r) => ({
     filename: r.filename,
     kind: classifyPlanInput(r.filename, r.contentType),
   }));
-  const addedPictures = added.filter((a) => a.kind === 'image').map((a) => a.filename);
-  const addedPdf = added.some((a) => a.kind === 'pdf');
-  if (!changed && addedPictures.length === 0 && !addedPdf) return d;
-  let inputIndexPath = d.inputIndexPath ?? null;
-  // Only a deletion touches the index: it lists what was prepared, and nothing prepared an addition.
-  if (changed) {
-    try {
-      if (output.inputs.length > 0) {
-        inputIndexPath = await writePlanInputsIndex(
-          ctx.repoPath,
-          ctx.taskId,
-          output.inputs,
-          output.archiveNotes,
-        );
-      } else {
-        await removePlanInputsIndex(ctx.repoPath, ctx.taskId);
-        inputIndexPath = null;
-      }
-    } catch (err) {
-      // The index on disk still names what was deleted, so the prompt must not send the agent to
-      // it. The attachments notice still names every live file.
-      inputIndexPath = null;
-      ctx.logger.warn({ err }, 'plan build: could not re-render the plan-inputs index');
-    }
-  }
   return {
     ...d,
-    inputIndexPath,
-    visualOnlyInputs: [...visualOnlyInputsOf(output), ...addedPictures],
-    hasPdfInputs: output.hasPdfInputs === true || addedPdf,
+    inputIndexPath: current.output.indexPath,
+    visualOnlyInputs: [
+      ...visualOnlyInputsOf(current.output),
+      ...added.filter((a) => a.kind === 'image').map((a) => a.filename),
+    ],
+    hasPdfInputs: current.output.hasPdfInputs === true || added.some((a) => a.kind === 'pdf'),
   };
 }
 
@@ -723,11 +696,13 @@ export function createPlanBuildStep(
         // selectAgents only while no mining row exists.
         const root = await findPlanRoot(ctx.db, repositoryId);
         if (root) return [];
-        // One read of the attachments for the whole root dispatch, so refusing and choosing the
-        // capabilities see the same rows.
+        // The refusal is made on the rows read here and again once the inputs are prepared:
+        // preparing a late document can take minutes, and deleting the only one meanwhile must
+        // still stop a root that would have nothing to build from.
         const attachments = await loadLiveAttachments(ctx);
         assertSomethingToBuildFrom(d, attachments);
         const live = await withLiveInputs(ctx, d, attachments);
+        assertSomethingToBuildFrom(d, await loadLiveAttachments(ctx));
         return [
           {
             agentId: 'plan-root',
@@ -735,11 +710,7 @@ export function createPlanBuildStep(
             roleKey: 'outline',
             capabilities: planAgentCapabilities(live),
             preferVision: live.hasPdfInputs === true,
-            prompt: await augmentPromptWithAttachments(
-              ctx.db,
-              ctx.taskId,
-              buildRootPrompt(live, formValues),
-            ),
+            prompt: buildRootPrompt(live, formValues),
           },
         ];
       },
@@ -934,25 +905,19 @@ export function createPlanBuildStep(
         // index is compacted before provider selection, so this contract is the
         // same for every supported CLI.
         const live = await withLiveInputs(ctx, d);
-        const dispatches = await Promise.all(
-          slice.map(async (node) => ({
-            agentId: `plan-expand-${node.id}-p${nextWave}`,
-            agentTitle: `Expand: ${node.title}`,
-            roleKey: 'expand',
-            capabilities: planAgentCapabilities(live),
-            preferVision: live.hasPdfInputs === true,
-            prompt: await augmentPromptWithAttachments(
-              ctx.db,
-              ctx.taskId,
-              buildExpandPrompt(
-                live,
-                args.formValues,
-                node,
-                buildPlanExpansionContext(nodes, node),
-              ),
-            ),
-          })),
-        );
+        const dispatches = slice.map((node) => ({
+          agentId: `plan-expand-${node.id}-p${nextWave}`,
+          agentTitle: `Expand: ${node.title}`,
+          roleKey: 'expand',
+          capabilities: planAgentCapabilities(live),
+          preferVision: live.hasPdfInputs === true,
+          prompt: buildExpandPrompt(
+            live,
+            args.formValues,
+            node,
+            buildPlanExpansionContext(nodes, node),
+          ),
+        }));
         throw new MiningWaveError(
           dispatches,
           `next plan level: ${dispatches.length} node(s) to expand`,
