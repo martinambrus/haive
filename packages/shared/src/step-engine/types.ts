@@ -1,6 +1,10 @@
 import type { FormSchema, FormField } from '../schemas/form.js';
 import type { StepStatus } from '../types/index.js';
 
+/** Every `StepCapability`, for narrowing a STORED value back to the type: a mining row records
+ *  the capabilities its dispatch asked for, and the database knows only strings. */
+export const STEP_CAPABILITIES = ['subagents', 'tool_use', 'file_write', 'vision'] as const;
+
 /** What a dispatch needs from whichever CLI serves it.
  *
  *  `vision` is a HARD requirement, not a preference: a provider whose model is
@@ -10,7 +14,7 @@ import type { StepStatus } from '../types/index.js';
  *  tells the agent not to open images, so it silently plans around one and
  *  reports success. Declare it only where an image is genuinely load-bearing;
  *  a task that merely COULD have one must not lock every blind model out. */
-export type StepCapability = 'subagents' | 'tool_use' | 'file_write' | 'vision';
+export type StepCapability = (typeof STEP_CAPABILITIES)[number];
 
 export interface DetectResult {
   summary?: string;
