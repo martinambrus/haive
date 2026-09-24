@@ -939,14 +939,13 @@ describe('advanceStep agentMining second wave', () => {
   });
 
   it('continues without the wave rather than parking on a barrier nothing will clear', async () => {
-    // Every insert loses the (task_step_id, agent_id) race, so no job is enqueued and no
-    // row goes pending. Parking here would hang the step forever; apply must be re-run
-    // and told the wave is not coming.
+    // No provider can take the wave's agent, so no job is enqueued and no row goes pending.
+    // Parking here would hang the step forever; apply must be re-run and told the wave is
+    // not coming.
     const state = freshState([miningRow('peer-reviewer', 1)]);
-    state.miningInsertConflicts = true;
     const applyCalls: StepApplyArgs[] = [];
     const enqueued: CliExecJobPayload[] = [];
-    const result = await run(makeMockDb(state), waveStep(applyCalls, ['refute-abc']), enqueued);
+    const result = await run(makeMockDb(state), waveStep(applyCalls, ['refute-abc']), enqueued, []);
 
     expect(result.status).toBe('done');
     expect(enqueued).toHaveLength(0);
@@ -993,17 +992,17 @@ describe('advanceStep agentMining second wave', () => {
   });
 
   it('fails rather than looping when the wave-exhausted pass asks again', async () => {
-    // Every insert loses the (task_step_id, agent_id) race, so the runner tells apply()
-    // the wave is not coming. A step that asks anyway is in breach of the contract: the
-    // loop must give up and surface the throw, not spin re-dispatching forever.
+    // No provider can take the wave's agent, so the runner tells apply() the wave is not
+    // coming. A step that asks anyway is in breach of the contract: the loop must give up
+    // and surface the throw, not spin re-dispatching forever.
     const state = freshState([miningRow('peer-reviewer', 1)]);
-    state.miningInsertConflicts = true;
     const applyCalls: StepApplyArgs[] = [];
     const enqueued: CliExecJobPayload[] = [];
     const result = await run(
       makeMockDb(state),
       waveStep(applyCalls, ['refute-abc'], true),
       enqueued,
+      [],
     );
 
     expect(result.status).toBe('failed');
@@ -1631,6 +1630,22 @@ const takenByAnotherPass = (state: MockState) => () => {
   state.miningRows = state.miningRows.map((r, i) => (i === 0 ? { ...r, status: 'pending' } : r));
 };
 
+/** Another pass took the first row and its run already finished: a fresh read sees it done. */
+const finishedByAnotherPass = (state: MockState) => () => {
+  state.miningRows = state.miningRows.map((r, i) =>
+    i === 0
+      ? {
+          ...r,
+          status: 'done',
+          output: { fromTheOtherPass: true },
+          errorMessage: null,
+          cliInvocationId: 'inv-other-pass',
+          userRetryRequestedAt: null,
+        }
+      : r,
+  );
+};
+
 describe('a fan-out reserved before any agent is sent', () => {
   const miningLinks = (state: MockState) =>
     (state.miningUpdateLog ?? []).filter(
@@ -1895,6 +1910,115 @@ describe('a fan-out reserved before any agent is sent', () => {
 
     expect(result.status).toBe('waiting_cli');
     expect(applyCalls).toEqual([]);
+  });
+
+  it('settles on the result another pass already finished, not on the failure it read', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(enqueued).toEqual([]);
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(
+      applyCalls[0]!.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer'),
+    ).toMatchObject({ status: 'done', output: { fromTheOtherPass: true } });
+  });
+
+  it('hands apply the re-run another pass finished, not the failure a person asked to redo', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), noRetryMiningStep(applyCalls), []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.agentMiningResults).toEqual([
+      expect.objectContaining({
+        agentId: 'peer-reviewer',
+        status: 'done',
+        output: { fromTheOtherPass: true },
+      }),
+    ]);
+  });
+
+  it('re-runs apply on a re-roll another pass already finished, instead of degrading', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.miningCasLost = (set) => set.status === 'pending';
+    state.onMiningCasLost = finishedByAnotherPass(state);
+    const applyCalls: StepApplyArgs[] = [];
+    await run(makeMockDb(state), miningStep(['peer-reviewer'], applyCalls), []);
+
+    // The pass after the lost re-roll reads the reply the other pass wrote, still on budget.
+    const second = applyCalls[1]!;
+    expect(second.isFinalMiningAttempt).toBe(false);
+    expect(second.agentMiningResults?.find((r) => r.agentId === 'peer-reviewer')).toMatchObject({
+      output: { fromTheOtherPass: true },
+    });
+  });
+
+  it('folds a wave another pass already sent and finished, instead of settling without it', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const step = waveStep(applyCalls, ['refute-a']);
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The other pass sent the wave, and its agent finished, while this one was applying.
+      if (applyCalls.length === 0) {
+        state.miningRows = [...state.miningRows, miningRow('refute-a', 1, { output: 'refuted' })];
+      }
+      return apply(ctx, args);
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[1]!.miningWaveExhausted).not.toBe(true);
+    expect(applyCalls[1]!.agentMiningResults?.map((r) => r.agentId)).toContain('refute-a');
+  });
+
+  it('settles a first fan-out another pass reserved and finished, rather than failing it', async () => {
+    const state = freshState([]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const step = noRetryMiningStep(applyCalls);
+    const select = step.agentMining!.selectAgents;
+    step.agentMining!.selectAgents = async (args) => {
+      // The other pass reserved both agents after this one read none, and both finished.
+      state.miningRows = [
+        miningRow('peer-reviewer', 1, { output: 'reviewed' }),
+        miningRow('security-code-reviewer', 1, { output: 'audited' }),
+      ];
+      return select(args);
+    };
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.agentMiningResults?.map((r) => r.output)).toEqual([
+      'reviewed',
+      'audited',
+    ]);
   });
 
   it('leaves an orphan another pass already re-rolled to that pass', async () => {

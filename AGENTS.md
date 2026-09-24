@@ -226,9 +226,14 @@ other's run. Now the loser supersedes only its own new invocation and sends noth
 winner supersedes the run it replaced. The orphan reconcile's fail write swaps on the link it read
 for the same reason: a pass beside it may already have re-rolled the row onto a live run.
 
-**A pass that sent nothing parks while any row is live** (`hasLiveMiningAgents`). A wave, a
-re-roll or a user-requested re-run can find its agents taken by a pass running beside it, and
-settling there would conclude the step while that pass's agents are still in flight.
+**A pass that lost agents to another pass reads the barrier again before it settles.** A first
+fan-out, a wave, a re-roll or a user-requested re-run can find its agents taken by a pass running
+beside it, and that pass's run may already have finished, so every row the loser read can be
+stale: settling on them applied the old failure in place of the new result, or finished a wave
+without folding it. `dispatchMiningAgents` therefore reports what it `lost` beside what it sent,
+and the loser reads the rows again, once, and settles on those (`rereadMiningBarrier` in the apply
+loop). Once is the bound: a pass that loses a second race settles on its second read. A pass that
+sent nothing still parks while any row is live (`hasLiveMiningAgents`).
 
 A dispatch that throws part-way fails what it reserved or linked and did not queue
 (`releaseUnsentAgents`), and ends the one run it had recorded. Left `pending`, such a row would

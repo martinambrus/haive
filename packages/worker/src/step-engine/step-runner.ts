@@ -1120,6 +1120,8 @@ type AgentMiningResolved =
     }
   | { resolved: false; result: AdvanceStepResult };
 
+/** `reread` marks the second read a pass takes after losing agents to another pass. It is taken
+ *  once, so a pass that keeps losing settles on what it last read. */
 async function resolveAgentMiningPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -1129,6 +1131,7 @@ async function resolveAgentMiningPhase(
   formValues: FormValues | null,
   llmOutput: unknown,
   params: AdvanceStepParams,
+  reread = false,
 ): Promise<AgentMiningResolved> {
   const spec = stepDef.agentMining!;
 
@@ -1195,7 +1198,7 @@ async function resolveAgentMiningPhase(
     // never re-fan-out by itself.
     const userRequested = existing.filter((r) => r.userRetryRequestedAt != null);
     if (userRequested.length > 0 && params.providers && params.deps) {
-      const requeued = await retryMiningAgents(
+      const { sent: requeued, lost } = await retryMiningAgents(
         db,
         stepDef,
         current,
@@ -1228,6 +1231,21 @@ async function resolveAgentMiningPhase(
           statusMessage: `Re-running ${requeued} agent(s) at your request...`,
         });
         return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+      }
+      // Another pass re-ran what this one was asked to, and may already have finished it, so
+      // every row read above can be stale: settle on a fresh read rather than on the old failure.
+      if (lost > 0 && !reread) {
+        return resolveAgentMiningPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          true,
+        );
       }
       if (await hasLiveMiningAgents(db, current.id)) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -1311,7 +1329,7 @@ async function resolveAgentMiningPhase(
         return result && retryOnInvocationFailure(result) ? [row.agentId] : [];
       });
       if (retryableAgentIds.length > 0) {
-        const requeued = await retryMiningAgents(
+        const { sent: requeued, lost } = await retryMiningAgents(
           db,
           stepDef,
           current,
@@ -1338,6 +1356,19 @@ async function resolveAgentMiningPhase(
             statusMessage: `Re-running ${requeued} mining agent(s) after a transient terminal failure...`,
           });
           return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+        }
+        if (lost > 0 && !reread) {
+          return resolveAgentMiningPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            llmOutput,
+            params,
+            true,
+          );
         }
         if (await hasLiveMiningAgents(db, current.id)) {
           return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -1371,7 +1402,7 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results: [], newResults: [], current };
   }
 
-  const dispatched = await dispatchMiningAgents(
+  const { sent: dispatched, lost } = await dispatchMiningAgents(
     db,
     stepDef,
     current,
@@ -1380,6 +1411,21 @@ async function resolveAgentMiningPhase(
     dispatches,
     null,
   );
+  // Another pass reserved these agents first: the barrier over the rows it wrote decides, not a
+  // failure naming refusals this pass never met.
+  if (dispatched === 0 && lost > 0 && !reread) {
+    return resolveAgentMiningPhase(
+      db,
+      stepDef,
+      current,
+      ctx,
+      detected,
+      formValues,
+      llmOutput,
+      params,
+      true,
+    );
+  }
 
   // Nothing went out AND nothing is already in flight: no provider would take any
   // of these agents (dispatchMiningAgents recorded each refusal on its own row).
@@ -1595,12 +1641,18 @@ async function reserveMiningAgents(
   );
 }
 
+/** What one dispatch did: the agents it `sent`, and the ones it `lost` because another pass had
+ *  already reserved or re-linked their rows, which leaves every row this pass read possibly stale. */
+type MiningDispatchOutcome = { sent: number; lost: number };
+
+const NOTHING_SENT: MiningDispatchOutcome = { sent: 0, lost: 0 };
+
 /** Enqueue one cli invocation per dispatch.
  *
  *  A fresh fan-out (`existing` = null) first reserves a row per agent; a retry (`existing` = the
  *  rows to re-roll) reuses its rows. Each row is then linked to its new invocation by a
  *  compare-and-swap on the state read, and only the pass that wins queues it, so two passes over
- *  one agent send it once. Returns the number actually enqueued. */
+ *  one agent send it once. */
 async function dispatchMiningAgents(
   db: Database,
   stepDef: StepDefinition,
@@ -1609,13 +1661,14 @@ async function dispatchMiningAgents(
   params: AdvanceStepParams,
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
-): Promise<number> {
+): Promise<MiningDispatchOutcome> {
   const spec = stepDef.agentMining!;
   const targets = new Map(
     existing ??
       (await reserveMiningAgents(db, params.taskId, stepDef.metadata.id, current.id, dispatches)),
   );
   const taken = dispatches.filter((d) => !targets.has(d.agentId)).map((d) => d.agentId);
+  let lost = taken.length;
   if (taken.length > 0) {
     ctx.logger.warn(
       { agentIds: taken, taskStepId: current.id },
@@ -1772,6 +1825,7 @@ async function dispatchMiningAgents(
           .where(eq(schema.cliInvocations.id, invRow.id));
         linking = null;
         targets.delete(dispatch.agentId);
+        lost++;
         ctx.logger.warn(
           { agentId: dispatch.agentId, taskStepId: current.id },
           'agent mining row taken by another pass before this one linked it — not sending it again',
@@ -1824,7 +1878,7 @@ async function dispatchMiningAgents(
       targets.delete(dispatch.agentId);
       enqueued++;
     }
-    return enqueued;
+    return { sent: enqueued, lost };
   } catch (err) {
     await releaseUnsentAgents(db, linking, [...targets.values()], err, ctx);
     throw err;
@@ -1892,7 +1946,7 @@ async function dispatchReservedAgents(
   llmOutput: unknown,
   params: AdvanceStepParams,
   rows: MiningRow[],
-): Promise<number> {
+): Promise<MiningDispatchOutcome> {
   // The step's own dispatch where it still offers the agent, as a retry takes it: that carries
   // what a recorded prompt cannot, such as the personas 03's roster names.
   const offered = new Map(
@@ -1960,7 +2014,7 @@ async function dispatchReservedAgents(
     });
     targets.set(row.agentId, target);
   }
-  if (dispatches.length === 0) return 0;
+  if (dispatches.length === 0) return NOTHING_SENT;
   ctx.logger.warn(
     { stepId: stepDef.metadata.id, agentIds: dispatches.map((d) => d.agentId) },
     'sending mining agents a fan-out reserved and never sent',
@@ -2467,6 +2521,28 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       isFinalLlmAttempt,
       isFinalMiningAttempt,
     };
+    // A dispatch below that lost agents to another pass leaves the results apply() was handed
+    // possibly stale, so the barrier is read again, once, and apply() re-run on what it finds.
+    let reread = false;
+    const rereadMiningBarrier = async (): Promise<AdvanceStepResult | null> => {
+      reread = true;
+      const fresh = await resolveAgentMiningPhase(
+        db,
+        stepDef,
+        current,
+        ctx,
+        detected,
+        formValues,
+        llmOutput,
+        params,
+        true,
+      );
+      if (!fresh.resolved) return fresh.result;
+      applyArgs.agentMiningResults = fresh.results;
+      applyArgs.newAgentMiningResults = fresh.newResults;
+      current = fresh.current;
+      return null;
+    };
     let output: unknown;
     for (;;) {
       try {
@@ -2529,7 +2605,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             .update(schema.taskStepAgentMinings)
             .set({ consumedAt: new Date(), updatedAt: new Date() })
             .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
-          const dispatched = await dispatchMiningAgents(
+          const { sent: dispatched, lost } = await dispatchMiningAgents(
             db,
             stepDef,
             current,
@@ -2548,6 +2624,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               statusMessage: `Running ${dispatched} follow-up agent(s)...`,
             });
             return { status: 'waiting_cli', row: parked };
+          }
+          if (lost > 0 && !reread) {
+            const settled = await rereadMiningBarrier();
+            if (settled) return settled;
+            continue;
           }
           if (await hasLiveMiningAgents(db, current.id)) {
             return { status: 'waiting_cli', row: current };
@@ -2574,7 +2655,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepDef.loop &&
           applyArgs.isFinalMiningAttempt !== true
         ) {
-          const requeued = await retryMiningAgents(
+          const { sent: requeued, lost } = await retryMiningAgents(
             db,
             stepDef,
             current,
@@ -2592,6 +2673,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
             });
             return { status: 'waiting_cli', row: parked };
+          }
+          if (lost > 0 && !reread) {
+            const settled = await rereadMiningBarrier();
+            if (settled) return settled;
+            continue;
           }
           if (await hasLiveMiningAgents(db, current.id)) {
             return { status: 'waiting_cli', row: current };
@@ -3378,8 +3464,8 @@ async function retryMiningAgents(
   params: AdvanceStepParams,
   agentIds: string[],
   maxAttempts: number,
-): Promise<number> {
-  if (agentIds.length === 0 || !params.providers || !params.deps) return 0;
+): Promise<MiningDispatchOutcome> {
+  if (agentIds.length === 0 || !params.providers || !params.deps) return NOTHING_SENT;
 
   const rows = await db
     .select(MINING_ROW_COLUMNS)
@@ -3446,7 +3532,7 @@ async function retryMiningAgents(
       { stepId: stepDef.metadata.id, agentIds, maxAttempts },
       'mining retry requested but every named agent is out of budget',
     );
-    return 0;
+    return NOTHING_SENT;
   }
 
   const dispatches: RunnerMiningDispatch[] = (
@@ -3569,7 +3655,7 @@ async function retryMiningAgents(
       { stepId: stepDef.metadata.id, agentIds },
       'mining retry requested but selectAgents no longer offers those agents, and none has a prior run to repeat',
     );
-    return 0;
+    return NOTHING_SENT;
   }
 
   ctx.logger.warn(
@@ -3660,7 +3746,7 @@ async function reconcileOrphanedMiningAgents(
   }
 
   if (transientAgentIds.length > 0 && params.providers && params.deps) {
-    const requeued = await retryMiningAgents(
+    const { sent: requeued } = await retryMiningAgents(
       db,
       stepDef,
       current,
