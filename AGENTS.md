@@ -241,6 +241,14 @@ sending, such as a `selectAgents` that refuses, fails every reservation still un
 (`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
 still running.
 
+**A run's end and its mining result land together, on the row still linked to it.**
+`handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no
+crash can leave a run ended beside an agent row still `running`. Every write it makes to a mining
+row matches the run the row is linked to (`ownMiningRow`): a re-roll moves the row to a new run, and
+a late completion of the old one used to overwrite it. What follows that transaction (learning a
+model limit, the recap, `markCliParkBegin` and handing the step back) sits outside the `try` whose
+catch records a failed run, so a queue error there no longer rewrites a finished run as exit -1.
+
 ### Worker restarts
 
 **A step keeps the status that says what it is waiting on, even while its apply runs.** A
@@ -300,8 +308,10 @@ only after the outcome has landed and only while the row still reads `done`: the
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
 since a Retry's reset supersedes only the runs that already exist. That check narrows the window
 without closing it: a Retry supersedes a step's runs before it writes the rows, so a recap inserted in
-between still reads the row as `done`, and only a summary write that lands on the row version it
-summarized can refuse it. The handoff is fenced on the
+between still reads the row as `done`. The summary write closes it (`writeStepSummary`): it lands only
+on the row version it summarized, keyed on the row's `ended_at`, which a Retry nulls and a re-run
+rewrites, and only while its own run stands, read under a lock that waits out a supersede in flight.
+Its ledger entry follows only a write that landed. The handoff is fenced on the
 epoch the pass ran under: `handleResult` does nothing once the task has moved on, and every write it
 makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
 landing after that check stands: pointing the task at the next step, parking it on a form, a run or a

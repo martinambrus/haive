@@ -3347,7 +3347,7 @@ async function maybeEnqueueStepSummary(
     // row is still the one this pass finished, which the step's hold keeps from being re-run in
     // between; otherwise it is ended here, never queued.
     const [stillFinished] = await db
-      .select({ id: schema.taskSteps.id })
+      .select({ id: schema.taskSteps.id, endedAt: schema.taskSteps.endedAt })
       .from(schema.taskSteps)
       .where(and(eq(schema.taskSteps.id, current.id), eq(schema.taskSteps.status, 'done')))
       .limit(1);
@@ -3372,6 +3372,7 @@ async function maybeEnqueueStepSummary(
       timeoutMs: STEP_SUMMARY_TIMEOUT_MS,
       purpose: 'step_summary',
       summaryForStepId: current.id,
+      summaryForStepEndedAt: stillFinished.endedAt?.toISOString(),
     });
     logger.info({ stepId: stepDef.metadata.id, invocationId: invRow.id }, 'step summary enqueued');
   } catch (err) {
