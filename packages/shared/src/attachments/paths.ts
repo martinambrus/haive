@@ -30,11 +30,14 @@ export class AttachmentPathError extends Error {
 /** One path segment, reduced to the safe allowlist. May return `''` when the
  *  segment was nothing but dots or control characters. */
 export function sanitizeAttachmentSegment(raw: string): string {
-  return raw
-    .replace(/[^\w .()\-]/g, '_')
-    .replace(/^\.+/, '')
-    .trim()
-    .slice(0, ATTACHMENT_MAX_SEGMENT_LENGTH);
+  return (
+    raw
+      .replace(/[^\w .()\-]/g, '_')
+      // Spaces go with the dots: a dot behind a leading space would outlive the trim below.
+      .replace(/^[ .]+/, '')
+      .trim()
+      .slice(0, ATTACHMENT_MAX_SEGMENT_LENGTH)
+  );
 }
 
 /**
