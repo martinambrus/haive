@@ -271,6 +271,8 @@ export interface UpgradeApplyOutput {
   /** Every repository path this run wrote, for 03 to stage. Optional because it is read back
    *  from a persisted output that may predate it. */
   writtenPaths?: string[];
+  /** Every repository path this run removed, for 03 to stage the removal. Optional likewise. */
+  deletedPaths?: string[];
 }
 
 async function resolvePlanFromStep(ctx: {
@@ -460,6 +462,23 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const plan = args.detected;
     const values = args.formValues;
     const warnings: string[] = [];
+
+    // The form parks between the plan and this apply, and RTK switched meanwhile leaves the plan's
+    // RTK actions pointing the wrong way.
+    const plannedRtk = plan.renderCtxSnapshot.rtkEnabled;
+    if (typeof plannedRtk === 'boolean') {
+      const [repo] = await ctx.db
+        .select({ rtkEnabled: schema.repositories.rtkEnabled })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, plan.repositoryId))
+        .limit(1);
+      if (repo && repo.rtkEnabled !== plannedRtk) {
+        throw new Error(
+          `RTK was switched ${repo.rtkEnabled ? 'on' : 'off'} after this upgrade was planned, so ` +
+            'its plan no longer holds. Retry the plan step to plan the upgrade again.',
+        );
+      }
+    }
     const manifest = getTemplateManifest();
     const haiveVersion = getHaiveVersion();
 
@@ -485,6 +504,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let skippedCount = 0;
     let deletedCount = 0;
     const writtenPaths: string[] = [];
+    const deletedPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -606,6 +626,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             writtenPaths.push(rel);
           } else {
             await removeNoFollow(ctx.repoPath, rel);
+            deletedPaths.push(rel);
           }
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
           deletedCount += 1;
@@ -856,6 +877,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       installManifestWritten,
       rulesImportStubs,
       writtenPaths,
+      deletedPaths,
     };
   },
 };

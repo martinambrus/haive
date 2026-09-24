@@ -216,6 +216,34 @@ async function main(): Promise<void> {
       off.detected.rtkBlockLeftovers,
     );
     check('and the form says so', off.form?.fields.some((f) => f.id === 'rtkBlockNote') === true);
+    // RTK switched back on while the form was parked: the plan no longer holds, so nothing is applied.
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: true })
+      .where(eq(schema.repositories.id, repositoryId));
+    const refused = await upgradeApplyStep
+      .apply(off.applyCtx, {
+        detected: off.plan,
+        formValues: { selectedObsoleteRemovals: [settingsEntry(off.detected)!.entryId] },
+        iteration: 0,
+        previousIterations: [],
+      })
+      .then(
+        () => null,
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+    check(
+      'a plan RTK was switched back on under is refused, and nothing is touched',
+      refused?.startsWith('RTK was switched on after this upgrade was planned') === true &&
+        (await readOrNull(SETTINGS)) === editedSettings &&
+        (await readOrNull('AGENTS.md'))?.includes(RTK_REF_MARKER_START) === true,
+      refused,
+    );
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: false })
+      .where(eq(schema.repositories.id, repositoryId));
+
     const offValues = defaultValues(off.form);
     // Only the RTK change: the rules region these upgrades also offer is declined.
     offValues.selectedNew = [];
@@ -283,7 +311,12 @@ async function main(): Promise<void> {
       iteration: 0,
       previousIterations: [],
     });
-    check('an unedited settings file is removed', (await readOrNull(SETTINGS)) === null);
+    check(
+      'an unedited settings file is removed, and handed to the commit as a removal',
+      (await readOrNull(SETTINGS)) === null &&
+        againApplied.deletedPaths?.includes(SETTINGS) === true,
+      againApplied.deletedPaths,
+    );
     check('and its row retired', (await liveRowsAt(SETTINGS)).length === 0);
     check(
       'the rules files are left alone',

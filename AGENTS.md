@@ -2354,7 +2354,11 @@ adopted file the person had declined.
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
-`obsolete` and go only under the rule above. The RTK block is no manifest item, so 02 takes it out
+`obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
+--cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
+out from it would restore it. A plan made before RTK was switched again is refused at apply, since
+the form parks between the two; retrying the plan step plans it afresh. The RTK block is no
+manifest item, so 02 takes it out
 of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
