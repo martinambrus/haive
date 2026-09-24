@@ -1803,6 +1803,10 @@ The same barrier RESTORES THE WINDOW, and Gate 2's bring-up does it again before
 - `pnpm typecheck` runs `tsc --noEmit` everywhere.
 - `pnpm test` runs Vitest across the workspace.
 - `pnpm test:e2e` runs Playwright against the dev compose stack.
+- A smoke that puts jobs on a queue (`smoke:onboarding`, `smoke:workflow`, `smoke:fix-loop` and
+  their siblings) needs its OWN Redis and database, as CI gives it. Pointed at the dev stack's, the
+  dev worker takes its jobs off the shared queue and runs them with the dev stack's code rather than
+  the branch's. Start a throwaway `redis` container and a scratch database for it.
 - `pnpm --filter @haive/database migrate` applies pending SQL migrations to `DATABASE_URL`. This is the applier: the `db-migrate` compose one-shot and CI both run it, and api/worker/web wait for it via `depends_on: service_completed_successfully`.
 - `pnpm db:push` (`drizzle-kit push`, interactive) is the DEV escape hatch, not the applier. Use it to iterate on a schema shape, then hand-write the numbered migration before committing — the CI `schema-parity` job compares the two and goes red if they disagree. It will offer to DROP `schema_migrations`, because that table is deliberately absent from the Drizzle barrel; accepting is recoverable (the next `migrate` re-adopts) but never what you want.
 - `pnpm docker:dev` (alias for `scripts/dev.sh up`) boots `docker-compose.yml` plus the dev override, GPU-aware. The script also exposes `rebuild`/`reset`/`restart`/`libs`/`logs`/`status` — run `pnpm docker help`.
