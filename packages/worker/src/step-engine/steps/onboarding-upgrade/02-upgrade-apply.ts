@@ -143,6 +143,24 @@ export async function pathContentHash(
   return (await pathContent(repoPath, rel, templateKind))?.hash ?? null;
 }
 
+/** What a "Keep my edits" answer writes over a live row: the version declined, under the identity
+ *  that version carries, since a custom item re-ingested under a new id is otherwise offered again. */
+export function keptRowUpdate(
+  entry: Pick<UpgradePlanEntry, 'templateId' | 'templateSchemaVersion'>,
+  declinedTemplateContentHash: string,
+  keptHash: string,
+  liveBundleItemIds: ReadonlySet<string>,
+) {
+  return {
+    templateId: entry.templateId,
+    bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+    templateContentHash: declinedTemplateContentHash,
+    templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+    lastObservedDiskHash: keptHash,
+    userModified: true,
+  };
+}
+
 /** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
  *  recorded writing there. A row alone proves nothing: 12 records one for a file 07 skipped. */
 export function deleteRefusal(
@@ -432,12 +450,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // Superseded baselines for what a written path with no row already held.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
-    const keptInPlace: {
-      id: string;
-      templateContentHash: string;
-      templateSchemaVersion: number;
-      lastObservedDiskHash: string;
-    }[] = [];
+    const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -489,9 +502,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         if (entry.liveArtifactId) {
           keptInPlace.push({
             id: entry.liveArtifactId,
-            templateContentHash: entry.currentTemplateContentHash,
-            templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-            lastObservedDiskHash: kept.hash,
+            update: keptRowUpdate(
+              entry,
+              entry.currentTemplateContentHash,
+              kept.hash,
+              liveBundleItemIds,
+            ),
           });
           continue;
         }
@@ -731,13 +747,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         for (const k of keptInPlace) {
           await tx
             .update(schema.onboardingArtifacts)
-            .set({
-              templateContentHash: k.templateContentHash,
-              templateSchemaVersion: k.templateSchemaVersion,
-              lastObservedDiskHash: k.lastObservedDiskHash,
-              userModified: true,
-              updatedAt: now,
-            })
+            .set({ ...k.update, updatedAt: now })
             .where(
               and(
                 eq(schema.onboardingArtifacts.id, k.id),

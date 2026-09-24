@@ -16,6 +16,7 @@ import {
   classifyEntry,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { cliRulesRegionRecord } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import type { ExpandedRendering } from '../src/step-engine/template-manifest.js';
 
@@ -329,5 +330,28 @@ describe('backfillRecord', () => {
   it('offers a claim the boot repair swapped while the template is unchanged', () => {
     // A pre-fix row held the disk hash as writtenHash; the repair swaps it with the template's.
     expect(next({ templateContentHash: 'wh-EDITED', writtenHash: 'h1' }, 'h1')).toBe('conflict');
+  });
+});
+
+describe('keptRowUpdate', () => {
+  it('stops offering a kept custom item that was re-ingested under a new id', () => {
+    const row = live({
+      templateId: 'custom.b.old',
+      templateContentHash: 'h-old',
+      writtenHash: 'w-old',
+      bundleItemId: 'old',
+    });
+    const next = current({
+      templateId: 'custom.b.new',
+      templateContentHash: 'h-new',
+      content: 'NEW',
+      writtenHash: 'w-new',
+    });
+    const disk = { current: next, diskContent: 'EDITED', diskHash: 'wh-EDITED' };
+    expect(classifyEntry({ live: row, ...disk })).toBe('conflict');
+
+    const update = keptRowUpdate(next, next.templateContentHash, 'wh-EDITED', new Set(['new']));
+    expect(update.bundleItemId).toBe('new');
+    expect(classifyEntry({ live: { ...row, ...update }, ...disk })).toBe('unchanged');
   });
 });
