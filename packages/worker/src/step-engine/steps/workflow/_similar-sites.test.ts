@@ -248,4 +248,22 @@ describe('similarSitesRow', () => {
     expect(row.body).toContain('- `c.ts` (from DAG issue I-1)');
     expect(row.body).toContain('4 more not shown.');
   });
+
+  it('escapes the reason, so it cannot form an image or emphasis', () => {
+    const row = similarSitesRow(
+      [
+        {
+          path: 'a.ts',
+          reason: '![x](https://attacker.example/pixel) *see* <b>',
+          source: 'implementation round 0',
+        },
+      ],
+      0,
+      'x',
+    )!;
+    expect(row.body).toContain(
+      '— \\!\\[x\\]\\(https\\:\\/\\/attacker\\.example\\/pixel\\) \\*see\\* \\<b\\> (from',
+    );
+    expect(row.body).not.toContain('![x](');
+  });
 });
