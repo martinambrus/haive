@@ -26,6 +26,40 @@ export const PROJECT_INFO_END = '<!-- /haive:project-info -->';
 export const RTK_REF_MARKER_START = '<!-- haive:rtk-ref -->';
 export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
 
+/** Slim RTK awareness body, inlined into AGENTS.md by the worker's `buildRtkAwarenessBlock`.
+ *  Vendored from rtk-ai/rtk@v0.37.2 `src/hooks/init.rs` (RTK_SLIM constant). Re-vendor on rtk
+ *  version bump. */
+export const RTK_SLIM = `# RTK (Rust Token Killer)
+
+RTK is installed in this sandbox and proxies common dev commands so their
+output is compressed before it lands in your context. Most git, npm, pnpm,
+docker, kubectl, pytest, jest, eslint, tsc, curl, and log-tail invocations
+are auto-routed via the configured PreToolUse / BeforeTool hook — you do
+not need to invoke \`rtk\` explicitly.
+
+Meta commands you can run directly:
+
+- \`rtk gain\` — show cumulative token savings for this session
+- \`rtk gain --history\` — per-command savings history
+- \`rtk discover\` — analyze recent runs for missed opportunities
+- \`rtk proxy <cmd>\` — bypass filters (debugging only)
+
+Trust the hook. If a command output looks unexpectedly compact, that is RTK
+working as intended — re-run with \`rtk proxy <cmd>\` only when you suspect
+filtering is hiding a real signal.
+`;
+
+/** The files 07 wrote the RTK body to before bd9b94c0 inlined it into AGENTS.md. */
+export const LEGACY_RTK_MD_PATHS: readonly string[] = [
+  'RTK.md',
+  '.gemini/RTK.md',
+  '.claude/RTK.md',
+];
+/** `sha256Hex(normalizeContent(RTK_SLIM))` as those runs wrote it. Frozen: if RTK_SLIM is ever
+ *  re-vendored, keep this literal, since it names what is already on disk. */
+export const LEGACY_RTK_MD_SHA256 =
+  'a1fb23c6477436be8b84a26435cf91f8b0f9a3f433a3081c7778b5b0835a2a54';
+
 /** Every region Haive writes into a rules file, so an onboarding reset strips each of them. */
 export const HAIVE_REGION_MARKERS: ReadonlyArray<readonly [string, string]> = [
   [PROJECT_INFO_START, PROJECT_INFO_END],
