@@ -291,7 +291,8 @@ async function readDiskContent(
 }
 
 /** What a backfill records for one rendering. The bytes on disk, edited or not, so a rollback
- *  restores what was there; the render's hash, so an edited file is never taken as Haive's. */
+ *  restores what was there; the render's hash, so an edited file is never taken as Haive's; and
+ *  for an edited file its own hash as the template's, so the template reads as not installed. */
 export function backfillRecord(
   r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash' | 'content'>,
   disk: { content: string | null; hash: string | null },
@@ -302,12 +303,13 @@ export function backfillRecord(
   lastObservedDiskHash: string | null;
   userModified: boolean;
 } {
+  const editedHash = disk.hash !== null && disk.hash !== r.writtenHash ? disk.hash : null;
   return {
-    templateContentHash: r.templateContentHash,
+    templateContentHash: editedHash ?? r.templateContentHash,
     writtenHash: r.writtenHash,
     writtenContent: disk.content ?? r.content,
     lastObservedDiskHash: disk.hash,
-    userModified: disk.hash !== null && disk.hash !== r.writtenHash,
+    userModified: editedHash !== null,
   };
 }
 
@@ -487,8 +489,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
       const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
-      // An offered conflict stays unrecorded until 02 writes it: a row would carry the current
-      // template's hash, so a skipped one would read as installed and never be offered again.
+      // An offered conflict stays unrecorded until 02 writes it: a row would belong to this upgrade
+      // with no prior, which a rollback takes for a file the upgrade introduced and deletes.
       const offered = new Set(
         detected.entries.filter((e) => e.bucket === 'conflict').map((e) => e.diskPath),
       );

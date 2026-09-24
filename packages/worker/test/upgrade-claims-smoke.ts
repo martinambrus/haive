@@ -1,5 +1,5 @@
 /**
- * The real 01/02 upgrade steps, the rollback's plan and the boot repair, against a database and a
+ * The real 01/02 upgrade steps, a rollback of them (04) and the boot repair, against a database and a
  * seeded blank repository holding two edited files and a hand-written AGENTS.md region. One throwaway
  * user, deleted after.
  */
@@ -263,7 +263,8 @@ async function main(): Promise<void> {
         status: 'running',
       })
       .returning({ id: schema.taskSteps.id });
-    const rollback = await upgradeRollbackStep.detect!(ctxFor(rollbackRow!.id, rollbackTask!.id));
+    const rollbackCtx = ctxFor(rollbackRow!.id, rollbackTask!.id);
+    const rollback = await upgradeRollbackStep.detect!(rollbackCtx);
     const restoreOf = (path: string) => rollback.targets.find((t) => t.diskPath === path);
     const deletes = (path: string) => rollback.newArtifactsToUndo.some((u) => u.diskPath === path);
 
@@ -301,6 +302,33 @@ async function main(): Promise<void> {
       : [];
     check("and marked as a person's", regionPrior?.userModified === true);
     check('a rollback leaves the skipped edit alone', !restoreOf(edited) && !deletes(edited));
+
+    await upgradeRollbackStep.apply(rollbackCtx, {
+      detected: rollback,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'the rollback puts the overwritten file back',
+      (await readFile(join(repoPath, overwritten), 'utf8')) === overwrittenBytes,
+    );
+    check(
+      'and leaves the skipped edit as it was',
+      (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
+    );
+    const restored = await upgradePlanStep.detect!(planCtx);
+    const bucketAfter = (path: string) => restored.entries.find((e) => e.diskPath === path)?.bucket;
+    check(
+      'the next upgrade offers the restored file again',
+      bucketAfter(overwritten) === 'conflict',
+      {
+        bucket: bucketAfter(overwritten),
+      },
+    );
+    check('and the restored region', bucketAfter(CLI_RULES_DISK_PATH) === 'conflict', {
+      bucket: bucketAfter(CLI_RULES_DISK_PATH),
+    });
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = (c: string) => c.repeat(64);
@@ -349,19 +377,23 @@ async function main(): Promise<void> {
           userModified: true,
           writtenHash: h('e'),
           lastObservedDiskHash: h('f'),
-          templateContentHash: h('0'),
+          templateContentHash: h('f'),
         }),
       ])
       .returning({ id: schema.onboardingArtifacts.id });
     const ours = new Set([preFix!.id, copy!.id, rules!.id, postFix!.id]);
     if (replaced) ours.add(replaced.priorArtifactId);
-    const hashOf = async (id: string) =>
+    const hashesOf = async (id: string) =>
       (
         await db
-          .select({ writtenHash: schema.onboardingArtifacts.writtenHash })
+          .select({
+            writtenHash: schema.onboardingArtifacts.writtenHash,
+            templateContentHash: schema.onboardingArtifacts.templateContentHash,
+          })
           .from(schema.onboardingArtifacts)
           .where(eq(schema.onboardingArtifacts.id, id))
-      )[0]?.writtenHash;
+      )[0];
+    const hashOf = async (id: string) => (await hashesOf(id))?.writtenHash;
 
     const first = (await unclaimBackfilledEdits(db)).filter((id) => ours.has(id));
     check(
@@ -369,9 +401,14 @@ async function main(): Promise<void> {
       first.length === 2 && first.includes(preFix!.id) && first.includes(copy!.id),
       first,
     );
+    const unresolved = async (id: string) => {
+      const row = await hashesOf(id);
+      return row?.writtenHash === h('b') && row.templateContentHash === h('a');
+    };
     check(
-      'each now holds the render sentinel',
-      (await hashOf(preFix!.id)) === h('b') && (await hashOf(copy!.id)) === h('b'),
+      'each now claims neither the bytes nor the template',
+      (await unresolved(preFix!.id)) && (await unresolved(copy!.id)),
+      { preFix: await hashesOf(preFix!.id), copy: await hashesOf(copy!.id) },
     );
     check('a rules row is left alone', (await hashOf(rules!.id)) === h('c'));
     check('a row the fix wrote is left alone', (await hashOf(postFix!.id)) === h('e'));

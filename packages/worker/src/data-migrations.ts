@@ -673,11 +673,12 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
 }
 
 /** Withdraw the claim an upgrade backfill made on an edited file, and the rollback copies carrying
- *  it. Only such a row holds its disk hash as `written_hash`; the render's hash is the sentinel. */
+ *  it. Only such a row holds its disk hash as `written_hash`. Swapped with `template_content_hash`
+ *  it claims nothing and reads the template as not installed, which is what a backfill now records. */
 export async function unclaimBackfilledEdits(db: Database): Promise<string[]> {
   const rows = await db.execute(sql`
     UPDATE onboarding_artifacts a
-    SET written_hash = a.template_content_hash, updated_at = now()
+    SET written_hash = a.template_content_hash, template_content_hash = a.written_hash, updated_at = now()
     WHERE a.source IN ('backfill', 'rollback')
       AND a.template_kind <> ${CLI_RULES_TEMPLATE_KIND}
       AND a.written_hash <> a.template_content_hash

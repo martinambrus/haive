@@ -278,9 +278,9 @@ describe('backfillRecord', () => {
     templateContentHash: 'h1',
   });
 
-  it("keeps an edited file's bytes but claims only the render", () => {
+  it("keeps an edited file's bytes but claims neither them nor the template", () => {
     expect(backfillRecord(render, { content: 'EDITED', hash: 'wh-EDITED' })).toEqual({
-      templateContentHash: 'h1',
+      templateContentHash: 'wh-EDITED',
       writtenHash: 'wh-RENDER',
       writtenContent: 'EDITED',
       lastObservedDiskHash: 'wh-EDITED',
@@ -290,6 +290,7 @@ describe('backfillRecord', () => {
 
   it('records an untouched file as the render it is', () => {
     expect(backfillRecord(render, { content: 'RENDER', hash: 'wh-RENDER' })).toMatchObject({
+      templateContentHash: 'h1',
       writtenHash: 'wh-RENDER',
       writtenContent: 'RENDER',
       userModified: false,
@@ -306,22 +307,27 @@ describe('backfillRecord', () => {
     });
   });
 
-  it('leaves an edited file a conflict once the template changes', () => {
-    const record = backfillRecord(render, { content: 'EDITED', hash: 'wh-EDITED' });
-    expect(
-      classifyEntry({
-        live: live({
-          templateContentHash: record.templateContentHash,
-          writtenHash: record.writtenHash,
-        }),
-        current: current({
-          templateContentHash: 'h2',
-          content: 'RENDER2',
-          writtenHash: 'wh-RENDER2',
-        }),
-        diskContent: 'EDITED',
-        diskHash: 'wh-EDITED',
+  /** The next plan over a row holding `row`, with the edit still on disk and the template at `now`. */
+  const next = (row: { templateContentHash: string; writtenHash: string }, now: string) =>
+    classifyEntry({
+      live: live(row),
+      current: current({
+        templateContentHash: now,
+        content: `RENDER-${now}`,
+        writtenHash: `wh-RENDER-${now}`,
       }),
-    ).toBe('conflict');
+      diskContent: 'EDITED',
+      diskHash: 'wh-EDITED',
+    });
+
+  it('leaves an edited file a conflict, whether or not the template changes', () => {
+    const record = backfillRecord(render, { content: 'EDITED', hash: 'wh-EDITED' });
+    expect(next(record, 'h1')).toBe('conflict');
+    expect(next(record, 'h2')).toBe('conflict');
+  });
+
+  it('offers a claim the boot repair swapped while the template is unchanged', () => {
+    // A pre-fix row held the disk hash as writtenHash; the repair swaps it with the template's.
+    expect(next({ templateContentHash: 'wh-EDITED', writtenHash: 'h1' }, 'h1')).toBe('conflict');
   });
 });
