@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -296,6 +296,18 @@ describe('failing to read an input', () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.getuid?.() === 0)(
+    'reads a document only the worker could read, and leaves its mode as it was',
+    async () => {
+      const file = await writeZip('private.docx', {
+        'word/document.xml': docxDocument('<w:p><w:r><w:t>Owner only.</w:t></w:r></w:p>'),
+      });
+      await chmod(file, 0o600);
+      expect((await extractPlanInput('docx', held(file))).markdown).toBe('Owner only.');
+      expect((await lstat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('refuses to guess at a kind it has no extractor for', async () => {
     const out = await extractPlanInput('image', held(path.join(dir, 'anything.png')));

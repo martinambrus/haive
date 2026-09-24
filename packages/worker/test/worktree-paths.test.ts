@@ -11,6 +11,14 @@ describe('splitUploadPath', () => {
     });
   });
 
+  it('accepts a storage root configured with a trailing slash', () => {
+    // The api joins with path.join, so it stores the path without the doubled separator.
+    expect(splitUploadPath(`${ROOT}/`, `${ROOT}/_uploads/u1/repo.zip`)).toEqual({
+      anchor: ROOT,
+      rel: '_uploads/u1/repo.zip',
+    });
+  });
+
   it('refuses a path outside the uploads directory', () => {
     // A repository tree, not an upload — the caller must not delete or read through this helper.
     expect(splitUploadPath(ROOT, `${ROOT}/u1/r1/.ddev/config.yaml`)).toBeNull();

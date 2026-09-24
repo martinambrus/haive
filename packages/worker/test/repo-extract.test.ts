@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
@@ -290,6 +290,8 @@ describe('extractArchive', () => {
       expect(await readFile(path.join(tmpRoot, 'out-private', 'README.md'), 'utf8')).toBe(
         '# owner only\n',
       );
+      // Readable to that uid only while unzip ran.
+      expect((await stat(path.join(tmpRoot, 'private.zip'))).mode & 0o777).toBe(0o600);
     },
   );
 

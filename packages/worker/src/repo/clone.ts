@@ -466,18 +466,23 @@ export async function extractArchive(
       try {
         if (format === 'zip') {
           // unzip seeks, so it re-opens the archive through its slot instead of reading a stream.
-          await letToolRead(held);
-          // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still extracted.
-          const { exitCode, stderr } = await runTool(
-            'unzip',
-            ['-q', '-o', childFd(FIRST_SLOT + 1), '-d', childFd(FIRST_SLOT)],
-            { fds: [inner, held], okExits: [0, 1] },
-          );
-          if (exitCode !== 0) {
-            logger.warn(
-              { cmd: 'unzip', exit: exitCode, stderr: stderr.trim() },
-              'extract completed with warnings',
+          const restore = await letToolRead(held);
+          try {
+            // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still
+            // extracted.
+            const { exitCode, stderr } = await runTool(
+              'unzip',
+              ['-q', '-o', childFd(FIRST_SLOT + 1), '-d', childFd(FIRST_SLOT)],
+              { fds: [inner, held], okExits: [0, 1] },
             );
+            if (exitCode !== 0) {
+              logger.warn(
+                { cmd: 'unzip', exit: exitCode, stderr: stderr.trim() },
+                'extract completed with warnings',
+              );
+            }
+          } finally {
+            await restore?.();
           }
         } else {
           const flags = format === 'tar.gz' ? ['-xz'] : ['-x'];

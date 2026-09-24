@@ -68,7 +68,10 @@ export function splitUploadPath(
   storageRoot: string,
   stored: string,
 ): { anchor: string; rel: string } | null {
-  const prefix = `${storageRoot}/_uploads/`;
+  // The api joins its paths with `path.join`, so a root configured with a trailing slash is stored
+  // without one.
+  const root = path.resolve(storageRoot);
+  const prefix = `${root}/_uploads/`;
   if (!stored.startsWith(prefix)) return null;
   const segs = stored.slice(prefix.length).split('/');
   if (segs.length !== 2) return null;
@@ -79,7 +82,7 @@ export function splitUploadPath(
   // their primitive in a `.catch`, so the throw would be swallowed and read as "nothing to do".
   // A guard that answers null is the honest shape, as `safeDiskRel` concluded in #137.
   if (owner === '.' || owner === '..' || name === '.' || name === '..') return null;
-  return { anchor: storageRoot, rel: `_uploads/${owner}/${name}` };
+  return { anchor: root, rel: `_uploads/${owner}/${name}` };
 }
 
 /**

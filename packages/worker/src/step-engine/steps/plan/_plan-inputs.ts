@@ -475,8 +475,12 @@ export async function extractPlanInput(
     // unprivileged extraction uid, which re-opens the document through its slot.
     const held = (await openFileNoFollow(doc.anchor, doc.rel, 'read', { strict: true }))!;
     try {
-      await letToolRead(held);
-      return await extract(held);
+      const restore = await letToolRead(held);
+      try {
+        return await extract(held);
+      } finally {
+        await restore?.();
+      }
     } finally {
       await held.close();
     }

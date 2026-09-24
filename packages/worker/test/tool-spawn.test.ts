@@ -127,17 +127,20 @@ describe('runTool', () => {
   });
 
   describe.runIf(process.getuid?.() === 0)('letToolRead', () => {
-    it('opens a file only the worker could read to the extraction uid, through its descriptor', async () => {
+    it('opens a file only the worker could read to the extraction uid while it needs it', async () => {
       const fh = await held('private.txt', 'owner only');
       try {
         await fh.chmod(0o600);
-        await letToolRead(fh);
+        const restore = await letToolRead(fh);
         expect((await stat(path.join(dir, 'private.txt'))).mode & 0o777).toBe(0o604);
         const { stdout } = await runTool('cat', [childFd(FIRST_SLOT)], {
           fds: [fh],
           maxStdout: 64,
         });
         expect(stdout).toBe('owner only');
+        // Opened up only while the tool runs: the restore puts the file's own mode back.
+        await restore!();
+        expect((await stat(path.join(dir, 'private.txt'))).mode & 0o777).toBe(0o600);
       } finally {
         await fh.close();
       }
