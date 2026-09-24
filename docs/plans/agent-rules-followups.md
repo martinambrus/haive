@@ -1,7 +1,7 @@
 # Found-not-fixed follow-ups from the agent-rules series
 
-> **IN PROGRESS.** PR 1 is in review (branch `md-images-links`). Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS.** PR 1 shipped as #249 (`5223d7b3`). PR 2 is in review (branch `csp-mermaid`).
+> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
@@ -121,6 +121,21 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - the refusal predicate;
   - the secured-key list;
   - the label escaping.
+- **As built:**
+  - The CSP hostname comes from the request's Host header. Next's `nextUrl` does not carry it:
+    MEASURED on a production build, `Host: haive.example.test` read as localhost, which would have
+    blocked the api's images for anyone reaching an install by IP or DNS name. The same build
+    showed that runtime-only `HAIVE_API_PORT` reaches the header, and that an explicit
+    `HAIVE_PUBLIC_API_URL` is reduced to its origin.
+  - The api's host is named under both `http:` and `https:` (review round 1): a TLS proxy serves the
+    page over https while the server sees http. MEASURED in Chrome, `img-src http://127.0.0.1:47937`
+    refused `https://127.0.0.1:47937/a.png`; listing both admits it and still refuses another port.
+    Both schemes rather than trusting `X-Forwarded-Proto`, since a proxy may not set it.
+  - The guarded render is `renderMermaid`, and `loadMermaid` is internal to the loader.
+  - The `properties` refusal matches the sequence syntax (`properties <actor>:`), so a flowchart node
+    named `properties` still draws.
+  - MEASURED before choosing to refuse: none of the 12 distinct diagrams stored on the dev install
+    uses a directive, frontmatter, `@{` or `properties`.
 - **Verify:** a local HTTP listener stands in as the outside host. Fixtures cover every vector:
   - HTML label;
   - image shape;
@@ -165,6 +180,9 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - an ignored AGENTS.md arriving through `writtenPaths`;
   - 12's ignored stub and empty list.
 - **Live check:** a run-checkpoint row. It needs an onboarded repository.
+- **As built (#252):** 12 and 03 share `dropIgnoredRulesFiles` and `readAgentsRulesRegion`
+  (`onboarding/_rules-files.ts`, 1 MiB cap). 03's check is `agentsRulesVerdict`, answering `stage`,
+  `current` or `unknown`; `unknown` warns and stages nothing.
 
 ## PR 4 — The cli-rules record describes the region on disk
 
@@ -188,6 +206,12 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - `upgrade-plan-classify.test.ts` cases: region untouched, region edited, region of unknown origin,
     backfill.
 - **Live check:** a run-checkpoint row.
+- **As built:** `cliRulesRegionRecord` and `loadCliRulesRenderHashes` (`onboarding/_rules-files.ts`).
+  An earlier render is any `onboarding` or `upgrade` row of the repository, live or superseded; a
+  `backfill` or `rollback` row does not count, since its hash is whatever was on disk. An AGENTS.md
+  that cannot be read is reported and its live row left alone. 12 sets no `userModified`, which
+  nothing reads; the backfill still sets it. Verified with the real step code against the dev
+  database on a fixture repository: 18 checks pass, and the same script against main fails 12.
 
 ## PR 5 — Reset strips the RTK block
 
@@ -199,6 +223,7 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Comments:** `_rtk-templates.ts` lines 3-5 (RTK.md is no longer written) and 26-29 (true once this
   lands).
 - **Tests:** `repo-artifact-reset.test.ts` gains an RTK block case.
+- **As built (#254):** as planned; the three pairs are `HAIVE_REGION_MARKERS` in `@haive/shared`.
 
 ## PR 6 — The upgrade banner sees a missing import stub
 
@@ -290,6 +315,9 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Test:** `cli-providers/ui.spec.ts:95` waits with `toBeEnabled()` before typing.
 - **Verify:** in the browser, with the network throttled, the field stays locked until the load
   answers.
+- **As built (#255):** the field is `readOnly`, `aria-busy` and dimmed until the load settles, and a
+  failed load unlocks it: the save deletes only names the form loaded. The spec waits with
+  `toBeEditable()`, since `toBeEnabled()` passes on a read-only field.
 
 ## PR 11 — Test flakes
 
@@ -308,6 +336,7 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - AGENTS.md:1211 ("Review findings and waivers") says nothing SELECTs `review_findings`; in fact
   `loadFindingRecurrence` and `GET /stats/quality` do. The claims about the single insert and "no
   behaviour gates on it" stay.
+- **As built (#253):** as planned.
 
 ## Closed without code
 

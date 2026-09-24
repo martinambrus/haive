@@ -38,6 +38,15 @@ export interface ApiOriginInputs {
 
 export const FALLBACK_API_URL = 'http://localhost:3001';
 
+/** The config the server hands the browser, from the container's environment. Server-only: these
+ *  names are not `NEXT_PUBLIC_*`, so the client bundle reads them as undefined. */
+export function runtimeApiConfig(): RuntimeApiConfig {
+  return {
+    ...(process.env.HAIVE_PUBLIC_API_URL ? { apiUrl: process.env.HAIVE_PUBLIC_API_URL } : {}),
+    ...(process.env.HAIVE_API_PORT ? { apiPort: process.env.HAIVE_API_PORT } : {}),
+  };
+}
+
 export function resolveApiOrigin(inputs: ApiOriginInputs): string {
   const { config, location, buildTime } = inputs;
 

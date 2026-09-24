@@ -38,6 +38,7 @@ import {
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
+  HAIVE_REGION_MARKERS,
   normalizeContent,
   sha256Hex,
   unmanagedAgentsDir,
@@ -1522,10 +1523,6 @@ function keptSweepReason(name: string): string | null {
 }
 
 const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
-const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
-  ['<!-- haive:project-info -->', '<!-- /haive:project-info -->'],
-  ['<!-- haive:cli-rules -->', '<!-- /haive:cli-rules -->'],
-];
 
 /** Remove Haive's own marker regions from one rules file, reporting what that did to it.
  *
@@ -1540,7 +1537,7 @@ export async function stripHaiveContent(
   const content = await readTextNoFollow(root, rel, { strict: true });
   if (content === null) return null;
   let next = content;
-  for (const [start, end] of HAIVE_MARKER_PAIRS) {
+  for (const [start, end] of HAIVE_REGION_MARKERS) {
     while (true) {
       const s = next.indexOf(start);
       if (s < 0) break;

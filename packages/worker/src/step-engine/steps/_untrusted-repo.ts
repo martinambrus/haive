@@ -194,13 +194,11 @@ export const UNTRUSTED_FENCE_LEGEND = [
  *  kept, the duty is dropped, because this pass has no safe place to put the report. An
  *  earlier draft pointed it at `concerns` on the grounds that every consumer of that field
  *  was fenced. That was wrong, and wrong in the direction that matters — `concerns` reaches
- *  `recordLedgerEntry`, and `augmentPromptWithLedger` prepends ledger entries RAW to every
- *  later agent prompt in the task. Asking a coder to quote hostile text into `concerns` would
- *  have manufactured a persistent relay into every prompt that follows it, which is a wider
- *  blast radius than the reading it protects against.
- *
- *  The ledger being unfenced is a PRE-EXISTING hole — coders already write `concerns` — and
- *  closing it belongs in its own change, not in the one that would have widened it.
+ *  `recordLedgerEntry`, and `augmentPromptWithLedger` carries ledger entries into every later
+ *  agent prompt in the task. Asking a coder to quote hostile text into `concerns` would have
+ *  manufactured a persistent relay into every prompt that follows it, which is a wider blast
+ *  radius than the reading it protects against. The ledger block has been fenced since #216,
+ *  but a fence contains text a prompt carries; it does not make carrying it safe.
  *
  *  The closing paragraph covers the ASSIGNMENT itself, which the planner authored after
  *  reading the same repository. `REPO_IS_DATA_AUTHORING_LINES` stops that at the source, but

@@ -164,6 +164,15 @@ export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): b
   return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_PREEMPTED_HEADLINE);
 }
 
+/** True when re-running after this run spends no recovery budget: it was preempted, or it never
+ *  started, which the handler stamps before anything that can fail, so nothing ran at all. */
+export function isFreeRedispatch(run: {
+  errorMessage: string | null;
+  startedAt: Date | null;
+}): boolean {
+  return isCliPreemptionFailure(run) || run.startedAt === null;
+}
+
 /** Drop preemption rows from a step's invocation history before any consecutive-failure budget
  *  scans it. One helper rather than a skip inside each loop, so the rule is stated (and tested)
  *  once instead of three times — and so a fourth budget added later inherits it by using the same

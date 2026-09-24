@@ -116,6 +116,7 @@ test.describe('cli providers UI', () => {
       await expect(page.getByRole('heading', { level: 1, name: 'Secrets target' })).toBeVisible();
 
       const secretsField = page.getByLabel('Secrets', { exact: true });
+      await expect(secretsField).toBeEditable();
       await expect(secretsField).toHaveValue('');
       await secretsField.fill(`ANTHROPIC_API_KEY=${PLAINTEXT}`);
 

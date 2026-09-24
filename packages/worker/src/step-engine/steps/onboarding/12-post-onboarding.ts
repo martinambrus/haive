@@ -21,10 +21,8 @@ import {
   getCliProviderMetadata,
   getHaiveVersion,
   HAIVE_DATA_FILES,
-  normalizeContent,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
   ONBOARDING_TOOLING_INFRA_KEYS,
-  sha256Hex,
   unmanagedAgentsDir,
 } from '@haive/shared';
 import type { Database } from '@haive/database';
@@ -35,6 +33,12 @@ import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import {
+  cliRulesRegionRecord,
+  dropIgnoredRulesFiles,
+  loadCliRulesRenderHashes,
+  readAgentsRulesRegion,
+} from './_rules-files.js';
 import {
   expandCustomBundlesFor,
   expandManifestFor,
@@ -254,21 +258,38 @@ async function recordOnboardingArtifacts(
   // The AGENTS.md cli-rules region is per-repo (depends on the user's enabled
   // providers' rules), so it is tracked as a region-scoped artifact rather than
   // a manifest template. detect.cliProviders is already enabled+non-empty and
-  // sorted by name, so the block and its hash are deterministic and match the
-  // API's drift recompute. diskPath 'AGENTS.md' carries no other live artifact
-  // row, so the (repository_id, disk_path) unique index stays satisfied.
+  // sorted by name, so the render is deterministic and matches the API's drift
+  // recompute. diskPath 'AGENTS.md' carries no other live artifact row, so the
+  // (repository_id, disk_path) unique index stays satisfied. The row records the
+  // region on disk, which 07 leaves alone when it exists and overwrite is off.
   const cliRulesBlock = buildCliRulesBlock(detect.cliProviders.map((p) => p.rulesContent));
+  let retireCliRulesRow = false;
   if (cliRulesBlock) {
-    const writtenHash = sha256Hex(normalizeContent(cliRulesBlock));
-    expanded.push({
-      templateId: CLI_RULES_TEMPLATE_ID,
-      templateKind: CLI_RULES_TEMPLATE_KIND,
-      templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
-      templateContentHash: writtenHash,
-      diskPath: CLI_RULES_DISK_PATH,
-      content: cliRulesBlock,
-      writtenHash,
-    });
+    const read = await readAgentsRulesRegion(ctx.repoPath);
+    if ('unreadable' in read) {
+      warnings.push(
+        `AGENTS.md could not be read (${read.unreadable}), so its rules block is not recorded`,
+      );
+    } else if (read.region === null) {
+      // 07 writes a missing region, so none here means something removed it since. A row would
+      // read as the person's deletion; without one the next upgrade offers the region again.
+      retireCliRulesRow = true;
+    } else {
+      const record = cliRulesRegionRecord(
+        read.region,
+        cliRulesBlock,
+        await loadCliRulesRenderHashes(ctx.db, repositoryId),
+      );
+      expanded.push({
+        templateId: CLI_RULES_TEMPLATE_ID,
+        templateKind: CLI_RULES_TEMPLATE_KIND,
+        templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+        templateContentHash: record.templateContentHash,
+        diskPath: CLI_RULES_DISK_PATH,
+        content: record.content,
+        writtenHash: record.writtenHash,
+      });
+    }
   }
 
   if (expanded.length === 0) {
@@ -312,9 +333,11 @@ async function recordOnboardingArtifacts(
   // a failing insert would leave onboarding running with every prior row for these files retired
   // and no replacement — destroying the hashes that distinguish Haive's output from the user's
   // edits, silently, on a path that reports success.
-  const insertPaths = Array.from(new Set(rows.map((r) => r.diskPath)));
+  const supersedePaths = Array.from(
+    new Set([...rows.map((r) => r.diskPath), ...(retireCliRulesRow ? [CLI_RULES_DISK_PATH] : [])]),
+  );
   await ctx.db.transaction(async (tx) => {
-    if (insertPaths.length > 0) {
+    if (supersedePaths.length > 0) {
       await tx
         .update(schema.onboardingArtifacts)
         .set({ supersededAt: new Date() })
@@ -322,7 +345,7 @@ async function recordOnboardingArtifacts(
           and(
             eq(schema.onboardingArtifacts.repositoryId, repositoryId),
             isNull(schema.onboardingArtifacts.supersededAt),
-            inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+            inArray(schema.onboardingArtifacts.diskPath, supersedePaths),
           ),
         );
     }
@@ -691,11 +714,18 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await exec('git', ['add', '-A'], { cwd: ctx.repoPath });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
+      // After any init, so a repository that had no git yet is checked against its .gitignore too.
+      const { keep, warnings: ignored } = await dropIgnoredRulesFiles(
+        ctx.repoPath,
+        existingPaths,
+        new Set(EXTRA_RULES_STAGE_PATHS),
+      );
+      warnings.push(...ignored);
       // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
-      await exec('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
+      if (keep.length > 0) await exec('git', ['add', '-f', '--', ...keep], { cwd: ctx.repoPath });
       const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
         cwd: ctx.repoPath,
       });

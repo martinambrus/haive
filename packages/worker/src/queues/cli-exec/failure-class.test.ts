@@ -13,6 +13,7 @@ import {
   isCliPreemptionFailure,
   isCliTimeoutFailure,
   isFatalProviderFailure,
+  isFreeRedispatch,
   isTransientCliFailure,
   withoutPreemptions,
   MODEL_CAPABILITY_HEADLINES,
@@ -456,6 +457,29 @@ describe('preemption classification', () => {
 
   it('a timeout is not mistaken for a preemption', () => {
     expect(isCliPreemptionFailure({ errorMessage: `${CLI_TIMEOUT_HEADLINE} (30m).` })).toBe(false);
+  });
+});
+
+describe('isFreeRedispatch', () => {
+  const started = new Date();
+  const ORPHAN = 'CLI invocation orphaned by a worker restart (worker exited mid-run)';
+
+  it('is free for a run that never started, whatever ended it', () => {
+    expect(isFreeRedispatch({ errorMessage: ORPHAN, startedAt: null })).toBe(true);
+    expect(isFreeRedispatch({ errorMessage: null, startedAt: null })).toBe(true);
+  });
+
+  it('is free for a preempted run', () => {
+    expect(
+      isFreeRedispatch({ errorMessage: `${CLI_PREEMPTED_HEADLINE}.`, startedAt: started }),
+    ).toBe(true);
+  });
+
+  it('charges a run that started and died', () => {
+    expect(isFreeRedispatch({ errorMessage: ORPHAN, startedAt: started })).toBe(false);
+    expect(
+      isFreeRedispatch({ errorMessage: `${CLI_TIMEOUT_HEADLINE} (30m).`, startedAt: started }),
+    ).toBe(false);
   });
 });
 

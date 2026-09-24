@@ -48,6 +48,7 @@ import {
   capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
   isCliPreemptionFailure,
+  isFreeRedispatch,
   isCliTimeoutFailure,
   isFatalProviderFailure,
   isOutputTruncationMessage,
@@ -1120,6 +1121,8 @@ type AgentMiningResolved =
     }
   | { resolved: false; result: AdvanceStepResult };
 
+/** `reread` marks the second read a pass takes after losing agents to another pass. It is taken
+ *  once, so a pass that keeps losing settles on what it last read. */
 async function resolveAgentMiningPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -1129,6 +1132,7 @@ async function resolveAgentMiningPhase(
   formValues: FormValues | null,
   llmOutput: unknown,
   params: AdvanceStepParams,
+  reread = false,
 ): Promise<AgentMiningResolved> {
   const spec = stepDef.agentMining!;
 
@@ -1195,7 +1199,7 @@ async function resolveAgentMiningPhase(
     // never re-fan-out by itself.
     const userRequested = existing.filter((r) => r.userRetryRequestedAt != null);
     if (userRequested.length > 0 && params.providers && params.deps) {
-      const requeued = await retryMiningAgents(
+      const { sent: requeued, lost } = await retryMiningAgents(
         db,
         stepDef,
         current,
@@ -1228,6 +1232,21 @@ async function resolveAgentMiningPhase(
           statusMessage: `Re-running ${requeued} agent(s) at your request...`,
         });
         return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+      }
+      // Another pass re-ran what this one was asked to, and may already have finished it, so
+      // every row read above can be stale: settle on a fresh read rather than on the old failure.
+      if (lost > 0 && !reread) {
+        return resolveAgentMiningPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          true,
+        );
       }
       if (await hasLiveMiningAgents(db, current.id)) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -1311,7 +1330,7 @@ async function resolveAgentMiningPhase(
         return result && retryOnInvocationFailure(result) ? [row.agentId] : [];
       });
       if (retryableAgentIds.length > 0) {
-        const requeued = await retryMiningAgents(
+        const { sent: requeued, lost } = await retryMiningAgents(
           db,
           stepDef,
           current,
@@ -1338,6 +1357,19 @@ async function resolveAgentMiningPhase(
             statusMessage: `Re-running ${requeued} mining agent(s) after a transient terminal failure...`,
           });
           return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+        }
+        if (lost > 0 && !reread) {
+          return resolveAgentMiningPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            llmOutput,
+            params,
+            true,
+          );
         }
         if (await hasLiveMiningAgents(db, current.id)) {
           return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -1371,7 +1403,7 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results: [], newResults: [], current };
   }
 
-  const dispatched = await dispatchMiningAgents(
+  const { sent: dispatched, lost } = await dispatchMiningAgents(
     db,
     stepDef,
     current,
@@ -1380,6 +1412,21 @@ async function resolveAgentMiningPhase(
     dispatches,
     null,
   );
+  // Another pass reserved these agents first: the barrier over the rows it wrote decides, not a
+  // failure naming refusals this pass never met.
+  if (dispatched === 0 && lost > 0 && !reread) {
+    return resolveAgentMiningPhase(
+      db,
+      stepDef,
+      current,
+      ctx,
+      detected,
+      formValues,
+      llmOutput,
+      params,
+      true,
+    );
+  }
 
   // Nothing went out AND nothing is already in flight: no provider would take any
   // of these agents (dispatchMiningAgents recorded each refusal on its own row).
@@ -1447,7 +1494,7 @@ async function resolveAgentMiningPhase(
  *  row per agent.
  *
  *  `chargeAttempt: false` re-dispatches WITHOUT spending the row's durable `attempts` budget —
- *  used when the prior invocation was killed by the preemption sweeper. Unlike the LLM/timeout
+ *  used when the prior invocation was preempted or never started. Unlike the LLM/timeout
  *  caps (trailing scans that can simply skip a row) this budget is a stored counter, so the only
  *  way to keep preemption out of it is not to increment. Three evictions must not exhaust the
  *  worker-restart recovery a mining agent gets. */
@@ -1595,12 +1642,18 @@ async function reserveMiningAgents(
   );
 }
 
+/** What one dispatch did: the agents it `sent`, and the ones it `lost` because another pass had
+ *  already reserved or re-linked their rows, which leaves every row this pass read possibly stale. */
+type MiningDispatchOutcome = { sent: number; lost: number };
+
+const NOTHING_SENT: MiningDispatchOutcome = { sent: 0, lost: 0 };
+
 /** Enqueue one cli invocation per dispatch.
  *
  *  A fresh fan-out (`existing` = null) first reserves a row per agent; a retry (`existing` = the
  *  rows to re-roll) reuses its rows. Each row is then linked to its new invocation by a
  *  compare-and-swap on the state read, and only the pass that wins queues it, so two passes over
- *  one agent send it once. Returns the number actually enqueued. */
+ *  one agent send it once. */
 async function dispatchMiningAgents(
   db: Database,
   stepDef: StepDefinition,
@@ -1609,13 +1662,14 @@ async function dispatchMiningAgents(
   params: AdvanceStepParams,
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
-): Promise<number> {
+): Promise<MiningDispatchOutcome> {
   const spec = stepDef.agentMining!;
   const targets = new Map(
     existing ??
       (await reserveMiningAgents(db, params.taskId, stepDef.metadata.id, current.id, dispatches)),
   );
   const taken = dispatches.filter((d) => !targets.has(d.agentId)).map((d) => d.agentId);
+  let lost = taken.length;
   if (taken.length > 0) {
     ctx.logger.warn(
       { agentIds: taken, taskStepId: current.id },
@@ -1711,7 +1765,7 @@ async function dispatchMiningAgents(
       });
 
       if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-        await db
+        const [refused] = await db
           .update(schema.taskStepAgentMinings)
           .set({
             status: 'failed',
@@ -1720,8 +1774,10 @@ async function dispatchMiningAgents(
             ...requirements,
             updatedAt: new Date(),
           })
-          .where(sameMiningState(target));
+          .where(sameMiningState(target))
+          .returning({ id: schema.taskStepAgentMinings.id });
         targets.delete(dispatch.agentId);
+        if (!refused) lost++;
         continue;
       }
 
@@ -1772,6 +1828,7 @@ async function dispatchMiningAgents(
           .where(eq(schema.cliInvocations.id, invRow.id));
         linking = null;
         targets.delete(dispatch.agentId);
+        lost++;
         ctx.logger.warn(
           { agentId: dispatch.agentId, taskStepId: current.id },
           'agent mining row taken by another pass before this one linked it — not sending it again',
@@ -1824,7 +1881,7 @@ async function dispatchMiningAgents(
       targets.delete(dispatch.agentId);
       enqueued++;
     }
-    return enqueued;
+    return { sent: enqueued, lost };
   } catch (err) {
     await releaseUnsentAgents(db, linking, [...targets.values()], err, ctx);
     throw err;
@@ -1879,6 +1936,32 @@ async function releaseUnsentAgents(
   }
 }
 
+/** Fail the agents a fan-out reserved and nothing sent, for a pass leaving its step finished or
+ *  failed: once the pass is gone nothing would send them, and Resume refuses a step whose agents
+ *  read as pending. Best effort, so the step's own error is what is reported. */
+async function failReservedAgents(db: Database, taskStepId: string, reason: string): Promise<void> {
+  const now = new Date();
+  try {
+    await db
+      .update(schema.taskStepAgentMinings)
+      .set({
+        status: 'failed',
+        errorMessage: `the step ended before the agent was sent: ${reason}`.slice(0, 2000),
+        endedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
+          eq(schema.taskStepAgentMinings.status, 'pending'),
+          isNull(schema.taskStepAgentMinings.cliInvocationId),
+        ),
+      );
+  } catch (err) {
+    log.error({ err, taskStepId }, 'could not fail the mining agents a failed step left unsent');
+  }
+}
+
 /** Send the agents a fan-out reserved and never linked, the worker having died between the two,
  *  from the prompt their step wrote and without charging an attempt. A row whose prompt is no
  *  longer recorded cannot be sent, so it is failed rather than left for the barrier to wait on. */
@@ -1892,7 +1975,7 @@ async function dispatchReservedAgents(
   llmOutput: unknown,
   params: AdvanceStepParams,
   rows: MiningRow[],
-): Promise<number> {
+): Promise<MiningDispatchOutcome> {
   // The step's own dispatch where it still offers the agent, as a retry takes it: that carries
   // what a recorded prompt cannot, such as the personas 03's roster names.
   const offered = new Map(
@@ -1960,7 +2043,7 @@ async function dispatchReservedAgents(
     });
     targets.set(row.agentId, target);
   }
-  if (dispatches.length === 0) return 0;
+  if (dispatches.length === 0) return NOTHING_SENT;
   ctx.logger.warn(
     { stepId: stepDef.metadata.id, agentIds: dispatches.map((d) => d.agentId) },
     'sending mining agents a fan-out reserved and never sent',
@@ -2467,6 +2550,28 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       isFinalLlmAttempt,
       isFinalMiningAttempt,
     };
+    // A dispatch below that lost agents to another pass leaves the results apply() was handed
+    // possibly stale, so the barrier is read again, once, and apply() re-run on what it finds.
+    let reread = false;
+    const rereadMiningBarrier = async (): Promise<AdvanceStepResult | null> => {
+      reread = true;
+      const fresh = await resolveAgentMiningPhase(
+        db,
+        stepDef,
+        current,
+        ctx,
+        detected,
+        formValues,
+        llmOutput,
+        params,
+        true,
+      );
+      if (!fresh.resolved) return fresh.result;
+      applyArgs.agentMiningResults = fresh.results;
+      applyArgs.newAgentMiningResults = fresh.newResults;
+      current = fresh.current;
+      return null;
+    };
     let output: unknown;
     for (;;) {
       try {
@@ -2545,7 +2650,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             .update(schema.taskStepAgentMinings)
             .set({ consumedAt: new Date(), updatedAt: new Date() })
             .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
-          const dispatched = await dispatchMiningAgents(
+          const { sent: dispatched, lost } = await dispatchMiningAgents(
             db,
             stepDef,
             current,
@@ -2564,6 +2669,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               statusMessage: `Running ${dispatched} follow-up agent(s)...`,
             });
             return { status: 'waiting_cli', row: parked };
+          }
+          if (lost > 0 && !reread) {
+            const settled = await rereadMiningBarrier();
+            if (settled) return settled;
+            continue;
           }
           if (await hasLiveMiningAgents(db, current.id)) {
             return { status: 'waiting_cli', row: current };
@@ -2590,7 +2700,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepDef.loop &&
           applyArgs.isFinalMiningAttempt !== true
         ) {
-          const requeued = await retryMiningAgents(
+          const { sent: requeued, lost } = await retryMiningAgents(
             db,
             stepDef,
             current,
@@ -2608,6 +2718,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
             });
             return { status: 'waiting_cli', row: parked };
+          }
+          if (lost > 0 && !reread) {
+            const settled = await rereadMiningBarrier();
+            if (settled) return settled;
+            continue;
           }
           if (await hasLiveMiningAgents(db, current.id)) {
             return { status: 'waiting_cli', row: current };
@@ -2910,6 +3025,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
+    if (stepDef.agentMining) await failReservedAgents(db, row.id, errorMessage);
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
@@ -3394,8 +3510,8 @@ async function retryMiningAgents(
   params: AdvanceStepParams,
   agentIds: string[],
   maxAttempts: number,
-): Promise<number> {
-  if (agentIds.length === 0 || !params.providers || !params.deps) return 0;
+): Promise<MiningDispatchOutcome> {
+  if (agentIds.length === 0 || !params.providers || !params.deps) return NOTHING_SENT;
 
   const rows = await db
     .select(MINING_ROW_COLUMNS)
@@ -3404,13 +3520,13 @@ async function retryMiningAgents(
 
   const wanted = new Set(agentIds);
   const wantedRows = rows.filter((r) => wanted.has(r.agentId));
-  // Which of those were killed by the preemption sweeper rather than by anything wrong with the
-  // run. Resolved BEFORE the budget filter, because a preemption does two things: it re-dispatches
-  // without spending the row's attempts budget, AND it re-dispatches even when that budget is
-  // already spent — an eviction must never be the thing that retires an agent. One query for the
-  // whole batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it,
-  // so a future third caller cannot forget either half.
-  const preemptedInvocationIds = new Set<string>();
+  // Which of those ran nothing of their own: preempted by the sweeper, or never started. Resolved
+  // BEFORE the budget filter, because such a run does two things: it re-dispatches without
+  // spending the row's attempts budget, AND it re-dispatches even when that budget is already
+  // spent — an eviction must never be the thing that retires an agent. One query for the whole
+  // batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it, so a
+  // future third caller cannot forget either half.
+  const freeInvocationIds = new Set<string>();
   // Which of those burned their whole budget and were SIGKILLed. Same query, because the
   // two facts answer different questions about the same prior run: a preemption re-dispatches
   // at the SAME budget (it never got its time), a timeout must re-dispatch at a BIGGER one
@@ -3420,17 +3536,20 @@ async function retryMiningAgents(
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
-      .select({ id: schema.cliInvocations.id, errorMessage: schema.cliInvocations.errorMessage })
+      .select({
+        id: schema.cliInvocations.id,
+        errorMessage: schema.cliInvocations.errorMessage,
+        startedAt: schema.cliInvocations.startedAt,
+      })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
-      if (isCliPreemptionFailure({ errorMessage: p.errorMessage }))
-        preemptedInvocationIds.add(p.id);
+      if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
     }
   }
-  const wasPreempted = (r: { cliInvocationId: string | null }): boolean =>
-    !!r.cliInvocationId && preemptedInvocationIds.has(r.cliInvocationId);
+  const runsFree = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && freeInvocationIds.has(r.cliInvocationId);
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
@@ -3442,7 +3561,7 @@ async function retryMiningAgents(
   const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
     r.userRetryRequestedAt != null;
   const candidates = wantedRows.filter(
-    (r) => r.attempts < maxAttempts || wasPreempted(r) || userAsked(r),
+    (r) => r.attempts < maxAttempts || runsFree(r) || userAsked(r),
   );
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
@@ -3451,7 +3570,7 @@ async function retryMiningAgents(
       attempts: r.attempts,
       cliInvocationId: r.cliInvocationId,
       status: r.status,
-      chargeAttempt: !wasPreempted(r),
+      chargeAttempt: !runsFree(r),
       // Consecutive, so anything that is not a timeout resets the chain. A preemption
       // between two timeouts must not climb a rung — it never spent a budget to justify one.
       timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,
@@ -3462,7 +3581,7 @@ async function retryMiningAgents(
       { stepId: stepDef.metadata.id, agentIds, maxAttempts },
       'mining retry requested but every named agent is out of budget',
     );
-    return 0;
+    return NOTHING_SENT;
   }
 
   const dispatches: RunnerMiningDispatch[] = (
@@ -3585,7 +3704,7 @@ async function retryMiningAgents(
       { stepId: stepDef.metadata.id, agentIds },
       'mining retry requested but selectAgents no longer offers those agents, and none has a prior run to repeat',
     );
-    return 0;
+    return NOTHING_SENT;
   }
 
   ctx.logger.warn(
@@ -3635,6 +3754,7 @@ async function reconcileOrphanedMiningAgents(
       .select({
         exitCode: schema.cliInvocations.exitCode,
         errorMessage: schema.cliInvocations.errorMessage,
+        startedAt: schema.cliInvocations.startedAt,
         endedAt: schema.cliInvocations.endedAt,
       })
       .from(schema.cliInvocations)
@@ -3664,19 +3784,18 @@ async function reconcileOrphanedMiningAgents(
       .returning({ id: schema.taskStepAgentMinings.id });
     if (!failed) continue;
     changed = true;
-    // Same rule as the LLM path: an eviction re-dispatches whatever the budget says, because it
-    // is a scheduling decision rather than evidence the agent cannot run.
+    // Same rule as the LLM path: a run that was evicted or never started re-dispatches whatever
+    // the budget says, since neither is evidence the agent cannot run.
     if (
       isTransientCliFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) &&
-      (isCliPreemptionFailure({ errorMessage: inv.errorMessage }) ||
-        row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
+      (isFreeRedispatch(inv) || row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
     ) {
       transientAgentIds.push(row.agentId);
     }
   }
 
   if (transientAgentIds.length > 0 && params.providers && params.deps) {
-    const requeued = await retryMiningAgents(
+    const { sent: requeued } = await retryMiningAgents(
       db,
       stepDef,
       current,

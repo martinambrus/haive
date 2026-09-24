@@ -4,7 +4,14 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormField, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
+import {
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  extractRegion,
+  getCliProviderMetadata,
+  normalizeContent,
+} from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
@@ -12,7 +19,13 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { RULES_IMPORT_LINE, isLinkToAgentsMd } from '../onboarding/_rules-files.js';
+import {
+  AGENTS_MD_READ_CAP,
+  RULES_IMPORT_LINE,
+  dropIgnoredRulesFiles,
+  isLinkToAgentsMd,
+  readAgentsRulesRegion,
+} from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
 
 const execFileAsync = promisify(execFile);
@@ -111,15 +124,52 @@ export async function headLacksImport(repoPath: string, rel: string): Promise<bo
   }
 }
 
-/** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of the
- *  upgrade commit too: the `git add -f` that stages the rest would otherwise commit it. A tracked
- *  file is never reported ignored, and a failed check answers false. */
-export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
+export type AgentsRulesVerdict =
+  { verdict: 'stage' | 'current' } | { verdict: 'unknown'; reason: string };
+
+/** Whether a workflow task would check out a stale rules block: `stage` when AGENTS.md's cli-rules
+ *  region on disk is absent from HEAD or differs from HEAD's, `current` when it matches or there is
+ *  none, `unknown` when that cannot be told. Only the region is compared; staging is whole-file. */
+export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesVerdict> {
+  const disk = await readAgentsRulesRegion(repoPath);
+  if ('unreadable' in disk) return { verdict: 'unknown', reason: disk.unreadable };
+  if (disk.region === null) return { verdict: 'current' };
   try {
-    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repoPath });
-    return true;
+    await execFileAsync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
   } catch {
-    return false;
+    return { verdict: 'stage' };
+  }
+  try {
+    const { stdout: entry } = await execFileAsync(
+      'git',
+      ['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH],
+      { cwd: repoPath },
+    );
+    if (entry === '') return { verdict: 'stage' };
+    const tree = /^(\d{6}) \w+ ([0-9a-f]+)\t/.exec(entry);
+    if (!tree) return { verdict: 'unknown', reason: 'unexpected git ls-tree output' };
+    // A link (120000) or a submodule (160000) in HEAD is replaced by the regular file on disk.
+    if (tree[1] !== '100644' && tree[1] !== '100755') return { verdict: 'stage' };
+    const { stdout: size } = await execFileAsync('git', ['cat-file', '-s', tree[2]!], {
+      cwd: repoPath,
+    });
+    if (Number(size.trim()) > AGENTS_MD_READ_CAP) {
+      return {
+        verdict: 'unknown',
+        reason: `HEAD's copy is larger than ${AGENTS_MD_READ_CAP} bytes`,
+      };
+    }
+    const { stdout: blob } = await execFileAsync('git', ['cat-file', 'blob', tree[2]!], {
+      cwd: repoPath,
+      maxBuffer: AGENTS_MD_READ_CAP + 1024,
+    });
+    const head = extractRegion(blob, CLI_RULES_START, CLI_RULES_END);
+    if (head === null) return { verdict: 'stage' };
+    return {
+      verdict: normalizeContent(head) === normalizeContent(disk.region) ? 'current' : 'stage',
+    };
+  } catch (err) {
+    return { verdict: 'unknown', reason: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -253,11 +303,18 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         stubPaths.push(stub.file);
       }
     }
+    const agentsRules = await agentsRulesVerdict(ctx.repoPath);
+    if (agentsRules.verdict === 'unknown') {
+      warnings.push(
+        `AGENTS.md was not compared with HEAD (${agentsRules.reason}), so it is staged only if the upgrade wrote it`,
+      );
+    }
     const stagePaths = [
       ...new Set([
         ...(await resolveStagePaths(ctx.db, ctx.userId)),
         ...appliedWrittenPaths(applied?.output),
         ...stubPaths,
+        ...(agentsRules.verdict === 'stage' ? [CLI_RULES_DISK_PATH] : []),
       ]),
     ];
     const existingPaths: string[] = [];
@@ -289,17 +346,12 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.
-      const ruleFiles = new Set(stubs.map((s) => s.file));
-      const toStage: string[] = [];
-      for (const rel of existingPaths) {
-        if (ruleFiles.has(rel) && (await isGitIgnored(ctx.repoPath, rel))) {
-          warnings.push(
-            `${rel} is ignored by git, so it stays out of this commit and a workflow task will not load AGENTS.md through it`,
-          );
-        } else {
-          toStage.push(rel);
-        }
-      }
+      const { keep: toStage, warnings: ignored } = await dropIgnoredRulesFiles(
+        ctx.repoPath,
+        existingPaths,
+        new Set([CLI_RULES_DISK_PATH, ...stubs.map((s) => s.file)]),
+      );
+      warnings.push(...ignored);
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
