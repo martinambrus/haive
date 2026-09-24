@@ -329,6 +329,32 @@ describe('ensureArchivesExpanded', () => {
     expect(await readFile(path.join(f.uploads, 'brief.md'), 'utf8')).toBe('brief');
   });
 
+  it('sweeps what attempts left once no attachment is left, from the repository root', async () => {
+    // No row is left to say where the uploads dir is, so the caller names the root.
+    const f = await setup();
+    const attempt = (id: string, n: string) =>
+      path.join(
+        f.uploads,
+        `.expanding-${id}-${n.repeat(8)}-${n.repeat(4)}-4${n.repeat(3)}-8${n.repeat(3)}-${n.repeat(12)}`,
+      );
+    const settled = attempt('00000000-0000-4000-8000-0000000000e2', '4');
+    await mkdir(settled);
+    const died = attempt('00000000-0000-4000-8000-0000000000e3', '5');
+    await mkdir(died);
+    await writeFile(path.join(died, 'placed-as'), JSON.stringify({ dir: 'old', files: ['x.md'] }));
+    await mkdir(path.join(f.uploads, 'old'));
+    await writeFile(path.join(f.uploads, 'old', 'x.md'), 'orphan');
+
+    await ensureArchivesExpanded(
+      f.fake.db as unknown as Database,
+      TASK,
+      path.resolve(f.uploads, '../../..'),
+    );
+
+    expect(await f.staging()).toEqual([]);
+    expect(await exists(path.join(f.uploads, 'old'))).toBe(false);
+  });
+
   it('takes nothing from a folder an interrupted attempt claimed but never moved into', async () => {
     // Its tree is still staged, so whatever the claimed folder holds is someone else's — here an
     // upload whose row is not written yet.

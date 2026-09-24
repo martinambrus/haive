@@ -31,6 +31,7 @@ import {
   sanitizeAttachmentPath,
   splitAttachmentPath,
   splitAttachmentStoredPath,
+  taskUploadsRel,
 } from '@haive/shared';
 import {
   EXPANSION_INTENT_FILE,
@@ -581,10 +582,14 @@ async function discardStaging(anchor: string, stagingRel: string): Promise<void>
  * a partial tree is worse than none — nothing downstream can tell which half of a specification it
  * was given. A placement that fails leaves the archive unstamped, so the next call tries again from
  * the start; so does a lock that could not be had in time.
+ *
+ * `repoRoot` is where the uploads dir lives once no row is left to say so, which is what lets the
+ * sweep reach an attempt a delete of the last attachment could not clean up.
  */
 export async function ensureArchivesExpanded(
   db: Database,
   taskId: string,
+  repoRoot?: string | null,
 ): Promise<ExpandArchivesResult> {
   let rows: (typeof schema.taskAttachments.$inferSelect)[];
   try {
@@ -612,6 +617,10 @@ export async function ensureArchivesExpanded(
   // sits under `.haive/`, which the sandbox mounts read-write, so it can never be one. A row that does
   // not have that shape is refused rather than expanded from a guessed root.
   const split = rows.map((row) => splitAttachmentStoredPath(row, taskId)).find((s) => s !== null);
+  if (!split && rows.length === 0 && repoRoot) {
+    await sweepStaleAttempts(db, taskId, repoRoot, taskUploadsRel(taskId), new Set());
+    return EMPTY;
+  }
   if (!split) {
     if (archives.length > 0) {
       log.warn({ taskId, archive: archives[0]!.filename }, 'unrecognised attachment path layout');
