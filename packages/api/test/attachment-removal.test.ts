@@ -27,7 +27,7 @@ describe('filesToRemove', () => {
   });
 
   it('leaves a file that only shares the sidecar name, when a surviving attachment owns it', () => {
-    // Sidecar names are not reserved, so this can be a real upload.
+    // New uploads refuse a sidecar name, but a row stored before they did can still hold one.
     expect(files(['a'], [row('a', 'x.docx'), row('b', 'x.docx.extracted.md')])).toEqual(['x.docx']);
   });
 

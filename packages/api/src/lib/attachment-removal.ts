@@ -15,8 +15,8 @@ export interface RemovableAttachment {
  *
  *  - the worker's extracted-text SIDECAR beside a document. Every removed file's sidecar name is
  *    listed, whatever its kind — removing an absent one is a no-op, and a kind that gains a sidecar
- *    later is covered without a change here. A name a SURVIVING row owns is left alone: sidecar
- *    names are not reserved, so it can be a real attachment someone uploaded.
+ *    later is covered without a change here. A name a SURVIVING row owns is left alone: uploads
+ *    and expansions no longer take a sidecar name, but a row stored before they refused one can.
  *  - an archive's MEMBERS. Their rows cascade on the delete; their files do not. An archive anywhere
  *    expands into one directory at the uploads ROOT, so a folder delete that takes `docs/x.zip` must
  *    also take `x/…`, which is not under `docs/`.

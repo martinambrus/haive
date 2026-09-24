@@ -43,13 +43,12 @@ import { HttpError, type AppEnv } from '../../context.js';
 // User-supplied reference files attached to a task (docs, screenshots, sample
 // data). Stored on the haive_repos volume under
 // `<repoRoot>/.haive/task-uploads/<taskId>/` so the AI CLI agent reads them at
-// `/haive/workdir/.haive/task-uploads/<taskId>/`. `.haive/` is git-excluded, so
-// the files are durable and never show in the agent's git status. Auth + userId
-// come from the parent taskRoutes (requireAuth), mirroring files.ts / steps.ts.
+// `/haive/workdir/.haive/task-uploads/<taskId>/`. Auth + userId come from the
+// parent taskRoutes (requireAuth), mirroring files.ts / steps.ts.
 //
 // The api container runs as root; repo dirs are owned by `node` (uid 1000, the
-// sandbox user). We write the files then chown 1000:1000 + chmod 0644 so the
-// agent can read them.
+// sandbox user). We create the files 0644 and chown them 1000:1000 so the agent
+// can read them.
 
 export const attachmentRoutes = new Hono<AppEnv>();
 
@@ -268,8 +267,8 @@ async function claimAttachmentName(
   }
 }
 
-/** Stream the request body to `destPath`, aborting + unlinking once the byte count
- *  exceeds `maxBytes` (413). Streaming keeps memory bounded regardless of the cap. */
+/** Stream the request body into `fh`, aborting once the byte count exceeds
+ *  `maxBytes` (413). Streaming keeps memory bounded regardless of the cap. */
 async function streamToFileWithCap(
   body: ReadableStream<Uint8Array>,
   fh: FileHandle,
@@ -324,14 +323,11 @@ function headerContentType(raw: string | undefined): string | null {
 }
 
 /**
- * Everything that happens AFTER an attachment's bytes are on disk: permissions,
- * the `task_attachments` row, and the manifest rewrite.
+ * Everything that happens AFTER an upload's bytes are on disk: the
+ * `task_attachments` row and the manifest rewrite.
  *
- * One tail for every write path, because two of the three things it does fail
- * invisibly. The api runs as root while the sandbox user is uid 1000, so a file
- * written without the chown reaches the agent as a permission error and only
- * inside a container. And `augmentPromptWithAttachments` tells EVERY agent to
- * read `_ATTACHMENTS.md` unconditionally — a write path that skips the manifest
+ * The manifest is not optional: `augmentPromptWithAttachments` tells EVERY agent
+ * to read `_ATTACHMENTS.md` unconditionally — a write path that skips the manifest
  * therefore hands the agent a prompt pointing at a file that does not exist.
  *
  * Returns the inserted row.
@@ -347,9 +343,8 @@ async function finalizeAttachment(args: {
   contentType: string | null;
   description: string | null;
 }) {
-  // No chmod/chown here any more: the file was created through `create-exclusive`, which applied
-  // the mode and owner to the descriptor before any bytes were written — so there is no window in
-  // which the agent's file exists with the wrong owner.
+  // No chmod/chown here: `createUniqueAttachment` created the file 0644 and chowned it to the
+  // sandbox uid (best-effort) before any bytes were written.
   // The id is chosen here so a failed insert can be told from one whose answer was lost.
   const id = randomUUID();
   let row: typeof schema.taskAttachments.$inferSelect | undefined;
@@ -383,57 +378,6 @@ async function finalizeAttachment(args: {
 
   await rewriteAttachmentsManifest(getDb(), args.taskId, args.anchor, args.uploadsRel);
   return row!;
-}
-
-/**
- * Write one attachment from bytes already in memory.
- *
- * Sibling of the streaming route below, sharing its tail. Kept separate because
- * the route streams with a byte cap and this takes a whole buffer.
- */
-export async function writeTaskAttachment(args: {
-  taskId: string;
-  userId: string;
-  filename: string;
-  content: string | Buffer;
-  contentType?: string | null;
-  description?: string | null;
-}) {
-  const { dir, anchor, rel: uploadsRel } = await resolveTaskUploadsDir(args.taskId, args.userId);
-  await ensureUploadsDir(anchor, uploadsRel);
-
-  const { rel: safeName, fh } = await claimAttachmentName(
-    args.taskId,
-    anchor,
-    uploadsRel,
-    safeUploadPath(args.filename),
-  );
-  const bytes = typeof args.content === 'string' ? Buffer.from(args.content, 'utf8') : args.content;
-  try {
-    let written = 0;
-    while (written < bytes.length) {
-      const res = await fh.write(bytes, written, bytes.length - written, written);
-      written += res.bytesWritten;
-    }
-  } catch (err) {
-    await fh.close().catch(() => {});
-    await removeNoFollow(anchor, `${uploadsRel}/${safeName}`).catch(() => {});
-    throw err;
-  }
-  await fh.close();
-  const destPath = join(dir, safeName);
-
-  return finalizeAttachment({
-    anchor,
-    uploadsRel,
-    destPath,
-    filename: safeName,
-    taskId: args.taskId,
-    userId: args.userId,
-    sizeBytes: bytes.length,
-    contentType: args.contentType ?? null,
-    description: args.description ?? null,
-  });
 }
 
 attachmentRoutes.post('/:id/attachments', async (c) => {
