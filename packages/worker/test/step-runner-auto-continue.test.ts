@@ -42,15 +42,14 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
-/** updateRow's ownership guard, evaluated against the mock row: a write lands only while the row
- *  is not `pending` or `skipped`. */
-function refusedByOwnershipGuard(cond: unknown, status: unknown): boolean {
+/** The row guards, evaluated against the mock row: a pass's write lands only while the row is not
+ *  `pending` or `skipped`, and the claim that opens a pass only while it is still `pending`. */
+function refusedByRowGuard(cond: unknown, status: unknown): boolean {
   const values = conditionValues(cond);
-  return (
-    values.includes('pending') &&
-    values.includes('skipped') &&
-    (status === 'pending' || status === 'skipped')
-  );
+  if (values.includes('pending') && values.includes('skipped')) {
+    return status === 'pending' || status === 'skipped';
+  }
+  return values.includes('pending') && status !== 'pending';
 }
 
 function makeMockDb(state: MockState): Database {
@@ -91,12 +90,9 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         set: (v: Record<string, unknown>) => ({
-          where: (cond: unknown) => ({
-            returning: async () => {
-              if (
-                tableName === 'task_steps' &&
-                refusedByOwnershipGuard(cond, state.taskStepRow.status)
-              ) {
+          where: (cond: unknown) => {
+            const write = (): unknown[] => {
+              if (tableName === 'task_steps' && refusedByRowGuard(cond, state.taskStepRow.status)) {
                 return [];
               }
               state.updates.push({ table: tableName, patch: v });
@@ -105,8 +101,18 @@ function makeMockDb(state: MockState): Database {
                 return [state.taskStepRow];
               }
               return [];
-            },
-          }),
+            };
+            return {
+              returning: async () => write(),
+              // Awaited directly by a write that needs no row back.
+              then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+                Promise.resolve()
+                  .then(() => {
+                    write();
+                  })
+                  .then(res, rej),
+            };
+          },
         }),
       };
     },
@@ -617,10 +623,11 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
       autoContinue: true,
       preAnswers: null,
       status: 'running',
-      orchestrationEpoch: 6,
+      orchestrationEpoch: 5,
     };
     const def = makeStep({ form: () => ZERO_FIELD_FORM });
     def.apply = async (ctx) => {
+      state.taskRow!.orchestrationEpoch = 6;
       // A long deterministic apply that checks for cancellation, as RAG sync does.
       await new Promise((resolve) => setTimeout(resolve, 3_000));
       ctx.throwIfCancelled();
@@ -644,6 +651,90 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect(state.taskStepRow.status).toBe('running');
     expect(state.updates.filter((u) => u.patch.status === 'failed')).toEqual([]);
     expect(doneWrites(state)).toEqual([]);
+  });
+
+  /** A step whose shouldRun is where a Retry or a Skip lands, and whose detect says it ran. */
+  const guardedStep = (onShouldRun: () => void, should = true) => {
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    const detected: unknown[] = [];
+    def.shouldRun = async () => {
+      onShouldRun();
+      return should;
+    };
+    def.detect = async () => {
+      detected.push(1);
+      return { ok: true };
+    };
+    return { def, detected };
+  };
+
+  const runAtEpoch = (state: MockState, stepDef: StepDefinition, epoch: number) =>
+    advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef,
+      epoch,
+    });
+
+  const atEpoch = (epoch: number) => ({
+    id: 'task-1',
+    autoContinue: true,
+    preAnswers: null,
+    status: 'running',
+    orchestrationEpoch: epoch,
+  });
+
+  it('gives the row back when a Retry landed while shouldRun ran', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    // The Retry's reset leaves the row `pending`, so only the epoch says it happened.
+    const { def, detected } = guardedStep(() => {
+      state.taskRow!.orchestrationEpoch = 6;
+    });
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(detected).toEqual([]);
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(state.taskStepRow.startedAt).toBeNull();
+  });
+
+  it('gives back the skip shouldRun chose when a Retry landed meanwhile', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def } = guardedStep(() => {
+      state.taskRow!.orchestrationEpoch = 6;
+    }, false);
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(state.taskStepRow.endedAt).toBeNull();
+  });
+
+  it('leaves a Skip that landed while shouldRun ran in place', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def, detected } = guardedStep(() => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'skipped' };
+    });
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(detected).toEqual([]);
+    expect(state.taskStepRow.status).toBe('skipped');
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
+  });
+
+  it('claims the row as before when nothing landed during shouldRun', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    const { def, detected } = guardedStep(() => {});
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('done');
+    expect(detected).toHaveLength(1);
+    expect(state.taskStepRow.status).toBe('done');
   });
 
   it('lets a pass at the task epoch finish as before', async () => {

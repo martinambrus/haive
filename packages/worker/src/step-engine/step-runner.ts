@@ -2176,10 +2176,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
-        const updated = await openRow(db, row.id, {
+        const updated = await openRow(db, taskId, params.epoch, row.id, {
           status: 'skipped',
           endedAt: new Date(),
         });
+        if (!updated) return supersededPass(row);
         return { status: 'skipped', row: updated };
       }
     }
@@ -2192,13 +2193,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // the totals the moment the step started; without clearing it, `pending` + marker (the
       // park's signature) would keep reading as queued. No-op when nothing was parked.
       await foldCliParkOnResume(db, current.id);
-      current = await openRow(db, current.id, {
+      const claimed = await openRow(db, taskId, params.epoch, current.id, {
         status: 'running',
         startedAt: new Date(),
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,
       });
+      if (!claimed) return supersededPass(current);
+      current = claimed;
     } else if (current.status === 'waiting_cli') {
       // Same fold, for the CLI continuation. The invocation ended, markCliParkBegin stamped the
       // wait (cli-exec/handlers.ts), and THIS advance is where work actually resumes — so the
@@ -3174,16 +3177,33 @@ function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskSt
   return updateOwnedStep(db, id, patch);
 }
 
-/** The writes that open a pass on its `pending` row: claiming it, or skipping it outright. */
-async function openRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
-  const rows = await db
+/** The writes that open a pass on its `pending` row: claiming it, or skipping it outright. Each
+ *  lands only while the row is still `pending`, so a Skip that took it meanwhile stands. A Retry
+ *  leaves it `pending` too, so the task's epoch is read after the claim, and a claim a Retry
+ *  overtook is given back as the reset left it. Null when the pass lost the row either way. */
+async function openRow(
+  db: Database,
+  taskId: string,
+  epoch: number | null | undefined,
+  id: string,
+  patch: UpdatePatch,
+): Promise<TaskStepRow | null> {
+  const [claimed] = await db
     .update(schema.taskSteps)
     .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, id))
+    .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.status, 'pending')))
     .returning();
-  const row = rows[0];
-  if (!row) throw new Error(`Task step ${id} not found`);
-  return row;
+  if (!claimed || epoch == null) return claimed ?? null;
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { orchestrationEpoch: true },
+  });
+  if (!task || task.orchestrationEpoch === epoch) return claimed;
+  await db
+    .update(schema.taskSteps)
+    .set({ status: 'pending', startedAt: null, endedAt: null, updatedAt: new Date() })
+    .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.updatedAt, claimed.updatedAt)));
+  return null;
 }
 
 const STEP_SUMMARY_TIMEOUT_MS = 60_000;

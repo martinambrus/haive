@@ -419,15 +419,26 @@ async function markTaskRunningWithStep(
     );
 }
 
-async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
-  await db
+/** Complete the task, only while it is still at `epoch`, the one the finishing pass ran under: a
+ *  Retry that moved it on meanwhile owns it, and completing it would also reap its workspace. */
+export async function markTaskCompleted(
+  db: Database,
+  taskId: string,
+  epoch: number,
+): Promise<void> {
+  const [completed] = await db
     .update(schema.tasks)
     .set({
       status: 'completed',
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)))
+    .returning({ id: schema.tasks.id });
+  if (!completed) {
+    logger.info({ taskId, epoch }, 'task not completed: it moved to a newer epoch');
+    return;
+  }
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
@@ -474,8 +485,15 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   }
 }
 
-async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
-  await db
+/** Fail the task. With `epoch`, only while the task is still at it, as a step's own failure is;
+ *  false when it had moved on and nothing was written. */
+async function markTaskFailed(
+  db: Database,
+  taskId: string,
+  message: string,
+  epoch?: number,
+): Promise<boolean> {
+  const [failed] = await db
     .update(schema.tasks)
     .set({
       status: 'failed',
@@ -483,13 +501,20 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(
+      epoch === undefined
+        ? eq(schema.tasks.id, taskId)
+        : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)),
+    )
+    .returning({ id: schema.tasks.id });
+  if (!failed) return false;
   await cleanupTaskContainers(db, taskId, 'failed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
   // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
   // it 'failed' so the KB view can show a retry / go-to-task affordance.
   await reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed', logger);
+  return true;
 }
 
 /** After a task reaches a terminal state, evict its RAG embedding model from
@@ -993,13 +1018,30 @@ const workerDeps: WorkerDeps = {
   },
 };
 
-async function handleResult(
+async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<boolean> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { orchestrationEpoch: true },
+  });
+  return task !== undefined && task.orchestrationEpoch !== ctx.orchestrationEpoch;
+}
+
+export async function handleResult(
   db: Database,
   ctx: ResolvedTaskContext,
   stepId: string,
   result: AdvanceStepResult,
 ): Promise<void> {
   const stepDef = stepRegistry.require(stepId);
+  // The pass ran under the epoch its job was picked up at. A Retry, a reset or a cancel that moved
+  // the task on while it ran owns the task now, so this result hands nothing off.
+  if (result.status !== 'superseded' && (await taskEpochMoved(db, ctx))) {
+    logger.info(
+      { taskId: ctx.taskId, stepId, status: result.status },
+      'step result dropped: the task moved to a newer epoch while the pass ran',
+    );
+    return;
+  }
   switch (result.status) {
     case 'superseded':
       // A Retry or Skip took the row over; the pass that replaced this one carries the task.
@@ -1066,7 +1108,7 @@ async function handleResult(
           ctx.orchestrationEpoch,
         );
       } else {
-        await markTaskCompleted(db, ctx.taskId);
+        await markTaskCompleted(db, ctx.taskId, ctx.orchestrationEpoch);
       }
       return;
     }
@@ -1315,7 +1357,7 @@ async function handleResult(
       return;
     }
     case 'failed': {
-      await markTaskFailed(db, ctx.taskId, result.error);
+      if (!(await markTaskFailed(db, ctx.taskId, result.error, ctx.orchestrationEpoch))) return;
       // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
       // server failure, attach a structured errorHint so the UI shows an
       // "outage — retry when the provider recovers" banner instead of implying a code
@@ -1514,7 +1556,7 @@ async function resolveFixLoopGate(
       );
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
-      await markTaskCompleted(db, ctx.taskId);
+      await markTaskCompleted(db, ctx.taskId, ctx.orchestrationEpoch);
     }
     return;
   }

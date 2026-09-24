@@ -279,11 +279,14 @@ reset. Every write step-runner makes to a pass's row, and every status the DAG e
 merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` or `skipped`. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
-hands nothing off (`superseded`), and the Retry's pass runs once it lets go. Only the two writes that
-open a pass on its `pending` row, claiming or skipping it, go around the check (`openRow`). The recap
-goes to the ledger, or to a recap run, only after the outcome has landed, and a recap run is queued
-only while the row is still the finished one, since a Retry's reset supersedes only the runs that
-already exist.
+hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
+a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
+`pending`, so a Skip stands. A Retry leaves the row `pending` too, so the claim then reads the task's
+epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
+only after the outcome has landed, and a recap run is queued only while the row is still the finished
+one, since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
+epoch the pass ran under: `handleResult` does nothing once the task has moved on, and completing or
+failing the task carries that epoch, since either one also reaps the task's containers.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
