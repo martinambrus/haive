@@ -2265,7 +2265,7 @@ async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise
       statusMessage: null,
       updatedAt: new Date(),
     })
-    .where(eq(schema.taskSteps.id, taskStepId));
+    .where(and(eq(schema.taskSteps.id, taskStepId), eq(schema.taskSteps.status, 'waiting_cli')));
 }
 
 /** What boot recovery needs from BullMQ, injectable so a test can drive the re-drive branch
@@ -2439,7 +2439,27 @@ export async function reconcileOrphanedSteps(
           ),
         )
         .returning({ epoch: schema.tasks.orchestrationEpoch });
-      if (!fenced) continue;
+      if (!fenced) {
+        // Lost to an api action taken during boot. One that moved the task to another step left
+        // this row abandoned like those requeued above, where it would block that step's advance.
+        const [task] = await db
+          .select({
+            status: schema.tasks.status,
+            currentStepId: schema.tasks.currentStepId,
+            currentRound: schema.tasks.currentRound,
+          })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, s.taskId))
+          .limit(1);
+        if (task?.status === 'running' && !isCurrentStep({ ...s, ...task })) {
+          await requeueAbandonedOrphan(db, s.taskStepId);
+          logger.info(
+            { taskId: s.taskId, stepId: s.stepId, currentStepId: task.currentStepId },
+            'requeued a waiting_cli orphan the task left during boot (not re-driven)',
+          );
+        }
+        continue;
+      }
       try {
         await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch);
       } catch (err) {

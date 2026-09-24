@@ -116,6 +116,10 @@ interface CurrentStepScenario {
   unstarted: string[];
   /** What the epoch fence's UPDATE ... RETURNING yields: empty when the task stopped running. */
   fenced: { epoch: number }[];
+  /** The task as a read after a lost fence finds it. */
+  taskNow?: { status: string; currentStepId: string | null; currentRound: number };
+  /** The step row the abandoned-row requeue reads. */
+  stepRow?: Record<string, unknown>;
 }
 
 /** One `waiting_cli` step that IS the task's current step, so reconcile re-drives it. */
@@ -140,8 +144,14 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
             : joinedReads++ === 0
               ? [stuck]
               : [];
+        const limited = (): unknown[] => {
+          const name = tableNameOf(table);
+          if (name === 'tasks') return scenario.taskNow ? [scenario.taskNow] : [];
+          if (name === 'task_steps') return scenario.stepRow ? [scenario.stepRow] : [];
+          return [];
+        };
         const whereFn = (_cond: unknown) => ({
-          limit: async (_n: number) => [],
+          limit: async (_n: number) => limited(),
           then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
             Promise.resolve(rows()).then(onOk, onErr),
         });
@@ -214,6 +224,60 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
     } finally {
       errors.mockRestore();
     }
+  });
+
+  describe('after losing the fence to an api action taken during boot', () => {
+    const stepRow = {
+      id: 'ts-1',
+      status: 'waiting_cli',
+      startedAt: new Date(Date.now() - 60_000),
+      endedAt: null,
+      idleMs: 0,
+      userActiveMs: 0,
+      waitingStartedAt: null,
+      carriedWorkMs: 0,
+      carriedIdleMs: 0,
+      carriedUserActiveMs: 0,
+    };
+    const lose = async (taskNow: CurrentStepScenario['taskNow']) => {
+      advances.length = 0;
+      const recorded: RecordedUpdate[] = [];
+      await reconcileOrphanedSteps(
+        makeCurrentStepDb(recorded, { unstarted: [], fenced: [], taskNow, stepRow }),
+        deps(new Set()),
+      );
+      return recorded.filter((u) => u.table === 'task_steps' && u.set.status === 'pending');
+    };
+
+    it('requeues the row when the task moved to another step', async () => {
+      const requeues = await lose({
+        status: 'running',
+        currentStepId: '08b-test-management',
+        currentRound: 2,
+      });
+      expect(requeues).toHaveLength(1);
+      // Only while still parked: a row the api reset since is its to run.
+      expect(conditionValues(requeues[0]!.where)).toContain('waiting_cli');
+      expect(advances).toEqual([]);
+    });
+
+    it('leaves the row to a retry of this same step', async () => {
+      const requeues = await lose({
+        status: 'running',
+        currentStepId: '09_5-skill-generation',
+        currentRound: 2,
+      });
+      expect(requeues).toEqual([]);
+    });
+
+    it('leaves the row alone once the task stopped running', async () => {
+      const requeues = await lose({
+        status: 'cancelled',
+        currentStepId: '08b-test-management',
+        currentRound: 2,
+      });
+      expect(requeues).toEqual([]);
+    });
   });
 
   it('hands the epoch back when the re-drive cannot be queued', async () => {
