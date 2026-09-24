@@ -65,6 +65,8 @@ interface MockState {
   miningCasLost?: boolean | ((set: Record<string, unknown>) => boolean);
   /** What that other pass left behind, applied when a compare-and-swap is lost. */
   onMiningCasLost?: () => void;
+  /** Make a read fail, picked by what it selects. */
+  failSelect?: (projection: unknown) => boolean;
   /** Transactions opened, and INSERT statements sent to the mining table. */
   transactions?: number;
   miningInsertStatements?: number;
@@ -122,6 +124,7 @@ function makeMockDb(state: MockState): Database {
   const db = {
     select: (projection?: unknown) => ({
       from: (table: unknown) => {
+        if (state.failSelect?.(projection)) throw new Error('read failed');
         if (tableNameOf(table) === 'task_step_agent_minings') {
           (state.miningProjections ??= []).push(projection);
         }
@@ -1730,6 +1733,62 @@ describe('a fan-out reserved before any agent is sent', () => {
     const message =
       outcome instanceof Error ? outcome.message : String((outcome as { error?: unknown }).error);
     expect(message).toContain('redis refused');
+  });
+
+  it('releases every reservation when the work after reserving throws before the first send', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    // The step's learned budget is read after the reservation and before anything is sent.
+    state.failSelect = (projection) =>
+      !!projection && typeof projection === 'object' && 'learnedMs' in projection;
+    await run(makeMockDb(state), waveStep([], ['refute-a', 'refute-b']), []).catch(() => undefined);
+
+    const reserved = state.inserts
+      .filter((i) => i.table === 'task_step_agent_minings')
+      .map((i) => String(i.row.id));
+    expect(reserved).toHaveLength(2);
+    for (const id of reserved) {
+      expect(writesTo(state, id).map((u) => u.set.status)).toEqual(['failed']);
+    }
+  });
+
+  it('releases the agent it was working on when that agent throws before it is linked', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliPreferences = {
+      findFirst: async () => {
+        throw new Error('preferences unreadable');
+      },
+    };
+    await run(db as unknown as Database, waveStep([], ['refute-a']), []).catch(() => undefined);
+
+    const [reserved] = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
+    expect(writesTo(state, String(reserved!.row.id)).map((u) => u.set.status)).toEqual(['failed']);
+  });
+
+  it('sends a reserved agent its step still offers as the step offers it, personas included', async () => {
+    const state = freshState([
+      miningRow('refute-a', 1, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'the prompt recorded at reservation',
+      }),
+    ]);
+    const step = waveStep([], []);
+    step.agentMining!.selectAgents = async () => [
+      {
+        agentId: 'refute-a',
+        agentTitle: 'refute-a',
+        prompt: 'the prompt the step offers now',
+        personaIds: ['security-auditor'],
+      },
+    ];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), step, enqueued);
+
+    const spec = enqueued[0]?.spec as { assignedAgentIds?: string[] } | undefined;
+    expect(spec?.assignedAgentIds).toContain('security-auditor');
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(String(sent?.row.prompt)).toContain('the prompt the step offers now');
   });
 
   it('sends an agent a fan-out reserved and never sent, from its recorded prompt, uncharged', async () => {

@@ -1166,7 +1166,17 @@ async function resolveAgentMiningPhase(
     // else would ever send them, so the barrier below would wait on them for good.
     const unsent = existing.filter((r) => r.status === 'pending' && r.cliInvocationId === null);
     if (unsent.length > 0 && params.providers && params.deps) {
-      await dispatchReservedAgents(db, stepDef, current, ctx, params, unsent);
+      await dispatchReservedAgents(
+        db,
+        stepDef,
+        current,
+        ctx,
+        detected,
+        formValues,
+        llmOutput,
+        params,
+        unsent,
+      );
       existing = await db
         .select(MINING_ROW_COLUMNS)
         .from(schema.taskStepAgentMinings)
@@ -1612,52 +1622,55 @@ async function dispatchMiningAgents(
       'agent mining rows already exist (concurrent/duplicate run) — not dispatching them again',
     );
   }
-  // Per-SEAT provider selection. This used to resolve once for the whole fan-out, which
-  // made every agent the same model wearing a different persona — so 08c's refuter panel
-  // (three lenses, unanimity, fail-closed) was three identical models, and anything that
-  // model could not see, none of the three saw. A dispatch's `roleKey` names its seat;
-  // memoised because the refuter wave dispatches one agent PER FINDING over only three
-  // distinct lenses, so N agents must not cost N lookups.
-  //
-  // A dispatch with no roleKey resolves 'default', which is byte-for-byte the call this
-  // replaced — an un-opted-in step is unchanged.
-  const seatCache = new Map<string, { cliProviderId: string | null; effortLevel: string | null }>();
-  const resolveSeat = async (roleKey: string) => {
-    const hit = seatCache.get(roleKey);
-    if (hit) return hit;
-    const resolved = await resolvePreferredCli(
-      db,
-      params.userId,
-      stepDef.metadata.id,
-      params.cliProviderId ?? null,
-      params.providers!,
-      roleKey,
-      params.taskId,
-      params.ignoreSavedStepClis ?? false,
-    );
-    seatCache.set(roleKey, resolved);
-    return resolved;
-  };
-  // Each mining agent is its own Claude-family invocation with its own terminal,
-  // so each is independently steerable (gated globally + by adapter support).
-  const steeringRequested = await resolveSteeringEnabled();
-  // Cross-round memory is a property of the STEP, not of one agent, so resolve it once for the
-  // whole fan-out instead of per agent.
-  const learnedMs = await learnedTimeoutMs(db, params.taskId, stepDef.metadata.id, current.id);
-  // What the task has attached, told to every agent of the fan-out: the notice `resolveLlmPhase`
-  // prepends to a single dispatch, after the same archive expansion, so a mining agent sees the
-  // files — and any archive that did not fully expand — exactly as that one would. Once per call:
-  // the notice is a property of the task, not of an agent. `''` when nothing is attached.
-  await ensureArchivesExpanded(db, params.taskId);
-  const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
-  let enqueued = 0;
-  // The dispatch between inserting its invocation and queueing it, for the release below.
+  // The dispatch between inserting its invocation and queueing it, for the release below. A target
+  // leaves `targets` only once settled, so a throw anywhere after the reservation releases it.
   let linking: { rowId: string; invocationId: string; linked: boolean } | null = null;
   try {
+    // Per-SEAT provider selection. This used to resolve once for the whole fan-out, which
+    // made every agent the same model wearing a different persona — so 08c's refuter panel
+    // (three lenses, unanimity, fail-closed) was three identical models, and anything that
+    // model could not see, none of the three saw. A dispatch's `roleKey` names its seat;
+    // memoised because the refuter wave dispatches one agent PER FINDING over only three
+    // distinct lenses, so N agents must not cost N lookups.
+    //
+    // A dispatch with no roleKey resolves 'default', which is byte-for-byte the call this
+    // replaced — an un-opted-in step is unchanged.
+    const seatCache = new Map<
+      string,
+      { cliProviderId: string | null; effortLevel: string | null }
+    >();
+    const resolveSeat = async (roleKey: string) => {
+      const hit = seatCache.get(roleKey);
+      if (hit) return hit;
+      const resolved = await resolvePreferredCli(
+        db,
+        params.userId,
+        stepDef.metadata.id,
+        params.cliProviderId ?? null,
+        params.providers!,
+        roleKey,
+        params.taskId,
+        params.ignoreSavedStepClis ?? false,
+      );
+      seatCache.set(roleKey, resolved);
+      return resolved;
+    };
+    // Each mining agent is its own Claude-family invocation with its own terminal,
+    // so each is independently steerable (gated globally + by adapter support).
+    const steeringRequested = await resolveSteeringEnabled();
+    // Cross-round memory is a property of the STEP, not of one agent, so resolve it once for the
+    // whole fan-out instead of per agent.
+    const learnedMs = await learnedTimeoutMs(db, params.taskId, stepDef.metadata.id, current.id);
+    // What the task has attached, told to every agent of the fan-out: the notice `resolveLlmPhase`
+    // prepends to a single dispatch, after the same archive expansion, so a mining agent sees the
+    // files — and any archive that did not fully expand — exactly as that one would. Once per call:
+    // the notice is a property of the task, not of an agent. `''` when nothing is attached.
+    await ensureArchivesExpanded(db, params.taskId);
+    const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
+    let enqueued = 0;
     for (const dispatch of dispatches) {
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
-      targets.delete(dispatch.agentId);
       // The same augmentation `resolveLlmPhase` gives a single dispatch, in its order — the
       // attachments notice, the task ledger, then the admin terseness level — less learned
       // guidance, which is recorded per STEP and has no per-agent form. Fan-out sub-prompts are
@@ -1708,6 +1721,7 @@ async function dispatchMiningAgents(
             updatedAt: new Date(),
           })
           .where(sameMiningState(target));
+        targets.delete(dispatch.agentId);
         continue;
       }
 
@@ -1757,6 +1771,7 @@ async function dispatchMiningAgents(
           .set({ supersededAt: new Date() })
           .where(eq(schema.cliInvocations.id, invRow.id));
         linking = null;
+        targets.delete(dispatch.agentId);
         ctx.logger.warn(
           { agentId: dispatch.agentId, taskStepId: current.id },
           'agent mining row taken by another pass before this one linked it — not sending it again',
@@ -1806,13 +1821,14 @@ async function dispatchMiningAgents(
         softTimeout: spec.softTimeout === true,
       });
       linking = null;
+      targets.delete(dispatch.agentId);
       enqueued++;
     }
+    return enqueued;
   } catch (err) {
     await releaseUnsentAgents(db, linking, [...targets.values()], err, ctx);
     throw err;
   }
-  return enqueued;
 }
 
 /** A dispatch that throws part-way fails what it reserved or linked and did not queue, so no row
@@ -1849,6 +1865,7 @@ async function releaseUnsentAgents(
     }
     for (const target of unsent) {
       if (target.status !== 'pending' || target.cliInvocationId !== null) continue;
+      if (linking?.linked && target.id === linking.rowId) continue;
       await db
         .update(schema.taskStepAgentMinings)
         .set({ status: 'failed', errorMessage, endedAt: now, updatedAt: now })
@@ -1870,21 +1887,40 @@ async function dispatchReservedAgents(
   stepDef: StepDefinition,
   current: TaskStepRow,
   ctx: StepContext,
+  detected: unknown,
+  formValues: FormValues | null,
+  llmOutput: unknown,
   params: AdvanceStepParams,
   rows: MiningRow[],
 ): Promise<number> {
-  const stored = await db
-    .select({
-      id: schema.taskStepAgentMinings.id,
-      dispatchPrompt: schema.taskStepAgentMinings.dispatchPrompt,
-    })
-    .from(schema.taskStepAgentMinings)
-    .where(
-      inArray(
-        schema.taskStepAgentMinings.id,
-        rows.map((r) => r.id),
-      ),
-    );
+  // The step's own dispatch where it still offers the agent, as a retry takes it: that carries
+  // what a recorded prompt cannot, such as the personas 03's roster names.
+  const offered = new Map(
+    (
+      await stepDef.agentMining!.selectAgents({
+        ctx,
+        detected,
+        formValues: formValues ?? {},
+        llmOutput,
+      })
+    ).map((d) => [d.agentId, d]),
+  );
+  const unoffered = rows.filter((r) => !offered.has(r.agentId));
+  const stored =
+    unoffered.length === 0
+      ? []
+      : await db
+          .select({
+            id: schema.taskStepAgentMinings.id,
+            dispatchPrompt: schema.taskStepAgentMinings.dispatchPrompt,
+          })
+          .from(schema.taskStepAgentMinings)
+          .where(
+            inArray(
+              schema.taskStepAgentMinings.id,
+              unoffered.map((r) => r.id),
+            ),
+          );
   const promptById = new Map(stored.map((r) => [r.id, r.dispatchPrompt]));
   const dispatches: RunnerMiningDispatch[] = [];
   const targets: MiningRetryTargets = new Map();
@@ -1897,6 +1933,12 @@ async function dispatchReservedAgents(
       chargeAttempt: false,
       timeoutAttempts: row.timeoutAttempts,
     };
+    const fresh = offered.get(row.agentId);
+    if (fresh) {
+      dispatches.push(fresh);
+      targets.set(row.agentId, target);
+      continue;
+    }
     const prompt = promptById.get(row.id);
     if (!prompt) {
       await db
