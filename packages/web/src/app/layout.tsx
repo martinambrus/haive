@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import './globals.css';
-import type { RuntimeApiConfig } from '@/lib/api-origin';
+import { runtimeApiConfig, type RuntimeApiConfig } from '@/lib/api-origin';
 
 // Rendered per REQUEST, never prerendered. The whole point of this config is that it comes from
 // the environment the container was started with; baking it in at build time would reproduce the
@@ -26,10 +26,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   // Read here rather than in the client bundle: `NEXT_PUBLIC_*` is inlined at build time and a
   // published image cannot be told a different port afterwards. These two are ordinary runtime
   // env vars, so the same image serves any install.
-  const runtime: RuntimeApiConfig = {
-    ...(process.env.HAIVE_PUBLIC_API_URL ? { apiUrl: process.env.HAIVE_PUBLIC_API_URL } : {}),
-    ...(process.env.HAIVE_API_PORT ? { apiPort: process.env.HAIVE_API_PORT } : {}),
-  };
+  const runtime = runtimeApiConfig();
 
   return (
     <html lang="en" suppressHydrationWarning>

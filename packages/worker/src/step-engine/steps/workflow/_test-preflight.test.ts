@@ -174,6 +174,12 @@ describe('preflightGateSchema', () => {
     expect(body).toContain('COMMON_DATA env variable not defined');
   });
 
+  it('keeps runner output that holds a fence of its own inside one code block', () => {
+    const output = 'Error:\n```\nsnippet\n```';
+    const body = preflightGateSchema({ ...block, output }).description ?? '';
+    expect(body).toContain(['````', block.command, output, '````'].join('\n'));
+  });
+
   it('renders without a missing-file section when the hint named none', () => {
     const body = preflightGateSchema({ ...block, missing: [] }).description ?? '';
     expect(body).not.toContain('Missing environment files');

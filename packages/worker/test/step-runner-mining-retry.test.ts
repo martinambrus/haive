@@ -825,6 +825,48 @@ describe('advanceStep agentMining retry', () => {
 
 /** The fatal class a fan-out must never degrade past: the provider is gone for hours, so
  *  every downstream step re-hits it and the review that "passed" never happened. */
+describe('a mining agent orphaned by a worker restart', () => {
+  const ORPHAN =
+    'CLI invocation orphaned by a worker restart (the worker exited before queueing it)';
+  const stuck = (startedAt: Date | null) => {
+    const state = freshState([
+      miningRow('peer-reviewer', 3, { status: 'pending' }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-peer-reviewer',
+        prompt: 'review',
+        errorMessage: ORPHAN,
+        startedAt,
+        endedAt: new Date(),
+        exitCode: null,
+      },
+    ];
+    return state;
+  };
+
+  it('re-dispatches one that never started, uncharged, even at its attempt cap', async () => {
+    const state = stuck(null);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), terminalFailureRetryStep([]), enqueued);
+
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-peer-reviewer']);
+    const reroll = state.updates.find(
+      (u) => u.table === 'task_step_agent_minings' && u.status === 'pending',
+    );
+    expect(reroll?.attempts).toBe(3);
+  });
+
+  it('retires one that started and died once its attempts are spent', async () => {
+    const state = stuck(new Date());
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), terminalFailureRetryStep([]), enqueued);
+
+    expect(enqueued).toEqual([]);
+  });
+});
+
 const RATE_LIMIT_ERR =
   "Provider rate limit or quota exhausted — the provider's usage limit or quota is exhausted; " +
   'retry this task once it resets. (LLM run reported a failure (terminal_reason "api_error"): ' +

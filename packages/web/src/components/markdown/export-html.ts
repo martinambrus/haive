@@ -92,6 +92,7 @@ export function downloadMarkdownHtml(title: string, root: HTMLElement): void {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>${escapeHtml(title)}</title>
 <style>${BASE_CSS}${harvestHaiveMdCss()}</style>
 </head>

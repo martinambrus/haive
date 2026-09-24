@@ -1,14 +1,28 @@
-import { and, eq } from 'drizzle-orm';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { buildCliRulesBlock } from '@haive/shared';
+import {
+  buildCliRulesBlock,
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import {
   lstatNoFollow,
+  readFileNoFollow,
   readLinkNoFollow,
   readTextNoFollow,
   updateFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface RulesPlan {
   /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
@@ -146,4 +160,97 @@ export async function enabledImportRulesFiles(db: Database, userId: string): Pro
       };
     });
   return planRulesFiles(joined).importFiles;
+}
+
+/** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of a
+ *  forced stage too. A tracked file is never reported ignored, and a failed check answers false. */
+export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repoPath });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `paths` without the rules files git ignores, each dropped one reported: the `git add -f` the
+ *  rest needs would otherwise commit a file the repository keeps out of history on purpose. Call it
+ *  after any `git init`, since before one there is no repository to ask. */
+export async function dropIgnoredRulesFiles(
+  repoPath: string,
+  paths: readonly string[],
+  rulesFiles: ReadonlySet<string>,
+): Promise<{ keep: string[]; warnings: string[] }> {
+  const keep: string[] = [];
+  const warnings: string[] = [];
+  for (const rel of paths) {
+    if (rulesFiles.has(rel) && (await isGitIgnored(repoPath, rel))) {
+      warnings.push(`${rel} is ignored by git, so it stays out of this commit`);
+    } else {
+      keep.push(rel);
+    }
+  }
+  return { keep, warnings };
+}
+
+/** Past any rules block; a larger AGENTS.md is one no comparison is attempted on. */
+export const AGENTS_MD_READ_CAP = 1024 * 1024;
+
+/** The cli-rules region of AGENTS.md on disk: null with no file or no region, `unreadable` for a
+ *  link, a refused read or a file past the cap. */
+export async function readAgentsRulesRegion(
+  repoPath: string,
+): Promise<{ region: string | null } | { unreadable: string }> {
+  let read;
+  try {
+    read = await readFileNoFollow(repoPath, CLI_RULES_DISK_PATH, {
+      strict: true,
+      maxBytes: AGENTS_MD_READ_CAP,
+    });
+  } catch (err) {
+    return { unreadable: err instanceof Error ? err.message : String(err) };
+  }
+  if (read === null) return { region: null };
+  if (read.truncated) return { unreadable: `larger than ${AGENTS_MD_READ_CAP} bytes` };
+  return { region: extractRegion(read.data.toString('utf8'), CLI_RULES_START, CLI_RULES_END) };
+}
+
+/** What a cli-rules artifact row records for the region on disk. It records the region's own
+ *  bytes, and claims them as Haive's only when they are a render: this one, or one an earlier
+ *  onboarding or upgrade of the repository wrote. Otherwise the row keeps the render's hash, so
+ *  the upgrade plan offers the region as a conflict instead of overwriting it. */
+export function cliRulesRegionRecord(
+  region: string,
+  render: string,
+  earlierRenderHashes: ReadonlySet<string>,
+): { content: string; templateContentHash: string; writtenHash: string; haiveWritten: boolean } {
+  const content = normalizeContent(region);
+  const regionHash = sha256Hex(content);
+  const renderHash = sha256Hex(normalizeContent(render));
+  const haiveWritten = regionHash === renderHash || earlierRenderHashes.has(regionHash);
+  return {
+    content,
+    templateContentHash: regionHash,
+    writtenHash: haiveWritten ? regionHash : renderHash,
+    haiveWritten,
+  };
+}
+
+/** The written hashes of the repository's earlier cli-rules rows that hold a render. Backfill
+ *  and rollback rows are left out: their hash is whatever was on disk. */
+export async function loadCliRulesRenderHashes(
+  db: Database,
+  repositoryId: string,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({ writtenHash: schema.onboardingArtifacts.writtenHash })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        eq(schema.onboardingArtifacts.templateKind, CLI_RULES_TEMPLATE_KIND),
+        inArray(schema.onboardingArtifacts.source, ['onboarding', 'upgrade']),
+      ),
+    );
+  return new Set(rows.map((r) => r.writtenHash));
 }

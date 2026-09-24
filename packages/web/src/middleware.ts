@@ -4,6 +4,8 @@ import {
   SESSION_EXPIRED_PARAM,
   SESSION_EXPIRED_VALUE,
 } from '@/lib/route-access';
+import { resolveApiOrigin, runtimeApiConfig } from '@/lib/api-origin';
+import { browserHostname, contentSecurityPolicy } from '@/lib/content-security-policy';
 
 const ACCESS_COOKIE = 'haive_access';
 const REFRESH_COOKIE = 'haive_refresh';
@@ -22,6 +24,16 @@ export function middleware(request: NextRequest) {
   }
 
   const response = NextResponse.next();
+  // Per request, because the api origin is the browser's own hostname on a port set at runtime.
+  const apiOrigin = resolveApiOrigin({
+    config: runtimeApiConfig(),
+    location: {
+      protocol: request.nextUrl.protocol,
+      hostname: browserHostname(request.headers.get('host'), request.nextUrl.hostname),
+    },
+    buildTime: process.env.NEXT_PUBLIC_API_URL,
+  });
+  response.headers.set('Content-Security-Policy', contentSecurityPolicy(apiOrigin));
   if (decision.action === 'continue-and-clear') {
     // Deleted HERE rather than by the layout that discovered the problem: a Server Component
     // cannot set cookies, and leaving them in place is what closes the loop — the next request

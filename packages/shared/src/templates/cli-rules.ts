@@ -19,6 +19,20 @@ export const CLI_RULES_START = '<!-- haive:cli-rules -->';
 /** Closing marker of the cli-rules region inside AGENTS.md. */
 export const CLI_RULES_END = '<!-- /haive:cli-rules -->';
 
+/** Step 07's project-info block. */
+export const PROJECT_INFO_START = '<!-- haive:project-info -->';
+export const PROJECT_INFO_END = '<!-- /haive:project-info -->';
+/** The RTK awareness block 07 inlines into AGENTS.md; `rtk-ref` is kept for blocks older versions wrote. */
+export const RTK_REF_MARKER_START = '<!-- haive:rtk-ref -->';
+export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
+
+/** Every region Haive writes into a rules file, so an onboarding reset strips each of them. */
+export const HAIVE_REGION_MARKERS: ReadonlyArray<readonly [string, string]> = [
+  [PROJECT_INFO_START, PROJECT_INFO_END],
+  [CLI_RULES_START, CLI_RULES_END],
+  [RTK_REF_MARKER_START, RTK_REF_MARKER_END],
+];
+
 /** Stable identity of the cli-rules artifact, shared by the onboarding writer,
  *  the upgrade plan/apply/rollback steps, and the API drift recompute so the id,
  *  kind, and schema version never drift apart across those call sites. */

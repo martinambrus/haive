@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  agentsRulesVerdict,
   appliedImportStubs,
   appliedWrittenPaths,
   headLacksImport,
@@ -127,6 +128,75 @@ describe('headLacksImport', () => {
   });
 });
 
+const RULES = (body: string) =>
+  `# Project\n\n<!-- haive:cli-rules -->\n${body}\n<!-- /haive:cli-rules -->\n`;
+
+describe('agentsRulesVerdict', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), 'haive-agents-verdict-'));
+    await run('git', ['-C', repo, 'init', '-q']);
+    await run('git', ['-C', repo, 'config', 'user.email', 't@example.com']);
+    await run('git', ['-C', repo, 'config', 'user.name', 'T']);
+    await run('git', ['-C', repo, 'config', 'gc.auto', '0']);
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const commit = async (name: string, body: string): Promise<void> => {
+    await writeFile(join(repo, name), body);
+    await run('git', ['-C', repo, 'add', '--', name]);
+    await run('git', ['-C', repo, 'commit', '-qm', name]);
+  };
+
+  it('stages a rules block when there is no HEAD, or HEAD has no AGENTS.md', async () => {
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+    await commit('README.md', 'hi\n');
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+  });
+
+  it('stages a block that differs from HEAD, or that HEAD lacks', async () => {
+    await commit('AGENTS.md', RULES('- rule one'));
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule two'));
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+    await commit('AGENTS.md', '# Project\n');
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+  });
+
+  it('leaves the file alone when only lines outside the block changed', async () => {
+    await commit('AGENTS.md', RULES('- rule one'));
+    await writeFile(join(repo, 'AGENTS.md'), `${RULES('- rule one')}\nA note of my own.\n`);
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'current' });
+  });
+
+  it('has nothing to stage without a block on disk', async () => {
+    await commit('README.md', 'hi\n');
+    await writeFile(join(repo, 'AGENTS.md'), '# Project\n');
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'current' });
+  });
+
+  it('stages a regular file over a link HEAD holds', async () => {
+    await writeFile(join(repo, 'OTHER.md'), RULES('- rule one'));
+    await symlink('OTHER.md', join(repo, 'AGENTS.md'));
+    await run('git', ['-C', repo, 'add', '--', 'OTHER.md', 'AGENTS.md']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'link']);
+    await rm(join(repo, 'AGENTS.md'));
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
+    expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+  });
+
+  it('cannot tell through a link on disk, and says why', async () => {
+    await writeFile(join(repo, 'OTHER.md'), RULES('- rule one'));
+    await symlink('OTHER.md', join(repo, 'AGENTS.md'));
+    expect((await agentsRulesVerdict(repo)).verdict).toBe('unknown');
+  });
+});
+
 describe('03 apply stages the rules delivery HEAD lacks', () => {
   let repo: string;
   const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
@@ -214,6 +284,26 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
       expect(out.warnings.join('\n')).toContain('CLAUDE.md is ignored by git');
     }
     expect(await headTree()).not.toContain('CLAUDE.md');
+  });
+
+  it('commits an AGENTS.md whose rules block HEAD lacks', async () => {
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
+    const out = await applyWith({ writtenPaths: [] });
+    expect(out.commitPerformed).toBe(true);
+    const head = (await run('git', ['-C', repo, 'show', 'HEAD:AGENTS.md'])).stdout;
+    expect(head).toContain('- rule one');
+  });
+
+  it('keeps an AGENTS.md the repository ignores out of the commit, whatever route named it', async () => {
+    await writeFile(join(repo, '.gitignore'), 'AGENTS.md\n');
+    await run('git', ['-C', repo, 'rm', '-q', '--cached', 'AGENTS.md']);
+    await run('git', ['-C', repo, 'add', '.gitignore']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'ignore']);
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
+    const out = await applyWith({ writtenPaths: ['AGENTS.md'] });
+    expect(out.commitPerformed).toBe(false);
+    expect(out.warnings.join('\n')).toContain('AGENTS.md is ignored by git');
+    expect(await headTree()).not.toContain('AGENTS.md');
   });
 
   it('leaves a committed stub and the edits beside it alone', async () => {

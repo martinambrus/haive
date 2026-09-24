@@ -297,6 +297,15 @@ describe('gate-2 status summary', () => {
     expect(decisionDefault(d)).toBe('reject');
   });
 
+  it('keeps check output that holds a fence of its own inside one code block', () => {
+    const output = 'FAIL\n```\n![x](https://img.example/p.png)\n```';
+    const d = baseDetect({
+      verify: { ...allSkipped, test: { ran: true, passed: false, output } },
+      allPassed: false,
+    });
+    expect(row(d, 'Tests')?.body).toBe(['````', output, '````'].join('\n'));
+  });
+
   it('a standalone smoke failure defaults the gate to reject', () => {
     const d = baseDetect({ runtimeSmoke: failSmoke(null) });
     expect(decisionDefault(d)).toBe('reject');

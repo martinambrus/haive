@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/cn';
+import { Markdown } from './markdown';
 import type { ParsedQuiz } from './quiz-parser';
 
 /** Renders quiz prompt/option/explanation strings as inline markdown. The `p`
@@ -24,9 +25,9 @@ const INLINE_COMPONENTS: Components = {
 
 function InlineMarkdown({ text }: { text: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={INLINE_COMPONENTS}>
+    <Markdown remarkPlugins={[remarkGfm]} components={INLINE_COMPONENTS}>
       {text}
-    </ReactMarkdown>
+    </Markdown>
   );
 }
 
