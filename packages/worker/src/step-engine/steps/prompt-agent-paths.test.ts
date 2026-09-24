@@ -839,6 +839,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     'delivery mechanism (argv vs stdin), not a builder',
   'queues/cli-exec/stream-log-retention.ts#expiredPromptFilter':
     'a SQL predicate for stream-log retention',
+  'queues/cli-exec/stream-log-retention.ts#expiredDispatchPromptFilter':
+    'a SQL predicate for stream-log retention',
   'step-engine/steps/workflow/_prompt-defect.ts#parsePromptDefects': 'a parser of agent OUTPUT',
   'sub-agent-emulator/native-mode.ts#assembleNativePrompt':
     'sub-agent assembly — `input.kind` is not `prompt` there, so agentIsolationApplies excludes it',

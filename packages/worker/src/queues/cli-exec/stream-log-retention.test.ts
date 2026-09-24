@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { createDatabase, schema } from '@haive/database';
-import { expiredPromptFilter, expiredStreamLogFilter } from './stream-log-retention.js';
+import {
+  expiredDispatchPromptFilter,
+  expiredPromptFilter,
+  expiredStreamLogFilter,
+} from './stream-log-retention.js';
 
 // postgres.js opens no socket until a query runs, so a bogus URL is enough to render SQL.
 const db = createDatabase('postgres://u:p@127.0.0.1:1/none');
@@ -23,6 +27,16 @@ function renderPrompt(): { sql: string; params: unknown[] } {
     .update(schema.cliInvocations)
     .set({ prompt: '' })
     .where(expiredPromptFilter(db, CUTOFF))
+    .toSQL();
+  return { sql: q.sql, params: q.params };
+}
+
+/** The mining dispatch-prompt sweep's statement, same treatment. */
+function renderDispatchPrompt(): { sql: string; params: unknown[] } {
+  const q = db
+    .update(schema.taskStepAgentMinings)
+    .set({ dispatchPrompt: null })
+    .where(expiredDispatchPromptFilter(db, CUTOFF))
     .toSQL();
   return { sql: q.sql, params: q.params };
 }
@@ -114,5 +128,32 @@ describe('expiredPromptFilter', () => {
     // survives; evicting it here too would empty the Raw tab outright.
     expect(renderPrompt().sql).not.toContain('raw_output');
     expect(render().sql).not.toContain('raw_output');
+  });
+});
+
+describe('expiredDispatchPromptFilter', () => {
+  it('never renders an unconstrained update', () => {
+    // An undefined filter would reach .where() as "no filter" and null every mining row's
+    // dispatch prompt in one pass.
+    expect(expiredDispatchPromptFilter(db, CUTOFF)).toBeDefined();
+    expect(renderDispatchPrompt().sql).toContain('where');
+  });
+
+  it('reaches a mining row only through a step of an exited task', () => {
+    // The same task-exit gate as the invocation sweeps: a revived or still-running task keeps
+    // the prompts its wave-agent retries recover from.
+    const { sql, params } = renderDispatchPrompt();
+    expect(sql).toContain('"task_step_agent_minings"."task_step_id" in (select');
+    expect(sql).toContain('from "task_steps" where "task_steps"."task_id" in (select');
+    expect(sql).toContain('"tasks"."completed_at" is not null');
+    expect(sql).toContain('"tasks"."completed_at" < ');
+    expect(params.filter((p) => p === CUTOFF.toISOString())).toHaveLength(1);
+    for (const status of ['completed', 'failed', 'cancelled']) expect(params).toContain(status);
+  });
+
+  it('leaves an already-swept row alone, and touches no invocation', () => {
+    const { sql } = renderDispatchPrompt();
+    expect(sql).toContain('"dispatch_prompt" is not null');
+    expect(sql).not.toContain('"cli_invocations"');
   });
 });
