@@ -77,7 +77,9 @@ export function InfoSections({
             <>
               <span className="font-medium">{section.title}</span>
               {section.preview && (
-                <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
+                <span className="ml-2 text-xs text-neutral-400 [overflow-wrap:anywhere]">
+                  {section.preview}
+                </span>
               )}
             </>
           }
@@ -129,7 +131,11 @@ function StatusRowHead({ item, expandable }: { item: StatusItem; expandable: boo
       )}
       <span className="min-w-0 flex-1 text-sm text-neutral-100">
         <span className="font-medium">{item.label}</span>
-        {item.detail && <span className="ml-2 text-xs text-neutral-400">{item.detail}</span>}
+        {item.detail && (
+          <span className="ml-2 text-xs text-neutral-400 [overflow-wrap:anywhere]">
+            {item.detail}
+          </span>
+        )}
       </span>
       <span
         className={cn(

@@ -52,7 +52,7 @@ export function CliPickerGrid({
   // so the default row and the per-role/per-seat rows line up as columns.
   const cliSelectBase =
     'h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50';
-  const cliSelectClass = `${cliSelectBase} w-60`;
+  const cliSelectClass = `${cliSelectBase} w-60 min-w-0`;
   const effortSelectClass = `${cliSelectBase} w-24`;
   // Label sits ABOVE its dropdowns, not beside them. Beside, the labels have to share one
   // fixed-width column or the dropdowns go ragged — and that column is as wide as the
@@ -129,7 +129,7 @@ export function CliPickerGrid({
        picker starting wherever the previous label happened to end. auto-fill
        drops cells per row as the window narrows; the cell width never changes,
        so nothing re-flows on a CLI switch. */
-    <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(22rem,1fr))]">
+    <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(min(22rem,100%),1fr))]">
       {roles && roles.length > 0 ? (
         // Multi-CLI step (e.g. spec-quality): one dropdown per role.
         roles.map((roleDesc) => (
