@@ -340,6 +340,45 @@ describe('task attachment routes', () => {
       expect(await listing(up('spec'))).toEqual(['a.md']);
     });
 
+    it('takes back a name claimed after the driver gave up on its section', async () => {
+      const archive = await seedFile('spec.zip', 'PK');
+      await interruptedExpansion(archive.id as string, 'spec', ['a.md']);
+      // The transaction rejects while the section is still settling, and the section runs on to
+      // claim a name, as postgres.js allows.
+      const real = fake.db;
+      let section: Promise<unknown> = Promise.resolve();
+      h.db = {
+        ...real,
+        transaction: <R>(fn: (tx: typeof real) => Promise<R>) =>
+          new Promise<R>((resolve, reject) => {
+            const run = real.transaction((tx) =>
+              fn({
+                ...tx,
+                query: {
+                  ...tx.query,
+                  taskAttachments: {
+                    ...tx.query.taskAttachments,
+                    findMany: async (opts) => {
+                      reject(new Error('connection lost'));
+                      await new Promise((r) => setTimeout(r, 20));
+                      return tx.query.taskAttachments.findMany(opts);
+                    },
+                  },
+                },
+              }),
+            );
+            section = run.catch(() => {});
+            run.then(resolve, reject);
+          }),
+      };
+      const res = await upload('b.md', 'mine');
+      await section;
+      expect(res.status).toBe(500);
+      expect(await exists(up('b.md'))).toBe(false);
+      expect(filenames()).toEqual(['spec.zip']);
+      expect((await listing(up())).filter((n) => n.startsWith('.expanding-'))).toEqual([]);
+    });
+
     it('de-dupes within the file’s own folder, starting at (2)', async () => {
       const names: unknown[] = [];
       for (const [name, body] of [
