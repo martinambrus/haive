@@ -102,7 +102,11 @@ import {
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
-import { StepSupersededError, updateOwnedStep } from '../step-engine/step-ownership.js';
+import {
+  StepSupersededError,
+  lockOwnedStep,
+  updateOwnedStep,
+} from '../step-engine/step-ownership.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -1326,9 +1330,11 @@ export async function handleResult(
       }
       if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
       // The round is recorded with the pointer write that hands the task to it, and only while the
-      // task is still at the epoch this job holds: a round a Retry overtook would leave a `started`
-      // that counts toward the cap, and a diagnosis nobody was sent.
+      // source row is still this pass's and the task is still at the epoch this job holds: a round
+      // a Retry overtook would leave a `started` that counts toward the cap, and a diagnosis nobody
+      // was sent. The row is taken first, as a Retry takes the steps before the task.
       const entered = await db.transaction(async (tx) => {
+        if (!(await lockOwnedStep(tx, result.row.id))) return false;
         const pointed = await markTaskRunningWithStep(
           tx,
           ctx.taskId,
@@ -1352,7 +1358,7 @@ export async function handleResult(
       if (!entered) {
         logger.info(
           { taskId: ctx.taskId, stepId },
-          'fix loop not entered: the task moved to a newer epoch before its hand-off',
+          'fix loop not entered: a Retry overtook its hand-off',
         );
         return;
       }
@@ -2419,6 +2425,9 @@ async function isStepLive(
   return row.status === 'pending' && row.waitingStartedAt !== null;
 }
 
+const ABANDONED_RUN_MESSAGE =
+  'CLI invocation superseded by a worker restart (the task had moved past its step)';
+
 /** Requeue an orphan the task has moved past: fold its dead run into carried_* and put the row
  *  back to a clean `pending`. It must not stay in running/waiting_cli, because the
  *  other-step-active guard refuses every advance while a sibling sits there — the task would
@@ -2435,27 +2444,44 @@ async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise
   const row = rows[0];
   if (!row) return;
   const fold = computeFoldContribution(row, Date.now());
-  await db
-    .update(schema.taskSteps)
-    .set({
-      status: 'pending',
-      startedAt: null,
-      endedAt: null,
-      idleMs: 0,
-      waitingStartedAt: null,
-      userActiveMs: 0,
-      carriedWorkMs: row.carriedWorkMs + fold.workMs,
-      carriedIdleMs: row.carriedIdleMs + fold.idleMs,
-      carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
-      statusMessage: null,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.taskSteps.id, taskStepId),
-        inArray(schema.taskSteps.status, ['waiting_cli', 'running']),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    const [requeued] = await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'pending',
+        startedAt: null,
+        endedAt: null,
+        idleMs: 0,
+        waitingStartedAt: null,
+        userActiveMs: 0,
+        carriedWorkMs: row.carriedWorkMs + fold.workMs,
+        carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+        carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
+        statusMessage: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.taskSteps.id, taskStepId),
+          inArray(schema.taskSteps.status, ['waiting_cli', 'running']),
+        ),
+      )
+      .returning({ id: schema.taskSteps.id });
+    if (!requeued) return;
+    // A run the row still has would resume it once it ends, stamped with the task's epoch at that
+    // moment, and the other-step guard cannot refuse that while the current step is still pending.
+    const now = new Date();
+    await tx
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now, endedAt: now, errorMessage: ABANDONED_RUN_MESSAGE })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, taskStepId),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+  });
 }
 
 /** What boot recovery needs from BullMQ, injectable so a test can drive the re-drive branch

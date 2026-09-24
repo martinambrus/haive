@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import { StepSupersededError, updateOwnedStep } from '../src/step-engine/step-ownership.js';
+import {
+  StepSupersededError,
+  lockOwnedStep,
+  updateOwnedStep,
+} from '../src/step-engine/step-ownership.js';
 
 /** Values a drizzle condition binds, in order. */
 function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
@@ -51,5 +55,41 @@ describe('updateOwnedStep', () => {
     await expect(updateOwnedStep(db, 'step1', { status: 'failed' })).rejects.toBeInstanceOf(
       StepSupersededError,
     );
+  });
+});
+
+function lockDb(returned: unknown[]) {
+  const seen: { where?: unknown; strength?: unknown } = {};
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: (cond: unknown) => {
+          seen.where = cond;
+          return {
+            for: async (strength: unknown) => {
+              seen.strength = strength;
+              return returned;
+            },
+          };
+        },
+      }),
+    }),
+  } as unknown as Database;
+  return { db, seen };
+}
+
+describe('lockOwnedStep', () => {
+  it('locks the row for update only while it is not pending or skipped', async () => {
+    const { db, seen } = lockDb([{ id: 'step1' }]);
+    expect(await lockOwnedStep(db, 'step1')).toBe(true);
+    expect(seen.strength).toBe('update');
+    expect(conditionValues(seen.where)).toEqual(
+      expect.arrayContaining(['step1', 'pending', 'skipped']),
+    );
+  });
+
+  it('answers false once a Retry or a Skip took the row', async () => {
+    const { db } = lockDb([]);
+    expect(await lockOwnedStep(db, 'step1')).toBe(false);
   });
 });

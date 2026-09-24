@@ -36,6 +36,8 @@ const h = vi.hoisted(() => {
     events: [] as unknown[],
     /** What the task queue is asked to enqueue. */
     add: vi.fn(async (..._args: unknown[]) => undefined),
+    /** The source row still reads as this pass's, not reset by a Retry. */
+    sourceOwned: true,
   };
   return { state };
 });
@@ -63,8 +65,11 @@ const db = {
   select: () => {
     h.state.onSelect();
     if (!h.state.readsAnswer) throw new Error('the job went no further');
-    // Awaited directly by some reads and cut with .limit() by others.
-    const rows = Object.assign(Promise.resolve([]), { limit: async () => [] });
+    // Awaited directly by some reads, cut with .limit() by others, and locked by the hand-off.
+    const rows = Object.assign(Promise.resolve([]), {
+      limit: async () => [],
+      for: async () => (h.state.sourceOwned ? [{ id: 'ts-1' }] : []),
+    });
     return { from: () => ({ where: () => rows }) };
   },
   insert: () => ({
@@ -129,6 +134,7 @@ afterEach(() => {
   h.state.taskWrites = [];
   h.state.events = [];
   h.state.add.mockClear();
+  h.state.sourceOwned = true;
   setContainerCleanupRunner(null);
 });
 
@@ -225,6 +231,18 @@ describe('a job that resets steps itself', () => {
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     // No round recorded as requested or started, and nothing queued for it.
+    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('enters no fix round once a Retry reset its source step, whatever the epoch', async () => {
+    h.state.readsAnswer = true;
+    // The Retry has written the steps and not yet the task, so the epoch still matches.
+    h.state.sourceOwned = false;
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
     expect(h.state.add).not.toHaveBeenCalled();
   });

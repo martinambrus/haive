@@ -258,7 +258,8 @@ redelivered after it was applied. A submission, a retry and a first run still fl
 - A `waiting_cli` step the task is on has its orphaned runs ended, and unstarted runs no queued job
   owes are ended too. The task's epoch is then fenced by a compare-and-swap on the state read, and
   the step is re-driven at the new epoch, so every advance queued before the restart is stale. A
-  step the task has moved past is requeued rather than re-driven.
+  step the task has moved past is requeued rather than re-driven, and every run it still has is
+  superseded: one that ended later would resume it at whatever epoch the task was at by then.
 - A `running` step the task is on is decided by `bootRecoveryAction`. With agent work behind it (a
   finished loop pass, an agent row, or a run of its own nothing superseded), it is a parked step
   whose park write was lost. It is demoted to `waiting_cli`, guarded on `running`, and recovered
@@ -301,7 +302,8 @@ api Retry keeps its own, and a lost swap rolls the whole reset back and hands no
 hand-off after it points the task at the target only while the task is still at that epoch, and a
 fix round's request and `started` event are written in the same transaction: a new round has no row
 to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
-cap.
+cap. That transaction first locks the source row while it is still the pass's own
+(`lockOwnedStep`), since a Retry writes the steps before it moves the epoch.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,

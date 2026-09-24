@@ -126,9 +126,12 @@ interface CurrentStepScenario {
   taskNow?: { status: string; currentStepId: string | null; currentRound: number };
   /** The step row the abandoned-row requeue reads. */
   stepRow?: Record<string, unknown>;
+  /** Where the task points, when it has moved past the stuck step. */
+  currentStepId?: string;
 }
 
-/** One `waiting_cli` step that IS the task's current step, so reconcile re-drives it. */
+/** One `waiting_cli` step that IS the task's current step, so reconcile re-drives it, unless the
+ *  scenario points the task elsewhere. */
 function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScenario): Database {
   const stuck = {
     taskStepId: 'ts-1',
@@ -137,11 +140,11 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
     round: 2,
     userId: 'user-1',
     epoch: 3,
-    currentStepId: '09_5-skill-generation',
+    currentStepId: scenario.currentStepId ?? '09_5-skill-generation',
     currentRound: 2,
   };
   let joinedReads = 0;
-  return {
+  const db = {
     select: (_fields?: unknown) => ({
       from: (table: unknown) => {
         const rows = (): unknown[] =>
@@ -172,16 +175,23 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
           return {
             then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
               done.then(onOk, onErr),
-            returning: async () => (tableNameOf(table) === 'tasks' ? scenario.fenced : []),
+            returning: async () => {
+              const name = tableNameOf(table);
+              if (name === 'tasks') return scenario.fenced;
+              return name === 'task_steps' ? [{ id: 'ts-1' }] : [];
+            },
           };
         },
       }),
     }),
-  } as unknown as Database;
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+  };
+  return db as unknown as Database;
 }
 
-/** Pass 1 finds nothing; pass 2 finds a `running` row the task has moved past. */
-function makeAbandonedRunningDb(recorded: RecordedUpdate[]): Database {
+/** Pass 1 finds nothing; pass 2 finds a `running` row the task has moved past. The requeue lands
+ *  unless something else moved the row first. */
+function makeAbandonedRunningDb(recorded: RecordedUpdate[], requeueLands = true): Database {
   const abandoned = {
     taskStepId: 'ts-2',
     taskId: 'task-1',
@@ -204,7 +214,7 @@ function makeAbandonedRunningDb(recorded: RecordedUpdate[]): Database {
     carriedUserActiveMs: 0,
   };
   let joinedReads = 0;
-  return {
+  const db = {
     select: (_fields?: unknown) => ({
       from: (table: unknown) => {
         const whereFn = (_cond: unknown) => ({
@@ -217,12 +227,27 @@ function makeAbandonedRunningDb(recorded: RecordedUpdate[]): Database {
     }),
     update: (table: unknown) => ({
       set: (v: Record<string, unknown>) => ({
-        where: async (cond: unknown) => {
-          recorded.push({ table: tableNameOf(table), set: v, where: cond });
+        where: (cond: unknown) => {
+          const name = tableNameOf(table);
+          const landed = !(name === 'task_steps' && !requeueLands);
+          if (landed) recorded.push({ table: name, set: v, where: cond });
+          const done = Promise.resolve(undefined);
+          return {
+            then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+              done.then(onOk, onErr),
+            returning: async () => (landed ? [{ id: 'ts-2' }] : []),
+          };
         },
       }),
     }),
-  } as unknown as Database;
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+  };
+  return db as unknown as Database;
+}
+
+/** The write that detaches a requeued row's runs, if any. */
+function detachOf(recorded: RecordedUpdate[]): RecordedUpdate | undefined {
+  return recorded.find((u) => u.table === 'cli_invocations' && u.set.supersededAt !== undefined);
 }
 
 describe('reconcileOrphanedSteps requeueing a running row the task moved past', () => {
@@ -237,6 +262,31 @@ describe('reconcileOrphanedSteps requeueing a running row the task moved past', 
     expect(conditionValues(requeue!.where)).toEqual(
       expect.arrayContaining(['waiting_cli', 'running']),
     );
+  });
+
+  it('supersedes every run the row still has, so none can resume it', async () => {
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(makeAbandonedRunningDb(recorded), {
+      enqueueAdvance: async () => undefined,
+      queuedInvocationIds: async () => new Set(),
+    });
+    const detach = detachOf(recorded);
+    expect(detach).toBeDefined();
+    expect(detach!.set.endedAt).toBeInstanceOf(Date);
+    expect(conditionValues(detach!.where)).toContain('ts-2');
+    // Live runs only: a run that already ended keeps its outcome and its spend.
+    expect(conditionColumns(detach!.where)).toEqual(
+      expect.arrayContaining(['task_step_id', 'ended_at', 'superseded_at']),
+    );
+  });
+
+  it('leaves the runs to whatever moved the row first', async () => {
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(makeAbandonedRunningDb(recorded, false), {
+      enqueueAdvance: async () => undefined,
+      queuedInvocationIds: async () => new Set(),
+    });
+    expect(detachOf(recorded)).toBeUndefined();
   });
 });
 
@@ -393,6 +443,41 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
     } finally {
       errors.mockRestore();
     }
+  });
+
+  it('supersedes the queued run of a parked row the task moved past', async () => {
+    advances.length = 0;
+    const recorded: RecordedUpdate[] = [];
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb(recorded, {
+        unstarted: ['inv-queued'],
+        fenced: [],
+        currentStepId: '08b-test-management',
+        stepRow: {
+          id: 'ts-1',
+          status: 'waiting_cli',
+          startedAt: new Date(Date.now() - 60_000),
+          endedAt: null,
+          idleMs: 0,
+          userActiveMs: 0,
+          waitingStartedAt: null,
+          carriedWorkMs: 0,
+          carriedIdleMs: 0,
+          carriedUserActiveMs: 0,
+        },
+      }),
+      deps(new Set(['inv-queued'])),
+    );
+    const requeue = recorded.findIndex(
+      (u) => u.table === 'task_steps' && u.set.status === 'pending',
+    );
+    const detach = recorded.findIndex(
+      (u) => u.table === 'cli_invocations' && u.set.supersededAt !== undefined,
+    );
+    expect(requeue).toBeGreaterThanOrEqual(0);
+    expect(detach).toBeGreaterThan(requeue);
+    expect(conditionValues(recorded[detach]!.where)).toContain('ts-1');
+    expect(advances).toEqual([]);
   });
 
   it('ends a never-started run that no job owes, and leaves a queued one alone', async () => {
