@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -251,14 +252,24 @@ async function dropDeletedSources(
   ctx.logger.info({ dropped: [...gone] }, 'coverage: skipping gaps from deleted documents');
   return picked.filter((key) => !gone.has(key));
 }
+const rawSectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
-const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+export const sectionAgentId = (key: string): string => {
+  const raw = rawSectionAgentId(key);
+  // `agent_id` is 128 characters with the `-r<round>` suffix, and an attachment path can run to 400.
+  return raw.length <= 120
+    ? raw
+    : `cover-${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+};
 /** Whether a clean repair already answered this section: under its own key, or under the name-only
  *  key a repair was recorded by before sections carried their row. Such a record cannot say which
  *  row it covered, so it keeps the meaning it had. */
-const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
-  handled.has(sectionAgentId(sectionKey(c))) || handled.has(sectionAgentId(nameSectionKey(c)));
+export const sectionHandled = (handled: ReadonlySet<string>, c: CoverageCandidate): boolean =>
+  // A raw id past 120 characters that fit once its round was appended may already be stored.
+  [sectionKey(c), nameSectionKey(c)].some(
+    (key) => handled.has(sectionAgentId(key)) || handled.has(rawSectionAgentId(key)),
+  );
 
 /**
  * The gate can offer the SAME gap twice, so its agent id has to say which round
