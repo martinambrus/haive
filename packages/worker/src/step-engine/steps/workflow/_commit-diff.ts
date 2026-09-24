@@ -130,7 +130,8 @@ export async function buildFileEntry(
     // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
     // write. A link, a FIFO or a vanished file all read as empty, which is what this artifact
     // already means by an unreadable working file.
-    const read = await readFileNoFollow(workspacePath, e.path, {
+    const wa = workspaceAnchor(workspacePath);
+    const read = await readFileNoFollow(wa.anchor, `${wa.prefix}${e.path}`, {
       maxBytes: PER_FILE_CONTENT_CAP + 1,
     });
     if (read !== null) {

@@ -14,6 +14,7 @@ import {
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { gitRun } from '../../../repo/git-push.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
@@ -322,6 +323,7 @@ export async function runRagIndexSync(
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
   const { repoPath, prefs, projectName, ollamaReachable, codeCollect, sweepProtectedPaths } = opts;
+  const wa = workspaceAnchor(repoPath);
 
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -442,7 +444,7 @@ export async function runRagIndexSync(
 
       let text: string;
       try {
-        const read = await readTextNoFollow(repoPath, relPath);
+        const read = await readTextNoFollow(wa.anchor, `${wa.prefix}${relPath}`);
         if (read === null) continue;
         text = read;
       } catch {

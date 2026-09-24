@@ -197,6 +197,41 @@ describe('instructionsNameAgentPath', () => {
     }
   });
 
+  it('reads a worktree through the repository root and follows its imports there', async () => {
+    const root = await tree({
+      '.haive/worktrees/wt/CLAUDE.md': '@AGENTS.md\n',
+      '.haive/worktrees/wt/AGENTS.md': 'Read .claude/agents/reviewer.md before you start.',
+    });
+    try {
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: join(root, '.haive/worktrees/wt'),
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails OPEN when the worktree directory is a link', async () => {
+    const root = await tree({ 'elsewhere/CLAUDE.md': 'Nothing to see.\n' });
+    await mkdir(join(root, '.haive/worktrees'), { recursive: true });
+    await symlink(join(root, 'elsewhere'), join(root, '.haive/worktrees/wt'));
+    try {
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: join(root, '.haive/worktrees/wt'),
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an @ import that leaves the tree', async () => {
     const root = await tree({ 'CLAUDE.md': '@../outside.md\n@/etc/passwd\n' });
     try {
@@ -233,6 +268,29 @@ describe('readPersonaBodies', () => {
       expect(bodies['peer-reviewer']).toContain('Do the review.');
       expect(bodies['peer-reviewer']).not.toContain('description: d');
       expect(oversized).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a worktree body through the repository root, and nothing through a linked one', async () => {
+    const body = '---\nname: reviewer\ndescription: d\n---\n\nReview carefully.\n';
+    const root = await tree({
+      '.haive/worktrees/real/.claude/agents/reviewer.md': body,
+      'elsewhere/.claude/agents/reviewer.md': body,
+    });
+    await symlink(join(root, 'elsewhere'), join(root, '.haive/worktrees/linked'));
+    const read = (worktree: string) =>
+      readPersonaBodies({
+        workerTree: join(root, '.haive/worktrees', worktree),
+        projectAgentsDir: '.claude/agents',
+        ids: ['reviewer'],
+        policy: OPEN_POLICY,
+        loadTracked: noTracked,
+      });
+    try {
+      expect((await read('real')).bodies).toEqual({ reviewer: 'Review carefully.' });
+      expect((await read('linked')).bodies).toEqual({});
     } finally {
       await rm(root, { recursive: true, force: true });
     }
