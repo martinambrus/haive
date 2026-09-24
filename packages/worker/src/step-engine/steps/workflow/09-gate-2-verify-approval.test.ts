@@ -335,6 +335,57 @@ describe('gate-2 status summary', () => {
   });
 });
 
+describe('gate-2 similar sites', () => {
+  const ran = { ran: true, passed: true, output: '' };
+  const base = {
+    verify: { test: ran, lint: ran, typecheck: ran },
+    allPassed: true,
+    validation: null,
+    testManagement: null,
+    browser: null,
+    codeReview: null,
+    codeAudit: null,
+    adversarial: null,
+    liveBrowser: null,
+    runtimeSmoke: { ran: true, passed: true, httpStatus: 200, url: 'u', errorExcerpt: '' },
+  };
+  const form = (detected: unknown) =>
+    gate2VerifyApprovalStep.form!({} as never, detected as never)!;
+
+  it('lists them in the last row, with the way to act on them', () => {
+    const rows =
+      form({
+        ...base,
+        similarSites: [{ path: 'b.ts', reason: 'same', source: 'implementation round 0' }],
+        similarSitesOmitted: 0,
+      }).statusSummary ?? [];
+    const last = rows[rows.length - 1]!;
+    expect(last.label).toBe('Similar code elsewhere — not changed');
+    expect(last.status).toBe('info');
+    expect(last.body).toContain('reject with feedback that names it');
+    expect(last.body).toContain('- `b.ts` — same (from implementation round 0)');
+  });
+
+  it('renders a payload persisted before the field existed exactly as before', () => {
+    const before = form(base);
+    expect((before.statusSummary ?? []).some((r) => r.label.startsWith('Similar code'))).toBe(
+      false,
+    );
+    expect(form({ ...base, similarSites: [], similarSitesOmitted: 0 })).toEqual(before);
+  });
+
+  it('never moves the decision default', () => {
+    const decision = (d: unknown) =>
+      (form(d).fields.find((f) => f.id === 'decision') as { default?: string }).default;
+    const withSites = {
+      ...base,
+      similarSites: [{ path: 'b.ts', reason: '', source: 'implementation round 0' }],
+    };
+    expect(decision(base)).toBe('approve');
+    expect(decision(withSites)).toBe('approve');
+  });
+});
+
 describe('recurrenceTag', () => {
   const map = new Map<string, number[]>([
     [recurrenceKey('peer-reviewer', 'src/a.ts'), [0, 2]],

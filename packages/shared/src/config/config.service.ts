@@ -310,7 +310,7 @@ export const CONFIG_KEYS = {
 
   // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
   // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
-  // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
+  // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (256 MiB).
   TASK_ATTACHMENT_MAX_BYTES: 'config:tasks:attachmentMaxBytes',
 
   // Retention window (days) for cli_invocations.stream_log — the full CLI transcript

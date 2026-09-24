@@ -94,8 +94,10 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     ),
     '',
     'Do NOT run git — it is unavailable in this environment; the orchestrator commits your work after you finish.',
+    'If you come across the same code or the same defect in a place this issue does not ask you to change,',
+    'leave it unchanged and list it under "similar_sites" instead, so the person reviewing the change can decide.',
     'When finished, emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": ["path/one"], "debt_items": [], "concerns": "<notes or empty>" }`,
+    `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": ["path/one"], "debt_items": [], "concerns": "<notes or empty>", "similar_sites": [{ "path": "<workspace-relative path>", "lines": "<e.g. 12-18, optional>", "reason": "<one line: what is similar>" }] }`,
   ]
     .filter(Boolean)
     .join('\n');

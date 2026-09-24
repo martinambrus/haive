@@ -7,6 +7,7 @@ import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { sanitizeSimilarSites, type SimilarSite } from './_similar-sites.js';
 import {
   commentPolicyLines,
   ddevConfigGuidanceLines,
@@ -66,6 +67,9 @@ interface ImplementApply {
    *  carried into later fix rounds by loadPriorFixContext. '' when none reported. */
   environmentFindings: string;
   source: 'llm' | 'stub';
+  /** Same code or defect elsewhere that the agent deliberately left alone; shown at gate 2.
+   *  Last, so a long list cannot push the fields above out of a truncated recap. */
+  similarSites: SimilarSite[];
 }
 
 interface PrePlanningOutput {
@@ -83,6 +87,7 @@ export function parseImplementOutput(raw: unknown): {
   filesTouched: string[];
   notes: string;
   environmentFindings: string;
+  similarSites: SimilarSite[];
 } | null {
   if (!raw) return null;
   let text: string;
@@ -96,6 +101,7 @@ export function parseImplementOutput(raw: unknown): {
         obj.filesTouched,
         typeof obj.notes === 'string' ? obj.notes : '',
         typeof obj.environmentFindings === 'string' ? obj.environmentFindings : '',
+        obj.similarSites,
       );
     }
     return null;
@@ -114,6 +120,7 @@ export function parseImplementOutput(raw: unknown): {
       obj.filesTouched,
       typeof obj.notes === 'string' ? (obj.notes as string) : '',
       typeof obj.environmentFindings === 'string' ? (obj.environmentFindings as string) : '',
+      obj.similarSites,
     );
   }
   return null;
@@ -124,11 +131,24 @@ function normalise(
   filesTouchedRaw: unknown,
   notes: string,
   environmentFindings: string,
-): { summary: string; filesTouched: string[]; notes: string; environmentFindings: string } {
+  similarSitesRaw: unknown,
+): {
+  summary: string;
+  filesTouched: string[];
+  notes: string;
+  environmentFindings: string;
+  similarSites: SimilarSite[];
+} {
   const filesTouched = Array.isArray(filesTouchedRaw)
     ? (filesTouchedRaw as unknown[]).filter((v): v is string => typeof v === 'string')
     : [];
-  return { summary, filesTouched, notes, environmentFindings };
+  return {
+    summary,
+    filesTouched,
+    notes,
+    environmentFindings,
+    similarSites: sanitizeSimilarSites(similarSitesRaw),
+  };
 }
 
 /** Remove fenced code blocks (```...```), leaving the agent's prose. */
@@ -159,9 +179,13 @@ function collectFileList(obj: Record<string, unknown> | null): string[] {
  *  salvage an honest record from whatever it returned — its prose summary plus any file
  *  list — instead of falsely reporting a skip. Null only when there is no agent output
  *  at all (then apply emits the genuine no-output stub). */
-export function salvageImplementOutput(
-  raw: unknown,
-): { summary: string; filesTouched: string[]; notes: string; environmentFindings: string } | null {
+export function salvageImplementOutput(raw: unknown): {
+  summary: string;
+  filesTouched: string[];
+  notes: string;
+  environmentFindings: string;
+  similarSites: SimilarSite[];
+} | null {
   let text = '';
   let obj: Record<string, unknown> | null = null;
   if (typeof raw === 'string') {
@@ -187,6 +211,7 @@ export function salvageImplementOutput(
     filesTouched: collectFileList(obj),
     notes: '',
     environmentFindings: envFindings.slice(0, 2000),
+    similarSites: sanitizeSimilarSites(obj?.similarSites),
   };
 }
 
@@ -195,6 +220,7 @@ function stubImplement(detect: ImplementDetect): {
   filesTouched: string[];
   notes: string;
   environmentFindings: string;
+  similarSites: SimilarSite[];
 } {
   return {
     summary:
@@ -204,6 +230,7 @@ function stubImplement(detect: ImplementDetect): {
       ? `Gate 1 feedback carried forward: ${detect.gateFeedback}`
       : 'No additional notes recorded.',
     environmentFindings: '',
+    similarSites: [],
   };
 }
 
@@ -367,8 +394,12 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         'Follow the patterns you find; avoid documented anti-patterns.',
         ...commentPolicyLines(),
         '',
+        'If you come across the same code or the same defect in a place this task does not ask you to',
+        'change, leave it unchanged and list it under "similarSites" instead, so the person reviewing',
+        'the change can decide. Use an empty list when there are none.',
+        '',
         'When finished emit ONE JSON object inside a ```json fenced code block with the shape:',
-        '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>", "environmentFindings": "<facts you established about the sandbox/tooling/runtime and anything you ruled out, so later fix rounds need not redo it>" }',
+        '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>", "environmentFindings": "<facts you established about the sandbox/tooling/runtime and anything you ruled out, so later fix rounds need not redo it>", "similarSites": [{ "path": "<workspace-relative path>", "lines": "<e.g. 12-18, optional>", "reason": "<one line: what is similar>" }] }',
         '',
         `Workspace path: ${detected.sandboxWorkspacePath}`,
         `Your current working directory is already set to the workspace path above.`,
@@ -522,6 +553,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         notes: parsed.notes,
         environmentFindings: parsed.environmentFindings,
         source: 'llm',
+        similarSites: parsed.similarSites,
       };
     }
     // Strict parse missed. If the agent still returned output (e.g. the browser-verify
@@ -534,7 +566,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         'implementation summary salvaged from off-format agent output',
       );
       await record(salvaged);
-      return { ...salvaged, source: 'llm' };
+      return { source: 'llm', ...salvaged };
     }
     const stub = stubImplement(args.detected);
     ctx.logger.info({ source: 'stub' }, 'implementation stubbed (no agent output)');
@@ -544,6 +576,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       notes: stub.notes,
       environmentFindings: stub.environmentFindings,
       source: 'stub',
+      similarSites: stub.similarSites,
     };
   },
 };

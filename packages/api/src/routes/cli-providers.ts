@@ -11,6 +11,7 @@ import {
   createCliProviderRequestSchema,
   DEFAULT_AGENT_RULES,
   envelopeEncrypt,
+  inheritsDefaultRules,
   isOllamaCloudModel,
   isRunnableCliVersion,
   normalizeCliArgsArray,
@@ -235,6 +236,14 @@ async function enqueueOllamaProvisionForProvider(
 
 export const cliProviderRoutes = new Hono<AppEnv>();
 
+/** `rulesInherited` lets the provider form show the live default, which follows template edits,
+ *  instead of the possibly stale copy of it stored on the row. */
+export function withRulesState<T extends { rulesContent: string }>(
+  row: T,
+): T & { rulesInherited: boolean } {
+  return { ...row, rulesInherited: inheritsDefaultRules(row.rulesContent) };
+}
+
 cliProviderRoutes.get('/catalog', async (c) => {
   const db = getDb();
   const versionRows = await db.query.cliPackageVersions.findMany();
@@ -343,7 +352,7 @@ cliProviderRoutes.get('/', async (c) => {
   // null for knob-less CLIs) so the task UI can populate the per-step effort
   // dropdown and hide it for CLIs without an effort knob.
   const providers = rows.map((p) => ({
-    ...p,
+    ...withRulesState(p),
     effortScale: CLI_PROVIDER_CATALOG[p.name].effortScale,
   }));
   return c.json({ providers });
@@ -357,7 +366,7 @@ cliProviderRoutes.get('/:id', async (c) => {
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
   });
   if (!row) throw new HttpError(404, 'CLI provider not found');
-  return c.json({ provider: row });
+  return c.json({ provider: withRulesState(row) });
 });
 
 cliProviderRoutes.post('/', async (c) => {
@@ -408,7 +417,7 @@ cliProviderRoutes.post('/', async (c) => {
   return c.json(
     {
       provider: {
-        ...created,
+        ...withRulesState(created),
         sandboxImageBuildStatus: 'building' as const,
         ...(provisioningModel
           ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
@@ -514,7 +523,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     await enqueueBuildForProvider(id, userId);
     return c.json({
       provider: {
-        ...updatedRow,
+        ...withRulesState(updatedRow),
         sandboxImageBuildStatus: 'building' as const,
         sandboxImageBuildError: null,
         ...modelStatusOverride,
@@ -522,7 +531,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     });
   }
 
-  return c.json({ provider: { ...updatedRow, ...modelStatusOverride } });
+  return c.json({ provider: { ...withRulesState(updatedRow), ...modelStatusOverride } });
 });
 
 cliProviderRoutes.delete('/:id', async (c) => {
@@ -723,7 +732,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
   return c.json(
     {
       provider: {
-        ...created,
+        ...withRulesState(created),
         sandboxImageBuildStatus: 'building' as const,
         ...(provisioningModel
           ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }

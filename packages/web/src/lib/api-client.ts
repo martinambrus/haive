@@ -529,6 +529,9 @@ export interface CliProvider {
   envVars: Record<string, string> | null;
   cliArgs: string[] | null;
   rulesContent: string;
+  /** True when the stored rules are empty or a copy of a shipped default, so the provider follows
+   *  the live default. Absent on a response that does not compute it. */
+  rulesInherited?: boolean;
   supportsSubagents: boolean;
   networkPolicy: CliNetworkPolicy;
   egressDomains: string[];

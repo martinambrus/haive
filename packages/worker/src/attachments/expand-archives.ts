@@ -1,15 +1,22 @@
+import { randomUUID } from 'node:crypto';
 import {
-  chmodNoFollow,
-  chownNoFollow,
+  applyTreeNoFollow,
+  ensureDirNoFollow,
   lstatNoFollow,
   readdirNoFollow,
   removeNoFollow,
   renameNoFollow,
+  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import path from 'node:path';
-import { and, asc, eq, isNull } from 'drizzle-orm';
-import type { Database } from '@haive/database';
-import { schema } from '@haive/database';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import {
+  isLockNotAvailable,
+  schema,
+  withTaskAttachmentsLock,
+  type Database,
+  type DbTx,
+} from '@haive/database';
 import {
   archiveStem,
   attachmentCopyName,
@@ -25,7 +32,18 @@ import {
   splitAttachmentPath,
   splitAttachmentStoredPath,
 } from '@haive/shared';
-import { rewriteAttachmentsManifest } from '@haive/shared/attachments-fs';
+import {
+  EXPANSION_INTENT_FILE,
+  EXPANSION_STAGING_PREFIX,
+  expansionAttemptArchiveId,
+  pruneAfter,
+  readExpansionIntent,
+  removeExpansionStagings,
+  removeFiles,
+  rewriteAttachmentsManifest,
+  settleExpansionAttempt,
+  settleExpansionAttempts,
+} from '@haive/shared/attachments-fs';
 import { extractArchive } from '../repo/clone.js';
 import { collapseToLine } from '../step-engine/steps/_untrusted-repo.js';
 
@@ -50,8 +68,7 @@ import { collapseToLine } from '../step-engine/steps/_untrusted-repo.js';
  */
 
 const log = logger.child({ module: 'attachment-archives' });
-const NODE_UID = 1000;
-const NODE_GID = 1000;
+const SANDBOX_OWNER = { uid: 1000, gid: 1000 };
 
 export interface ExpandArchivesResult {
   /** Archives processed by THIS call (0 on the common repeat path). */
@@ -70,7 +87,17 @@ const EXPANSION_NOTE_CHARS = 1000;
 const PATH_DROP_NAMES = 3;
 const PATH_DROP_NAME_CHARS = 80;
 
+/* Each attempt at one archive works in its own `.expanding-<archiveId>-<nonce>` directory under the
+ * uploads dir: `EXPANSION_STAGING_PREFIX`, with the rules for settling an interrupted attempt beside
+ * it in `@haive/shared/attachments-fs`. The nonce is what lets two overlapping calls at one archive
+ * each extract without the second moving the first's tree aside. */
+/** How many folder names an expansion tries, the api's bound for a file name. */
+const FOLDER_CANDIDATES = 1000;
+const NO_FOLDER_NOTE =
+  'could not be expanded: every folder name for its contents is taken or would make a path too long';
+
 const cap = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const storedNote = (note: string): string => cap(collapseToLine(note), EXPANSION_NOTE_CHARS);
 
 /** The line of an expansion failure worth keeping: the first non-empty one, with the repository's
  *  host path taken out. An extractor reports `<tool> failed (exit N): <stderr>`, which is usually
@@ -152,25 +179,19 @@ async function walkRegularFiles(
   return { files, skipped };
 }
 
-/** A directory name for the archive's contents that is not already taken. Mirrors
- *  the api's per-directory de-dupe, so an archive uploaded twice lands as `spec/`
- *  and `spec (2)/` rather than merging into one tree. A name a generated file owns
- *  counts as taken too: `_PLAN_INPUTS.md.zip` expanded into a FOLDER named
- *  `_PLAN_INPUTS.md` would stop the plan-inputs index from ever being written. */
-async function uniqueDirName(anchor: string, uploadsRel: string, stem: string): Promise<string> {
-  const base = sanitizeAttachmentPath(stem).split('/').pop() || 'archive';
-  let candidate = base;
-  let n = 1;
-  // A LINK at that name counts as TAKEN, which is the point: an occupied name is not free
-  // space, and the `stat` this replaced would have followed it to decide.
-  while (
-    isReservedAttachmentName(candidate, true) ||
-    (await lstatNoFollow(anchor, `${uploadsRel}/${candidate}`)) !== null
-  ) {
-    n += 1;
-    candidate = attachmentCopyName(base, n, false);
+/** The folder names an archive's contents may take, in the order they are tried. Mirrors the api's
+ *  per-directory de-dupe, so an archive uploaded twice lands as `spec/` and `spec (2)/` rather than
+ *  merging into one tree. A name a generated file owns is never offered: `_PLAN_INPUTS.md.zip`
+ *  expanded into a FOLDER named `_PLAN_INPUTS.md` would stop the plan-inputs index from ever being
+ *  written. */
+function folderCandidates(archiveFilename: string): string[] {
+  const base = sanitizeAttachmentPath(archiveStem(archiveFilename)).split('/').pop() || 'archive';
+  const names: string[] = [];
+  for (let n = 1; names.length < FOLDER_CANDIDATES && n <= FOLDER_CANDIDATES * 2; n += 1) {
+    const name = n === 1 ? base : attachmentCopyName(base, n, false);
+    if (!isReservedAttachmentName(name, true)) names.push(name);
   }
-  return candidate;
+  return names;
 }
 
 /**
@@ -231,202 +252,430 @@ function memberLayout(): (relPath: string) => string {
   };
 }
 
-async function harmonize(anchor: string, rel: string, mode: number): Promise<void> {
-  await chownNoFollow(anchor, rel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
-  await chmodNoFollow(anchor, rel, mode).catch(() => {});
+/** A tree built in the staging dir, ready to be moved into place whole. */
+interface StagedTree {
+  /** Member paths relative to the tree's root, which becomes the folder, with their sizes. */
+  members: { rel: string; size: number }[];
+  /** Folder names to try; the member paths were held to the length limit under the first. */
+  folders: string[];
+  longest: number;
+  note: string | null;
 }
 
-/** Move one extracted file to its place under the uploads dir, creating the
- *  directories it needs. Returns the relative path it now lives at. */
-async function placeFile(
+const stagingRelOf = (uploadsRel: string, staging: string): string => `${uploadsRel}/${staging}`;
+
+/**
+ * Settle the attempts whose archive nothing will expand any more: deleted, or already stamped. The
+ * rows are read again under the lock, because an archive attached after the caller read its
+ * candidates has an attempt in flight that this must not touch.
+ */
+async function sweepStaleAttempts(
+  db: Database,
+  taskId: string,
   anchor: string,
   uploadsRel: string,
-  relPath: string,
-  fromRel: string,
-): Promise<string> {
-  const destRel = `${uploadsRel}/${relPath}`;
-  // `createParents` does the `mkdir -p`, refusing a link in the chain rather than creating below it.
-  // Ownership is NOT passed here: it is best-effort in this module (the `harmonize` calls below), and
-  // handing it to the primitive makes it strict — which is EPERM for any worker that is not root,
-  // as CI is. Chowning to uid 1000 is a courtesy for the sandbox, never a precondition for placing
-  // the file.
-  await renameNoFollow(anchor, fromRel, destRel, { createParents: true });
-  const dirRel = destRel.slice(0, destRel.lastIndexOf('/'));
-  await harmonize(anchor, dirRel, 0o755);
-  await harmonize(anchor, destRel, 0o644);
-  return relPath;
+  candidateIds: ReadonlySet<string>,
+): Promise<void> {
+  const stale = ((await readdirNoFollow(anchor, uploadsRel)) ?? [])
+    .map((entry) => entry.name)
+    .filter((name) => {
+      const id = expansionAttemptArchiveId(name);
+      return id !== null && !candidateIds.has(id);
+    });
+  if (stale.length === 0) return;
+  let settled: string[] = [];
+  try {
+    settled = await withTaskAttachmentsLock(db, taskId, async (tx) => {
+      const ids = [...new Set(stale.map((name) => expansionAttemptArchiveId(name)!))];
+      const pending = new Set(
+        (
+          await tx.query.taskAttachments.findMany({
+            where: and(
+              eq(schema.taskAttachments.taskId, taskId),
+              inArray(schema.taskAttachments.id, ids),
+            ),
+            columns: { id: true, expandedAt: true },
+          })
+        )
+          .filter((row) => row.expandedAt === null)
+          .map((row) => row.id),
+      );
+      const done: string[] = [];
+      for (const name of stale) {
+        if (!pending.has(expansionAttemptArchiveId(name)!)) {
+          await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, name);
+          done.push(name);
+        }
+      }
+      return done;
+    });
+  } catch (err) {
+    log.warn({ err, taskId }, 'could not settle interrupted archive expansions');
+  }
+  await removeExpansionStagings(anchor, uploadsRel, settled);
+}
+
+/** Mark an archive as expanded, only while nothing else has. True when this call did. */
+async function stamp(tx: DbTx, archiveId: string, note: string | null): Promise<boolean> {
+  const rows = await tx
+    .update(schema.taskAttachments)
+    .set({ expandedAt: new Date(), expansionNote: note })
+    .where(and(eq(schema.taskAttachments.id, archiveId), isNull(schema.taskAttachments.expandedAt)))
+    .returning({ id: schema.taskAttachments.id });
+  return rows.length > 0;
+}
+
+/**
+ * Record an archive that will not be expanded, and settle the other attempts at it on the way.
+ * Stamped whatever the reason, or a failed or capped archive is re-extracted on every step for the
+ * life of the task. This attempt's own staging dir is left to the caller, outside the section: after
+ * a cap breach it holds the whole extracted archive. False when it was not this call that recorded
+ * it: already stamped, deleted, or the lock could not be had, in which case the archive stays a
+ * candidate.
+ */
+async function stampNote(
+  db: Database,
+  taskId: string,
+  anchor: string,
+  uploadsRel: string,
+  archiveId: string,
+  note: string,
+  staging: string,
+): Promise<boolean> {
+  let settled: string[] = [];
+  let stamped = false;
+  try {
+    ({ settled, stamped } = await withTaskAttachmentsLock(db, taskId, async (tx) => ({
+      settled: await settleExpansionAttempts(
+        tx,
+        taskId,
+        anchor,
+        uploadsRel,
+        new Set([archiveId]),
+        staging,
+      ),
+      stamped: await stamp(tx, archiveId, note),
+    })));
+  } catch (err) {
+    log.warn({ err, taskId, archiveId }, 'could not stamp archive expansion');
+  }
+  await removeExpansionStagings(anchor, uploadsRel, settled);
+  return stamped;
+}
+
+/**
+ * Extract one archive and build its tree in the staging dir, OUTSIDE the lock: extraction is the
+ * slow part and runs as an unprivileged uid. Answers the note to stamp when there is nothing to
+ * place.
+ */
+async function stageTree(
+  anchor: string,
+  stagingRel: string,
+  archive: typeof schema.taskAttachments.$inferSelect,
+  taskId: string,
+): Promise<StagedTree | string> {
+  // Split PER ROW rather than reusing the batch's anchor with a composed rel: a row whose stored path
+  // is not the layout the api writes is then reported as missing instead of being probed at a
+  // guessed path.
+  const rowSplit = splitAttachmentStoredPath(archive, taskId);
+  const onDisk = rowSplit ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel) : null;
+  if (onDisk?.kind !== 'file') return 'the archive file is missing from the task workspace';
+
+  // 0711: extraction runs as uid 65534 (`clone.ts`), which has to TRAVERSE this to reach the stage
+  // `extractArchive` makes inside it, and must not be able to list it.
+  await ensureDirNoFollow(anchor, stagingRel, { mode: 0o711 });
+  const rawRel = `${stagingRel}/raw`;
+  // The report is the extraction's own account of what it would not write — symlinks, device nodes,
+  // setuid files — and is folded into the note, since those members are gone before the walk runs.
+  const report = await extractArchive(
+    archive.storedPath,
+    detectAttachmentArchiveFormat(archive.filename)!,
+    path.join(anchor, rawRel),
+  );
+  const { files, skipped } = await walkRegularFiles(anchor, rawRel);
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+
+  // Measured AFTER extraction, deliberately. The alternative is to trust the archive's own declared
+  // sizes, which means parsing `unzip -Z`/`tar -tv` human-facing output — and a bomb is exactly the
+  // input that lies in it.
+  if (files.length === 0) return 'the archive contains no readable files';
+  if (files.length > ATTACHMENT_ARCHIVE_MAX_FILES) {
+    return `contains ${files.length} files, over the ${ATTACHMENT_ARCHIVE_MAX_FILES} limit — nothing was extracted; attach the parts you need`;
+  }
+  if (totalBytes > ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES) {
+    return `expands to ${Math.round(totalBytes / 1024 / 1024)} MB, over the ${Math.round(ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES / 1024 / 1024)} MB limit — nothing was extracted`;
+  }
+
+  const folders = folderCandidates(archive.filename);
+  const first = folders[0]!;
+  const place = memberLayout();
+  const members: StagedTree['members'] = [];
+  const pathDropped: string[] = [];
+  for (const file of files) {
+    let rel: string;
+    try {
+      // The same rules the api enforces on an upload, held against the first folder name so the
+      // length limit is the one the placed path has to meet.
+      rel = place(reserveAttachmentDirs(sanitizeAttachmentPath(`${first}/${file.rel}`))).slice(
+        first.length + 1,
+      );
+    } catch (err) {
+      // A member that cannot be expressed as a safe relative path is dropped, and named in the note.
+      if (!(err instanceof AttachmentPathError)) throw err;
+      log.warn({ member: file.rel, archive: archive.filename }, 'dropped archive member');
+      pathDropped.push(file.rel);
+      continue;
+    }
+    await renameNoFollow(anchor, `${rawRel}/${file.rel}`, `${stagingRel}/tree/${rel}`, {
+      createParents: true,
+    });
+    members.push({ rel, size: file.size });
+  }
+
+  // Both halves are reported: what extraction dropped, and anything the walk still skipped (an entry
+  // that vanished between the two, say). Joined rather than one overwriting the other, because they
+  // describe different sets.
+  const walkNote =
+    skipped > 0
+      ? `${skipped} entr(y/ies) were skipped: only regular files are extracted (no symlinks or devices)`
+      : null;
+  const note =
+    [report.note, walkNote, describePathDrops(pathDropped)].filter((n) => n !== null).join('; ') ||
+    null;
+  if (members.length === 0) return note ?? 'the archive contains no readable files';
+
+  // Handed to the sandbox user in one pass. Best-effort, as it always was here: a worker that is not
+  // root cannot chown, and the modes alone keep the tree world-readable.
+  const mode = (_current: number, isDir: boolean): number => (isDir ? 0o755 : 0o644);
+  await applyTreeNoFollow(anchor, `${stagingRel}/tree`, { owner: SANDBOX_OWNER, mode }).catch(() =>
+    applyTreeNoFollow(anchor, `${stagingRel}/tree`, { mode }).catch(() => undefined),
+  );
+  return {
+    members,
+    folders,
+    longest: Math.max(...members.map((m) => m.rel.length)),
+    note,
+  };
+}
+
+interface Placement {
+  kind: 'placed' | 'superseded' | 'unplaced';
+  /** Earlier attempts this section settled, whose staging dirs go once it is over. */
+  settled: string[];
+}
+
+/**
+ * Move a staged tree into place and write its rows, as ONE section under the task's attachments
+ * lock: the archive is re-checked, earlier attempts at it are settled, a free folder is claimed, and
+ * the rows and the stamp are written together — so two overlapping calls produce one tree, and a
+ * delete never lands between a file being placed and its row existing.
+ *
+ * The intent is written before each move and the tree is moved whole, so an attempt that dies
+ * anywhere in here leaves either its tree still staged or a `placed-as` naming exactly what the next
+ * call must take back. A throw after the move takes the files back INSIDE the callback: the driver
+ * can reject the transaction while the callback is still running, and nothing outside it may assume
+ * the callback has stopped.
+ */
+async function placeTree(
+  db: Database,
+  taskId: string,
+  anchor: string,
+  uploadsRel: string,
+  staging: string,
+  archive: typeof schema.taskAttachments.$inferSelect,
+  staged: StagedTree,
+): Promise<Placement> {
+  const stagingRel = stagingRelOf(uploadsRel, staging);
+  return withTaskAttachmentsLock<Placement>(db, taskId, async (tx) => {
+    const current = await tx.query.taskAttachments.findFirst({
+      where: eq(schema.taskAttachments.id, archive.id),
+      columns: { id: true, expandedAt: true },
+    });
+    if (current === undefined || current.expandedAt !== null) {
+      return { kind: 'superseded', settled: [] };
+    }
+    const settled = await settleExpansionAttempts(
+      tx,
+      taskId,
+      anchor,
+      uploadsRel,
+      new Set([archive.id]),
+      staging,
+    );
+
+    const files = staged.members.map((m) => m.rel);
+    let dir: string | null = null;
+    for (const candidate of staged.folders) {
+      // Candidates only grow longer, so the first one too long ends the search.
+      if (candidate.length + 1 + staged.longest > ATTACHMENT_MAX_PATH_LENGTH) break;
+      await writeFileNoFollow(
+        anchor,
+        `${stagingRel}/${EXPANSION_INTENT_FILE}`,
+        JSON.stringify({ dir: candidate, files }),
+        { fileMode: 0o600 },
+      );
+      try {
+        await renameNoFollow(anchor, `${stagingRel}/tree`, `${uploadsRel}/${candidate}`, {
+          noReplace: true,
+        });
+        dir = candidate;
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST' && code !== 'ENOTEMPTY' && code !== 'ENOTDIR') throw err;
+      }
+    }
+    if (dir === null) {
+      await stamp(tx, archive.id, NO_FOLDER_NOTE);
+      return { kind: 'unplaced', settled };
+    }
+
+    try {
+      await tx.insert(schema.taskAttachments).values(
+        staged.members.map((m) => ({
+          taskId,
+          userId: archive.userId,
+          filename: `${dir}/${m.rel}`,
+          storedPath: path.join(anchor, uploadsRel, dir, m.rel),
+          sizeBytes: m.size,
+          contentType: null,
+          description: null,
+          expandedFromId: archive.id,
+        })),
+      );
+      // Under the lock nothing else can stamp or delete it, so a miss here is a defect, and the
+      // whole placement is taken back rather than left without the stamp that marks it done.
+      if (!(await stamp(tx, archive.id, staged.note === null ? null : storedNote(staged.note)))) {
+        throw new Error('the archive changed while its contents were being placed');
+      }
+    } catch (err) {
+      const placed = files.map((file) => `${dir}/${file}`);
+      await removeFiles(anchor, uploadsRel, placed);
+      await pruneAfter(anchor, uploadsRel, placed);
+      throw err;
+    }
+    return { kind: 'placed', settled };
+  });
+}
+
+/** Remove an attempt's staging dir unless it records a placement that may still need taking back:
+ *  a `placed-as` whose tree has left. That one is settled by the next call that holds the lock. */
+async function discardStaging(anchor: string, stagingRel: string): Promise<void> {
+  if (
+    (await readExpansionIntent(anchor, stagingRel)) !== null &&
+    (await lstatNoFollow(anchor, `${stagingRel}/tree`)) === null
+  ) {
+    return;
+  }
+  await removeNoFollow(anchor, stagingRel, { recursive: true, repairPermissions: true }).catch(
+    () => {},
+  );
 }
 
 /**
  * Expand every not-yet-expanded archive attached to `taskId`.
  *
- * All-or-nothing per archive: a cap breach or an unreadable archive records a
- * note and inserts nothing, because a partial tree is worse than none — nothing
- * downstream can tell which half of a specification it was given.
+ * All-or-nothing per archive: a cap breach or an unreadable archive records a note and places
+ * nothing, and a failure while the tree is being placed takes back every file and row of it, because
+ * a partial tree is worse than none — nothing downstream can tell which half of a specification it
+ * was given. A placement that fails leaves the archive unstamped, so the next call tries again from
+ * the start; so does a lock that could not be had in time.
  */
 export async function ensureArchivesExpanded(
   db: Database,
   taskId: string,
 ): Promise<ExpandArchivesResult> {
-  let candidates: (typeof schema.taskAttachments.$inferSelect)[];
+  let rows: (typeof schema.taskAttachments.$inferSelect)[];
   try {
-    candidates = await db.query.taskAttachments.findMany({
-      where: and(
-        eq(schema.taskAttachments.taskId, taskId),
-        isNull(schema.taskAttachments.expandedAt),
-        // A row that came OUT of an archive is never itself expanded. That is
-        // what makes "nested archives are not recursed" structural rather than a
-        // depth counter, and it is why an archive inside an archive stays a file.
-        isNull(schema.taskAttachments.expandedFromId),
-      ),
+    rows = await db.query.taskAttachments.findMany({
+      where: eq(schema.taskAttachments.taskId, taskId),
       orderBy: asc(schema.taskAttachments.createdAt),
     });
   } catch (err) {
     log.warn({ err, taskId }, 'could not load attachments for archive expansion');
     return EMPTY;
   }
+  // A row that came OUT of an archive is never itself expanded. That is what makes "nested archives
+  // are not recursed" structural rather than a depth counter, and it is why an archive inside an
+  // archive stays a file.
+  const archives = rows.filter(
+    (row) =>
+      row.expandedAt === null &&
+      row.expandedFromId === null &&
+      detectAttachmentArchiveFormat(row.filename) !== null,
+  );
 
-  const archives = candidates.filter((row) => detectAttachmentArchiveFormat(row.filename) !== null);
-  if (archives.length === 0) return EMPTY;
-
-  const result: ExpandArchivesResult = { expanded: 0, filesAdded: 0, notes: [] };
-
-  // Derived from the row rather than from the task's repository: the row says where its own bytes
-  // are, so this needs no repo lookup and cannot write the expanded tree somewhere the originals
-  // are not. The ANCHOR is the repository root, recovered by removing the suffix the api wrote —
-  // the uploads dir itself sits under `.haive/`, which the sandbox mounts read-write, so it can
-  // never be one. A row that does not have that shape is refused rather than expanded from a
-  // guessed root.
-  const split = splitAttachmentStoredPath(archives[0]!, taskId);
+  // Derived from a row rather than from the task's repository: the row says where its own bytes are,
+  // so this needs no repo lookup and cannot write a tree somewhere the originals are not. The ANCHOR
+  // is the repository root, recovered by removing the suffix the api wrote — the uploads dir itself
+  // sits under `.haive/`, which the sandbox mounts read-write, so it can never be one. A row that does
+  // not have that shape is refused rather than expanded from a guessed root.
+  const split = rows.map((row) => splitAttachmentStoredPath(row, taskId)).find((s) => s !== null);
   if (!split) {
-    log.warn({ taskId, archive: archives[0]!.filename }, 'unrecognised attachment path layout');
+    if (archives.length > 0) {
+      log.warn({ taskId, archive: archives[0]!.filename }, 'unrecognised attachment path layout');
+    }
     return EMPTY;
   }
   const { anchor, uploadsRel } = split;
-  const uploadsDir = path.join(anchor, uploadsRel);
 
+  await sweepStaleAttempts(db, taskId, anchor, uploadsRel, new Set(archives.map((a) => a.id)));
+  if (archives.length === 0) return EMPTY;
+
+  const result: ExpandArchivesResult = { expanded: 0, filesAdded: 0, notes: [] };
   for (const archive of archives) {
-    const format = detectAttachmentArchiveFormat(archive.filename)!;
-    // A leading dot, so it can never collide with an attachment: the path sanitiser strips leading
-    // dots from every segment.
-    //
-    // This stays INSIDE the uploads dir on purpose, even though the plan proposed moving it to the
-    // extraction stage. `extractArchive` now stages privately beside its own destination and swaps
-    // the finished tree in, so this directory is no longer where untrusted members are unpacked —
-    // it only ever receives an already-validated tree. Moving it out would buy nothing and would
-    // put the expansion's working set on a different filesystem from the attachments it feeds,
-    // turning every `placeFile` rename into a cross-device copy.
-    const tmp = path.join(uploadsDir, `.expanding-${archive.id}`);
-    // The same directory as a rel, which is what everything except `extractArchive` wants: that
-    // takes an absolute destination, while the walk, the placement source and the cleanup are all
-    // anchored on the repository root.
-    const tmpRel = `${uploadsRel}/.expanding-${archive.id}`;
-    let note: string | null = null;
-    let added = 0;
-    try {
-      // Split PER ROW rather than reusing the first archive's anchor with a composed rel: a row
-      // whose stored path is not the layout the api writes is then reported as missing instead of
-      // being probed at a guessed path — the same refusal the split above makes for the batch.
-      const rowSplit = splitAttachmentStoredPath(archive, taskId);
-      const onDisk = rowSplit ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel) : null;
-      if (onDisk?.kind !== 'file') {
-        note = 'the archive file is missing from the task workspace';
-      } else {
-        // The report is the extraction's own account of what it would not write — symlinks, device
-        // nodes, setuid files. It MUST be folded into the note below: those members used to be
-        // counted by `walkRegularFiles` as `skipped`, and now they are gone before that walk runs,
-        // so without this the drop would happen with nothing said about it.
-        const report = await extractArchive(archive.storedPath, format, tmp);
-        const { files, skipped } = await walkRegularFiles(anchor, tmpRel);
-        const dropNote = report.note;
-        const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const staging = `${EXPANSION_STAGING_PREFIX}${archive.id}-${randomUUID()}`;
+    const stagingRel = stagingRelOf(uploadsRel, staging);
 
-        // Measured AFTER extraction, deliberately. The alternative is to trust the
-        // archive's own declared sizes, which means parsing `unzip -Z`/`tar -tv`
-        // human-facing output — and a bomb is exactly the input that lies in it.
-        // The temp tree is removed below either way, so nothing is left behind.
-        if (files.length === 0) {
-          note = 'the archive contains no readable files';
-        } else if (files.length > ATTACHMENT_ARCHIVE_MAX_FILES) {
-          note = `contains ${files.length} files, over the ${ATTACHMENT_ARCHIVE_MAX_FILES} limit — nothing was extracted; attach the parts you need`;
-        } else if (totalBytes > ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES) {
-          note = `expands to ${Math.round(totalBytes / 1024 / 1024)} MB, over the ${Math.round(ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES / 1024 / 1024)} MB limit — nothing was extracted`;
-        } else {
-          const dirName = await uniqueDirName(anchor, uploadsRel, archiveStem(archive.filename));
-          const place = memberLayout();
-          const pathDropped: string[] = [];
-          for (const file of files) {
-            let relPath: string;
-            try {
-              relPath = place(
-                reserveAttachmentDirs(sanitizeAttachmentPath(`${dirName}/${file.rel}`)),
-              );
-            } catch (err) {
-              // The same rules the api enforces on an upload. A member that cannot be
-              // expressed as a safe relative path is dropped, and named in the note below.
-              if (!(err instanceof AttachmentPathError)) throw err;
-              log.warn({ member: file.rel, archive: archive.filename }, 'dropped archive member');
-              pathDropped.push(file.rel);
-              continue;
-            }
-            const stored = await placeFile(anchor, uploadsRel, relPath, `${tmpRel}/${file.rel}`);
-            try {
-              await db.insert(schema.taskAttachments).values({
-                taskId,
-                userId: archive.userId,
-                filename: stored,
-                storedPath: path.join(uploadsDir, stored),
-                sizeBytes: file.size,
-                contentType: null,
-                description: null,
-                expandedFromId: archive.id,
-              });
-            } catch (err) {
-              // A delete removes what ROWS name, so a placed file with none would outlive the
-              // archive's delete, still mounted in the sandbox. Take it back before failing.
-              await removeNoFollow(anchor, `${uploadsRel}/${stored}`).catch(() => {});
-              throw err;
-            }
-            added += 1;
-          }
-          // Both halves are reported: what extraction dropped, and anything the walk still skipped
-          // (an entry that vanished between the two, say). Joined rather than one overwriting the
-          // other, because they describe different sets.
-          const walkNote =
-            skipped > 0
-              ? `${skipped} entr(y/ies) were skipped: only regular files are extracted (no symlinks or devices)`
-              : null;
-          note =
-            [dropNote, walkNote, describePathDrops(pathDropped)]
-              .filter((n) => n !== null)
-              .join('; ') || null;
-        }
-      }
+    let staged: StagedTree | string;
+    try {
+      staged = await stageTree(anchor, stagingRel, archive, taskId);
     } catch (err) {
-      note = `could not be expanded: ${expansionErrorLine(err, anchor)}`;
       log.warn({ err, taskId, archive: archive.filename }, 'archive expansion failed');
-    } finally {
-      await removeNoFollow(anchor, `${uploadsRel}/.expanding-${archive.id}`, {
-        recursive: true,
-      }).catch(() => {});
+      staged = `could not be expanded: ${expansionErrorLine(err, anchor)}`;
+    }
+    if (typeof staged === 'string') {
+      // ONE line whatever produced it — extraction's own drop note names members raw too — so the
+      // stored note is what AGENTS.md promises it is, and not only what a prompt makes of it.
+      const note = storedNote(staged);
+      if (await stampNote(db, taskId, anchor, uploadsRel, archive.id, note, staging)) {
+        result.expanded += 1;
+        result.notes.push({ filename: archive.filename, note });
+      }
+      await discardStaging(anchor, stagingRel);
+      continue;
     }
 
-    // Stamped whatever happened. Without it a failed or capped archive is retried
-    // on every step for the life of the task, each time paying a full extraction.
-    // ONE line whatever produced it — extraction's own drop note names members raw too — so the
-    // stored note is what AGENTS.md promises it is, and not only what a prompt makes of it.
-    if (note !== null) note = cap(collapseToLine(note), EXPANSION_NOTE_CHARS);
-    await db
-      .update(schema.taskAttachments)
-      .set({ expandedAt: new Date(), expansionNote: note })
-      .where(eq(schema.taskAttachments.id, archive.id))
-      .catch((err: unknown) => {
-        log.warn({ err, taskId, archive: archive.filename }, 'could not stamp archive expansion');
-      });
-
+    let placement: Placement;
+    try {
+      placement = await placeTree(db, taskId, anchor, uploadsRel, staging, archive, staged);
+    } catch (err) {
+      log.warn({ err, taskId, archive: archive.filename }, 'could not place archive contents');
+      // Nothing is stamped: the archive stays a candidate, and the next call starts it over. A
+      // placement that reached the disk is settled first, under the lock, unless the lock itself
+      // was the problem.
+      if (!isLockNotAvailable(err)) {
+        const settled = await withTaskAttachmentsLock(db, taskId, (tx) =>
+          settleExpansionAttempts(tx, taskId, anchor, uploadsRel, new Set([archive.id])),
+        ).catch(() => [] as string[]);
+        await removeExpansionStagings(anchor, uploadsRel, settled);
+      }
+      await discardStaging(anchor, stagingRel);
+      continue;
+    }
+    // Committed, so what this attempt's `placed-as` names is owned by rows now, and its staging dir
+    // goes whole, with those of the earlier attempts the section settled.
+    await removeExpansionStagings(anchor, uploadsRel, [...placement.settled, staging]);
+    if (placement.kind === 'superseded') continue;
     result.expanded += 1;
-    result.filesAdded += added;
-    if (note) result.notes.push({ filename: archive.filename, note });
+    if (placement.kind === 'unplaced') {
+      result.notes.push({ filename: archive.filename, note: NO_FOLDER_NOTE });
+      continue;
+    }
+    result.filesAdded += staged.members.length;
+    if (staged.note !== null) {
+      result.notes.push({ filename: archive.filename, note: storedNote(staged.note) });
+    }
   }
 
   // The api writes this index on upload and delete; the expansion is the third writer, and a prompt

@@ -220,6 +220,12 @@ export const taskDagIssues = pgTable(
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** Same code or defect elsewhere that this issue's coders deliberately left alone, merged
+     *  across every coder pass on the issue; shown at gate 2. */
+    similarSites: jsonb('similar_sites')
+      .$type<{ path: string; lines?: string; reason: string }[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
   },
   (table) => [
     index('task_dag_issues_plan_id_idx').on(table.dagPlanId),

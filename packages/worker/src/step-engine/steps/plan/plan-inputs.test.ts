@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { schema, withTaskAttachmentsLock, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import {
   classifyPlanInput,
   docxToMarkdown,
@@ -18,7 +19,9 @@ import {
   uploadsInputRel,
 } from './_plan-inputs.js';
 import {
+  PLAN_INPUTS_INDEX,
   livePlanInputs,
+  loadLiveAttachments,
   planInputsStep,
   renderIndex,
   type PlanInputRow,
@@ -29,6 +32,7 @@ import {
   assertSomethingToBuildFrom,
   buildRootPrompt,
   planAgentCapabilities,
+  planBuildStep,
   withLiveInputs,
   type PlanBuildDetect,
 } from './01-plan-build.js';
@@ -807,14 +811,14 @@ describe('the inputs that are still attached', () => {
   });
 });
 
-describe('a build dispatching on what is still attached', () => {
-  async function dispatchView(
-    live: (string | { id: string; filename: string })[] | 'unreadable',
-    stored: PlanInputsApply | null,
-    opts: { linkedUploads?: boolean; snapshot?: string[] } = {},
-  ) {
+describe('a build dispatching on what is attached now', () => {
+  const INDEX = `${SANDBOX_WORKDIR}/.haive/task-uploads/${TASK_ID}/${PLAN_INPUTS_INDEX}`;
+
+  /** A plan build whose `00-plan-inputs` ran, on the in-memory database, with an index on disk as
+   *  00 wrote it. */
+  async function buildFixture(opts: { linkedUploads?: boolean } = {}) {
     const repo = await mkdtemp(path.join(dir, 'build-'));
-    const uploads = path.join(repo, '.haive', 'task-uploads', 't1');
+    const uploads = path.join(repo, '.haive', 'task-uploads', TASK_ID);
     if (opts.linkedUploads) {
       // A link where the uploads directory should be, which the index write refuses to go through.
       const real = path.join(repo, 'elsewhere');
@@ -824,9 +828,72 @@ describe('a build dispatching on what is still attached', () => {
     } else {
       await mkdir(uploads, { recursive: true });
     }
-    await writeFile(path.join(uploads, '_PLAN_INPUTS.md'), 'as 00-plan-inputs wrote it');
-    // Exactly what detect copies out of the recorded output.
-    const d = {
+    await writeFile(path.join(uploads, PLAN_INPUTS_INDEX), 'as 00-plan-inputs wrote it');
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskAttachments: schema.taskAttachments,
+      taskSteps: schema.taskSteps,
+      planNodes: schema.planNodes,
+    });
+    fake.insert(schema.tasks, {
+      id: TASK_ID,
+      userId: USER_ID,
+      repositoryId: '00000000-0000-4000-8000-0000000000f1',
+      type: 'plan_build',
+      title: 'plan',
+      description: 'a shop',
+      metadata: { planBuildMode: 'greenfield' },
+    });
+    const progress: string[] = [];
+    const ctx = {
+      taskId: TASK_ID,
+      repoPath: repo,
+      db: fake.db,
+      logger: { warn() {} },
+      emitProgress: async (line: string) => {
+        progress.push(line);
+      },
+    } as never;
+    /** A row, and its file unless `content` is null. */
+    async function attach(filename: string, content: string | Buffer | null) {
+      const file = path.join(uploads, filename);
+      if (content !== null) {
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, content);
+      }
+      const row = fake.insert(schema.taskAttachments, {
+        taskId: TASK_ID,
+        userId: USER_ID,
+        filename,
+        storedPath: file,
+        sizeBytes: 1,
+      });
+      return { id: row.id as string, filename };
+    }
+    async function remove(row: { id: string; filename: string }) {
+      await fake.db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, row.id));
+      await rm(path.join(uploads, row.filename), { force: true });
+    }
+    function record(output: PlanInputsApply) {
+      fake.insert(schema.taskSteps, {
+        taskId: TASK_ID,
+        stepId: '00-plan-inputs',
+        stepIndex: -1,
+        title: 'Prepare the inputs',
+        status: 'done',
+        output,
+      });
+    }
+    const recordedNow = () =>
+      fake.rows(schema.taskSteps).find((r) => r.stepId === '00-plan-inputs')?.output as
+        PlanInputsApply | null | undefined;
+    const index = () => readFile(path.join(uploads, PLAN_INPUTS_INDEX), 'utf8').catch(() => null);
+    return { fake, ctx, uploads, progress, attach, remove, record, recordedNow, index };
+  }
+
+  /** Exactly what detect copies out of the recorded output. */
+  const detectedFrom = (stored: PlanInputsApply | null): PlanBuildDetect =>
+    ({
       mode: 'greenfield',
       repositoryId: 'r1',
       existingNodeCount: 0,
@@ -842,136 +909,357 @@ describe('a build dispatching on what is still attached', () => {
           ]
         : [],
       hasPdfInputs: stored?.hasPdfInputs === true,
-    } as PlanBuildDetect;
-    const ctx = {
-      taskId: 't1',
-      repoPath: repo,
-      logger: { warn() {} },
-      db: {
-        select: () => ({
-          from: (table: unknown) => ({
-            where: () =>
-              table === schema.taskSteps
-                ? { limit: async () => (stored ? [{ output: stored }] : []) }
-                : live === 'unreadable'
-                  ? Promise.reject(new Error('connection lost'))
-                  : Promise.resolve(
-                      live.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
-                    ),
-          }),
-        }),
-      },
-    } as never;
-    const handed = opts.snapshot && {
-      rows: opts.snapshot.map((filename) => ({
-        id: `id-${filename}`,
-        filename,
-        contentType: null,
-      })),
-      ids: new Set(opts.snapshot.map((f) => `id-${f}`)),
-      names: new Set(opts.snapshot),
-    };
-    const view = await withLiveInputs(ctx, d, handed);
-    const index = await readFile(path.join(uploads, '_PLAN_INPUTS.md'), 'utf8').catch(() => null);
-    return { d, view, index };
+    }) as PlanBuildDetect;
+
+  /** 00 recorded a brief and nothing else. */
+  async function briefOnly(extracted = 0) {
+    const f = await buildFixture();
+    const brief = await f.attach('brief.md', '# Brief');
+    const stored = recorded({
+      inputs: [inputRow('brief.md', 'text', { id: brief.id })],
+      extracted,
+      hasImageInputs: false,
+      hasPdfInputs: false,
+      indexPath: INDEX,
+    });
+    f.record(stored);
+    return { ...f, stored, d: detectedFrom(stored) };
   }
 
-  it('dispatches exactly as detected while everything is still attached', async () => {
-    const { d, view, index } = await dispatchView(['brief.md', 'wire.png', 'spec.pdf'], recorded());
-    expect(view).toBe(d);
-    expect(index).toBe('as 00-plan-inputs wrote it');
+  /** 00 recorded a brief, a wireframe picture and a PDF that has text. */
+  async function standard(opts: { linkedUploads?: boolean } = {}) {
+    const f = await buildFixture(opts);
+    const brief = await f.attach('brief.md', '# Brief');
+    const wire = await f.attach('wire.png', 'png');
+    const spec = await f.attach('spec.pdf', '%PDF');
+    const stored = recorded({
+      inputs: [
+        inputRow('brief.md', 'text', { id: brief.id }),
+        inputRow('wire.png', 'image', { id: wire.id }),
+        inputRow('spec.pdf', 'pdf', {
+          id: spec.id,
+          sidecar: 'spec.pdf.extracted.md',
+          hasText: true,
+        }),
+      ],
+      indexPath: INDEX,
+    });
+    f.record(stored);
+    return { ...f, brief, wire, spec, stored, d: detectedFrom(stored) };
+  }
+
+  it('dispatches on the recorded fields, and rewrites nothing, while everything is still attached', async () => {
+    const f = await standard();
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(view).toEqual(f.d);
+    expect(await f.index()).toBe('as 00-plan-inputs wrote it');
+    expect(f.recordedNow()).toBe(f.stored);
   });
 
-  it('stops requiring vision once the only picture is deleted, and re-renders the index', async () => {
-    const { view, index } = await dispatchView(['brief.md', 'spec.pdf'], recorded());
+  it('stops requiring vision once the only picture is deleted, and re-renders and records that', async () => {
+    const f = await standard();
+    await f.remove(f.wire);
+    const view = await withLiveInputs(f.ctx, f.d);
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
     expect(view.hasPdfInputs).toBe(true);
-    expect(view.inputIndexPath).toBe(recorded().indexPath);
+    expect(view.inputIndexPath).toBe(INDEX);
+    const index = await f.index();
     expect(index).toContain('`spec.pdf`');
     expect(index).not.toContain('wire.png');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual(['brief.md', 'spec.pdf']);
   });
 
-  it('still requires vision when the picture was replaced under the same name', async () => {
-    // The recorded picture is gone, but the replacement is a picture too, and the attachments notice
-    // points the agent at it.
-    const stored = recorded({
-      inputs: [inputRow('brief.md', 'text'), inputRow('wire.png', 'image', { id: 'img-1' })],
-      hasPdfInputs: false,
-    });
-    const { view } = await dispatchView(
-      ['brief.md', { id: 'img-2', filename: 'wire.png' }],
-      stored,
+  it('prepares a picture uploaded in place of a deleted one as a document of its own', async () => {
+    const f = await standard();
+    await f.remove(f.wire);
+    const again = await f.attach('wire.png', 'another png');
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    expect(f.recordedNow()?.inputs.find((i) => i.filename === 'wire.png')?.id).toBe(again.id);
+  });
+
+  it('prepares a picture attached since, and still requires vision once it is recorded', async () => {
+    // The first dispatch records it, so the next one reads it as a prepared input rather than as
+    // an addition, and has to go on counting it there.
+    const f = await briefOnly();
+    await f.attach('new.png', 'png');
+    const first = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(f.d)).toEqual(['tool_use']);
+    expect(planAgentCapabilities(first)).toEqual(['tool_use', 'vision']);
+    expect(await f.index()).toContain('`new.png`');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual(['brief.md', 'new.png']);
+
+    const next = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(next)).toEqual(['tool_use', 'vision']);
+  });
+
+  it('extracts a document attached since, indexes its text and counts it', async () => {
+    const f = await briefOnly();
+    const doc = await f.attach('late.docx', await docxBytes('Late requirements.'));
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(await readFile(path.join(f.uploads, 'late.docx.extracted.md'), 'utf8')).toContain(
+      'Late requirements.',
     );
-    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
-  });
-
-  it('requires vision for a picture attached after the inputs were prepared', async () => {
-    const stored = recorded({
-      inputs: [inputRow('brief.md', 'text')],
-      hasImageInputs: false,
-      hasPdfInputs: false,
+    const now = f.recordedNow();
+    expect(now?.inputs.find((i) => i.id === doc.id)).toMatchObject({
+      sidecar: 'late.docx.extracted.md',
+      hasText: true,
     });
-    const { d, view, index } = await dispatchView(['brief.md', 'new.png'], stored);
-    expect(planAgentCapabilities(d)).toEqual(['tool_use']);
-    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
-    // Nothing was deleted, so the index 00-plan-inputs wrote still stands.
-    expect(view.inputIndexPath).toBe(stored.indexPath);
-    expect(index).toBe('as 00-plan-inputs wrote it');
-  });
-
-  it('prefers vision, without requiring it, for a PDF attached after the inputs were prepared', async () => {
-    const stored = recorded({
-      inputs: [inputRow('brief.md', 'text')],
-      hasImageInputs: false,
-      hasPdfInputs: false,
-    });
-    const { view } = await dispatchView(['brief.md', 'scan.pdf'], stored);
-    expect(view.hasPdfInputs).toBe(true);
+    expect(now?.extracted).toBe(1);
+    expect(await f.index()).toContain('late.docx.extracted.md');
+    expect(view.inputIndexPath).toBe(INDEX);
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
-  it('stops preferring vision once the PDF is deleted', async () => {
-    const { view } = await dispatchView(['brief.md', 'wire.png'], recorded());
-    expect(view.hasPdfInputs).toBe(false);
+  it('requires vision for a document attached since that nothing could read, and reads it once', async () => {
+    // Unreadable whether or not pdftotext is installed: the bytes are not a PDF.
+    const f = await briefOnly();
+    await f.attach('scan.pdf', 'not a pdf');
+    const extracting = () => f.progress.filter((l) => l.startsWith('Extracting text from'));
+    const view = await withLiveInputs(f.ctx, f.d);
     expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    expect(f.recordedNow()?.unreadable).toEqual(['scan.pdf']);
+    expect(extracting()).toHaveLength(1);
+
+    await withLiveInputs(f.ctx, f.d);
+    expect(extracting()).toHaveLength(1);
+  });
+
+  it('spends the extraction budget the way 00-plan-inputs spends it', async () => {
+    // The budget is spent, so the late PDF is left for an agent to open: preferred, not required.
+    const f = await briefOnly(50);
+    const pdf = await f.attach('late.pdf', '%PDF');
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(f.recordedNow()?.inputs.find((i) => i.id === pdf.id)).toMatchObject({
+      extractionSkipped: true,
+      sidecar: null,
+    });
+    expect(view.hasPdfInputs).toBe(true);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(f.progress).toEqual([]);
+  });
+
+  it('leaves a file it cannot read to its kind, and prepares it once it is there', async () => {
+    const f = await briefOnly();
+    const shot = await f.attach('shot.png', null);
+    const foreign = f.fake.insert(schema.taskAttachments, {
+      taskId: TASK_ID,
+      userId: USER_ID,
+      filename: 'scan.pdf',
+      storedPath: '/elsewhere/scan.pdf',
+      sizeBytes: 1,
+    });
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    expect(view.hasPdfInputs).toBe(true);
+    expect(f.recordedNow()).toBe(f.stored);
+
+    await writeFile(path.join(f.uploads, 'shot.png'), 'png');
+    await withLiveInputs(f.ctx, f.d);
+    const ids = f.recordedNow()?.inputs.map((i) => i.id);
+    expect(ids).toContain(shot.id);
+    expect(ids).not.toContain(foreign.id);
+  });
+
+  it('does not hand a replacement the verdict of the document it replaced', async () => {
+    // The deleted docx yielded no text, so it was visual-only; the one uploaded in its place says
+    // something.
+    const f = await buildFixture();
+    const old = await f.attach('spec.docx', await docxBytes(''));
+    const stored = recorded({
+      inputs: [inputRow('spec.docx', 'docx', { id: old.id, sidecar: 'spec.docx.extracted.md' })],
+      visualOnly: ['spec.docx'],
+      hasImageInputs: false,
+      hasPdfInputs: false,
+      indexPath: INDEX,
+    });
+    f.record(stored);
+    const d = detectedFrom(stored);
+    expect(planAgentCapabilities(d)).toEqual(['tool_use', 'vision']);
+
+    await f.remove(old);
+    await f.attach('spec.docx', await docxBytes('Now it says something.'));
+    const view = await withLiveInputs(f.ctx, d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(f.recordedNow()?.visualOnly).toEqual([]);
+  });
+
+  it('adds the note of an archive expanded since', async () => {
+    const f = await briefOnly();
+    const note = '1 archive member(s) were not extracted (1 symlink(s)): bundle/escape';
+    await writeFile(path.join(f.uploads, 'bundle.zip'), 'PK');
+    f.fake.insert(schema.taskAttachments, {
+      taskId: TASK_ID,
+      userId: USER_ID,
+      filename: 'bundle.zip',
+      storedPath: path.join(f.uploads, 'bundle.zip'),
+      sizeBytes: 2,
+      expandedAt: new Date(),
+      expansionNote: note,
+    });
+    await withLiveInputs(f.ctx, f.d);
+    expect(f.recordedNow()?.archiveNotes).toEqual([{ filename: 'bundle.zip', note }]);
+    expect(await f.index()).toContain(note);
+  });
+
+  it('leaves out the note of an archive it could not read, rather than rewriting it every time', async () => {
+    const f = await briefOnly();
+    f.fake.insert(schema.taskAttachments, {
+      taskId: TASK_ID,
+      userId: USER_ID,
+      filename: 'bundle.zip',
+      storedPath: path.join(f.uploads, 'bundle.zip'),
+      sizeBytes: 2,
+      expandedAt: new Date(),
+      expansionNote: 'cut short',
+    });
+    await withLiveInputs(f.ctx, f.d);
+    await withLiveInputs(f.ctx, f.d);
+    expect(f.recordedNow()).toBe(f.stored);
+    expect(await f.index()).toBe('as 00-plan-inputs wrote it');
   });
 
   it('removes the index, and the line telling the agent to read it, once nothing is left', async () => {
-    const { view, index } = await dispatchView([], recorded());
+    const f = await standard();
+    for (const row of [f.brief, f.wire, f.spec]) await f.remove(row);
+    const view = await withLiveInputs(f.ctx, f.d);
     expect(view.inputIndexPath).toBeNull();
-    expect(index).toBeNull();
-    expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+    expect(await f.index()).toBeNull();
+    expect(buildRootPrompt(view, {})).not.toContain(PLAN_INPUTS_INDEX);
   });
 
-  it('drops the index from the prompt when it cannot be rewritten, rather than name a stale one', async () => {
-    const { view, index } = await dispatchView(['brief.md', 'spec.pdf'], recorded(), {
-      linkedUploads: true,
-    });
-    expect(index).toBe('as 00-plan-inputs wrote it');
+  it('drops the index from the prompt when it cannot be rewritten, and records that', async () => {
+    const f = await standard({ linkedUploads: true });
+    await f.remove(f.wire);
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(await f.index()).toBe('as 00-plan-inputs wrote it');
     expect(view.inputIndexPath).toBeNull();
-    expect(buildRootPrompt(view, {})).not.toContain('_PLAN_INPUTS.md');
+    expect(buildRootPrompt(view, {})).not.toContain(PLAN_INPUTS_INDEX);
     // The capabilities still follow the deletion.
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(f.recordedNow()?.indexPath).toBeNull();
   });
 
   it('judges the snapshot it is handed rather than reading the attachments again', async () => {
     // The root dispatch reads once, so refusing and choosing capabilities see the same rows. Here
-    // the database would answer every file; the handed snapshot has lost the picture.
-    const { view } = await dispatchView(['brief.md', 'wire.png', 'spec.pdf'], recorded(), {
-      snapshot: ['brief.md', 'spec.pdf'],
+    // the database still holds the picture; the handed snapshot has lost it.
+    const f = await standard();
+    const rows = (await loadLiveAttachments(f.ctx))!.rows.filter((r) => r.id !== f.wire.id);
+    const view = await withLiveInputs(f.ctx, f.d, {
+      rows,
+      ids: new Set(rows.map((r) => r.id)),
+      names: new Set(rows.map((r) => r.filename)),
     });
     expect(planAgentCapabilities(view)).toEqual(['tool_use']);
   });
 
   it('keeps the detected fields when the attachments cannot be read', async () => {
-    const { d, view } = await dispatchView('unreadable', recorded());
-    expect(view).toBe(d);
+    const f = await standard();
+    await f.remove(f.wire);
+    const view = await withLiveInputs(f.ctx, f.d, null);
+    expect(view).toBe(f.d);
     expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
   });
 
-  it('leaves a build that recorded no inputs alone', async () => {
-    const { d, view } = await dispatchView([], null);
-    expect(view).toBe(d);
+  it('leaves a build whose inputs were never recorded alone', async () => {
+    const f = await buildFixture();
+    await f.attach('brief.md', '# Brief');
+    const d = detectedFrom(null);
+    expect(await withLiveInputs(f.ctx, d)).toBe(d);
+  });
+
+  it('refuses the root when the only file is deleted while it is being prepared', async () => {
+    // Preparing a late document can take minutes, and a greenfield root with no brief must still have
+    // something to build from once that is over.
+    const f = await buildFixture();
+    f.record(recorded({ inputs: [], extracted: 0, hasImageInputs: false, hasPdfInputs: false }));
+    const doc = await f.attach('only.docx', await docxBytes('The whole brief.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.remove(doc);
+    };
+    const d = {
+      ...detectedFrom(null),
+      brief: '',
+      repositoryId: '00000000-0000-4000-8000-0000000000f1',
+    } as PlanBuildDetect;
+    await expect(
+      planBuildStep.agentMining!.selectAgents({
+        ctx: f.ctx,
+        detected: d,
+        formValues: {},
+      } as never),
+    ).rejects.toThrow(/nothing to build from/);
+  });
+
+  it('counts a picture attached while an earlier addition was being prepared', async () => {
+    // The dispatch's attachments notice names what is attached once preparing is over, so what it
+    // requires has to be read from the same rows.
+    const f = await briefOnly();
+    await f.attach('late.docx', await docxBytes('Late requirements.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.attach('mid.png', 'png');
+    };
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use', 'vision']);
+    expect(await f.index()).toContain('`mid.png`');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'late.docx',
+      'mid.png',
+    ]);
+  });
+
+  it('drops an input deleted while another was being prepared', async () => {
+    const f = await standard();
+    await f.attach('late.docx', await docxBytes('Late requirements.'));
+    f.fake.hooks.beforeLock = async () => {
+      f.fake.hooks.beforeLock = null;
+      await f.remove(f.wire);
+    };
+    const view = await withLiveInputs(f.ctx, f.d);
+    expect(planAgentCapabilities(view)).toEqual(['tool_use']);
+    expect(await f.index()).not.toContain('wire.png');
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'spec.pdf',
+      'late.docx',
+    ]);
+  });
+
+  it('stops after three passes while files keep arriving, leaving the last for the next dispatch', async () => {
+    const f = await briefOnly();
+    await f.attach('a0.docx', await docxBytes('Zero.'));
+    let fired = 0;
+    f.fake.hooks.beforeLock = async () => {
+      fired += 1;
+      await f.attach(`a${fired}.docx`, await docxBytes(`Number ${fired}.`));
+    };
+    await withLiveInputs(f.ctx, f.d);
+    f.fake.hooks.beforeLock = null;
+    expect(fired).toBe(3);
+    expect(f.recordedNow()?.inputs.map((i) => i.filename)).toEqual([
+      'brief.md',
+      'a0.docx',
+      'a1.docx',
+      'a2.docx',
+    ]);
+  });
+
+  it('records nothing over a 00-plan-inputs retry that reset its output', async () => {
+    // The retry's own output is newer than anything computed from the one it replaced.
+    const f = await standard();
+    await f.remove(f.wire);
+    f.fake.hooks.beforeUpdate = async () => {
+      f.fake.hooks.beforeUpdate = null;
+      await f.fake.db
+        .update(schema.taskSteps)
+        .set({ output: null })
+        .where(eq(schema.taskSteps.stepId, '00-plan-inputs'));
+    };
+    await withLiveInputs(f.ctx, f.d);
+    expect(f.recordedNow()).toBeNull();
   });
 });
 
@@ -980,7 +1268,15 @@ describe('a greenfield root with nothing left to build from', () => {
     ({ mode, repositoryId: 'r1', brief }) as PlanBuildDetect;
   /** The one attachment snapshot the root dispatch reads. */
   const snapshot = (...filenames: string[]) => ({
-    rows: filenames.map((filename) => ({ id: `id-${filename}`, filename, contentType: null })),
+    rows: filenames.map((filename) => ({
+      id: `id-${filename}`,
+      filename,
+      contentType: null,
+      storedPath: `/uploads/${filename}`,
+      description: null,
+      expandedAt: null,
+      expansionNote: null,
+    })),
     ids: new Set(filenames.map((f) => `id-${f}`)),
     names: new Set(filenames),
   });

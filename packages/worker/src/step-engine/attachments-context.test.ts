@@ -109,6 +109,50 @@ describe('augmentPromptWithAttachments', () => {
     );
   });
 
+  it('counts the top-level files past the limit when there is no folder', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      filename: `f${i}.md`,
+      description: null,
+    }));
+    const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');
+    expect(out).toBe(
+      [
+        '[User-attached files]',
+        'The user attached 50 reference file(s) for this task, available read-only at:',
+        `  ${DIR}/`,
+        ...Array.from({ length: 40 }, (_, i) => `  - f${i}.md`),
+        'COVERAGE: the list above names 40 of 50 attached files; the rest are',
+        `10 top-level files it does not name. ${DIR}/_ATTACHMENTS.md indexes every one of them by path.`,
+        SEE,
+        '',
+        'ORIGINAL',
+      ].join('\n'),
+    );
+  });
+
+  it('counts the top-level files past the limit beside the folders', async () => {
+    const rows = [
+      ...Array.from({ length: 45 }, (_, i) => ({ filename: `f${i}.md`, description: null })),
+      { filename: 'docs/a.md', description: null },
+      { filename: 'docs/b.md', description: null },
+    ];
+    const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');
+    expect(out).toBe(
+      [
+        '[User-attached files]',
+        'The user attached 47 reference file(s) for this task, available read-only at:',
+        `  ${DIR}/`,
+        ...Array.from({ length: 40 }, (_, i) => `  - f${i}.md`),
+        '  - docs/ — 2 file(s)',
+        'COVERAGE: the list above names 40 of 47 attached files; the rest are',
+        `inside the folders listed, except 5 top-level files it does not name. ${DIR}/_ATTACHMENTS.md indexes every one of them by path.`,
+        SEE,
+        '',
+        'ORIGINAL',
+      ].join('\n'),
+    );
+  });
+
   describe('an archive that did not fully expand', () => {
     const NOTE = '1 archive member(s) were not extracted (1 symlink(s)): bundle/escape';
     const archive = (filename: string, note: string | null, expanded = true) => ({

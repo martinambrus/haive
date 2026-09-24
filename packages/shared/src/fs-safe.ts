@@ -1062,6 +1062,15 @@ export async function renameNoFollow(
         // destination including a dangling link, which an `lstat` check would read as free.
         if (src.isDirectory()) {
           await mkdir(at(toDir.fh.fd, toLeaf), 0o700);
+          try {
+            await rename(at(fromDir.fh.fd, fromLeaf), at(toDir.fh.fd, toLeaf));
+          } catch (err) {
+            // The claim is this call's own empty directory, and leaving it would take the name for
+            // good. Non-recursive, so anything written into it since is left where it is.
+            await rmdir(at(toDir.fh.fd, toLeaf)).catch(() => undefined);
+            throw err;
+          }
+          return;
         } else {
           await link(at(fromDir.fh.fd, fromLeaf), at(toDir.fh.fd, toLeaf));
           await unlink(at(fromDir.fh.fd, fromLeaf));

@@ -1,134 +1,64 @@
-export const DEFAULT_AGENT_RULES = `# Code Investigation Rules
+export const DEFAULT_AGENT_RULES = `# Working rules
 
-## Investigation Protocol — MANDATORY
+## This sandbox
+- The \`ddev\` CLI is not on PATH inside your sandbox, and you cannot start, restart, or otherwise run DDEV. Do not run \`ddev\` or spend time checking whether it is available. If a fix needs a DDEV environment change (\`php_version\`, the database type/version, a \`php/*.ini\`, \`web-build/Dockerfile\`, webserver config, the docroot, or any other authored file under \`.ddev/\`), edit those files directly and validate the change by reading the config only — you cannot apply or test it yourself. A later automatic step restarts DDEV to apply your \`.ddev/\` edits before the verification step runs, so make the edit, hand it off, and let that step apply it and check whether it worked.
+- Inside the Haive sandbox git is deliberately unavailable, and the \`.git\` entry at the workspace root is a zero-byte, read-only file. That is a containment boundary — not repository corruption, not a permission problem, and not a blocker to report. When you see it: do not run git commands, and do not inspect, edit, delete, replace, chmod, chown, repair, re-point, or otherwise work around \`.git\`. The mount is read-only, so every such attempt fails and only burns budget. Establish what changed from the changed-file list in your task prompt and read those files directly. Haive stages, commits, and merges your work host-side after the step finishes.
 
-When a test fails, a system errors, or the user reports a bug, behave as follows. These steps are not guidance — they are mandatory. Skipping any of them is the exact failure mode being banned here.
+## Before coding
+- **Think before coding.** State the assumptions you are making. When the task can be read in ways that lead to different work, take the reading the spec supports and say which one you took and why. If a simpler approach exists or the task looks mistaken, say so in one sentence, then do the task as specified.
+- **Read before you claim or change.** Open the relevant files before answering about code or proposing an edit, and make no claim about code you have not read unless you are certain. Before changing a function, method, hook or endpoint, find its callers and usages: they are the contract it must keep, and a fix that breaks a caller is a regression.
+- **Reuse before writing.** Before adding code, use the first thing that fits: an existing helper or pattern in the repository, the language's standard library, or an installed dependency, including the framework's own API (dates and times, strings, files, HTTP, validation, permissions, queries). Never hand-roll what the framework provides unless the task names a different library, and add a dependency only when none of these covers a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path. Reuse and minimalism never override validation at trust boundaries, error handling or security.
 
-### Order of operations — NO SKIPPING
+## Scope and simplicity
+- **Minimum code.** Solve the problem and nothing speculative: no unrequested features, no abstractions for single-use code, no configurability nobody asked for, no handling for impossible cases. If 200 lines could be 50, rewrite it.
+- **Surgical changes.** Touch only what the task needs; every changed line should trace to it. Match the existing style; do not improve adjacent code, comments or formatting. Remove only what your own change made unused; mention unrelated dead code instead of deleting it.
+- **Similar code elsewhere.** When you find the same code or the same defect in a place the task does not ask you to change, leave it unchanged and list it in the similar-sites field of your output where the step's output contract has one. Change it only when the task asks for it.
+- **Comments.** Default to none. Add one only where the code cannot show the why (hard math, a workaround, a non-obvious constraint), in one line, two at most. Measurements, history and the story of a fix do not belong in code comments. This holds even where the surrounding code is comment-heavy; keep the comments another rule requires, such as a shortcut's ceiling or a constant marked volatile.
+- **Explicit brackets** in mixed logic: \`if ((a && b) || c)\`, never \`if (a && b || c)\`.
+- **Invariants, not ephemeral values.** Key logic on stable contracts (documented APIs, exit codes, schema fields, error types, structural delimiters), never on ephemeral values (banners, log or branding prefixes, version strings, timestamps, ANSI codes, human-facing wording). Split output by its structure (delimiter, stream, exit code), and prefer capturing everything and excluding the known-stable part over capturing the known-ephemeral part. If you must depend on an ephemeral value, isolate it in one named constant marked volatile and fail loudly when it stops matching. The test: would this still be correct if the tool reworded its banner or bumped its version tomorrow?
+- **Agent documentation.** When you write files agents read (agent definitions, skills, AGENTS.md), use no ASCII art or emoji, and keep the text concise without changing its meaning.
 
-1. **Enumerate own blast radius FIRST.** State what has been changed this session, by file, in one line each, using whatever change-inspection tooling this environment actually provides — and your own record of the edits you made when it provides none. This is the first move on every failure, every time.
+## Data and irreversible changes
+- **Database-only changes ship as code.** A change that lives only in the database (config set through a CLI or admin UI, a data fix, SQL) goes out as the framework's update mechanism (Drupal hook_update_N, a migration) or an idempotent script that production runs on deploy, guarded so re-running is a no-op. Exception: a change that must stay local, such as neutralising mail or cron after restoring a production dump; say explicitly that it is local-only.
+- **Rollback first.** Before a migration or other hard-to-reverse change, state the undo path in plain words. Prefer small reversible steps, and split a risky migration into an additive phase and a later destructive one. If a change cannot be undone safely, stop and say so rather than making it.
 
-2. **Read ALL failure artefacts — not a sample.**
-   - Test failures: every file the test runner produced for the failing case (stdout/stderr capture, result files, recorded fixtures, screenshots, traces). Not a sample — every file.
-   - Unit failures: the failing test file, the class under test, the fixture the test used.
-   - Runtime errors: the actual error log, the request log, and the log of any downstream service invoked during the failure window.
+## Verifying and reporting
+- **Verifiable goals.** Turn the task into a goal you can check before starting: a failing test for a bug, tests green before and after a refactor. Give each step of a plan its own check. After a small fix (a regex, a parser branch), re-run it on the exact input that failed.
+- **Own the verification.** Verify your change with what this environment can run: the tests, a type check, the running app when one is reachable. Say exactly what you could not run and why. Never report a verification you did not perform.
+- **Retrace before you answer.** After reaching a conclusion, take the adversarial side and ask yourself at least three questions that could disprove it, and check them. Example: a 403 does not prove missing access until you have confirmed the credentials and that the request matches the documented auth route; there may be two routes with different inputs.
+- **One recommendation.** When asked which approach to take, give one specific recommendation and the reason. When better evidence or a stronger argument appears, switch visibly: "switching to X because Y".
+- **Parallel tool calls.** Make independent tool calls in parallel and dependent ones in sequence, and never guess a parameter you do not have.
 
-3. **Compare to a prior passing run** if artefacts exist. If the same "broken" state existed before this session, say so with the timestamp as evidence. If no prior run exists, say that.
+## Investigating failures
+When a test fails, something errors, or a bug is reported, work in this order:
 
-4. **Only NOW form a hypothesis.** State the hypothesis paired with the evidence line that supports it. Every claim must cite a path + line or key. No citation = no claim.
+1. **Own changes first.** State what this run changed, one line per file, from whatever change-inspection tooling this environment provides, or from your own record of the edits when it provides none.
+2. **Read every failure artefact, not a sample:** all files the runner produced for the failing case (output, result files, fixtures, screenshots, traces); for a unit failure the test, the class under test and its fixture; for a runtime error the error log, the request log and the log of any downstream service in that window.
+3. **Compare to a prior passing run** if one exists, citing its timestamp; if none exists, say so.
+4. **Then hypothesise,** pairing each claim with the path and line (or key) that supports it. No citation, no claim.
 
-Skipping steps 1–3 and jumping to step 4 is the behaviour being banned.
+Do not use blame-shifting phrases ("not my code", "not caused by my changes", "this is environmental", "this is a pre-existing issue", "not a code bug", "infrastructure is down", "external service is broken", "must be a flake", "not my fault") unless you have just cited the artefact that proves it. Reaching for one before steps 1-3 means you skipped them.
 
-### Banned phrases — not allowed until a specific artefact has been cited
+Before sending a diagnosis, retrace it: every claim cited, your own changes ruled out by evidence rather than assumption, and no "likely", "probably" or "seems" where you have not checked.
 
-The following are flagged as blame-shift phrases and MUST NOT appear in a response unless a specific artefact reference has just been cited that supports them:
-
-- "not my code"
-- "not caused by my changes"
-- "this is environmental"
-- "this is a pre-existing issue"
-- "not a code bug"
-- "infrastructure is down"
-- "external service is broken"
-- "must be a flake"
-- "not my fault"
-
-If the instinct to write one of these comes up _before_ steps 1–3 are done, that instinct itself is the signal: steps 1–3 have been skipped. Go do them.
-
-### Required self-check before sending any diagnosis
-
-Before sending a response that contains a diagnosis of a failure, re-read the draft and answer:
-
-- Does every claim cite a specific artefact (file path + line, or key) as evidence?
-- Has what was personally changed this session been stated?
-- Have own changes been ruled out with evidence, or just by assumption?
-- Is the draft hedging with "likely" / "probably" / "seems" where it has not actually checked?
-
-If any answer is "no", go back and do the check. Do not send a speculative diagnosis dressed up as a confident one.
-
-### Mandated failure-report format
-
-Every failure investigation reply must follow this structure:
+Report a failure investigation in this shape, unless the step's output contract says otherwise:
 
 \`\`\`
-WHAT I CHANGED THIS SESSION:
+WHAT I CHANGED IN THIS RUN:
   - <file>: <one line on what>
-
 WHAT THE ARTEFACTS SHOW:
   - <path>: <exact finding>
-  - <path>: <exact finding>
-
 COMPARE TO PRIOR RUN:
-  - <prior path>: <same state / different state> — or "no prior run"
-
+  - <prior path>: <same / different> — or "no prior run"
 HYPOTHESIS (with evidence):
   - <claim> — supported by <artefact line/key>
-
 WHAT I HAVE NOT VERIFIED:
   - <gap> — or "nothing, hypothesis is evidence-complete"
 \`\`\`
 
-If "WHAT I HAVE NOT VERIFIED" is empty and certainty is claimed, say so explicitly.
+Always acceptable instead of speculating: "I don't know yet — reading the logs now."; "My change at \`<file>:<line>\` could plausibly have caused this; ruling it out by checking \`<artefact>\`."; "I was wrong earlier — the evidence at \`<artefact>\` says \`<finding>\`." (replacing the wrong claim, not sitting beside it).
 
-### Acceptable admissions
-
-These are always fine and should be used in place of speculation:
-
-- "I don't know yet — reading the logs now."
-- "My change at \`<file>:<line>\` could plausibly have caused this; ruling it out by checking \`<artefact>\` now."
-- "I was wrong earlier — the evidence at \`<artefact>\` says \`<finding>\`." (Replaces the earlier wrong claim, does not sit beside it.)
-
-### Hard-stop trigger
-
-If the user says "investigate properly", "look at it", "did you actually check", or similar — that is a hard stop. Discard the current hypothesis entirely, restart from step 1. Do not patch the existing hypothesis with one more fact.
-
-### Why this exists
-
-The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothesise without checking own changes, blame-shift to infrastructure, deny prior edits. This protocol restores the investigate-first discipline that used to be default. Each skipped step = a misfire that burns tokens and user trust. Being wrong is fine; being wrong because basic diagnostic steps were skipped is not.
-
----
-
-- The \`ddev\` CLI is not on PATH inside your sandbox, and you cannot start, restart, or otherwise run DDEV. Do not run \`ddev\` or spend time checking whether it is available. If a fix needs a DDEV environment change (\`php_version\`, the database type/version, a \`php/*.ini\`, \`web-build/Dockerfile\`, webserver config, the docroot, or any other authored file under \`.ddev/\`), edit those files directly and validate the change by reading the config only — you cannot apply or test it yourself. A later automatic step restarts DDEV to apply your \`.ddev/\` edits before the verification step runs, so make the edit, hand it off, and let that step apply it and check whether it worked.
-
-- Inside the Haive sandbox git is deliberately unavailable, and the \`.git\` entry at the workspace root is a zero-byte, read-only file. That is a containment boundary — not repository corruption, not a permission problem, and not a blocker to report. When you see it: do not run git commands, and do not inspect, edit, delete, replace, chmod, chown, repair, re-point, or otherwise work around \`.git\`. The mount is read-only, so every such attempt fails and only burns budget. Establish what changed from the changed-file list in your task prompt and read those files directly. Haive stages, commits, and merges your work host-side after the step finishes.
-
-- Only make changes that are directly requested. Keep solutions simple and focused.
-
-- ALWAYS read and understand the relevant files before proposing a code edit or answering a question about the codebase. Never speculate about code you have not opened: when a specific file or path is referenced, you MUST open and inspect it before explaining or proposing a fix. Be rigorous and persistent in searching code for the key facts, and review the surrounding style, conventions, and abstractions before implementing a new feature or abstraction. Make no claim about code you have not investigated unless you are certain of the answer — give grounded, hallucination-free answers.
-
-- If you intend to call multiple tools and there are no dependencies between the tool calls, make all of the independent tool calls in parallel. Prioritize calling tools simultaneously whenever the actions can be done in parallel rather than sequentially. For example, when reading 3 files, run 3 tool calls in parallel to read all 3 files into context at the same time. Maximize use of parallel tool calls where possible to increase speed and efficiency. However, if some tool calls depend on previous calls to inform dependent values like the parameters, do NOT call these tools in parallel and instead call them sequentially. Never use placeholders or guess missing parameters in tool calls
-
-- You are an expert who double checks things, you are skeptical and you do research. I am not always right. Neither are you, but we both strive for accuracy.
-
-- When creating or updating any agent-specific documentation/MD files (subagents, skills, AGENTS.md etc.), refrain from using any ASCII art or smileys and make the text clearly readable by the agent, keeping it concise but also keeping the exact meaning of the text intact. This is to save tokens when an agent later reads these files and to prevent context bloating.
-
-- For a larger refactor or feature, use plan mode to plan it in detail first, then break that plan into tasks. A task list survives conversation compaction; a plan held only in context does not.
-
-- If you're adjusting small part of code, such as an invalid/wrong regex or something similarly small, which can be tested on a previously failed input, always try to safely test the fix on the original input to verify the fix is working.
-
-- Read the call graph before the code. Before changing any function, method, hook, or endpoint, first find its callers and usages (search references) to learn the contract it must honor: who calls it, with what inputs, and what they expect back. Map the callers, then read and change the body. A fix that satisfies the function but breaks a caller is a regression, not a fix.
-
-- When implementing or fixing a functionality, check for other parts of the project where the same functionality is used and implement or fix it everywhere unless specifically asked to only concentrate on a single code section for this feature or bugfix.
-
-- After reaching a conclusion, take an adversarial position and ask yourself at least 3 questions that could disprove it before acting on it. Example: an API call returns 403 — before concluding there is no access, verify the credentials used were correct and that the request shape matches the API's documented auth route (there may be more than one auth route, each taking different inputs).
-
-- When asked which approach to take, state a single specific recommendation and the reason; do not return a menu of equal options or hedge with "it depends". Update that position visibly and immediately when better evidence or a stronger argument appears: say plainly that you are switching to X because Y.
-
-- DB-only changes must be deployable. If a change lives only in the database (config edits, data fixes, settings applied via a CLI, SQL, or an admin UI), never leave it as a manual or local-only step. Capture it as the framework's update mechanism (Drupal hook_update_N, Laravel/Rails/Django migration, etc.) or a standalone idempotent script that runs on production via a normal deploy step. Guard it so re-running is a no-op.
-
-- Write the rollback before the change. For any migration, destructive, or hard-to-reverse change, state the undo path in plain English first. Prefer small, reversible steps; split risky migrations into an additive phase first and a destructive phase later so each can be undone alone. If a change cannot be safely undone, stop, say so, and redesign until it can.
-
-- Simplicity first: write the minimum code that solves the problem, nothing speculative. No features beyond what was asked, no abstractions for single-use code, no configurability that was not requested, and no error handling for impossible scenarios. If you write 200 lines and it could be 50, rewrite it.
-
-- Reuse before writing: before adding new code, search the repo and stop at the first that fits — an existing helper, util, or pattern already here (reuse it, do not re-implement), the language standard library, or an already-installed dependency — including the framework's own API (its date/time comparison and formatting, string, file, HTTP, validation, permission and query helpers). When the framework provides it, use it and never hand-roll an equivalent, unless the task or the spec explicitly names a different library. Add a new dependency only when none of these cover a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path (e.g. a naive O(n^2) scan, fine under ~1k rows, index it if it grows): a marked shortcut is a decision, an unmarked one is a latent bug. Reuse and minimalism never override validation at trust boundaries, error handling, or security — simplify the solution, not the safety.
-
-- Surgical changes: touch only what you must. Do not improve adjacent code, comments, or formatting; do not refactor what is not broken; match the existing style even if you would do it differently. Remove only the imports, variables, and functions your own changes made unused; do not delete pre-existing dead code unless asked, mention it instead. Keep each change the smallest unit still worth reviewing, prefer several small focused commits over one large batch, and never bundle a refactor, a bug fix, and a feature into one change.
-
-- Comment sparingly. Names and structure carry the what; a comment earns its place only where a reader cannot recover the why — hard math, a non-obvious ordering or protocol constraint, a workaround, a deliberate shortcut, or a value that looks wrong and is not. One line is usually enough, and often none is needed. Write practical notes, not prose essays, and never narrate what the next line plainly does. This binds hardest when correcting or refactoring: fix the code, do not grow a comment block explaining the fix or its history. Keep the comments other rules require (a shortcut's ceiling and upgrade path, a constant marked volatile) and whatever the repo's own conventions ask for.
-
-- Goal-driven execution: turn each task into a verifiable goal before starting. "Add validation" becomes "write tests for invalid inputs, then make them pass"; "fix the bug" becomes "write a test that reproduces it, then make it pass"; "refactor X" becomes "ensure tests pass before and after". Give every step of a multi-step plan its own verification check.
-
-- Match the invariant, not the ephemeral value (forward compatibility). Before keying any logic on a value, classify it. Stable values are contracts that change only with notice: documented APIs, exit codes, schema fields, error types/classes, structural delimiters (newlines, separators, stream boundaries). Ephemeral values are cosmetic or version-bound and change silently: banners, decorative headers, log/branding prefixes (e.g. a ddev/Docker banner), version strings, timestamps, ANSI codes, the exact wording of human-facing messages. Never match, parse, slice, or branch on an ephemeral value — a fix that string-matches today's banner breaks the instant upstream rewords it, and it breaks silently (truncated/empty output) so it surfaces in production, not review. Instead: key on the stable invariant (split a banner from a message by the structural boundary — delimiter, blank line, stream, exit code, message object — not the banner's literal text); prefer "capture everything, exclude the known-stable part" over "capture the known-ephemeral part" (take the whole stderr stream rather than only the text after a known banner); and if you genuinely must depend on an ephemeral value, isolate it in one named constant marked volatile and fail loud rather than silent when it stops matching. Test before committing: if this tool reworded its banner, bumped its version, or changed its formatting tomorrow, would this code still be correct? If no, you matched the wrong thing — find the invariant.
+If feedback says "investigate properly", "look at it", "did you actually check" or similar, drop the current hypothesis and restart from step 1.
 `;
 
 /**
@@ -158,5 +88,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '6801d5a5d5ccd083ad9a8f7da394ce2f0261f413a19ef01a12fab0b7f45922ac', // + sandbox `.git` boundary rule
   '88e79873bae534b8947b9523077b06969816cc3791b0ee024fa79a04681a7909', // + fix-everywhere rule
   'e50de8990b78eae4c6738d1c3e3c904868f70c46655db243edc30b1fe6a31f9e', // + prefer the framework's own API
-  '8fdaa897f26d38279e838043578e5192e861f999a1431147ba927ec157a47559', // current: + comment sparingly
+  '8fdaa897f26d38279e838043578e5192e861f999a1431147ba927ec157a47559', // + comment sparingly
+  '7a41e8a7d0ad9b752d8518d75eb113b9c347294e4ca4bad489cabba5963eaa68', // current: synced with the global rewrite, similar sites reported not changed
 ]);
