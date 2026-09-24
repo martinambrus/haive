@@ -1,7 +1,7 @@
 # Found-not-fixed follow-ups from the agent-rules series
 
-> **IN PROGRESS.** PR 1 is in review (branch `md-images-links`). Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS.** PR 1 shipped as #249 (`5223d7b3`). PR 2 is in review (branch `csp-mermaid`).
+> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
@@ -121,6 +121,17 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - the refusal predicate;
   - the secured-key list;
   - the label escaping.
+- **As built:**
+  - The CSP hostname comes from the request's Host header. Next's `nextUrl` does not carry it:
+    MEASURED on a production build, `Host: haive.example.test` read as localhost, which would have
+    blocked the api's images for anyone reaching an install by IP or DNS name. The same build
+    showed that runtime-only `HAIVE_API_PORT` reaches the header, and that an explicit
+    `HAIVE_PUBLIC_API_URL` is reduced to its origin.
+  - The guarded render is `renderMermaid`, and `loadMermaid` is internal to the loader.
+  - The `properties` refusal matches the sequence syntax (`properties <actor>:`), so a flowchart node
+    named `properties` still draws.
+  - MEASURED before choosing to refuse: none of the 12 distinct diagrams stored on the dev install
+    uses a directive, frontmatter, `@{` or `properties`.
 - **Verify:** a local HTTP listener stands in as the outside host. Fixtures cover every vector:
   - HTML label;
   - image shape;
