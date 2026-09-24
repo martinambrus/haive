@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import rehypeHighlight from 'rehype-highlight';
+import { fencedCode } from '@/components/markdown/fenced-code';
 import { Markdown } from '@/components/markdown/markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import {
@@ -107,14 +108,7 @@ function langForName(name: string): string {
  *  `.haive-md` theme in globals.css styles the `.hljs` tokens). Deliberately
  *  bypasses MarkdownView so source files are not collapsed/segmented. */
 function HighlightedSource({ name, content }: { name: string; content: string }) {
-  const fenced = useMemo(() => {
-    // The fence has to be longer than any backtick run inside the file, or the
-    // file's own ``` would terminate the block early and leak into markdown.
-    let longest = 0;
-    for (const m of content.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
-    const fence = '`'.repeat(Math.max(3, longest + 1));
-    return `${fence}${langForName(name)}\n${content}\n${fence}`;
-  }, [name, content]);
+  const fenced = useMemo(() => fencedCode(content, langForName(name)), [name, content]);
   return (
     <div className="haive-md max-h-[600px] overflow-auto">
       <Markdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>{fenced}</Markdown>

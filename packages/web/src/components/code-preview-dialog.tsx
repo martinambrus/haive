@@ -5,6 +5,7 @@ import rehypeHighlight from 'rehype-highlight';
 import { getRepoFile } from '@/lib/api-client';
 import { Dialog, DialogContent } from '@/components/dialog';
 import { FormError } from '@/components/ui';
+import { fencedCode } from '@/components/markdown/fenced-code';
 import { Markdown } from '@/components/markdown/markdown';
 import { languageForPath, resolvePreviewLine } from './code-preview-source';
 
@@ -162,7 +163,7 @@ export function CodePreviewDialog({
                 />
               )}
               <Markdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
-                {`\`\`\`${lang}\n${file.content}\n\`\`\``}
+                {fencedCode(file.content, lang)}
               </Markdown>
             </div>
           </div>

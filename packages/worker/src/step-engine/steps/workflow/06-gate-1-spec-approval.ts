@@ -5,6 +5,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
 import { resolveTaskWorktreePath, writeSpecArtifact } from './_spec-artifact.js';
+import { codeBlock } from './_plan-ops.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import {
   resolveAffectedComponentsForIds,
@@ -226,7 +227,7 @@ export function extractMermaidBlocks(body: string): string[] {
     // A closing fence is a bare run of at least as many backticks as the opener.
     if (marker && ticks.length >= fence.length && info.trim() === '') {
       if (lang === 'mermaid' && current.join('\n').trim().length > 0) {
-        blocks.push(['```mermaid', ...current, '```'].join('\n'));
+        blocks.push(codeBlock(current.join('\n'), 'mermaid'));
       }
       fence = null;
       continue;

@@ -54,6 +54,15 @@ export function code(text: string): string {
   return `${fence}${pad}${text}${pad}${fence}`;
 }
 
+/** `text` as a fenced block for a form body, sized like `code()`: command output and specs
+ *  hold ``` lines of their own, which end a fixed fence and render the rest as markdown. */
+export function codeBlock(text: string, lang = ''): string {
+  let longest = 0;
+  for (const m of text.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}${lang}\n${text}\n${fence}`;
+}
+
 export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): string {
   // Refs arrive as the agent wrote them — `parsePlanPatch` normalises nothing,
   // and the patch contract tells the agent to quote ids as `node:<uuid>`, which
