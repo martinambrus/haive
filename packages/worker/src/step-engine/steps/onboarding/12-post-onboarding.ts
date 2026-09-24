@@ -35,6 +35,7 @@ import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { dropIgnoredRulesFiles } from './_rules-files.js';
 import {
   expandCustomBundlesFor,
   expandManifestFor,
@@ -691,11 +692,18 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await exec('git', ['add', '-A'], { cwd: ctx.repoPath });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
+      // After any init, so a repository that had no git yet is checked against its .gitignore too.
+      const { keep, warnings: ignored } = await dropIgnoredRulesFiles(
+        ctx.repoPath,
+        existingPaths,
+        new Set(EXTRA_RULES_STAGE_PATHS),
+      );
+      warnings.push(...ignored);
       // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
-      await exec('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
+      if (keep.length > 0) await exec('git', ['add', '-f', '--', ...keep], { cwd: ctx.repoPath });
       const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
         cwd: ctx.repoPath,
       });
