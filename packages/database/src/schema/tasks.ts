@@ -770,6 +770,12 @@ export const taskStepAgentMinings = pgTable(
     roleKey: text('role_key'),
     capabilities: text('capabilities').array(),
     preferVision: boolean('prefer_vision'),
+    /** The prompt the step wrote for this agent's last dispatch, before any augmentation or
+     *  provider adaptation, so a retry that cannot rebuild the dispatch re-runs it the way a
+     *  fresh one runs: augmented and adapted anew. NULL: not recorded (rows before migration
+     *  0167, and a legacy verbatim replay), which recovers from `cli_invocations.prompt` as
+     *  before. Prompt-sized, so the hot reads leave it out (`MINING_ROW_COLUMNS`). */
+    dispatchPrompt: text('dispatch_prompt'),
   },
   (table) => [
     index('task_step_agent_minings_task_step_id_idx').on(table.taskStepId),
