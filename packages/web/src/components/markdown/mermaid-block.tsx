@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useState } from 'react';
 import { repairFlowchartLabelParens, repairSequenceSemicolons } from './mermaid-repair';
-import { loadMermaid } from './mermaid-loader';
+import { renderMermaid } from './mermaid-loader';
 
 type RenderState = { kind: 'pending' } | { kind: 'error' } | { kind: 'done'; svg: string };
 
@@ -17,24 +17,9 @@ export function MermaidBlock({ source }: { source: string }) {
     let cancelled = false;
     setState({ kind: 'pending' });
     void (async () => {
-      let mermaid: Awaited<ReturnType<typeof loadMermaid>>;
-      try {
-        mermaid = await loadMermaid();
-      } catch {
-        if (!cancelled) setState({ kind: 'error' });
-        return;
-      }
-      // Pre-validate with parse so invalid syntax becomes our plain-code
+      // A source that is refused or fails to parse becomes our plain-code
       // fallback instead of mermaid's error SVG injected into the document.
-      const attempt = async (src: string, id: string): Promise<string | null> => {
-        try {
-          await mermaid.parse(src);
-          return (await mermaid.render(id, src)).svg;
-        } catch {
-          return null;
-        }
-      };
-      let svg = await attempt(source, renderId);
+      let svg = await renderMermaid(renderId, source);
       // Targeted repair passes for the LLM authoring mistakes that abort the
       // strict parser: a bare `;` in a sequence message, raw parens in a
       // flowchart label. Each is gated to its own diagram type and retry-only,
@@ -42,7 +27,7 @@ export function MermaidBlock({ source }: { source: string }) {
       const repairs = [repairSequenceSemicolons, repairFlowchartLabelParens];
       for (let i = 0; svg === null && i < repairs.length; i++) {
         const repaired = repairs[i]!(source);
-        if (repaired !== null) svg = await attempt(repaired, `${renderId}-repaired-${i}`);
+        if (repaired !== null) svg = await renderMermaid(`${renderId}-repaired-${i}`, repaired);
       }
       if (cancelled) return;
       setState(svg !== null ? { kind: 'done', svg } : { kind: 'error' });
