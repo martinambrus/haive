@@ -948,7 +948,9 @@ ISO-29500, so this matches an invariant not someone's formatting), `.pdf` via `p
 Sidecars land beside the originals with the api's same chown-to-1000 dance and are indexed by
 `_PLAN_INPUTS.md`, which the greenfield prompt names. An extraction that THROWS is reported
 per-file and never fails the step — the original is still mounted — while one that yields
-nothing is reported as empty, because "unreadable" and "says nothing" are different facts.
+nothing is reported as empty, because "unreadable" and "says nothing" are different facts. An
+extractor still running after 120 s is killed and reported the same way (`EXTRACT_TIMEOUT_MS`),
+since a build's dispatch extracts too, and a hung `pdftotext` there would hold the whole wave.
 `02-plan-coverage` reads that normalised set: it used to read the FIRST attachment as UTF-8
 regardless of kind, so a PNG arrived as mojibake whose headings were whatever followed a
 newline and a hash. Sections carry their `source`, so a gap names its file and two files'
@@ -981,22 +983,34 @@ already seeded the old one (`seedDefaults` is `setnx`), so `reconcileRaisedDefau
 stored value that is still exactly the previous default, on every boot, idempotently — the
 deploy path a config-only change would otherwise not have.
 
-**Plan inputs follow deletions; additions count only by kind.** `00-plan-inputs` records the set
-once, and 01's detect copies what it found into a PERSISTED payload, so a deleted picture kept
-demanding `vision` and the index the root prompt reads FIRST kept naming a deleted file.
-`withLiveInputs` (`01-plan-build.ts`) recomputes those fields at DISPATCH, the root and every
-wave, through `livePlanInputs` (`00-plan-inputs.ts`). Membership changes and a measured verdict
-never does: a PDF that yielded no text stays visual-only. Membership is by ROW, never by name: a
-file deleted and re-uploaded under the same name is a different document that nothing extracted,
-so it counts as a deletion plus an addition. The index is re-rendered, or removed once nothing in
-it is left. An ADDITION is neither extracted nor indexed, but the attachments notice names every
-live row, so its kind still counts (`unpreparedAttachments`): a picture requires `vision`, a PDF
-prefers it. A greenfield root with no brief refuses to dispatch once nothing at all is attached
-(`assertSomethingToBuildFrom`), which is 00's own "a brief or a file" rule re-checked against the
-live rows. 02's manual repair drops a picked section whose document is gone, because the gate
-carries its BODY. Every lookup fails open, onto the fields the build had before. A failed index
-REWRITE is the exception: it drops the index from the prompt, since the file on disk still names
-what was deleted.
+**Plan inputs follow the attachments, deletions and additions alike.** `00-plan-inputs` records
+the set once, and 01's detect copies what it found into a PERSISTED payload, so a deleted picture
+kept demanding `vision`, the index the root prompt reads FIRST kept naming a deleted file, and a
+document attached after 00 ran was never extracted at all. `withLiveInputs` (`01-plan-build.ts`)
+recomputes those fields at DISPATCH, the root and every wave, through `currentPlanInputs`
+(`00-plan-inputs.ts`). A deletion drops the input with every verdict it carried, and a measured
+verdict never changes otherwise: a PDF that yielded no text stays visual-only. An addition is
+prepared exactly as 00 prepares one (`preparePlanInput`), inside the same 50-extraction budget, and
+the note of an archive expanded since joins it. Preparing can take minutes, and the attachments
+notice the dispatch builds afterwards names what is attached THEN, so a pass that prepared anything
+reads the rows again and another pass catches up with any that changed, up to three in all.
+Membership is by ROW, never by name: a file deleted
+and re-uploaded under the same name is a different document, prepared on its own, and never
+inherits the verdict of the one it replaced. When anything changed, the index is re-rendered, or
+removed once nothing in it is left, and the result is written back over 00's output by
+compare-and-set (`WHERE output = <what was read>`), so the next wave neither extracts the same
+document again nor loses what it found, while a 00 retry, which resets that output, makes the write
+match nothing. That record is also why nothing falls back to the detected fields: after it, a late
+picture is a recorded input rather than an addition. A file attached since whose bytes cannot be
+read is left unprepared and counts by KIND alone, since the attachments notice names every live
+row: a picture requires `vision`, a PDF prefers it. A greenfield root with no brief refuses to
+dispatch once nothing at all is attached (`assertSomethingToBuildFrom`), which is 00's own "a brief
+or a file" rule re-checked against the live rows, before the inputs are prepared and again after,
+since preparing a late document can take minutes and deleting the only one meanwhile must still
+refuse. 02's manual repair drops a picked section whose
+document is gone, because the gate carries its BODY. Every lookup fails open, onto the fields the
+build had before. A failed index REWRITE is the exception: it drops the index from the prompt, and
+is recorded that way, since the file on disk no longer lists what is attached.
 
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 

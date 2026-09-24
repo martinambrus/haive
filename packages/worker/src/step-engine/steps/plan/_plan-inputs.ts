@@ -5,6 +5,20 @@ import { planInputSidecarName, taskUploadsRel } from '@haive/shared';
 
 const exec = promisify(execFile);
 
+/** How long one extractor subprocess may run. Extraction also happens when a build dispatches, where
+ *  a hung `pdftotext` would hold the whole wave. */
+const EXTRACT_TIMEOUT_MS = 120_000;
+
+const extractorLimits = () => ({
+  signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
+  killSignal: 'SIGKILL' as const,
+});
+
+/** An extractor stopped by the timeout above: node's documented abort code, never its message. */
+function timedOut(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ABORT_ERR';
+}
+
 /**
  * Turning a task's attachments into something every CLI can actually read.
  *
@@ -139,12 +153,17 @@ export async function unzipMember(archivePath: string, member: string): Promise<
   const { stdout } = await exec('unzip', ['-p', archivePath, member], {
     maxBuffer: 64 * 1024 * 1024,
     encoding: 'utf8',
+    ...extractorLimits(),
   });
   return stdout;
 }
 
 async function unzipMemberOrNull(archivePath: string, member: string): Promise<string | null> {
-  return unzipMember(archivePath, member).catch(() => null);
+  return unzipMember(archivePath, member).catch((err: unknown) => {
+    // A part that took too long to read is there, so reporting it absent would mis-render the rest.
+    if (timedOut(err)) throw err;
+    return null;
+  });
 }
 
 /** Member paths inside the archive, from `unzip -Z1`. Needed for XLSX, whose
@@ -153,6 +172,7 @@ async function listZipMembers(archivePath: string): Promise<string[]> {
   const { stdout } = await exec('unzip', ['-Z1', archivePath], {
     maxBuffer: 8 * 1024 * 1024,
     encoding: 'utf8',
+    ...extractorLimits(),
   });
   return stdout
     .split('\n')
@@ -415,6 +435,7 @@ async function extractPdf(filePath: string): Promise<ExtractionResult> {
   const { stdout } = await exec('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-'], {
     maxBuffer: 64 * 1024 * 1024,
     encoding: 'utf8',
+    ...extractorLimits(),
   });
   // Split on the form feed poppler writes between pages and drop the blank ones
   // BEFORE joining. Adding the rule first and trimming after is what made an
@@ -444,6 +465,13 @@ export async function extractPlanInput(
     if (kind === 'pdf') return await extractPdf(filePath);
     return { markdown: '', hasContent: false, error: `no extractor for ${kind}` };
   } catch (err) {
+    if (timedOut(err)) {
+      return {
+        markdown: '',
+        hasContent: false,
+        error: `timed out after ${EXTRACT_TIMEOUT_MS / 1000}s`,
+      };
+    }
     const message = err instanceof Error ? err.message : String(err);
     return { markdown: '', hasContent: false, error: message.split('\n')[0]!.slice(0, 300) };
   }
