@@ -73,11 +73,18 @@ stepRegistry.register({
   },
 } as StepDefinition);
 
-function advanceJob(): Job {
+function advanceJob(extra: Record<string, unknown> = {}): Job {
   return {
     id: 'job-1',
     name: TASK_JOB_NAMES.ADVANCE_STEP,
-    data: { taskId: 'task-1', userId: 'user-1', stepId: 'failed-advance-step', round: 0, epoch: 5 },
+    data: {
+      taskId: 'task-1',
+      userId: 'user-1',
+      stepId: 'failed-advance-step',
+      round: 0,
+      epoch: 5,
+      ...extra,
+    },
     timestamp: Date.now(),
     moveToDelayed: vi.fn(async () => undefined),
   } as unknown as Job;
@@ -100,5 +107,18 @@ describe('an advance queued before its task failed', () => {
     h.state.rowStatus = 'waiting_cli';
     await processTaskJob(advanceJob(), 'tok');
     expect(h.state.writes).toEqual([]);
+  });
+
+  it('is dropped when it lands on a form still parked but carries no answer', async () => {
+    h.state.rowStatus = 'waiting_form';
+    await processTaskJob(advanceJob(), 'tok');
+    expect(h.state.writes).toEqual([]);
+  });
+
+  it('lets an answer submitted to that form through, as before', async () => {
+    h.state.rowStatus = 'waiting_form';
+    // Past the guard the advance goes on to the step's own work, which this db does not serve.
+    await processTaskJob(advanceJob({ formValues: { answer: 'yes' } }), 'tok').catch(() => {});
+    expect(h.state.writes).not.toEqual([]);
   });
 });

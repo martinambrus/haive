@@ -275,8 +275,9 @@ which no continuation does any more. The hold is taken outside the job's own cat
 catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
 then run after the pass it waited behind failed the step, so an advance on a `failed` task is
 dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
-task `running` first. A form still parked is the one exception, since answering it is what reopens
-the task.
+task `running` first. An answer submitted to a form still parked is the one exception, since
+answering it is what reopens the task; an advance onto that form that carries no answer is dropped
+like any other.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the

@@ -65,17 +65,22 @@ describe('staleSubmitAction', () => {
 describe('failedTaskRefusesAdvance', () => {
   it('keeps out an advance on a failed task, whatever the step row says', () => {
     for (const row of ['failed', 'running', 'waiting_cli', 'pending', 'done', undefined]) {
-      expect(failedTaskRefusesAdvance('failed', row)).toBe(true);
+      expect(failedTaskRefusesAdvance('failed', row, false)).toBe(true);
+      expect(failedTaskRefusesAdvance('failed', row, true)).toBe(true);
     }
   });
 
-  it('lets an answer to a form still parked on a failed task through', () => {
-    expect(failedTaskRefusesAdvance('failed', 'waiting_form')).toBe(false);
+  it('lets an answer submitted to a form still parked on a failed task through', () => {
+    expect(failedTaskRefusesAdvance('failed', 'waiting_form', true)).toBe(false);
+  });
+
+  it('keeps out an advance onto that form that carries no answer', () => {
+    expect(failedTaskRefusesAdvance('failed', 'waiting_form', false)).toBe(true);
   });
 
   it('lets any advance through on a task something has reopened', () => {
     for (const task of ['running', 'waiting_user', 'paused', 'queued']) {
-      expect(failedTaskRefusesAdvance(task, 'failed')).toBe(false);
+      expect(failedTaskRefusesAdvance(task, 'failed', false)).toBe(false);
     }
   });
 });

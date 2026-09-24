@@ -1819,7 +1819,7 @@ async function handleAdvanceStep(
   // An advance queued before the task failed, such as one a fan-out's agent queued and the step's
   // hold deferred behind the pass that then failed the step, would otherwise revive the task and run
   // the step again.
-  if (failedTaskRefusesAdvance(ctx.status, existing?.status)) {
+  if (failedTaskRefusesAdvance(ctx.status, existing?.status, payload.formValues != null)) {
     logger.info(
       { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
       'advance-step skipped: the task failed and nothing has reopened it',
