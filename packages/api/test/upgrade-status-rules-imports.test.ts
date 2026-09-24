@@ -8,6 +8,8 @@ import {
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
   normalizeContent,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
 
@@ -201,5 +203,79 @@ describe('upgrade-status and a template rendered to several paths', () => {
       expect(body.changedTemplateIds, order).toEqual(['agent.x']);
       expect(body.hasUpgradeAvailable, order).toBe(true);
     }
+  });
+});
+
+describe('upgrade-status and a repository that switched RTK off', () => {
+  let repo: string;
+  let outside: string;
+  const rtk = { templateId: 'rtk.claude-settings', schemaVersion: 1, contentHash: 'h-rtk' };
+  const block = `${RTK_REF_MARKER_START}\nRTK is here.\n${RTK_REF_MARKER_END}\n`;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-rtk-'));
+    outside = await mkdtemp(path.join(tmpdir(), 'upgrade-status-rtk-out-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    inSync([claude]);
+    state.rows.get(schema.templateManifestCache)!.push({
+      ...rtk,
+      templateKind: 'rtk-config',
+      setHash: 's',
+    });
+    state.rows.get(schema.onboardingArtifacts)!.push({
+      templateId: rtk.templateId,
+      templateSchemaVersion: rtk.schemaVersion,
+      templateContentHash: rtk.contentHash,
+      bundleItemId: null,
+      haiveVersion: null,
+      generatedAt: null,
+    });
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  const repoRow = (rtkEnabled: boolean, applicable = ['agent.x', rtk.templateId]) => {
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: applicable,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled,
+    };
+  };
+
+  it('reports an installed RTK settings file as changed once RTK is off', async () => {
+    repoRow(true);
+    expect((await status()).hasUpgradeAvailable).toBe(false);
+    repoRow(false);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([rtk.templateId]);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('offers an upgrade for an RTK block left in a rules file once RTK is off', async () => {
+    await writeFile(path.join(repo, 'AGENTS.md'), `# rules\n${block}`, 'utf8');
+    repoRow(true, ['agent.x']);
+    const on = await status();
+    expect(on.hasUpgradeAvailable).toBe(false);
+    expect(on.rtkBlockLeftovers).toBeUndefined();
+    repoRow(false, ['agent.x']);
+    const off = await status();
+    expect(off.changedTemplateIds).toEqual([]);
+    expect(off.rtkBlockLeftovers).toEqual(['AGENTS.md']);
+    expect(off.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('claims nothing for a block behind a link', async () => {
+    await rm(path.join(repo, 'CLAUDE.md'));
+    await writeFile(path.join(outside, 'CLAUDE.md'), `@AGENTS.md\n${block}`, 'utf8');
+    await symlink(path.join(outside, 'CLAUDE.md'), path.join(repo, 'CLAUDE.md'));
+    repoRow(false, ['agent.x']);
+    const body = await status();
+    expect(body.rtkBlockLeftovers).toBeUndefined();
   });
 });

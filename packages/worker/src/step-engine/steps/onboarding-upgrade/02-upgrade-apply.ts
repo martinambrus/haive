@@ -34,6 +34,7 @@ import {
   enabledImportRulesFiles,
   loadCliRulesRenderHashes,
   restoreRulesImportStubs,
+  stripRtkBlocks,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
 import {
@@ -432,6 +433,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         variant: 'info',
       });
     }
+    const rtkBlocks = detected.rtkBlockLeftovers ?? [];
+    if (rtkBlocks.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'rtkBlockNote',
+        label: 'Takes out the RTK block',
+        body:
+          'RTK is switched off for this repository, so the RTK block comes out of ' +
+          `${rtkBlocks.map((f) => `\`${f}\``).join(', ')}.`,
+        variant: 'info',
+      });
+    }
 
     if (fields.length === 0) return null;
 
@@ -730,6 +743,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (stub.result === 'created' || stub.result === 'appended') writtenPaths.push(stub.file);
       if (stub.result === 'refused') {
         warnings.push(`did not restore the @AGENTS.md import in ${stub.file}: ${stub.error}`);
+      }
+    }
+
+    // The RTK block is no manifest item, so no obsolete entry takes it out once RTK is off.
+    if (plan.renderCtxSnapshot.rtkEnabled === false) {
+      for (const strip of await stripRtkBlocks(ctx.repoPath)) {
+        if (strip.result === 'stripped') writtenPaths.push(strip.file);
+        if (strip.result === 'refused') {
+          warnings.push(`could not check ${strip.file} for an RTK block: ${strip.error}`);
+        }
       }
     }
 

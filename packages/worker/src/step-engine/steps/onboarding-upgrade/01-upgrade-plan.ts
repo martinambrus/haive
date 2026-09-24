@@ -1,4 +1,5 @@
 import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { rtkBlockFiles } from '@haive/shared/rules-files';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -88,6 +89,9 @@ export interface UpgradePlanDetect {
   /** Import-mode rules files lacking `@AGENTS.md`, which 02 restores. Optional: persisted plans
    *  predate it. */
   missingRulesImports?: string[];
+  /** Rules files holding the RTK block of a repository that switched RTK off, which 02 takes it
+   *  out of. Optional: persisted plans predate it. */
+  rtkBlockLeftovers?: string[];
 }
 
 export interface UpgradePlanOutput extends UpgradePlanDetect {
@@ -165,7 +169,14 @@ async function resolveRenderContext(
   liveRows: LiveArtifactRow[],
 ): Promise<TemplateRenderContext | null> {
   const snapshot = liveRows.find((r) => r.formValuesSnapshot)?.formValuesSnapshot ?? null;
-  if (snapshot) return snapshot as unknown as TemplateRenderContext;
+  if (snapshot) {
+    return withLiveRtk(
+      ctx,
+      repositoryId,
+      snapshot as unknown as TemplateRenderContext,
+      typeof snapshot.rtkEnabled === 'boolean',
+    );
+  }
 
   const priorOnboarding = await ctx.db
     .select({ id: schema.tasks.id })
@@ -237,7 +248,7 @@ async function resolveRenderContext(
       (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
   }));
 
-  return {
+  const recorded: TemplateRenderContext = {
     projectInfo: detect.projectInfo ?? {
       name: null,
       framework: null,
@@ -260,15 +271,28 @@ async function resolveRenderContext(
     customAgentSpecs: detect.customAgentSpecs ?? [],
     agentTargets,
     lspLanguages,
-    // Legacy detect outputs (pre-rtk) didn't snapshot these fields; default
-    // to "rtk off, no providers" so backfilled renders don't accidentally
-    // surface rtk artifacts the user never opted into. The live
-    // upgrade-plan path uses the current `repositories.rtk_enabled` value
-    // via step 04 / 07 detect; this fallback is only hit during artifact
-    // reconstruction for repos onboarded before rtk shipped.
+    // A detect output from before rtk shipped recorded no choice: off, not the column's default.
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
   };
+  return withLiveRtk(ctx, repositoryId, recorded, detect.rtkEnabled !== undefined);
+}
+
+/** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
+ *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
+async function withLiveRtk(
+  ctx: StepContext,
+  repositoryId: string,
+  recorded: TemplateRenderContext,
+  recordedChoice: boolean,
+): Promise<TemplateRenderContext> {
+  if (!recordedChoice) return recorded;
+  const [repo] = await ctx.db
+    .select({ rtkEnabled: schema.repositories.rtkEnabled })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  return repo ? { ...recorded, rtkEnabled: repo.rtkEnabled } : recorded;
 }
 
 async function readDiskContent(
@@ -465,6 +489,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       ctx.repoPath,
       await enabledImportRulesFiles(ctx.db, ctx.userId),
     );
+    const rtkBlockLeftovers =
+      renderCtx.rtkEnabled === false ? await rtkBlockFiles(ctx.repoPath) : [];
 
     return {
       repositoryId,
@@ -475,6 +501,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       currentTemplateSetHash: manifest.setHash,
       renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
       missingRulesImports,
+      rtkBlockLeftovers,
     };
   },
 

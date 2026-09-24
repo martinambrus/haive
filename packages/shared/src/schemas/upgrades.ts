@@ -43,6 +43,9 @@ export const upgradeStatusResponseSchema = z.object({
   /** Rules files that link somewhere other than AGENTS.md. No upgrade writes through a link, so
    *  these never set `hasUpgradeAvailable`. */
   linkedRulesFiles: z.array(z.string()).optional(),
+  /** Rules files still holding the RTK block of a repository that switched RTK off. An upgrade
+   *  takes it out, so they set `hasUpgradeAvailable`. Omitted when there are none. */
+  rtkBlockLeftovers: z.array(z.string()).optional(),
 });
 
 export type UpgradeStatusResponse = z.infer<typeof upgradeStatusResponseSchema>;
