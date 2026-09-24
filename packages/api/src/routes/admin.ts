@@ -767,6 +767,23 @@ adminRoutes.put('/config/agent-isolation', async (c) => {
   return c.json({ enabled });
 });
 
+const agentRulesInjectionSchema = z.object({ enabled: z.boolean() });
+
+// Per-dispatch agent rules: every prompt opens with its provider's effective rules, so a run gets
+// them whatever AGENTS.md its checkout holds. Read once per dispatch (within the ~30s config cache)
+// and recorded on the invocation; off leaves the rules to AGENTS.md for every newly dispatched run.
+adminRoutes.get('/config/agent-rules-injection', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/agent-rules-injection', async (c) => {
+  const { enabled } = agentRulesInjectionSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'agent-rules-injection switch updated');
+  return c.json({ enabled });
+});
+
 const prWorkflowSchema = z.object({ enabled: z.boolean() });
 
 // Global master switch for the create-PR close-out workflow. Gates step 12's create_pr

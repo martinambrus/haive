@@ -166,6 +166,19 @@ export interface CliCommandSpec {
    *  dispatch names explicitly (`AgentMiningDispatch.personaIds`). Read at the completion write
    *  into `tool_usage.agents.assigned`; never sent to the CLI. Absent when none. */
   assignedAgentIds?: string[];
+  /** Which agent rules this run's prompt carries, decided with the prompt at dispatch and written to
+   *  `cli_invocations.agent_rules` at exec start. Never sent to the CLI. */
+  agentRules?: AgentRulesStamp;
+}
+
+/** Why a dispatch went out without its provider's rules block. */
+export type AgentRulesSkipReason = 'disabled' | 'opt-out' | 'prompt-too-large';
+
+/** `hash` identifies the provider's effective rules whether or not they were injected. */
+export interface AgentRulesStamp {
+  hash: string | null;
+  injected: boolean;
+  reason?: AgentRulesSkipReason;
 }
 
 export interface SubAgent {

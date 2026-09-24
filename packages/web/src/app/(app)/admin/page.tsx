@@ -183,6 +183,10 @@ function AdminPageInner() {
   const [savingCodexAppServer, setSavingCodexAppServer] = useState(false);
   const [agentIsolationEnabled, setAgentIsolationEnabled] = useState<boolean | null>(null);
   const [savingAgentIsolation, setSavingAgentIsolation] = useState(false);
+  const [agentRulesInjectionEnabled, setAgentRulesInjectionEnabled] = useState<boolean | null>(
+    null,
+  );
+  const [savingAgentRulesInjection, setSavingAgentRulesInjection] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
@@ -320,6 +324,7 @@ function AdminPageInner() {
         promptRetentionData,
         chromeMcpTimeoutData,
         ragEmbeddingData,
+        agentRulesInjectionData,
       ] = await Promise.all([
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
@@ -362,6 +367,7 @@ function AdminPageInner() {
         api.get<{ retentionDays: number }>('/admin/config/cli-prompt-retention'),
         api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
+        api.get<{ enabled: boolean }>('/admin/config/agent-rules-injection'),
       ]);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
@@ -370,6 +376,7 @@ function AdminPageInner() {
       setCodexAppServerEnabled(codexAppServerData.enabled);
       setCodexAppServerFailures(codexAppServerData.recentFailures);
       setAgentIsolationEnabled(agentIsolationData.enabled);
+      setAgentRulesInjectionEnabled(agentRulesInjectionData.enabled);
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
@@ -676,6 +683,21 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update agent isolation');
     } finally {
       setSavingAgentIsolation(false);
+    }
+  }
+
+  async function setAgentRulesInjection(next: boolean) {
+    setSavingAgentRulesInjection(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/agent-rules-injection', {
+        enabled: next,
+      });
+      setAgentRulesInjectionEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update agent rules injection');
+    } finally {
+      setSavingAgentRulesInjection(false);
     }
   }
 
@@ -1746,6 +1768,33 @@ function AdminPageInner() {
             />
             {agentIsolationEnabled ? 'Enabled' : 'Disabled'}
             {savingAgentIsolation && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {tab === 'execution' && agentRulesInjectionEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Agent rules in every prompt</CardTitle>
+            <CardDescription>
+              Opens every call&apos;s prompt with its CLI&apos;s effective agent rules (the ones set
+              on the CLI provider), so a run follows them whatever AGENTS.md its checkout holds. A
+              worktree is checked out from the last commit, so rules that were never committed
+              otherwise never reach it. The step&apos;s own instructions still take precedence. Each
+              run records which rules it was given. Turn this off to leave the rules to AGENTS.md
+              alone. Takes effect within ~30s; a run already queued keeps its prompt.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={agentRulesInjectionEnabled}
+              disabled={savingAgentRulesInjection}
+              onChange={(e) => void setAgentRulesInjection(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {agentRulesInjectionEnabled ? 'Enabled' : 'Disabled'}
+            {savingAgentRulesInjection && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

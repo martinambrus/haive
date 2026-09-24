@@ -1051,6 +1051,15 @@ export const cliInvocations = pgTable(
         toolCount: number;
       } | null;
     }>(),
+    /** Which agent rules the run was given: the hash of its provider's effective rules, whether
+     *  they were injected at the top of the prompt, and why not when they were not. Written at exec
+     *  start from the spec, so a run that never started stays NULL. Migration 0166; declared LAST
+     *  for schema-parity. */
+    agentRules: jsonb('agent_rules').$type<{
+      hash: string | null;
+      injected: boolean;
+      reason?: 'disabled' | 'opt-out' | 'prompt-too-large';
+    }>(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

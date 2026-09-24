@@ -210,6 +210,7 @@ export function makeModelHealthStep(
     llm: {
       requiredCapabilities: [],
       timeoutMs: 2 * 60 * 1000,
+      skipAgentRules: true,
       buildPrompt: () => PROMPT,
       bypassStub: () => HEALTHY_OUTPUT,
     },

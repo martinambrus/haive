@@ -110,6 +110,10 @@ export interface LlmInvocationSpec {
    *  already handled: the prompt path scan leaves any invocation whose prompt names an agent
    *  directory unisolated, with nothing to declare. */
   agentPool?: '*';
+  /** Leave this step's invocations without the provider's agent rules block. For a prompt that
+   *  carries its whole task and whose reply is parsed as it is, where standing rules about how to
+   *  code and report are cost and noise: `01-env-detect` and the model health canary. */
+  skipAgentRules?: true;
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */

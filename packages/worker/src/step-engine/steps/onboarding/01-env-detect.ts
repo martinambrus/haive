@@ -1490,6 +1490,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     disableTools: true,
     // With the built-in tools gone there is nothing an MCP server could serve here.
     toolProfile: 'none',
+    skipAgentRules: true,
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
