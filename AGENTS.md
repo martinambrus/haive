@@ -2163,3 +2163,15 @@ AGENTS.md included, and reported (`dropIgnoredRulesFiles`), and `12-post-onboard
 same filter to the rules files it stages by name: the stage runs `git add -f` for `.haive/install.json`'s sake, which
 would otherwise commit a personal CLAUDE.md the repository deliberately keeps out of history. The
 check runs after any `git init`, since before it there is no repository to ask.
+
+**The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
+alone unless its overwrite flag is on, so `12-post-onboarding` reads the region back and records
+it through `cliRulesRegionRecord` (`steps/onboarding/_rules-files.ts`): the region's bytes and their
+hash as `templateContentHash`, so a stale region shows as an upgrade and a rollback restores bytes
+that were really there. The row claims those bytes as Haive's (`writtenHash` equal to that hash)
+only when they are a render, this one or one an earlier `onboarding` or `upgrade` row of the
+repository recorded; a `backfill` or `rollback` row does not count, since its hash is whatever was
+on disk. Anything else keeps the render's hash, so the upgrade plan offers the region as a
+conflict, whose default is skip. No region on disk means no row, and a live one is retired, since
+it would read as the person's deletion. `01-upgrade-plan`'s backfill applies the same rule to the
+region: it used to store the whole file, which a rollback could paste into the region.

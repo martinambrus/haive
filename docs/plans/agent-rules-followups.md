@@ -180,6 +180,9 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - an ignored AGENTS.md arriving through `writtenPaths`;
   - 12's ignored stub and empty list.
 - **Live check:** a run-checkpoint row. It needs an onboarded repository.
+- **As built (#252):** 12 and 03 share `dropIgnoredRulesFiles` and `readAgentsRulesRegion`
+  (`onboarding/_rules-files.ts`, 1 MiB cap). 03's check is `agentsRulesVerdict`, answering `stage`,
+  `current` or `unknown`; `unknown` warns and stages nothing.
 
 ## PR 4 — The cli-rules record describes the region on disk
 
@@ -203,6 +206,12 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - `upgrade-plan-classify.test.ts` cases: region untouched, region edited, region of unknown origin,
     backfill.
 - **Live check:** a run-checkpoint row.
+- **As built:** `cliRulesRegionRecord` and `loadCliRulesRenderHashes` (`onboarding/_rules-files.ts`).
+  An earlier render is any `onboarding` or `upgrade` row of the repository, live or superseded; a
+  `backfill` or `rollback` row does not count, since its hash is whatever was on disk. An AGENTS.md
+  that cannot be read is reported and its live row left alone. 12 sets no `userModified`, which
+  nothing reads; the backfill still sets it. Verified with the real step code against the dev
+  database on a fixture repository: 18 checks pass, and the same script against main fails 12.
 
 ## PR 5 — Reset strips the RTK block
 
@@ -214,6 +223,7 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Comments:** `_rtk-templates.ts` lines 3-5 (RTK.md is no longer written) and 26-29 (true once this
   lands).
 - **Tests:** `repo-artifact-reset.test.ts` gains an RTK block case.
+- **As built (#254):** as planned; the three pairs are `HAIVE_REGION_MARKERS` in `@haive/shared`.
 
 ## PR 6 — The upgrade banner sees a missing import stub
 
@@ -305,6 +315,9 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - **Test:** `cli-providers/ui.spec.ts:95` waits with `toBeEnabled()` before typing.
 - **Verify:** in the browser, with the network throttled, the field stays locked until the load
   answers.
+- **As built (#255):** the field is `readOnly`, `aria-busy` and dimmed until the load settles, and a
+  failed load unlocks it: the save deletes only names the form loaded. The spec waits with
+  `toBeEditable()`, since `toBeEnabled()` passes on a read-only field.
 
 ## PR 11 — Test flakes
 
@@ -323,6 +336,7 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
 - AGENTS.md:1211 ("Review findings and waivers") says nothing SELECTs `review_findings`; in fact
   `loadFindingRecurrence` and `GET /stats/quality` do. The claims about the single insert and "no
   behaviour gates on it" stay.
+- **As built (#253):** as planned.
 
 ## Closed without code
 

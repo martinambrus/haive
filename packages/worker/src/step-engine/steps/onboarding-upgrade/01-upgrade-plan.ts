@@ -30,7 +30,13 @@ import {
   type BundleWithMeta,
 } from '../../_custom-bundle-loader.js';
 import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
-import { enabledImportRulesFiles, missingRulesImportStubs } from '../onboarding/_rules-files.js';
+import {
+  cliRulesRegionRecord,
+  enabledImportRulesFiles,
+  loadCliRulesRenderHashes,
+  missingRulesImportStubs,
+  readAgentsRulesRegion,
+} from '../onboarding/_rules-files.js';
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
@@ -447,10 +453,39 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
       const haiveVersion = getHaiveVersion();
       for (const r of expanded) {
-        const { content: diskContent, hash: diskHash } = await readDiskContent(
-          ctx.repoPath,
-          r.diskPath,
-        );
+        let recorded;
+        if (r.templateKind === CLI_RULES_TEMPLATE_KIND) {
+          // The region, never the whole file: a rollback writes this row's content into the region.
+          const read = await readAgentsRulesRegion(ctx.repoPath);
+          if ('unreadable' in read || read.region === null) continue;
+          const record = cliRulesRegionRecord(
+            read.region,
+            r.content,
+            await loadCliRulesRenderHashes(ctx.db, detected.repositoryId),
+          );
+          recorded = {
+            templateContentHash: record.templateContentHash,
+            writtenHash: record.writtenHash,
+            writtenContent: record.content,
+            lastObservedDiskHash: record.templateContentHash,
+            userModified: !record.haiveWritten,
+          };
+        } else {
+          const { content: diskContent, hash: diskHash } = await readDiskContent(
+            ctx.repoPath,
+            r.diskPath,
+          );
+          recorded = {
+            templateContentHash: r.templateContentHash,
+            writtenHash: diskHash ?? r.writtenHash,
+            // Backfill stamps whatever bytes are on disk right now, even if the
+            // user has edited them. That captures the truth of the baseline at
+            // backfill time so a later rollback restores what the user had.
+            writtenContent: diskContent ?? r.content,
+            lastObservedDiskHash: diskHash,
+            userModified: diskHash !== null && diskHash !== r.writtenHash,
+          };
+        }
         rowsToInsert.push({
           userId: ctx.userId,
           repositoryId: detected.repositoryId,
@@ -459,14 +494,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
           templateId: r.templateId,
           templateKind: r.templateKind,
           templateSchemaVersion: r.templateSchemaVersion,
-          templateContentHash: r.templateContentHash,
-          writtenHash: diskHash ?? r.writtenHash,
-          // Backfill stamps whatever bytes are on disk right now, even if the
-          // user has edited them. That captures the truth of the baseline at
-          // backfill time so a later rollback restores what the user had.
-          writtenContent: diskContent ?? r.content,
-          lastObservedDiskHash: diskHash,
-          userModified: diskHash !== null && diskHash !== r.writtenHash,
+          ...recorded,
           formValuesSnapshot: renderCtx as unknown as Record<string, unknown>,
           sourceStepId: '01-upgrade-plan',
           source: 'backfill' as const,

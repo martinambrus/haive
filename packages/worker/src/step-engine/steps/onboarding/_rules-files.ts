@@ -1,13 +1,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
   CLI_RULES_END,
   CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
   extractRegion,
+  normalizeContent,
+  sha256Hex,
 } from '@haive/shared';
 import {
   lstatNoFollow,
@@ -210,4 +213,44 @@ export async function readAgentsRulesRegion(
   if (read === null) return { region: null };
   if (read.truncated) return { unreadable: `larger than ${AGENTS_MD_READ_CAP} bytes` };
   return { region: extractRegion(read.data.toString('utf8'), CLI_RULES_START, CLI_RULES_END) };
+}
+
+/** What a cli-rules artifact row records for the region on disk. It records the region's own
+ *  bytes, and claims them as Haive's only when they are a render: this one, or one an earlier
+ *  onboarding or upgrade of the repository wrote. Otherwise the row keeps the render's hash, so
+ *  the upgrade plan offers the region as a conflict instead of overwriting it. */
+export function cliRulesRegionRecord(
+  region: string,
+  render: string,
+  earlierRenderHashes: ReadonlySet<string>,
+): { content: string; templateContentHash: string; writtenHash: string; haiveWritten: boolean } {
+  const content = normalizeContent(region);
+  const regionHash = sha256Hex(content);
+  const renderHash = sha256Hex(normalizeContent(render));
+  const haiveWritten = regionHash === renderHash || earlierRenderHashes.has(regionHash);
+  return {
+    content,
+    templateContentHash: regionHash,
+    writtenHash: haiveWritten ? regionHash : renderHash,
+    haiveWritten,
+  };
+}
+
+/** The written hashes of the repository's earlier cli-rules rows that hold a render. Backfill
+ *  and rollback rows are left out: their hash is whatever was on disk. */
+export async function loadCliRulesRenderHashes(
+  db: Database,
+  repositoryId: string,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({ writtenHash: schema.onboardingArtifacts.writtenHash })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        eq(schema.onboardingArtifacts.templateKind, CLI_RULES_TEMPLATE_KIND),
+        inArray(schema.onboardingArtifacts.source, ['onboarding', 'upgrade']),
+      ),
+    );
+  return new Set(rows.map((r) => r.writtenHash));
 }
