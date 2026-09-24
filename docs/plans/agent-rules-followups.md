@@ -127,6 +127,10 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
     blocked the api's images for anyone reaching an install by IP or DNS name. The same build
     showed that runtime-only `HAIVE_API_PORT` reaches the header, and that an explicit
     `HAIVE_PUBLIC_API_URL` is reduced to its origin.
+  - The api's host is named under both `http:` and `https:` (review round 1): a TLS proxy serves the
+    page over https while the server sees http. MEASURED in Chrome, `img-src http://127.0.0.1:47937`
+    refused `https://127.0.0.1:47937/a.png`; listing both admits it and still refuses another port.
+    Both schemes rather than trusting `X-Forwarded-Proto`, since a proxy may not set it.
   - The guarded render is `renderMermaid`, and `loadMermaid` is internal to the loader.
   - The `properties` refusal matches the sequence syntax (`properties <actor>:`), so a flowchart node
     named `properties` still draws.

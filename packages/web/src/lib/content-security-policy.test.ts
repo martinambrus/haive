@@ -4,20 +4,21 @@ import { browserHostname, contentSecurityPolicy } from './content-security-polic
 describe('contentSecurityPolicy', () => {
   it('admits images and media from the page, inline data, object URLs and the api only', () => {
     expect(contentSecurityPolicy('http://localhost:3001')).toBe(
-      "img-src 'self' data: blob: http://localhost:3001; media-src 'self' blob: http://localhost:3001; font-src 'self' data:",
+      "img-src 'self' data: blob: http://localhost:3001 https://localhost:3001; " +
+        "media-src 'self' blob: http://localhost:3001 https://localhost:3001; font-src 'self' data:",
     );
   });
 
-  it('names the api by its origin, since a source with a path matches that path alone', () => {
+  it('names the api host without its path, under both schemes', () => {
     expect(contentSecurityPolicy('https://example.com/api/')).toContain(
-      "img-src 'self' data: blob: https://example.com;",
+      "img-src 'self' data: blob: http://example.com https://example.com;",
     );
   });
 
-  it('leaves the api out rather than throwing when its URL does not parse', () => {
-    expect(contentSecurityPolicy('not a url')).toBe(
-      "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:",
-    );
+  it('leaves the api out rather than throwing when its URL does not parse or is not http', () => {
+    const none = "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:";
+    expect(contentSecurityPolicy('not a url')).toBe(none);
+    expect(contentSecurityPolicy('ftp://example.com')).toBe(none);
   });
 });
 

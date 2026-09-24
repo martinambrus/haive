@@ -2,7 +2,7 @@
  *  (screenshots). A body can name any URL, and this is what keeps the browser from fetching it. No
  *  `script-src` or `default-src`, so the root layout's inline script needs no nonce. */
 export function contentSecurityPolicy(apiUrl: string): string {
-  const api = originOf(apiUrl);
+  const api = apiSources(apiUrl);
   return [
     `img-src 'self' data: blob:${api}`,
     `media-src 'self' blob:${api}`,
@@ -21,11 +21,14 @@ export function browserHostname(hostHeader: string | null, fallback: string): st
   }
 }
 
-/** The origin alone: a CSP source with a path matches that exact path, not the api's routes. */
-function originOf(url: string): string {
+/** The api's host under both schemes, without its path (a source with a path matches that path
+ *  alone). A TLS proxy serves the page over https while the server sees http, and Chrome does not
+ *  let an http source admit an https URL on an explicit port. */
+function apiSources(url: string): string {
   try {
-    const { origin } = new URL(url);
-    return origin === 'null' ? '' : ` ${origin}`;
+    const { protocol, host } = new URL(url);
+    if (protocol !== 'http:' && protocol !== 'https:') return '';
+    return ` http://${host} https://${host}`;
   } catch {
     return '';
   }
