@@ -2285,6 +2285,24 @@ export interface ReconcileDeps {
   ) => Promise<void>;
   /** Every invocation a cli-exec job still owes a run, or null when the queue could not be read. */
   queuedInvocationIds: () => Promise<Set<string> | null>;
+  /** Waits before each further attempt at queueing a re-drive. */
+  redriveRetryDelaysMs?: number[];
+}
+
+const REDRIVE_RETRY_DELAYS_MS = [1_000, 3_000];
+
+/** Run `attempt`, waiting each delay in turn before trying again; the last failure is thrown. */
+async function retrying(attempt: () => Promise<void>, delaysMs: number[]): Promise<void> {
+  for (let tried = 0; ; tried++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const delay = delaysMs[tried];
+      if (delay === undefined) throw err;
+      logger.warn({ err }, 'boot re-drive could not be queued; retrying');
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 
 const NEVER_QUEUED_ORPHAN_MESSAGE =
@@ -2466,7 +2484,12 @@ export async function reconcileOrphanedSteps(
         continue;
       }
       try {
-        await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch);
+        // Retried, because nothing else drives the step once this pass has ended its runs: a
+        // redelivered cli-exec job exits on the finalized invocation before it can resume it.
+        await retrying(
+          () => deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, fenced.epoch),
+          deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS,
+        );
       } catch (err) {
         // No job carries the new epoch, so hand the task back to the one the advances queued
         // before the restart carry, rather than leave them stale with nothing to drive it.

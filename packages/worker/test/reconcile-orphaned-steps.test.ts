@@ -340,19 +340,45 @@ describe('reconcileOrphanedSteps re-driving the current step', () => {
     });
   });
 
-  it('hands the epoch back when the re-drive cannot be queued', async () => {
+  it('retries a re-drive that could not be queued, and keeps the fence once it is', async () => {
+    advances.length = 0;
+    const recorded: RecordedUpdate[] = [];
+    let attempts = 0;
+    await reconcileOrphanedSteps(
+      makeCurrentStepDb(recorded, { unstarted: [], fenced: [{ epoch: 4 }] }),
+      {
+        enqueueAdvance: async (_t, _u, stepId, _r, epoch) => {
+          attempts += 1;
+          if (attempts < 3) throw new Error('redis blinked');
+          advances.push({ stepId, epoch });
+        },
+        queuedInvocationIds: async () => new Set(),
+        redriveRetryDelaysMs: [0, 0],
+      },
+    );
+    expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 4 }]);
+    expect(recorded.find((u) => u.table === 'tasks' && u.set.orchestrationEpoch === 3)).toBe(
+      undefined,
+    );
+  });
+
+  it('hands the epoch back when the re-drive cannot be queued at all', async () => {
     const recorded: RecordedUpdate[] = [];
     const errors = vi.spyOn(logger, 'error');
+    let attempts = 0;
     try {
       await reconcileOrphanedSteps(
         makeCurrentStepDb(recorded, { unstarted: [], fenced: [{ epoch: 4 }] }),
         {
           enqueueAdvance: async () => {
+            attempts += 1;
             throw new Error('redis refused the job');
           },
           queuedInvocationIds: async () => new Set(),
+          redriveRetryDelaysMs: [0, 0],
         },
       );
+      expect(attempts).toBe(3);
       const revert = recorded.find((u) => u.table === 'tasks' && u.set.orchestrationEpoch === 3);
       expect(revert).toBeDefined();
       expect(conditionColumns(revert!.where)).toContain('orchestration_epoch');
