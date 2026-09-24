@@ -2236,6 +2236,9 @@ one rule to bytes that are not a render: the bytes are `writtenContent`, so a ro
 them; the render's hash is `writtenHash`, so they are never taken as Haive's; and their own hash is
 `templateContentHash`, so the template reads as not installed. A rollback copies both hashes, so a
 restored file is offered again at the next upgrade rather than classified `unchanged`.
+`GET /repos/:id/upgrade-status` keeps one row per template, and a rendering that is not current
+stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
+is invisible there once a sibling rendering has one; the next upgrade still offers it.
 `unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
 such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
 rollback copies get the two hashes swapped.
