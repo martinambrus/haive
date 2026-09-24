@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { api, patchUiPrefs } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import {
+  PHONE_MEDIA_QUERY,
   SIDEBAR_RAIL_PX,
   SIDEBAR_WIDTH_VAR,
   clampSidebarWidth,
@@ -17,6 +18,14 @@ import { type TaskToneFilter } from '@/lib/task-tone';
 import { isNavItemActive, navItemsFor } from '@/components/sidebar/nav-items';
 import { SidebarResizer } from '@/components/sidebar/sidebar-resizer';
 import { SidebarTasks } from '@/components/sidebar/sidebar-tasks';
+
+function subscribePhone(onChange: () => void): () => void {
+  const query = window.matchMedia(PHONE_MEDIA_QUERY);
+  query.addEventListener('change', onChange);
+  return () => query.removeEventListener('change', onChange);
+}
+const isPhone = () => window.matchMedia(PHONE_MEDIA_QUERY).matches;
+const notPhone = () => false;
 
 interface SidebarNavProps {
   email: string;
@@ -42,6 +51,13 @@ export function SidebarNav({
   const router = useRouter();
 
   const [collapsed, setCollapsed] = useState(initialCollapsed);
+  // On a phone the column opens over the page and never touches the saved preference. Leaving
+  // the page it was opened on closes it, and coming back does not reopen it.
+  const phone = useSyncExternalStore(subscribePhone, isPhone, notPhone);
+  const [openedOn, setOpenedOn] = useState<string | null>(null);
+  if (openedOn !== null && openedOn !== pathname) setOpenedOn(null);
+  const phoneOpen = phone && openedOn !== null && openedOn === pathname;
+  const effectiveCollapsed = phone ? !phoneOpen : collapsed;
   const [width, setWidth] = useState(() => clampSidebarWidth(initialWidthPx));
   const [tree, setTree] = useState(initialTree);
   // Held HERE and not in SidebarTasks: collapsing unmounts that component, and a filter
@@ -57,9 +73,18 @@ export function SidebarNav({
   useEffect(() => {
     asideRef.current?.parentElement?.style.setProperty(
       SIDEBAR_WIDTH_VAR,
-      `${sidebarOffsetPx(collapsed, width)}px`,
+      `${sidebarOffsetPx(collapsed || phone, width)}px`,
     );
-  }, [collapsed, width]);
+  }, [collapsed, phone, width]);
+
+  useEffect(() => {
+    if (!phoneOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenedOn(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phoneOpen]);
 
   // The e2e suite waits for this before it drags or clicks in the sidebar: the column's text
   // is server-rendered, so it is visible before React has attached a single handler.
@@ -83,12 +108,16 @@ export function SidebarNav({
   }, []);
 
   const toggleCollapsed = useCallback(() => {
+    if (phone) {
+      setOpenedOn((prev) => (prev === pathname ? null : pathname));
+      return;
+    }
     setCollapsed((prev) => {
       const next = !prev;
       void patchUiPrefs({ sidebarCollapsed: next }).catch(() => {});
       return next;
     });
-  }, []);
+  }, [phone, pathname]);
 
   const commitWidth = useCallback((px: number) => {
     void patchUiPrefs({ sidebarWidthPx: px }).catch(() => {});
@@ -129,12 +158,16 @@ export function SidebarNav({
           that would otherwise cover it at rail width. */}
       <aside
         ref={asideRef}
-        style={{ width: collapsed ? SIDEBAR_RAIL_PX : width }}
-        className="sticky top-0 z-30 flex h-screen shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 px-2 py-3"
+        data-phone-open={phoneOpen ? '' : undefined}
+        style={{ width: effectiveCollapsed ? SIDEBAR_RAIL_PX : width }}
+        className={cn(
+          'haive-aside top-0 flex h-screen shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 px-2 py-3',
+          phoneOpen ? 'fixed left-0 z-40 max-w-[85vw] shadow-2xl' : 'sticky z-30',
+        )}
       >
         <div className="mb-3 flex items-start gap-1">
-          {!collapsed && (
-            <div className="min-w-0 flex-1">
+          {!effectiveCollapsed && (
+            <div className="haive-expanded-only min-w-0 flex-1">
               <h1 className="truncate text-xl font-bold leading-none text-neutral-50">
                 hAIv<sup className="text-[0.6em]">e</sup>
               </h1>
@@ -144,15 +177,15 @@ export function SidebarNav({
           <button
             type="button"
             onClick={toggleCollapsed}
-            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!effectiveCollapsed}
+            title={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             className={cn(
-              'shrink-0 rounded p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200',
-              collapsed && 'mx-auto',
+              'haive-sidebar-toggle shrink-0 rounded p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200',
+              effectiveCollapsed && 'mx-auto',
             )}
           >
-            {collapsed ? (
+            {effectiveCollapsed ? (
               <PanelLeftOpen className="h-4 w-4" />
             ) : (
               <PanelLeftClose className="h-4 w-4" />
@@ -190,8 +223,8 @@ export function SidebarNav({
           })}
         </nav>
 
-        {!collapsed && (
-          <>
+        {!effectiveCollapsed && (
+          <div className="haive-expanded-only contents">
             <div className="mt-3 border-t border-neutral-800" />
             <SidebarTasks
               tree={tree}
@@ -200,17 +233,17 @@ export function SidebarNav({
               onToggleFilter={toggleFilter}
               originLabel={originLabel}
             />
-          </>
+          </div>
         )}
 
         <div
           className={cn(
-            'mt-auto flex flex-col gap-2 border-t border-neutral-800 pt-3',
-            collapsed && 'items-center',
+            'haive-sidebar-footer mt-auto flex flex-col gap-2 border-t border-neutral-800 pt-3',
+            effectiveCollapsed && 'items-center',
           )}
         >
-          {!collapsed && (
-            <div className="truncate text-xs text-neutral-400" title={email}>
+          {!effectiveCollapsed && (
+            <div className="haive-expanded-only truncate text-xs text-neutral-400" title={email}>
               {email}
             </div>
           )}
@@ -218,18 +251,33 @@ export function SidebarNav({
             type="button"
             onClick={handleLogout}
             aria-label="Sign out"
-            title={collapsed ? `Sign out (${email})` : undefined}
+            title={effectiveCollapsed ? `Sign out (${email})` : undefined}
             className={cn(
               'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md border border-neutral-700 bg-neutral-800 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700',
-              collapsed ? 'h-8 w-8' : 'h-8 px-3',
+              effectiveCollapsed ? 'h-8 w-8' : 'h-8 px-3',
             )}
           >
             <LogOut className="h-4 w-4 shrink-0" />
-            {!collapsed && 'Sign out'}
+            {!effectiveCollapsed && <span className="haive-expanded-only">Sign out</span>}
           </button>
         </div>
       </aside>
-      {!collapsed && <SidebarResizer onResize={setWidth} onCommit={commitWidth} />}
+      {/* Open on a phone, the column floats over the page: the spacer keeps the page where the
+          rail left it, and a tap anywhere outside closes the column again. */}
+      {phoneOpen && (
+        <>
+          <div aria-hidden className="w-14 shrink-0" />
+          <button
+            type="button"
+            aria-label="Close sidebar"
+            onClick={() => setOpenedOn(null)}
+            className="fixed inset-0 z-[35] bg-black/50"
+          />
+        </>
+      )}
+      {!effectiveCollapsed && !phone && (
+        <SidebarResizer onResize={setWidth} onCommit={commitWidth} />
+      )}
     </>
   );
 }

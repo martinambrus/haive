@@ -1509,7 +1509,7 @@ export default function TaskDetailPage() {
         // line box, so any type or spacing change here would silently move it out from under.
         <div
           data-fixed-title-strip
-          className="fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur"
+          className="fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur md:px-8"
         >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}
@@ -1609,7 +1609,7 @@ export default function TaskDetailPage() {
                 }}
                 maxLength={512}
                 autoFocus
-                className="w-80 text-lg"
+                className="w-full text-lg md:w-80"
               />
               <Button size="sm" disabled={renameBusy} onClick={() => void saveRename()}>
                 {renameBusy ? 'Saving…' : 'Save'}
@@ -1649,9 +1649,10 @@ export default function TaskDetailPage() {
                   siblings and a min-width of 0, MEASURED at a 1280px viewport this title
                   was squeezed to 1px — the badges fit and the title was simply gone. The
                   row wraps instead, so a viewport too narrow for both pushes badges onto a
-                  second line rather than erasing what the page is about. */}
+                  second line rather than erasing what the page is about. Below md the floor is
+                  smaller, since 18rem is wider than a phone's whole row. */}
               <h1
-                className="min-w-[18rem] flex-1 truncate text-2xl font-bold text-neutral-50"
+                className="min-w-[10rem] flex-1 truncate text-2xl font-bold text-neutral-50 md:min-w-[18rem]"
                 title={task.title}
               >
                 {task.title}

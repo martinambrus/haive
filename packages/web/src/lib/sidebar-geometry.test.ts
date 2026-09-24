@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  PHONE_MEDIA_QUERY,
   SIDEBAR_DEFAULT_PX,
   SIDEBAR_DIVIDER_PX,
   SIDEBAR_RAIL_PX,
@@ -59,5 +61,15 @@ describe('sidebarOffsetPx', () => {
   it('clamps the width it is given rather than trusting a stored value', () => {
     expect(sidebarOffsetPx(false, 99999)).toBe(SIDEBAR_MAX_PX + SIDEBAR_DIVIDER_PX);
     expect(sidebarOffsetPx(false, Number.NaN)).toBe(SIDEBAR_DEFAULT_PX + SIDEBAR_DIVIDER_PX);
+  });
+});
+
+describe('the phone breakpoint', () => {
+  // The first paint happens before any script, so globals.css carries its own copy of both values.
+  it('is the query and the rail width globals.css paints the first frame with', () => {
+    const css = readFileSync(new URL('../app/globals.css', import.meta.url), 'utf8');
+    expect(css).toContain(`@media ${PHONE_MEDIA_QUERY} {`);
+    expect(css).toContain(`--haive-sidebar-w: ${SIDEBAR_RAIL_PX}px !important`);
+    expect(css).toContain(`{ width: ${SIDEBAR_RAIL_PX}px !important; }`);
   });
 });

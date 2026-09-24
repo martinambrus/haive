@@ -149,3 +149,14 @@ body {
 .haive-md .hljs-deletion { color: rgb(252 165 165); }
 .haive-md .hljs-emphasis { font-style: italic; }
 .haive-md .hljs-strong { font-weight: 600; }
+
+/* Below md (PHONE_MEDIA_QUERY) the sidebar is a rail until opened, painted before any script
+ * runs: the saved width is inline on the aside, so these rules must outrank it. */
+@media (width < 48rem) {
+  .haive-shell { --haive-sidebar-w: 56px !important; }
+  .haive-aside:not([data-phone-open]) { width: 56px !important; }
+  .haive-aside:not([data-phone-open]) .haive-expanded-only,
+  .haive-sidebar-resizer { display: none !important; }
+  .haive-aside:not([data-phone-open]) .haive-sidebar-toggle { margin-inline: auto; }
+  .haive-aside:not([data-phone-open]) .haive-sidebar-footer { align-items: center; }
+}
