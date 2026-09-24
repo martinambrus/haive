@@ -74,7 +74,7 @@ describe('the fake database', () => {
       title: 'with metadata',
       metadata: doc,
     });
-    const matches = (value: unknown): number =>
+    const matches = (value: Record<string, unknown>): number =>
       fake
         .rows(schema.tasks)
         .filter(fake.compileWhere(schema.tasks, eq(schema.tasks.metadata, value))).length;
@@ -83,7 +83,8 @@ describe('the fake database', () => {
     expect(matches({ nested: { b: 'x' }, list: [1, 2], a: 1 })).toBe(1);
     expect(matches({ ...doc, list: [2, 1] })).toBe(0);
     expect(matches({ ...doc, nested: { b: 'y' } })).toBe(0);
-    expect(matches(null)).toBe(0);
+    // The column's type rules a NULL argument out; a value read back from a NULL column is one.
+    expect(matches(null as unknown as Record<string, unknown>)).toBe(0);
   });
 
   it('projects a select onto the columns it names', async () => {
