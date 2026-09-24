@@ -1,6 +1,6 @@
 import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
-import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
+import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
 import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -80,11 +80,7 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
-import {
-  blockedByActiveStepMessage,
-  findLiveSibling,
-  staleSubmitAction,
-} from './_advance-guards.js';
+import { blockedByActiveStepMessage, staleSubmitAction } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
@@ -1769,45 +1765,13 @@ async function handleAdvanceStep(
     .limit(1);
   const existing = existingRows[0];
 
-  // Same-step duplicate guard: only meaningful once an apply() is ACTUALLY
-  // running (step status 'running'). The task worker's concurrency (5) lets a
-  // second advance-step job for the same step+round+epoch start a parallel
-  // apply() — observed as two RAG-populate embed loops (double CPU) after a
-  // worker reload. If the step is already 'running', another delivery set it so;
-  // yield to the live sibling (tiebreak on job id, lower wins, so two can't both
-  // yield). Gating on 'running' is what keeps this from skipping a legit
-  // waiting_form submit / pending first run — with no apply in flight there is
-  // nothing to duplicate. "Live" means a job THIS process is executing
-  // (inFlightJobIds): BullMQ's active set also holds the jobs of a worker that
-  // died, whose 30-min lock has not expired, and yielding to one of those froze
-  // the step for that whole window. See findLiveSibling for the full reasoning.
-  // A genuinely orphaned 'running' step recovers via its own job's same-id
-  // stalled re-delivery (excluded by the self check in findLiveSibling).
-  if (existing?.status === 'running' && jobId != null) {
-    const sibling = findLiveSibling(await getTaskQueue().getActive(), inFlightJobIds, {
-      jobId,
-      taskId: ctx.taskId,
-      stepId: payload.stepId,
-      round,
-      epoch: payload.epoch ?? null,
-    });
-    if (sibling) {
-      logger.warn(
-        { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, siblingJobId: sibling.id },
-        'advance-step skipped: same step already running in another job (duplicate)',
-      );
-      return;
-    }
-  }
-
   // Already finalized at this round — a duplicate delivery must NOT re-run apply().
-  // The same-step guard above only covers a row still 'running', so a second job that
-  // arrives AFTER the first finished matched nothing and re-executed the whole step.
-  // MEASURED on 08-phase-5-verify: two step.done events 0.63s apart with no retry
-  // between, so its verify commands ran twice. Free on a repo with no test runner, a
-  // duplicated test suite on one that has them. It slipped the other-active guard by a
-  // hair too — that read ran in the same instant the successor's row was being created,
-  // so it saw nothing active.
+  // A second job that arrives after the first finished, or was deferred behind it
+  // (holdStepAdvance), finds the row done here. MEASURED on 08-phase-5-verify before
+  // this guard: two step.done events 0.63s apart with no retry between, so its verify
+  // commands ran twice. Free on a repo with no test runner, a duplicated test suite on
+  // one that has them. It slipped the other-active guard by a hair too — that read ran
+  // in the same instant the successor's row was being created, so it saw nothing active.
   //
   // Re-drive the hand-off ONLY on evidence the chain has not moved (the task still
   // points at this step + round). Re-driving unconditionally would enqueue an advance
@@ -2188,13 +2152,13 @@ async function handleAdvanceStep(
  *     re-delivered cli-exec job a no-op — handlers skip ended invocations) and
  *     re-drive: a step whose CLI DID finish + record resumes (exit 0 → apply →
  *     advance), an orphaned one fails (retryable).
- *  2. `running`: the advance-step JOB itself died mid-execution. Its zombie sits in
- *     BullMQ's active list under a 30-min lock, so the same-step duplicate guard
- *     blocks any retry until that lock expires. Reset the step (resetStepAndDownstream
- *     also bumps the task's orchestration epoch) and re-drive at the NEW epoch: the
- *     duplicate guard matches siblings by epoch so the new advance is not blocked, and
- *     the zombie is skipped by the epoch guard when BullMQ eventually redelivers it. No
- *     BullMQ/redis surgery, so it is safe regardless of worker count.
+ *  2. `running`: the advance-step JOB itself died mid-execution. `bootRecoveryAction`
+ *     decides: a step with agent work behind it is demoted to `waiting_cli` and recovered as
+ *     pass 1 recovers a parked step; one without is reset (resetStepAndDownstream also bumps
+ *     the task's orchestration epoch) and re-driven at the NEW epoch. Either way the zombie
+ *     job, sitting in BullMQ's active list under a 30-min lock, is skipped by the epoch guard
+ *     when BullMQ eventually redelivers it. No BullMQ/redis surgery, so it is safe regardless
+ *     of worker count.
  *
  *  `waiting_form` user gates are durable (no in-flight job) and left untouched.
  *
@@ -2653,8 +2617,8 @@ export async function reconcileOrphanedSteps(
         continue;
       }
       // resetStepAndDownstream supersedes the step's open invocations, resets it to
-      // pending, and bumps the task epoch so the orphaned zombie advance job no longer
-      // matches the same-step duplicate guard; re-drive at that new epoch.
+      // pending, and bumps the task epoch, so the orphaned zombie advance job is dropped as
+      // stale when it is redelivered; re-drive at that new epoch.
       const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round);
       if (!reset) continue;
       await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
@@ -2861,68 +2825,107 @@ async function handleCleanupRepoResources(
 
 type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
 
-/** Job ids this process is executing right now, maintained by the worker's processor below.
- *  The duplicate guard needs it because BullMQ's `active` set is not proof of life: with a
- *  30-minute lockDuration, a worker killed mid-job leaves its jobs there for up to half an
- *  hour, and yielding to one of those corpses froze the step for that whole window. Dies with
- *  the process, which is exactly right — a restarted worker is running none of them. */
-const inFlightJobIds = new Set<string>();
+/** Steps whose advance this process is running, by task, step and round. */
+const advancingSteps = new Set<string>();
+
+/** How long an advance waits before trying a step another advance holds again. */
+const ADVANCE_DEFER_MS = 5_000;
+
+/**
+ * Hold a step's advances to one at a time in this process, or defer this job while another holds
+ * them. A step parked on its CLI stays `waiting_cli` through apply, and a fan-out's agents each
+ * queue an advance as they finish, so two advances of one step can reach apply together. The later
+ * one is deferred rather than dropped: the one running may be a barrier check that parks without
+ * seeing what the later one was queued for.
+ *
+ * Answers the release, or null for a job with no step to hold, or when the defer itself failed and
+ * the job runs beside the holder, as every advance did before. In-process, like the queue's
+ * single worker: a worker that died holds nothing.
+ */
+export async function holdStepAdvance(
+  job: Pick<Job<TaskWorkerPayload>, 'id' | 'data' | 'moveToDelayed'>,
+  token: string | undefined,
+): Promise<(() => void) | null> {
+  const { taskId, stepId, round } = job.data as TaskJobPayload;
+  if (!stepId) return null;
+  const key = `${taskId}:${stepId}:${round ?? 0}`;
+  if (!advancingSteps.has(key)) {
+    advancingSteps.add(key);
+    return () => advancingSteps.delete(key);
+  }
+  if (!token) return null;
+  try {
+    await job.moveToDelayed(Date.now() + ADVANCE_DEFER_MS, token);
+  } catch (err) {
+    logger.warn({ err, taskId, stepId, round }, 'advance defer failed; running beside the holder');
+    return null;
+  }
+  logger.debug({ taskId, stepId, round, jobId: job.id }, 'step advance held elsewhere; deferring');
+  throw new DelayedError();
+}
+
+/** One task-queue job. The hold is taken outside the job's own try: a deferral is not a failure,
+ *  and that catch fails the task. */
+export async function processTaskJob(job: Job<TaskWorkerPayload>, token?: string): Promise<void> {
+  const release =
+    job.name === TASK_JOB_NAMES.ADVANCE_STEP ? await holdStepAdvance(job, token) : null;
+  try {
+    await runTaskJob(job);
+  } finally {
+    release?.();
+  }
+}
+
+async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
+  const db = getDb();
+  try {
+    if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
+      await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
+      return;
+    }
+    if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES) {
+      await handleCleanupRepoResources(db, job.data as RepoResourceCleanupPayload);
+      return;
+    }
+
+    const payload = job.data as TaskJobPayload;
+    if (job.name === TASK_JOB_NAMES.START) {
+      await handleStartTask(db, payload);
+    } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
+      await handleAdvanceStep(db, payload, job.id, job.timestamp);
+    } else if (job.name === TASK_JOB_NAMES.CANCEL) {
+      await handleCancelTask(db, payload);
+    } else {
+      throw new Error(`unknown task job ${job.name}`);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const taskId = (job.data as TaskJobPayload).taskId;
+    logger.error({ taskId, jobName: job.name, err }, 'task job failed');
+    if (
+      taskId &&
+      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
+      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
+    ) {
+      await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
+        logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
+      });
+    }
+    throw err;
+  }
+}
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
   ensureRegistered();
-  const worker = new Worker<TaskWorkerPayload>(
-    QUEUE_NAMES.TASK,
-    async (job: Job<TaskWorkerPayload>) => {
-      const db = getDb();
-      if (job.id) inFlightJobIds.add(job.id);
-      try {
-        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
-          await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
-          return;
-        }
-        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES) {
-          await handleCleanupRepoResources(db, job.data as RepoResourceCleanupPayload);
-          return;
-        }
-
-        const payload = job.data as TaskJobPayload;
-        if (job.name === TASK_JOB_NAMES.START) {
-          await handleStartTask(db, payload);
-        } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload, job.id, job.timestamp);
-        } else if (job.name === TASK_JOB_NAMES.CANCEL) {
-          await handleCancelTask(db, payload);
-        } else {
-          throw new Error(`unknown task job ${job.name}`);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const taskId = (job.data as TaskJobPayload).taskId;
-        logger.error({ taskId, jobName: job.name, err }, 'task job failed');
-        if (
-          taskId &&
-          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
-          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
-        ) {
-          await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
-            logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
-          });
-        }
-        throw err;
-      } finally {
-        if (job.id) inFlightJobIds.delete(job.id);
-      }
-    },
-    {
-      connection: getBullRedis(),
-      concurrency: 5,
-      // Task jobs orchestrate step runs which can wait minutes on CLI execs.
-      // Match cli-exec lockDuration so a worker restart doesn't cause job
-      // redelivery + duplicate step processing.
-      lockDuration: 30 * 60 * 1000,
-      maxStalledCount: 10,
-    },
-  );
+  const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, processTaskJob, {
+    connection: getBullRedis(),
+    concurrency: 5,
+    // Task jobs orchestrate step runs which can wait minutes on CLI execs.
+    // Match cli-exec lockDuration so a worker restart doesn't cause job
+    // redelivery + duplicate step processing.
+    lockDuration: 30 * 60 * 1000,
+    maxStalledCount: 10,
+  });
 
   worker.on('completed', (job) => {
     logger.info({ jobId: job.id, name: job.name }, 'task job completed');

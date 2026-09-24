@@ -265,6 +265,15 @@ redelivered after it was applied. A submission, a retry and a first run still fl
   like the parked ones. Without agent work it is reset and re-run, as a deterministic step always
   was.
 
+**A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
+apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
+both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
+at a time in the worker and defers a second with `moveToDelayed` rather than dropping it: the
+advance already running may be a barrier check that parks without seeing what the second was
+queued for. It replaced a guard that let a second advance skip only while the row read `running`,
+which no continuation does any more. The hold is taken outside the job's own catch, since that
+catch fails the task, and it is per process, like the queue's single worker.
+
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
