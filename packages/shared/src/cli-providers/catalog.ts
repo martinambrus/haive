@@ -13,6 +13,13 @@ export interface EffortScaleMetadata {
   max: string;
 }
 
+/** How step 07 surfaces the merged rules block (which lives in AGENTS.md) to this CLI:
+ *   - 'native': CLI auto-reads AGENTS.md.
+ *   - 'import': CLI reads its own file, which holds only an `@AGENTS.md` line.
+ *   - 'copy': CLI reads its own file and has no import syntax, so the file carries
+ *     AGENTS.md's project-info and rules blocks itself. */
+export type CliRulesFileMode = 'native' | 'import' | 'copy';
+
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -62,6 +69,11 @@ export interface CliProviderMetadata {
    *  one fewer `.toml` than the others hold `.md`. Null iff projectAgentsDir is
    *  null. */
   agentFileFormat: 'markdown' | 'toml' | null;
+  /** Repo-relative file this CLI reads its project rules from; `AGENTS.md` itself for a CLI
+   *  that reads AGENTS.md natively. Mirrors the adapter's `rulesFile`. */
+  rulesFile: string;
+  /** How step 07 surfaces the rules to this CLI. Mirrors the adapter's `rulesFileMode`. */
+  rulesFileMode: CliRulesFileMode;
   /** Whether this provider's reported costUsd is a trustworthy real backend price.
    *  - 'metered': real per-token price from the provider's own backend (claude-code,
    *    codex, gemini) — sum + display as $.
@@ -155,6 +167,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'CLAUDE.md',
+    rulesFileMode: 'import',
   },
   codex: {
     name: 'codex',
@@ -181,6 +195,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.agents/skills',
     projectAgentsDir: '.codex/agents',
     agentFileFormat: 'toml',
+    rulesFile: 'AGENTS.md',
+    rulesFileMode: 'native',
   },
   gemini: {
     name: 'gemini',
@@ -208,6 +224,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.gemini/skills',
     projectAgentsDir: '.gemini/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'GEMINI.md',
+    rulesFileMode: 'import',
   },
   amp: {
     name: 'amp',
@@ -230,6 +248,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: null,
     agentFileFormat: null,
+    rulesFile: 'AGENTS.md',
+    rulesFileMode: 'native',
   },
   zai: {
     name: 'zai',
@@ -251,6 +271,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'CLAUDE.md',
+    rulesFileMode: 'import',
   },
   antigravity: {
     name: 'antigravity',
@@ -283,6 +305,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.agents/skills',
     projectAgentsDir: '.agents/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'AGENTS.md',
+    rulesFileMode: 'native',
   },
   ollama: {
     name: 'ollama',
@@ -315,6 +339,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'CLAUDE.md',
+    rulesFileMode: 'import',
   },
   muse: {
     name: 'muse',
@@ -344,6 +370,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'CLAUDE.md',
+    rulesFileMode: 'import',
   },
   grok: {
     name: 'grok',
@@ -400,6 +428,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.grok/skills',
     projectAgentsDir: '.grok/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'AGENTS.md',
+    rulesFileMode: 'native',
   },
   openrouter: {
     name: 'openrouter',
@@ -448,6 +478,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
+    rulesFile: 'CLAUDE.md',
+    rulesFileMode: 'import',
   },
 };
 

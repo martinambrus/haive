@@ -83,6 +83,10 @@
       "types": "./dist/attachments-fs.d.ts",
       "import": "./dist/attachments-fs.js"
     },
+    "./rules-files": {
+      "types": "./dist/rules-files.d.ts",
+      "import": "./dist/rules-files.js"
+    },
     "./knowledge-paths": {
       "types": "./dist/knowledge-paths.d.ts",
       "import": "./dist/knowledge-paths.js"

@@ -2176,6 +2176,11 @@ re-creates each currently enabled import-mode provider's `@AGENTS.md` stub (`CLA
 itself calls), and records a refused link per file instead of throwing, since a throw there would
 skip the applicable-template and install-manifest writes after it. Without the stub a
 claude-family CLI never loads AGENTS.md, rules block included, and nothing else ever wrote it back.
+`GET /repos/:id/upgrade-status` checks the same files through the same module
+(`@haive/shared/rules-files`, with each provider's `rulesFile` in the catalog), so a repository
+whose only gap is a missing import still gets the upgrade banner. A rules file linked anywhere but
+AGENTS.md is reported apart (`linkedRulesFiles`) and never offers an upgrade, since the restore
+refuses to write through a link, and a repository root the api cannot read claims nothing.
 `03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
