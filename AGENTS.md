@@ -2250,6 +2250,12 @@ warns, and retires the upgrade's row all the same. 04 also reads only the rows t
 (`source = 'upgrade'`). 01's backfill rows belong to the same task, but they record what was already
 there, and read as new files they were deleted: on a first upgrade's rollback, that took every
 adopted file the person had declined.
+
+**"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
+version declined, so the next upgrade offers only a newer one. On a live row it moves
+`templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
+render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
+for one it introduced. Skip records nothing, so the path is offered again.
 `unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
 such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
 rollback copies get the two hashes swapped.

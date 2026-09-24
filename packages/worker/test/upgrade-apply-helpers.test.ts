@@ -149,13 +149,21 @@ describe('classifyApplyAction — primary buckets', () => {
     ).toBe('apply');
   });
 
-  it('conflict with keep_ours → skip', () => {
+  it('conflict with keep_ours → keep, a decision Skip does not record', () => {
     expect(
       classify(
         'conflict',
         'a.md',
         { entryId: 'sel-1' },
         { conflictChoices: new Map([['sel-1', 'keep_ours']]) },
+      ),
+    ).toBe('keep');
+    expect(
+      classify(
+        'conflict',
+        'a.md',
+        { entryId: 'sel-1' },
+        { conflictChoices: new Map([['sel-1', 'skip']]) },
       ),
     ).toBe('skip');
   });

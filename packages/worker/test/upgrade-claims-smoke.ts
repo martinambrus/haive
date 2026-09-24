@@ -97,15 +97,17 @@ async function main(): Promise<void> {
       { userId, repositoryId, repoName: 'upgrade-claims-smoke' },
       repoPath,
     );
-    const [edited, overwritten] = seeded.filter((p) => p.endsWith('.md'));
-    const untouched = seeded.find((p) => p !== edited && p !== overwritten);
-    if (!edited || !overwritten || !untouched) {
+    const [edited, overwritten, keptEdit] = seeded.filter((p) => p.endsWith('.md'));
+    const untouched = seeded.find((p) => p !== edited && p !== overwritten && p !== keptEdit);
+    if (!edited || !overwritten || !keptEdit || !untouched) {
       throw new Error(`scaffold wrote too little: ${seeded.join(', ')}`);
     }
     const editedBytes = `${await readFile(join(repoPath, edited), 'utf8')}\nEdited by hand.\n`;
     await writeFile(join(repoPath, edited), editedBytes);
     const overwrittenBytes = `${await readFile(join(repoPath, overwritten), 'utf8')}\nAlso edited.\n`;
     await writeFile(join(repoPath, overwritten), overwrittenBytes);
+    const keptBytes = `${await readFile(join(repoPath, keptEdit), 'utf8')}\nKept by hand.\n`;
+    await writeFile(join(repoPath, keptEdit), keptBytes);
     const untouchedBytes = await readFile(join(repoPath, untouched), 'utf8');
     const handRegion = `${CLI_RULES_START}\nOur own rule, written by hand.\n${CLI_RULES_END}`;
     await writeFile(join(repoPath, CLI_RULES_DISK_PATH), `# Project\n\n${handRegion}\n`);
@@ -150,7 +152,7 @@ async function main(): Promise<void> {
       );
     const liveRowsAt = (rel: string) =>
       db
-        .select({ id: schema.onboardingArtifacts.id })
+        .select()
         .from(schema.onboardingArtifacts)
         .where(
           and(
@@ -237,6 +239,11 @@ async function main(): Promise<void> {
     );
     if (!overwriteField) throw new Error(`no conflict field for ${overwritten}`);
     values[overwriteField.id] = 'apply_theirs';
+    const keepField = form?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${keptEdit}`,
+    );
+    if (!keepField) throw new Error(`no conflict field for ${keptEdit}`);
+    values[keepField.id] = 'keep_ours';
     // Its backfill row stays live under this task, and a rollback must not read it as a new file.
     const untouchedId = detected.entries.find((e) => e.diskPath === untouched)!.entryId;
     values.selectedNew = (values.selectedNew as string[]).filter((id) => id !== untouchedId);
@@ -251,6 +258,16 @@ async function main(): Promise<void> {
       'the edited file is left as it was',
       (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
     );
+    const keptEntry = detected.entries.find((e) => e.diskPath === keptEdit)!;
+    const [keptRow] = await liveRowsAt(keptEdit);
+    check(
+      '"Keep my edits" records the version declined, and claims nothing',
+      keptRow?.templateContentHash === keptEntry.currentTemplateContentHash &&
+        keptRow?.writtenHash === keptEntry.newContentHash &&
+        keptRow?.writtenContent === keptBytes &&
+        (await readOrNull(keptEdit)) === keptBytes,
+      { row: keptRow ?? null, render: keptEntry.newContentHash },
+    );
 
     // ---- the next upgrade, and a rollback of this one -----------------------------------
     const again = await upgradePlanStep.detect!(planCtx);
@@ -258,6 +275,8 @@ async function main(): Promise<void> {
     check('the next upgrade offers the skipped edit again', againBucket === 'conflict', {
       bucket: againBucket,
     });
+    const keptAgain = again.entries.find((e) => e.diskPath === keptEdit)?.bucket;
+    check('but not the kept one', keptAgain === 'unchanged', { bucket: keptAgain });
 
     await db
       .update(schema.tasks)
@@ -341,6 +360,10 @@ async function main(): Promise<void> {
       (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
     );
     check(
+      'and a kept file',
+      !restoreOf(keptEdit) && !deletes(keptEdit) && (await readOrNull(keptEdit)) === keptBytes,
+    );
+    check(
       'and a file the upgrade was told not to write',
       !restoreOf(untouched) &&
         !deletes(untouched) &&
@@ -363,7 +386,8 @@ async function main(): Promise<void> {
     // ---- a second upgrade: two retired templates, and two files new to it ------------------
     const [fresh, freshEdited] = seeded.filter(
       (p) =>
-        p.endsWith('.md') && ![edited, overwritten, untouched, CLI_RULES_DISK_PATH].includes(p),
+        p.endsWith('.md') &&
+        ![edited, overwritten, keptEdit, untouched, CLI_RULES_DISK_PATH].includes(p),
     );
     if (!fresh || !freshEdited)
       throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
@@ -466,9 +490,13 @@ async function main(): Promise<void> {
 
     const secondApplyCtx = ctxFor(secondApplyRow!.id, secondTask!.id);
     const secondPlan = await upgradeApplyStep.detect!(secondApplyCtx);
-    const secondValues = defaultValues(
-      upgradeApplyStep.form!(secondApplyCtx, secondPlan) as FormSchema | null,
+    const secondForm = upgradeApplyStep.form!(secondApplyCtx, secondPlan) as FormSchema | null;
+    const secondValues = defaultValues(secondForm);
+    const keepTracked = secondForm?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${overwritten}`,
     );
+    if (!keepTracked) throw new Error(`no conflict field for ${overwritten} in the second upgrade`);
+    secondValues[keepTracked.id] = 'keep_ours';
     secondValues.selectedObsoleteRemovals = secondDetected.entries
       .filter((e) => e.bucket === 'obsolete')
       .map((e) => e.entryId);
@@ -489,6 +517,11 @@ async function main(): Promise<void> {
       secondApplied.warnings,
     );
     check('and its row stays live', (await liveRowsAt(retired('retired-kept'))).length === 1);
+    const third = await upgradePlanStep.detect!(secondPlanCtx);
+    const keptTracked = third.entries.find((e) => e.diskPath === overwritten)?.bucket;
+    check('"Keep my edits" on a tracked file stops the offer too', keptTracked === 'unchanged', {
+      bucket: keptTracked,
+    });
 
     // ---- a rollback of the second upgrade, one new file edited since -----------------------
     const freshEditedBytes = `${await readFile(join(repoPath, freshEdited), 'utf8')}Edited after.\n`;

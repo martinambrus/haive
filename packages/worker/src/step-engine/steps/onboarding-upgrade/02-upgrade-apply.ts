@@ -45,7 +45,7 @@ const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
 
 /** Action the apply loop should take for a single plan entry. */
-export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'skip';
+export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'keep' | 'skip';
 
 export interface ApplySelections {
   selectedUpdates: ReadonlySet<string>;
@@ -56,8 +56,8 @@ export interface ApplySelections {
 }
 
 /** Pure classifier for the apply loop. Splits the per-entry decision out of
- *  the imperative loop so the four branches (`apply`, `delete`, `untrack`,
- *  `skip`) can be unit-tested without a DB or file system. The `untrack`
+ *  the imperative loop so the five branches (`apply`, `delete`, `untrack`,
+ *  `keep`, `skip`) can be unit-tested without a DB or file system. The `untrack`
  *  branch — supersede the artifact row without touching disk — fires when
  *  the user skipped an obsolete custom-bundle row whose source bundle item
  *  is gone AND no other entry in the plan rewrites the same diskPath; that
@@ -75,6 +75,12 @@ export function classifyApplyAction(
     (entry.bucket === 'conflict' &&
       selections.conflictChoices.get(entry.entryId) === 'apply_theirs');
   if (shouldApply) return 'apply';
+  if (
+    entry.bucket === 'conflict' &&
+    selections.conflictChoices.get(entry.entryId) === 'keep_ours'
+  ) {
+    return 'keep';
+  }
 
   const shouldDelete =
     entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
@@ -110,18 +116,30 @@ export function resolveBundleItemId(
   return id && liveBundleItemIds.has(id) ? id : null;
 }
 
-/** What sits at a path, hashed the way the plan compares it: the whole file, or the rules region
- *  alone. Null when there is nothing there to compare. */
+/** What sits at a path as its row records it, and hashed the way the plan compares it: the whole
+ *  file, or the rules region alone. Null when there is nothing there. */
+export async function pathContent(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+): Promise<{ content: string; hash: string } | null> {
+  const raw = await readTextNoFollow(repoPath, rel);
+  if (raw === null) return null;
+  if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
+    return { content: raw, hash: sha256Hex(normalizeContent(raw)) };
+  }
+  const region = extractRegion(raw, CLI_RULES_START, CLI_RULES_END);
+  if (region === null) return null;
+  const content = normalizeContent(region);
+  return { content, hash: sha256Hex(content) };
+}
+
 export async function pathContentHash(
   repoPath: string,
   rel: string,
   templateKind: string,
 ): Promise<string | null> {
-  const content = await readTextNoFollow(repoPath, rel);
-  if (content === null) return null;
-  if (templateKind !== CLI_RULES_TEMPLATE_KIND) return sha256Hex(normalizeContent(content));
-  const region = extractRegion(content, CLI_RULES_START, CLI_RULES_END);
-  return region === null ? null : sha256Hex(normalizeContent(region));
+  return (await pathContent(repoPath, rel, templateKind))?.hash ?? null;
 }
 
 /** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
@@ -412,6 +430,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Superseded baselines for what a written path with no row already held.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
+    // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
+    const keptInPlace: {
+      id: string;
+      templateContentHash: string;
+      templateSchemaVersion: number;
+      lastObservedDiskHash: string;
+    }[] = [];
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -443,6 +468,51 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
       if (action === 'skip') {
         skippedCount += 1;
+        continue;
+      }
+
+      if (action === 'keep') {
+        // A decision, not a write: the version declined is recorded against the bytes kept, so
+        // the next upgrade offers only a newer one. An untracked path gets a row claiming nothing.
+        skippedCount += 1;
+        const rel = safeDiskRel(entry.diskPath);
+        let kept: { content: string; hash: string } | null = null;
+        try {
+          kept = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
+          continue;
+        }
+        if (kept === null || !entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        if (entry.liveArtifactId) {
+          keptInPlace.push({
+            id: entry.liveArtifactId,
+            templateContentHash: entry.currentTemplateContentHash,
+            templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+            lastObservedDiskHash: kept.hash,
+          });
+          continue;
+        }
+        rowsToInsert.push({
+          userId: ctx.userId,
+          repositoryId: plan.repositoryId,
+          taskId: ctx.taskId,
+          diskPath: entry.diskPath,
+          templateId: entry.templateId,
+          templateKind: entry.templateKind,
+          templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+          templateContentHash: entry.currentTemplateContentHash,
+          writtenHash: entry.newContentHash,
+          writtenContent: kept.content,
+          lastObservedDiskHash: kept.hash,
+          userModified: true,
+          formValuesSnapshot: plan.renderCtxSnapshot,
+          sourceStepId: '02-upgrade-apply',
+          source: 'backfill' as const,
+          haiveVersion,
+          bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+        });
         continue;
       }
 
@@ -626,7 +696,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // plan attached. Wrapped in a single transaction so a half-applied state
     // is impossible.
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
-    if (rowsToSupersede.length > 0 || insertPaths.length > 0 || baselineRows.length > 0) {
+    if (
+      rowsToSupersede.length > 0 ||
+      insertPaths.length > 0 ||
+      baselineRows.length > 0 ||
+      keptInPlace.length > 0
+    ) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
         if (rowsToSupersede.length > 0) {
@@ -648,6 +723,23 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               and(
                 eq(schema.onboardingArtifacts.repositoryId, plan.repositoryId),
                 inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        for (const k of keptInPlace) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({
+              templateContentHash: k.templateContentHash,
+              templateSchemaVersion: k.templateSchemaVersion,
+              lastObservedDiskHash: k.lastObservedDiskHash,
+              userModified: true,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.id, k.id),
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
             );
