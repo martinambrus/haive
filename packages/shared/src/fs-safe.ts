@@ -345,6 +345,46 @@ export async function openFileNoFollow(
   return readResult(opts.strict, () => openVerified(anchor, safe, mode));
 }
 
+/** A readable descriptor on the DIRECTORY at `<anchor>/<rel>`, opened without following anything
+ *  and verified through `/proc/self/fd`. What a caller hands a child process as a slot
+ *  (`/proc/self/fd/N` there) instead of a path the child would resolve by name, and what it can
+ *  `fchown` first. Strict: absence, a link and a non-directory all throw, as does an empty `rel` —
+ *  the anchor itself is never handed out. The caller closes it. */
+export async function openDirNoFollow(anchor: string, rel: string): Promise<FileHandle> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, safe, '');
+  const dir = await walkDir(anchor, safe, segs);
+  try {
+    let fh: FileHandle;
+    try {
+      fh = await open(at(dir.fh.fd, leaf), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    } catch (err) {
+      const code = errno(err);
+      if (code === 'ENOTDIR' || code === 'ELOOP') {
+        const st = await lstat(at(dir.fh.fd, leaf)).catch(() => null);
+        throw new PathContainmentError(
+          st?.isSymbolicLink() ? 'link' : 'not-directory',
+          anchor,
+          safe,
+          safe,
+        );
+      }
+      throw err;
+    }
+    try {
+      await assertHeldAt(fh, below(dir.real, leaf), anchor, safe, safe);
+      return fh;
+    } catch (err) {
+      await closeQuietly(fh);
+      throw err;
+    }
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
 export interface ReadOptions extends StrictOption {
   /** Stop after this many bytes; `truncated` says so. A prompt or a preview never needs more than
    *  its own cap, and a small file swapped for a huge one must not exhaust memory. */
