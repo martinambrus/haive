@@ -221,9 +221,12 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
 16. **fix(api,web): only the app can boot a runtime.**
     - `GET /tasks/:id/access-urls` and `/db-access` enqueue a runtime ENSURE and become POST.
       `BrowserDirectPanel` and `DatabaseAccessPanel` call POST.
-    - The VNC and IDE WebSocket upgrades (which also ensure runtimes) check `Origin` against the
-      api's allowed web origins.
-    - Control: GET enqueues today. Live: curl GET 404 and POST 200; the panels work in the browser.
+    - Every WebSocket upgrade (all six: the VNC and IDE ones, which also ensure runtimes, plus the
+      CLI terminal, task shell, CLI stream and login banner) and every state-changing request refuse
+      an `Origin` that is neither the app's nor the api's own. POST alone was not enough: a page on
+      the same site (another localhost port) still sends the Lax cookie with a simple POST.
+    - Control: GET enqueues today, and a foreign-origin POST or handshake reaches the route or auth.
+      Live: curl GET 404 and POST 200; the panels work in the browser.
     - Out of scope, with reasons: the `/ide` HTTP proxy ensures nothing, and the idempotent config
       self-heals.
 

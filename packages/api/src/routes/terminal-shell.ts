@@ -23,6 +23,7 @@ import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { isForeignOrigin, webOrigin } from '../lib/request-origin.js';
 
 const log = logger.child({ module: 'terminal-shell-ws' });
 const WS_PATH_PREFIX = '/terminal-shell/';
@@ -62,6 +63,10 @@ export function installTerminalShellWebSocket(
     const isRepo = rawUrl.startsWith(repoPathPrefix);
     const isTask = rawUrl.startsWith(pathPrefix);
     if (!isRepo && !isTask) return;
+    if (isForeignOrigin(req.headers.origin, req.headers.host, webOrigin())) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
 
     void (async () => {
       try {

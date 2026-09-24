@@ -56,7 +56,7 @@ async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
  *  from the live runner. Short-circuits when the feature is off so a disabled
  *  install never cold-boots a runtime just to answer. `pending` (202) means the
  *  ensure is still running — the client should retry. */
-browserAccessRoutes.get('/:id/access-urls', async (c) => {
+browserAccessRoutes.post('/:id/access-urls', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
   await requireOwnedTask(taskId, userId);
@@ -85,7 +85,7 @@ browserAccessRoutes.get('/:id/access-urls', async (c) => {
  *  browser one — and returns only the `database`-kind endpoints. Decoupled so db access
  *  works even when an admin turned browser access off. `pending` (202) = ensure still
  *  running; the client retries. */
-browserAccessRoutes.get('/:id/db-access', async (c) => {
+browserAccessRoutes.post('/:id/db-access', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
   await requireOwnedTask(taskId, userId);

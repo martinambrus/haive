@@ -66,7 +66,7 @@ export function DatabaseAccessPanel({
     setState('loading');
     setMessage(null);
     try {
-      const data = await api.get<DbAccessResponse>(`/tasks/${taskId}/db-access`);
+      const data = await api.post<DbAccessResponse>(`/tasks/${taskId}/db-access`);
       if (!data.enabled) {
         setState('disabled');
         return;

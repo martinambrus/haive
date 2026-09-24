@@ -12,6 +12,7 @@ import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
+import { isForeignOrigin, webOrigin } from '../lib/request-origin.js';
 
 const log = logger.child({ module: 'terminal-ws' });
 const WS_PATH_PREFIX = '/terminal/';
@@ -39,6 +40,10 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
+    if (isForeignOrigin(req.headers.origin, req.headers.host, webOrigin())) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
 
     void (async () => {
       try {
