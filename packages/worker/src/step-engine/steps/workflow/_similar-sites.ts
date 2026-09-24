@@ -135,6 +135,10 @@ export async function loadTaskSimilarSites(
   };
 }
 
+/** Every ASCII punctuation character escaped, so agent text forms no markup: an image in it would be
+ *  fetched the moment the gate renders, collapsed or not. A bare URL still autolinks (GFM). */
+const asPlainText = (text: string): string => text.replace(/[!-/:-@[-`{-~]/g, '\\$&');
+
 /** The gate row listing them, or null when there are none. `nextStep` says what this gate lets
  *  the person do about them. */
 export function similarSitesRow(
@@ -151,7 +155,7 @@ export function similarSitesRow(
     '',
     ...sites.map(
       (s) =>
-        `- ${code(s.path)}${s.lines ? ` (${range(s.lines)})` : ''}${s.reason ? ` — ${s.reason}` : ''} (from ${s.source}${s.editedInRound !== undefined ? `; its file was edited again in implementation round ${s.editedInRound}, so it may be addressed` : ''})`,
+        `- ${code(s.path)}${s.lines ? ` (${range(s.lines)})` : ''}${s.reason ? ` — ${asPlainText(s.reason)}` : ''} (from ${s.source}${s.editedInRound !== undefined ? `; its file was edited again in implementation round ${s.editedInRound}, so it may be addressed` : ''})`,
     ),
     ...(omitted > 0 ? ['', `${omitted} more not shown.`] : []),
   ].join('\n');
