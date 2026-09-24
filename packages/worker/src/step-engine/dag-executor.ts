@@ -764,6 +764,9 @@ interface ReviewArgs {
   deps: WorkerDeps;
   taskId: string;
   specView: SpecView;
+  /** What the task has attached, prepended to every review-loop agent's prompt. `''` when nothing
+   *  is attached. */
+  attachmentsNotice: string;
 }
 
 /** The two spec lines every review-loop agent gets, in the coder's order and wording
@@ -919,11 +922,14 @@ async function spawnReviewAgent(
     ra.params.taskId,
     ra.params.ignoreSavedStepClis ?? false,
   );
+  // A fix coder repairs against the specification the user attached, so every agent this spawns is
+  // told what is attached, as the coders it follows were.
+  const fullPrompt = ra.attachmentsNotice + prompt;
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
     worktreeRel,
-    input: { kind: 'prompt', prompt, capabilities },
+    input: { kind: 'prompt', prompt: fullPrompt, capabilities },
     invokeOpts: {
       cwd: issue.sandboxWorktreePath ?? undefined,
       effortLevel: preferredEffort ?? undefined,
@@ -945,7 +951,7 @@ async function spawnReviewAgent(
         issue,
         iteration > 0 ? `${REVIEW_ROLE_LABEL[role]} ${iteration}` : REVIEW_ROLE_LABEL[role],
       ),
-      prompt: plan.effectivePrompt ?? prompt,
+      prompt: plan.effectivePrompt ?? fullPrompt,
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;
@@ -2299,6 +2305,10 @@ export async function resolveDagPhase(
     if (plan.reviewEnabled) {
       // Resolved once per re-entry; issueSpecText narrows it per issue, as on the coder path.
       const reviewSpecView = await resolveSpecView(ctx);
+      // Once per re-entry too, after the same expansion: every reviewer, fix coder and advisor is
+      // told what the task has attached.
+      await ensureArchivesExpanded(db, ctx.taskId);
+      const reviewAttachmentsNotice = await augmentPromptWithAttachments(db, ctx.taskId, '');
       const reReadLevel = async () =>
         (await db
           .select()
@@ -2321,6 +2331,7 @@ export async function resolveDagPhase(
         deps,
         taskId: ctx.taskId,
         specView: reviewSpecView,
+        attachmentsNotice: reviewAttachmentsNotice,
       });
       if (review.status === 'waiting') {
         return { resolved: false, result: { status: 'waiting_cli', row: review.row } };
@@ -2356,6 +2367,7 @@ export async function resolveDagPhase(
         deps,
         taskId: ctx.taskId,
         specView: reviewSpecView,
+        attachmentsNotice: reviewAttachmentsNotice,
         plan,
       });
       if (escalation.status === 'waiting') {
