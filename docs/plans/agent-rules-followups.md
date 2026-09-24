@@ -359,7 +359,11 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   time out of 23 cases that had spent 100 ms or more each on it. Waiting for hydration also lets the
   dashboard render in full before the drag, and the divider is as tall as the page, so the drag now
   aims at the middle of its on-screen part: aimed at the centre of its box, it pressed at y=1022 in a
-  720 px viewport and failed on every attempt.
+  720 px viewport and failed on every attempt. Found while checking this PR's CI: the step Retry spec
+  (`tasks/actions.spec.ts`) was flaky in 10 of the 53 CI runs since 2026-09-21 that reached the
+  end-to-end suite. Its wait for the task's current step returned at once, because the fixture
+  already sits on that step, so the event was read before the click's request landed. It now polls
+  for the event.
 
 ## PR 12 — Stale docs
 
