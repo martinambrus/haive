@@ -3,6 +3,7 @@ import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 
 type TaskStepRow = typeof schema.taskSteps.$inferSelect;
+type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** A pass lost its row: a Retry or a Skip that arrived meanwhile left it `pending` or `skipped`. */
 export class StepSupersededError extends Error {
@@ -16,7 +17,7 @@ export class StepSupersededError extends Error {
  *  `pending` (a Retry reset it) or `skipped` (a Skip took it); otherwise it throws
  *  StepSupersededError, which `advanceStep` turns into `superseded`. */
 export async function updateOwnedStep(
-  db: Database,
+  db: Database | DbHandle,
   id: string,
   patch: PgUpdateSetSource<typeof schema.taskSteps>,
 ): Promise<TaskStepRow> {

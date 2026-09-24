@@ -2624,23 +2624,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepDef.loop
         ) {
           // Consumed and cleared together, with the form held: a worker that dies before the park
-          // below re-detects and stops at the form rather than re-sending the answered items.
+          // below re-detects and stops at the form rather than re-sending the answered items. The
+          // row is written first and only while the pass owns it, so a Retry's reset keeps its own
+          // hold and the agent rows are left as the reset left them.
           const reopenedAt = new Date();
           await db.transaction(async (tx) => {
+            await updateOwnedStep(tx, current.id, {
+              detectOutput: null,
+              formSchema: null,
+              formValues: null,
+              pauseFormOnRetry: true,
+            });
             await tx
               .update(schema.taskStepAgentMinings)
               .set({ consumedAt: reopenedAt, updatedAt: reopenedAt })
               .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
-            await tx
-              .update(schema.taskSteps)
-              .set({
-                detectOutput: null,
-                formSchema: null,
-                formValues: null,
-                pauseFormOnRetry: true,
-                updatedAt: reopenedAt,
-              })
-              .where(eq(schema.taskSteps.id, current.id));
           });
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {

@@ -111,6 +111,17 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+/** updateOwnedStep's guard, evaluated against the mock row: a write that carries it lands only
+ *  while the row is not `pending` or `skipped`. */
+function refusedByOwnershipGuard(cond: unknown, status: unknown): boolean {
+  const values = conditionValues(cond);
+  return (
+    values.includes('pending') &&
+    values.includes('skipped') &&
+    (status === 'pending' || status === 'skipped')
+  );
+}
+
 /** The mining-row writes whose WHERE names this row id. */
 const writesTo = (state: MockState, rowId: string) =>
   (state.miningUpdateLog ?? []).filter((u) => conditionValues(u.where).includes(rowId));
@@ -210,13 +221,16 @@ function makeMockDb(state: MockState): Database {
           };
           return {
             where: (cond: unknown) => {
+              const refused = () =>
+                tableName === 'task_steps' &&
+                refusedByOwnershipGuard(cond, state.taskStepRow.status);
               return {
                 then: (res: (v: unknown[]) => unknown, rej: (e: unknown) => unknown) => {
-                  if (!lost()) record(cond);
+                  if (!lost() && !refused()) record(cond);
                   return Promise.resolve([]).then(res, rej);
                 },
                 returning: async () => {
-                  if (lost()) return [];
+                  if (lost() || refused()) return [];
                   record(cond);
                   if (tableName === 'task_steps') return [state.taskStepRow];
                   return tableName === 'task_step_agent_minings' ? [{ id: 'mock-updated' }] : [];
@@ -621,6 +635,40 @@ describe('advanceStep apply-to-form continuation', () => {
     expect(
       state.updates.find((u) => u.table === 'task_steps' && u.status === 'waiting_form'),
     ).toMatchObject({ pauseFormOnRetry: false, waitingStartedAt: expect.any(Date) });
+  });
+
+  it('leaves a row a Retry reset alone when the form would have reopened', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    state.taskStepRow.formSchema = { title: 'Old form', fields: [] };
+    state.taskStepRow.formValues = { decision: 'continue' };
+    const step = reopeningFormStep();
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // The Retry resets the row, and leaves it unheld, while this pass is still in apply.
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        status: 'pending',
+        formValues: null,
+        pauseFormOnRetry: false,
+      };
+      return apply(ctx, args);
+    };
+
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('superseded');
+    expect(state.taskStepRow.status).toBe('pending');
+    // The Retry's own hold stands, so a retried auto-continue step is not stopped at its form.
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(state.updates.some((u) => u.table === 'task_step_agent_minings' && u.consumedAt)).toBe(
+      false,
+    );
+    // Nothing of the reopen or its park reached the row.
+    expect(
+      state.updates.filter(
+        (u) => u.table === 'task_steps' && ('pauseFormOnRetry' in u || 'status' in u),
+      ),
+    ).toEqual([]);
   });
 
   it('holds the form after a crash between clearing it and parking, rather than resubmitting', async () => {
