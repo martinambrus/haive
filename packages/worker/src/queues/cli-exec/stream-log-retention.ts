@@ -70,36 +70,76 @@ export function expiredPromptFilter(db: Database, cutoff: Date): SQL | undefined
   return agedInvocationFilter(db, cutoff, ne(schema.cliInvocations.prompt, ''));
 }
 
-/** The task-exit gate both sweeps share, parameterised only by the guard that makes a
- *  repeat pass a no-op. `unswept` is required, not optional: `and()` over an undefined
+/** The same window for `task_step_agent_minings.dispatch_prompt`, the step's own prompt a
+ *  wave-agent retry recovers from first. It shares the prompt window because it has the same
+ *  reader and the same consequence: a swept row falls back to its invocation's prompt, which the
+ *  same window blanks too.
+ *
+ *  Gated on the invocation the row links as well as on the task, so the two prompt forms age
+ *  together: an invocation can finish after its task exited, and a dispatch prompt gone while
+ *  that invocation's prompt remains would send a revived task's retry back to replaying the
+ *  sent prompt verbatim. A row that never reached a CLI has only this prompt. */
+export function expiredDispatchPromptFilter(db: Database, cutoff: Date): SQL | undefined {
+  return and(
+    isNotNull(schema.taskStepAgentMinings.dispatchPrompt),
+    inArray(
+      schema.taskStepAgentMinings.taskStepId,
+      db
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(inArray(schema.taskSteps.taskId, exitedTaskIds(db, cutoff))),
+    ),
+    or(
+      isNull(schema.taskStepAgentMinings.cliInvocationId),
+      inArray(
+        schema.taskStepAgentMinings.cliInvocationId,
+        db
+          .select({ id: schema.cliInvocations.id })
+          .from(schema.cliInvocations)
+          .where(finalizedBefore(cutoff)),
+      ),
+    ),
+  );
+}
+
+/** When an invocation was finalized: ended, or else superseded (see `expiredStreamLogFilter`). */
+function finalizedBefore(cutoff: Date): SQL | undefined {
+  return or(
+    lt(schema.cliInvocations.endedAt, cutoff),
+    and(isNull(schema.cliInvocations.endedAt), lt(schema.cliInvocations.supersededAt, cutoff)),
+  );
+}
+
+/** The tasks that exited before `cutoff`: the gate every sweep here shares. */
+function exitedTaskIds(db: Database, cutoff: Date) {
+  return db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        inArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        isNotNull(schema.tasks.completedAt),
+        lt(schema.tasks.completedAt, cutoff),
+      ),
+    );
+}
+
+/** The task-exit gate both invocation sweeps share, parameterised only by the guard that makes
+ *  a repeat pass a no-op. `unswept` is required, not optional: `and()` over an undefined
  *  term still returns a filter, so a missing guard would rewrite every row it had already
  *  cleared on every hourly tick. */
 function agedInvocationFilter(db: Database, cutoff: Date, unswept: SQL): SQL | undefined {
   return and(
-    or(
-      lt(schema.cliInvocations.endedAt, cutoff),
-      and(isNull(schema.cliInvocations.endedAt), lt(schema.cliInvocations.supersededAt, cutoff)),
-    ),
+    finalizedBefore(cutoff),
     unswept,
-    inArray(
-      schema.cliInvocations.taskId,
-      db
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(
-          and(
-            inArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
-            isNotNull(schema.tasks.completedAt),
-            lt(schema.tasks.completedAt, cutoff),
-          ),
-        ),
-    ),
+    inArray(schema.cliInvocations.taskId, exitedTaskIds(db, cutoff)),
   );
 }
 
 /** Periodic sweep that drops the two large text columns on `cli_invocations` once an
  *  invocation is older than their configured retention window: `stream_log` — the full CLI
- *  transcript behind the terminal's Raw tab — and `prompt`.
+ *  transcript behind the terminal's Raw tab — and `prompt`. The prompt's window also drops
+ *  `task_step_agent_minings.dispatch_prompt`, the step's own prompt a wave-agent retry reads first.
  *
  *  TWO windows, not one, and they are deliberately independent. Sharing a number would mean
  *  "keep transcripts 30 days" silently also stood down wave-agent retry recovery, which is a
@@ -177,7 +217,11 @@ export class CliStreamLogReaper {
    *  The two columns are swept independently, each against its own window, and a failure in
    *  one must not skip the other — so they run in sequence and both results are returned
    *  even when one window is off. */
-  async sweep(): Promise<{ purged: number; promptsPurged: number }> {
+  async sweep(): Promise<{
+    purged: number;
+    promptsPurged: number;
+    dispatchPromptsPurged: number;
+  }> {
     const [logDays, promptDays] = await Promise.all([
       configService.getNumber(
         CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS,
@@ -190,8 +234,12 @@ export class CliStreamLogReaper {
     ]);
 
     const purged = await this.sweepStreamLogs(logDays);
-    const promptsPurged = await this.sweepPrompts(promptDays);
-    return { purged, promptsPurged };
+    // One clock for both prompt forms, the invocations' first, so a dispatch prompt is never gone
+    // while the invocation prompt its recovery falls back to is still there.
+    const now = Date.now();
+    const promptsPurged = await this.sweepPrompts(promptDays, now);
+    const dispatchPromptsPurged = await this.sweepDispatchPrompts(promptDays, now);
+    return { purged, promptsPurged, dispatchPromptsPurged };
   }
 
   private async sweepStreamLogs(days: number): Promise<number> {
@@ -214,9 +262,9 @@ export class CliStreamLogReaper {
 
   /** Blanked to '' rather than NULL — the column is NOT NULL, so this needs no schema
    *  change, and the one reader already treats a falsy prompt as "no prior run to repeat". */
-  private async sweepPrompts(days: number): Promise<number> {
+  private async sweepPrompts(days: number, now: number): Promise<number> {
     if (!Number.isFinite(days) || days <= 0) return 0;
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
     const rows = await this.db
       .update(schema.cliInvocations)
       .set({ prompt: '' })
@@ -225,6 +273,26 @@ export class CliStreamLogReaper {
 
     if (rows.length > 0) {
       log.info({ purged: rows.length, retentionDays: days }, 'purged expired CLI prompts');
+    }
+    return rows.length;
+  }
+
+  /** NULLed, which is the column's own "not recorded": a retry then recovers from the
+   *  invocation's prompt, the fallback every row written before the column already takes. */
+  private async sweepDispatchPrompts(days: number, now: number): Promise<number> {
+    if (!Number.isFinite(days) || days <= 0) return 0;
+    const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
+    const rows = await this.db
+      .update(schema.taskStepAgentMinings)
+      .set({ dispatchPrompt: null })
+      .where(expiredDispatchPromptFilter(this.db, cutoff))
+      .returning({ id: schema.taskStepAgentMinings.id });
+
+    if (rows.length > 0) {
+      log.info(
+        { purged: rows.length, retentionDays: days },
+        'purged expired mining dispatch prompts',
+      );
     }
     return rows.length;
   }

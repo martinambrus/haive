@@ -1593,9 +1593,10 @@ adminRoutes.put('/config/cli-prompt-retention', async (c) => {
   return c.json({ retentionDays });
 });
 
-/** What the two sweepable columns currently occupy, so the retention settings are a choice
+/** What the sweepable columns currently occupy, so the retention settings are a choice
  *  rather than a guess. Both windows default to "keep forever" precisely because the sweep
- *  is irreversible, which makes the size the missing half of that decision.
+ *  is irreversible, which makes the size the missing half of that decision. The prompt
+ *  window also governs the mining rows' `dispatch_prompt`, so that is reported beside it.
  *
  *  `pg_column_size` reads the TOAST pointer's stored (compressed) size and does NOT detoast
  *  the value, so this is a heap-only scan: MEASURED 3.6 ms over 2,584 rows holding 445 MB.
@@ -1612,11 +1613,19 @@ adminRoutes.get('/config/cli-retention-usage', async (c) => {
       promptBytes: sql<number>`coalesce(sum(pg_column_size(${schema.cliInvocations.prompt})), 0)::bigint`,
     })
     .from(schema.cliInvocations);
+  const [agents] = await db
+    .select({
+      withDispatchPrompt: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.dispatchPrompt} is not null)::int`,
+      dispatchPromptBytes: sql<number>`coalesce(sum(pg_column_size(${schema.taskStepAgentMinings.dispatchPrompt})), 0)::bigint`,
+    })
+    .from(schema.taskStepAgentMinings);
   return c.json({
     invocations: Number(row?.invocations ?? 0),
     withStreamLog: Number(row?.withStreamLog ?? 0),
     withPrompt: Number(row?.withPrompt ?? 0),
     streamLogBytes: Number(row?.streamLogBytes ?? 0),
     promptBytes: Number(row?.promptBytes ?? 0),
+    withDispatchPrompt: Number(agents?.withDispatchPrompt ?? 0),
+    dispatchPromptBytes: Number(agents?.dispatchPromptBytes ?? 0),
   });
 });
