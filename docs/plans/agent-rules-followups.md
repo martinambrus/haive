@@ -352,6 +352,11 @@ module (region reading, rules-file helpers), so 3 → 4 → 6. 5 lands before 6 
   - An app-shell effect sets `document.documentElement.dataset.hydrated`.
   - An e2e helper waits for it; `gotoWithSidebar` and the other interaction helpers use it.
   - The drag targets an absolute x, so the spec stays deterministic.
+- **As built:** as planned, with the marker named for what it proves: `data-shell-hydrated`, set by
+  `SidebarNav`, since the page beside the sidebar can hydrate later. `waitForShellHydration`
+  (`tests/e2e/helpers/shell.ts`) also covers the two reloads in `tree.spec.ts` that a click follows,
+  and the Sign out click in `nav/app-layout.spec.ts`. The mining-retry stub took the `docker exec`
+  time out of 23 cases that had spent 100 ms or more each on it.
 
 ## PR 12 — Stale docs
 
