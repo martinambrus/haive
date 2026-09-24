@@ -227,11 +227,122 @@ async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
   await chmodNoFollow(anchor, rel, 0o644).catch(() => {});
 }
 
-/** Write the index for these inputs and return the path an agent sees it at. Shared with the plan
- *  builder, which re-renders it at dispatch once attachments have been deleted. A link planted at
- *  the name is replaced as a link: no attachment may hold that name, so whatever stands there is not
- *  a person's file, and refusing it would fail every later write. */
-export async function writePlanInputsIndex(
+/** What preparing one attachment came to. `missing` is a row whose file is gone while the row is
+ *  still there; `deleted` is one removed while it was being prepared, which is no input at all. */
+export type PreparedPlanInput =
+  | { status: 'prepared'; row: PlanInputRow; extracted: boolean; unreadable: boolean }
+  | { status: 'missing' }
+  | { status: 'deleted' };
+
+/** Prepare one attachment: its kind and size and, for a document no CLI can open, a sidecar of its
+ *  text. `canExtract` is false once the extraction budget is spent. Shared by this step's apply and
+ *  by a build's dispatch, which prepares what was attached since. */
+export async function preparePlanInput(
+  ctx: StepContext,
+  attachment: {
+    id?: string;
+    filename: string;
+    storedPath: string;
+    contentType: string | null;
+    description: string | null;
+  },
+  canExtract: boolean,
+): Promise<PreparedPlanInput> {
+  const kind = classifyPlanInput(attachment.filename, attachment.contentType);
+  const split = splitAttachmentStoredPath(attachment, ctx.taskId);
+  const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
+  if (info === null || info.kind !== 'file') {
+    return (await stillAttachedUnderLock(ctx, attachment))
+      ? { status: 'missing' }
+      : { status: 'deleted' };
+  }
+  const row: PlanInputRow = {
+    id: attachment.id,
+    filename: attachment.filename,
+    kind,
+    bytes: info.stats.size,
+    description: attachment.description,
+    sidecar: null,
+    // A text kind is readable as it stands; everything else has to earn it.
+    hasText: kind === 'text',
+    note: null,
+  };
+  if (!needsExtraction(kind))
+    return { status: 'prepared', row, extracted: false, unreadable: false };
+  if (!canExtract) {
+    row.extractionSkipped = true;
+    row.note = `not extracted: this plan already has ${PLAN_INPUT_EXTRACTION_LIMIT} extracted documents`;
+    return { status: 'prepared', row, extracted: false, unreadable: false };
+  }
+  await ctx.emitProgress(`Extracting text from ${attachment.filename}...`);
+  // Still the absolute path: the extractors are `unzip`/`pdftotext` subprocesses,
+  // which resolve a path of their own by name, so containing them is a separate
+  // change from anchoring this module's own reads.
+  const result = await extractPlanInput(kind, attachment.storedPath);
+  if (result.error) {
+    // Reported, not thrown. The original is still mounted, so an agent that
+    // can open it is not blocked by our inability to read it.
+    row.note = `could not be extracted: ${result.error}`;
+    ctx.logger.warn(
+      { file: attachment.filename, kind, err: result.error },
+      'plan input extraction failed',
+    );
+    return { status: 'prepared', row, extracted: false, unreadable: true };
+  }
+  const name = sidecarName(attachment.filename);
+  // The name is a DATABASE column, so it becomes a rel walked under the repository
+  // root a component at a time rather than a path joined onto the uploads dir and
+  // checked afterwards. A name that cannot address a file inside it is a per-item
+  // skip, like an extraction that failed: one bad row must not discard the sidecars
+  // written beside it.
+  const sidecarRel = uploadsInputRel(ctx.taskId, name);
+  if (sidecarRel === null) {
+    row.note = `extracted text could not be stored: "${name}" does not name a file inside the uploads directory`;
+    ctx.logger.warn(
+      { file: attachment.filename, sidecar: name },
+      'plan inputs: refusing a sidecar name that leaves the uploads directory',
+    );
+    return { status: 'prepared', row, extracted: false, unreadable: true };
+  }
+  const body =
+    result.markdown.length > 0
+      ? `# ${attachment.filename}\n\n${result.markdown}\n`
+      : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
+  const outcome = await storeSidecar(ctx, attachment, sidecarRel, body);
+  // Deleted while it was being extracted: it is no longer an input at all.
+  if (outcome === 'deleted') return { status: 'deleted' };
+  // A refused write is a per-item skip, like an extraction that failed: the original is
+  // still mounted, and one bad name must not discard the sidecars written beside it.
+  if (outcome === 'refused') {
+    row.note = 'extracted text could not be stored beside it';
+    return { status: 'prepared', row, extracted: false, unreadable: true };
+  }
+  await harmonizeOwnership(ctx.repoPath, sidecarRel);
+  row.sidecar = name;
+  // The extractor's own verdict on its INPUT, never a test on the string
+  // it rendered — that string carries page rules and sheet headings this
+  // module added, and a document that says nothing still produces them.
+  row.hasText = result.hasContent;
+  // An empty extraction is a fact about the DOCUMENT, not a failure of
+  // the extractor, and the two must not read the same downstream.
+  if (!row.hasText) row.note = 'contains no readable text';
+  return { status: 'prepared', row, extracted: true, unreadable: false };
+}
+
+/** Needed extraction and got nothing usable out of it — either the extractor failed or the document
+ *  genuinely carries no text. Both leave the file readable only by looking at it.
+ *  `extractionSkipped` is excluded on purpose. Visual-only is a HARD vision requirement on the
+ *  dispatch, and it must rest on a measurement: "the extractor found no text" is one, "the extractor
+ *  never ran" is not. */
+function isVisualOnly(input: PlanInputRow): boolean {
+  return needsExtraction(input.kind) && !input.hasText && !input.extractionSkipped;
+}
+
+/** Write the index for these inputs and return the path an agent sees it at. Rewritten at a build's
+ *  dispatch too, once what is attached has changed. A link planted at the name is replaced as a link:
+ *  no attachment may hold that name, so whatever stands there is not a person's file, and refusing it
+ *  would fail every later write. */
+async function writePlanInputsIndex(
   repoPath: string,
   taskId: string,
   inputs: PlanInputRow[],
@@ -247,32 +358,43 @@ export async function writePlanInputsIndex(
 }
 
 /** Remove the index, once nothing it would list is still attached. */
-export async function removePlanInputsIndex(repoPath: string, taskId: string): Promise<void> {
+async function removePlanInputsIndex(repoPath: string, taskId: string): Promise<void> {
   await removeNoFollow(repoPath, `${taskUploadsRel(taskId)}/${PLAN_INPUTS_INDEX}`).catch(() => {});
 }
 
-/** What this step recorded, or null when it did not run for the task (the onboarding wrapper
- *  registers no such step). Never throws: a build must not fail because the lookup did. */
-export async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
+/** This step's row and what it recorded, or null when it did not run for the task (the onboarding
+ *  wrapper registers no such step). Never throws: a build must not fail because the lookup did. */
+async function loadPlanInputsRow(
+  ctx: StepContext,
+): Promise<{ id: string; output: PlanInputsApply } | null> {
   try {
     const [row] = await ctx.db
-      .select({ output: schema.taskSteps.output })
+      .select({ id: schema.taskSteps.id, output: schema.taskSteps.output })
       .from(schema.taskSteps)
       .where(
         and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
       )
       .limit(1);
-    return (row?.output as PlanInputsApply | null) ?? null;
+    return row?.output ? { id: row.id, output: row.output as PlanInputsApply } : null;
   } catch (err) {
     ctx.logger.warn({ err }, 'could not read prepared plan inputs');
     return null;
   }
 }
 
+/** What this step recorded, or null when it did not run for the task. */
+export async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
+  return (await loadPlanInputsRow(ctx))?.output ?? null;
+}
+
 export interface LiveAttachmentRow {
   id: string;
   filename: string;
   contentType: string | null;
+  storedPath: string;
+  description: string | null;
+  expandedAt: Date | null;
+  expansionNote: string | null;
 }
 
 /** What is attached to the task right now: the rows, their ids, and the names they carry. */
@@ -293,9 +415,14 @@ export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachm
         id: schema.taskAttachments.id,
         filename: schema.taskAttachments.filename,
         contentType: schema.taskAttachments.contentType,
+        storedPath: schema.taskAttachments.storedPath,
+        description: schema.taskAttachments.description,
+        expandedAt: schema.taskAttachments.expandedAt,
+        expansionNote: schema.taskAttachments.expansionNote,
       })
       .from(schema.taskAttachments)
-      .where(eq(schema.taskAttachments.taskId, ctx.taskId));
+      .where(eq(schema.taskAttachments.taskId, ctx.taskId))
+      .orderBy(asc(schema.taskAttachments.createdAt));
     return {
       rows,
       ids: new Set(rows.map((r) => r.id)),
@@ -319,7 +446,7 @@ export function stillAttachedInput(
 /** Live attachments no recorded input accounts for: attached after this step ran, or re-uploaded
  *  under a recorded name. Nothing prepared them, yet the attachments notice lists every live row,
  *  so a dispatch still has to account for what they are. */
-export function unpreparedAttachments(
+function unpreparedAttachments(
   prepared: PlanInputsApply,
   live: LiveAttachments,
 ): LiveAttachmentRow[] {
@@ -363,6 +490,124 @@ export function livePlanInputs(
       hasPdfInputs: inputs.some((i) => i.kind === 'pdf'),
     },
   };
+}
+
+/** The plan inputs as they stand now, and the attachments nothing could prepare. */
+export interface CurrentPlanInputs {
+  output: PlanInputsApply;
+  /** Live attachments whose file could not be read, so only their kind counts. */
+  unprepared: LiveAttachmentRow[];
+}
+
+/**
+ * What this step recorded, brought up to what is attached NOW. An attachment deleted since is dropped
+ * by row, with every verdict it carried; one attached since is prepared exactly as this step would
+ * have prepared it, within the same extraction budget, and the note of an archive expanded since is
+ * added. When anything changed the index is rewritten, or removed once nothing is left, and the result
+ * is recorded over the output it was computed from, so the next dispatch neither extracts the same
+ * document again nor loses what it found.
+ *
+ * Null when this step did not run for the task or the attachments cannot be read, which leaves a build
+ * on the fields it had. `attachments` is a snapshot the caller already read; without one this reads
+ * its own.
+ */
+export async function currentPlanInputs(
+  ctx: StepContext,
+  attachments?: LiveAttachments | null,
+): Promise<CurrentPlanInputs | null> {
+  const recorded = await loadPlanInputsRow(ctx);
+  if (!recorded) return null;
+  const live = attachments === undefined ? await loadLiveAttachments(ctx) : attachments;
+  if (!live) return null;
+
+  const pruned = livePlanInputs(recorded.output, live);
+  let changed = pruned.changed;
+  const inputs = [...pruned.output.inputs];
+  const unreadable = [...pruned.output.unreadable];
+  const visualOnly = [...(pruned.output.visualOnly ?? [])];
+  const archiveNotes = [...(pruned.output.archiveNotes ?? [])];
+  let extracted = pruned.output.extracted;
+  const unprepared: LiveAttachmentRow[] = [];
+  for (const attachment of unpreparedAttachments(recorded.output, live)) {
+    const prepared = await preparePlanInput(
+      ctx,
+      attachment,
+      extracted < PLAN_INPUT_EXTRACTION_LIMIT,
+    );
+    if (prepared.status === 'deleted') continue;
+    if (prepared.status === 'missing') {
+      unprepared.push(attachment);
+      continue;
+    }
+    changed = true;
+    inputs.push(prepared.row);
+    if (prepared.extracted) extracted += 1;
+    if (prepared.unreadable) unreadable.push(attachment.filename);
+    if (isVisualOnly(prepared.row)) visualOnly.push(attachment.filename);
+  }
+  // Only for an archive that is an input: the notes follow the inputs, and `livePlanInputs` drops
+  // any other, so adding one here would rewrite the index on every dispatch.
+  const ids = new Set(inputs.flatMap((i) => (i.id ? [i.id] : [])));
+  const noted = new Set(archiveNotes.map((n) => n.filename));
+  for (const row of live.rows) {
+    if (row.expandedAt === null || !row.expansionNote) continue;
+    if (!ids.has(row.id) || noted.has(row.filename)) continue;
+    archiveNotes.push({ filename: row.filename, note: row.expansionNote });
+    changed = true;
+  }
+  if (!changed) return { output: recorded.output, unprepared };
+
+  const output: PlanInputsApply = {
+    ...pruned.output,
+    inputs,
+    extracted,
+    unreadable,
+    visualOnly,
+    archiveNotes,
+    hasImageInputs: inputs.some((i) => i.kind === 'image'),
+    hasPdfInputs: inputs.some((i) => i.kind === 'pdf'),
+    indexPath: await rewritePlanInputsIndex(ctx, inputs, archiveNotes),
+  };
+  await recordPlanInputs(ctx, recorded, output);
+  return { output, unprepared };
+}
+
+/** Rewrite the index for these inputs, or remove it once there are none, and answer the path a prompt
+ *  may name. A write that fails answers null, since the file on disk no longer lists what is attached. */
+async function rewritePlanInputsIndex(
+  ctx: StepContext,
+  inputs: PlanInputRow[],
+  archiveNotes: { filename: string; note: string }[],
+): Promise<string | null> {
+  try {
+    if (inputs.length > 0) {
+      return await writePlanInputsIndex(ctx.repoPath, ctx.taskId, inputs, archiveNotes);
+    }
+    await removePlanInputsIndex(ctx.repoPath, ctx.taskId);
+    return null;
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan inputs: could not rewrite the index');
+    return null;
+  }
+}
+
+/** Record `next` only over the output it was computed from. A retry of this step resets that output,
+ *  and what the retry writes is newer than anything computed here, so the write then matches nothing. */
+async function recordPlanInputs(
+  ctx: StepContext,
+  recorded: { id: string; output: PlanInputsApply },
+  next: PlanInputsApply,
+): Promise<void> {
+  try {
+    await ctx.db
+      .update(schema.taskSteps)
+      .set({ output: next })
+      .where(
+        and(eq(schema.taskSteps.id, recorded.id), eq(schema.taskSteps.output, recorded.output)),
+      );
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan inputs: could not record the inputs attached since');
+  }
 }
 
 /** The index the greenfield root prompt tells its agent to read FIRST, so every value it names is
@@ -419,9 +664,7 @@ export function renderIndex(
       ...shownNotes.map((n) => `- \`${n.filename}\` — ${safeNote(n.note)}`),
     );
   }
-  const visual = rows.filter(
-    (r) => r.kind === 'image' || (needsExtraction(r.kind) && !r.hasText && !r.extractionSkipped),
-  );
+  const visual = rows.filter((r) => r.kind === 'image' || isVisualOnly(r));
   if (visual.length > 0) {
     lines.push(
       '',
@@ -573,101 +816,23 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     const uploadsDir = d.uploadsDir;
 
     for (const attachment of d.attachments) {
-      const kind = classifyPlanInput(attachment.filename, attachment.contentType);
-      // detect() proved every row had a real file; one that cannot be split or read now
-      // changed between the two phases. Deleted meanwhile, it is simply no longer an input;
-      // still attached, it is the same fact — and the same fix — as a row missing then.
-      const split = splitAttachmentStoredPath(attachment, ctx.taskId);
-      const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
-      if (info === null || info.kind !== 'file') {
-        if (!(await stillAttachedUnderLock(ctx, attachment))) continue;
+      const prepared = await preparePlanInput(
+        ctx,
+        attachment,
+        extracted < PLAN_INPUT_EXTRACTION_LIMIT,
+      );
+      // detect() proved every row had a real file; one that cannot be read now changed between the
+      // two phases. Deleted meanwhile, it is simply no longer an input; still attached, it is the
+      // same fact — and the same fix — as a row missing then.
+      if (prepared.status === 'deleted') continue;
+      if (prepared.status === 'missing') {
         throw new Error(
           `Attached file "${attachment.filename}" is no longer readable in the task workspace. Re-attach it and retry this step.`,
         );
       }
-      const row: PlanInputRow = {
-        id: attachment.id,
-        filename: attachment.filename,
-        kind,
-        bytes: info.stats.size,
-        description: attachment.description,
-        sidecar: null,
-        // A text kind is readable as it stands; everything else has to earn it.
-        hasText: kind === 'text',
-        note: null,
-      };
-
-      if (needsExtraction(kind) && extracted >= PLAN_INPUT_EXTRACTION_LIMIT) {
-        row.extractionSkipped = true;
-        row.note = `not extracted: this plan already has ${PLAN_INPUT_EXTRACTION_LIMIT} extracted documents`;
-      } else if (needsExtraction(kind)) {
-        await ctx.emitProgress(`Extracting text from ${attachment.filename}...`);
-        // Still the absolute path: the extractors are `unzip`/`pdftotext` subprocesses,
-        // which resolve a path of their own by name, so containing them is a separate
-        // change from anchoring this module's own reads.
-        const result = await extractPlanInput(kind, attachment.storedPath);
-        if (result.error) {
-          // Reported, not thrown. The original is still mounted, so an agent that
-          // can open it is not blocked by our inability to read it.
-          row.note = `could not be extracted: ${result.error}`;
-          unreadable.push(attachment.filename);
-          ctx.logger.warn(
-            { file: attachment.filename, kind, err: result.error },
-            'plan input extraction failed',
-          );
-        } else {
-          const name = sidecarName(attachment.filename);
-          // A task with no uploads dir has nowhere to put a sidecar, and detect()
-          // is what knows whether it has one. The PATH is not taken from this
-          // value, nor from the row's stored path — it is built below as a rel.
-          if (uploadsDir === null) {
-            throw new Error(
-              `Refusing to write a sidecar for "${attachment.filename}": the task has no uploads directory.`,
-            );
-          }
-          // The name is a DATABASE column, so it becomes a rel walked under the repository
-          // root a component at a time rather than a path joined onto the uploads dir and
-          // checked afterwards. A name that cannot address a file inside it is a per-item
-          // skip, like an extraction that failed: one bad row must not discard the sidecars
-          // written beside it.
-          const sidecarRel = uploadsInputRel(ctx.taskId, name);
-          if (sidecarRel === null) {
-            row.note = `extracted text could not be stored: "${name}" does not name a file inside the uploads directory`;
-            unreadable.push(attachment.filename);
-            ctx.logger.warn(
-              { file: attachment.filename, sidecar: name },
-              'plan inputs: refusing a sidecar name that leaves the uploads directory',
-            );
-          } else {
-            const body =
-              result.markdown.length > 0
-                ? `# ${attachment.filename}\n\n${result.markdown}\n`
-                : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
-            const outcome = await storeSidecar(ctx, attachment, sidecarRel, body);
-            // Deleted while it was being extracted: it is no longer an input at all.
-            if (outcome === 'deleted') continue;
-            // A refused write is a per-item skip, like an extraction that failed: the original is
-            // still mounted, and one bad name must not discard the sidecars written beside it.
-            if (outcome === 'refused') {
-              row.note = 'extracted text could not be stored beside it';
-              unreadable.push(attachment.filename);
-              inputs.push(row);
-              continue;
-            }
-            await harmonizeOwnership(ctx.repoPath, sidecarRel);
-            row.sidecar = name;
-            // The extractor's own verdict on its INPUT, never a test on the string
-            // it rendered — that string carries page rules and sheet headings this
-            // module added, and a document that says nothing still produces them.
-            row.hasText = result.hasContent;
-            // An empty extraction is a fact about the DOCUMENT, not a failure of
-            // the extractor, and the two must not read the same downstream.
-            if (!row.hasText) row.note = 'contains no readable text';
-            extracted += 1;
-          }
-        }
-      }
-      inputs.push(row);
+      inputs.push(prepared.row);
+      if (prepared.extracted) extracted += 1;
+      if (prepared.unreadable) unreadable.push(attachment.filename);
     }
 
     let indexPath: string | null = null;
@@ -688,15 +853,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
       unreadable,
       hasImageInputs: inputs.some((i) => i.kind === 'image'),
       hasPdfInputs: inputs.some((i) => i.kind === 'pdf'),
-      // Needed extraction and got nothing usable out of it — either the extractor
-      // failed or the document genuinely carries no text. Both leave the file
-      // readable only by looking at it.
-      visualOnly: inputs
-        // `extractionSkipped` is excluded on purpose. Visual-only is a HARD
-        // vision requirement on the dispatch, and it must rest on a measurement:
-        // "the extractor found no text" is one, "the extractor never ran" is not.
-        .filter((i) => needsExtraction(i.kind) && !i.hasText && !i.extractionSkipped)
-        .map((i) => i.filename),
+      visualOnly: inputs.filter(isVisualOnly).map((i) => i.filename),
       indexPath,
       archiveNotes,
     };

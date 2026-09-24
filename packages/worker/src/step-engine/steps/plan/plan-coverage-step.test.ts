@@ -375,9 +375,10 @@ const attachedCtx = (
           where: () =>
             table === schema.taskSteps
               ? { limit: async () => [{ output: { inputs: recorded } }] }
-              : Promise.resolve(
-                  rows.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
-                ),
+              : {
+                  orderBy: async () =>
+                    rows.map((x) => (typeof x === 'string' ? { id: `id-${x}`, filename: x } : x)),
+                },
         }),
       }),
     },
