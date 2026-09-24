@@ -2441,10 +2441,25 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           stepDef.form &&
           !stepDef.loop
         ) {
-          await db
-            .update(schema.taskStepAgentMinings)
-            .set({ consumedAt: new Date(), updatedAt: new Date() })
-            .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+          // Consumed and cleared together, with the form held: a worker that dies before the park
+          // below re-detects and stops at the form rather than re-sending the answered items.
+          const reopenedAt = new Date();
+          await db.transaction(async (tx) => {
+            await tx
+              .update(schema.taskStepAgentMinings)
+              .set({ consumedAt: reopenedAt, updatedAt: reopenedAt })
+              .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+            await tx
+              .update(schema.taskSteps)
+              .set({
+                detectOutput: null,
+                formSchema: null,
+                formValues: null,
+                pauseFormOnRetry: true,
+                updatedAt: reopenedAt,
+              })
+              .where(eq(schema.taskSteps.id, current.id));
+          });
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
@@ -2460,6 +2475,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             detectOutput: refreshedDetected,
             formSchema: refreshedSchema,
             formValues: null,
+            pauseFormOnRetry: false,
             statusMessage: null,
             errorMessage: null,
           });

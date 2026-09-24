@@ -22,7 +22,12 @@ import {
   withLiveInputs,
   withMinedStatus,
 } from './01-plan-build.js';
-import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import {
+  PLAN_PATCH_CONTRACT,
+  applyAgentPatch,
+  applyAgentPatchOnce,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 import {
   findCoverageGaps,
   findStructuralGaps,
@@ -696,7 +701,8 @@ async function stampMiningError(ctx: StepContext, agentId: string, errorMessage:
     .catch(() => undefined);
 }
 
-async function foldCoverageResults(
+/** Exported for the unit test; apply() is the only caller. */
+export async function foldCoverageResults(
   ctx: StepContext,
   detected: CoverageDetect,
   results: AgentMiningResult[],
@@ -724,25 +730,29 @@ async function foldCoverageResults(
       // A document-coverage agent may legitimately conclude that the section
       // was already represented. It has no single focus node to mark.
       if (ops.length === 0) continue;
-      await assertPlanPatchWithinBreadth(
-        ctx.db,
-        detected.repositoryId!,
-        ops,
-        self,
-        breadthCap(detected.buildFormValues),
-      );
-      const applied = await applyAgentPatch(
-        ctx.db,
-        {
-          ...patch,
-          ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
-        },
-        {
-          repositoryId: detected.repositoryId!,
-          sourceTaskId: ctx.taskId,
-          ...(self ? { selfNodeId: self } : {}),
-        },
-      );
+      const applied = await applyAgentPatchOnce(ctx, result.agentId, async (tx) => {
+        await assertPlanPatchWithinBreadth(
+          ctx.db,
+          detected.repositoryId!,
+          ops,
+          self,
+          breadthCap(detected.buildFormValues),
+        );
+        return applyAgentPatch(
+          tx,
+          {
+            ...patch,
+            ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
+          },
+          {
+            repositoryId: detected.repositoryId!,
+            sourceTaskId: ctx.taskId,
+            ...(self ? { selfNodeId: self } : {}),
+          },
+        );
+      });
+      // Folded by a pass running beside this one.
+      if (!applied) continue;
       if (applied.dropped.length > 0) {
         hadFailure = true;
         await stampMiningError(

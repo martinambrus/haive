@@ -25,7 +25,12 @@ import {
   PARTIAL_APPLY_PREFIX,
   PLAN_AGENT_TIMEOUT_MS,
 } from './01-plan-build.js';
-import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import {
+  PLAN_PATCH_CONTRACT,
+  applyAgentPatch,
+  applyAgentPatchOnce,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 import {
   REPO_IS_DATA_AUTHORING_LINES,
   UNTRUSTED_FENCE_LEGEND,
@@ -549,15 +554,19 @@ export async function foldSequenceResults(
     }
     const self = sequenceSelfNodeId(result.agentId);
     try {
-      const outcome = await applyAgentPatch(
-        ctx.db,
-        { ...patch, ops },
-        {
-          repositoryId,
-          sourceTaskId: ctx.taskId,
-          ...(self ? { selfNodeId: self } : {}),
-        },
+      const outcome = await applyAgentPatchOnce(ctx, result.agentId, (tx) =>
+        applyAgentPatch(
+          tx,
+          { ...patch, ops },
+          {
+            repositoryId,
+            sourceTaskId: ctx.taskId,
+            ...(self ? { selfNodeId: self } : {}),
+          },
+        ),
       );
+      // Folded by a pass running beside this one.
+      if (!outcome) continue;
       applied += outcome.updated.length;
       notes.push(...outcome.dropped);
       if (notes.length > 0) {

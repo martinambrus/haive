@@ -592,6 +592,54 @@ describe('advanceStep apply-to-form continuation', () => {
         (update) => update.table === 'task_step_agent_minings' && update.consumedAt instanceof Date,
       ),
     ).toBe(true);
+    // The rows are consumed and the form cleared and held in one transaction; the park releases
+    // the hold.
+    expect(state.transactions).toBe(1);
+    expect(
+      state.updates.find((u) => u.table === 'task_steps' && u.pauseFormOnRetry === true),
+    ).toMatchObject({ detectOutput: null, formSchema: null, formValues: null });
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+  });
+
+  it('holds the form after a crash between clearing it and parking, rather than resubmitting', async () => {
+    // A form that auto-submits its defaults, so only the hold keeps it from going straight back
+    // into apply with the items it had already answered.
+    const autoSubmitting = (applyCalls: unknown[]): StepDefinition => {
+      const step = reopeningFormStep();
+      step.metadata = { ...step.metadata, autoSubmitDefaults: true };
+      const form = step.form!;
+      step.form = (ctx, detected, llmOutput) => {
+        const schema = form(ctx, detected, llmOutput)!;
+        return { ...schema, fields: schema.fields.map((f) => ({ ...f, default: 'continue' })) };
+      };
+      step.apply = async () => {
+        applyCalls.push(1);
+        throw new ReopenStepFormError('bounded batch finished');
+      };
+      return step;
+    };
+    const crashed = (pauseFormOnRetry: boolean) => {
+      const state = freshState([miningRow('prior-batch-agent', 1)]);
+      Object.assign(state.taskStepRow, {
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        pauseFormOnRetry,
+      });
+      return state;
+    };
+
+    const held = crashed(true);
+    const applyCalls: unknown[] = [];
+    const result = await run(makeMockDb(held), autoSubmitting(applyCalls), []);
+    expect(result.status).toBe('waiting_form');
+    expect(applyCalls).toEqual([]);
+    expect(held.taskStepRow.detectOutput).toEqual({ remaining: 42 });
+    expect(held.taskStepRow.pauseFormOnRetry).toBe(false);
+
+    const unheld: unknown[] = [];
+    await run(makeMockDb(crashed(false)), autoSubmitting(unheld), []);
+    expect(unheld.length).toBeGreaterThan(0);
   });
 });
 

@@ -289,16 +289,25 @@ describe('sequenceForm', () => {
 });
 
 describe('foldSequenceResults', () => {
-  function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
+  function fakeDb(opts: { claimedElsewhere?: boolean } = {}): {
+    db: Database;
+    stamps: Record<string, unknown>[];
+  } {
     const stamps: Record<string, unknown>[] = [];
     const db = {
       update: () => ({
         set: (values: Record<string, unknown>) => ({
-          where: async () => {
+          where: () => {
+            // The fold's claim on the reply, taken with its patch; every other write is a stamp.
+            if ('consumedAt' in values) {
+              return { returning: async () => (opts.claimedElsewhere ? [] : [{ id: 'row' }]) };
+            }
             stamps.push(values);
+            return Promise.resolve();
           },
         }),
       }),
+      transaction: async (fn: (tx: unknown) => unknown) => fn({ ...db, inTransaction: true }),
     } as unknown as Database;
     return { db, stamps };
   }
@@ -338,6 +347,9 @@ describe('foldSequenceResults', () => {
     vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A], dropped: [gone] }));
     const { db, stamps } = fakeDb();
     expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(1);
+    expect(
+      (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
+    ).toBe(true);
     expect(stamps).toEqual([{ errorMessage: `plan patch partially applied: ${gone}` }]);
   });
 
@@ -402,6 +414,14 @@ describe('foldSequenceResults', () => {
     expect(stamps).toEqual([
       { errorMessage: "plan patch not applied: upsert dropped: unknown node reference '42'" },
     ]);
+  });
+
+  it('leaves a reply another pass already folded to that pass', async () => {
+    const { db, stamps } = fakeDb({ claimedElsewhere: true });
+    const count = await foldSequenceResults(ctx(db), 'repo', [agentReply(ORDER)]);
+    expect(vi.mocked(applyAgentPatch)).not.toHaveBeenCalled();
+    expect(count).toBe(0);
+    expect(stamps).toEqual([]);
   });
 
   it('stamps nothing on a reply that landed whole', async () => {

@@ -24,7 +24,12 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import {
+  PLAN_PATCH_CONTRACT,
+  applyAgentPatch,
+  applyAgentPatchOnce,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
@@ -766,32 +771,36 @@ export function createPlanBuildStep(
           // children can be parented with `self` instead of a transcribed uuid —
           // the single commonest thing an agent gets wrong.
           const expanding = EXPAND_AGENT_RE.exec(result.agentId)?.[1];
-          if (patch.ops.length === 0 && !expanding) {
-            throw new Error('plan outline returned no operations');
-          }
-          const ops = await ensureSemanticExpansionResolution(
-            ctx.db,
-            repositoryId,
-            expanding ?? null,
-            patch.ops,
-          );
-          await assertPlanPatchWithinBreadth(
-            ctx.db,
-            repositoryId,
-            ops,
-            expanding ?? null,
-            breadthCap(args.formValues),
-          );
-          const applied = await applyAgentPatch(
-            ctx.db,
-            { ...patch, ops: withMinedStatus(ops, d.mode) },
-            {
+          const applied = await applyAgentPatchOnce(ctx, result.agentId, async (tx) => {
+            if (patch.ops.length === 0 && !expanding) {
+              throw new Error('plan outline returned no operations');
+            }
+            const ops = await ensureSemanticExpansionResolution(
+              ctx.db,
               repositoryId,
-              sourceTaskId: ctx.taskId,
-              derivedAtCommit,
-              ...(expanding ? { selfNodeId: expanding } : {}),
-            },
-          );
+              expanding ?? null,
+              patch.ops,
+            );
+            await assertPlanPatchWithinBreadth(
+              ctx.db,
+              repositoryId,
+              ops,
+              expanding ?? null,
+              breadthCap(args.formValues),
+            );
+            return applyAgentPatch(
+              tx,
+              { ...patch, ops: withMinedStatus(ops, d.mode) },
+              {
+                repositoryId,
+                sourceTaskId: ctx.taskId,
+                derivedAtCommit,
+                ...(expanding ? { selfNodeId: expanding } : {}),
+              },
+            );
+          });
+          // Folded by a pass running beside this one, so its nodes are already in the plan.
+          if (!applied) continue;
           if (applied.dropped.length > 0) {
             // A DIFFERENT prefix from the failure case, and the difference is
             // load-bearing: `askedState` re-asks a node only on "not applied",
