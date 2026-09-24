@@ -34,6 +34,7 @@ import {
   removeFiles,
   rewriteAttachmentsManifest,
   settleExpansionAttempts,
+  settleExpansionIntents,
 } from '@haive/shared/attachments-fs';
 import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
@@ -252,7 +253,8 @@ async function claimAttachmentName(
 ): Promise<{ rel: string; fh: FileHandle }> {
   let claim = null as Promise<{ rel: string; fh: FileHandle }> | null;
   try {
-    await withTaskAttachmentsLock(getDb(), taskId, async () => {
+    await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
+      await settleExpansionIntents(tx, taskId, anchor, uploadsRel);
       claim = createUniqueAttachment(anchor, uploadsRel, relPath);
       await claim;
     });

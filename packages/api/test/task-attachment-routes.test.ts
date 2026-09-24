@@ -325,6 +325,21 @@ describe('task attachment routes', () => {
       expect(await modeOf(up('_ATTACHMENTS.md'))).toBe(0o644);
     });
 
+    it('settles an interrupted expansion before claiming a name it still names', async () => {
+      const archive = await seedFile('spec.zip', 'PK');
+      await interruptedExpansion(archive.id as string, 'spec', ['a.md', 'b.md']);
+      // Something in the sandbox removed one placed file, which frees its name for an upload.
+      await rm(up('spec/a.md'));
+      const res = await upload('spec/a.md', 'mine');
+      expect(res.status).toBe(201);
+      expect((res.body?.attachment as Row).filename).toBe('spec/a.md');
+      expect(await readFile(up('spec/a.md'), 'utf8')).toBe('mine');
+      // No intent is left to name the upload's path, so no later settle can take its file.
+      const staging = (await listing(up())).find((n) => n.startsWith('.expanding-'))!;
+      expect(await listing(up(staging))).not.toContain('placed-as');
+      expect(await listing(up('spec'))).toEqual(['a.md']);
+    });
+
     it('de-dupes within the file’s own folder, starting at (2)', async () => {
       const names: unknown[] = [];
       for (const [name, body] of [
