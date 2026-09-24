@@ -259,7 +259,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
             ne(schema.onboardingArtifacts.id, upgradeRow.id),
           ),
         )
-        .orderBy(desc(schema.onboardingArtifacts.supersededAt))
+        // 02 retires a live row and inserts the baseline it captured in one instant, and the
+        // baseline, holding what was on disk, is the one to restore.
+        .orderBy(
+          desc(schema.onboardingArtifacts.supersededAt),
+          desc(schema.onboardingArtifacts.generatedAt),
+        )
         .limit(1);
       const prior = priorCandidates[0];
       if (!prior) {
