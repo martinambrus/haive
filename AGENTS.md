@@ -292,7 +292,9 @@ only after the outcome has landed and only while the row still reads `done`: the
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
 since a Retry's reset supersedes only the runs that already exist. The handoff is fenced on the
 epoch the pass ran under: `handleResult` does nothing once the task has moved on, and completing or
-failing the task carries that epoch, since either one also reaps the task's containers.
+failing the task carries that epoch, since either one also reaps the task's containers. That holds
+for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
+read, or the one a reset the job made itself moved it to.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,

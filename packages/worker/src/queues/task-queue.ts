@@ -136,6 +136,11 @@ export async function closeTaskQueue(): Promise<void> {
   }
 }
 
+/** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
+interface HeldTask {
+  ctx?: ResolvedTaskContext;
+}
+
 interface ResolvedTaskContext {
   taskId: string;
   userId: string;
@@ -1303,7 +1308,7 @@ export async function handleResult(
         target.metadata.id,
         nextRound,
       );
-      const reentryEpoch = reentryReset?.newEpoch ?? ctx.orchestrationEpoch;
+      if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
       await markTaskRunningWithStep(
         db,
         ctx.taskId,
@@ -1311,7 +1316,13 @@ export async function handleResult(
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         nextRound,
       );
-      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound, reentryEpoch);
+      await enqueueAdvance(
+        ctx.taskId,
+        ctx.userId,
+        target.metadata.id,
+        nextRound,
+        ctx.orchestrationEpoch,
+      );
       return;
     }
     case 'revise': {
@@ -1333,6 +1344,8 @@ export async function handleResult(
         round: targetRound,
       });
       const reset = await resetStepAndDownstream(db, ctx.taskId, result.targetStepId, targetRound);
+      // The reset moved the task to a new epoch, and this job holds it there from now on.
+      if (reset) ctx.orchestrationEpoch = reset.newEpoch;
       // An in-place self-revise REQUIRES the existing row. A forked round legitimately has
       // no row yet — reset is then a crash-safety no-op (only resets a stale terminal row),
       // exactly as in loop_back; upsertRow materializes the fresh round-N rows.
@@ -1341,6 +1354,7 @@ export async function handleResult(
           db,
           ctx.taskId,
           `revise: target step ${result.targetStepId} not found at round ${result.row.round}`,
+          ctx.orchestrationEpoch,
         );
         return;
       }
@@ -1356,7 +1370,7 @@ export async function handleResult(
         ctx.userId,
         target.metadata.id,
         targetRound,
-        reset?.newEpoch ?? ctx.orchestrationEpoch,
+        ctx.orchestrationEpoch,
       );
       return;
     }
@@ -1535,7 +1549,12 @@ async function resolveFixLoopGate(
 
   if (action === 'abort') {
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
-    await markTaskFailed(db, ctx.taskId, `Fix loop aborted by the user at round ${round}.`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `Fix loop aborted by the user at round ${round}.`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
 
@@ -1603,8 +1622,13 @@ async function resolveFixLoopGate(
   );
 }
 
-async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<void> {
+async function handleStartTask(
+  db: Database,
+  payload: TaskJobPayload,
+  held?: HeldTask,
+): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
+  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
@@ -1615,7 +1639,12 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   const steps = await buildRunList(ctx, db);
   const first = steps[0];
   if (!first) {
-    await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `no steps registered for workflow ${ctx.workflowType}`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
@@ -1702,8 +1731,10 @@ async function handleAdvanceStep(
   payload: TaskJobPayload,
   jobId?: string,
   jobTimestamp?: number,
+  held?: HeldTask,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
+  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'advance-step: task not found');
     return;
@@ -1726,7 +1757,12 @@ async function handleAdvanceStep(
   }
   const stepDef = stepRegistry.get(payload.stepId);
   if (!stepDef) {
-    await markTaskFailed(db, ctx.taskId, `unknown step id ${payload.stepId}`);
+    await markTaskFailed(
+      db,
+      ctx.taskId,
+      `unknown step id ${payload.stepId}`,
+      ctx.orchestrationEpoch,
+    );
     return;
   }
 
@@ -2941,6 +2977,7 @@ export async function processTaskJob(job: Job<TaskWorkerPayload>, token?: string
 
 async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
   const db = getDb();
+  const held: HeldTask = {};
   try {
     if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
       await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
@@ -2953,9 +2990,9 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
 
     const payload = job.data as TaskJobPayload;
     if (job.name === TASK_JOB_NAMES.START) {
-      await handleStartTask(db, payload);
+      await handleStartTask(db, payload, held);
     } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-      await handleAdvanceStep(db, payload, job.id, job.timestamp);
+      await handleAdvanceStep(db, payload, job.id, job.timestamp, held);
     } else if (job.name === TASK_JOB_NAMES.CANCEL) {
       await handleCancelTask(db, payload);
     } else {
@@ -2970,7 +3007,9 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
     ) {
-      await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
+      // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
+      const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
+      await markTaskFailed(db, taskId, message, epoch).catch((cleanupErr) => {
         logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
       });
     }
