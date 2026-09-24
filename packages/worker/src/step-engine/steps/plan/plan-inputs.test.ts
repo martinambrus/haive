@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -54,6 +54,9 @@ function have(binary: string): boolean {
     return false;
   }
 }
+
+/** A file under the fixture dir in the anchored form the extractor opens. */
+const held = (file: string) => ({ anchor: dir, rel: path.relative(dir, file) });
 
 async function writeZip(name: string, members: Record<string, string>): Promise<string> {
   const zip = new JSZip();
@@ -182,7 +185,7 @@ describe('docx extraction', () => {
     const file = await writeZip('spec.docx', {
       'word/document.xml': docxDocument('<w:p><w:r><w:t>Renewal reminders.</w:t></w:r></w:p>'),
     });
-    expect(await extractPlanInput('docx', file)).toEqual({
+    expect(await extractPlanInput('docx', held(file))).toEqual({
       markdown: 'Renewal reminders.',
       hasContent: true,
       error: null,
@@ -236,7 +239,7 @@ describe('xlsx extraction', () => {
       'xl/worksheets/sheet1.xml':
         '<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>',
     });
-    const out = await extractPlanInput('xlsx', file);
+    const out = await extractPlanInput('xlsx', held(file));
     expect(out.error).toBeNull();
     expect(out.markdown).toContain('## Members');
     expect(out.markdown).toContain('| Field |');
@@ -248,13 +251,13 @@ describe('failing to read an input', () => {
     // The original is still mounted for whichever agent runs, so one corrupt
     // upload must not turn into a task that produces nothing at all.
     await writeFile(path.join(dir, 'broken.docx'), 'not a zip');
-    const out = await extractPlanInput('docx', path.join(dir, 'broken.docx'));
+    const out = await extractPlanInput('docx', held(path.join(dir, 'broken.docx')));
     expect(out.markdown).toBe('');
     expect(out.error).toBeTruthy();
   });
 
   it('records a missing file rather than crashing the step', async () => {
-    const out = await extractPlanInput('xlsx', path.join(dir, 'nope.xlsx'));
+    const out = await extractPlanInput('xlsx', held(path.join(dir, 'nope.xlsx')));
     expect(out.error).toBeTruthy();
   });
 
@@ -262,15 +265,52 @@ describe('failing to read an input', () => {
     // Different facts about the input. "Says nothing" is the document's problem;
     // "could not be read" is ours, and the index words them differently.
     const file = await writeZip('empty.docx', { 'word/document.xml': docxDocument('') });
-    expect(await extractPlanInput('docx', file)).toEqual({
+    expect(await extractPlanInput('docx', held(file))).toEqual({
       markdown: '',
       hasContent: false,
       error: null,
     });
   });
 
+  it('reports a document reached through a link, and never reads what it names', async () => {
+    // The worker opens the document itself, without following a link anywhere on its way, and
+    // hands the extractor that descriptor: a link planted where an upload sits reads nothing.
+    const outside = await mkdtemp(path.join(tmpdir(), 'haive-plan-outside-'));
+    try {
+      const zip = new JSZip();
+      zip.file('word/document.xml', docxDocument('<w:p><w:r><w:t>OUTSIDE TEXT</w:t></w:r></w:p>'));
+      await writeFile(
+        path.join(outside, 'real.docx'),
+        await zip.generateAsync({ type: 'nodebuffer' }),
+      );
+      await symlink(path.join(outside, 'real.docx'), path.join(dir, 'linked.docx'));
+      await symlink(outside, path.join(dir, 'linked-dir'));
+
+      for (const rel of ['linked.docx', 'linked-dir/real.docx']) {
+        const out = await extractPlanInput('docx', { anchor: dir, rel });
+        expect(out.error).toBeTruthy();
+        expect(out.markdown).toBe('');
+        expect(JSON.stringify(out)).not.toContain('OUTSIDE TEXT');
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.getuid?.() === 0)(
+    'reads a document only the worker could read, and leaves its mode as it was',
+    async () => {
+      const file = await writeZip('private.docx', {
+        'word/document.xml': docxDocument('<w:p><w:r><w:t>Owner only.</w:t></w:r></w:p>'),
+      });
+      await chmod(file, 0o600);
+      expect((await extractPlanInput('docx', held(file))).markdown).toBe('Owner only.');
+      expect((await lstat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
+
   it('refuses to guess at a kind it has no extractor for', async () => {
-    const out = await extractPlanInput('image', path.join(dir, 'anything.png'));
+    const out = await extractPlanInput('image', held(path.join(dir, 'anything.png')));
     expect(out.error).toContain('no extractor');
   });
 });
@@ -293,7 +333,7 @@ describe.skipIf(!have('pdftotext'))('pdf extraction', () => {
     ].join('\n');
     const file = path.join(dir, 'manual.pdf');
     await writeFile(file, pdf, 'latin1');
-    const out = await extractPlanInput('pdf', file);
+    const out = await extractPlanInput('pdf', held(file));
     expect(out.error).toBeNull();
     expect(out.markdown).toContain('Renewal reminders');
   });
@@ -1321,7 +1361,7 @@ describe('deciding whether a document says anything', () => {
       'trailer\n<</Size 4/Root 1 0 R>>\n%%EOF\n';
     const file = path.join(dir, 'blank.pdf');
     await writeFile(file, page, 'latin1');
-    const out = await extractPlanInput('pdf', file);
+    const out = await extractPlanInput('pdf', held(file));
     expect(out.error).toBeNull();
     expect(out.hasContent).toBe(false);
     expect(out.markdown).toBe('');
@@ -1334,7 +1374,7 @@ describe('deciding whether a document says anything', () => {
       'xl/workbook.xml': '<workbook><sheets><sheet name="Sheet1" sheetId="1"/></sheets></workbook>',
       'xl/worksheets/sheet1.xml': '<worksheet><sheetData/></worksheet>',
     });
-    const out = await extractPlanInput('xlsx', file);
+    const out = await extractPlanInput('xlsx', held(file));
     expect(out.error).toBeNull();
     expect(out.hasContent).toBe(false);
     // The rendered form still shows the sheet — that is fine, and exactly why the
@@ -1348,12 +1388,12 @@ describe('deciding whether a document says anything', () => {
       'xl/worksheets/sheet1.xml':
         '<worksheet><sheetData><row><c r="A1"><v>7</v></c></row></sheetData></worksheet>',
     });
-    expect((await extractPlanInput('xlsx', file)).hasContent).toBe(true);
+    expect((await extractPlanInput('xlsx', held(file))).hasContent).toBe(true);
   });
 
   it('reports an unreadable file as having no content either', async () => {
     await writeFile(path.join(dir, 'junk.xlsx'), 'not a zip');
-    const out = await extractPlanInput('xlsx', path.join(dir, 'junk.xlsx'));
+    const out = await extractPlanInput('xlsx', held(path.join(dir, 'junk.xlsx')));
     expect(out.error).toBeTruthy();
     expect(out.hasContent).toBe(false);
   });

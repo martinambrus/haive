@@ -1,12 +1,14 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   applyTreeNoFollow,
   chownNoFollow,
   ensureDirNoFollow,
   lstatNoFollow,
+  openDirNoFollow,
+  openFileNoFollow,
   readdirNoFollow,
   removeNoFollow,
   renameNoFollow,
@@ -30,6 +32,8 @@ import { detectFromDirectory } from './framework-detect.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
+import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
+import { splitUploadPath } from './worktree-paths.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
   // Only http(s) carries userinfo. An `ssh://` or scp-style address
@@ -324,90 +328,6 @@ export async function handleCopyLocal(
   });
 }
 
-/** uid/gid the extraction tool runs as. NOT 1000: that uid owns every repository on the volume, so a
- *  tool escaping its destination would be writing as the owner of everything it could reach. 65534
- *  (nobody) owns nothing. A worker that is not root cannot setuid at all — CI, and any non-root
- *  deployment — so there it stays the current user, which is no worse than today. */
-const EXTRACT_UID = 65534;
-
-/** Spawn an extraction tool with the narrowest environment and identity available.
- *
- *  Two things this fixes, and the env is the bigger one. `spawn(cmd, args)` passes NO `env` option,
- *  so the child inherited the worker's entire environment — which holds `CONFIG_ENCRYPTION_KEY`,
- *  `DATABASE_URL` and `JWT_SECRET` — and it also meant `TAR_OPTIONS`, `UNZIP` and
- *  `EXTRACT_UNSAFE_SYMLINKS` would be honoured if anything ever set them. `PATH` and `LANG` are all
- *  either tool needs. And it ran as root, which is what let a tar archive restore header owners and
- *  setuid bits into storage. */
-function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promise<void> {
-  const asRoot = process.getuid?.() === 0;
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
-      ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
-    });
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code !== null && okExits.includes(code)) {
-        if (code !== 0) {
-          logger.warn(
-            { cmd, exit: code, stderr: stderr.trim() },
-            'extract completed with warnings',
-          );
-        }
-        resolve();
-        return;
-      }
-      reject(new Error(`${cmd} failed (exit ${code}): ${stderr.trim()}`));
-    });
-  });
-}
-
-/** Feed the archive on STDIN, so the parent opens it and the child never resolves a path. Also the
- *  only way tar can read an archive the unprivileged extraction uid cannot open itself. */
-async function runExtractStdin(cmd: string, args: string[], archivePath: string): Promise<void> {
-  const asRoot = process.getuid?.() === 0;
-  const fh = await open(archivePath, 'r');
-  // The stream does NOT own this handle, so `autoClose` cannot be trusted with it: Node 26 turns a
-  // FileHandle reclaimed without an explicit close into a hard ERR_INVALID_STATE. MEASURED on CI —
-  // every one of 4670 tests passed and the run still exited 1 on "A FileHandle object was closed
-  // during garbage collection", which names no test because it is raised by the collector.
-  const stream = fh.createReadStream({ autoClose: false });
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(cmd, args, {
-        stdio: ['pipe', 'ignore', 'pipe'],
-        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
-        ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
-      });
-      let stderr = '';
-      proc.stderr?.on('data', (d: Buffer) => {
-        stderr += d.toString();
-      });
-      proc.on('error', reject);
-      proc.on('exit', (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(new Error(`${cmd} failed (exit ${code}): ${stderr.trim()}`));
-      });
-      // A tool that rejects the archive exits while we are still writing, so a broken pipe is the
-      // NORMAL shape of a failure here. The exit code is what to report; an unhandled 'error' on
-      // the write end would take the whole process down instead of failing this extraction.
-      stream.on('error', reject);
-      proc.stdin?.on('error', () => undefined);
-      stream.pipe(proc.stdin!);
-    });
-  } finally {
-    stream.destroy();
-    await fh.close().catch(() => undefined);
-  }
-}
-
 export type DroppedReason = 'symlink' | 'special-file' | 'setuid' | 'hard-link' | 'foreign-owner';
 
 export interface DroppedMember {
@@ -496,14 +416,16 @@ async function validateStagedTree(
  * environment inherited. So a malformed archive was unpacked over live repository storage by a root
  * process that also held `CONFIG_ENCRYPTION_KEY` and `DATABASE_URL`. Now:
  *
- * 1. A stage is created as a SIBLING of `dest` — `dirname(dest)` is the trusted directory for all
- *    three callers (`<storage>/<userId>` for a repository, `<root>/<userId>/<bundleId>` for a bundle,
- *    the uploads dir for an attachment), and a sibling is guaranteed to be on the same filesystem, so
- *    the final rename cannot fail EXDEV.
- * 2. The tool runs unprivileged (uid 65534 where the worker is root) with only PATH and LANG, and tar
- *    reads the archive from stdin so the child resolves no path at all.
- * 3. The staged tree is walked and offending members are unlinked and named.
- * 4. Only then is it swapped into place: the old `dest` is moved aside inside the stage, the new tree
+ * 1. The archive is opened first, without following a link anywhere on its way, so an archive that
+ *    is refused leaves nothing behind. Both paths are an anchor the caller trusts and a rel walked
+ *    below it one held directory at a time.
+ * 2. A 0700 stage is created as a SIBLING of `dest`, which is guaranteed to be on the same
+ *    filesystem, so the final rename cannot fail EXDEV.
+ * 3. The tool runs unprivileged (uid 65534 where the worker is root) with only PATH and LANG, and is
+ *    handed the stage's `x` and the archive as descriptors (`runTool`). It resolves no path of the
+ *    worker's by name, which is also why it never has to traverse the stage.
+ * 4. The staged tree is walked and offending members are unlinked and named.
+ * 5. Only then is it swapped into place: the old `dest` is moved aside inside the stage, the new tree
  *    renamed in, and the stage removed — so `dest` is never a half-extracted tree, and a failure
  *    anywhere above leaves the previous contents untouched.
  *
@@ -511,16 +433,17 @@ async function validateStagedTree(
  * returns and inserts nothing when they are exceeded, because half a specification is worse than none.
  */
 export async function extractArchive(
-  archivePath: string,
+  archive: { anchor: string; rel: string },
   format: ArchiveFormat,
-  dest: string,
+  dest: { anchor: string; rel: string },
 ): Promise<ExtractReport> {
   if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
     throw new Error(`unsupported archive format: ${format as string}`);
   }
-  const anchor = path.dirname(dest);
-  const leaf = path.basename(dest);
-  await mkdir(anchor, { recursive: true });
+  const { anchor } = dest;
+  const cut = dest.rel.lastIndexOf('/');
+  const parentRel = cut === -1 ? '' : dest.rel.slice(0, cut);
+  const within = (leaf: string): string => (parentRel === '' ? leaf : `${parentRel}/${leaf}`);
 
   const selfUid = process.getuid?.() ?? null;
   const asRoot = selfUid === 0;
@@ -528,63 +451,84 @@ export async function extractArchive(
   // restore header owners. An entry owned by anything else did not come from the extraction.
   const expectedUid = asRoot ? EXTRACT_UID : selfUid;
 
-  const stageLeaf = `.haive-extract-${process.pid}-${randomUUID()}`;
-  // 0711, not 0700: the stage stays UNLISTABLE by others, but the extraction uid has to TRAVERSE it
-  // to reach the `x/` it writes into. MEASURED in the worker image — 0700 owned by root gave
-  // `tar: .../x: Cannot open: Permission denied` for every archive, because uid 65534 could not
-  // cross the parent. The host CI job never caught it: a non-root worker cannot setuid, so it keeps
-  // its own identity and the traversal always worked there.
-  await ensureDirNoFollow(anchor, stageLeaf, { mode: 0o711 });
+  const held = (await openFileNoFollow(archive.anchor, archive.rel, 'read', { strict: true }))!;
   try {
-    const innerRel = `${stageLeaf}/x`;
-    await ensureDirNoFollow(anchor, innerRel, { mode: 0o755 });
-    if (asRoot) {
-      await chownNoFollow(anchor, innerRel, { uid: EXTRACT_UID, gid: EXTRACT_UID });
-    }
-    const innerAbs = path.join(anchor, innerRel);
+    if (parentRel !== '') await ensureDirNoFollow(anchor, parentRel);
+    const stageRel = within(`.haive-extract-${process.pid}-${randomUUID()}`);
+    await ensureDirNoFollow(anchor, stageRel, { mode: 0o700 });
+    try {
+      const innerRel = `${stageRel}/x`;
+      await ensureDirNoFollow(anchor, innerRel, { mode: 0o755 });
+      if (asRoot) {
+        await chownNoFollow(anchor, innerRel, { uid: EXTRACT_UID, gid: EXTRACT_UID });
+      }
+      const inner = await openDirNoFollow(anchor, innerRel);
+      try {
+        if (format === 'zip') {
+          // unzip seeks, so it re-opens the archive through its slot instead of reading a stream.
+          const readable = await toolReadable(held);
+          try {
+            // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still
+            // extracted.
+            const { exitCode, stderr } = await runTool(
+              'unzip',
+              ['-q', '-o', childFd(FIRST_SLOT + 1), '-d', childFd(FIRST_SLOT)],
+              { fds: [inner, readable.fh], okExits: [0, 1] },
+            );
+            if (exitCode !== 0) {
+              logger.warn(
+                { cmd: 'unzip', exit: exitCode, stderr: stderr.trim() },
+                'extract completed with warnings',
+              );
+            }
+          } finally {
+            await readable.close();
+          }
+        } else {
+          const flags = format === 'tar.gz' ? ['-xz'] : ['-x'];
+          await runTool('tar', [...flags, '-f', '-', '-C', childFd(FIRST_SLOT)], {
+            fds: [inner],
+            stdin: held,
+          });
+        }
+      } finally {
+        await inner.close();
+      }
 
-    if (format === 'zip') {
-      // unzip needs a seekable file, so it gets the path — and the archive has to be readable by the
-      // extraction uid. Best-effort: it is our own upload, and 0644 is what the api already writes.
-      await chmod(archivePath, 0o644).catch(() => {});
-      // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still extracted.
-      await runExtract('unzip', ['-q', '-o', archivePath, '-d', innerAbs], [0, 1]);
-    } else {
-      const flags = format === 'tar.gz' ? ['-xz'] : ['-x'];
-      await runExtractStdin('tar', [...flags, '-f', '-', '-C', innerAbs], archivePath);
-    }
+      const dropped = await validateStagedTree(anchor, innerRel, expectedUid);
 
-    const dropped = await validateStagedTree(anchor, innerRel, expectedUid);
+      // `spec.zip` holding a single `spec/` becomes that directory's contents. Only a REAL directory
+      // is flattened, and the flatten is a choice of rename SOURCE rather than a move of each child.
+      let sourceRel = innerRel;
+      const top = (await readdirNoFollow(anchor, innerRel)) ?? [];
+      if (top.length === 1) {
+        const only = top[0]!.name;
+        const info = await lstatNoFollow(anchor, `${innerRel}/${only}`);
+        if (info?.kind === 'directory') sourceRel = `${innerRel}/${only}`;
+      }
 
-    // `spec.zip` holding a single `spec/` becomes that directory's contents. Only a REAL directory is
-    // flattened, and the flatten is now a choice of rename SOURCE rather than a move of each child.
-    let sourceRel = innerRel;
-    const top = (await readdirNoFollow(anchor, innerRel)) ?? [];
-    if (top.length === 1) {
-      const only = top[0]!.name;
-      const info = await lstatNoFollow(anchor, `${innerRel}/${only}`);
-      if (info?.kind === 'directory') sourceRel = `${innerRel}/${only}`;
-    }
+      // Hand the tree back to the worker's identity while it is still private, so the swapped result
+      // is owned exactly as it was before this change. Best-effort: a non-root worker cannot, and the
+      // sandbox ownership repair runs later anyway.
+      if (asRoot) {
+        await applyTreeNoFollow(anchor, sourceRel, { owner: { uid: 0, gid: 0 } }).catch(
+          () => undefined,
+        );
+      }
 
-    // Hand the tree back to the worker's identity while it is still private, so the swapped result
-    // is owned exactly as it was before this change. Best-effort: a non-root worker cannot, and the
-    // sandbox ownership repair runs later anyway.
-    if (asRoot) {
-      await applyTreeNoFollow(anchor, sourceRel, { owner: { uid: 0, gid: 0 } }).catch(
-        () => undefined,
-      );
+      if ((await lstatNoFollow(anchor, dest.rel)) !== null) {
+        await renameNoFollow(anchor, dest.rel, `${stageRel}/old`);
+      }
+      await renameNoFollow(anchor, sourceRel, dest.rel);
+      return { dropped, note: describeDrops(dropped) };
+    } finally {
+      await removeNoFollow(anchor, stageRel, {
+        recursive: true,
+        repairPermissions: true,
+      }).catch(() => undefined);
     }
-
-    if ((await lstatNoFollow(anchor, leaf)) !== null) {
-      await renameNoFollow(anchor, leaf, `${stageLeaf}/old`);
-    }
-    await renameNoFollow(anchor, sourceRel, leaf);
-    return { dropped, note: describeDrops(dropped) };
   } finally {
-    await removeNoFollow(anchor, stageLeaf, {
-      recursive: true,
-      repairPermissions: true,
-    }).catch(() => undefined);
+    await held.close();
   }
 }
 
@@ -595,7 +539,8 @@ export async function handleExtract(
 ): Promise<void> {
   if (!payload.archivePath) throw new Error('archivePath required for extract job');
   if (!payload.archiveFormat) throw new Error('archiveFormat required for extract job');
-  const archivePath = payload.archivePath;
+  const archive = splitUploadPath(repoStorageRoot, payload.archivePath);
+  if (!archive) throw new Error('archivePath is not an upload in the repository storage');
   const archiveFormat = payload.archiveFormat;
 
   // Claimed like the three that `rm -rf`, because it destroys the root just as thoroughly by a
@@ -604,7 +549,10 @@ export async function handleExtract(
   // "replaces the repository root", not which call does it.
   return withRootClaim(db, payload.repositoryId, async () => {
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-    const report = await extractArchive(archivePath, archiveFormat, dest);
+    const report = await extractArchive(archive, archiveFormat, {
+      anchor: repoStorageRoot,
+      rel: `${payload.userId}/${payload.repositoryId}`,
+    });
     if (report.note) {
       logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
     }
@@ -612,7 +560,7 @@ export async function handleExtract(
     // Only remove the archive after successful extract + detection. Leaving it
     // in place on failure lets the user (or a retry) look at what actually
     // arrived on disk instead of silently masking the error.
-    await rm(archivePath, { force: true }).catch(() => {});
+    await removeNoFollow(archive.anchor, archive.rel).catch(() => {});
     logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
   });
 }

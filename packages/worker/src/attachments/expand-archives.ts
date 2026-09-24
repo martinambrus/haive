@@ -379,18 +379,19 @@ async function stageTree(
   // guessed path.
   const rowSplit = splitAttachmentStoredPath(archive, taskId);
   const onDisk = rowSplit ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel) : null;
-  if (onDisk?.kind !== 'file') return 'the archive file is missing from the task workspace';
+  if (rowSplit === null || onDisk?.kind !== 'file') {
+    return 'the archive file is missing from the task workspace';
+  }
 
-  // 0711: extraction runs as uid 65534 (`clone.ts`), which has to TRAVERSE this to reach the stage
-  // `extractArchive` makes inside it, and must not be able to list it.
-  await ensureDirNoFollow(anchor, stagingRel, { mode: 0o711 });
+  // 0700: the extraction tool is handed its directory as a descriptor and never resolves this one.
+  await ensureDirNoFollow(anchor, stagingRel, { mode: 0o700 });
   const rawRel = `${stagingRel}/raw`;
   // The report is the extraction's own account of what it would not write — symlinks, device nodes,
   // setuid files — and is folded into the note, since those members are gone before the walk runs.
   const report = await extractArchive(
-    archive.storedPath,
+    { anchor: rowSplit.anchor, rel: rowSplit.rel },
     detectAttachmentArchiveFormat(archive.filename)!,
-    path.join(anchor, rawRel),
+    { anchor, rel: rawRel },
   );
   const { files, skipped } = await walkRegularFiles(anchor, rawRel);
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);

@@ -1,10 +1,20 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -14,6 +24,25 @@ import {
 } from './expand-archives.js';
 
 const exec = promisify(execFile);
+
+/** Run once just before the next tool starts, after the worker holds what it hands the tool. */
+const beforeTool = vi.hoisted(() => ({ hook: null as null | (() => Promise<void>) }));
+vi.mock('../repo/tool-spawn.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../repo/tool-spawn.js')>();
+  return {
+    ...actual,
+    runTool: async (
+      cmd: string,
+      args: readonly string[],
+      opts?: Parameters<typeof actual.runTool>[2],
+    ) => {
+      const hook = beforeTool.hook;
+      beforeTool.hook = null;
+      if (hook) await hook();
+      return actual.runTool(cmd, args, opts);
+    },
+  };
+});
 
 // Uuid-shaped on purpose: every id lands in a uuid column, and the fake answers a malformed one the
 // way Postgres does rather than with a quiet "not found".
@@ -631,6 +660,34 @@ describe('ensureArchivesExpanded', () => {
     const repoRoot = path.resolve(f.uploads, '..', '..', '..');
     expect(note).not.toContain(repoRoot);
     expect(await f.staging()).toEqual([]);
+  });
+
+  it('writes nothing through a staging dir swapped for a link while the tool runs', async () => {
+    // The uploads dir is the sandbox's to write, so its staging dir can be renamed away and a link
+    // planted in its place. The far side mirrors the stage, so a tool resolving its path by name
+    // would find somewhere to write; the tool writes into the directory it was handed instead.
+    const f = await setup();
+    await tarball(f.uploads, 'spec.tar', twoFiles);
+    f.attach('spec.tar');
+    const outside = await mkdtemp(path.join(tmpdir(), 'haive-outside-'));
+    dirs.push(outside);
+    let mirrored = '';
+    beforeTool.hook = async () => {
+      const [staging] = await f.staging();
+      const stagingAbs = path.join(f.uploads, staging!);
+      const [stage] = (await readdir(stagingAbs)).filter((n) => n.startsWith('.haive-extract-'));
+      mirrored = path.join(outside, stage!, 'x');
+      await mkdir(mirrored, { recursive: true });
+      await rename(stagingAbs, path.join(f.uploads, 'moved-aside'));
+      await symlink(outside, stagingAbs);
+    };
+
+    const result = await f.expand();
+
+    expect(mirrored).not.toBe('');
+    expect(await readdir(mirrored)).toEqual([]);
+    expect(f.members()).toEqual([]);
+    expect(result.notes[0]?.note).toContain('could not be expanded');
   });
 
   it('reports a missing archive file rather than throwing', async () => {
