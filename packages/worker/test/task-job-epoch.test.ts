@@ -482,6 +482,23 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
+  it('completes nothing, and releases nothing, once a Stop failed the task', async () => {
+    h.state.readsAnswer = true;
+    h.state.onRead = () => {
+      h.state.taskStatus = 'failed';
+    };
+    const cleanup = vi.fn(async () => 0);
+    setContainerCleanupRunner(cleanup);
+    // The chain's last step, so its hand-off is the task's completion.
+    await handleResult(db as never, ctx() as never, 'epoch-chain-runtime', {
+      status: 'done',
+      row,
+      output: null,
+    } as never);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
   it('marks a stopped task running on no parked run', async () => {
     h.state.readsAnswer = true;
     h.state.onRead = () => {
@@ -621,6 +638,19 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       await resolveFixLoopGate(db as never, failedCtx as never, gate as never, 'continue', 1, '');
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: '07-phase-2-implement' });
+    });
+
+    it('completes a task that failed while its last gate waited, answering accept', async () => {
+      h.state.readsAnswer = true;
+      h.state.taskStatus = 'failed';
+      const cleanup = vi.fn(async () => 0);
+      setContainerCleanupRunner(cleanup);
+      const lastGate = { ...gate, stepId: 'epoch-chain-runtime' };
+      const failedCtx = { ...ctx(), status: 'failed' };
+      await resolveFixLoopGate(db as never, failedCtx as never, lastGate as never, 'accept', 1, '');
+      // The completion lands; bookkeeping after it writes the task again.
+      expect(h.state.taskWrites).toContainEqual({ epochs: [5], landed: true });
+      expect(cleanup).toHaveBeenCalledTimes(1);
     });
 
     it('leaves a task a Stop failed during the answer stopped', async () => {

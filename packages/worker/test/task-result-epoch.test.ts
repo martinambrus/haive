@@ -182,7 +182,7 @@ describe('a result handed off after a Retry moved the task on', () => {
   it('completes nothing, and reaps nothing, once the task moved to a newer epoch', async () => {
     setContainerCleanupRunner(cleanup);
     const { db, statements } = taskDb(6);
-    await markTaskCompleted(db, 'task-1', 5);
+    await markTaskCompleted(db, 'task-1', { epoch: 5 });
     expect(statements).toEqual(['update tasks']);
     expect(cleanup).not.toHaveBeenCalled();
   });

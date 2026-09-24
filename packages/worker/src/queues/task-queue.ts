@@ -499,12 +499,12 @@ async function writeFencedPark(
   }
 }
 
-/** Complete the task, only while it is still at `epoch`, the one the finishing pass ran under: a
- *  Retry that moved it on meanwhile owns it, and completing it would also reap its workspace. */
+/** Complete the task, only while the fence of the pass that finished it holds: a Retry that moved
+ *  it on owns it, a Stop that failed it stands, and completing it would also reap its workspace. */
 export async function markTaskCompleted(
   db: Database,
   taskId: string,
-  epoch: number,
+  fence: TaskFence,
 ): Promise<void> {
   const [completed] = await db
     .update(schema.tasks)
@@ -513,10 +513,13 @@ export async function markTaskCompleted(
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)))
+    .where(taskWriteTarget(taskId, fence))
     .returning({ id: schema.tasks.id });
   if (!completed) {
-    logger.info({ taskId, epoch }, 'task not completed: it moved to a newer epoch');
+    logger.info(
+      { taskId, epoch: fence.epoch },
+      'task not completed: a Retry moved it on or a Stop failed it',
+    );
     return;
   }
   await cleanupTaskContainers(db, taskId, 'completed');
@@ -1225,7 +1228,7 @@ export async function handleResult(
           ctx.orchestrationEpoch,
         );
       } else {
-        await markTaskCompleted(db, ctx.taskId, ctx.orchestrationEpoch);
+        await markTaskCompleted(db, ctx.taskId, { epoch: ctx.orchestrationEpoch });
       }
       return;
     }
@@ -1738,7 +1741,7 @@ export async function resolveFixLoopGate(
       if (!pointed) return;
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
-      await markTaskCompleted(db, ctx.taskId, ctx.orchestrationEpoch);
+      await markTaskCompleted(db, ctx.taskId, fence);
     }
     return;
   }
