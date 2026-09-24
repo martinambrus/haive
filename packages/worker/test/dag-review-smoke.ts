@@ -17,6 +17,7 @@ import { initRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue } from '../src/queues/task-queue.js';
 import { SANDBOX_WORKDIR } from '../src/sandbox/sandbox-runner.js';
 import { resolveDagPhase } from '../src/step-engine/dag-executor.js';
+import { loadLedgerEntries, recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import { dagExecuteStep } from '../src/step-engine/steps/workflow/06c-dag-execute.js';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
 import type { AdvanceStepParams } from '../src/step-engine/step-runner.js';
@@ -25,7 +26,11 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 // Slice 5 review smoke: two issues at one level with reviewEnabled. Each issue
 // runs the inner loop — reviewer says fix_required once, a fix coder runs, then
 // the reviewer approves — before the (non-conflicting) merge. Validates the
-// coder<->reviewer loop, dag_agent_runs tracking, and the review-gated merge.
+// coder<->reviewer loop, dag_agent_runs tracking, the review-gated merge, and the
+// task ledger each review-loop agent reads and a fix coder writes.
+
+const SEEDED_FACT = 'the fixture has no build step, so nothing needs running before a review';
+const FIXER_CONCERN = 'the fixture keeps every issue file at the worktree root';
 
 const log = logger.child({ module: 'dag-review-smoke' });
 
@@ -150,6 +155,13 @@ async function main(): Promise<void> {
       sizeBytes: 8,
     });
 
+    // One fact an earlier step established, so every review-loop prompt must carry the ledger.
+    await recordLedgerEntry(db, task!.id, null, {
+      stepId: '04-phase-0b',
+      round: 0,
+      text: SEEDED_FACT,
+    });
+
     await db.insert(schema.taskSteps).values({
       taskId: task!.id,
       stepId: '01-worktree-setup',
@@ -216,7 +228,7 @@ async function main(): Promise<void> {
 
     // Fake spawner: initial coder writes the issue file; reviewer says
     // fix_required on its first pass (iteration 0) then approve; fix coder is a
-    // no-op that reports completed.
+    // no-op that reports completed for ISSUE-001 and leaves no result for ISSUE-002.
     const enqueueCliInvocation = async (payload: CliExecJobPayload): Promise<void> => {
       const finish = (out: unknown) =>
         db
@@ -261,13 +273,20 @@ async function main(): Promise<void> {
         );
         return;
       }
+      const fixing = await db.query.taskDagIssues.findFirst({
+        where: eq(schema.taskDagIssues.id, run!.dagIssueId),
+      });
+      if (fixing?.issueKey === 'ISSUE-002') {
+        await finish('fixed it, but no result block');
+        return;
+      }
       // fix coder: repeats one site the coder reported and adds its own
       await finish({
         issue_id: 'fix',
         outcome: 'completed',
         files_modified: [],
         debt_items: [],
-        concerns: '',
+        concerns: FIXER_CONCERN,
         similar_sites: [
           { path: 'shared/a.ts', lines: '3', reason: 'repeat' },
           { path: 'shared/b.ts', reason: 'fixer' },
@@ -347,12 +366,16 @@ async function main(): Promise<void> {
     // Compared as tuples because jsonb does not keep an object's key order.
     const siteTuples = (sites: { path: string; lines?: string; reason: string }[]) =>
       JSON.stringify(sites.map((x) => [x.path, x.lines ?? null, x.reason]));
-    const wantSites = JSON.stringify([
-      ['shared/a.ts', '3', 'coder'],
-      ['shared/b.ts', null, 'fixer'],
-    ]);
+    const wantSites: Record<string, string> = {
+      'ISSUE-001': JSON.stringify([
+        ['shared/a.ts', '3', 'coder'],
+        ['shared/b.ts', null, 'fixer'],
+      ]),
+      // Its fix coder left no result, so only the level coder's report is kept.
+      'ISSUE-002': JSON.stringify([['shared/a.ts', '3', 'coder']]),
+    };
     for (const i of issues) {
-      if (siteTuples(i.similarSites) !== wantSites) {
+      if (siteTuples(i.similarSites) !== wantSites[i.issueKey]) {
         throw new Error(`${i.issueKey} similar sites: ${JSON.stringify(i.similarSites)}`);
       }
     }
@@ -360,7 +383,7 @@ async function main(): Promise<void> {
     // Every reviewer and fix coder was told what the task has attached, as the coders were.
     const invocationIds = runs.flatMap((r) => (r.cliInvocationId ? [r.cliInvocationId] : []));
     const sent = await db
-      .select({ prompt: schema.cliInvocations.prompt })
+      .select({ id: schema.cliInvocations.id, prompt: schema.cliInvocations.prompt })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, invocationIds));
     if (sent.length !== runs.length) {
@@ -371,6 +394,30 @@ async function main(): Promise<void> {
     );
     if (uninformed.length > 0) {
       throw new Error(`${uninformed.length} review-loop prompt(s) carry no attachments notice`);
+    }
+    // ...and what earlier agents established, as the level coders were.
+    const noLedger = sent.filter(({ prompt }) => !prompt.includes(SEEDED_FACT));
+    if (noLedger.length > 0) {
+      throw new Error(`${noLedger.length} review-loop prompt(s) carry no task ledger`);
+    }
+
+    // A fix coder's concerns reach the ledger; a fix coder that left no result adds nothing.
+    const ledger = await loadLedgerEntries(db, task!.id);
+    const fixerEntries = ledger.filter((e) => e.stepId === '06c-dag-execute/ISSUE-001');
+    if (fixerEntries.length !== 1 || fixerEntries[0]!.text !== FIXER_CONCERN) {
+      throw new Error(`fix coder concerns not recorded: ${JSON.stringify(ledger)}`);
+    }
+    if (ledger.some((e) => e.stepId === '06c-dag-execute/ISSUE-002')) {
+      throw new Error(`a fix coder with no result was recorded: ${JSON.stringify(ledger)}`);
+    }
+    // The re-review that follows ISSUE-001's fix coder already reads what it recorded.
+    const issue1 = issues.find((i) => i.issueKey === 'ISSUE-001')!;
+    const reReview = runs.find(
+      (r) => r.dagIssueId === issue1.id && r.role === 'reviewer' && r.iteration === 1,
+    );
+    const reReviewPrompt = sent.find((x) => x.id === reReview?.cliInvocationId)?.prompt ?? '';
+    if (!reReviewPrompt.includes(FIXER_CONCERN)) {
+      throw new Error('the re-review does not carry the fix coder concerns');
     }
 
     console.log(

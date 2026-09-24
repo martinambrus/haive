@@ -957,15 +957,20 @@ async function resolveAiFixPhase(
     };
   }
 
-  const prompt = [
-    'A workflow step just failed. Diagnose the root cause and FIX it by editing files in the workspace so the step can succeed when it re-runs.',
-    `Step: ${stepDef.metadata.id} (${stepDef.metadata.title}).`,
-    '',
-    `Failure error:\n${fixCtx.priorError || '(none recorded)'}`,
-    fixCtx.priorOutput ? `\nOutput tail:\n${fixCtx.priorOutput}` : '',
-    '',
-    'Make minimal, correct edits. The step re-runs automatically after you finish — do NOT run it yourself. When done, stop.',
-  ].join('\n');
+  // The ledger but no attachments notice: this agent repairs the workspace, not the task's work.
+  const prompt = await augmentPromptWithLedger(
+    db,
+    params.taskId,
+    [
+      'A workflow step just failed. Diagnose the root cause and FIX it by editing files in the workspace so the step can succeed when it re-runs.',
+      `Step: ${stepDef.metadata.id} (${stepDef.metadata.title}).`,
+      '',
+      `Failure error:\n${fixCtx.priorError || '(none recorded)'}`,
+      fixCtx.priorOutput ? `\nOutput tail:\n${fixCtx.priorOutput}` : '',
+      '',
+      'Make minimal, correct edits. The step re-runs automatically after you finish — do NOT run it yourself. When done, stop.',
+    ].join('\n'),
+  );
 
   const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
     await resolvePreferredCli(

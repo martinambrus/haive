@@ -14,6 +14,8 @@ interface MockState {
    *  (countTrailingOrphans and friends read `limit(10)`, newest first). Unset means
    *  "the history is just the live row", which is what every test predating it assumes. */
   cliInvocationHistory?: Record<string, unknown>[];
+  /** Task ledger events, as `loadLedgerEntries` reads them. Unset means an empty ledger. */
+  taskEvents?: { payload: Record<string, unknown>; taskStepId: string | null }[];
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
 }
@@ -46,6 +48,13 @@ function makeMockDb(state: MockState): Database {
                 }
                 return [];
               },
+              // The ledger's read awaits the ordered query with no limit.
+              ...(tableName === 'task_events'
+                ? {
+                    then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+                      Promise.resolve(state.taskEvents ?? []).then(onOk, onErr),
+                  }
+                : {}),
             }),
             // Drizzle's query builder is a thenable: awaiting .where() directly, with no
             // .limit()/.orderBy(), runs the query. learnedTimeoutMs does exactly that, and
@@ -318,6 +327,33 @@ describe('advanceStep LLM phase', () => {
     expect(invInsert!.row.prompt).toContain('Diagnose the root cause');
     expect(invInsert!.row.prompt).toContain('boom');
     expect(invInsert!.row.prompt).not.toContain('prompt with detected=');
+  });
+
+  it('gives the retry_ai fix agent what earlier steps established', async () => {
+    const state = freshState();
+    state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'partial' };
+    const fact = 'the app only answers inside ddev, on the project hostname';
+    state.taskEvents = [
+      {
+        payload: { stepId: '01c-ddev-env', round: 0, text: fact, kind: 'finding' },
+        taskStepId: null,
+      },
+    ];
+    const db = makeMockDb(state);
+    await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: { async enqueueCliInvocation() {} },
+    });
+    const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(invInsert!.row.prompt).toContain('Diagnose the root cause');
+    expect(invInsert!.row.prompt).toContain(fact);
   });
 
   it('routes api_key zai providers through the claude CLI binary', async () => {

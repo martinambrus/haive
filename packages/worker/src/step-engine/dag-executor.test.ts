@@ -39,6 +39,7 @@ describe('parseCoderResult', () => {
     expect(r.outcome).toBe('completed');
     expect(r.filesModified).toEqual(['a.ts']);
     expect(r.concerns).toBe('none');
+    expect(r.parsed).toBe(true);
   });
 
   it('uses parsedOutput when it is already an object', () => {
@@ -55,6 +56,7 @@ describe('parseCoderResult', () => {
     );
     expect(r.outcome).toBe('completed_with_debt');
     expect(r.debtItems).toHaveLength(1);
+    expect(r.parsed).toBe(true);
   });
 
   it('fails closed on unparseable output even when the CLI exits 0', () => {
@@ -62,6 +64,7 @@ describe('parseCoderResult', () => {
     expect(r.outcome).toBe('failed_unrecoverable');
     expect(r.filesModified).toEqual([]);
     expect(r.concerns).toContain('without a valid ISSUE_RESULT_JSON');
+    expect(r.parsed).toBe(false);
   });
 
   it('returns the similar sites a coder left unchanged, sanitised', () => {
@@ -108,6 +111,7 @@ describe('parseCoderResult', () => {
   it('falls back to failed_unrecoverable on a non-zero exit with no json', () => {
     const r = parseCoderResult(inv({ rawOutput: 'crashed', exitCode: 1 }));
     expect(r.outcome).toBe('failed_unrecoverable');
+    expect(r.parsed).toBe(false);
   });
 });
 

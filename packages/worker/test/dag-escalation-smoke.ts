@@ -17,6 +17,7 @@ import { initRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue } from '../src/queues/task-queue.js';
 import { SANDBOX_WORKDIR } from '../src/sandbox/sandbox-runner.js';
 import { resolveDagPhase } from '../src/step-engine/dag-executor.js';
+import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import { dagExecuteStep } from '../src/step-engine/steps/workflow/06c-dag-execute.js';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
 import type { AdvanceStepParams } from '../src/step-engine/step-runner.js';
@@ -38,6 +39,7 @@ for (const k of ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const)
 }
 
 const BRANCH = 'feat-escalation';
+const SEEDED_FACT = 'the fixture has no build step, so nothing needs running before a review';
 
 interface State {
   fixtureDir?: string;
@@ -150,6 +152,12 @@ async function main(): Promise<void> {
       filename: 'brief.md',
       storedPath: path.join(uploadsDir, 'brief.md'),
       sizeBytes: 8,
+    });
+    // ...and one fact an earlier step established, which each of them must carry too.
+    await recordLedgerEntry(db, task!.id, null, {
+      stepId: '04-phase-0b',
+      round: 0,
+      text: SEEDED_FACT,
     });
 
     await db.insert(schema.taskSteps).values({
@@ -402,7 +410,8 @@ async function main(): Promise<void> {
     const debt = finalPlan!.debtAggregate as { total?: number };
     if (!debt || (debt.total ?? 0) < 1) throw new Error('expected debt aggregated from the accept');
 
-    // Every reviewer, advisor and fix coder was told what the task has attached.
+    // Every reviewer, advisor and fix coder was told what the task has attached and what earlier
+    // agents established.
     const runs = await db
       .select()
       .from(schema.dagAgentRuns)
@@ -424,6 +433,10 @@ async function main(): Promise<void> {
     );
     if (uninformed.length > 0) {
       throw new Error(`${uninformed.length} escalation prompt(s) carry no attachments notice`);
+    }
+    const noLedger = sent.filter(({ prompt }) => !prompt.includes(SEEDED_FACT));
+    if (noLedger.length > 0) {
+      throw new Error(`${noLedger.length} escalation prompt(s) carry no task ledger`);
     }
 
     console.log(
