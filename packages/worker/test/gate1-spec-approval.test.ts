@@ -223,6 +223,11 @@ describe('extractMermaidBlocks', () => {
     expect(extractMermaidBlocks(md)).toEqual([]);
   });
 
+  it('re-fences a diagram that holds a shorter fence of its own', () => {
+    const md = ['````mermaid', 'graph LR', '```', '  A --> B', '````'].join('\n');
+    expect(extractMermaidBlocks(md)).toEqual(['````mermaid\ngraph LR\n```\n  A --> B\n````']);
+  });
+
   it('drops an unterminated or empty mermaid fence', () => {
     expect(extractMermaidBlocks('```mermaid\ngraph LR')).toEqual([]);
     expect(extractMermaidBlocks('```mermaid\n\n```')).toEqual([]);

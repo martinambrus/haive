@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { planReconcileStep, type PlanReconcileDetect } from './11f-plan-reconcile.js';
-import { MAX_PROPOSED_OPS, describePlanOp, proposedOps } from './_plan-ops.js';
+import { MAX_PROPOSED_OPS, codeBlock, describePlanOp, proposedOps } from './_plan-ops.js';
 
 const KNOWN = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const titles = new Map([[KNOWN, 'Auth service']]);
@@ -114,6 +114,13 @@ describe('describePlanOp', () => {
     expect(
       describePlanOp({ op: 'delete', nodeRef: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }, titles),
     ).toBe('Delete **`bbbbbbbb…`** and everything under it');
+  });
+});
+
+describe('codeBlock', () => {
+  it('fences with three backticks, or one more than the longest run inside', () => {
+    expect(codeBlock('npm test', 'sh')).toBe('```sh\nnpm test\n```');
+    expect(codeBlock('a\n```\nb')).toBe('````\na\n```\nb\n````');
   });
 });
 
