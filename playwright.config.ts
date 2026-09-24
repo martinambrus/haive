@@ -36,10 +36,20 @@ export default defineConfig({
   },
   projects: [
     {
+      name: 'sandbox-warmup',
+      testMatch: /sandbox\.setup\.ts$/,
+      teardown: 'sandbox-warmup-teardown',
+    },
+    {
+      name: 'sandbox-warmup-teardown',
+      testMatch: /sandbox\.teardown\.ts$/,
+    },
+    {
       name: 'chromium',
       // The visual project is opt-in: it needs the pinned container, and a normal run must not
       // try to compare screenshots taken wherever the developer happens to be.
       testIgnore: '**/visual/**',
+      dependencies: ['sandbox-warmup'],
       use: { ...devices['Desktop Chrome'] },
     },
     {
