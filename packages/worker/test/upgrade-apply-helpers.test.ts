@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -335,6 +335,15 @@ describe('pathContentHash', () => {
     await writeFile(join(root, 'AGENTS.md'), `# Two, edited\n\n${region}\n\nMore.\n`, 'utf8');
     expect(before).toBe(sha256Hex(normalizeContent(region)));
     expect(await pathContentHash(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toBe(before);
+  });
+
+  it('refuses a link or a directory at the path instead of reading it as absent', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'target.md'), 'body\n', 'utf8');
+    await symlink(join(root, 'target.md'), join(root, 'link.md'));
+    await mkdir(join(root, 'dir.md'));
+    await expect(pathContentHash(root, 'link.md', 'agent')).rejects.toThrow();
+    await expect(pathContentHash(root, 'dir.md', 'agent')).rejects.toThrow();
   });
 
   it('answers null for a missing file or a file with no region', async () => {

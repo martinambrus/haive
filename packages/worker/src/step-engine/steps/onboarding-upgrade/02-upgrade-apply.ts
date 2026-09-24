@@ -117,13 +117,14 @@ export function resolveBundleItemId(
 }
 
 /** What sits at a path as its row records it, and hashed the way the plan compares it: the whole
- *  file, or the rules region alone. Null when there is nothing there. */
+ *  file, or the rules region alone. Null only when nothing is there: a link or anything but a
+ *  regular file throws, so no caller mistakes it for absence and removes it. */
 export async function pathContent(
   repoPath: string,
   rel: string,
   templateKind: string,
 ): Promise<{ content: string; hash: string } | null> {
-  const raw = await readTextNoFollow(repoPath, rel);
+  const raw = await readTextNoFollow(repoPath, rel, { strict: true });
   if (raw === null) return null;
   if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
     return { content: raw, hash: sha256Hex(normalizeContent(raw)) };
