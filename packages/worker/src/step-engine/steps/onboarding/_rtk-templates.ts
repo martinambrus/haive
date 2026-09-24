@@ -45,8 +45,8 @@ export function hasGemini(ctx: RtkRenderInputs): boolean {
 
 /** Hook block written to `.claude/settings.json` (claude-code, zai). Shape
  *  pulled verbatim from rtk's `insert_hook_entry` (PreToolUse → Bash matcher
- *  → command). When rtk is later disabled the upgrade flow surfaces this
- *  file as `obsolete` and removes it on apply. */
+ *  → command). Once rtk is disabled the next upgrade offers this file for
+ *  removal as `obsolete`, and keeps it when it no longer holds these bytes. */
 export function buildClaudeSettingsJson(): string {
   const obj = {
     hooks: {

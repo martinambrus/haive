@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -284,6 +284,31 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
       expect(out.warnings.join('\n')).toContain('CLAUDE.md is ignored by git');
     }
     expect(await headTree()).not.toContain('CLAUDE.md');
+  });
+
+  it('keeps out an ignored rules file of a provider no longer enabled, which the RTK strip wrote', async () => {
+    await writeFile(join(repo, '.gitignore'), 'GEMINI.md\n');
+    await run('git', ['-C', repo, 'add', '.gitignore']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'ignore']);
+    await writeFile(join(repo, 'GEMINI.md'), '# private\n');
+    const out = await applyWith({ writtenPaths: ['GEMINI.md'] });
+    expect(out.commitPerformed).toBe(false);
+    expect(out.warnings.join('\n')).toContain('GEMINI.md is ignored by git');
+    expect(await headTree()).not.toContain('GEMINI.md');
+  });
+
+  it('commits the removal of a file 02 deleted, and skips a path git never tracked', async () => {
+    await mkdir(join(repo, '.claude'), { recursive: true });
+    await writeFile(join(repo, '.claude', 'settings.json'), '{}\n');
+    await run('git', ['-C', repo, 'add', '.claude/settings.json']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'rtk hook']);
+    await rm(join(repo, '.claude', 'settings.json'));
+    const out = await applyWith({
+      writtenPaths: [],
+      deletedPaths: ['.claude/settings.json', '.gemini/settings.json'],
+    });
+    expect(out.commitPerformed).toBe(true);
+    expect(await headTree()).not.toContain('.claude');
   });
 
   it('commits an AGENTS.md whose rules block HEAD lacks', async () => {

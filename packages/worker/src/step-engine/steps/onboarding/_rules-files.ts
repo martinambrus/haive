@@ -10,6 +10,8 @@ import {
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
   normalizeContent,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
 import { readFileNoFollow, updateFileNoFollow } from '@haive/shared/fs-safe';
@@ -17,6 +19,8 @@ import {
   importRulesFiles,
   importRulesFilesFor,
   isLinkToAgentsMd,
+  RTK_BLOCK_FILES,
+  RULES_FILE_READ_CAP,
   RULES_IMPORT_LINE,
   rulesImportState,
 } from '@haive/shared/rules-files';
@@ -98,6 +102,57 @@ export async function restoreRulesImportStubs(
   for (const file of files) {
     try {
       outcomes.push({ file, result: await ensureRulesImportStub(repoPath, file) });
+    } catch (err) {
+      outcomes.push({
+        file,
+        result: 'refused',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return outcomes;
+}
+
+/** `content` without its RTK blocks, each taken with the newline 07 wrote after it, or null when
+ *  it holds none. */
+export function withoutRtkBlocks(content: string): string | null {
+  let next = content;
+  for (;;) {
+    const start = next.indexOf(RTK_REF_MARKER_START);
+    if (start === -1) break;
+    const endAt = next.indexOf(RTK_REF_MARKER_END, start);
+    if (endAt === -1) break;
+    const end = endAt + RTK_REF_MARKER_END.length;
+    next = next.slice(0, start) + next.slice(next[end] === '\n' ? end + 1 : end);
+  }
+  return next === content ? null : next;
+}
+
+export interface RtkBlockStripOutcome {
+  file: string;
+  result: 'stripped' | 'none' | 'skipped-link' | 'refused';
+  error?: string;
+}
+
+/** Take the RTK block out of each rules file that holds one. A `CLAUDE.md -> AGENTS.md` link is
+ *  AGENTS.md's own pass, and any other link is refused, as is a file past the read cap, which the
+ *  plan could not report. A refusal or an I/O error is recorded per file and never thrown. */
+export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOutcome[]> {
+  const outcomes: RtkBlockStripOutcome[] = [];
+  for (const file of RTK_BLOCK_FILES) {
+    try {
+      if (await isLinkToAgentsMd(repoPath, file)) {
+        outcomes.push({ file, result: 'skipped-link' });
+        continue;
+      }
+      // `create` only makes an absent file answer 'unchanged': `update` returns null for it.
+      const result = await updateFileNoFollow(
+        repoPath,
+        file,
+        (current) => (current === null ? null : withoutRtkBlocks(current)),
+        { create: true, maxBytes: RULES_FILE_READ_CAP },
+      );
+      outcomes.push({ file, result: result === 'updated' ? 'stripped' : 'none' });
     } catch (err) {
       outcomes.push({
         file,

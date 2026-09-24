@@ -1,6 +1,7 @@
 import type { CliProviderName } from './types/index.js';
 import { CLI_PROVIDER_CATALOG, type CliRulesFileMode } from './cli-providers/catalog.js';
 import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
+import { extractRegion, RTK_REF_MARKER_END, RTK_REF_MARKER_START } from './templates/cli-rules.js';
 
 // Shared so the worker's upgrade steps and the api's upgrade status name the same files. Node-only
 // and outside the root barrel, like `fs-safe`, which refuses to load anywhere but Linux.
@@ -57,4 +58,32 @@ export async function rulesImportState(repoPath: string, rel: string): Promise<R
   } catch {
     return 'unreadable';
   }
+}
+
+/** Where an RTK block can sit: the awareness block 07 writes into AGENTS.md, and the `@RTK.md`
+ *  import older onboardings put between the same markers in the rules stubs. */
+export const RTK_BLOCK_FILES: readonly string[] = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
+
+async function holdsRtkBlock(repoPath: string, rel: string): Promise<boolean> {
+  try {
+    const read = await readFileNoFollow(repoPath, rel, {
+      strict: true,
+      maxBytes: RULES_FILE_READ_CAP,
+    });
+    if (read === null || read.truncated) return false;
+    const text = read.data.toString('utf8');
+    return extractRegion(text, RTK_REF_MARKER_START, RTK_REF_MARKER_END) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** The rules files that hold an RTK block. A link, and a file that cannot be read whole, claim
+ *  nothing: no upgrade writes through a link, and it reports a file it could not check. */
+export async function rtkBlockFiles(repoPath: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const file of RTK_BLOCK_FILES) {
+    if (await holdsRtkBlock(repoPath, file)) found.push(file);
+  }
+  return found;
 }

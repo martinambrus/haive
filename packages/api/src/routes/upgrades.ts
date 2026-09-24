@@ -16,7 +16,7 @@ import {
   type RollbackUpgradeResponse,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import { importRulesFilesFor, rulesImportState } from '@haive/shared/rules-files';
+import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -68,13 +68,20 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, applicableTemplateIds: true, storagePath: true, localPath: true },
+    columns: {
+      id: true,
+      applicableTemplateIds: true,
+      storagePath: true,
+      localPath: true,
+      rtkEnabled: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
   const manifestCache = await db
     .select({
       templateId: schema.templateManifestCache.templateId,
+      templateKind: schema.templateManifestCache.templateKind,
       schemaVersion: schema.templateManifestCache.schemaVersion,
       contentHash: schema.templateManifestCache.contentHash,
       setHash: schema.templateManifestCache.setHash,
@@ -249,9 +256,13 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     schemaVersion: number;
     contentHash: string;
   }
+  // With RTK switched off no RTK settings file is current, so the ones installed read as changed.
   const currentByTemplate = new Map<string, CurrentTemplate>(
     manifestCache
-      .filter((m) => applicableSet.has(m.templateId))
+      .filter(
+        (m) =>
+          applicableSet.has(m.templateId) && (repo.rtkEnabled || m.templateKind !== 'rtk-config'),
+      )
       .map((m) => [
         m.templateId,
         { templateId: m.templateId, schemaVersion: m.schemaVersion, contentHash: m.contentHash },
@@ -360,10 +371,14 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   );
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
+  // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
+  const root = repo.storagePath ?? repo.localPath;
+  const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
 
   const hasUpgradeAvailable =
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
-    missingRulesImports.length > 0;
+    missingRulesImports.length > 0 ||
+    rtkBlockLeftovers.length > 0;
 
   // Group `custom.<bundleId>.*` changes by bundle so the banner can render
   // "Bundle X: N changed items" alongside Haive template counts. Bundles with
@@ -408,6 +423,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(customChanges.length > 0 ? { customChanges } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
+    ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),
   };
   return c.json(res);
 });

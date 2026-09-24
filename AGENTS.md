@@ -2351,6 +2351,25 @@ since, warns, and retires the upgrade's row all the same. 04 also reads only the
 there, and read as new files they were deleted: on a first upgrade's rollback, that took every
 adopted file the person had declined.
 
+**Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
+`rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
+off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
+`obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
+--cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
+out from it would restore it. A plan whose RTK choice was the repository's live one
+(`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
+two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
+RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it
+out
+of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
+after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
+plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
+stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
+holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
+repository and reports the files still holding a block (`rtkBlockLeftovers`), so the banner offers
+the upgrade. Switching RTK back on is one-sided: the next upgrade offers the settings files again,
+but nothing prompts it, and only a re-onboarding writes the block.
+
 **"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
 version declined, so the next upgrade offers only a newer one. On a live row it moves
 `templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
