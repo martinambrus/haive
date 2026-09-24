@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { cleanupUser, getSql } from '../helpers/db.js';
-import { registerUser } from '../helpers/auth.js';
+import { API_BASE, registerUser } from '../helpers/auth.js';
 
 /**
  * The admin console: who may reach it, and that its pages render for someone who may.
@@ -125,13 +125,20 @@ test.describe('admin console', () => {
       userId = (await registerUser(sql, page.request, { prefix: 'admin-audit', role: 'admin' }))
         .userId;
 
+      // The api's origin, not the page's: the page's own document shares the path.
+      const loaded = page.waitForResponse(
+        (r) => r.request().method() === 'GET' && r.url().startsWith(`${API_BASE}/admin/audit`),
+        { timeout: 30_000 },
+      );
       await page.goto('/admin/audit');
       await expect(page.getByRole('heading', { name: 'Admin console' })).toBeVisible({
         timeout: 30_000,
       });
       // Read-only on purpose: what the log CONTAINS is this install's history, which a spec must
-      // not depend on. That it loads at all is the regression worth catching.
-      await expect(page.getByRole('alert')).toHaveCount(0);
+      // not depend on. That it loads at all is the regression worth catching. Scoped to main, since
+      // Next's route announcer is a role="alert" of its own (see auth/forms.spec.ts).
+      expect((await loaded).ok()).toBe(true);
+      await expect(page.getByRole('main').getByRole('alert')).toHaveCount(0);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

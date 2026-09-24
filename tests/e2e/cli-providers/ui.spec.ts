@@ -1,7 +1,26 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Response } from '@playwright/test';
 import { cleanupUser, getSql } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 import { invokeAction } from '../helpers/actions.js';
+
+/** A GET to the api at exactly this path. The page's own document can share a path, and a CORS
+ *  preflight shares it too, so both the origin and the method are part of the match. */
+function apiLoaded(page: Page, path: string): Promise<Response> {
+  return page.waitForResponse(
+    (r) => r.request().method() === 'GET' && r.url() === `${API_BASE}${path}`,
+    { timeout: 30_000 },
+  );
+}
+
+/** The edit page draws its heading only after hydration and two client fetches, which on a cold
+ *  `next dev` can outlast the default assertion timeout. */
+async function openEditPage(page: Page, providerId: string): Promise<void> {
+  const provider = apiLoaded(page, `/cli-providers/${providerId}`);
+  const catalog = apiLoaded(page, '/cli-providers/catalog');
+  await page.goto(`/cli-providers/${providerId}`);
+  expect((await provider).ok()).toBe(true);
+  expect((await catalog).ok()).toBe(true);
+}
 
 test.describe('cli providers UI', () => {
   test('Add Claude Code from available card: fill form, submit, appears under Configured', async ({
@@ -17,6 +36,7 @@ test.describe('cli providers UI', () => {
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
 
       // Available card has an Add button that links to /new?name=claude-code
+      const catalog = apiLoaded(page, '/cli-providers/catalog');
       await page
         .locator('div')
         .filter({ has: page.getByRole('heading', { level: 2, name: 'Claude Code' }) })
@@ -25,6 +45,7 @@ test.describe('cli providers UI', () => {
         .click();
 
       await page.waitForURL(/\/cli-providers\/new\?name=claude-code$/);
+      expect((await catalog).ok()).toBe(true);
 
       await expect(page.getByRole('heading', { level: 1, name: /Add Claude Code/ })).toBeVisible();
 
@@ -69,7 +90,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Before label' })).toBeVisible();
 
       await page.getByLabel('Label').fill('After label');
@@ -112,7 +133,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Secrets target' })).toBeVisible();
 
       const secretsField = page.getByLabel('Secrets', { exact: true });
@@ -162,7 +183,7 @@ test.describe('cli providers UI', () => {
       );
       expect(seedSecretRes.status()).toBe(201);
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Delete target' })).toBeVisible();
 
       const secretsField = page.getByLabel('Secrets', { exact: true });
@@ -198,7 +219,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Gate target' })).toBeVisible();
 
       const testButton = page.getByRole('button', { name: 'Test connection' });
@@ -296,7 +317,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Rebuild target' })).toBeVisible();
 
       const testButton = page.getByRole('button', { name: 'Test connection' });
@@ -373,7 +394,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Clearable UI' })).toBeVisible();
 
       const execField = page.getByLabel('Executable path');
@@ -471,7 +492,7 @@ test.describe('cli providers UI', () => {
       expect(before).toHaveLength(1);
       const beforeEncrypted = before[0]!.encrypted_value;
 
-      await page.goto(`/cli-providers/${providerId}`);
+      await openEditPage(page, providerId);
       await expect(page.getByRole('heading', { level: 1, name: 'Keep target' })).toBeVisible();
 
       // Auto-filled with name= placeholder; do not touch, click Save.
