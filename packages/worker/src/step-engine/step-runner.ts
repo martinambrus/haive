@@ -48,6 +48,7 @@ import {
   capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
   isCliPreemptionFailure,
+  isFreeRedispatch,
   isCliTimeoutFailure,
   isFatalProviderFailure,
   isOutputTruncationMessage,
@@ -1418,7 +1419,7 @@ async function resolveAgentMiningPhase(
 /** Existing mining row a retry re-dispatches onto, keyed by agentId.
  *
  *  `chargeAttempt: false` re-dispatches WITHOUT spending the row's durable `attempts` budget —
- *  used when the prior invocation was killed by the preemption sweeper. Unlike the LLM/timeout
+ *  used when the prior invocation was preempted or never started. Unlike the LLM/timeout
  *  caps (trailing scans that can simply skip a row) this budget is a stored counter, so the only
  *  way to keep preemption out of it is not to increment. Three evictions must not exhaust the
  *  worker-restart recovery a mining agent gets. */
@@ -3133,13 +3134,13 @@ async function retryMiningAgents(
 
   const wanted = new Set(agentIds);
   const wantedRows = rows.filter((r) => wanted.has(r.agentId));
-  // Which of those were killed by the preemption sweeper rather than by anything wrong with the
-  // run. Resolved BEFORE the budget filter, because a preemption does two things: it re-dispatches
-  // without spending the row's attempts budget, AND it re-dispatches even when that budget is
-  // already spent — an eviction must never be the thing that retires an agent. One query for the
-  // whole batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it,
-  // so a future third caller cannot forget either half.
-  const preemptedInvocationIds = new Set<string>();
+  // Which of those ran nothing of their own: preempted by the sweeper, or never started. Resolved
+  // BEFORE the budget filter, because such a run does two things: it re-dispatches without
+  // spending the row's attempts budget, AND it re-dispatches even when that budget is already
+  // spent — an eviction must never be the thing that retires an agent. One query for the whole
+  // batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it, so a
+  // future third caller cannot forget either half.
+  const freeInvocationIds = new Set<string>();
   // Which of those burned their whole budget and were SIGKILLed. Same query, because the
   // two facts answer different questions about the same prior run: a preemption re-dispatches
   // at the SAME budget (it never got its time), a timeout must re-dispatch at a BIGGER one
@@ -3149,17 +3150,20 @@ async function retryMiningAgents(
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
-      .select({ id: schema.cliInvocations.id, errorMessage: schema.cliInvocations.errorMessage })
+      .select({
+        id: schema.cliInvocations.id,
+        errorMessage: schema.cliInvocations.errorMessage,
+        startedAt: schema.cliInvocations.startedAt,
+      })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
-      if (isCliPreemptionFailure({ errorMessage: p.errorMessage }))
-        preemptedInvocationIds.add(p.id);
+      if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
     }
   }
-  const wasPreempted = (r: { cliInvocationId: string | null }): boolean =>
-    !!r.cliInvocationId && preemptedInvocationIds.has(r.cliInvocationId);
+  const runsFree = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && freeInvocationIds.has(r.cliInvocationId);
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
@@ -3171,7 +3175,7 @@ async function retryMiningAgents(
   const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
     r.userRetryRequestedAt != null;
   const candidates = wantedRows.filter(
-    (r) => r.attempts < maxAttempts || wasPreempted(r) || userAsked(r),
+    (r) => r.attempts < maxAttempts || runsFree(r) || userAsked(r),
   );
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
@@ -3179,7 +3183,7 @@ async function retryMiningAgents(
       id: r.id,
       attempts: r.attempts,
       cliInvocationId: r.cliInvocationId,
-      chargeAttempt: !wasPreempted(r),
+      chargeAttempt: !runsFree(r),
       // Consecutive, so anything that is not a timeout resets the chain. A preemption
       // between two timeouts must not climb a rung — it never spent a budget to justify one.
       timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,
@@ -3363,6 +3367,7 @@ async function reconcileOrphanedMiningAgents(
       .select({
         exitCode: schema.cliInvocations.exitCode,
         errorMessage: schema.cliInvocations.errorMessage,
+        startedAt: schema.cliInvocations.startedAt,
         endedAt: schema.cliInvocations.endedAt,
       })
       .from(schema.cliInvocations)
@@ -3383,12 +3388,11 @@ async function reconcileOrphanedMiningAgents(
       })
       .where(eq(schema.taskStepAgentMinings.id, row.id));
     changed = true;
-    // Same rule as the LLM path: an eviction re-dispatches whatever the budget says, because it
-    // is a scheduling decision rather than evidence the agent cannot run.
+    // Same rule as the LLM path: a run that was evicted or never started re-dispatches whatever
+    // the budget says, since neither is evidence the agent cannot run.
     if (
       isTransientCliFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) &&
-      (isCliPreemptionFailure({ errorMessage: inv.errorMessage }) ||
-        row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
+      (isFreeRedispatch(inv) || row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
     ) {
       transientAgentIds.push(row.agentId);
     }

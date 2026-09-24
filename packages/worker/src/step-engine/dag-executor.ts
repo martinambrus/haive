@@ -34,7 +34,7 @@ import {
   type SpecView,
 } from './steps/workflow/_spec-artifact.js';
 import {
-  isCliPreemptionFailure,
+  isFreeRedispatch,
   isFatalProviderFailure,
   isCliTimeoutFailure,
   cliTimeoutBudgetMinutes,
@@ -1066,14 +1066,14 @@ async function ingestReviewRun(
         exitCode: inv.exitCode,
         errorMessage: inv.errorMessage,
       });
-      // Free re-dispatch when the sweeper preempted the reviewer — same reasoning as the
-      // coder path: a scheduling eviction must not spend an infrastructure-recovery budget.
-      const preempted = isCliPreemptionFailure({ errorMessage: inv.errorMessage });
-      if (cls === 'transient' && (preempted || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
+      // Free re-dispatch when the reviewer was preempted or never started — same reasoning as
+      // the coder path: neither must spend an infrastructure-recovery budget.
+      const free = isFreeRedispatch(inv);
+      if (cls === 'transient' && (free || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
         await ra.db
           .update(schema.taskDagIssues)
           .set({
-            reviewInfraRetries: issue.reviewInfraRetries + (preempted ? 0 : 1),
+            reviewInfraRetries: issue.reviewInfraRetries + (free ? 0 : 1),
             updatedAt: new Date(),
           })
           .where(eq(schema.taskDagIssues.id, issue.id));
@@ -2204,11 +2204,11 @@ export async function resolveDagPhase(
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,
           });
-          // Preemption is a scheduling decision Haive made, not an environment problem, so it
-          // re-dispatches for free. Charging it here would let a busy machine drive a healthy
-          // issue to DAG_INFRA_EXHAUSTED and halt the task with a misleading "raise
-          // RUNTIME_MEMORY_MB" diagnosis.
-          const preempted = isCliPreemptionFailure({ errorMessage: inv.errorMessage });
+          // Preemption is a scheduling decision Haive made, not an environment problem, and a
+          // run that never started ran nothing, so both re-dispatch for free. Charging them here
+          // would let a busy machine drive a healthy issue to DAG_INFRA_EXHAUSTED and halt the
+          // task with a misleading "raise RUNTIME_MEMORY_MB" diagnosis.
+          const free = isFreeRedispatch(inv);
           // A coder SIGKILLed at its own budget needs MORE TIME, not another identical run.
           // Without this it burns every infra retry at the budget that just killed it and its
           // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three
@@ -2236,13 +2236,13 @@ export async function resolveDagPhase(
               );
             }
           }
-          if (cls === 'transient' && (preempted || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) {
+          if (cls === 'transient' && (free || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) {
             await db
               .update(schema.taskDagIssues)
               .set({
                 outcome: 'pending',
                 cliInvocationId: null,
-                infraRetries: issue.infraRetries + (preempted ? 0 : 1),
+                infraRetries: issue.infraRetries + (free ? 0 : 1),
                 concerns: null,
                 errorMessage: null,
                 rawOutput: null,
