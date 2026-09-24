@@ -25,6 +25,7 @@ import {
   ATTACHMENT_MAX_PATH_LENGTH,
   AttachmentPathError,
   detectAttachmentArchiveFormat,
+  isReadOnlyLocalRepo,
   isReservedAttachmentName,
   logger,
   reserveAttachmentDirs,
@@ -574,6 +575,26 @@ async function discardStaging(anchor: string, stagingRel: string): Promise<void>
   );
 }
 
+/** Where an upload for this task can only have been written, by the upload route's own rule: under
+ *  the storage path of a repository that is not a read-only local one. */
+async function uploadsRootOf(db: Database, taskId: string): Promise<string | null> {
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (!task?.repositoryId) return null;
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { source: true, writable: true, storagePath: true },
+    });
+    return repo?.storagePath && !isReadOnlyLocalRepo(repo) ? repo.storagePath : null;
+  } catch (err) {
+    log.warn({ err, taskId }, 'could not resolve the uploads dir for a sweep');
+    return null;
+  }
+}
+
 /**
  * Expand every not-yet-expanded archive attached to `taskId`.
  *
@@ -582,14 +603,10 @@ async function discardStaging(anchor: string, stagingRel: string): Promise<void>
  * a partial tree is worse than none — nothing downstream can tell which half of a specification it
  * was given. A placement that fails leaves the archive unstamped, so the next call tries again from
  * the start; so does a lock that could not be had in time.
- *
- * `repoRoot` is where the uploads dir lives once no row is left to say so, which is what lets the
- * sweep reach an attempt a delete of the last attachment could not clean up.
  */
 export async function ensureArchivesExpanded(
   db: Database,
   taskId: string,
-  repoRoot?: string | null,
 ): Promise<ExpandArchivesResult> {
   let rows: (typeof schema.taskAttachments.$inferSelect)[];
   try {
@@ -617,8 +634,11 @@ export async function ensureArchivesExpanded(
   // sits under `.haive/`, which the sandbox mounts read-write, so it can never be one. A row that does
   // not have that shape is refused rather than expanded from a guessed root.
   const split = rows.map((row) => splitAttachmentStoredPath(row, taskId)).find((s) => s !== null);
-  if (!split && rows.length === 0 && repoRoot) {
-    await sweepStaleAttempts(db, taskId, repoRoot, taskUploadsRel(taskId), new Set());
+  if (!split && rows.length === 0) {
+    // No row is left to say where the uploads dir is, and a delete of the last one may have left an
+    // attempt behind.
+    const root = await uploadsRootOf(db, taskId);
+    if (root) await sweepStaleAttempts(db, taskId, root, taskUploadsRel(taskId), new Set());
     return EMPTY;
   }
   if (!split) {

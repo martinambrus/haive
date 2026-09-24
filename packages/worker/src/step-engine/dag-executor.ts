@@ -2061,7 +2061,7 @@ export async function resolveDagPhase(
       // Once per dispatch pass too: what the task has attached, after the same expansion every
       // other dispatch path runs, so a coder is told about the files as a single-agent step is.
       // `''` when nothing is attached.
-      await ensureArchivesExpanded(db, ctx.taskId, ctx.repoPath);
+      await ensureArchivesExpanded(db, ctx.taskId);
       const attachmentsNotice = await augmentPromptWithAttachments(db, ctx.taskId, '');
       let dispatched = 0;
       for (const issue of undispatched) {
@@ -2344,7 +2344,7 @@ export async function resolveDagPhase(
       const reviewSpecView = await resolveSpecView(ctx);
       // Once per re-entry too, after the same expansion: every reviewer, fix coder and advisor is
       // told what the task has attached.
-      await ensureArchivesExpanded(db, ctx.taskId, ctx.repoPath);
+      await ensureArchivesExpanded(db, ctx.taskId);
       const reviewAttachmentsNotice = await augmentPromptWithAttachments(db, ctx.taskId, '');
       const reReadLevel = async () =>
         (await db

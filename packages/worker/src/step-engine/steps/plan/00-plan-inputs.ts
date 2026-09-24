@@ -408,7 +408,7 @@ export interface LiveAttachments {
  *  is expanded first, so what a dispatch requires is chosen from its members — a wireframe inside a
  *  `.zip` — and not from one opaque `binary` file. */
 export async function loadLiveAttachments(ctx: StepContext): Promise<LiveAttachments | null> {
-  await ensureArchivesExpanded(ctx.db, ctx.taskId, ctx.repoPath);
+  await ensureArchivesExpanded(ctx.db, ctx.taskId);
   try {
     const rows = await ctx.db
       .select({
@@ -734,7 +734,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     // Before the rows are read, not after: an archive the user attached has to
     // already be the tree it contains, or every file inside it is invisible to
     // the classification, the sidecars and the coverage scan below.
-    const expansion = await ensureArchivesExpanded(ctx.db, ctx.taskId, ctx.repoPath);
+    const expansion = await ensureArchivesExpanded(ctx.db, ctx.taskId);
     if (expansion.filesAdded > 0) {
       await ctx.emitProgress(
         `Expanded ${expansion.expanded} archive(s) into ${expansion.filesAdded} file(s).`,

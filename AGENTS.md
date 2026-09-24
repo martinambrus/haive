@@ -1072,7 +1072,8 @@ lock, so an archive attached a moment ago keeps its attempt in flight. A DELETE 
 at the archives it removes in its own section (`settleExpansionAttempts`,
 `@haive/shared/attachments-fs`), and a staging dir it then fails to remove is swept by the next
 expansion call. The worker finds the uploads dir through a row, so once the last attachment is gone
-it sweeps from the repository root its caller passes (`ensureArchivesExpanded`'s `repoRoot`). Settling
+it sweeps under the task repository's storage path, the one root an upload is ever written under,
+and never in a read-only local repository. Settling
 removes the intent inside the section, so no later settle acts on it twice — a name it freed is one
 an upload can take, and that upload's file has no row until its bytes are in. An upload's claim
 settles every attempt that wrote its intent before it takes a name (`settleExpansionIntents`): a
