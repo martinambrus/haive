@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -173,7 +174,7 @@ export async function countFilesMatching(
   maxDepth = 3,
 ): Promise<number> {
   let total = 0;
-  await walk(root, '', 0, maxDepth, (rel, isDir) => {
+  await walk(workspaceAnchor(root), '', 0, maxDepth, (rel, isDir) => {
     if (predicate(rel, isDir)) total += 1;
   });
   return total;
@@ -192,7 +193,7 @@ export async function listFilesMatching(
 ): Promise<string[]> {
   const out: string[] = [];
   await walk(
-    root,
+    workspaceAnchor(root),
     '',
     0,
     maxDepth,
@@ -207,7 +208,7 @@ export async function listFilesMatching(
 type Visitor = (relPath: string, isDir: boolean) => void;
 
 async function walk(
-  root: string,
+  wa: { anchor: string; prefix: string },
   rel: string,
   depth: number,
   maxDepth: number,
@@ -220,7 +221,7 @@ async function walk(
   // candidate set. A linked directory here would enumerate — and hand downstream readers — a tree
   // that is not this repository's. A `Dirent` answers the kind without following anything, so a
   // link is neither visited as a file nor descended as a directory.
-  const entries = await readdirNoFollow(root, rel.split(path.sep).join('/'));
+  const entries = await readdirNoFollow(wa.anchor, `${wa.prefix}${rel.split(path.sep).join('/')}`);
   if (entries === null) return;
   for (const entry of entries) {
     const childRel = rel ? path.join(rel, entry.name) : entry.name;
@@ -232,7 +233,7 @@ async function walk(
       // The directory itself was still visited above, so a caller counting or listing
       // directories sees it; only its contents are skipped.
       if (prune?.(entry.name, childRel)) continue;
-      await walk(root, childRel, depth + 1, maxDepth, visit, prune);
+      await walk(wa, childRel, depth + 1, maxDepth, visit, prune);
     } else if (entry.isFile()) {
       visit(childRel, false);
     }
