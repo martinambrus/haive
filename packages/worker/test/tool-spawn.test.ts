@@ -3,8 +3,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import JSZip from 'jszip';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { statSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from '../src/repo/tool-spawn.js';
+
+/** The mode each tool copy had at the moment its name was removed. */
+const modesAtRemoval = vi.hoisted(() => [] as number[]);
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...actual,
+    removeNoFollow: async (...args: Parameters<typeof actual.removeNoFollow>) => {
+      const [anchor, rel] = args;
+      if (rel.startsWith('.haive-tool-')) {
+        modesAtRemoval.push(statSync(path.join(anchor, rel)).mode & 0o777);
+      }
+      return actual.removeNoFollow(...args);
+    },
+  };
+});
 
 const have = (tool: string): boolean => {
   try {
@@ -176,6 +193,23 @@ describe('runTool', () => {
           });
           expect(stdout).toBe('two names');
           expect((await stat(path.join(dir, 'other-name.txt'))).mode & 0o777).toBe(0o600);
+        } finally {
+          await readable.close();
+        }
+      } finally {
+        await fh.close();
+      }
+    });
+
+    it('keeps the copy private until it has no name', async () => {
+      modesAtRemoval.length = 0;
+      const fh = await held('secret.txt', 'owner only');
+      try {
+        await fh.chmod(0o600);
+        const readable = await toolReadable(fh);
+        try {
+          expect(modesAtRemoval).toEqual([0o600]);
+          expect((await readable.fh.stat()).mode & 0o777).toBe(0o604);
         } finally {
           await readable.close();
         }

@@ -125,10 +125,12 @@ export async function toolReadable(
   }
   const rel = `.haive-tool-${randomUUID()}`;
   const copy = (await openFileNoFollow(os.tmpdir(), rel, 'create-exclusive', {
-    fileMode: 0o604,
+    fileMode: 0o600,
   }))!;
   try {
     await removeNoFollow(os.tmpdir(), rel);
+    // Readable to others only once it has no name, so nothing can open it on the way.
+    await copy.chmod(0o604);
     // Positional reads and writes on the two handles: neither stream would own its handle, and a
     // stream that does not emits no close for a pipeline to wait on.
     const buf = Buffer.allocUnsafe(1 << 20);
