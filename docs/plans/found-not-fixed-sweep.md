@@ -1,7 +1,7 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-21 and 5c merged (#267-#280, #282-#286, #288-#290); PR 22
-> (the 501-file archive tests get a measured timeout) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-24. PRs 1-22 and 5c merged (#267-#280, #282-#286, #288-#291); PR 21b
+> (the task title strip hides by its own width) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context
@@ -267,8 +267,10 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
     - **e2e** `tasks/phone.spec.ts` at 375:
       - Setup: two providers plus a seat preference, so two meters render.
       - Assert: no horizontal scroll, strip children inside the strip, `StepDuration` one line.
-    - **Measure 768/1280 before and after** (sidebar expanded and collapsed). If the strip already
-      overflows there, a follow-up PR keys its hiding to the strip's own width (`@container`).
+    - **Measure 768/1280 before and after** (sidebar expanded and collapsed). The strip overflowed
+      there (by up to 570px, title 0px), so PR 21b keys its hiding to the strip's own width
+      (`@container`): meters below 80rem, badges below 48rem, the AI estimate below 28rem. Its
+      control sweeps 375-1920px in both sidebar states.
 
 ### Tooling and dependencies
 
