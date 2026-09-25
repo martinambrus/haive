@@ -972,7 +972,7 @@ taskRoutes.patch('/:id', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, currentStepId: true },
+    columns: { id: true, status: true, currentStepId: true, currentRound: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
@@ -1000,7 +1000,12 @@ taskRoutes.patch('/:id', async (c) => {
     if (body.autoContinue === true && task.status === 'waiting_user' && task.currentStepId) {
       await getTaskQueue().add(
         TASK_JOB_NAMES.ADVANCE_STEP,
-        { taskId: id, userId, stepId: task.currentStepId } as TaskJobPayload,
+        {
+          taskId: id,
+          userId,
+          stepId: task.currentStepId,
+          round: task.currentRound,
+        } as TaskJobPayload,
         {
           attempts: 3,
           backoff: { type: 'exponential', delay: 5000 },

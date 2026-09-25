@@ -845,14 +845,17 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
 });
 
 describe('a park or a step start that a Retry or a Stop overtakes', () => {
-  const job = (stepId: string, extra: Record<string, unknown> = {}) =>
-    ({
+  const job = (stepId: string, extra: Record<string, unknown> = {}) => {
+    // Every hand-off points the task at a step before it queues the step's advance.
+    h.state.currentStepId = stepId;
+    return {
       id: 'job-park',
       name: TASK_JOB_NAMES.ADVANCE_STEP,
       data: { taskId: 'task-1', userId: 'user-1', stepId, round: 0, epoch: 5, ...extra },
       timestamp: Date.now(),
       moveToDelayed: vi.fn(async () => undefined),
-    }) as unknown as Job;
+    } as unknown as Job;
+  };
   const unparked = {
     id: 'ts-1',
     status: 'pending',
@@ -972,10 +975,11 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
     it('re-parks a step already parked only while the job still holds the task', async () => {
       h.state.readsAnswer = true;
       h.state.admission = full;
+      // Already parked, and the task points at it, so the tick only confirms its hold.
       h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
       h.state.onSelect = retryLands;
       await processTaskJob(job('epoch-chain-runtime'), 'tok');
-      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: false }]);
       expect(h.state.add).not.toHaveBeenCalled();
     });
   });
@@ -1031,6 +1035,26 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('an advance for a step the task has moved past', () => {
+  it('neither runs the step nor points the task back at it', async () => {
+    h.state.readsAnswer = true;
+    // The task went on to another step while this advance sat in the queue.
+    h.state.currentStepId = 'epoch-job-target';
+    const job = {
+      id: 'job-left-over',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId: 'epoch-job-step', round: 0, epoch: 5 },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    } as unknown as Job;
+
+    await processTaskJob(job, 'tok');
+
+    expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    expect(h.state.landedTaskPatches).toEqual([]);
   });
 });
 
