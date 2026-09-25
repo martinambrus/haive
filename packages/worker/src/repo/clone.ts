@@ -436,6 +436,7 @@ export async function extractArchive(
   archive: { anchor: string; rel: string },
   format: ArchiveFormat,
   dest: { anchor: string; rel: string },
+  opts: { keepLoneDir?: (name: string) => boolean } = {},
 ): Promise<ExtractReport> {
   if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
     throw new Error(`unsupported archive format: ${format as string}`);
@@ -504,7 +505,9 @@ export async function extractArchive(
       if (top.length === 1) {
         const only = top[0]!.name;
         const info = await lstatNoFollow(anchor, `${innerRel}/${only}`);
-        if (info?.kind === 'directory') sourceRel = `${innerRel}/${only}`;
+        if (info?.kind === 'directory' && !opts.keepLoneDir?.(only)) {
+          sourceRel = `${innerRel}/${only}`;
+        }
       }
 
       // Hand the tree back to the worker's identity while it is still private, so the swapped result

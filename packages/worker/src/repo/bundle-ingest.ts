@@ -4,6 +4,7 @@ import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
+import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
 import { buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
 import { getDecryptedCredentials } from './credentials.js';
@@ -146,6 +147,7 @@ export async function handleIngestZip(
       { anchor: bundleStorageRoot, rel: archiveRel },
       bundle.archiveFormat as ArchiveFormat,
       { anchor: bundleStorageRoot, rel: `${bundleDirRel(payload.userId, bundle.id)}/extracted` },
+      { keepLoneDir: isBundleRootDir },
     );
     if (report.note) {
       logger.warn({ bundleId: bundle.id, dropped: report.dropped }, report.note);
