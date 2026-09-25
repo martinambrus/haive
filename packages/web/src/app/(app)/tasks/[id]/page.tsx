@@ -1507,9 +1507,11 @@ export default function TaskDetailPage() {
         // data-fixed-title-strip: StaleBuildBanner parks itself directly under this strip and
         // MEASURES it rather than carrying a copy of its height — the height is padding plus a
         // line box, so any type or spacing change here would silently move it out from under.
+        // Its items hide by the strip's own width (@container), not the viewport's: the sidebar
+        // beside it takes anything from 56 to 484px of the screen.
         <div
           data-fixed-title-strip
-          className="fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur md:px-8"
+          className="@container fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur md:px-8"
         >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}
@@ -1558,7 +1560,7 @@ export default function TaskDetailPage() {
           {task.repository && (
             <Badge
               variant="default"
-              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300 max-sm:hidden"
+              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300 @max-3xl:hidden"
             >
               <FolderGit2 className="h-3 w-3" />
               {task.repository.name}
@@ -1567,7 +1569,7 @@ export default function TaskDetailPage() {
           {task.executionPath && (
             <Badge
               variant={executionPathVariant(task.executionPath)}
-              className="shrink-0 gap-1 max-sm:hidden"
+              className="shrink-0 gap-1 @max-3xl:hidden"
             >
               <Route className="h-3 w-3" />
               {EXECUTION_PATH_LABELS[task.executionPath]}
@@ -1581,11 +1583,13 @@ export default function TaskDetailPage() {
           )}
           {/* Usage chip centers in the gap between the left badges and the right
               pace chip: its ml-auto + the pace chip's own ml-auto split the free
-              space evenly on each side. Collapses to the strip's gap-3 at low res. */}
+              space evenly on each side. Collapses to the strip's gap-3 at low res.
+              It needs a wide strip: its meters would otherwise squeeze the title to nothing,
+              and the page header carries them one scroll up. */}
           <HeaderUsageChip
             providerIds={usageProviderIds}
             providers={providers}
-            className="ml-auto max-md:hidden"
+            className="ml-auto @max-7xl:hidden"
           />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
@@ -2810,7 +2814,7 @@ function HeaderPaceChip({
         <>
           {' / '}
           {aiSegmentMs > 0 && (
-            <span className="max-sm:hidden">
+            <span className="@max-md:hidden">
               <span className="text-neutral-400">{formatHoursMinutes(aiSegmentMs)}</span>
               {' / '}
             </span>
@@ -2827,9 +2831,9 @@ function HeaderPaceChip({
 /** How many meters the fixed title strip draws before collapsing the rest into "+N". The
  *  strip is ONE line that also carries the back link, the vote score, the title, up to four
  *  badges and the pace chip, and a full meter is ~250px (name + a 50px bar per window + its
- *  reset time). Two is what fits on a laptop without the title truncating to nothing; the
- *  hidden ones keep their numbers in the "+N" tooltip. The page header applies the same cap
- *  for the same reason — it shares its row with the recovery buttons. */
+ *  reset time). Two is what fits beside a readable title on a wide strip, the only one that
+ *  shows the chip; the hidden ones keep their numbers in the "+N" tooltip. The page header
+ *  applies the same cap for the same reason — it shares its row with the recovery buttons. */
 const HEADER_METER_LIMIT = 2;
 
 /**

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+import type postgres from 'postgres';
 import {
   cleanupRepoFixture,
   cleanupTaskFixture,
@@ -9,67 +10,93 @@ import {
 } from '../helpers/db.js';
 import { registerUser } from '../helpers/auth.js';
 
+interface TaskPageFixture {
+  taskId: string;
+  userId: string;
+  repoId: string;
+}
+
 /**
- * The task page at a phone's width. The fixture carries everything that competes for the header
- * and the fixed title strip: a repository and an execution path badge, a long title, and two live
- * usage meters (the current step's default CLI and one of its seats on a second provider), which is
- * the widest those rows get. A finished step carries a duration and a round badge beside its title.
+ * A running task carrying everything that competes for the header and the fixed title strip: a
+ * repository and an execution path badge, a long title, two live usage meters (the current step's
+ * default CLI and one of its seats on a second provider), and both estimates, which is the widest
+ * those rows get. A finished step carries a duration and a round badge beside its title.
+ *
+ * Fills `fx` as it goes, so the cleanup removes whatever was created before a failure.
  */
+async function seedTaskPage(
+  sql: postgres.Sql,
+  page: Page,
+  prefix: string,
+  fx: TaskPageFixture,
+): Promise<void> {
+  fx.userId = (await registerUser(sql, page.request, { prefix })).userId;
+  fx.repoId = (await seedRepoFixture(sql, fx.userId, 'phone')).repoId;
+  const [claude, codex] = [randomUUID(), randomUUID()];
+  await sql`
+    insert into cli_providers (id, user_id, name, label)
+    values (${claude}, ${fx.userId}, 'claude-code', 'Claude'), (${codex}, ${fx.userId}, 'codex', 'Codex')
+  `;
+  const reset = new Date(Date.now() + 3 * 3_600_000);
+  await sql`
+    insert into usage_window_snapshots (
+      provider_id, user_id, provider_name, five_hour_pct, five_hour_reset_at,
+      seven_day_pct, seven_day_reset_at, status
+    ) values
+      (${claude}, ${fx.userId}, 'claude-code', 41, ${reset}, 52, ${reset}, 'ok'),
+      (${codex}, ${fx.userId}, 'codex', 12, ${reset}, 33, ${reset}, 'ok')
+  `;
+  await sql`
+    insert into user_step_cli_role_preferences (user_id, step_id, role, cli_provider_id, explicit)
+    values (${fx.userId}, '08c-code-review', 'peer-reviewer', ${codex}, true)
+  `;
+  const started = new Date(Date.now() - 2 * 3_600_000);
+  const ended = new Date(started.getTime() + 37 * 60_000 + 13_000);
+  await sql`
+    insert into tasks (
+      id, user_id, type, title, status, repository_id, cli_provider_id, execution_path,
+      current_step_id, current_step_index, estimated_time_hours, ai_estimated_time_hours,
+      started_at, created_at, updated_at
+    ) values (
+      ${fx.taskId}, ${fx.userId}, 'workflow',
+      'A task title long enough that a phone has to truncate it somewhere',
+      'running', ${fx.repoId}, ${claude}, 'full_workflow', '08c-code-review', 1, 3, 1.5,
+      ${started}, ${started}, ${started}
+    )
+  `;
+  await sql`
+    insert into task_steps (
+      id, task_id, step_id, step_index, title, status, iteration_count, started_at, ended_at,
+      created_at, updated_at
+    ) values
+      (${randomUUID()}, ${fx.taskId}, '08b-test-management', 0, 'Phase 5b: Test management',
+       'done', 2, ${started}, ${ended}, ${started}, ${ended}),
+      (${randomUUID()}, ${fx.taskId}, '08c-code-review', 1, 'Phase 6: Code review',
+       'running', 0, ${ended}, null, ${ended}, ${ended})
+  `;
+}
+
+async function cleanupTaskPage(sql: postgres.Sql, fx: TaskPageFixture): Promise<void> {
+  await cleanupTaskFixture(sql, fx.taskId);
+  if (fx.userId) {
+    await sql`delete from user_step_cli_role_preferences where user_id = ${fx.userId}`;
+    await sql`delete from usage_window_snapshots where user_id = ${fx.userId}`;
+    await sql`delete from cli_providers where user_id = ${fx.userId}`;
+  }
+  if (fx.repoId) await cleanupRepoFixture(sql, fx.repoId);
+  if (fx.userId) await cleanupUser(sql, fx.userId);
+}
+
 test.describe('task page on a phone', () => {
   test.use({ viewport: { width: 375, height: 812 } });
 
   test('fits the screen, and the title strip keeps to one line', async ({ page }) => {
     const sql = getSql();
-    let userId = '';
-    let repoId = '';
-    const taskId = randomUUID();
-    const providerIds = [randomUUID(), randomUUID()];
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
     try {
-      userId = (await registerUser(sql, page.request, { prefix: 'task-phone' })).userId;
-      repoId = (await seedRepoFixture(sql, userId, 'phone')).repoId;
-      const [claude, codex] = providerIds as [string, string];
-      await sql`
-        insert into cli_providers (id, user_id, name, label)
-        values (${claude}, ${userId}, 'claude-code', 'Claude'), (${codex}, ${userId}, 'codex', 'Codex')
-      `;
-      const reset = new Date(Date.now() + 3 * 3_600_000);
-      await sql`
-        insert into usage_window_snapshots (
-          provider_id, user_id, provider_name, five_hour_pct, five_hour_reset_at,
-          seven_day_pct, seven_day_reset_at, status
-        ) values
-          (${claude}, ${userId}, 'claude-code', 41, ${reset}, 52, ${reset}, 'ok'),
-          (${codex}, ${userId}, 'codex', 12, ${reset}, 33, ${reset}, 'ok')
-      `;
-      await sql`
-        insert into user_step_cli_role_preferences (user_id, step_id, role, cli_provider_id, explicit)
-        values (${userId}, '08c-code-review', 'peer-reviewer', ${codex}, true)
-      `;
-      const started = new Date(Date.now() - 2 * 3_600_000);
-      const ended = new Date(started.getTime() + 37 * 60_000 + 13_000);
-      await sql`
-        insert into tasks (
-          id, user_id, type, title, status, repository_id, cli_provider_id, execution_path,
-          current_step_id, current_step_index, started_at, created_at, updated_at
-        ) values (
-          ${taskId}, ${userId}, 'workflow',
-          'A task title long enough that a phone has to truncate it somewhere',
-          'running', ${repoId}, ${claude}, 'full_workflow', '08c-code-review', 1,
-          ${started}, ${started}, ${started}
-        )
-      `;
-      await sql`
-        insert into task_steps (
-          id, task_id, step_id, step_index, title, status, iteration_count, started_at, ended_at,
-          created_at, updated_at
-        ) values
-          (${randomUUID()}, ${taskId}, '08b-test-management', 0, 'Phase 5b: Test management',
-           'done', 2, ${started}, ${ended}, ${started}, ${ended}),
-          (${randomUUID()}, ${taskId}, '08c-code-review', 1, 'Phase 6: Code review',
-           'running', 0, ${ended}, null, ${ended}, ${ended})
-      `;
+      await seedTaskPage(sql, page, 'task-phone', fx);
 
-      await page.goto(`/tasks/${taskId}`);
+      await page.goto(`/tasks/${fx.taskId}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       await expect(page.locator('[title*="subscription usage"]')).toHaveCount(2);
 
@@ -103,14 +130,58 @@ test.describe('task page on a phone', () => {
       expect(fit.outside, 'every item of the strip is inside it').toBe(0);
       expect(fit.height, 'the strip keeps to one line').toBeLessThan(48);
     } finally {
-      await cleanupTaskFixture(sql, taskId);
-      if (userId) {
-        await sql`delete from user_step_cli_role_preferences where user_id = ${userId}`;
-        await sql`delete from usage_window_snapshots where user_id = ${userId}`;
-        await sql`delete from cli_providers where user_id = ${userId}`;
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+});
+
+test.describe('task title strip', () => {
+  test('keeps its title readable at every width, with the sidebar open or folded', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    try {
+      await seedTaskPage(sql, page, 'task-strip', fx);
+
+      // Short, so the header scrolls out of view even at the widest width.
+      await page.setViewportSize({ width: 1920, height: 500 });
+      await page.goto(`/tasks/${fx.taskId}`);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
+
+      const strip = page.locator('[data-fixed-title-strip]');
+      const misfits: string[] = [];
+      for (const sidebar of ['open', 'folded'] as const) {
+        if (sidebar === 'folded') {
+          await page.setViewportSize({ width: 1920, height: 500 });
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+          await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+        }
+        for (let width = 375; width <= 1920; width += 25) {
+          await page.setViewportSize({ width, height: 500 });
+          await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+          await expect(strip).toBeVisible();
+          // The strip's own usage chip fetches when the strip mounts; hidden or not, its two
+          // meters are in the DOM once it has loaded.
+          await expect(strip.locator('[title*="subscription usage"]')).toHaveCount(2);
+          const fit = await strip.evaluate((el) => ({
+            overflow: el.scrollWidth - el.clientWidth,
+            title: Math.round(el.querySelector('p')!.getBoundingClientRect().width),
+          }));
+          // 80px is about ten characters of the title, the one thing the strip is there to show.
+          if (fit.overflow > 1 || fit.title < 80) {
+            misfits.push(
+              `${width}px, sidebar ${sidebar}: overflow ${fit.overflow}px, title ${fit.title}px`,
+            );
+          }
+        }
       }
-      if (repoId) await cleanupRepoFixture(sql, repoId);
-      if (userId) await cleanupUser(sql, userId);
+      expect(misfits, 'the strip holds all its items and a readable title').toEqual([]);
+    } finally {
+      await cleanupTaskPage(sql, fx);
       await sql.end({ timeout: 5 });
     }
   });
