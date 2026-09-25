@@ -43,6 +43,7 @@ import {
   stepRegistry,
   registerAllSteps,
   dagTimeoutInfo,
+  finishedStepResult,
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
@@ -2012,23 +2013,29 @@ async function handleAdvanceStep(
   // in the same instant the successor's row was being created, so it saw nothing active.
   //
   // Re-drive the hand-off ONLY on evidence the chain has not moved (the task still
-  // points at this step + round). Re-driving unconditionally would enqueue an advance
+  // points at this step + round), with the result the row finished with
+  // (finishedStepResult). Re-driving unconditionally would enqueue an advance
   // for an already-done successor, which would re-drive ITS successor, cascading; never
   // re-driving would strand the chain when a job dies between advanceStep and
   // handleResult (adjacent lines in one try block). Same rule as the pause guard below:
   // act on positive evidence, not on a bare mismatch.
   if (existing?.status === 'done') {
     const chainMoved = advanceChainHasMoved(ctx, payload.stepId, round);
+    const redriven = chainMoved
+      ? null
+      : await finishedStepResult(db, ctx.taskId, stepDef, existing);
     logger.warn(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, chainMoved },
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        round,
+        chainMoved,
+        redrivenStatus: redriven?.status ?? null,
+      },
       'advance-step skipped: step already done (duplicate delivery)',
     );
-    if (!chainMoved) {
-      await handleResult(db, ctx, payload.stepId, {
-        status: 'done',
-        row: existing,
-        output: existing.output,
-      });
+    if (redriven) {
+      await handleResult(db, ctx, payload.stepId, redriven);
     }
     return;
   }

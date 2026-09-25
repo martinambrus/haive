@@ -2117,6 +2117,67 @@ export function isFreshStepEntry(status: TaskStepRow['status']): boolean {
 
 const CANCEL_POLL_INTERVAL_MS = 2_000;
 
+export function routesErrorToFixLoop(stepDef: StepDefinition, errorMessage: string): boolean {
+  return typeof stepDef.fixLoopOnError === 'function'
+    ? stepDef.fixLoopOnError(errorMessage)
+    : stepDef.fixLoopOnError === true;
+}
+
+export type FinishedRoutingVerdict =
+  | { kind: 'loop_back'; diagnosis: string; uncapped?: boolean }
+  | { kind: 'revise'; targetStepId: string };
+
+/** The loop_back/revise verdict for this output: fixLoop unless suppressed, then restartLoop,
+ *  then reviseLoop — or null when none fires. */
+export async function finishedRoutingVerdict(
+  db: Database,
+  taskId: string,
+  stepDef: StepDefinition,
+  output: unknown,
+): Promise<FinishedRoutingVerdict | null> {
+  if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
+    const verdict = stepDef.fixLoop.evaluate(output);
+    if (verdict?.blocking) return { kind: 'loop_back', diagnosis: verdict.diagnosis };
+  }
+  if (stepDef.restartLoop) {
+    const restart = stepDef.restartLoop.evaluate(output);
+    if (restart) return { kind: 'loop_back', diagnosis: restart.diagnosis, uncapped: true };
+  }
+  if (stepDef.reviseLoop) {
+    const target = stepDef.reviseLoop.evaluate(output);
+    if (target) return { kind: 'revise', targetStepId: target.targetStepId };
+  }
+  return null;
+}
+
+/** The result a `done` row was handed off with: its fixLoopOnError diagnosis, else its
+ *  output's loop_back/revise verdict, else plain done. */
+export async function finishedStepResult(
+  db: Database,
+  taskId: string,
+  stepDef: StepDefinition,
+  row: TaskStepRow,
+): Promise<AdvanceStepResult> {
+  const sourceStepId = stepDef.metadata.id;
+  if (row.errorMessage != null && routesErrorToFixLoop(stepDef, row.errorMessage)) {
+    return { status: 'loop_back', row, diagnosis: row.errorMessage, sourceStepId };
+  }
+  const verdict = await finishedRoutingVerdict(db, taskId, stepDef, row.output);
+  if (verdict?.kind === 'revise') {
+    return { status: 'revise', row, targetStepId: verdict.targetStepId, sourceStepId };
+  }
+  if (verdict?.kind === 'loop_back') {
+    return {
+      status: 'loop_back',
+      row,
+      diagnosis: verdict.diagnosis,
+      sourceStepId,
+      ...(verdict.uncapped ? { uncapped: true } : {}),
+    };
+  }
+  return { status: 'done', row, output: row.output };
+}
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
@@ -2953,99 +3014,45 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     };
 
-    // --- Fix-loop hook: a downstream step that finds a BLOCKING defect routes back
-    // to the implementation step for a new round instead of finishing the chain. The
-    // step row is still marked done (it ran successfully and produced its findings);
-    // handleResult turns the loop_back into a round bump + re-entry at implement. ---
-    // Skip the loop-back once the user accepted remaining issues at the escalation
-    // gate — every later fix-loop check stands down so the run proceeds to gate 2.
-    if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
-      const verdict = stepDef.fixLoop.evaluate(output);
-      if (verdict?.blocking) {
-        const finished = await updateRow(db, current.id, {
-          status: 'done',
-          output,
-          summary: curatedSummary,
-          statusMessage: null,
-          // Ends successfully => carries no error; see the main done write below.
-          errorMessage: null,
-          endedAt: new Date(),
-        });
-        await recordRecap();
+    // The row is still done; handleResult turns loop_back into a new round at implement and
+    // revise into a reset of its target.
+    const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
+    if (verdict) {
+      const finished = await updateRow(db, current.id, {
+        status: 'done',
+        output,
+        summary: curatedSummary,
+        statusMessage: null,
+        // Ends successfully => carries no error; see the main done write below.
+        errorMessage: null,
+        endedAt: new Date(),
+      });
+      await recordRecap();
+      if (verdict.kind === 'revise') {
         ctx.logger.info(
-          { stepId: meta.id, round },
-          'fix-loop: blocking defect found; routing back to implementation',
-        );
-        return {
-          status: 'loop_back',
-          row: finished,
-          diagnosis: verdict.diagnosis,
-          sourceStepId: meta.id,
-        };
-      }
-    }
-
-    // --- Restart-loop hook: a HUMAN gate (gate-2 developer reject after browser/manual
-    // verification) that asks to restart from implementation. Like fixLoop it returns
-    // loop_back — round bump + re-enter at implement, whole chain re-runs as new round
-    // rows — but UNCAPPED and suppression-immune: the developer is the bound, not
-    // max_fix_rounds, and a prior auto-fix Accept does not stand it down. ---
-    if (stepDef.restartLoop) {
-      const restart = stepDef.restartLoop.evaluate(output);
-      if (restart) {
-        const finished = await updateRow(db, current.id, {
-          status: 'done',
-          output,
-          summary: curatedSummary,
-          statusMessage: null,
-          // Ends successfully => carries no error; see the main done write below.
-          errorMessage: null,
-          endedAt: new Date(),
-        });
-        await recordRecap();
-        ctx.logger.info(
-          { stepId: meta.id, round },
-          'restart-loop: human gate requested restart from implementation (uncapped)',
-        );
-        return {
-          status: 'loop_back',
-          row: finished,
-          diagnosis: restart.diagnosis,
-          sourceStepId: meta.id,
-          uncapped: true,
-        };
-      }
-    }
-
-    // --- Revise-loop hook: a review step whose apply output asks to revise an EARLIER
-    // step (e.g. 03c reject → re-mine 03b). The step row is marked done (it ran fine and
-    // recorded its decision); handleResult resets the target + its downstream and
-    // re-enters the target in the SAME round. Human-gated (the review form re-parks each
-    // cycle), so unlike fix-loop there is no round bump and no cap. ---
-    if (stepDef.reviseLoop) {
-      const target = stepDef.reviseLoop.evaluate(output);
-      if (target) {
-        const finished = await updateRow(db, current.id, {
-          status: 'done',
-          output,
-          summary: curatedSummary,
-          statusMessage: null,
-          // Ends successfully => carries no error; see the main done write below.
-          errorMessage: null,
-          endedAt: new Date(),
-        });
-        await recordRecap();
-        ctx.logger.info(
-          { stepId: meta.id, targetStepId: target.targetStepId },
+          { stepId: meta.id, targetStepId: verdict.targetStepId },
           'revise-loop: apply requested revising an earlier step',
         );
         return {
           status: 'revise',
           row: finished,
-          targetStepId: target.targetStepId,
+          targetStepId: verdict.targetStepId,
           sourceStepId: meta.id,
         };
       }
+      ctx.logger.info(
+        { stepId: meta.id, round },
+        verdict.uncapped
+          ? 'restart-loop: human gate requested restart from implementation (uncapped)'
+          : 'fix-loop: blocking defect found; routing back to implementation',
+      );
+      return {
+        status: 'loop_back',
+        row: finished,
+        diagnosis: verdict.diagnosis,
+        sourceStepId: meta.id,
+        ...(verdict.uncapped ? { uncapped: true } : {}),
+      };
     }
 
     // A Stop/Cancel that landed during apply() (task set failed/cancelled -> poll
@@ -3104,10 +3111,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
     // decides per error, so a step can loop back on the failures its implementer authored
     // and still hard-fail on the ones no amount of re-implementing would clear.
-    const routeErrorToFixLoop =
-      typeof stepDef.fixLoopOnError === 'function'
-        ? stepDef.fixLoopOnError(errorMessage)
-        : stepDef.fixLoopOnError === true;
+    const routeErrorToFixLoop = routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       const finished = await updateRow(db, row.id, {
         status: 'done',

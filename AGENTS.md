@@ -281,6 +281,16 @@ re-drive enqueue can still be lost, and every minute for a task idle five minute
 lost between boots. It bumps the epoch under the task row's lock and re-checks the row in the same
 statement, so a step a pass claimed since the candidate read is left to that pass.
 
+**A duplicate delivery re-drives the hand-off the step finished with.** An advance that finds its
+row already `done`, while the task still points at that step and round, re-drives the hand-off from
+the row (`finishedStepResult`, `step-runner.ts`) rather than as a plain `done`. The apply tail writes
+`done` for a fix-loop, restart or revise verdict too, and for a `fixLoopOnError` failure, whose
+diagnosis is the row's `error_message`, so a job that died between that write and its hand-off used
+to walk forward past the round its step had asked for. The verdict is recomputed from the stored
+output by the one function the tail itself routes with (`finishedRoutingVerdict`), so the two
+cannot disagree on precedence. `advanceStep`'s own `done` short-circuit is left as it is: the START
+path that reaches it has no moved-chain check, so a verdict re-driven there could bump a round.
+
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
 apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
 both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance

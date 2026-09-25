@@ -1,0 +1,433 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Queue } from 'bullmq';
+import { and, eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import {
+  configService,
+  secretsService,
+  userSecretsService,
+  logger,
+  QUEUE_NAMES,
+  TASK_JOB_NAMES,
+  type TaskJobPayload,
+} from '@haive/shared';
+import { initDatabase } from '../src/db.js';
+import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
+import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+
+// A duplicate ADVANCE_STEP for an already-done row must re-drive its real verdict; the
+// two loop/revise targets are stubbed to park on a form so nothing cascades or spends.
+
+const log = logger.child({ module: 'done-duplicate-smoke' });
+
+const REQUIRED_ENV = ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const;
+for (const k of REQUIRED_ENV) {
+  if (!process.env[k]) {
+    console.error(`[smoke] missing env ${k}`);
+    process.exit(2);
+  }
+}
+
+let failures = 0;
+let checks = 0;
+function check(name: string, ok: boolean, detail?: unknown): void {
+  checks += 1;
+  if (ok) {
+    log.info({ check: name }, 'ok');
+    return;
+  }
+  failures += 1;
+  log.error({ check: name, detail }, 'FAILED');
+}
+
+async function pollUntil<T>(
+  fn: () => Promise<T | null>,
+  predicate: (val: T) => boolean,
+  label: string,
+  timeoutMs = 15000,
+  intervalMs = 200,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const val = await fn();
+    if (val !== null && predicate(val)) return val;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+async function createFixtureRepo(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-done-duplicate-smoke-'));
+  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'smoke@test.local']);
+  git(['config', 'user.name', 'Smoke Test']);
+  git(['commit', '--allow-empty', '-m', 'initial']);
+  return dir;
+}
+
+/** Stands in for a loop/revise target: detects instantly and parks on a form, no CLI. */
+function overrideParkingStub(id: string, index: number): void {
+  stepRegistry.override({
+    metadata: {
+      id,
+      workflowType: 'workflow',
+      index,
+      title: 'smoke stub',
+      description: 'smoke stub target for done-duplicate-smoke',
+      requiresCli: false,
+    },
+    async detect() {
+      return {};
+    },
+    form() {
+      return {
+        title: 'smoke stub',
+        fields: [{ type: 'textarea', id: 'note', label: 'note' }],
+      };
+    },
+    async apply() {
+      return {};
+    },
+  });
+}
+
+interface TaskRow {
+  id: string;
+  status: string;
+  currentStepId: string | null;
+  currentRound: number;
+}
+
+async function loadTask(db: Database, taskId: string): Promise<TaskRow | null> {
+  const rows = await db
+    .select({
+      id: schema.tasks.id,
+      status: schema.tasks.status,
+      currentStepId: schema.tasks.currentStepId,
+      currentRound: schema.tasks.currentRound,
+    })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function main(): Promise<void> {
+  initRedis(process.env.REDIS_URL!);
+  await configService.initialize(process.env.REDIS_URL!);
+  const db = initDatabase(process.env.DATABASE_URL!);
+  await secretsService.initialize(db);
+  const masterKek = await secretsService.getMasterKek();
+  await userSecretsService.initialize(db, masterKek);
+
+  let fixtureDir: string | undefined;
+  let userId: string | undefined;
+  let repoId: string | undefined;
+  const taskIds: string[] = [];
+  let worker: Awaited<ReturnType<typeof startTaskWorker>> | undefined;
+  let queue: Queue<TaskJobPayload> | undefined;
+
+  try {
+    fixtureDir = await createFixtureRepo();
+    const now = new Date();
+    userId = randomUUID();
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'done-duplicate-smoke@test.local',
+      emailBlindIndex: `done-dup-${randomBytes(4).toString('hex')}`,
+      passwordHash: 'smoke-not-real',
+      role: 'user',
+      status: 'active',
+      tokenVersion: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'done-duplicate-smoke-fixture',
+        source: 'local_path',
+        localPath: fixtureDir,
+        storagePath: fixtureDir,
+        status: 'ready',
+      })
+      .returning();
+    if (!repo) throw new Error('repo insert failed');
+    repoId = repo.id;
+
+    worker = startTaskWorker();
+    queue = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, { connection: getBullRedis() });
+
+    // Must run AFTER startTaskWorker registers the real steps, or override would collide.
+    overrideParkingStub('07-phase-2-implement', 7);
+    overrideParkingStub('03b-business-requirements', 3.5);
+
+    const makeTask = async (title: string, opts: Partial<typeof schema.tasks.$inferInsert>) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: userId!,
+          repositoryId: repoId!,
+          type: 'workflow',
+          title,
+          status: 'running',
+          autoContinue: false,
+          orchestrationEpoch: 1,
+          ...opts,
+        })
+        .returning({ id: schema.tasks.id });
+      if (!task) throw new Error(`task insert failed: ${title}`);
+      taskIds.push(task.id);
+      return task.id;
+    };
+
+    const insertDoneStep = async (
+      taskId: string,
+      stepId: string,
+      round: number,
+      stepIndex: number,
+      output: unknown,
+    ) => {
+      await db.insert(schema.taskSteps).values({
+        taskId,
+        stepId,
+        stepIndex,
+        round,
+        title: 'smoke',
+        status: 'done',
+        output,
+        endedAt: new Date(),
+      });
+    };
+
+    const enqueueDuplicate = (taskId: string, stepId: string, round: number) =>
+      queue!.add(TASK_JOB_NAMES.ADVANCE_STEP, {
+        taskId,
+        userId: userId!,
+        stepId,
+        round,
+        epoch: 1,
+      });
+
+    // --- Case 1: fix loop -------------------------------------------------------------
+    // 07b's fixLoop fires on any non-VALID verdict with no churn files.
+    {
+      const taskId = await makeTask('fix-loop dup', {
+        executionPath: 'quick_bugfix',
+        currentStepId: '07b-phase-4-validate',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+        verdict: 'ISSUES_FOUND',
+        findingsSummary: 'smoke-forced blocking finding',
+      });
+      await enqueueDuplicate(taskId, '07b-phase-4-validate', 0);
+
+      const task = await pollUntil(
+        () => loadTask(db, taskId),
+        (t) => t.currentStepId === '07-phase-2-implement' && t.currentRound === 1,
+        'fix-loop case: task re-entering 07-phase-2-implement at round 1',
+      );
+      check(
+        'fix-loop: task points at 07-phase-2-implement round 1 (not the next spine step)',
+        task.currentStepId === '07-phase-2-implement' && task.currentRound === 1,
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.requested'),
+          ),
+        );
+      check(
+        'fix-loop: a fix_loop.requested event was recorded for round 1',
+        events.some((e) => (e.payload as { round?: number } | null)?.round === 1),
+        events,
+      );
+
+      const targetRows = await db
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, '07-phase-2-implement'),
+            eq(schema.taskSteps.round, 1),
+          ),
+        );
+      check(
+        'fix-loop: 07-phase-2-implement round 1 row was materialized',
+        targetRows.length > 0,
+        targetRows,
+      );
+    }
+
+    // --- Case 2: revise ----------------------------------------------------------------
+    // 03c's reviseLoop targets 03b; cross-step revise forks round 1, not the same round.
+    {
+      const taskId = await makeTask('revise dup', {
+        currentStepId: '03c-business-requirements-review',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '03c-business-requirements-review', 0, 3.6, {
+        decision: 'reject',
+        requirements: 'drafted requirements',
+        summary: 'summary',
+        feedback: 'please redo the second section',
+      });
+      await enqueueDuplicate(taskId, '03c-business-requirements-review', 0);
+
+      const task = await pollUntil(
+        () => loadTask(db, taskId),
+        (t) => t.currentStepId === '03b-business-requirements' && t.currentRound === 1,
+        'revise case: task re-entering 03b-business-requirements at round 1',
+      );
+      check(
+        'revise: task points at 03b-business-requirements at round 1 (forked round)',
+        task.currentStepId === '03b-business-requirements' && task.currentRound === 1,
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, 'step.revise')),
+        );
+      check(
+        'revise: a step.revise event names the target step',
+        events.some(
+          (e) =>
+            (e.payload as { targetStepId?: string } | null)?.targetStepId ===
+            '03b-business-requirements',
+        ),
+        events,
+      );
+
+      const targetRows = await db
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, '03b-business-requirements'),
+            eq(schema.taskSteps.round, 1),
+          ),
+        );
+      check(
+        'revise: 03b-business-requirements round 1 row was reset/materialized',
+        targetRows.length > 0,
+        targetRows,
+      );
+    }
+
+    // --- Case 3: plain done --------------------------------------------------------------
+    // 04a has no loop hooks and is excluded from quick_bugfix, so the task completes.
+    {
+      const taskId = await makeTask('plain done dup', {
+        executionPath: 'quick_bugfix',
+        currentStepId: '04a-spec-audit',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '04a-spec-audit', 0, 4.6, {});
+      await enqueueDuplicate(taskId, '04a-spec-audit', 0);
+
+      const task = await pollUntil(
+        () => loadTask(db, taskId),
+        (t) => t.status === 'completed',
+        'plain-done case: task completing',
+      );
+      check(
+        'plain done: task completed (forward hand-off, no loop/revise)',
+        task.status === 'completed',
+        task,
+      );
+    }
+
+    // --- Case 4: chain moved -------------------------------------------------------------
+    // The task points elsewhere, so nothing may be re-driven regardless of the output.
+    {
+      const taskId = await makeTask('chain moved dup', {
+        currentStepId: '08b-test-management',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+        verdict: 'ISSUES_FOUND',
+        findingsSummary: 'would have been blocking, but the chain moved on',
+      });
+      const before = await loadTask(db, taskId);
+      const job = await enqueueDuplicate(taskId, '07b-phase-4-validate', 0);
+      const state = await pollUntil(
+        () => job.getState(),
+        (s) => s === 'completed' || s === 'failed',
+        'chain moved case: duplicate advance job settling',
+      );
+      if (state === 'failed') {
+        check('chain moved: the duplicate advance job did not fail', false, state);
+      }
+      const after = await loadTask(db, taskId);
+      check(
+        'chain moved: the task pointer is unchanged',
+        after?.currentStepId === before?.currentStepId &&
+          after?.currentRound === before?.currentRound,
+        { before, after },
+      );
+      const implementRows = await db
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, '07-phase-2-implement'),
+          ),
+        );
+      check(
+        'chain moved: nothing was re-driven at 07-phase-2-implement',
+        implementRows.length === 0,
+        implementRows,
+      );
+    }
+
+    log.info({ checks, failures }, failures === 0 ? 'done-duplicate smoke PASSED' : 'FAILED');
+    console.log(failures === 0 ? '[smoke] done-duplicate PASSED' : '[smoke] done-duplicate FAILED');
+  } finally {
+    try {
+      if (taskIds.length > 0) {
+        for (const id of taskIds) {
+          await db
+            .delete(schema.tasks)
+            .where(eq(schema.tasks.id, id))
+            .catch(() => {});
+        }
+      }
+      if (repoId) await db.delete(schema.repositories).where(eq(schema.repositories.id, repoId));
+      if (userId) await db.delete(schema.users).where(eq(schema.users.id, userId));
+    } catch (cleanupErr) {
+      log.warn({ err: cleanupErr }, 'cleanup db rows failed');
+    }
+    if (fixtureDir) await rm(fixtureDir, { recursive: true, force: true }).catch(() => {});
+    if (worker) await worker.close().catch(() => {});
+    if (queue) await queue.close().catch(() => {});
+    await closeTaskQueue().catch(() => {});
+    await closeRedis().catch(() => {});
+  }
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((err) => {
+  log.error({ err }, 'done-duplicate smoke crashed');
+  console.error('[smoke] FAILED:', err);
+  process.exit(1);
+});
