@@ -369,7 +369,10 @@ had a container. That kill runs once, and it can land while a job is still prepa
 the run is read again right before the container is created (`beforeRun`), as soon as it first
 prints, when it is certainly running and so either the kill found it or this read sees the
 supersede, and every few seconds after (`run-superseded.ts`); a run that reads superseded gets no
-sandbox or loses the one it has. A pass a Stop cut off
+sandbox or loses the one it has. A Stop takes the Retry's steps in one transaction
+(`stopActiveCliInvocations`): runs, steps, a second sweep of runs, then the task, and the sandboxes
+are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
+Stop that fails leaves every run as it was and kills nothing. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
