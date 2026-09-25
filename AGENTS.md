@@ -281,6 +281,22 @@ re-drive enqueue can still be lost, and every minute for a task idle five minute
 lost between boots. It bumps the epoch under the task row's lock and re-checks the row in the same
 statement, so a step a pass claimed since the candidate read is left to that pass.
 
+**A duplicate delivery re-drives the hand-off the step finished with.** An advance that finds its
+row already `done`, while the task still points at that step and round, re-drives the hand-off from
+the row (`finishedStepResult`, `step-runner.ts`) rather than as a plain `done`. The apply tail writes
+`done` for a fix-loop, restart or revise verdict too, and for a `fixLoopOnError` failure, whose
+diagnosis is the row's `error_message`, so a job that died between that write and its hand-off used
+to walk forward past the round its step had asked for. The verdict is recomputed from the stored
+output by the one function the tail itself routes with (`finishedRoutingVerdict`), so the two
+cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
+(`resolveFixLoopGate`): the gate writes its row `done` before it acts, so a verdict recomputed
+there would replace the person's decision with the step's own. On a task that failed before the
+answer was sent, the pickup guard admits the answer onto the `done` row as it would onto the parked
+form (`gateAnswerSentAfterFailure`, the task's `completed_at` against the job's own timestamp); a
+failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `done` short-circuit
+is left as it is: the START path that reaches it has no moved-chain check, so a verdict re-driven
+there could bump a round.
+
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
 apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
 both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
@@ -345,8 +361,9 @@ points the task at it in one transaction (`writeFencedPark`), the row first as a
 first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
 signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
 while the fence holds. A job revives a failed task only when the task was already failed at pickup,
-which the pickup guard allows only for an answer to a form still parked, so a Stop landing after
-pickup stands; the answer to a fix-loop gate hands off under the same rule. That holds
+which the pickup guard allows only for an answer to a form still parked, or to a fix-loop gate
+that answer closed before a worker died (above), so a Stop landing after pickup stands; the answer
+to a fix-loop gate hands off under the same rule. That holds
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
 read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the

@@ -43,6 +43,7 @@ import {
   stepRegistry,
   registerAllSteps,
   dagTimeoutInfo,
+  finishedStepResult,
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
@@ -84,6 +85,7 @@ import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/al
 import {
   blockedByActiveStepMessage,
   failedTaskRefusesAdvance,
+  gateAnswerSentAfterFailure,
   staleSubmitAction,
 } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
@@ -175,6 +177,8 @@ interface ResolvedTaskContext {
   /** Task status as of job pickup. A `cancelled`/`completed` task must never be advanced —
    *  cancel leaves its already-queued advance jobs in place, so this is what stops them. */
   status: string;
+  /** When the task last ended: on a failed task, when it failed. */
+  completedAt: Date | null;
 }
 
 async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<StepDefinition[]> {
@@ -304,6 +308,7 @@ async function resolveTaskContext(
     currentStepId: task.currentStepId ?? null,
     currentRound: task.currentRound ?? 0,
     status: task.status,
+    completedAt: task.completedAt ?? null,
   };
 }
 
@@ -1762,6 +1767,19 @@ export async function resolveFixLoopGate(
   );
 }
 
+/** The fix-loop gate decision a submit carries: the job's formValues, else the row's saved ones. */
+function readFixLoopGateAction(
+  payload: TaskJobPayload,
+  existing: { formValues: unknown } | undefined,
+): { action: string; instruction: string } | null {
+  const gateValues =
+    payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
+  const action = gateValues?.[FIX_LOOP_ACTION_FIELD];
+  if (typeof action !== 'string') return null;
+  const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
+  return { action, instruction: typeof raw === 'string' ? raw : '' };
+}
+
 async function handleStartTask(
   db: Database,
   payload: TaskJobPayload,
@@ -1995,7 +2013,19 @@ async function handleAdvanceStep(
   // An advance queued before the task failed, such as one a fan-out's agent queued and the step's
   // hold deferred behind the pass that then failed the step, would otherwise revive the task and run
   // the step again.
-  if (failedTaskRefusesAdvance(ctx.status, existing?.status, payload.formValues != null)) {
+  const gateAnswerAfterFailure = gateAnswerSentAfterFailure(
+    readFixLoopGateAction(payload, undefined) !== null,
+    ctx.completedAt,
+    jobTimestamp,
+  );
+  if (
+    failedTaskRefusesAdvance(
+      ctx.status,
+      existing?.status,
+      payload.formValues != null,
+      gateAnswerAfterFailure,
+    )
+  ) {
     logger.info(
       { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
       'advance-step skipped: the task failed and nothing has reopened it',
@@ -2012,23 +2042,32 @@ async function handleAdvanceStep(
   // in the same instant the successor's row was being created, so it saw nothing active.
   //
   // Re-drive the hand-off ONLY on evidence the chain has not moved (the task still
-  // points at this step + round). Re-driving unconditionally would enqueue an advance
+  // points at this step + round), with the result the row finished with
+  // (finishedStepResult). Re-driving unconditionally would enqueue an advance
   // for an already-done successor, which would re-drive ITS successor, cascading; never
   // re-driving would strand the chain when a job dies between advanceStep and
   // handleResult (adjacent lines in one try block). Same rule as the pause guard below:
   // act on positive evidence, not on a bare mismatch.
   if (existing?.status === 'done') {
     const chainMoved = advanceChainHasMoved(ctx, payload.stepId, round);
+    const gate = chainMoved ? null : readFixLoopGateAction(payload, existing);
+    const redriven =
+      chainMoved || gate ? null : await finishedStepResult(db, ctx.taskId, stepDef, existing);
     logger.warn(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, chainMoved },
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        round,
+        chainMoved,
+        path: gate ? 'gate' : redriven ? 'redriven' : 'none',
+        redrivenStatus: redriven?.status ?? null,
+      },
       'advance-step skipped: step already done (duplicate delivery)',
     );
-    if (!chainMoved) {
-      await handleResult(db, ctx, payload.stepId, {
-        status: 'done',
-        row: existing,
-        output: existing.output,
-      });
+    if (gate) {
+      await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
+    } else if (redriven) {
+      await handleResult(db, ctx, payload.stepId, redriven);
     }
     return;
   }
@@ -2059,19 +2098,9 @@ async function handleAdvanceStep(
 
   // Fix-loop escalation gate: a submission carrying the gate's decision field resolves
   // the action (continue / accept / abort) here instead of re-running the parked step.
-  const gateValues =
-    payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
-  const gateAction = gateValues?.[FIX_LOOP_ACTION_FIELD];
-  if (existing && typeof gateAction === 'string') {
-    const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
-    await resolveFixLoopGate(
-      db,
-      ctx,
-      existing,
-      gateAction,
-      round,
-      typeof raw === 'string' ? raw : '',
-    );
+  const gate = readFixLoopGateAction(payload, existing);
+  if (existing && gate) {
+    await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
     return;
   }
 
