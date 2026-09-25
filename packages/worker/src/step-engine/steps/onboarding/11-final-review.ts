@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { closesFence, fenceOpener } from '@haive/shared/markdown-fences';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 
 interface ActiveAgentsTarget {
@@ -162,15 +163,20 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
 }
 
 function stripOuterFence(raw: string): string {
-  // Unwrap only when the ENTIRE payload is one fenced block, closed by a run at least as long as its
-  // opener: the scanner cannot, since a model's wrapper holds inner ``` samples that close it early.
+  // Unwrap only when the first line opens a fence and the last line closes it. The lines between are
+  // kept as they are: a model's ```markdown wrapper holds ``` samples, which by CommonMark close it.
   const trimmed = raw.trim();
-  const open = /^(`{3,}|~{3,})(?:markdown|md)?[ \t]*\n/.exec(trimmed);
-  if (!open) return trimmed;
-  const run = open[1]!;
-  const close = new RegExp(`${run[0]}{${run.length},}$`).exec(trimmed.slice(open[0].length));
-  if (!close) return trimmed;
-  return trimmed.slice(open[0].length, trimmed.length - close[0].length).trim();
+  const lines = trimmed.split('\n');
+  const opener = fenceOpener(lines[0]!);
+  if (
+    lines.length < 2 ||
+    !opener ||
+    !['', 'markdown', 'md'].includes(opener.info) ||
+    !closesFence(lines.at(-1)!, opener.run)
+  ) {
+    return trimmed;
+  }
+  return lines.slice(1, -1).join('\n').trim();
 }
 
 export function llmReviewMarkdown(raw: unknown, fallback: string): string {

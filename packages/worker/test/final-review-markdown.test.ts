@@ -28,6 +28,16 @@ describe('llmReviewMarkdown', () => {
     expect(llmReviewMarkdown(['~~~md', inner, '~~~'].join('\n'), 'fb')).toBe(`${inner}\n`);
   });
 
+  it('keeps a reply whose last line is not a closing fence of its own', () => {
+    for (const reply of [
+      ['~~~markdown', '# Review', 'Use separator ~~~'].join('\n'),
+      ['~~~md', '# Review', '    ~~~'].join('\n'),
+      ['````markdown', '# Review', '```'].join('\n'),
+    ]) {
+      expect(llmReviewMarkdown(reply, FALLBACK)).toBe(`# Onboarding final review\n\n${reply}\n`);
+    }
+  });
+
   it('passes an unwrapped review through unchanged (plus trailing newline)', () => {
     const review = '# Onboarding final review\n\nAll good.';
     expect(llmReviewMarkdown(review, FALLBACK)).toBe(`${review}\n`);
