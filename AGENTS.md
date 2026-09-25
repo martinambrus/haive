@@ -1700,6 +1700,15 @@ And `packages/worker/Dockerfile`'s production stage must keep copying `sandbox-i
 `docker/`: it otherwise ships only `dist`, which leaves both this self-heal and
 `ensureDdevRunnerImage` with no build context on a deployed host.
 
+**Builds of one image tag run once at a time.** Providers that resolve to one tag (the claude
+family at one CLI version) each queued a `docker build` of it, and the builds ran side by side in
+the light lane; each then removed the image the tag had named, which could be the one the other
+had just built. `handleBuildSandboxImageJob` keeps the builds in flight by tag (`inFlightBuilds`):
+a second provider joins the running build and does only its own bookkeeping, and the builder alone
+removes the previous image. In-process is enough, since the queued jobs and the inline dispatch
+build both run in the one worker compose pins, and a joiner holds its slot exactly as long as its
+own build would have.
+
 `cli_providers.sandbox_image_build_status` is reconciled against the real images on every
 boot (`clearPrunedSandboxImageState`, `data-migrations.ts`). Not cosmetic: a stale `ready`
 clears `createSandboxLoginContainer`'s gate and turns "not built" into `No such image`,

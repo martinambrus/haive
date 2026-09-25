@@ -46,9 +46,17 @@ import {
   refreshBrowserVersions,
   refreshRubyVersions,
 } from '../../cli-versions/index.js';
-import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
+import {
+  defaultDockerRunner,
+  type DockerBuildResult,
+  type DockerRunner,
+} from '../../sandbox/docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from '../../sandbox/image-composer.js';
-import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
+import {
+  renderDockerfile,
+  resolveImageTag,
+  type ImageTagResolution,
+} from '../../sandbox/image-cache.js';
 import { ensureSandboxCoreImage } from '../../sandbox/sandbox-core-image.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import { resolveProviderSecrets } from '../../secrets/provider-secrets.js';
@@ -652,30 +660,21 @@ export async function handleBuildSandboxImageJob(
     }
   }
 
-  const previousInspect = await defaultDockerRunner.inspect(imageTag);
-  const previousImageId = previousInspect.exists ? previousInspect.imageId : null;
-
-  const dockerfileContent = renderDockerfile(resolution);
-  const buildDir = join(tmpdir(), `haive-sandbox-build-${randomUUID()}`);
-  const dockerfilePath = join(buildDir, 'Dockerfile');
+  let build = inFlightBuilds.get(imageTag);
+  if (build) {
+    log.info({ providerId: provider.id, imageTag }, 'joining a sandbox image build of this tag');
+  } else {
+    const started = buildImage(resolution, provider.id);
+    build = started;
+    inFlightBuilds.set(imageTag, started);
+    const settle = () => {
+      if (inFlightBuilds.get(imageTag) === started) inFlightBuilds.delete(imageTag);
+    };
+    started.then(settle, settle);
+  }
 
   try {
-    // Every rendered Dockerfile here is `FROM haive-cli-sandbox:latest`, which is built
-    // locally and pushed nowhere — so a pruned host makes docker try to PULL it and the
-    // build dies on "pull access denied". Inside the try so the failure lands in
-    // sandbox_image_build_error like any other build failure.
-    await ensureSandboxCoreImage();
-    await mkdir(buildDir, { recursive: true });
-    await writeFile(dockerfilePath, dockerfileContent, 'utf8');
-
-    log.info({ providerId: provider.id, imageTag, shared }, 'building sandbox image');
-    const result = await defaultDockerRunner.build({
-      contextDir: buildDir,
-      dockerfilePath,
-      tag: imageTag,
-      timeoutMs: 20 * 60 * 1000,
-    });
-
+    const result = await build;
     if (result.exitCode === 0) {
       await markProvidersReady(db, imageTag, provider.id, shared);
       await removeOrphanedPreviousImage(db, {
@@ -683,26 +682,6 @@ export async function handleBuildSandboxImageJob(
         previousDbTag,
         newTag: imageTag,
       });
-      if (previousImageId && result.imageId && previousImageId !== result.imageId) {
-        const removeResult = await defaultDockerRunner.remove(previousImageId);
-        if (!removeResult.ok) {
-          log.warn(
-            {
-              providerId: provider.id,
-              imageTag,
-              previousImageId,
-              stderr: removeResult.stderr,
-              error: removeResult.error,
-            },
-            'failed to remove previous sandbox image',
-          );
-        } else {
-          log.info(
-            { providerId: provider.id, imageTag, previousImageId },
-            'removed previous sandbox image',
-          );
-        }
-      }
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
@@ -746,6 +725,68 @@ export async function handleBuildSandboxImageJob(
       .where(eq(schema.cliProviders.id, provider.id));
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
+  }
+}
+
+/** Builds of each tag in flight in this process, which is the one worker the queued jobs and the
+ *  inline dispatch build both run in: a provider that needs an image another is building joins
+ *  that build instead of starting a second. */
+const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
+
+/** One docker build of `resolution`'s tag. The builder alone removes the image the tag named
+ *  before, since a provider that joined the build has nothing of its own to replace. */
+async function buildImage(
+  resolution: ImageTagResolution,
+  providerId: string,
+): Promise<DockerBuildResult> {
+  const imageTag = resolution.tag;
+  const previousInspect = await defaultDockerRunner.inspect(imageTag);
+  const previousImageId = previousInspect.exists ? previousInspect.imageId : null;
+
+  const dockerfileContent = renderDockerfile(resolution);
+  const buildDir = join(tmpdir(), `haive-sandbox-build-${randomUUID()}`);
+  const dockerfilePath = join(buildDir, 'Dockerfile');
+
+  try {
+    // Every rendered Dockerfile here is `FROM haive-cli-sandbox:latest`, which is built
+    // locally and pushed nowhere — so a pruned host makes docker try to PULL it and the
+    // build dies on "pull access denied". Inside the try so the failure lands in
+    // sandbox_image_build_error like any other build failure.
+    await ensureSandboxCoreImage();
+    await mkdir(buildDir, { recursive: true });
+    await writeFile(dockerfilePath, dockerfileContent, 'utf8');
+
+    log.info({ providerId, imageTag, shared: resolution.shared }, 'building sandbox image');
+    const result = await defaultDockerRunner.build({
+      contextDir: buildDir,
+      dockerfilePath,
+      tag: imageTag,
+      timeoutMs: 20 * 60 * 1000,
+    });
+
+    if (
+      result.exitCode === 0 &&
+      previousImageId &&
+      result.imageId &&
+      previousImageId !== result.imageId
+    ) {
+      const removeResult = await defaultDockerRunner.remove(previousImageId);
+      if (!removeResult.ok) {
+        log.warn(
+          {
+            providerId,
+            imageTag,
+            previousImageId,
+            stderr: removeResult.stderr,
+            error: removeResult.error,
+          },
+          'failed to remove previous sandbox image',
+        );
+      } else {
+        log.info({ providerId, imageTag, previousImageId }, 'removed previous sandbox image');
+      }
+    }
+    return result;
   } finally {
     rm(buildDir, { recursive: true, force: true }).catch((err: unknown) => {
       log.warn({ err, buildDir }, 'failed to cleanup sandbox build dir');

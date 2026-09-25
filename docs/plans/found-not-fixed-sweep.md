@@ -1,8 +1,8 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-11 and 5c merged (#267-#278); PR 12 (a leftover expansion
-> staging dir is swept once no attachment is left) is in review. Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-24. PRs 1-12 and 5c merged (#267-#279); PR 13 (builds of one image
+> tag coalesce) is in review. Tracked in the status table of `docs/plans/README.md`, which each PR
+> updates.
 
 ## Context
 
