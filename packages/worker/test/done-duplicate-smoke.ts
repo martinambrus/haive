@@ -19,6 +19,7 @@ import { initDatabase } from '../src/db.js';
 import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import { FIX_LOOP_ACTION_FIELD } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 // A duplicate ADVANCE_STEP for an already-done row must re-drive its real verdict; the
 // two loop/revise targets are stubbed to park on a form so nothing cascades or spends.
@@ -169,6 +170,9 @@ async function main(): Promise<void> {
     // Must run AFTER startTaskWorker registers the real steps, or override would collide.
     overrideParkingStub('07-phase-2-implement', 7);
     overrideParkingStub('03b-business-requirements', 3.5);
+    // 07b's own successor under quick_bugfix (index 7.8, right after 07b's 7.7) — the accept
+    // case's forward hand-off target.
+    overrideParkingStub('07c-ddev-reconcile', 7.8);
 
     const makeTask = async (title: string, opts: Partial<typeof schema.tasks.$inferInsert>) => {
       const [task] = await db
@@ -208,13 +212,19 @@ async function main(): Promise<void> {
       });
     };
 
-    const enqueueDuplicate = (taskId: string, stepId: string, round: number) =>
+    const enqueueDuplicate = (
+      taskId: string,
+      stepId: string,
+      round: number,
+      formValues?: Record<string, unknown>,
+    ) =>
       queue!.add(TASK_JOB_NAMES.ADVANCE_STEP, {
         taskId,
         userId: userId!,
         stepId,
         round,
         epoch: 1,
+        ...(formValues ? { formValues } : {}),
       });
 
     // --- Case 1: fix loop -------------------------------------------------------------
@@ -397,6 +407,62 @@ async function main(): Promise<void> {
         'chain moved: nothing was re-driven at 07-phase-2-implement',
         implementRows.length === 0,
         implementRows,
+      );
+    }
+
+    // --- Case 5: fix-loop gate accepted on a duplicate delivery -------------------------
+    // A duplicate submit carrying the gate's Accept must resolve the gate, not rebuild
+    // loop_back from the blocking output the Accept was meant to stand down.
+    {
+      const taskId = await makeTask('gate accept dup', {
+        executionPath: 'quick_bugfix',
+        currentStepId: '07b-phase-4-validate',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+        verdict: 'ISSUES_FOUND',
+        findingsSummary: 'smoke-forced blocking finding',
+      });
+      await enqueueDuplicate(taskId, '07b-phase-4-validate', 0, {
+        [FIX_LOOP_ACTION_FIELD]: 'accept',
+      });
+
+      const task = await pollUntil(
+        () => loadTask(db, taskId),
+        (t) => t.currentStepId === '07c-ddev-reconcile' && t.currentRound === 0,
+        'gate-accept case: task advancing to 07c-ddev-reconcile at round 0',
+      );
+      check(
+        'gate accept: task advanced to the successor at the SAME round (not 07-phase-2-implement round 1)',
+        task.currentStepId === '07c-ddev-reconcile' && task.currentRound === 0,
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.accepted'),
+          ),
+        );
+      check('gate accept: a fix_loop.accepted event was recorded', events.length > 0, events);
+
+      const gateRow = await db
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, '07b-phase-4-validate'),
+            eq(schema.taskSteps.round, 0),
+          ),
+        );
+      check(
+        'gate accept: the gate row stayed done (not re-parked)',
+        gateRow[0]?.status === 'done',
+        gateRow,
       );
     }
 

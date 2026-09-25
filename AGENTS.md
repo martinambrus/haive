@@ -288,7 +288,9 @@ the row (`finishedStepResult`, `step-runner.ts`) rather than as a plain `done`. 
 diagnosis is the row's `error_message`, so a job that died between that write and its hand-off used
 to walk forward past the round its step had asked for. The verdict is recomputed from the stored
 output by the one function the tail itself routes with (`finishedRoutingVerdict`), so the two
-cannot disagree on precedence. `advanceStep`'s own `done` short-circuit is left as it is: the START
+cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
+(`resolveFixLoopGate`): the gate writes its row `done` before it acts, so a verdict recomputed
+there would replace the person's decision with the step's own. `advanceStep`'s own `done` short-circuit is left as it is: the START
 path that reaches it has no moved-chain check, so a verdict re-driven there could bump a round.
 
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through

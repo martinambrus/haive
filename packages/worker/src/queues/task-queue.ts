@@ -1763,6 +1763,19 @@ export async function resolveFixLoopGate(
   );
 }
 
+/** The fix-loop gate decision a submit carries: the job's formValues, else the row's saved ones. */
+function readFixLoopGateAction(
+  payload: TaskJobPayload,
+  existing: { formValues: unknown } | undefined,
+): { action: string; instruction: string } | null {
+  const gateValues =
+    payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
+  const action = gateValues?.[FIX_LOOP_ACTION_FIELD];
+  if (typeof action !== 'string') return null;
+  const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
+  return { action, instruction: typeof raw === 'string' ? raw : '' };
+}
+
 async function handleStartTask(
   db: Database,
   payload: TaskJobPayload,
@@ -2021,20 +2034,23 @@ async function handleAdvanceStep(
   // act on positive evidence, not on a bare mismatch.
   if (existing?.status === 'done') {
     const chainMoved = advanceChainHasMoved(ctx, payload.stepId, round);
-    const redriven = chainMoved
-      ? null
-      : await finishedStepResult(db, ctx.taskId, stepDef, existing);
+    const gate = chainMoved ? null : readFixLoopGateAction(payload, existing);
+    const redriven =
+      chainMoved || gate ? null : await finishedStepResult(db, ctx.taskId, stepDef, existing);
     logger.warn(
       {
         taskId: ctx.taskId,
         stepId: payload.stepId,
         round,
         chainMoved,
+        path: gate ? 'gate' : redriven ? 'redriven' : 'none',
         redrivenStatus: redriven?.status ?? null,
       },
       'advance-step skipped: step already done (duplicate delivery)',
     );
-    if (redriven) {
+    if (gate) {
+      await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
+    } else if (redriven) {
       await handleResult(db, ctx, payload.stepId, redriven);
     }
     return;
@@ -2066,19 +2082,9 @@ async function handleAdvanceStep(
 
   // Fix-loop escalation gate: a submission carrying the gate's decision field resolves
   // the action (continue / accept / abort) here instead of re-running the parked step.
-  const gateValues =
-    payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
-  const gateAction = gateValues?.[FIX_LOOP_ACTION_FIELD];
-  if (existing && typeof gateAction === 'string') {
-    const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
-    await resolveFixLoopGate(
-      db,
-      ctx,
-      existing,
-      gateAction,
-      round,
-      typeof raw === 'string' ? raw : '',
-    );
+  const gate = readFixLoopGateAction(payload, existing);
+  if (existing && gate) {
+    await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
     return;
   }
 
