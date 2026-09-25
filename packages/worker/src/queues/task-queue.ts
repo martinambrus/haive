@@ -1,4 +1,3 @@
-import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
@@ -76,6 +75,7 @@ import {
   taskWasCreatedRepoLess,
 } from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
+import { splitRepoStoragePath } from '../repo/worktree-paths.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
@@ -3257,18 +3257,18 @@ async function handleCleanupRepoResources(
 
   // Workspace files in the haive_repos volume. NEVER touch /host-fs local-path
   // repos (the user's real directories) — gate on the repo-storage root.
-  if (payload.storagePath) {
-    const resolved = resolve(payload.storagePath);
-    if (resolved.startsWith(WORKER_REPO_STORAGE_ROOT + '/')) {
-      // The USER directory is the anchor: it and the storage root above it are the worker's own,
-      // while the repository directory below it is a tree sandboxed agents write.
-      await removeNoFollow(dirname(resolved), basename(resolved), {
-        recursive: true,
-        repairPermissions: true,
-      }).catch((err: unknown) =>
-        logger.warn({ err, path: resolved }, 'repo-cleanup: workspace rm failed'),
-      );
-    }
+  const workspace = payload.storagePath
+    ? splitRepoStoragePath(WORKER_REPO_STORAGE_ROOT, payload.storagePath)
+    : null;
+  if (workspace) {
+    // The USER directory is the anchor: it and the storage root above it are the worker's own,
+    // while the repository directory below it is a tree sandboxed agents write.
+    await removeNoFollow(workspace.anchor, workspace.rel, {
+      recursive: true,
+      repairPermissions: true,
+    }).catch((err: unknown) =>
+      logger.warn({ err, path: payload.storagePath }, 'repo-cleanup: workspace rm failed'),
+    );
   }
 
   logger.info(

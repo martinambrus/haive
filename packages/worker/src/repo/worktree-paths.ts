@@ -84,6 +84,22 @@ export function splitUploadPath(
   return { anchor: storageRoot, rel: `_uploads/${owner}/${name}` };
 }
 
+/** Split a repository's `storage_path` into its user directory and the repository's name there,
+ *  or null for anything but `<storageRoot>/<userId>/<repoId>`. Rebuilt as `splitUploadPath`
+ *  rebuilds, since the repo handlers write it with `path.join` whatever form the root takes. */
+export function splitRepoStoragePath(
+  storageRoot: string,
+  stored: string,
+): { anchor: string; rel: string } | null {
+  const repo = path.basename(stored);
+  const owner = path.basename(path.dirname(stored));
+  if (!owner || !repo || owner === '.' || owner === '..' || repo === '.' || repo === '..') {
+    return null;
+  }
+  if (path.join(storageRoot, owner, repo) !== stored) return null;
+  return { anchor: path.join(storageRoot, owner), rel: repo };
+}
+
 /**
  * Split a worktree path into the repository root and the rel below it, refusing anything that is not
  * `<repoRoot>/.haive/worktrees/<dir>`.
