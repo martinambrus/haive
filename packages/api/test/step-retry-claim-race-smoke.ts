@@ -315,6 +315,55 @@ async function main(): Promise<void> {
       'the settle re-offers the form nobody answered',
       (await statusOf(stillParked!.id)) === 'pending',
     );
+
+    // 5. A Retry whose sweep meets a row a pass is still writing answers 503 and changes nothing: a
+    //    row activated after the Retry read the rows, and locked when the sweep reaches it.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'kaboom again', endedAt: now })
+      .where(eq(schema.taskSteps.id, retried!.id));
+    const [contended] = await db
+      .insert(schema.taskSteps)
+      .values({ taskId, stepId: 'contended', stepIndex: 11, title: 'Contended', status: 'pending' })
+      .returning();
+    const epochBeforeRefusal = await epochNow();
+    const releaseTaskRow = await holdOpen(db, async (tx) => {
+      await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, taskId!))
+        .for('share');
+    });
+    action = post(stepAction, { action: 'retry', round: 0 });
+    await sleep(500);
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running', updatedAt: new Date() })
+      .where(eq(schema.taskSteps.id, contended!.id));
+    const releaseRowLock = await holdOpen(db, async (tx) => {
+      await tx
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, contended!.id))
+        .for('update');
+    });
+    await releaseTaskRow();
+    res = await action;
+    await releaseRowLock();
+    check(
+      'a Retry whose sweep meets a row being written answers 503',
+      res.status === 503,
+      res.status,
+    );
+    check(
+      'the refused Retry leaves its step as it was',
+      (await statusOf(retried!.id)) === 'failed',
+      await statusOf(retried!.id),
+    );
+    check(
+      'the refused Retry leaves the epoch as it was',
+      (await epochNow()) === epochBeforeRefusal,
+    );
   } catch (err) {
     exitCode = 1;
     log.error({ err }, 'smoke crashed');

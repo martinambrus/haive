@@ -718,18 +718,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
       [step.id, ...downstream.map((r) => r.id)],
     );
-    const cascadeIsActive =
-      step.status === 'running' ||
-      step.status === 'waiting_cli' ||
-      downstream.some((r) => r.status === 'running' || r.status === 'waiting_cli') ||
-      leftActive.some((r) => r.status === 'running' || r.status === 'waiting_cli');
-    if (cascadeIsActive) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
-    }
 
     let newEpoch = 0;
-    await db.transaction(async (tx) => {
+    const activatedMeanwhile = await db.transaction(async (tx) => {
       const now = new Date();
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
@@ -805,7 +796,21 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           timeoutMinutes: body.timeoutMinutes ?? null,
         },
       });
+      return late;
     });
+    // Killed once the reset has committed and before the advance is queued: every run it reset is
+    // superseded by then, so a dying run's completion changes nothing, and a reset that rolled back
+    // (the 503 above) leaves every run alive.
+    const cascadeIsActive =
+      step.status === 'running' ||
+      step.status === 'waiting_cli' ||
+      [...downstream, ...leftActive, ...activatedMeanwhile].some(
+        (r) => r.status === 'running' || r.status === 'waiting_cli',
+      );
+    if (cascadeIsActive) {
+      const killed = await killTaskSandboxes(id);
+      logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
+    }
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
       // round is essential: handleAdvanceStep defaults a missing round to 0, so it
@@ -909,23 +914,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
         [step.id, ...downstream.map((r) => r.id)],
       );
-      // Same rule as Retry: if anything in the set being reset is in flight, its sandbox has to
-      // go first, or the reset row's CLI keeps running against a step that no longer owns it.
-      // The clicked step counts too — a fan-out step can be re-run while its own barrier is
-      // still parked. The web hides this action on a passed step, but the endpoint cannot rely
-      // on that: a live downstream row reaching the reset below is the case that would leave
-      // two steps live for the orchestrator's other-step-active guard to refuse.
-      const liveInCascade =
-        step.status === 'running' ||
-        step.status === 'waiting_cli' ||
-        downstreamToReset.some((r) => r.status === 'running' || r.status === 'waiting_cli') ||
-        leftActive.some((r) => r.status === 'running' || r.status === 'waiting_cli');
-      if (liveInCascade) {
-        const killed = await killTaskSandboxes(id);
-        logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
-      }
       let newEpoch = task.orchestrationEpoch;
-      await db.transaction(async (tx) => {
+      const activatedMeanwhile = await db.transaction(async (tx) => {
         await tx
           .update(schema.taskStepAgentMinings)
           .set({ userRetryRequestedAt: now, updatedAt: now })
@@ -989,7 +979,25 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             note: body.note ?? null,
           },
         });
+        return late;
       });
+      // Same rule as Retry: if anything in the set reset is in flight, its sandbox has to go, or
+      // the reset row's CLI keeps running against a step that no longer owns it, and it goes only
+      // once the reset has committed, as Retry's does. The clicked step counts too — a fan-out step
+      // can be re-run while its own barrier is still parked. The web hides this action on a passed
+      // step, but the endpoint cannot rely on that: a live downstream row reaching the reset above
+      // is the case that would leave two steps live for the orchestrator's other-step-active guard
+      // to refuse.
+      const liveInCascade =
+        step.status === 'running' ||
+        step.status === 'waiting_cli' ||
+        [...downstreamToReset, ...leftActive, ...activatedMeanwhile].some(
+          (r) => r.status === 'running' || r.status === 'waiting_cli',
+        );
+      if (liveInCascade) {
+        const killed = await killTaskSandboxes(id);
+        logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
+      }
       await getTaskQueue().add(
         TASK_JOB_NAMES.ADVANCE_STEP,
         {
