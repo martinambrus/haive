@@ -1808,7 +1808,12 @@ had just built. `handleBuildSandboxImageJob` keeps the builds in flight by tag (
 a second provider joins the running build and does only its own bookkeeping, and the builder alone
 removes the previous image. In-process is enough, since the queued jobs and the inline dispatch
 build both run in the one worker compose pins, and a joiner holds its slot exactly as long as its
-own build would have.
+own build would have. Marking a shared tag ready skips every sibling still `building`
+(`markProvidersReady`): that row has a build of its own queued or running, forced or not, and
+reports its own result. A sibling's cache hit during a forced rebuild used to mark the rebuilding
+provider ready and re-enable its Rebuild button while the build still ran. Joining the build in
+flight could not close that, since the api sets `building` the moment Rebuild is clicked, before
+any job exists to join.
 
 `cli_providers.sandbox_image_build_status` is reconciled against the real images on every
 boot (`clearPrunedSandboxImageState`, `data-migrations.ts`). Not cosmetic: a stale `ready`
