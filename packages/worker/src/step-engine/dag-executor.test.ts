@@ -23,6 +23,7 @@ import {
   ingestReviewRun,
   ingestAdvisor,
   resolveEscalationPhase,
+  resolveReviewPhase,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
@@ -876,6 +877,187 @@ describe('replannerPrompt trusted region is structurally closed', () => {
   });
 });
 
+/** A fake db for one DAG level/issue/plan. One thenable chain covers every `.select()`
+ *  shape used before runLevelMerge's fix-in-flight check, and before section C's coder ingest. */
+function makeDagMergeWaitDb(opts: {
+  invocation:
+    | {
+        id: string;
+        endedAt: Date | null;
+        supersededAt: Date | null;
+        startedAt?: Date | null;
+        exitCode?: number | null;
+        errorMessage?: string | null;
+        rawOutput?: string | null;
+        parsedOutput?: unknown;
+      }
+    | undefined;
+  integrationDir: string;
+  autoResolveConflicts: boolean;
+  conflictRetries?: Record<string, number>;
+  /** A Retry reset the row while the pass ran: lockOwnedStep's ownership probe matches
+   *  nothing, same as the update guard below. */
+  stepRowStatus?: string;
+  /** The issue as a coder left it, for section C. */
+  issue?: { outcome: string; cliInvocationId: string; infraRetries: number };
+  /** The level reads checkpointed after its first read, which ends the phase's loop. */
+  checkpointAfterFirstRead?: boolean;
+}) {
+  let stepStatus = opts.stepRowStatus ?? 'running';
+  let stepErrorMessage: string | null = null;
+  let issueMergeStatus = 'conflict';
+  let levelMergeState: unknown = {
+    activeConflict: 'ISSUE-1',
+    fixInvocationId: opts.invocation?.id ?? null,
+    conflictRetries: opts.conflictRetries ?? {},
+  };
+  const planRow = {
+    id: 'plan1',
+    mode: 'dag',
+    reviewEnabled: false,
+    autoResolveConflicts: opts.autoResolveConflicts,
+  };
+  const issueRow = {
+    id: 'issue1',
+    dagPlanId: 'plan1',
+    issueKey: 'ISSUE-1',
+    level: 0,
+    title: 'Fix the conflict',
+    outcome: 'completed',
+    resolution: null,
+    cliInvocationId: null,
+    worktreePath: '/does/not/matter',
+    mergeStatus: 'conflict',
+    branchName: 'main--ISSUE-1',
+    debtItems: [],
+    infraRetries: 0,
+    ...opts.issue,
+  };
+  const issueUpdates: Record<string, unknown>[] = [];
+  let levelReads = 0;
+
+  function chain(result: unknown) {
+    const c = {
+      where: () => c,
+      orderBy: () => c,
+      limit: () => Promise.resolve(result),
+      then: (resolve: (v: unknown) => void, reject?: (e: unknown) => void) =>
+        Promise.resolve(result).then(resolve, reject),
+    };
+    return c;
+  }
+  function resultsFor(table: unknown): unknown[] {
+    if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
+    if (table === schema.taskDagLevels) {
+      levelReads += 1;
+      const done = opts.checkpointAfterFirstRead === true && levelReads > 1;
+      return [
+        {
+          id: 'level1',
+          dagPlanId: 'plan1',
+          level: 0,
+          checkpointedAt: done ? new Date() : null,
+          mergeState: levelMergeState,
+        },
+      ];
+    }
+    if (table === schema.taskDagIssues) return [issueRow];
+    if (table === schema.taskSteps) {
+      // loadPreviousStepOutput('01-worktree-setup'): the integration worktree.
+      return [
+        {
+          detectOutput: null,
+          output: {
+            worktreePath: opts.integrationDir,
+            branchName: 'main',
+            sandboxWorktreePath: opts.integrationDir,
+          },
+          iterations: [],
+        },
+      ];
+    }
+    return [];
+  }
+
+  const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    query: {
+      taskDagPlans: { findFirst: async () => planRow },
+      tasks: { findFirst: async () => undefined },
+      users: { findFirst: async () => undefined },
+      cliInvocations: { findFirst: async () => opts.invocation },
+      userStepCliPreferences: { findFirst: async () => undefined },
+    },
+    // lockOwnedStep's ownership probe (select({id}).from(taskSteps).where(owned(id)).for(
+    // 'update')) is distinguished by its columns argument and honours the same ownership
+    // guard as the update mock below; every other select keeps the generic chain.
+    select: (cols?: unknown) => ({
+      from: (table: unknown) => {
+        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
+          return {
+            where: () => ({
+              for: async () =>
+                ['pending', 'skipped', 'failed'].includes(stepStatus) ? [] : [{ id: 'step1' }],
+            }),
+          };
+        }
+        return chain(resultsFor(table));
+      },
+    }),
+    insert: (table: unknown) => ({
+      values: () => ({
+        returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
+      }),
+    }),
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => {
+        const apply = () => {
+          if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
+            levelMergeState = patch.mergeState;
+          }
+          if (table === schema.taskDagIssues && patch && 'mergeStatus' in patch) {
+            issueMergeStatus = patch.mergeStatus as string;
+          }
+          if (table === schema.taskDagIssues) issueUpdates.push(patch);
+          if (table === schema.taskSteps) {
+            if ('status' in patch) stepStatus = patch.status as string;
+            if ('errorMessage' in patch) {
+              stepErrorMessage = (patch.errorMessage as string | null) ?? null;
+            }
+          }
+        };
+        return {
+          where: (cond: unknown) => ({
+            returning: async () => {
+              if (table === schema.taskSteps) {
+                const values = conditionValues(cond);
+                const guarded = values.includes('pending') && values.includes('skipped');
+                if (guarded && ['pending', 'skipped', 'failed'].includes(stepStatus)) return [];
+              }
+              apply();
+              return table === schema.taskSteps
+                ? [{ id: 'step1', status: stepStatus, errorMessage: stepErrorMessage }]
+                : [{}];
+            },
+            then: (resolve: (v: unknown) => void) => {
+              apply();
+              resolve(undefined);
+            },
+          }),
+        };
+      },
+    }),
+  };
+  return {
+    db,
+    getStepStatus: () => stepStatus,
+    getStepError: () => stepErrorMessage,
+    getLevelMergeState: () => levelMergeState,
+    getIssueMergeStatus: () => issueMergeStatus,
+    issueUpdates,
+  };
+}
+
 describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it started', () => {
   const exec = promisify(execFile);
   const GIT_ENV = {
@@ -913,173 +1095,6 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     await git(dir, ['commit', '-am', 'main edit']);
     await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'main--ISSUE-1']); // conflicts, left open
     return dir;
-  }
-
-  /** A fake db for one DAG level/issue/plan. One thenable chain covers every `.select()`
-   *  shape used before runLevelMerge's fix-in-flight check. */
-  function makeDagMergeWaitDb(opts: {
-    invocation:
-      | {
-          id: string;
-          endedAt: Date | null;
-          supersededAt: Date | null;
-          startedAt?: Date | null;
-          exitCode?: number | null;
-          errorMessage?: string | null;
-        }
-      | undefined;
-    integrationDir: string;
-    autoResolveConflicts: boolean;
-    conflictRetries?: Record<string, number>;
-    /** A Retry reset the row while the pass ran: lockOwnedStep's ownership probe matches
-     *  nothing, same as the update guard below. */
-    stepRowStatus?: string;
-  }) {
-    let stepStatus = opts.stepRowStatus ?? 'running';
-    let stepErrorMessage: string | null = null;
-    let issueMergeStatus = 'conflict';
-    let levelMergeState: unknown = {
-      activeConflict: 'ISSUE-1',
-      fixInvocationId: opts.invocation?.id ?? null,
-      conflictRetries: opts.conflictRetries ?? {},
-    };
-    const planRow = {
-      id: 'plan1',
-      mode: 'dag',
-      reviewEnabled: false,
-      autoResolveConflicts: opts.autoResolveConflicts,
-    };
-    const issueRow = {
-      id: 'issue1',
-      dagPlanId: 'plan1',
-      issueKey: 'ISSUE-1',
-      level: 0,
-      title: 'Fix the conflict',
-      outcome: 'completed',
-      resolution: null,
-      cliInvocationId: null,
-      worktreePath: '/does/not/matter',
-      mergeStatus: 'conflict',
-      branchName: 'main--ISSUE-1',
-      debtItems: [],
-    };
-
-    function chain(result: unknown) {
-      const c = {
-        where: () => c,
-        orderBy: () => c,
-        limit: () => Promise.resolve(result),
-        then: (resolve: (v: unknown) => void, reject?: (e: unknown) => void) =>
-          Promise.resolve(result).then(resolve, reject),
-      };
-      return c;
-    }
-    function resultsFor(table: unknown): unknown[] {
-      if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
-      if (table === schema.taskDagLevels) {
-        return [
-          {
-            id: 'level1',
-            dagPlanId: 'plan1',
-            level: 0,
-            checkpointedAt: null,
-            mergeState: levelMergeState,
-          },
-        ];
-      }
-      if (table === schema.taskDagIssues) return [issueRow];
-      if (table === schema.taskSteps) {
-        // loadPreviousStepOutput('01-worktree-setup'): the integration worktree.
-        return [
-          {
-            detectOutput: null,
-            output: {
-              worktreePath: opts.integrationDir,
-              branchName: 'main',
-              sandboxWorktreePath: opts.integrationDir,
-            },
-            iterations: [],
-          },
-        ];
-      }
-      return [];
-    }
-
-    const db = {
-      transaction: async (fn: (tx: unknown) => unknown) => fn(db),
-      query: {
-        taskDagPlans: { findFirst: async () => planRow },
-        tasks: { findFirst: async () => undefined },
-        users: { findFirst: async () => undefined },
-        cliInvocations: { findFirst: async () => opts.invocation },
-        userStepCliPreferences: { findFirst: async () => undefined },
-      },
-      // lockOwnedStep's ownership probe (select({id}).from(taskSteps).where(owned(id)).for(
-      // 'update')) is distinguished by its columns argument and honours the same ownership
-      // guard as the update mock below; every other select keeps the generic chain.
-      select: (cols?: unknown) => ({
-        from: (table: unknown) => {
-          if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
-            return {
-              where: () => ({
-                for: async () =>
-                  ['pending', 'skipped', 'failed'].includes(stepStatus) ? [] : [{ id: 'step1' }],
-              }),
-            };
-          }
-          return chain(resultsFor(table));
-        },
-      }),
-      insert: (table: unknown) => ({
-        values: () => ({
-          returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
-        }),
-      }),
-      update: (table: unknown) => ({
-        set: (patch: Record<string, unknown>) => {
-          const apply = () => {
-            if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
-              levelMergeState = patch.mergeState;
-            }
-            if (table === schema.taskDagIssues && patch && 'mergeStatus' in patch) {
-              issueMergeStatus = patch.mergeStatus as string;
-            }
-            if (table === schema.taskSteps) {
-              if ('status' in patch) stepStatus = patch.status as string;
-              if ('errorMessage' in patch) {
-                stepErrorMessage = (patch.errorMessage as string | null) ?? null;
-              }
-            }
-          };
-          return {
-            where: (cond: unknown) => ({
-              returning: async () => {
-                if (table === schema.taskSteps) {
-                  const values = conditionValues(cond);
-                  const guarded = values.includes('pending') && values.includes('skipped');
-                  if (guarded && ['pending', 'skipped', 'failed'].includes(stepStatus)) return [];
-                }
-                apply();
-                return table === schema.taskSteps
-                  ? [{ id: 'step1', status: stepStatus, errorMessage: stepErrorMessage }]
-                  : [{}];
-              },
-              then: (resolve: (v: unknown) => void) => {
-                apply();
-                resolve(undefined);
-              },
-            }),
-          };
-        },
-      }),
-    };
-    return {
-      db,
-      getStepStatus: () => stepStatus,
-      getStepError: () => stepErrorMessage,
-      getLevelMergeState: () => levelMergeState,
-      getIssueMergeStatus: () => issueMergeStatus,
-    };
   }
 
   it('is recognised as over rather than waited on forever once supersededAt is set', async () => {
@@ -1723,4 +1738,189 @@ describe('resolveEscalationPhase: a replanner run that never answered', () => {
       expect(invUpdates[0]!.patch).toHaveProperty('consumedAt');
     },
   );
+});
+
+/** A db for the review and escalation phases whose step row a Retry already took: the ownership
+ *  probe finds nothing, and every write is recorded so a case can show none happened. */
+function lostRowPhaseDb(opts: { agentRun?: Record<string, unknown>; invocation: unknown }) {
+  const writes: { op: string; table: unknown }[] = [];
+  const chain = (result: unknown[]) => {
+    const c = {
+      where: () => c,
+      orderBy: () => c,
+      limit: async () => result,
+      then: (ok: (v: unknown) => void, bad?: (e: unknown) => void) =>
+        Promise.resolve(result).then(ok, bad),
+    };
+    return c;
+  };
+  const written = (op: string, table: unknown) => {
+    writes.push({ op, table });
+    return {
+      returning: async () => [{ id: 'written' }],
+      then: (ok: (v: unknown) => void) => ok(undefined),
+    };
+  };
+  const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    query: {
+      cliInvocations: { findFirst: async () => opts.invocation },
+      userStepCliRolePreferences: { findFirst: async () => undefined },
+      userStepCliPreferences: { findFirst: async () => undefined },
+    },
+    select: (cols?: unknown) => ({
+      from: (table: unknown) =>
+        table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols
+          ? { where: () => ({ for: async () => [] }) }
+          : chain(table === schema.dagAgentRuns && opts.agentRun ? [opts.agentRun] : []),
+    }),
+    insert: (table: unknown) => ({ values: () => written('insert', table) }),
+    update: (table: unknown) => ({ set: () => ({ where: () => written('update', table) }) }),
+  };
+  return { db, writes };
+}
+
+describe('every DAG ownership check stops a pass whose row a Retry took', () => {
+  const superseded = (id: string) =>
+    inv({
+      id,
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: 137,
+      startedAt: new Date(),
+      endedAt: new Date(),
+      supersededAt: new Date(),
+    } as never);
+  const issue = (over: Record<string, unknown>) => ({
+    id: 'issue1',
+    issueKey: 'ISSUE-1',
+    title: 'Fix the flaky cache',
+    innerIteration: 1,
+    stuckCount: 0,
+    reviewInfraRetries: 0,
+    advisorInvocations: 1,
+    lastAdvisorAction: null,
+    branchName: 'main--ISSUE-1',
+    worktreePath: '/does/not/matter',
+    sandboxWorktreePath: '/does/not/matter',
+    filesModified: [],
+    similarSites: [],
+    specSections: [],
+    errorMessage: null,
+    reviewerVerdict: null,
+    ...over,
+  });
+  const phaseArgs = (db: unknown, issues: unknown[], plan: Record<string, unknown> = {}) =>
+    ({
+      db,
+      issues,
+      level: { level: 0 },
+      current: { id: 'step1', status: 'running' },
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } },
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: { id: 'plan1', replannerInvocationId: null, replannerInvocations: 0, ...plan },
+    }) as never;
+
+  it('in the review loop', async () => {
+    const { db, writes } = lostRowPhaseDb({
+      agentRun: { id: 'run-1', role: 'reviewer', consumedAt: null, cliInvocationId: 'rev-1' },
+      invocation: superseded('rev-1'),
+    });
+    const args = phaseArgs(db, [issue({ outcome: 'completed', resolution: null })]);
+    await expect(resolveReviewPhase(args)).rejects.toBeInstanceOf(StepSupersededError);
+    expect(writes).toEqual([]);
+  });
+
+  it('on a replanner run', async () => {
+    const { db, writes } = lostRowPhaseDb({ invocation: superseded('replanner-1') });
+    const args = phaseArgs(db, [], { replannerInvocationId: 'replanner-1' });
+    await expect(resolveEscalationPhase(args)).rejects.toBeInstanceOf(StepSupersededError);
+    expect(writes).toEqual([]);
+  });
+
+  it('on an advisor run', async () => {
+    const { db, writes } = lostRowPhaseDb({
+      agentRun: { id: 'run-a', role: 'issue_advisor', consumedAt: null, cliInvocationId: 'adv-1' },
+      invocation: superseded('adv-1'),
+    });
+    const failed = issue({ outcome: 'failed_unrecoverable', resolution: 'failed_unrecoverable' });
+    await expect(resolveEscalationPhase(phaseArgs(db, [failed]))).rejects.toBeInstanceOf(
+      StepSupersededError,
+    );
+    expect(writes).toEqual([]);
+  });
+
+  describe('on a level coder in flight (section C)', () => {
+    const killedCoder = {
+      id: 'coder-1',
+      endedAt: new Date(),
+      supersededAt: new Date(),
+      startedAt: new Date(),
+      exitCode: 137,
+      errorMessage: null,
+      rawOutput: null,
+      parsedOutput: null,
+    };
+    async function ingestCoder(stepRowStatus: string) {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-c-'));
+      try {
+        const h = makeDagMergeWaitDb({
+          invocation: killedCoder,
+          integrationDir,
+          autoResolveConflicts: false,
+          stepRowStatus,
+          issue: { outcome: 'running', cliInvocationId: killedCoder.id, infraRetries: 1 },
+          checkpointAfterFirstRead: true,
+        });
+        const ctx = {
+          taskId: 'task1',
+          userId: 'user1',
+          repoPath: integrationDir,
+          sandboxWorkdir: integrationDir,
+          logger: logger.child({ test: 'dag-section-c' }),
+          emitProgress: async () => {},
+        } as unknown as StepContext;
+        const params = {
+          userId: 'user1',
+          taskId: 'task1',
+          cliProviderId: null,
+          ignoreSavedStepClis: false,
+          providers: [{ id: 'p1', enabled: true }],
+          deps: { enqueueCliInvocation: async () => {} },
+        };
+        const outcome = await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: stepRowStatus, round: 0 } as never,
+          ctx,
+          params as never,
+        ).then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        );
+        return { outcome, issueUpdates: h.issueUpdates };
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    }
+
+    it('stops without re-dispatching once the row is gone', async () => {
+      const { outcome, issueUpdates } = await ingestCoder('pending');
+      expect('error' in outcome && outcome.error).toBeInstanceOf(StepSupersededError);
+      expect(issueUpdates).toEqual([]);
+    });
+
+    it('re-dispatches a coder a Retry superseded for free while the row is its own', async () => {
+      const { outcome, issueUpdates } = await ingestCoder('running');
+      expect('result' in outcome && outcome.result.resolved).toBe(true);
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({ outcome: 'pending', cliInvocationId: null, infraRetries: 1 }),
+      ]);
+    });
+  });
 });
