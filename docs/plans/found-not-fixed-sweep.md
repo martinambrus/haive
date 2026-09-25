@@ -1,7 +1,7 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-16 and 5c merged (#267-#280, #282-#284); PR 17 (dashboard
-> links do not wait for statistics) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-24. PRs 1-17 and 5c merged (#267-#280, #282-#285); PR 18 (markdown
+> fences are read by CommonMark's rules) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context

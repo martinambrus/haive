@@ -1,3 +1,5 @@
+import { scanFences } from '@haive/shared/markdown-fences';
+
 /** Heuristic markdown detection — true when the body has a heading line, a fenced
  *  code block, an inline code span `` `x` ``, a bold run `**x**`, or a Markdown link
  *  `[text](url)`. Stays conservative on bare "- " lists and single `*`/`_` emphasis
@@ -14,7 +16,7 @@
 export function looksLikeMarkdown(text: string): boolean {
   return (
     /^\s*#{1,6}\s+\S/m.test(text) ||
-    /^\s*```/m.test(text) ||
+    scanFences(text.split('\n')).length > 0 ||
     /`[^`\n]+`/.test(text) ||
     /\*\*[^\n]+?\*\*/.test(text) ||
     /\[[^\]\n]+\]\([^)\s]+\)/.test(text)

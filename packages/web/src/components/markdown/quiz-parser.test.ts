@@ -111,3 +111,25 @@ describe('parseQuiz', () => {
     expect(parseQuiz(md)!.questions[0]!.prompt).toBe('Late question?');
   });
 });
+
+describe('fences the quiz parser skips', () => {
+  it('finds no quiz heading inside a four-backtick or a tilde fence', () => {
+    expect(
+      extractQuizSection(['````md', '```', '## Comprehension Quiz', '```', '````'].join('\n')),
+    ).toBeNull();
+    expect(extractQuizSection(['~~~', '## Comprehension Quiz', '~~~'].join('\n'))).toBeNull();
+  });
+
+  it('reads no options inside a tilde fence', () => {
+    const quiz = [
+      '## Comprehension Quiz',
+      '### Q1: Pick one',
+      '- [ ] a',
+      '- [x] b',
+      '~~~',
+      '- [x] not an option',
+      '~~~',
+    ].join('\n');
+    expect(parseQuiz(quiz)?.questions[0]?.options).toHaveLength(2);
+  });
+});
