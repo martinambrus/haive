@@ -85,7 +85,9 @@ test.describe('task page on a phone', () => {
         'a step duration keeps to one line',
       ).toBeLessThan(20);
 
-      await main.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+      // The document scrolls, not <main> (see sidebar-nav.tsx), and the strip shows only once the
+      // header is scrolled out of view.
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
       const strip = page.locator('[data-fixed-title-strip]');
       await expect(strip).toBeVisible();
       const fit = await strip.evaluate((el) => {
