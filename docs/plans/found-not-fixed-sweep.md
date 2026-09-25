@@ -1,7 +1,7 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-18 and 5c merged (#267-#280, #282-#286); PR 19 (worker
-> markdown readers use the same fences) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-24. PRs 1-19 and 5c merged (#267-#280, #282-#286, #288); PR 20 (an
+> image in a plan node survives an edit) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context
