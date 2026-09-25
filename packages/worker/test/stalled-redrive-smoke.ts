@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     const makeTask = async (
       title: string,
       opts: {
-        taskStatus?: 'running' | 'waiting_user';
+        taskStatus?: 'running' | 'waiting_user' | 'queued' | 'created';
         taskUpdatedAt?: Date;
         stepStatus?: 'pending' | 'waiting_cli' | 'done' | 'skipped' | 'failed';
         stepUpdatedAt?: Date;
@@ -125,6 +125,61 @@ async function main(): Promise<void> {
     });
     const doneRaceTaskId = await makeTask('done-race', { stepStatus: 'done' });
 
+    // Tasks queued to start, whose START may have been lost.
+    const unstarted = (
+      title: string,
+      opts: { taskStatus?: 'queued' | 'created'; taskUpdatedAt?: Date } = {},
+    ) => makeTask(title, { taskStatus: 'queued', noStepRow: true, ...opts });
+    const lostStartTaskId = await unstarted('lost-start');
+    const startQueuedTaskId = await unstarted('start-queued');
+    const freshQueuedTaskId = await unstarted('fresh-queued', { taskUpdatedAt: new Date() });
+    const draftTaskId = await unstarted('draft', { taskStatus: 'created' });
+
+    // Steps parked on a run, whose cli-exec job may have been lost.
+    const stepRowOf = async (taskId: string) =>
+      (
+        await db
+          .select({ id: schema.taskSteps.id })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.taskId, taskId))
+      )[0]!.id;
+    const addRun = async (
+      taskId: string,
+      opts: { mining?: boolean; createdAt?: Date; startedAt?: Date } = {},
+    ) => {
+      const [run] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId,
+          taskStepId: await stepRowOf(taskId),
+          mode: opts.mining ? 'agent_mining' : 'cli',
+          prompt: 'stalled-redrive-smoke',
+          createdAt: opts.createdAt ?? longAgo,
+          startedAt: opts.startedAt ?? null,
+        })
+        .returning({ id: schema.cliInvocations.id });
+      return run!.id;
+    };
+    const parked = (title: string) => makeTask(title, { stepStatus: 'waiting_cli' });
+    const lostRunTaskId = await parked('lost-run');
+    const lostRunId = await addRun(lostRunTaskId);
+    const owedRunTaskId = await parked('owed-run');
+    const owedRunId = await addRun(owedRunTaskId);
+    const youngRunTaskId = await parked('young-run');
+    const youngRunId = await addRun(youngRunTaskId, { createdAt: new Date() });
+    const liveSiblingTaskId = await parked('live-sibling');
+    const liveSiblingRunId = await addRun(liveSiblingTaskId, {
+      mining: true,
+      startedAt: longAgo,
+    });
+    const liveSiblingLostId = await addRun(liveSiblingTaskId, { mining: true });
+    const miningTaskId = await parked('mining');
+    const miningLostIds = [
+      await addRun(miningTaskId, { mining: true }),
+      await addRun(miningTaskId, { mining: true }),
+    ];
+    const miningOwedId = await addRun(miningTaskId, { mining: true });
+
     const epochOf = async (id: string) =>
       (
         await db
@@ -140,12 +195,17 @@ async function main(): Promise<void> {
       round: number;
       epoch: number;
     }[] = [];
+    const starts: { taskId: string; userId: string }[] = [];
     const failures: FailedStep[] = [];
     const deps = {
       failTask: async (_db: unknown, f: FailedStep) => {
         failures.push(f);
         return true;
       },
+      enqueueStart: async (taskId: string, startUserId: string) => {
+        starts.push({ taskId, userId: startUserId });
+      },
+      queuedInvocationIds: async () => new Set([owedRunId, miningOwedId]),
       enqueueAdvance: async (
         taskId: string,
         advUserId: string,
@@ -157,7 +217,7 @@ async function main(): Promise<void> {
       },
       // Simulates a step claimed by another pass between the candidates SELECT and this pass's
       // fence: flips the race tasks' step rows live, after the SELECT already ran.
-      queuedTaskIds: async () => {
+      queuedTaskJobs: async () => {
         await db
           .update(schema.taskSteps)
           .set({ status: 'running', updatedAt: new Date() })
@@ -168,7 +228,11 @@ async function main(): Promise<void> {
               eq(schema.taskSteps.round, 0),
             ),
           );
-        return new Set([withJobTaskId]);
+        // A START this pass queued is on the queue for the next one.
+        return {
+          steps: new Set([withJobTaskId]),
+          starts: new Set([startQueuedTaskId, ...starts.map((st) => st.taskId)]),
+        };
       },
     };
 
@@ -252,6 +316,70 @@ async function main(): Promise<void> {
       (await epochOf(doneRaceTaskId)) === 3 && advances.every((a) => a.taskId !== doneRaceTaskId),
     );
 
+    const startsFor = (id: string) => starts.filter((st) => st.taskId === id);
+    check(
+      'a task queued to start whose START was lost gets one',
+      startsFor(lostStartTaskId).length === 1 && startsFor(lostStartTaskId)[0]?.userId === userId,
+      startsFor(lostStartTaskId),
+    );
+    check(
+      'a queued task the queue still owes a job, a fresh one and a draft get no START',
+      [startQueuedTaskId, freshQueuedTaskId, draftTaskId].every((id) => startsFor(id).length === 0),
+      starts,
+    );
+
+    const runOf = async (id: string) =>
+      (
+        await db
+          .select({
+            startedAt: schema.cliInvocations.startedAt,
+            endedAt: schema.cliInvocations.endedAt,
+          })
+          .from(schema.cliInvocations)
+          .where(eq(schema.cliInvocations.id, id))
+      )[0];
+    const advancesFor = (id: string) => advances.filter((a) => a.taskId === id);
+    check(
+      'a run no job owes is ended, and its step re-driven once at the new epoch',
+      (await runOf(lostRunId))?.endedAt != null &&
+        (await epochOf(lostRunTaskId)) === 4 &&
+        advancesFor(lostRunTaskId).length === 1 &&
+        advancesFor(lostRunTaskId)[0]?.epoch === 4 &&
+        advancesFor(lostRunTaskId)[0]?.stepId === 'smoke-step',
+      {
+        run: await runOf(lostRunId),
+        epoch: await epochOf(lostRunTaskId),
+        advances: advancesFor(lostRunTaskId),
+      },
+    );
+    for (const [name, taskId, runIds] of [
+      ['a run a job still owes', owedRunTaskId, [owedRunId]],
+      ['a run recorded since the cutoff', youngRunTaskId, [youngRunId]],
+      [
+        'a lost run beside one still running',
+        liveSiblingTaskId,
+        [liveSiblingRunId, liveSiblingLostId],
+      ],
+    ] as const) {
+      const runs = await Promise.all(runIds.map((id) => runOf(id)));
+      check(
+        `${name} leaves its step alone`,
+        runs.every((r) => r?.endedAt == null) &&
+          (await epochOf(taskId)) === 3 &&
+          advancesFor(taskId).length === 0,
+        { runs, epoch: await epochOf(taskId) },
+      );
+    }
+    const miningRuns = await Promise.all(miningLostIds.map((id) => runOf(id)));
+    check(
+      'a fan-out with two lost runs and one owed ends the two and re-drives the step once',
+      miningRuns.every((r) => r?.endedAt != null) &&
+        (await runOf(miningOwedId))?.endedAt == null &&
+        (await epochOf(miningTaskId)) === 4 &&
+        advancesFor(miningTaskId).length === 1,
+      { miningRuns, owed: await runOf(miningOwedId), epoch: await epochOf(miningTaskId) },
+    );
+
     // The fence write above also refreshed the redriven task's updated_at, so a second pass finds
     // it no longer stale rather than losing a compare-and-swap.
     await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
@@ -262,6 +390,13 @@ async function main(): Promise<void> {
     check(
       'a second pass records no further advance for it',
       advances.filter((a) => a.taskId === redriveTaskId).length === 1,
+    );
+    check(
+      'a second pass queues no second START and re-drives no recovered step again',
+      startsFor(lostStartTaskId).length === 1 &&
+        advancesFor(lostRunTaskId).length === 1 &&
+        advancesFor(miningTaskId).length === 1,
+      { starts, advances },
     );
   } finally {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));

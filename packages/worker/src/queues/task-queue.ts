@@ -2,7 +2,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
@@ -1034,6 +1034,20 @@ export async function enqueueAdvance(
       removeOnComplete: 100,
       removeOnFail: 100,
       ...(opts?.delayMs ? { delay: opts.delayMs } : {}),
+    },
+  );
+}
+
+/** Queue a START as the api's task routes do; the claim makes a duplicate one a no-op. */
+export async function enqueueStart(taskId: string, userId: string): Promise<void> {
+  await getTaskQueue().add(
+    TASK_JOB_NAMES.START,
+    { taskId, userId },
+    {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
     },
   );
 }
@@ -2726,7 +2740,7 @@ const NEVER_QUEUED_ORPHAN_MESSAGE =
 
 /** Every state in which a cli-exec job may still run: a stalled `active` one is redelivered, and
  *  GLOBAL_PAUSE holds its jobs as `delayed`. */
-async function readQueuedInvocationIds(): Promise<Set<string> | null> {
+export async function readQueuedInvocationIds(): Promise<Set<string> | null> {
   try {
     const jobs = await getCliExecQueue().getJobs([
       'active',
@@ -2748,7 +2762,7 @@ async function readQueuedInvocationIds(): Promise<Set<string> | null> {
 }
 
 /** A step parked on its CLI that boot finds with no worker behind it. */
-interface ParkedOrphan {
+export interface ParkedOrphan {
   taskStepId: string;
   taskId: string;
   stepId: string;
@@ -2761,13 +2775,16 @@ interface ParkedOrphan {
 
 /** Recover one parked step: end its orphaned runs, then requeue it when the task has moved past
  *  it, or fence the task and re-drive it. `queued` is every invocation a cli-exec job still owes
- *  a run, or null when the queue could not be read. */
-async function recoverParkedStep(
+ *  a run, or null when the queue could not be read. `bornBefore`, for a pass that runs beside a
+ *  live worker, leaves every run that started or was recorded since alone. True when it re-drove
+ *  the step. */
+export async function recoverParkedStep(
   db: Database,
   s: ParkedOrphan,
   queued: Set<string> | null,
   deps: ReconcileDeps,
-): Promise<void> {
+  bornBefore?: Date,
+): Promise<boolean> {
   // Mark EVERY live invocation for this step orphaned, not just the latest — a
   // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
   // crash, and leaving the siblings ended_at NULL makes the mining barrier count
@@ -2796,6 +2813,7 @@ async function recoverParkedStep(
         isNotNull(schema.cliInvocations.startedAt),
         isNull(schema.cliInvocations.endedAt),
         isNull(schema.cliInvocations.supersededAt),
+        ...(bornBefore ? [lt(schema.cliInvocations.startedAt, bornBefore)] : []),
       ),
     );
   // A never-started run that no cli-exec job owes any more: the worker died between
@@ -2813,6 +2831,7 @@ async function recoverParkedStep(
           isNull(schema.cliInvocations.startedAt),
           isNull(schema.cliInvocations.endedAt),
           isNull(schema.cliInvocations.supersededAt),
+          ...(bornBefore ? [lt(schema.cliInvocations.createdAt, bornBefore)] : []),
         ),
       );
     const neverQueued = unstarted.map((r) => r.id).filter((id) => !queued.has(id));
@@ -2847,7 +2866,7 @@ async function recoverParkedStep(
       },
       'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
     );
-    return;
+    return false;
   }
   // The step is now parked with NO invocation running — the state markCliParkBegin exists
   // for — but the park did not start now, it started when the worker died. Fold that dead
@@ -2892,7 +2911,7 @@ async function recoverParkedStep(
         'requeued a waiting_cli orphan the task left during boot (not re-driven)',
       );
     }
-    return;
+    return false;
   }
   try {
     // Retried, because nothing else drives the step once this pass has ended its runs: a
@@ -2914,6 +2933,7 @@ async function recoverParkedStep(
     { taskId: s.taskId, stepId: s.stepId, epoch: fenced.epoch },
     'reconciled orphaned waiting_cli step',
   );
+  return true;
 }
 
 export async function reconcileOrphanedSteps(

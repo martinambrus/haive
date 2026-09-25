@@ -11,7 +11,7 @@ vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
 import {
   defaultDeps,
   redriveStalledTasks,
-  taskIdsOwedAStep,
+  taskQueueOwed,
   type FailedStep,
 } from '../src/queues/stalled-redrive.js';
 
@@ -59,6 +59,19 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+/** A task queue owing a step to these tasks and no START to any. */
+const owesSteps = (...taskIds: string[]) => ({
+  steps: new Set(taskIds),
+  starts: new Set<string>(),
+});
+
+/** Deps for the failed-row path and the two other candidate sets, which these cases never reach. */
+const noLostWork = {
+  failTask: async () => false,
+  enqueueStart: async () => undefined,
+  queuedInvocationIds: async () => new Set<string>(),
+};
+
 interface RecordedUpdate {
   table: string;
   set: Record<string, unknown>;
@@ -91,6 +104,9 @@ function makeDb(
         leftJoin: (_table2: unknown, _cond: unknown) => ({
           where: (_cond2: unknown) => Promise.resolve(candidates),
         }),
+        // No task waiting to start and no parked step here; the smoke covers both.
+        innerJoin: () => ({ where: () => Promise.resolve([]) }),
+        where: () => Promise.resolve([]),
       }),
     }),
     transaction: async (_fn: (tx: unknown) => unknown) => {
@@ -130,6 +146,8 @@ async function captureQuery(): Promise<{ joinCond: unknown; whereCond: unknown }
             },
           };
         },
+        innerJoin: () => ({ where: () => Promise.resolve([]) }),
+        where: () => Promise.resolve([]),
       }),
     }),
   } as unknown as Database;
@@ -137,8 +155,8 @@ async function captureQuery(): Promise<{ joinCond: unknown; whereCond: unknown }
     db,
     {
       enqueueAdvance: async () => undefined,
-      queuedTaskIds: async () => new Set(),
-      failTask: async () => false,
+      queuedTaskJobs: async () => owesSteps(),
+      ...noLostWork,
     },
     { staleMs: 300_000 },
   );
@@ -163,8 +181,8 @@ describe('redriveStalledTasks', () => {
         enqueueAdvance: async (taskId, _userId, stepId, round, epoch) => {
           advances.push({ taskId, stepId, round, epoch });
         },
-        queuedTaskIds: async () => new Set(),
-        failTask: async () => false,
+        queuedTaskJobs: async () => owesSteps(),
+        ...noLostWork,
       },
       { staleMs: 300_000 },
     );
@@ -198,8 +216,8 @@ describe('redriveStalledTasks', () => {
         enqueueAdvance: async (taskId, _userId, _stepId, _round, epoch) => {
           advances.push({ taskId, epoch });
         },
-        queuedTaskIds: async () => new Set(),
-        failTask: async () => false,
+        queuedTaskJobs: async () => owesSteps(),
+        ...noLostWork,
       },
       { staleMs: 300_000 },
     );
@@ -232,8 +250,8 @@ describe('redriveStalledTasks', () => {
         enqueueAdvance: async (...args) => {
           advances.push(args);
         },
-        queuedTaskIds: async () => new Set(['task-1']),
-        failTask: async () => false,
+        queuedTaskJobs: async () => owesSteps('task-1'),
+        ...noLostWork,
       },
       { staleMs: 300_000 },
     );
@@ -259,8 +277,8 @@ describe('redriveStalledTasks', () => {
         enqueueAdvance: async (...args) => {
           advances.push(args);
         },
-        queuedTaskIds: async () => new Set(),
-        failTask: async () => false,
+        queuedTaskJobs: async () => owesSteps(),
+        ...noLostWork,
       },
       { staleMs: 300_000 },
     );
@@ -294,8 +312,8 @@ describe('redriveStalledTasks', () => {
           if (taskId === 'task-1') throw new Error('redis blinked');
           advances.push({ taskId, epoch });
         },
-        queuedTaskIds: async () => new Set(),
-        failTask: async () => false,
+        queuedTaskJobs: async () => owesSteps(),
+        ...noLostWork,
         redriveRetryDelaysMs: [0, 0],
       },
       { staleMs: 300_000 },
@@ -320,11 +338,7 @@ describe('redriveStalledTasks', () => {
     const db = makeDb([candidate], recorded);
     const redriven = await redriveStalledTasks(
       db,
-      {
-        enqueueAdvance: async () => undefined,
-        queuedTaskIds: async () => null,
-        failTask: async () => false,
-      },
+      { enqueueAdvance: async () => undefined, queuedTaskJobs: async () => null, ...noLostWork },
       { staleMs: 300_000 },
     );
     expect(redriven).toBe(0);
@@ -354,7 +368,8 @@ describe('a running task whose current step failed', () => {
         enqueueAdvance: async (...args) => {
           advances.push(args);
         },
-        queuedTaskIds: async () => new Set(),
+        queuedTaskJobs: async () => owesSteps(),
+        ...noLostWork,
         failTask: async (_db, f) => {
           failed.push(f);
           return true;
@@ -395,9 +410,9 @@ describe('a running task whose current step failed', () => {
   });
 });
 
-describe('taskIdsOwedAStep', () => {
-  it('counts an advance, a cancel and a job of any other kind, but never a START', () => {
-    const owed = taskIdsOwedAStep([
+describe('taskQueueOwed', () => {
+  it('owes a step for every job but a START, and records the STARTs apart', () => {
+    const owed = taskQueueOwed([
       { name: 'advance-step', data: { taskId: 'advancing' } },
       { name: 'cancel-task', data: { taskId: 'cancelling' } },
       // A START a dead worker left active: after its claim the task is running, and START refuses it.
@@ -405,6 +420,7 @@ describe('taskIdsOwedAStep', () => {
       { name: 'cleanup-repo-rag', data: { repositoryId: 'repo-1' } },
       undefined,
     ]);
-    expect([...owed].sort()).toEqual(['advancing', 'cancelling']);
+    expect([...owed.steps].sort()).toEqual(['advancing', 'cancelling']);
+    expect([...owed.starts]).toEqual(['claimed']);
   });
 });

@@ -1,10 +1,25 @@
-import { and, eq, exists, inArray, isNotNull, isNull, lt, not, or, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  not,
+  or,
+  sql,
+  type SQLWrapper,
+} from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
   enqueueAdvance,
+  enqueueStart,
   finishFailedStep,
   getTaskQueue,
+  readQueuedInvocationIds,
+  recoverParkedStep,
   retrying,
   REDRIVE_RETRY_DELAYS_MS,
 } from './task-queue.js';
@@ -12,7 +27,8 @@ import {
 /**
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
  * or any hand-off lost between boots, left `pending`/missing, finished with nothing after it, or
- * failed with the task still running.
+ * failed with the task still running; a task queued to start whose START was lost; and a step
+ * parked on a run whose cli-exec job was.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -35,25 +51,36 @@ export interface StalledRedriveDeps {
   ) => Promise<void>;
   /** Fail a running task at `epoch`, as the lost hand-off of its failed step would have. */
   failTask: (db: Database, failed: FailedStep) => Promise<boolean>;
-  /** Every task id a task-queue job still owes a step, or null when the queue could not be read. */
-  queuedTaskIds: () => Promise<Set<string> | null>;
+  enqueueStart: (taskId: string, userId: string) => Promise<void>;
+  /** What the task queue still owes each task, or null when the queue could not be read. */
+  queuedTaskJobs: () => Promise<TaskQueueOwed | null>;
+  /** Every invocation a cli-exec job still owes a run, or null when the queue could not be read. */
+  queuedInvocationIds: () => Promise<Set<string> | null>;
   redriveRetryDelaysMs?: number[];
 }
 
-/** The tasks these jobs still owe a step. A START owes none: it only claims a task still waiting
- *  to start, so one a dead worker left `active` under its lock must not hold a running task. */
-export function taskIdsOwedAStep(jobs: readonly ({ name?: string; data?: unknown } | undefined)[]) {
-  const ids = new Set<string>();
+export interface TaskQueueOwed {
+  /** Tasks a job still owes a step. A START owes none: it only claims a task still waiting to
+   *  start, so one a dead worker left `active` under its lock must not hold a running task. */
+  steps: Set<string>;
+  /** Tasks a START is still queued for. */
+  starts: Set<string>;
+}
+
+export function taskQueueOwed(
+  jobs: readonly ({ name?: string; data?: unknown } | undefined)[],
+): TaskQueueOwed {
+  const owed: TaskQueueOwed = { steps: new Set(), starts: new Set() };
   for (const job of jobs) {
-    if (job?.name === TASK_JOB_NAMES.START) continue;
     const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
-    if (typeof id === 'string') ids.add(id);
+    if (typeof id !== 'string') continue;
+    (job?.name === TASK_JOB_NAMES.START ? owed.starts : owed.steps).add(id);
   }
-  return ids;
+  return owed;
 }
 
 /** 'active' is redelivered; 'delayed' covers a holdStepAdvance, admission, or PAUSE park. */
-async function readTaskQueueTaskIds(): Promise<Set<string> | null> {
+async function readTaskQueueJobs(): Promise<TaskQueueOwed | null> {
   try {
     const jobs = await getTaskQueue().getJobs([
       'active',
@@ -62,7 +89,7 @@ async function readTaskQueueTaskIds(): Promise<Set<string> | null> {
       'delayed',
       'prioritized',
     ]);
-    return taskIdsOwedAStep(jobs);
+    return taskQueueOwed(jobs);
   } catch (err) {
     log.warn({ err }, 'task queue unreadable; leaving stalled tasks alone this pass');
     return null;
@@ -80,7 +107,9 @@ export const defaultDeps: StalledRedriveDeps = {
       f.message,
       ['running'],
     ),
-  queuedTaskIds: readTaskQueueTaskIds,
+  enqueueStart,
+  queuedTaskJobs: readTaskQueueJobs,
+  queuedInvocationIds: readQueuedInvocationIds,
 };
 
 /** A current row that shows the task's hand-off was lost: pending and not parked, or finished
@@ -173,9 +202,21 @@ async function redriveTask(
   return true;
 }
 
+/** A step's runs a live worker may still start: recorded, never started, still standing. */
+function unstartedRun(taskStepId: SQLWrapper | string) {
+  return and(
+    eq(schema.cliInvocations.taskStepId, taskStepId),
+    isNull(schema.cliInvocations.startedAt),
+    isNull(schema.cliInvocations.endedAt),
+    isNull(schema.cliInvocations.supersededAt),
+  );
+}
+
 /** One pass: re-drives each running task whose current step row is missing, pending and not
- *  parked, or finished, and fails one whose current row failed, while the task queue holds no job
- *  for it. */
+ *  parked, or finished, and fails one whose current row failed; queues a START for a task still
+ *  queued to start; and recovers a parked
+ *  step whose recorded run no cli-exec job owes any more, as boot does. Each only while the task
+ *  queue holds no job for the task. */
 export async function redriveStalledTasks(
   db: Database,
   deps: StalledRedriveDeps = defaultDeps,
@@ -214,15 +255,74 @@ export async function redriveStalledTasks(
         ),
       ),
     );
-  if (candidates.length === 0) return 0;
+  // `created` is left alone: a deferred-start draft waits there on purpose.
+  const unstartedTasks = await db
+    .select({ taskId: schema.tasks.id, userId: schema.tasks.userId })
+    .from(schema.tasks)
+    .where(and(eq(schema.tasks.status, 'queued'), lt(schema.tasks.updatedAt, cutoff)));
+  const parkedSteps = await db
+    .select({
+      taskStepId: schema.taskSteps.id,
+      taskId: schema.tasks.id,
+      stepId: schema.taskSteps.stepId,
+      round: schema.taskSteps.round,
+      userId: schema.tasks.userId,
+      epoch: schema.tasks.orchestrationEpoch,
+      currentStepId: schema.tasks.currentStepId,
+      currentRound: schema.tasks.currentRound,
+    })
+    .from(schema.tasks)
+    .innerJoin(
+      schema.taskSteps,
+      and(
+        eq(schema.taskSteps.taskId, schema.tasks.id),
+        eq(schema.taskSteps.stepId, schema.tasks.currentStepId),
+        eq(schema.taskSteps.round, schema.tasks.currentRound),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.tasks.status, 'running'),
+        lt(schema.tasks.updatedAt, cutoff),
+        eq(schema.taskSteps.status, 'waiting_cli'),
+        lt(schema.taskSteps.updatedAt, cutoff),
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(schema.cliInvocations)
+            .where(
+              and(unstartedRun(schema.taskSteps.id), lt(schema.cliInvocations.createdAt, cutoff)),
+            ),
+        ),
+        // A run that is running says the worker behind the step is alive.
+        not(
+          exists(
+            db
+              .select({ one: sql`1` })
+              .from(schema.cliInvocations)
+              .where(
+                and(
+                  eq(schema.cliInvocations.taskStepId, schema.taskSteps.id),
+                  isNotNull(schema.cliInvocations.startedAt),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              ),
+          ),
+        ),
+      ),
+    );
+  if (candidates.length === 0 && unstartedTasks.length === 0 && parkedSteps.length === 0) {
+    return 0;
+  }
 
-  const queued = await deps.queuedTaskIds();
+  const queued = await deps.queuedTaskJobs();
   if (queued === null) return 0;
 
   let redriven = 0;
   for (const c of candidates) {
     if (c.stepId === null) continue; // excluded by isNotNull above; narrows the type
-    if (queued.has(c.taskId)) continue;
+    if (queued.steps.has(c.taskId)) continue;
     try {
       if (c.rowStatus === 'failed' && c.rowId !== null) {
         // Its job died between failing the step and failing the task, and every write refuses a
@@ -238,6 +338,37 @@ export async function redriveStalledTasks(
       } else if (await redriveTask(db, { ...c, stepId: c.stepId }, deps, cutoff)) redriven++;
     } catch (err) {
       log.error({ err, taskId: c.taskId }, 'stalled task redrive failed');
+    }
+  }
+
+  for (const t of unstartedTasks) {
+    if (queued.starts.has(t.taskId)) continue;
+    try {
+      await retrying(
+        () => deps.enqueueStart(t.taskId, t.userId),
+        deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS,
+      );
+      redriven++;
+      log.info({ taskId: t.taskId }, 'queued a START for a task whose own was lost');
+    } catch (err) {
+      log.error({ err, taskId: t.taskId }, 'stalled task START could not be queued');
+    }
+  }
+
+  const lostRuns = parkedSteps.filter((p) => !queued.steps.has(p.taskId));
+  if (lostRuns.length === 0) return redriven;
+  const owed = await deps.queuedInvocationIds();
+  if (owed === null) return redriven;
+  for (const p of lostRuns) {
+    try {
+      const recorded = await db
+        .select({ id: schema.cliInvocations.id })
+        .from(schema.cliInvocations)
+        .where(and(unstartedRun(p.taskStepId), lt(schema.cliInvocations.createdAt, cutoff)));
+      if (recorded.every((r) => owed.has(r.id))) continue;
+      if (await recoverParkedStep(db, p, owed, deps, cutoff)) redriven++;
+    } catch (err) {
+      log.error({ err, taskId: p.taskId, stepId: p.stepId }, 'parked step recovery failed');
     }
   }
   return redriven;
