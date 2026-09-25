@@ -9,10 +9,11 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  *
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
- * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` /
- * `inArray` / `isNull` / `isNotNull` — and throws on anything else, so a drizzle upgrade or a new
- * query shape fails loudly instead of matching every row. The foreign-key cascade is read off the
- * schema.
+ * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
+ * `gt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five —
+ * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
+ * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and stores any
+ * other as it is. The foreign-key cascade is read off the schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
  * a savepoint. There is no isolation: a write is visible to every reader the moment it is made,
@@ -47,17 +48,21 @@ function columnKeys(table: PgTable): Map<unknown, string> {
 
 interface Lazy<T> extends PromiseLike<T> {
   catch<B>(bad: (e: unknown) => B | PromiseLike<B>): Promise<T | B>;
-  returning(): Promise<T>;
+  returning(fields?: Record<string, unknown>): Promise<T>;
 }
 
-/** A drizzle-style builder that runs once, when it is awaited, and can also be asked `returning()`. */
-function lazy<T>(run: () => T | Promise<T>): Lazy<T> {
+/** A drizzle-style builder that runs once, when it is awaited, and can also be asked `returning()`,
+ *  whose `fields` are applied through `shape`. */
+function lazy<T>(
+  run: () => T | Promise<T>,
+  shape?: (value: T, fields: Record<string, unknown>) => T,
+): Lazy<T> {
   let done: Promise<T> | null = null;
   const go = (): Promise<T> => (done ??= Promise.resolve().then(run));
   return {
     then: (ok, bad) => go().then(ok, bad),
     catch: (bad) => go().catch(bad),
-    returning: () => go(),
+    returning: (fields) => (fields && shape ? go().then((v) => shape(v, fields)) : go()),
   };
 }
 
@@ -166,19 +171,59 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           }
           return (row) => row[key] === v;
         }
+        if (ch.length === 3 && (text(op) === ' <> ' || text(op) === ' > ') && is(val, Param)) {
+          const v = checkValue(col, val.value);
+          const above = text(op) === ' > ';
+          return (row) =>
+            row[key] != null &&
+            v != null &&
+            (above ? (row[key] as number) > (v as number) : row[key] !== v);
+        }
         if (
           ch.length === 3 &&
-          text(op) === ' in ' &&
+          (text(op) === ' in ' || text(op) === ' not in ') &&
           Array.isArray(val) &&
           val.every((p) => is(p, Param))
         ) {
           const vs = new Set(val.map((p) => checkValue(col, (p as Param).value)));
-          return (row) => vs.has(row[key]);
+          return text(op) === ' in '
+            ? (row) => vs.has(row[key])
+            : (row) => row[key] != null && !vs.has(row[key]);
         }
       }
       return refuse();
     };
     return compile(cond);
+  }
+
+  /** An update's values as a function of the row it writes: `<column> + <integer>` read off that
+   *  row, and anything else, another SQL expression included, as it is. */
+  function compileSet(table: PgTable, values: FakeRow): (row: FakeRow) => FakeRow {
+    const cols = getTableColumns(table);
+    const keyOf = columnKeys(table);
+    const parts = Object.entries(values).map(([k, v]): [string, (row: FakeRow) => unknown] => {
+      if (!(k in cols)) throw new Error(`fake db: ${getTableName(table)} has no column "${k}"`);
+      const ch = is(v, SQL) ? v.queryChunks.filter((c) => text(c) !== '') : [];
+      const key = is(ch[0], Column) ? keyOf.get(ch[0]) : undefined;
+      const step = /^ \+ (\d+)$/.exec(text(ch[1]) ?? '');
+      if (ch.length !== 2 || key === undefined || !step) return [k, () => v];
+      return [k, (row) => Number(row[key]) + Number(step[1])];
+    });
+    return (row) => Object.fromEntries(parts.map(([k, value]) => [k, value(row)]));
+  }
+
+  /** A row shaped as `select({ alias: column })` and `returning({ alias: column })` shape it. */
+  function project(table: PgTable, fields: Record<string, unknown>, row: FakeRow): FakeRow {
+    const keyOf = columnKeys(table);
+    return Object.fromEntries(
+      Object.entries(fields).map(([alias, col]) => {
+        const key = keyOf.get(col);
+        if (key === undefined) {
+          throw new Error(`fake db: "${alias}" is not a column of ${getTableName(table)}`);
+        }
+        return [alias, row[key]];
+      }),
+    );
   }
 
   function sortBy(table: PgTable, rows: FakeRow[], order: unknown): FakeRow[] {
@@ -214,22 +259,9 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
 
   /** `select({ alias: column, … }).from(table)`, projected onto the aliases; all columns without. */
   function selectQuery(fields: Record<string, unknown> | undefined, table: PgTable): SelectQuery {
-    const keyOf = columnKeys(table);
     const opts: Record<string, unknown> = {};
     const run = (): FakeRow[] =>
-      select(table, opts).map((row) =>
-        fields === undefined
-          ? row
-          : Object.fromEntries(
-              Object.entries(fields).map(([alias, col]) => {
-                const key = keyOf.get(col);
-                if (key === undefined) {
-                  throw new Error(`fake db: "${alias}" is not a column of ${getTableName(table)}`);
-                }
-                return [alias, row[key]];
-              }),
-            ),
-      );
+      select(table, opts).map((row) => (fields === undefined ? row : project(table, fields, row)));
     const query: SelectQuery = {
       where: (cond) => ((opts.where = cond), query),
       orderBy: (order) => ((opts.orderBy = order), query),
@@ -275,16 +307,18 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return { ...row };
   }
 
-  function update(ctx: TxContext | null, table: PgTable, match: Pred, values: FakeRow): FakeRow[] {
-    const cols = getTableColumns(table);
-    for (const k of Object.keys(values)) {
-      if (!(k in cols)) throw new Error(`fake db: ${getTableName(table)} has no column "${k}"`);
-    }
+  function update(
+    ctx: TxContext | null,
+    table: PgTable,
+    match: Pred,
+    values: (row: FakeRow) => FakeRow,
+  ): FakeRow[] {
     const log = undoLog(ctx);
     const hit = store.get(table)!.filter(match);
     for (const row of hit) {
-      const before = Object.fromEntries(Object.keys(values).map((k) => [k, row[k]]));
-      Object.assign(row, values);
+      const next = values(row);
+      const before = Object.fromEntries(Object.keys(next).map((k) => [k, row[k]]));
+      Object.assign(row, next);
       log?.push(() => Object.assign(row, before));
     }
     return hit.map((row) => ({ ...row }));
@@ -352,19 +386,28 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
       insert: (table: PgTable) => ({
         values: (values: FakeRow | FakeRow[]) =>
-          lazy(async () => {
-            await hooks.beforeInsert?.(table);
-            return (Array.isArray(values) ? values : [values]).map((v) => insertRow(ctx, table, v));
-          }),
+          lazy(
+            async () => {
+              await hooks.beforeInsert?.(table);
+              return (Array.isArray(values) ? values : [values]).map((v) =>
+                insertRow(ctx, table, v),
+              );
+            },
+            (rows, fields) => rows.map((row) => project(table, fields, row)),
+          ),
       }),
       update: (table: PgTable) => ({
         set: (values: FakeRow) => ({
           where: (cond: unknown) =>
-            lazy(async () => {
-              const match = compileWhere(table, cond);
-              await hooks.beforeUpdate?.(table);
-              return update(ctx, table, match, values);
-            }),
+            lazy(
+              async () => {
+                const match = compileWhere(table, cond);
+                const next = compileSet(table, values);
+                await hooks.beforeUpdate?.(table);
+                return update(ctx, table, match, next);
+              },
+              (rows, fields) => rows.map((row) => project(table, fields, row)),
+            ),
         }),
       }),
       delete: (table: PgTable) => ({
