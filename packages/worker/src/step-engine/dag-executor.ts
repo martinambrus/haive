@@ -1054,15 +1054,39 @@ export async function ingestReviewRun(
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
   const spec = (await issueSpecText(ra.specView, issue)).text;
-  await ra.db
-    .update(schema.dagAgentRuns)
-    .set({
-      status: 'done',
-      consumedAt: new Date(),
-      endedAt: new Date(),
-      rawOutput: inv.rawOutput ?? null,
-    })
-    .where(eq(schema.dagAgentRuns.id, run.id));
+  const consume = async (): Promise<void> => {
+    await ra.db
+      .update(schema.dagAgentRuns)
+      .set({
+        status: 'done',
+        consumedAt: new Date(),
+        endedAt: new Date(),
+        rawOutput: inv.rawOutput ?? null,
+      })
+      .where(eq(schema.dagAgentRuns.id, run.id));
+  };
+  const fixed = parseCoderResult(inv);
+
+  // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
+  // after it — so the replacement is named (claim) before the old run is marked done.
+  if (run.role !== 'reviewer' && !fixed.parsed && isFreeRedispatch(inv)) {
+    const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const ok = await spawnReviewAgent(
+      ra,
+      issue,
+      'coder',
+      issue.innerIteration,
+      fixCoderPrompt(issue, storedVerdict.success ? storedVerdict.data.issues : [], spec),
+      ['tool_use', 'file_write'],
+      consume,
+    );
+    if (!ok) {
+      await consume();
+      await setResolution(ra.db, issue, 'failed_unrecoverable');
+    }
+    return;
+  }
+  await consume();
 
   if (run.role === 'reviewer') {
     const verdict = parseReviewerOutput(inv);
@@ -1146,21 +1170,6 @@ export async function ingestReviewRun(
   }
   // fix-coder finished → re-review. Its similar sites and concerns are kept as a level coder's are;
   // the review decides the rest.
-  const fixed = parseCoderResult(inv);
-  // A fix coder that never ran left no result; re-dispatch it rather than reviewing unchanged code.
-  if (!fixed.parsed && isFreeRedispatch(inv)) {
-    const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
-    const ok = await spawnReviewAgent(
-      ra,
-      issue,
-      'coder',
-      issue.innerIteration,
-      fixCoderPrompt(issue, storedVerdict.success ? storedVerdict.data.issues : [], spec),
-      ['tool_use', 'file_write'],
-    );
-    if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
-    return;
-  }
   if (fixed.similarSites.length > 0) {
     await ra.db
       .update(schema.taskDagIssues)

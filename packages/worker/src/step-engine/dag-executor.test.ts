@@ -1166,8 +1166,12 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
  *  Ledger/terseness augmentation reads no table this db provides and degrade to a no-op
  *  (augmentPromptWithLedger catches its own read failure). */
 function makeSpawnDb() {
-  const inserts: { table: unknown; values: Record<string, unknown> }[] = [];
-  const updates: { table: unknown; patch: Record<string, unknown>; cond: unknown }[] = [];
+  // seq orders inserts and updates on one shared clock, so a test can assert which of two
+  // writes to different tables (or the same one) actually happened first.
+  let seq = 0;
+  const inserts: { table: unknown; values: Record<string, unknown>; seq: number }[] = [];
+  const updates: { table: unknown; patch: Record<string, unknown>; cond: unknown; seq: number }[] =
+    [];
   let nextInvId = 0;
   const db = {
     query: {
@@ -1176,7 +1180,7 @@ function makeSpawnDb() {
     },
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown>) => {
-        const record = () => inserts.push({ table, values });
+        const record = () => inserts.push({ table, values, seq: ++seq });
         return {
           returning: async () => {
             record();
@@ -1192,7 +1196,7 @@ function makeSpawnDb() {
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => ({
         where: (cond: unknown) => {
-          updates.push({ table, patch, cond });
+          updates.push({ table, patch, cond, seq: ++seq });
           return { then: (resolve: (v: unknown) => void) => resolve(undefined) };
         },
       }),
@@ -1279,6 +1283,12 @@ describe('ingestReviewRun: a fix coder that never started', () => {
     expect(runInsert?.values.iteration).toBe(1);
     // Exactly one agent was spawned — a reviewer was never dispatched against unchanged code.
     expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(1);
+    // The replacement run must be recorded before the old one is marked consumed, so a
+    // crash in between leaves a coder — not a bare consume — as the issue's latest run.
+    const consumeUpdate = updates.find(
+      (u) => u.table === schema.dagAgentRuns && (u.patch as { consumedAt?: unknown }).consumedAt,
+    );
+    expect(runInsert!.seq).toBeLessThan(consumeUpdate!.seq);
   });
 });
 
