@@ -21,6 +21,7 @@ import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 // Reverse-proxies the in-task code-server editor through the authenticated api,
 // exactly mirroring how the terminal/VNC routes proxy into per-task containers.
@@ -123,6 +124,10 @@ export function installIdeWebSocket(server: Server): void {
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(WS_PATH_PREFIX)) return;
+    if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
 
     void (async () => {
       try {
@@ -197,11 +202,8 @@ function proxyWsUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, task
         lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
         continue;
       }
-      // code-server enforces a WebSocket origin check: the Origin host must equal the
-      // Host header, or it answers 403 (the client then sees a 1006 abnormal close).
-      // The browser's Origin is the api (e.g. http://localhost:3001), so rewrite it to
-      // match the upstream Host. Safe here — the api proxy is the auth boundary and the
-      // container is never host-published, so the rebind/CSRF guard is redundant.
+      // code-server refuses an Origin whose host is not the Host header, and here the Host is
+      // the container's; the upgrade handler already checked the browser's Origin.
       if (k.toLowerCase() === 'origin') {
         lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
         continue;

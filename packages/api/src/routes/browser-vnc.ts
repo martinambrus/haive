@@ -17,6 +17,7 @@ import { getDb } from '../db.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 // Bridges the web noVNC panel to the headed-browser desktop inside a task's
 // runtime container: RFB-over-WebSocket on the client side, raw TCP to
@@ -51,6 +52,10 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
+    if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
 
     void (async () => {
       try {

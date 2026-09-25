@@ -4,7 +4,8 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
-import type { AppEnv } from './context.js';
+import { HttpError, type AppEnv } from './context.js';
+import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
@@ -43,6 +44,8 @@ import { versionRoutes } from './routes/version.js';
 import { maintenanceGate } from './middleware/maintenance.js';
 import { maintenanceRoutes } from './routes/maintenance.js';
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export function createApiApp(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -56,6 +59,17 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
       allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
   );
+
+  const trusted = trustedOrigins(webOrigin);
+  app.use('*', async (c, next) => {
+    if (
+      !SAFE_METHODS.has(c.req.method) &&
+      isForeignOrigin(c.req.header('origin'), c.req.header('host'), trusted)
+    ) {
+      throw new HttpError(403, 'Refused a request from another page');
+    }
+    await next();
+  });
 
   // Before every route, and mounted ONCE rather than composed into each of the ~25 routers — a
   // gate that must be remembered at every mount point is one that will be missed at one. In the

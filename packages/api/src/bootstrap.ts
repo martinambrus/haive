@@ -2,6 +2,7 @@ import { configService, secretsService, userSecretsService, logger } from '@haiv
 import { waitForDatabaseReady } from '@haive/database';
 import { initDatabase } from './db.js';
 import { initRedis } from './redis.js';
+import { webOrigin as resolveWebOrigin } from './lib/request-origin.js';
 
 export interface BootstrapResult {
   databaseUrl: string;
@@ -34,7 +35,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
   await secretsService.getEmailBlindIndexPepper();
 
   const apiPort = await configService.getNumber('config:server:apiPort', 3001);
-  const webOrigin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
+  const webOrigin = resolveWebOrigin();
 
   logger.info({ apiPort, webOrigin }, 'API bootstrap complete');
   return { databaseUrl, redisUrl, apiPort, webOrigin };

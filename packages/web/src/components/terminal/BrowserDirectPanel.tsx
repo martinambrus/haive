@@ -67,7 +67,7 @@ export function BrowserDirectPanel({
     setState('loading');
     setMessage(null);
     try {
-      const data = await api.get<AccessUrlsResponse>(`/tasks/${taskId}/access-urls`);
+      const data = await api.post<AccessUrlsResponse>(`/tasks/${taskId}/access-urls`);
       if (!data.enabled) {
         setState('disabled');
         return;
