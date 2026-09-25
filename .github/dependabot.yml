@@ -9,19 +9,48 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
-    # The @tiptap packages share one @tiptap/core and only work at one version.
-    # Bumped one per PR, each leaves a second core in the tree and the web
-    # typecheck loses every command the extensions declare (#111, #112).
+    # A dependency joins the first group it matches, so the named groups come
+    # before the catch-alls. A major outside a named group gets its own PR.
     groups:
+      # The @tiptap packages share one @tiptap/core and only work at one version.
+      # Bumped one per PR, each leaves a second core in the tree and the web
+      # typecheck loses every command the extensions declare (#111, #112).
       tiptap:
         patterns:
           - "@tiptap/*"
+      # react-dom refuses to run beside a react of another version.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      production:
+        dependency-type: production
+        update-types: ["minor", "patch"]
+      development:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+    # Bumped together by hand: drizzle-kit refuses an older drizzle-orm, and the
+    # orm is pinned exactly in the root overrides.
+    ignore:
+      - dependency-name: "drizzle-orm"
+      - dependency-name: "drizzle-kit"
 
   # GitHub Actions pinned in the CI workflow.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      # Used together, only by release.yml, which runs on a tag alone.
+      docker:
+        patterns:
+          - "docker/*"
+      actions:
+        patterns:
+          - "*"
+        update-types: ["minor", "patch"]
 
   # Base images in the service Dockerfiles. Every Dockerfile in the repo must be
   # listed here or its FROM tag never gets a security bump; the ddev-runner and
@@ -36,6 +65,11 @@ updates:
       - "/packages/worker/docker/ddev-runner"
     schedule:
       interval: weekly
+    groups:
+      base-images:
+        patterns:
+          - "*"
+        update-types: ["minor", "patch"]
 
   # The sandbox image is deliberately held on node:24: node:26-alpine/bookworm
   # unbundles corepack, which the image's CLI install path relies on. Track it
@@ -45,6 +79,11 @@ updates:
     directory: "/packages/worker/sandbox-image"
     schedule:
       interval: weekly
+    groups:
+      base-images:
+        patterns:
+          - "*"
+        update-types: ["minor", "patch"]
     ignore:
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
