@@ -14,6 +14,7 @@ import {
   readTextNoFollow,
   readdirNoFollow,
   relUnder,
+  removeFileIfNoFollow,
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
@@ -1925,6 +1926,36 @@ export async function resetOnboardingArtifacts(
     return verdict;
   };
 
+  /** Remove a file only while it still holds bytes one of `hashes` names, judged on the inode it
+   *  takes: a save landing after the verdict was read is a new file, and is kept. Answers whether
+   *  the file stayed, so the directory around it is not removed with it. */
+  const removeIfStillHashed = async (rel: string, hashes: readonly string[]): Promise<boolean> => {
+    let stayed = true;
+    await guard(rel, async () => {
+      const result = await removeFileIfNoFollow(root, rel, (data) =>
+        hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+      );
+      if (result === 'removed') {
+        removed.push(rel);
+        vacatedPaths.add(rel);
+      } else if (result === 'kept') {
+        skipped.push({ path: rel, reason: claimRefusalReason('edited') });
+      }
+      stayed = result === 'kept';
+    });
+    return stayed;
+  };
+
+  /** A file `claimSatisfied` found ours, removed against the hashes that could have made it so. A
+   *  claim with no hash behind it is taken by its path, the window this cannot close. */
+  const removeClaimedFile = async (rel: string): Promise<boolean> => {
+    const recorded = haiveEntries.get(rel);
+    const hashes = [writtenHashes.get(rel), typeof recorded === 'string' ? recorded : undefined];
+    const known = hashes.filter((hash): hash is string => hash !== undefined);
+    if (known.length === 0) return (await remove(rel, false)) !== 'ok';
+    return removeIfStillHashed(rel, known);
+  };
+
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.
   for (const rel of ONBOARDING_SETTINGS_FILES) {
@@ -1933,12 +1964,7 @@ export async function resetOnboardingArtifacts(
       if (content === null) return;
       const written = writtenHashes.get(rel);
       if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
-        if (await removeNoFollow(root, rel)) {
-          removed.push(rel);
-          // Vacated, so its row must not survive on a later parent skip — this deletion does not
-          // go through `remove()` and would otherwise be invisible to `vacatedPaths`.
-          vacatedPaths.add(rel);
-        }
+        await removeIfStillHashed(rel, [written]);
         return;
       }
       skipped.push({
@@ -2126,7 +2152,7 @@ export async function resetOnboardingArtifacts(
         }
         const verdict = child.isFile() ? await claimSatisfied(rel) : 'unrecorded';
         if (verdict === 'ours') {
-          await remove(rel, false);
+          if (await removeClaimedFile(rel)) left += 1;
           continue;
         }
         left += 1;
@@ -2148,7 +2174,7 @@ export async function resetOnboardingArtifacts(
       const info = await lstatNoFollow(root, rel, { strict: true });
       if (info === null) return;
       const verdict = info.kind === 'file' ? await claimSatisfied(rel) : 'unrecorded';
-      if (verdict === 'ours') await remove(rel, false);
+      if (verdict === 'ours') await removeClaimedFile(rel);
       else skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
     });
   }
@@ -2169,7 +2195,10 @@ export async function resetOnboardingArtifacts(
     // entries that ARE ours are removed instead and it stays, holding what was left behind.
     if (mayRemoveSweptDirWhole(sweep, swept.left)) await remove(rel, true);
     else {
-      for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
+      for (const entry of swept.ours) {
+        if (entry.isDir) await remove(entry.rel, true);
+        else await removeClaimedFile(entry.rel);
+      }
     }
   }
   // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a
@@ -2232,7 +2261,7 @@ export async function resetOnboardingArtifacts(
         skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
         continue;
       }
-      await remove(rel, false);
+      if (await removeClaimedFile(rel)) kept += 1;
     }
     // Nothing of the user's in it: the directory goes too, as it always did.
     if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);
