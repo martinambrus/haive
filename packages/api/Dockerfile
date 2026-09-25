@@ -33,14 +33,14 @@ RUN npm install -g corepack@latest && \
 WORKDIR /app
 
 FROM base AS deps
-COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY tsconfig.base.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/database/package.json ./packages/database/
 COPY packages/api/package.json ./packages/api/
 COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
-RUN pnpm install --frozen-lockfile=false
+RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
 COPY packages/shared ./packages/shared

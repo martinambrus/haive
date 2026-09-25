@@ -28,7 +28,7 @@ COPY tsconfig.base.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/database/package.json ./packages/database/
 COPY packages/updater/package.json ./packages/updater/
-RUN pnpm install --frozen-lockfile=false --filter @haive/updater... --filter @haive/shared --filter @haive/database
+RUN pnpm install --frozen-lockfile --filter @haive/updater... --filter @haive/shared --filter @haive/database
 
 FROM deps AS builder
 COPY packages/shared ./packages/shared
