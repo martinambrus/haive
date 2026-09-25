@@ -1044,6 +1044,109 @@ export async function removeNoFollow(
   }
 }
 
+/** Delete the regular file at `rel` only while its bytes pass `accept`, judged on the inode deleted:
+ *  it is parked under a private name first, so a write landing at `rel` meanwhile is never taken. */
+export async function removeFileIfNoFollow(
+  anchor: string,
+  rel: string,
+  accept: (data: Buffer) => boolean | Promise<boolean>,
+  opts: { maxBytes?: number } = {},
+): Promise<'removed' | 'absent' | 'kept'> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  let dir: HeldDir;
+  try {
+    dir = await walkDir(anchor, safe, segs);
+  } catch (err) {
+    if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) return 'absent';
+    throw err;
+  }
+  try {
+    const st = await lstat(at(dir.fh.fd, leaf)).catch((err: unknown) => {
+      if (ABSENT.has(errno(err) ?? '')) return null;
+      throw err;
+    });
+    if (st === null) return 'absent';
+    if (!st.isFile()) return 'kept';
+
+    const parked = `.${leaf}.haive-rm-${process.pid}-${randomUUID()}`;
+    try {
+      await rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked));
+    } catch (err) {
+      if (ABSENT.has(errno(err) ?? '')) return 'absent';
+      throw err;
+    }
+    const putBack = async (): Promise<void> => {
+      try {
+        await link(at(dir.fh.fd, parked), at(dir.fh.fd, leaf));
+      } catch (err) {
+        throw new Error(
+          `${safe} was kept but could not be put back (${errno(err) ?? 'error'}); it is at ${[...segs, parked].join('/')}`,
+          { cause: err },
+        );
+      }
+      await unlink(at(dir.fh.fd, parked));
+    };
+
+    let accepted: boolean;
+    try {
+      accepted = await judgeParked(dir, parked, accept, opts.maxBytes, anchor, safe);
+    } catch (err) {
+      await putBack();
+      throw err;
+    }
+    if (!accepted) {
+      await putBack();
+      return 'kept';
+    }
+    try {
+      await unlink(at(dir.fh.fd, parked));
+    } catch (err) {
+      await putBack();
+      throw err;
+    }
+    return 'removed';
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
+/** Whether the parked entry is a regular file within `maxBytes` whose bytes pass `accept`. */
+async function judgeParked(
+  dir: HeldDir,
+  parked: string,
+  accept: (data: Buffer) => boolean | Promise<boolean>,
+  maxBytes: number | undefined,
+  anchor: string,
+  safe: string,
+): Promise<boolean> {
+  let fh: FileHandle;
+  try {
+    fh = await open(at(dir.fh.fd, parked), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+  } catch (err) {
+    // Swapped for a link between the lstat and the rename.
+    if (errno(err) === 'ELOOP') return false;
+    throw err;
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.size > (maxBytes ?? Number.POSITIVE_INFINITY)) return false;
+    await assertHeldAt(fh, below(dir.real, parked), anchor, safe, safe);
+    const buf = Buffer.allocUnsafe(st.size);
+    let filled = 0;
+    while (filled < st.size) {
+      const { bytesRead } = await fh.read(buf, filled, st.size - filled, filled);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+    return await accept(buf.subarray(0, filled));
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
 export interface RenameOptions extends EnsureDirOptions {
   /** Anchor for the destination; defaults to the source's. */
   toAnchor?: string;

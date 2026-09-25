@@ -23,6 +23,7 @@ import {
   ensureDirNoFollow,
   isPathContainmentError,
   openFileNoFollow,
+  removeFileIfNoFollow,
   removeNoFollow,
   renameNoFollow,
   updateFileNoFollow,
@@ -413,6 +414,71 @@ describe('fs-safe write primitives', () => {
         }
       },
     );
+  });
+
+  describe('removeFileIfNoFollow', () => {
+    const is = (text: string) => (data: Buffer) => data.toString('utf8') === text;
+
+    it('removes a file its check accepts, and keeps one it refuses on the same inode', async () => {
+      const file = path.join(root, 'src', 'a.txt');
+      const ino = (await stat(file)).ino;
+      expect(await removeFileIfNoFollow(root, 'src/a.txt', is('other'))).toBe('kept');
+      expect(await readFile(file, 'utf8')).toBe('hello');
+      expect((await stat(file)).ino).toBe(ino);
+      expect(await removeFileIfNoFollow(root, 'src/a.txt', is('hello'))).toBe('removed');
+      expect(await readdir(path.join(root, 'src'))).toEqual([]);
+    });
+
+    it('reports an absent file and an absent parent without calling the check', async () => {
+      const never = () => expect.unreachable();
+      expect(await removeFileIfNoFollow(root, 'src/none.txt', never)).toBe('absent');
+      expect(await removeFileIfNoFollow(root, 'none/a.txt', never)).toBe('absent');
+    });
+
+    it('keeps a link, a directory and a file over maxBytes without reading them', async () => {
+      const never = () => expect.unreachable();
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'src', 'link.txt'));
+      await mkdir(path.join(root, 'src', 'dir'));
+      expect(await removeFileIfNoFollow(root, 'src/link.txt', never)).toBe('kept');
+      expect(await removeFileIfNoFollow(root, 'src/dir', never)).toBe('kept');
+      expect(await removeFileIfNoFollow(root, 'src/a.txt', never, { maxBytes: 2 })).toBe('kept');
+      expect((await lstat(path.join(root, 'src', 'link.txt'))).isSymbolicLink()).toBe(true);
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('refuses a linked ancestor and an empty rel', async () => {
+      await symlink(outside, path.join(root, 'via'));
+      await expect(
+        removeFileIfNoFollow(root, 'via/secret.txt', is('elsewhere')),
+      ).rejects.toMatchObject({ reason: 'link' });
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+      await expect(removeFileIfNoFollow(root, '', is('x'))).rejects.toThrow();
+    });
+
+    it('never takes a file written at the path while the old one is judged', async () => {
+      const file = path.join(root, 'src', 'a.txt');
+      const result = await removeFileIfNoFollow(root, 'src/a.txt', async (data) => {
+        await writeFile(file, 'PERSON', 'utf8');
+        return data.toString('utf8') === 'hello';
+      });
+      expect(result).toBe('removed');
+      expect(await readFile(file, 'utf8')).toBe('PERSON');
+    });
+
+    it('leaves a refused file parked, and names where, when its name was taken meanwhile', async () => {
+      const file = path.join(root, 'src', 'a.txt');
+      await expect(
+        removeFileIfNoFollow(root, 'src/a.txt', async () => {
+          await writeFile(file, 'PERSON', 'utf8');
+          return false;
+        }),
+      ).rejects.toThrow(/could not be put back \(EEXIST\); it is at src\/\.a\.txt\.haive-rm-/);
+      expect(await readFile(file, 'utf8')).toBe('PERSON');
+      const parked = (await readdir(path.join(root, 'src'))).filter((n) => n !== 'a.txt');
+      expect(parked).toHaveLength(1);
+      expect(await readFile(path.join(root, 'src', parked[0]!), 'utf8')).toBe('hello');
+    });
   });
 
   describe('renameNoFollow', () => {
