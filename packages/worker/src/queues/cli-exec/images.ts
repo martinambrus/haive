@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
@@ -478,6 +478,8 @@ export async function markProvidersReady(
 ): Promise<void> {
   const now = new Date();
   if (shared) {
+    // A sibling still `building` has a build of its own queued or running, forced or not, and
+    // reports its own result: marking it here re-enabled its Rebuild button mid-rebuild.
     await db
       .update(schema.cliProviders)
       .set({
@@ -487,7 +489,12 @@ export async function markProvidersReady(
         sandboxImageBuiltAt: now,
         updatedAt: now,
       })
-      .where(eq(schema.cliProviders.sandboxImageTag, imageTag));
+      .where(
+        and(
+          eq(schema.cliProviders.sandboxImageTag, imageTag),
+          ne(schema.cliProviders.sandboxImageBuildStatus, 'building'),
+        ),
+      );
   }
   await db
     .update(schema.cliProviders)
