@@ -350,7 +350,8 @@ like any other. A clarification answer is one of those, since it rides `task_eve
 job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
-reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+reset. A task Retry's START runs its first step itself rather than through an advance, so it takes
+that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
 merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
 Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
