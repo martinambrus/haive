@@ -997,6 +997,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     }
 
     const db = {
+      transaction: async (fn: (tx: unknown) => unknown) => fn(db),
       query: {
         taskDagPlans: { findFirst: async () => planRow },
         tasks: { findFirst: async () => undefined },
@@ -1318,6 +1319,9 @@ function makeSpawnDb() {
     [];
   let nextInvId = 0;
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    // The ownership probe a run is recorded under: these cases never lose the row.
+    select: () => ({ from: () => ({ where: () => ({ for: async () => [{ id: 'step1' }] }) }) }),
     query: {
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },

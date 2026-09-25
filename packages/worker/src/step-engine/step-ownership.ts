@@ -83,6 +83,22 @@ export async function assertOwnsStep(db: Database | DbHandle, id: string): Promi
   if (!(await lockOwnedStep(db, id))) throw new StepSupersededError(id);
 }
 
+/** Record a run for a pass's own row, only while the row is still the pass's own. A Retry
+ *  supersedes the runs it can see and then waits on this lock, so a run inserted before it took
+ *  the row is swept by its second pass and none is inserted after. */
+export async function insertOwnedRun(
+  db: Database | DbHandle,
+  stepRowId: string,
+  values: typeof schema.cliInvocations.$inferInsert,
+): Promise<typeof schema.cliInvocations.$inferSelect> {
+  return db.transaction(async (tx) => {
+    await assertOwnsStep(tx, stepRowId);
+    const [run] = await tx.insert(schema.cliInvocations).values(values).returning();
+    if (!run) throw new Error(`failed to insert a cli_invocations row for task step ${stepRowId}`);
+    return run;
+  });
+}
+
 class ClaimOvertaken extends Error {}
 
 /** Open a pass on its `pending` row (claim it, or skip it). With the job's epoch, the fence is read

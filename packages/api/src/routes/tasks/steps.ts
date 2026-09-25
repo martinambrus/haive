@@ -93,8 +93,8 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
  *  formValues is cleared so the user re-confirms inputs against the regenerated schema.
  *  computeFoldContribution counts a failed step's fail->retry wait as idle so wall-clock
  *  reconciles, and reclassifies an orphaned still-open run's span as idle rather than inflating
- *  carried work — per row, because each contributes differently. */
-async function resetRowsForRerun(
+ *  carried work — per row, because each contributes differently. Exported for the unit test. */
+export async function resetRowsForRerun(
   tx: DbHandle,
   taskId: string,
   rows: (typeof schema.taskSteps.$inferSelect)[],
@@ -106,21 +106,24 @@ async function resetRowsForRerun(
   // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
   // recap's failure row live, and the step card keeps showing an error about a run that
   // has been replaced.
-  await tx
-    .update(schema.cliInvocations)
-    .set({ supersededAt: now })
-    .where(
-      and(
-        or(
-          inArray(schema.cliInvocations.taskStepId, ids),
-          inArray(schema.cliInvocations.summaryForStepId, ids),
+  const sweepRuns = async () => {
+    await tx
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now })
+      .where(
+        and(
+          or(
+            inArray(schema.cliInvocations.taskStepId, ids),
+            inArray(schema.cliInvocations.summaryForStepId, ids),
+          ),
+          isNull(schema.cliInvocations.supersededAt),
         ),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
-  await tx
-    .delete(schema.taskStepAgentMinings)
-    .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
+      );
+    await tx
+      .delete(schema.taskStepAgentMinings)
+      .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
+  };
+  await sweepRuns();
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
   // resolveDagPhase re-derives the same failure and the step re-halts identically. No-op when
@@ -168,6 +171,9 @@ async function resetRowsForRerun(
       })
       .where(eq(schema.taskSteps.id, r.id));
   }
+  // A pass records a run only under its row's lock, so each write above waited for one it was
+  // recording and every later one is refused: this finds whatever the first sweep missed.
+  await sweepRuns();
 }
 
 const ACTIVE_STEP_STATUSES = ['running', 'waiting_cli', 'waiting_form'] as const;

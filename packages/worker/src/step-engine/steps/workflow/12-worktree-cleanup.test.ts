@@ -172,6 +172,7 @@ function makeDb(
     if ('errorMessage' in patch) errorMessage = (patch.errorMessage as string | null) ?? null;
   };
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     query: {
       users: { findFirst: async () => undefined },
       tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },

@@ -74,21 +74,24 @@ export async function resetStepAndDownstream(
       // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
       // recap's failure row live, and the step card keeps showing an error about a run that
       // has been replaced. Keep in sync with the API retry site.
-      await tx
-        .update(schema.cliInvocations)
-        .set({ supersededAt: now })
-        .where(
-          and(
-            or(
-              inArray(schema.cliInvocations.taskStepId, allStepIds),
-              inArray(schema.cliInvocations.summaryForStepId, allStepIds),
+      const sweepRuns = async () => {
+        await tx
+          .update(schema.cliInvocations)
+          .set({ supersededAt: now })
+          .where(
+            and(
+              or(
+                inArray(schema.cliInvocations.taskStepId, allStepIds),
+                inArray(schema.cliInvocations.summaryForStepId, allStepIds),
+              ),
+              isNull(schema.cliInvocations.supersededAt),
             ),
-            isNull(schema.cliInvocations.supersededAt),
-          ),
-        );
-      await tx
-        .delete(schema.taskStepAgentMinings)
-        .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
+          );
+        await tx
+          .delete(schema.taskStepAgentMinings)
+          .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
+      };
+      await sweepRuns();
       // When this reset cascades through 06c-dag-execute, task_steps alone leaves the DAG's
       // task_dag_issues rows failed_unrecoverable, so resolveDagPhase re-derives the wedge and
       // the step re-halts with the identical error. Reset the current level's stuck issues too.
@@ -142,6 +145,9 @@ export async function resetStepAndDownstream(
           })
           .where(eq(schema.taskSteps.id, r.id));
       }
+      // Each write above waited for a pass recording a run under the row's lock; keep in sync
+      // with the API retry site.
+      await sweepRuns();
       // Bump the task's orchestration epoch so any advance-step job queued under the
       // prior epoch (a stale/duplicate job) is skipped by handleAdvanceStep — the
       // worker-side equivalent of the API retry's epoch bump.

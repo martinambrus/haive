@@ -81,6 +81,9 @@ interface MockState {
   /** Transactions opened, and INSERT statements sent to the mining table. */
   transactions?: number;
   miningInsertStatements?: number;
+  /** The transaction each of those statements ran in, 0 for none. */
+  miningInsertTransactions?: number[];
+  openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
@@ -160,16 +163,21 @@ function makeMockDb(state: MockState): Database {
             Promise.resolve(found).then(res, rej),
           limit: async () => found,
           orderBy: () => thenable(found),
+          for: async () => found,
         });
-        // A read that asks for the step row as finished finds nothing once it is not.
-        const where = (cond?: unknown) =>
-          thenable(
-            tableNameOf(table) === 'task_steps' &&
-              conditionValues(cond).includes('done') &&
-              state.taskStepRow.status !== 'done'
-              ? []
-              : rows,
-          );
+        // A read that asks for the step row as finished finds nothing once it is not, and a lock
+        // on it as the pass's own finds nothing once a Retry, a Skip or a Stop took it.
+        const where = (cond?: unknown) => {
+          if (tableNameOf(table) !== 'task_steps') return thenable(rows);
+          const values = conditionValues(cond);
+          const status = state.taskStepRow.status as string;
+          const lost =
+            (values.includes('done') && status !== 'done') ||
+            (values.includes('skipped') &&
+              values.includes('failed') &&
+              ['pending', 'skipped', 'failed'].includes(status));
+          return thenable(lost ? [] : rows);
+        };
         // A joined read (priorRoundTimeoutAttempts, which asks earlier rounds what rung this
         // agent reached) projects from the base table and uses task_steps only to scope the
         // task/step; the mock ignores the join condition and returns the base rows unchanged.
@@ -181,6 +189,7 @@ function makeMockDb(state: MockState): Database {
       const values = (v: Record<string, unknown> | Record<string, unknown>[]) => {
         if (tableName === 'task_step_agent_minings') {
           state.miningInsertStatements = (state.miningInsertStatements ?? 0) + 1;
+          (state.miningInsertTransactions ??= []).push(state.openTransaction ?? 0);
         }
         const commit = () =>
           (Array.isArray(v) ? v : [v]).map((one) => {
@@ -255,7 +264,13 @@ function makeMockDb(state: MockState): Database {
     // One statement's worth of atomicity is all a reservation asks of it.
     transaction: async (fn: (tx: unknown) => unknown) => {
       state.transactions = (state.transactions ?? 0) + 1;
-      return fn(db);
+      const outer = state.openTransaction;
+      state.openTransaction = state.transactions;
+      try {
+        return await fn(db);
+      } finally {
+        state.openTransaction = outer;
+      }
     },
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
@@ -1906,7 +1921,7 @@ describe('a fan-out reserved before any agent is sent', () => {
     const enqueued: CliExecJobPayload[] = [];
     await run(makeMockDb(state), waveStep([], ['refute-a', 'refute-b', 'refute-c']), enqueued);
 
-    expect(state.transactions).toBe(1);
+    expect(state.miningInsertTransactions).toEqual([1]);
     expect(state.inserts.map((i) => i.table)).toEqual([
       'task_step_agent_minings',
       'task_step_agent_minings',
@@ -1940,7 +1955,7 @@ describe('a fan-out reserved before any agent is sent', () => {
     const enqueued: CliExecJobPayload[] = [];
     await run(makeMockDb(state), waveStep([], ids), enqueued);
 
-    expect(state.transactions).toBe(1);
+    expect(state.miningInsertTransactions).toEqual([1, 1]);
     expect(state.miningInsertStatements).toBe(2);
     expect(enqueued).toHaveLength(51);
   });
@@ -2376,5 +2391,23 @@ describe('advanceStep recap run after a Retry reset the finished row', () => {
   it('queues the recap run while the row is still the finished one', async () => {
     const recaps = await finishWith(freshState(agents()));
     expect(recaps).toHaveLength(1);
+  });
+});
+
+describe('a fan-out a Retry took before it sent anything', () => {
+  it('reserves, records and sends nothing', async () => {
+    const state = freshState([]);
+    const step = miningStep([], []);
+    const pick = step.agentMining!.selectAgents;
+    step.agentMining!.selectAgents = async (args) => {
+      // The Retry resets the row while this pass picks its agents, after its last write to it.
+      state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+      return pick(args);
+    };
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), step, enqueued);
+    expect(result.status).toBe('superseded');
+    expect(state.inserts).toEqual([]);
+    expect(enqueued).toEqual([]);
   });
 });
