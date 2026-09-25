@@ -1045,18 +1045,19 @@ export async function removeNoFollow(
 }
 
 /** Delete the regular file at `rel` only while its bytes pass `accept`, judged on the inode deleted:
- *  it is parked under a private name first, so a write landing at `rel` meanwhile is never taken. */
+ *  it is parked under a private name first, so a write landing at `rel` meanwhile is never taken.
+ *  `repairPermissions` is `removeNoFollow`'s, for the directory the park is refused in. */
 export async function removeFileIfNoFollow(
   anchor: string,
   rel: string,
   accept: (data: Buffer) => boolean | Promise<boolean>,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; repairPermissions?: boolean } = {},
 ): Promise<'removed' | 'absent' | 'kept'> {
   const result = await settleParked(
     anchor,
     rel,
     async (data) => ((await accept(data)) ? 'remove' : 'keep'),
-    opts.maxBytes,
+    opts,
     false,
   );
   return result === 'rewritten' ? 'kept' : result;
@@ -1074,7 +1075,7 @@ export async function rewriteFileIfNoFollow(
     anchor,
     rel,
     async (data) => (await edit(data)) ?? 'keep',
-    opts.maxBytes,
+    opts,
     true,
   );
   return result === 'removed' ? 'kept' : result;
@@ -1086,7 +1087,7 @@ async function settleParked(
   anchor: string,
   rel: string,
   decide: (data: Buffer) => Promise<ParkedVerdict>,
-  maxBytes: number | undefined,
+  opts: { maxBytes?: number; repairPermissions?: boolean },
   writable: boolean,
 ): Promise<'removed' | 'rewritten' | 'absent' | 'kept'> {
   const safe = toSafeRel(rel);
@@ -1110,7 +1111,9 @@ async function settleParked(
 
     const parked = `.${leaf}.haive-park-${process.pid}-${randomUUID()}`;
     try {
-      await rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked));
+      await withRepair(dir.fh, { repairPermissions: opts.repairPermissions }, () =>
+        rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked)),
+      );
     } catch (err) {
       if (ABSENT.has(errno(err) ?? '')) return 'absent';
       throw err;
@@ -1128,7 +1131,7 @@ async function settleParked(
 
     let verdict: 'remove' | 'keep' | 'rewritten';
     try {
-      verdict = await judgeParked(dir, parked, decide, maxBytes, writable, anchor, safe);
+      verdict = await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe);
     } catch (err) {
       await putBack();
       throw err;

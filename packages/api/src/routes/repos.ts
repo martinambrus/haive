@@ -1932,8 +1932,11 @@ export async function resetOnboardingArtifacts(
   const removeIfStillHashed = async (rel: string, hashes: readonly string[]): Promise<boolean> => {
     let stayed = true;
     await guard(rel, async () => {
-      const result = await removeFileIfNoFollow(root, rel, (data) =>
-        hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+      const result = await removeFileIfNoFollow(
+        root,
+        rel,
+        (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+        { repairPermissions: true },
       );
       if (result === 'removed') {
         removed.push(rel);

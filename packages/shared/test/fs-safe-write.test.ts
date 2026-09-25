@@ -430,6 +430,26 @@ describe('fs-safe write primitives', () => {
       expect(await readdir(path.join(root, 'src'))).toEqual([]);
     });
 
+    // Root ignores DAC, so the refused park is only reachable as anyone else.
+    it.skipIf(process.getuid?.() === 0)(
+      'removes a file from a 0555 directory only with repairPermissions',
+      async () => {
+        await chmod(path.join(root, 'src'), 0o555);
+        try {
+          await expect(removeFileIfNoFollow(root, 'src/a.txt', is('hello'))).rejects.toMatchObject({
+            code: 'EACCES',
+          });
+          expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
+          expect(
+            await removeFileIfNoFollow(root, 'src/a.txt', is('hello'), { repairPermissions: true }),
+          ).toBe('removed');
+          expect(await readdir(path.join(root, 'src'))).toEqual([]);
+        } finally {
+          await chmod(path.join(root, 'src'), 0o700).catch(() => undefined);
+        }
+      },
+    );
+
     it('reports an absent file and an absent parent without calling the check', async () => {
       const never = () => expect.unreachable();
       expect(await removeFileIfNoFollow(root, 'src/none.txt', never)).toBe('absent');
