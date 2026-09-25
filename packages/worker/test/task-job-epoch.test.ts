@@ -114,6 +114,8 @@ const h = vi.hoisted(() => {
     currentStepId: 'epoch-job-step',
     /** Set when the task's repository is gone, so the job cannot resolve the task. */
     repoGone: false,
+    /** Set when the task row itself cannot be read. */
+    taskReadFails: false,
   };
   return { state };
 });
@@ -138,6 +140,7 @@ const db = {
   query: {
     tasks: {
       findFirst: async () => {
+        if (h.state.taskReadFails) throw new Error('the task read failed');
         const task = {
           id: 'task-1',
           userId: 'user-1',
@@ -315,6 +318,7 @@ afterEach(() => {
   h.state.taskType = 'workflow';
   h.state.currentStepId = 'epoch-job-step';
   h.state.repoGone = false;
+  h.state.taskReadFails = false;
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
 });
@@ -1012,6 +1016,15 @@ describe('a START job', () => {
     };
     await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the job went no further');
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+  });
+
+  it('fails nothing when it could not read the task at all', async () => {
+    // Queued, as a Retry leaves it: with no epoch read, this START cannot tell that generation
+    // from the one it was sent for.
+    h.state.taskStatus = 'queued';
+    h.state.taskReadFails = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the task read failed');
+    expect(h.state.taskWrites).toEqual([]);
   });
 
   it('fails a task still waiting to start when it cannot resolve it', async () => {

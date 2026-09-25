@@ -3280,12 +3280,15 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
       const epoch =
         held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch ?? held.readEpoch;
-      // A START that claimed nothing holds no task, so it fails only one nobody has started.
-      const statuses =
-        job.name === TASK_JOB_NAMES.START && !held.claimed ? STARTABLE_TASK_STATUSES : undefined;
-      await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
-        logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
-      });
+      // A START that claimed nothing holds no task: it fails only one nobody has started, and none
+      // when it read no epoch, since it cannot tell a Retry's newer generation from its own.
+      const unclaimed = job.name === TASK_JOB_NAMES.START && !held.claimed;
+      if (!unclaimed || epoch !== undefined) {
+        const statuses = unclaimed ? STARTABLE_TASK_STATUSES : undefined;
+        await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
+          logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
+        });
+      }
     }
     throw err;
   }

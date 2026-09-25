@@ -294,8 +294,9 @@ task from its first step or revive a cancelled one. The pointer is load-bearing:
 leaves it on the step that failed, so under a pause the advance START queues for a first step
 already `done` read the chain as moved and was dropped, leaving a `running` task nothing drove. A
 START that throws before its claim fails the task only while it is still `created` or `queued` at
-the epoch it read, since a Retry can re-queue the task in between, and `markTaskFailed` never
-writes over `cancelled` or `completed` from any caller. Once START has claimed, its redelivery is
+the epoch it read, since a Retry can re-queue the task in between, and fails nothing when it could
+not read the task at all; `markTaskFailed` never writes over `cancelled` or `completed` from any
+caller. Once START has claimed, its redelivery is
 no longer a recovery path: a START that dies after the claim is recovered by the reconcile and the
 re-driver above, as any advance is.
 
