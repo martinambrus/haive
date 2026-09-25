@@ -365,9 +365,10 @@ before the Retry took the row is ended there, and a pass after it is refused. A 
 can still be queued by the pass that recorded it, so its cli-exec job starts it only by a
 compare-and-swap on `ended_at` and `superseded_at`: the Retry's sandbox kill ran before that job
 had a container. That kill runs once, and it can land while a job is still preparing its sandbox, so
-the spawner reads the run again right before the container starts and every few seconds while it
-runs (`run-superseded.ts`), and starts or keeps no sandbox for a run that reads superseded. A pass a
-Stop cut off
+the run is read again right before the container is created (`beforeRun`), as soon as it first
+prints, when it is certainly running and so either the kill found it or this read sees the
+supersede, and every few seconds after (`run-superseded.ts`); a run that reads superseded gets no
+sandbox or loses the one it has. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and

@@ -21,23 +21,26 @@ export async function isRunSuperseded(invocationId: string): Promise<boolean> {
   }
 }
 
-/** Aborts once the run reads superseded, read every SUPERSEDED_POLL_MS until stopped. */
+/** Aborts once the run reads superseded: read every SUPERSEDED_POLL_MS until stopped, and at once on
+ *  `poll`, which answers whether it is. */
 export function watchSupersededRun(
   invocationId: string,
   check: (id: string) => Promise<boolean> = isRunSuperseded,
-): { signal: AbortSignal; stop: () => void } {
+): { signal: AbortSignal; poll: () => Promise<boolean>; stop: () => void } {
   const controller = new AbortController();
-  let reading = false;
-  const timer = setInterval(() => {
-    if (reading || controller.signal.aborted) return;
-    reading = true;
-    void check(invocationId)
+  let reading: Promise<boolean> | null = null;
+  const poll = (): Promise<boolean> => {
+    if (controller.signal.aborted) return Promise.resolve(true);
+    reading ??= check(invocationId)
       .then((superseded) => {
         if (superseded) controller.abort();
+        return superseded;
       })
       .finally(() => {
-        reading = false;
+        reading = null;
       });
-  }, SUPERSEDED_POLL_MS);
-  return { signal: controller.signal, stop: () => clearInterval(timer) };
+    return reading;
+  };
+  const timer = setInterval(() => void poll(), SUPERSEDED_POLL_MS);
+  return { signal: controller.signal, poll, stop: () => clearInterval(timer) };
 }

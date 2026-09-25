@@ -82,7 +82,7 @@ import { assertPastedPersonasStillAllowed, resolveSecretMasks } from './secret-m
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { consumePreemptionMark } from './preempt-mark.js';
-import { isRunSuperseded, SUPERSEDED_RUN_ERROR, watchSupersededRun } from './run-superseded.js';
+import { SUPERSEDED_RUN_ERROR, watchSupersededRun } from './run-superseded.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
 import {
   dropMasksUnderAgentDirs,
@@ -1555,22 +1555,23 @@ export function createSandboxSpawner(
       runnerOptions.noProxyHosts = appReach.noProxyHosts;
     }
     const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
-    // A Retry or a Stop kills the task's sandboxes once, and this one may not exist yet then.
-    if (invocationId && (await isRunSuperseded(invocationId))) {
-      return {
-        exitCode: null,
-        stdout: '',
-        stderr: '',
-        durationMs: 0,
-        timedOut: false,
-        error: SUPERSEDED_RUN_ERROR,
-      };
-    }
+    // A Retry or a Stop kills the task's sandboxes once, and this one may not exist yet then. It is
+    // read again right before the container starts, and once it first speaks, when it surely runs.
     const superseded = invocationId ? watchSupersededRun(invocationId) : null;
     const signal =
       superseded && opts.signal
         ? AbortSignal.any([opts.signal, superseded.signal])
         : (superseded?.signal ?? opts.signal);
+    let spoke = false;
+    const firstSpeech =
+      (onChunk?: (chunk: string) => void) =>
+      (chunk: string): void => {
+        if (!spoke) {
+          spoke = true;
+          void superseded?.poll();
+        }
+        onChunk?.(chunk);
+      };
     const result = await runInSandbox(
       {
         command: spec.command,
@@ -1593,9 +1594,10 @@ export function createSandboxSpawner(
           return all.length > 0 ? all : undefined;
         })(),
         timeoutMs: opts.timeoutMs,
-        onStdoutChunk: wrapStreamCallback(invocationId, 'stdout', opts.onStdoutChunk),
-        onStderrChunk: wrapStreamCallback(invocationId, 'stderr', opts.onStderrChunk),
+        onStdoutChunk: wrapStreamCallback(invocationId, 'stdout', firstSpeech(opts.onStdoutChunk)),
+        onStderrChunk: wrapStreamCallback(invocationId, 'stderr', firstSpeech(opts.onStderrChunk)),
         signal,
+        ...(superseded ? { beforeRun: async () => !(await superseded.poll()) } : {}),
         interactive: spec.steerable === true,
         stdinInitial: spec.stdinInitial,
         stdinPrompt: spec.stdinPrompt,
