@@ -364,7 +364,7 @@ are written (`resetRowsForRerun`, and `resetStepAndDownstream` worker-side): wha
 before the Retry took the row is ended there, and a pass after it is refused. A run swept that way
 can still be queued by the pass that recorded it, so its cli-exec job starts it only by a
 compare-and-swap on `ended_at` and `superseded_at`: the Retry's sandbox kill ran before that job
-had a container. That kill runs once, and a job can land it while still preparing its sandbox, so
+had a container. That kill runs once, and it can land while a job is still preparing its sandbox, so
 the spawner reads the run again right before the container starts and every few seconds while it
 runs (`run-superseded.ts`), and starts or keeps no sandbox for a run that reads superseded. A pass a
 Stop cut off
