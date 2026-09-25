@@ -12,12 +12,14 @@ import {
   isNull,
   lte,
   ne,
+  notInArray,
   or,
   sql,
 } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import {
   schema,
+  isLockNotAvailable,
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   type Database,
@@ -168,6 +170,8 @@ async function resetRowsForRerun(
   }
 }
 
+const ACTIVE_STEP_STATUSES = ['running', 'waiting_cli', 'waiting_form'] as const;
+
 /** The rows a retry or resume leaves active outside the set it resets, such as another round's
  *  step. The action moves the task to its own step, so these are work the task has left; kept
  *  active, each makes the worker's other-step guard refuse every advance the action queues, and
@@ -177,10 +181,32 @@ export function rowsLeftActive<T extends { id: string; status: string }>(
   kept: readonly string[],
 ): T[] {
   return rows.filter(
-    (r) =>
-      (r.status === 'running' || r.status === 'waiting_cli' || r.status === 'waiting_form') &&
-      !kept.includes(r.id),
+    (r) => (ACTIVE_STEP_STATUSES as readonly string[]).includes(r.status) && !kept.includes(r.id),
   );
+}
+
+/** Rows a pass activated between the action's read and its epoch bump. The worker's claim checks
+ *  the epoch under the task row's lock, so after the bump this set is final. */
+async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readonly string[]) {
+  try {
+    return await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, taskId),
+          inArray(schema.taskSteps.status, [...ACTIVE_STEP_STATUSES]),
+          ...(kept.length > 0 ? [notInArray(schema.taskSteps.id, [...kept])] : []),
+        ),
+      )
+      .for('update', { noWait: true });
+  } catch (err) {
+    // The bump holds the task row, so a row a pass is still writing rolls the action back.
+    if (isLockNotAvailable(err)) {
+      throw new HttpError(503, 'The task changed while this was being applied; try again');
+    }
+    throw err;
+  }
 }
 
 /** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
@@ -763,6 +789,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .where(eq(schema.tasks.id, id))
         .returning({ epoch: schema.tasks.orchestrationEpoch });
       newEpoch = bumped[0]?.epoch ?? 0;
+      const late = await rowsActivatedMeanwhile(tx, id, []);
+      await resetRowsForRerun(tx, id, late, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -772,7 +800,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           note: body.note ?? null,
           priorStatus: step.status,
           cascadedSteps: downstreamToReset.length,
-          leftActive: leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
+          leftActive: [...leftActive, ...late].map((r) => ({ stepId: r.stepId, round: r.round })),
           overrideLocalModel: body.overrideLocalModel === true,
           timeoutMinutes: body.timeoutMinutes ?? null,
         },
@@ -946,6 +974,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           .where(eq(schema.tasks.id, id))
           .returning({ epoch: schema.tasks.orchestrationEpoch });
         newEpoch = bumped[0]?.epoch ?? newEpoch;
+        const late = await rowsActivatedMeanwhile(tx, id, [step.id]);
+        await resetRowsForRerun(tx, id, late, now);
         await tx.insert(schema.taskEvents).values({
           taskId: id,
           taskStepId: step.id,
@@ -955,7 +985,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             round: step.round,
             retriedAgents: failedAgents.length,
             cascadedSteps: downstreamToReset.length,
-            leftActive: leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
+            leftActive: [...leftActive, ...late].map((r) => ({ stepId: r.stepId, round: r.round })),
             note: body.note ?? null,
           },
         });
