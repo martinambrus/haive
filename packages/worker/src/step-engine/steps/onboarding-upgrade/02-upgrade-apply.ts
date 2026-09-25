@@ -1,8 +1,10 @@
 import {
+  errno,
   isPathContainmentError,
   readTextNoFollow,
-  removeNoFollow,
+  removeFileIfNoFollow,
   toSafeRel,
+  updateFileNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -137,14 +139,6 @@ export async function pathContent(
   return { content, hash: sha256Hex(content) };
 }
 
-export async function pathContentHash(
-  repoPath: string,
-  rel: string,
-  templateKind: string,
-): Promise<string | null> {
-  return (await pathContent(repoPath, rel, templateKind))?.hash ?? null;
-}
-
 /** What "Keep my edits" writes over a live row: the version declined, under that version's identity,
  *  and the bytes kept, for a later rollback to restore. `writtenHash` stays, claiming none of them. */
 export function keptRowUpdate(
@@ -167,38 +161,46 @@ export function keptRowUpdate(
 const keptRefusal = (diskPath: string) =>
   `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
 
-/** Why a delete must keep what is at a path, or null while it holds nothing or the bytes Haive
- *  recorded writing there. A row alone proves nothing: 12 records one for a file 07 skipped. */
-export function deleteRefusal(
-  diskPath: string,
-  diskHash: string | null,
-  writtenHash: string | null | undefined,
-): string | null {
-  if (diskHash === null || diskHash === writtenHash) return null;
-  return keptRefusal(diskPath);
-}
+export type Removal = { outcome: 'removed' | 'absent' } | { outcome: 'kept'; refusal: string };
 
-/** `deleteRefusal` for what stands at `rel` now. A link or a directory there is not what Haive wrote
- *  either; only a read that could not run throws. */
-export async function deleteRefusalAt(
+/** Remove the file at `rel`, or the rules region alone, only while it holds `writtenHash`, judged on
+ *  the bytes removed: a row alone proves nothing, since 12 records one for a file 07 skipped. */
+export async function removeIfHaives(
   repoPath: string,
   rel: string,
   entry: { diskPath: string; templateKind: string },
   writtenHash: string | null | undefined,
-): Promise<string | null> {
-  let diskHash: string | null;
+): Promise<Removal> {
+  const haives = (text: string) => sha256Hex(normalizeContent(text)) === writtenHash;
+  const kept: Removal = { outcome: 'kept', refusal: keptRefusal(entry.diskPath) };
   try {
-    diskHash = await pathContentHash(repoPath, rel, entry.templateKind);
-  } catch (err) {
-    if (
-      !isPathContainmentError(err) ||
-      !['link', 'not-directory', 'not-regular-file'].includes(err.reason)
-    ) {
-      throw err;
+    if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) {
+      const result = await removeFileIfNoFollow(repoPath, rel, (data) =>
+        haives(data.toString('utf8')),
+      );
+      return result === 'kept' ? kept : { outcome: result };
     }
-    return keptRefusal(entry.diskPath);
+    let edited = false;
+    const result = await updateFileNoFollow(repoPath, rel, (current) => {
+      if (current === null) return null;
+      const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+      if (region === null) return null;
+      if (!haives(region)) {
+        edited = true;
+        return null;
+      }
+      return upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END);
+    });
+    if (edited) return kept;
+    return { outcome: result === 'updated' ? 'removed' : 'absent' };
+  } catch (err) {
+    if (isPathContainmentError(err)) {
+      if (['link', 'not-directory', 'not-regular-file'].includes(err.reason)) return kept;
+    } else if (['ENOENT', 'ENOTDIR'].includes(errno(err) ?? '')) {
+      return { outcome: 'absent' };
+    }
+    throw err;
   }
-  return deleteRefusal(entry.diskPath, diskHash, writtenHash);
 }
 
 function conflictFieldId(entryId: string): string {
@@ -603,31 +605,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         try {
-          const refusal = await deleteRefusalAt(
-            ctx.repoPath,
-            rel,
-            entry,
-            entry.baselineWrittenHash,
-          );
-          if (refusal !== null) {
-            warnings.push(refusal);
+          const removal = await removeIfHaives(ctx.repoPath, rel, entry, entry.baselineWrittenHash);
+          if (removal.outcome === 'kept') {
+            warnings.push(removal.refusal);
             skippedCount += 1;
             continue;
           }
-          if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
-            // Region-scoped artifact: strip just the cli-rules block, leaving
-            // the rest of AGENTS.md (project-info, RTK, user content) intact.
-            const existing = await readFileOrEmpty(ctx.repoPath, rel);
-            await writeFileNoFollow(
-              ctx.repoPath,
-              rel,
-              upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
-            );
-            writtenPaths.push(rel);
-          } else {
-            await removeNoFollow(ctx.repoPath, rel);
-            deletedPaths.push(rel);
-          }
+          if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) deletedPaths.push(rel);
+          else if (removal.outcome === 'removed') writtenPaths.push(rel);
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
           deletedCount += 1;
         } catch (err) {
