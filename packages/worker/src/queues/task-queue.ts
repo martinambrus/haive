@@ -586,7 +586,7 @@ export async function markTaskCompleted(
 /** Fail the task, never one that was cancelled or completed. With `epoch`, only while the task is
  *  still at it, as a step's own failure is, and with `statuses` only from one of them; false when
  *  nothing was written. */
-async function markTaskFailed(
+export async function markTaskFailed(
   db: Database,
   taskId: string,
   message: string,

@@ -58,6 +58,8 @@ interface Candidate {
   stepId: string;
   round: number;
   epoch: number;
+  rowStatus?: string | null;
+  rowError?: string | null;
 }
 
 /** One SELECT returning `candidates` verbatim, then a fenceResults-driven `transaction()` (the
@@ -119,7 +121,11 @@ async function captureQuery(): Promise<{ joinCond: unknown; whereCond: unknown }
   } as unknown as Database;
   await redriveStalledTasks(
     db,
-    { enqueueAdvance: async () => undefined, queuedTaskIds: async () => new Set() },
+    {
+      enqueueAdvance: async () => undefined,
+      queuedTaskIds: async () => new Set(),
+      failTask: async () => false,
+    },
     { staleMs: 300_000 },
   );
   return { joinCond, whereCond };
@@ -144,6 +150,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, stepId, round, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -178,6 +185,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -211,6 +219,7 @@ describe('redriveStalledTasks', () => {
           advances.push(args);
         },
         queuedTaskIds: async () => new Set(['task-1']),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -237,6 +246,7 @@ describe('redriveStalledTasks', () => {
           advances.push(args);
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -271,6 +281,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
         redriveRetryDelaysMs: [0, 0],
       },
       { staleMs: 300_000 },
@@ -295,11 +306,50 @@ describe('redriveStalledTasks', () => {
     const db = makeDb([candidate], recorded);
     const redriven = await redriveStalledTasks(
       db,
-      { enqueueAdvance: async () => undefined, queuedTaskIds: async () => null },
+      {
+        enqueueAdvance: async () => undefined,
+        queuedTaskIds: async () => null,
+        failTask: async () => false,
+      },
       { staleMs: 300_000 },
     );
     expect(redriven).toBe(0);
     expect(recorded).toEqual([]);
+  });
+});
+
+describe('a running task whose current step failed', () => {
+  it('is failed at its epoch with the step error, and nothing is queued for it', async () => {
+    const recorded: RecordedUpdate[] = [];
+    const candidate: Candidate = {
+      taskId: 'task-1',
+      userId: 'user-1',
+      stepId: 'step-a',
+      round: 0,
+      epoch: 3,
+      rowStatus: 'failed',
+      rowError: 'cli invocation failed: boom',
+    };
+    const db = makeDb([candidate], recorded);
+    const failed: unknown[][] = [];
+    const advances: unknown[] = [];
+    const redriven = await redriveStalledTasks(
+      db,
+      {
+        enqueueAdvance: async (...args) => {
+          advances.push(args);
+        },
+        queuedTaskIds: async () => new Set(),
+        failTask: async (_db, ...args) => {
+          failed.push(args);
+          return true;
+        },
+      },
+      { staleMs: 300_000 },
+    );
+    expect(redriven).toBe(1);
+    expect(failed).toEqual([['task-1', 'cli invocation failed: boom', 3]]);
+    expect(advances).toEqual([]);
   });
 });
 

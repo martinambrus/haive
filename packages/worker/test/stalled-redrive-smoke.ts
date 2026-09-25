@@ -59,6 +59,7 @@ async function main(): Promise<void> {
         stepUpdatedAt?: Date;
         waitingStartedAt?: Date | null;
         noStepRow?: boolean;
+        stepError?: string;
       } = {},
     ) => {
       const {
@@ -91,6 +92,7 @@ async function main(): Promise<void> {
           round: 0,
           title: 'smoke-step',
           status: stepStatus,
+          errorMessage: opts.stepError ?? null,
           waitingStartedAt,
           updatedAt: stepUpdatedAt,
         });
@@ -113,7 +115,14 @@ async function main(): Promise<void> {
       stepStatus: 'done',
       stepUpdatedAt: new Date(),
     });
-    const failedRowTaskId = await makeTask('failed-row', { stepStatus: 'failed' });
+    const failedRowTaskId = await makeTask('failed-row', {
+      stepStatus: 'failed',
+      stepError: 'cli invocation failed: boom',
+    });
+    const freshFailedRowTaskId = await makeTask('fresh-failed-row', {
+      stepStatus: 'failed',
+      stepUpdatedAt: new Date(),
+    });
     const doneRaceTaskId = await makeTask('done-race', { stepStatus: 'done' });
 
     const epochOf = async (id: string) =>
@@ -131,7 +140,12 @@ async function main(): Promise<void> {
       round: number;
       epoch: number;
     }[] = [];
+    const failures: { taskId: string; message: string; epoch: number }[] = [];
     const deps = {
+      failTask: async (_db: unknown, taskId: string, message: string, epoch: number) => {
+        failures.push({ taskId, message, epoch });
+        return true;
+      },
       enqueueAdvance: async (
         taskId: string,
         advUserId: string,
@@ -211,7 +225,18 @@ async function main(): Promise<void> {
       'a done row that finished recently is left to its own hand-off',
       (await epochOf(freshDoneRowTaskId)) === 3,
     );
-    check('a stale failed current row is left alone', (await epochOf(failedRowTaskId)) === 3);
+    check(
+      'a stale failed current row fails its task at its epoch, with the step error',
+      JSON.stringify(failures.filter((f) => f.taskId === failedRowTaskId)) ===
+        JSON.stringify([
+          { taskId: failedRowTaskId, message: 'cli invocation failed: boom', epoch: 3 },
+        ]) && advances.every((a) => a.taskId !== failedRowTaskId),
+      failures,
+    );
+    check(
+      'a row that failed recently is left to its own hand-off',
+      failures.every((f) => f.taskId !== freshFailedRowTaskId),
+    );
     check(
       'a finished row taken live between the SELECT and the fence is left alone',
       (await epochOf(doneRaceTaskId)) === 3 && advances.every((a) => a.taskId !== doneRaceTaskId),
