@@ -972,7 +972,7 @@ const RUNTIME_PARK_POLL_MS = 15_000;
  *  which is why it is not longer still. */
 const PAUSE_POLL_MS = 30_000;
 
-async function enqueueAdvance(
+export async function enqueueAdvance(
   taskId: string,
   userId: string,
   stepId: string,
@@ -2590,10 +2590,10 @@ export interface ReconcileDeps {
   redriveRetryDelaysMs?: number[];
 }
 
-const REDRIVE_RETRY_DELAYS_MS = [1_000, 3_000];
+export const REDRIVE_RETRY_DELAYS_MS = [1_000, 3_000];
 
 /** Run `attempt`, waiting each delay in turn before trying again; the last failure is thrown. */
-async function retrying(attempt: () => Promise<void>, delaysMs: number[]): Promise<void> {
+export async function retrying(attempt: () => Promise<void>, delaysMs: number[]): Promise<void> {
   for (let tried = 0; ; tried++) {
     try {
       return await attempt();
