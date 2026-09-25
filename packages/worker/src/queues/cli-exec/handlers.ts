@@ -30,6 +30,7 @@ import {
   type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
+  type SandboxImageRemoveJobPayload,
   type OllamaProvisionJobPayload,
   type OllamaProvisionResult,
 } from '@haive/shared';
@@ -746,6 +747,23 @@ export async function handleBuildSandboxImageJob(
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
 
+/** Remove the image a deleted provider named, unless its tag is being built or another provider
+ *  names it too. */
+export async function handleRemoveSandboxImageJob(
+  db: Database,
+  payload: SandboxImageRemoveJobPayload,
+): Promise<void> {
+  if (inFlightBuilds.has(payload.imageTag)) {
+    log.info(payload, "kept a deleted provider's sandbox image: its tag is being built");
+    return;
+  }
+  await removeOrphanedPreviousImage(db, {
+    providerId: payload.providerId,
+    previousDbTag: payload.imageTag,
+    newTag: null,
+  });
+}
+
 /** One docker build of `resolution`'s tag. The builder alone removes the image the tag named
  *  before, since a provider that joined the build has nothing of its own to replace. */
 async function buildImage(
@@ -1430,6 +1448,9 @@ export async function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE) {
         return handleBuildSandboxImageJob(db, job.data as SandboxImageBuildJobPayload);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE) {
+        return handleRemoveSandboxImageJob(db, job.data as SandboxImageRemoveJobPayload);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
         return handleRefreshCliVersionsJob(db);

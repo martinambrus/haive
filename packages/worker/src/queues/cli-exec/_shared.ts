@@ -11,6 +11,7 @@ import type {
   CliExecJobPayload,
   CliProbeJobPayload,
   SandboxImageBuildJobPayload,
+  SandboxImageRemoveJobPayload,
   RefreshCliVersionsJobPayload,
   CliLoginCreateJobPayload,
   CliSignOutJobPayload,
@@ -27,6 +28,7 @@ export type CliExecQueuePayload =
   | CliExecJobPayload
   | CliProbeJobPayload
   | SandboxImageBuildJobPayload
+  | SandboxImageRemoveJobPayload
   | RefreshCliVersionsJobPayload
   | CliLoginCreateJobPayload
   | CliSignOutJobPayload

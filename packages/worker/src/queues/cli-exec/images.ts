@@ -510,7 +510,7 @@ export async function markProvidersReady(
 
 export async function removeOrphanedPreviousImage(
   db: Database,
-  args: { providerId: string; previousDbTag: string | null; newTag: string },
+  args: { providerId: string; previousDbTag: string | null; newTag: string | null },
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<{
   removed: boolean;

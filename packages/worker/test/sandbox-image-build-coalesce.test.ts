@@ -26,7 +26,10 @@ vi.mock('../src/sandbox/sandbox-core-image.js', () => ({
 }));
 vi.mock('../src/queues/cli-exec/images.js', () => images);
 
-import { handleBuildSandboxImageJob } from '../src/queues/cli-exec/handlers.js';
+import {
+  handleBuildSandboxImageJob,
+  handleRemoveSandboxImageJob,
+} from '../src/queues/cli-exec/handlers.js';
 
 /** Two claude-family providers resolving to one shared tag. */
 function fakeDb(): Database {
@@ -93,5 +96,34 @@ describe('sandbox image builds', () => {
     await handleBuildSandboxImageJob(db, { providerId: 'p1', userId: 'u', force: true });
     await handleBuildSandboxImageJob(db, { providerId: 'p2', userId: 'u', force: true });
     expect(docker.build).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("removing a deleted provider's image", () => {
+  const removal = { providerId: 'gone', imageTag: 'haive-cli-claude:1.0.0' };
+
+  it('removes it unless another provider still names the tag', async () => {
+    await handleRemoveSandboxImageJob(fakeDb(), removal);
+    expect(images.removeOrphanedPreviousImage).toHaveBeenCalledWith(expect.anything(), {
+      providerId: 'gone',
+      previousDbTag: 'haive-cli-claude:1.0.0',
+      newTag: null,
+    });
+  });
+
+  it('keeps it while a build of the tag runs', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    docker.build.mockImplementation(async () => {
+      await gate;
+      return { exitCode: 0, imageTag: removal.imageTag, durationMs: 1, stderr: '' };
+    });
+    const db = fakeDb();
+    const building = handleBuildSandboxImageJob(db, { providerId: 'p1', userId: 'u', force: true });
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
+    await handleRemoveSandboxImageJob(db, removal);
+    expect(images.removeOrphanedPreviousImage).not.toHaveBeenCalled();
+    release();
+    await building;
   });
 });

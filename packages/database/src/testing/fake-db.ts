@@ -91,7 +91,7 @@ export interface FakeDbHandle<Q extends string = string> {
   select(fields?: Record<string, unknown>): { from(table: PgTable): SelectQuery };
   insert(table: PgTable): { values(values: FakeRow | FakeRow[]): Lazy<FakeRow[]> };
   update(table: PgTable): { set(values: FakeRow): { where(cond: unknown): Lazy<FakeRow[]> } };
-  delete(table: PgTable): { where(cond: unknown): Lazy<void> };
+  delete(table: PgTable): { where(cond: unknown): Lazy<FakeRow[]> };
   execute(query: unknown): Promise<void>;
   transaction<R>(fn: (tx: FakeDbHandle<Q>) => Promise<R>): Promise<R>;
 }
@@ -324,7 +324,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return hit.map((row) => ({ ...row }));
   }
 
-  function remove(ctx: TxContext | null, table: PgTable, match: Pred): void {
+  function remove(ctx: TxContext | null, table: PgTable, match: Pred): FakeRow[] {
     const log = undoLog(ctx);
     const rows = store.get(table)!;
     const gone = rows.filter(match);
@@ -350,6 +350,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
         if (ids.size > 0) remove(ctx, child, (r) => ids.has(r[childKey]));
       }
     }
+    return gone;
   }
 
   /** Test-side setup only: change a stored row in place. */
@@ -412,11 +413,14 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       }),
       delete: (table: PgTable) => ({
         where: (cond: unknown) =>
-          lazy(async () => {
-            const match = compileWhere(table, cond);
-            await hooks.beforeDelete?.(table);
-            remove(ctx, table, match);
-          }),
+          lazy(
+            async () => {
+              const match = compileWhere(table, cond);
+              await hooks.beforeDelete?.(table);
+              return remove(ctx, table, match);
+            },
+            (rows, fields) => rows.map((row) => project(table, fields, row)),
+          ),
       }),
       /** Only the two statements the attachments lock issues, and only inside a transaction. */
       execute: async (query: unknown): Promise<void> => {
