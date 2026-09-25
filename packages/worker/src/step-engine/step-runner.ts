@@ -1581,6 +1581,35 @@ function sameMiningState(target: Pick<MiningTarget, 'id' | 'cliInvocationId' | '
   );
 }
 
+/** Stamp consumed the rows apply() read, each only at the run it read and while still unconsumed:
+ *  a row another pass re-rolled onto a new run since then keeps its reply for the next apply(). */
+export async function consumeFoldedMiningRows(
+  db: Database | Parameters<Parameters<Database['transaction']>[0]>[0],
+  taskStepId: string,
+  folded: readonly AgentMiningResult[] | undefined,
+  at: Date,
+): Promise<void> {
+  if (!folded || folded.length === 0) return;
+  const t = schema.taskStepAgentMinings;
+  await db
+    .update(t)
+    .set({ consumedAt: at, updatedAt: at })
+    .where(
+      and(
+        eq(t.taskStepId, taskStepId),
+        isNull(t.consumedAt),
+        or(
+          ...folded.map((r) =>
+            and(
+              eq(t.agentId, r.agentId),
+              r.invocationId ? eq(t.cliInvocationId, r.invocationId) : isNull(t.cliInvocationId),
+            ),
+          ),
+        ),
+      ),
+    );
+}
+
 /** Rows per reservation statement; each carries a whole prompt. */
 const RESERVE_CHUNK = 50;
 
@@ -2635,10 +2664,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               formValues: null,
               pauseFormOnRetry: true,
             });
-            await tx
-              .update(schema.taskStepAgentMinings)
-              .set({ consumedAt: reopenedAt, updatedAt: reopenedAt })
-              .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+            await consumeFoldedMiningRows(tx, current.id, applyArgs.agentMiningResults, reopenedAt);
           });
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
@@ -2680,10 +2706,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref
           // creation, e.g. the plan builder) folds each wave exactly once. Steps
           // that fold idempotently (08c, by fingerprint) never read it back.
-          await db
-            .update(schema.taskStepAgentMinings)
-            .set({ consumedAt: new Date(), updatedAt: new Date() })
-            .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+          await consumeFoldedMiningRows(db, current.id, applyArgs.agentMiningResults, new Date());
           const { sent: dispatched, lost } = await dispatchMiningAgents(
             db,
             stepDef,

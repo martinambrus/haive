@@ -604,6 +604,12 @@ function reopeningFormStep(): StepDefinition {
         ],
       };
     },
+    agentMining: {
+      requiredCapabilities: [],
+      async selectAgents() {
+        return [{ agentId: 'prior-batch-agent', agentTitle: 'prior-batch-agent', prompt: 'batch' }];
+      },
+    },
     async apply() {
       throw new ReopenStepFormError('bounded batch finished');
     },
@@ -629,11 +635,10 @@ describe('advanceStep apply-to-form continuation', () => {
       title: 'More work remains',
       description: '42 items remain',
     });
-    expect(
-      state.updates.some(
-        (update) => update.table === 'task_step_agent_minings' && update.consumedAt instanceof Date,
-      ),
-    ).toBe(true);
+    const stamp = (state.miningUpdateLog ?? []).find((u) => u.set.consumedAt instanceof Date);
+    expect(conditionValues(stamp?.where)).toEqual(
+      expect.arrayContaining(['prior-batch-agent', 'inv-prior-batch-agent']),
+    );
     // The rows are consumed and the form cleared and held in one transaction; the park releases
     // the hold.
     expect(state.transactions).toBe(1);
@@ -1106,8 +1111,8 @@ describe('advanceStep agentMining second wave', () => {
     expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
     expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
     // The first wave's rows are never re-rolled or reset by a wave dispatch. The one update
-    // they get is the consumed_at stamp, written for the whole step rather than by row id, so a
-    // wave-aware apply() cannot re-fold them; the wave's own rows are what gets linked.
+    // they get is the consumed_at stamp, on the rows apply() read, so a wave-aware apply()
+    // cannot re-fold them; the wave's own rows are what gets linked.
     expect(writesTo(state, 'mining-peer-reviewer')).toEqual([]);
     const stamps = (state.miningUpdateLog ?? []).filter((u) => u.set.consumedAt instanceof Date);
     expect(
@@ -1118,6 +1123,28 @@ describe('advanceStep agentMining second wave', () => {
         (u) => u.set.status === 'pending' && u.set.cliInvocationId,
       ),
     ).toHaveLength(2);
+  });
+
+  it('stamps only the rows apply read, each at the run it read', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1), miningRow('sibling', 1)]);
+    const applyCalls: StepApplyArgs[] = [];
+    const step = waveStep(applyCalls, ['refute-abc']);
+    const apply = step.apply;
+    step.apply = async (ctx, args) => {
+      // Another pass re-rolls the sibling onto a new run while this one is in apply().
+      state.miningRows.find((r) => r.agentId === 'sibling')!.cliInvocationId = 'inv-rerolled';
+      return apply(ctx, args);
+    };
+
+    await run(makeMockDb(state), step, []);
+
+    const stamps = (state.miningUpdateLog ?? []).filter((u) => u.set.consumedAt instanceof Date);
+    expect(stamps).toHaveLength(1);
+    const bound = conditionValues(stamps[0]!.where);
+    expect(bound).toEqual(
+      expect.arrayContaining(['peer-reviewer', 'inv-peer-reviewer', 'sibling', 'inv-sibling']),
+    );
+    expect(bound).not.toContain('inv-rerolled');
   });
 
   it('settles without asking again once the wave’s results are present', async () => {
