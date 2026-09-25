@@ -76,6 +76,8 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
   where(cond: unknown): SelectQuery;
   orderBy(order: unknown): SelectQuery;
   limit(n: number): SelectQuery;
+  /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
+  for(strength: string, config?: unknown): SelectQuery;
 }
 
 /** The handle a test casts to `Database`, and the transaction a section receives. */
@@ -232,6 +234,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       where: (cond) => ((opts.where = cond), query),
       orderBy: (order) => ((opts.orderBy = order), query),
       limit: (n) => ((opts.limit = n), query),
+      for: () => query,
       then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),
     };
     return query;
