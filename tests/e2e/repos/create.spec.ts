@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, deleteRepoViaApi, getSql } from '../helpers/db.js';
+import { cleanupUser, deleteRepoViaApi, getSql, REPO_DELETE_DEADLINE_MS } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 interface FsEntry {
@@ -19,6 +19,7 @@ async function findFirstGitDir(request: APIRequestContext): Promise<FsEntry | nu
 
 test.describe('repos create UI', () => {
   test('local_path happy path: pick git dir, submit, redirected, row in db', async ({ page }) => {
+    test.setTimeout(REPO_DELETE_DEADLINE_MS + 60_000);
     const sql = getSql();
     let userId = '';
     const createdRepoIds: string[] = [];
@@ -74,6 +75,7 @@ test.describe('repos create UI', () => {
   });
 
   test('remote git_https submit records row with remote_url', async ({ page }) => {
+    test.setTimeout(REPO_DELETE_DEADLINE_MS + 60_000);
     // Note: the form's "Git (HTTPS)" option is `git_https`. The legacy
     // `github_https` source enum value still exists in shared/types but the UI
     // consolidated all https flows (github + gitlab + generic) under git_https.

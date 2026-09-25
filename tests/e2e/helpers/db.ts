@@ -104,6 +104,8 @@ export async function cleanupRepoFixture(sql: postgres.Sql, repoId: string): Pro
   await sql`delete from repositories where id = ${repoId}`;
 }
 
+export const REPO_DELETE_DEADLINE_MS = 120_000;
+
 /**
  * Delete a repository through the api, which also has the worker remove its checkout; a row deleted
  * by SQL leaves the tree on disk. The api refuses while a clone holds the root, so a refusal is
@@ -116,7 +118,7 @@ export async function deleteRepoViaApi(
   request: APIRequestContext,
   repoId: string,
 ): Promise<boolean> {
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + REPO_DELETE_DEADLINE_MS;
   for (;;) {
     const rows = await sql<{ status: string; claimed: Date | null }[]>`
       select status, root_claimed_at as claimed from repositories where id = ${repoId}
