@@ -281,7 +281,10 @@ once at boot after the reconcile, whose own re-drive enqueue can still be lost, 
 a task idle five minutes, for a hand-off lost between boots. It bumps the epoch under the task row's
 lock and re-checks the row in the same statement, so a step a pass claimed since the candidate read
 is left to that pass. A finished row is the job that died between ending the step and pointing the
-task on, and its advance takes the duplicate-delivery branch below, which re-drives the hand-off.
+task on, and its advance takes the duplicate-delivery branch below, which re-drives the hand-off. A
+START on the queue is no such job (`taskIdsOwedAStep`): it only claims a task still waiting to
+start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
+task for that long and then do nothing.
 
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that

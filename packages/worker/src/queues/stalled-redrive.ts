@@ -1,6 +1,6 @@
 import { and, eq, exists, inArray, isNotNull, isNull, lt, not, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger } from '@haive/shared';
+import { logger, TASK_JOB_NAMES } from '@haive/shared';
 import { enqueueAdvance, getTaskQueue, retrying, REDRIVE_RETRY_DELAYS_MS } from './task-queue.js';
 
 /**
@@ -18,9 +18,21 @@ export interface StalledRedriveDeps {
     round: number,
     epoch: number,
   ) => Promise<void>;
-  /** Every task id an advance-step job still owes, or null when the queue could not be read. */
+  /** Every task id a task-queue job still owes a step, or null when the queue could not be read. */
   queuedTaskIds: () => Promise<Set<string> | null>;
   redriveRetryDelaysMs?: number[];
+}
+
+/** The tasks these jobs still owe a step. A START owes none: it only claims a task still waiting
+ *  to start, so one a dead worker left `active` under its lock must not hold a running task. */
+export function taskIdsOwedAStep(jobs: readonly ({ name?: string; data?: unknown } | undefined)[]) {
+  const ids = new Set<string>();
+  for (const job of jobs) {
+    if (job?.name === TASK_JOB_NAMES.START) continue;
+    const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
+    if (typeof id === 'string') ids.add(id);
+  }
+  return ids;
 }
 
 /** 'active' is redelivered; 'delayed' covers a holdStepAdvance, admission, or PAUSE park. */
@@ -33,12 +45,7 @@ async function readTaskQueueTaskIds(): Promise<Set<string> | null> {
       'delayed',
       'prioritized',
     ]);
-    const ids = new Set<string>();
-    for (const job of jobs) {
-      const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
-      if (typeof id === 'string') ids.add(id);
-    }
-    return ids;
+    return taskIdsOwedAStep(jobs);
   } catch (err) {
     log.warn({ err }, 'task queue unreadable; leaving stalled tasks alone this pass');
     return null;

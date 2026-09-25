@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
+import { redriveStalledTasks, taskIdsOwedAStep } from '../src/queues/stalled-redrive.js';
 
 function tableNameOf(table: unknown): string {
   if (table && typeof table === 'object') {
@@ -300,5 +300,19 @@ describe('redriveStalledTasks', () => {
     );
     expect(redriven).toBe(0);
     expect(recorded).toEqual([]);
+  });
+});
+
+describe('taskIdsOwedAStep', () => {
+  it('counts an advance, a cancel and a job of any other kind, but never a START', () => {
+    const owed = taskIdsOwedAStep([
+      { name: 'advance-step', data: { taskId: 'advancing' } },
+      { name: 'cancel-task', data: { taskId: 'cancelling' } },
+      // A START a dead worker left active: after its claim the task is running, and START refuses it.
+      { name: 'start-task', data: { taskId: 'claimed' } },
+      { name: 'cleanup-repo-rag', data: { repositoryId: 'repo-1' } },
+      undefined,
+    ]);
+    expect([...owed].sort()).toEqual(['advancing', 'cancelling']);
   });
 });
