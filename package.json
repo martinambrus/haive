@@ -54,10 +54,12 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "bcrypt",
-      "cpu-features",
       "esbuild",
       "msgpackr-extract",
-      "protobufjs",
+      "protobufjs"
+    ],
+    "ignoredBuiltDependencies": [
+      "cpu-features",
       "ssh2"
     ],
     "overrides": {
