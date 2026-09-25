@@ -123,8 +123,6 @@ const h = vi.hoisted(() => {
     /** Set to fail the step's error-hint write and the usage-snapshot read. */
     hintWriteFails: false,
     snapshotReadFails: false,
-    /** Patches of task writes awaited without `.returning()`. */
-    plainTaskPatches: [] as Record<string, unknown>[],
   };
   return { state };
 });
@@ -225,7 +223,6 @@ const db = {
       return {
         where: (cond: unknown) => ({
           then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
-            if (tableNameOf(table) === 'tasks') h.state.plainTaskPatches.push(patch);
             const failed = tableNameOf(table) === 'task_steps' && 'errorHint' in patch;
             return (
               failed && h.state.hintWriteFails
@@ -347,7 +344,6 @@ afterEach(() => {
   h.state.endedRuns = [];
   h.state.hintWriteFails = false;
   h.state.snapshotReadFails = false;
-  h.state.plainTaskPatches = [];
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -419,10 +415,16 @@ describe("a failed step's hand-off", () => {
       { id: 'ts-1' },
       'cli invocation failed',
     );
-  const armed = () => h.state.plainTaskPatches.filter((p) => 'awaitingProviderReason' in p);
+  const armed = () => h.state.landedTaskPatches.filter((p) => 'awaitingProviderReason' in p);
+  const pollTicks = () =>
+    h.state.add.mock.calls.filter((call) => call[0] !== TASK_JOB_NAMES.ADVANCE_STEP);
   const outage = (reason: 'rate_limit' | 'server_error') => {
     setContainerCleanupRunner(vi.fn(async () => 0));
     h.state.readsAnswer = true;
+    // The fail write has landed by the time its teardown reads anything.
+    h.state.onSelect = () => {
+      h.state.taskStatus = 'failed';
+    };
     h.state.endedRuns = [
       { errorMessage: `${PROVIDER_FATAL_HEADLINES[reason]}: 429`, cliProviderId: 'prov-1' },
     ];
@@ -441,6 +443,20 @@ describe("a failed step's hand-off", () => {
     vi.spyOn(configService, 'get').mockRejectedValue(new Error('config unreadable'));
     await expect(finish()).resolves.toBe(true);
     expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  it('arms nothing, and wakes no poller, once a Retry moved the task on', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    // The Retry is clicked on the failure while its teardown runs.
+    h.state.onSelect = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([]);
+    expect(h.state.taskWrites.slice(1)).toEqual([{ epochs: [5], landed: false }]);
+    expect(pollTicks()).toEqual([]);
   });
 
   it('arms it with no reset time when the usage snapshot cannot be read', async () => {

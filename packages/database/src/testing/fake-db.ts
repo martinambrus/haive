@@ -9,9 +9,10 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  *
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
- * wrong folder. It supports exactly the conditions callers build — `and` of `eq` / `inArray` /
- * `isNull` / `isNotNull` — and throws on anything else, so a drizzle upgrade or a new query shape
- * fails loudly instead of matching every row. The foreign-key cascade is read off the schema.
+ * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` /
+ * `inArray` / `isNull` / `isNotNull` — and throws on anything else, so a drizzle upgrade or a new
+ * query shape fails loudly instead of matching every row. The foreign-key cascade is read off the
+ * schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
  * a savepoint. There is no isolation: a write is visible to every reader the moment it is made,
@@ -75,6 +76,8 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
   where(cond: unknown): SelectQuery;
   orderBy(order: unknown): SelectQuery;
   limit(n: number): SelectQuery;
+  /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
+  for(strength: string, config?: unknown): SelectQuery;
 }
 
 /** The handle a test casts to `Database`, and the transaction a section receives. */
@@ -141,6 +144,14 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       ) {
         const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
         return (row) => parts.every((part) => part(row));
+      }
+      if (
+        ch.length >= 3 &&
+        ch.length % 2 === 1 &&
+        ch.every((c, i) => (i % 2 === 1 ? text(c) === ' or ' : is(c, SQL)))
+      ) {
+        const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
+        return (row) => parts.some((part) => part(row));
       }
       const [col, op, val] = ch;
       const key = is(col, Column) ? keyOf.get(col) : undefined;
@@ -223,6 +234,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       where: (cond) => ((opts.where = cond), query),
       orderBy: (order) => ((opts.orderBy = order), query),
       limit: (n) => ((opts.limit = n), query),
+      for: () => query,
       then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),
     };
     return query;

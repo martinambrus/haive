@@ -1155,7 +1155,7 @@ export async function finishFailedStep(
     return false;
   }
   try {
-    await recordFailedStepHint(db, task.taskId, stepId, row);
+    await recordFailedStepHint(db, task.taskId, task.orchestrationEpoch, stepId, row);
   } catch (err) {
     logger.warn({ err, taskId: task.taskId, stepId }, 'failed-step hint not recorded');
   }
@@ -1167,9 +1167,37 @@ export async function finishFailedStep(
   return true;
 }
 
+/** Arm the allowance watch on the failure this pass wrote: at its epoch and while still failed. The
+ *  teardown before it can outlast a Retry clicked on that failure, which the watch must not follow. */
+async function armAllowanceWatch(
+  db: Database,
+  taskId: string,
+  epoch: number,
+  watch: {
+    awaitingAllowanceProviderId: string;
+    awaitingProviderReason: 'rate_limit' | 'server_error';
+    awaitingProviderSince: Date;
+    allowanceResetAt: Date | null;
+  },
+): Promise<boolean> {
+  const [armed] = await db
+    .update(schema.tasks)
+    .set({ ...watch, allowanceReplenishedAt: null, updatedAt: watch.awaitingProviderSince })
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        eq(schema.tasks.orchestrationEpoch, epoch),
+        eq(schema.tasks.status, 'failed'),
+      ),
+    )
+    .returning({ id: schema.tasks.id });
+  return armed !== undefined;
+}
+
 async function recordFailedStepHint(
   db: Database,
   taskId: string,
+  epoch: number,
   stepId: string,
   row: { id: string },
 ): Promise<void> {
@@ -1262,41 +1290,33 @@ async function recordFailedStepHint(
           return [];
         });
       const resetAt = snap ? constrainingResetAt(snap) : null;
-      await db
-        .update(schema.tasks)
-        .set({
-          awaitingAllowanceProviderId: outage.cliProviderId,
-          awaitingProviderReason: 'rate_limit',
-          awaitingProviderSince: armedAt,
-          allowanceResetAt: resetAt,
-          allowanceReplenishedAt: null,
-          updatedAt: armedAt,
-        })
-        .where(eq(schema.tasks.id, taskId));
+      const armed = await armAllowanceWatch(db, taskId, epoch, {
+        awaitingAllowanceProviderId: outage.cliProviderId,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: armedAt,
+        allowanceResetAt: resetAt,
+      });
       // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
       // to a full 5-min tick late. Both are best-effort (the repeatable tick is the floor).
-      await enqueueUsagePollTick();
-      if (resetAt && resetAt.getTime() > Date.now()) {
-        await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
+      if (armed) {
+        await enqueueUsagePollTick();
+        if (resetAt && resetAt.getTime() > Date.now()) {
+          await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
+        }
       }
     } else if (watchMode !== 'off' && outage.reason === 'server_error' && outage.cliProviderId) {
       // Server error: no quota meter to read, so recovery is judged by serverErrorVerdict
       // (cool-off, plus a post-failure OK usage snapshot where one is readable). That works
       // for every CLI, so unlike the rate-limit arm this is NOT gated on USAGE_PROVIDERS.
       const cooloffEnd = new Date(armedAt.getTime() + SERVER_ERROR_COOLOFF_MS);
-      await db
-        .update(schema.tasks)
-        .set({
-          awaitingAllowanceProviderId: outage.cliProviderId,
-          awaitingProviderReason: 'server_error',
-          awaitingProviderSince: armedAt,
-          allowanceResetAt: cooloffEnd,
-          allowanceReplenishedAt: null,
-          updatedAt: armedAt,
-        })
-        .where(eq(schema.tasks.id, taskId));
+      const armed = await armAllowanceWatch(db, taskId, epoch, {
+        awaitingAllowanceProviderId: outage.cliProviderId,
+        awaitingProviderReason: 'server_error',
+        awaitingProviderSince: armedAt,
+        allowanceResetAt: cooloffEnd,
+      });
       // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
-      await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
+      if (armed) await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
     }
   } else {
     // Budget-timeout hint: the step's CLI was SIGKILLed at its budget on every rung of
