@@ -1,7 +1,7 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-14 and 5c merged (#267-#280, #282); PR 15 (an @ import is
-> followed where the CLI reads it) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-24. PRs 1-15 and 5c merged (#267-#280, #282, #283); PR 16 (only the
+> app's own pages can boot a runtime or open a socket) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context
