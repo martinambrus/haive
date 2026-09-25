@@ -225,6 +225,8 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
+  // Skip revives an ended task as Retry does; the other callers refuse one, so a cancellation stands.
+  options: { reviveEnded?: boolean } = {},
 ) {
   await resetRowsForRerun(tx, taskId, leftActive, now);
   const [bumped] = await tx
@@ -241,11 +243,21 @@ async function moveTaskToStep(
       ...CLEAR_ALLOWANCE_WATCH,
       updatedAt: now,
     })
-    .where(eq(schema.tasks.id, taskId))
+    .where(
+      options.reviveEnded
+        ? eq(schema.tasks.id, taskId)
+        : and(
+            eq(schema.tasks.id, taskId),
+            notInArray(schema.tasks.status, ['cancelled', 'completed']),
+          ),
+    )
     .returning({ epoch: schema.tasks.orchestrationEpoch });
+  if (!bumped) {
+    throw new HttpError(409, 'The task has ended and cannot be moved back to a step');
+  }
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now);
-  return { epoch: bumped?.epoch ?? 0, leftActive: [...leftActive, ...late] };
+  return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
 }
 
 /** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
@@ -1269,7 +1281,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, { reviveEnded: true });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,

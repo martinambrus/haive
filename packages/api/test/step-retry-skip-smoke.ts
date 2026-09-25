@@ -441,6 +441,62 @@ async function main(): Promise<void> {
       throw new Error('expected a step.retry_ai event listing later-round-step in leftActive');
     }
 
+    // 1f. A loop Resume or retry_ai must not revive a task that has already ended.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'loop kaboom once more' })
+      .where(eq(schema.taskSteps.id, loopStep.id));
+    await db.update(schema.tasks).set({ status: 'cancelled' }).where(eq(schema.tasks.id, task.id));
+    const epochBefore1f = await taskEpoch();
+    const resumeOnEndedRes = await app.request(`/tasks/${task.id}/steps/loop-step/action`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'resume', round: 0 }),
+    });
+    assertStatus('POST /resume on a cancelled task', resumeOnEndedRes.status, 409);
+    const taskAfterResumeOnEnded = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, task.id),
+    });
+    if (taskAfterResumeOnEnded?.status !== 'cancelled') {
+      throw new Error(`expected the task to stay cancelled, got ${taskAfterResumeOnEnded?.status}`);
+    }
+    const loopAfterResumeOnEnded = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, loopStep.id),
+    });
+    if (loopAfterResumeOnEnded?.status !== 'failed') {
+      throw new Error(`expected loop-step to stay failed, got ${loopAfterResumeOnEnded?.status}`);
+    }
+    if ((await taskEpoch()) !== epochBefore1f) {
+      throw new Error('expected the epoch unchanged after resume on a cancelled task');
+    }
+
+    const retryAiOnEndedRes = await app.request(`/tasks/${task.id}/steps/loop-step/action`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'retry_ai', round: 0 }),
+    });
+    assertStatus('POST /retry_ai on a cancelled task', retryAiOnEndedRes.status, 409);
+    const taskAfterRetryAiOnEnded = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, task.id),
+    });
+    if (taskAfterRetryAiOnEnded?.status !== 'cancelled') {
+      throw new Error(
+        `expected the task to stay cancelled, got ${taskAfterRetryAiOnEnded?.status}`,
+      );
+    }
+    const loopAfterRetryAiOnEnded = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, loopStep.id),
+    });
+    if (loopAfterRetryAiOnEnded?.status !== 'failed') {
+      throw new Error(`expected loop-step to stay failed, got ${loopAfterRetryAiOnEnded?.status}`);
+    }
+    if ((await taskEpoch()) !== epochBefore1f) {
+      throw new Error('expected the epoch unchanged after retry_ai on a cancelled task');
+    }
+
+    // Restore for the scenarios that follow.
+    await db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, task.id));
+
     // 2. Mark 03b-business-requirements failed again, then skip it
     await db
       .update(schema.taskSteps)
