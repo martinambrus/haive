@@ -693,7 +693,17 @@ async function runLevelMerge(
       .set({ consumedAt: new Date() })
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
-    if (target) {
+    if (runNeverAnswered(inv)) {
+      // A fixer that never answered may have left the merge half-resolved, so its
+      // edits are discarded and it is dispatched again without spending an attempt.
+      await gitRun(integration.path, ['merge', '--abort']);
+      if (target) {
+        state.conflictRetries[target.issueKey] = Math.max(
+          0,
+          (state.conflictRetries[target.issueKey] ?? 1) - 1,
+        );
+      }
+    } else if (target) {
       // The fix agent only edited the conflicted files; finish the merge here
       // (verify markers gone, stage, commit) — git is unavailable in the sandbox.
       const committed = await completeMergeHostSide(integration.path, gitEnv);

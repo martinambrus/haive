@@ -237,7 +237,13 @@ async function main(): Promise<void> {
       await writeFile(path.join(integrationWorktree, CONFLICT_FILE), 'resolved: 001 + 002\n');
       await db
         .update(schema.cliInvocations)
-        .set({ exitCode: 0, rawOutput: 'merge resolved', endedAt: new Date() })
+        // Mirrors handlers.ts: a completed run started, whatever it returned.
+        .set({
+          exitCode: 0,
+          rawOutput: 'merge resolved',
+          startedAt: new Date(),
+          endedAt: new Date(),
+        })
         .where(eq(schema.cliInvocations.id, payload.invocationId));
     };
 

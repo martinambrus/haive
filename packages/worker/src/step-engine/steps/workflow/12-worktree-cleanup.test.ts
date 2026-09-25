@@ -448,6 +448,54 @@ describe('12 merge phase + apply (real git)', () => {
     }
   });
 
+  it('a superseded fixer whose fix result parsed as resolved still takes the completion path', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      // Live mid-merge; the agent resolved the file and answered right as it was superseded.
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      await writeFile(path.join(parent, 'base.txt'), 'resolved\n', 'utf8');
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({
+        invocation: {
+          id: 'inv1',
+          endedAt: new Date(),
+          supersededAt: new Date(),
+          rawOutput: '{"status":"resolved"}',
+        },
+      });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+        ctx,
+        mkParams(h.db, { providers: [], deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(merge.resolved).toBe(true);
+      expect(h.getState()?.merged).toBe(true);
+      expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toBe('resolved\n');
+      // Merge committed → MERGE_HEAD gone.
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('pushBase pushes the integrated base branch to origin', async () => {
     const { parent, wt } = await setupWorktree();
     const bare = await mkdtemp(path.join(tmpdir(), 'wt-bare-'));
@@ -540,6 +588,56 @@ describe('12 merge fix-agent dispatch', () => {
       }
       // The stale mid-merge was aborted rather than left open forever.
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a fixer that started, was superseded and produced no fix result: aborts, refunds the attempt, and dispatches again', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      // A superseded fixer that removed the conflict markers but never finished:
+      // the abort must discard this half-resolved edit, not let it pass as resolved.
+      await writeFile(path.join(parent, 'base.txt'), 'half-resolved\n', 'utf8');
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() } });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+        ctx,
+        mkParams(h.db, { ...withProvider, deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) expect(merge.result.status).toBe('waiting_cli');
+      // Re-opened for the fresh fixer, never committed — completeMergeHostSide's path
+      // did not run.
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      // A fresh fixer was dispatched...
+      expect(h.getState()?.fixInvocationId).not.toBeNull();
+      // ...and the refund (onIngest) plus the recharge (onInserted) net to the same
+      // conflictRetries the never-answered fixer was itself dispatched at.
+      expect(h.getState()?.conflictRetries).toBe(1);
+      // The half-resolved edit never reached completeMergeHostSide, so the merge
+      // did not land.
+      expect(h.getState()?.merged).not.toBe(true);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

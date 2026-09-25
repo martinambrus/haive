@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -921,13 +921,15 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     invocation: { id: string; endedAt: Date | null; supersededAt: Date | null } | undefined;
     integrationDir: string;
     autoResolveConflicts: boolean;
+    conflictRetries?: Record<string, number>;
   }) {
     let stepStatus = 'running';
     let stepErrorMessage: string | null = null;
+    let issueMergeStatus = 'conflict';
     let levelMergeState: unknown = {
       activeConflict: 'ISSUE-1',
       fixInvocationId: opts.invocation?.id ?? null,
-      conflictRetries: {},
+      conflictRetries: opts.conflictRetries ?? {},
     };
     const planRow = {
       id: 'plan1',
@@ -1011,6 +1013,9 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
             if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
               levelMergeState = patch.mergeState;
             }
+            if (table === schema.taskDagIssues && patch && 'mergeStatus' in patch) {
+              issueMergeStatus = patch.mergeStatus as string;
+            }
             if (table === schema.taskSteps) {
               if ('status' in patch) stepStatus = patch.status as string;
               if ('errorMessage' in patch) {
@@ -1045,6 +1050,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       getStepStatus: () => stepStatus,
       getStepError: () => stepErrorMessage,
       getLevelMergeState: () => levelMergeState,
+      getIssueMergeStatus: () => issueMergeStatus,
     };
   }
 
@@ -1155,6 +1161,80 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       };
       expect(state.fixInvocationId).toBe('fix-inv-1');
       expect(state.activeConflict).toBe('ISSUE-1');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a fix run that started and was superseded: aborts, dispatches again under auto-resolve, conflict counter unchanged net', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: true,
+        conflictRetries: { 'ISSUE-1': 1 },
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+        async () =>
+          ({
+            mode: 'cli',
+            providerId: 'p1',
+            providerName: 'p1',
+            adapter: null,
+            provider: null,
+            invocation: { kind: 'cli', spec: {} },
+            effectivePrompt: undefined,
+            effort: null,
+            reason: 'test stub',
+          }) as never,
+      );
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-superseded' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      // A superseded fixer that removed the conflict markers but never finished:
+      // the abort must discard this half-resolved edit, not let it pass as resolved.
+      const conflictedFile = path.join(integrationDir, 'base.txt');
+      await writeFile(conflictedFile, 'half-resolved\n', 'utf8');
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        ctx,
+        params as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) expect(result.result.status).toBe('waiting_cli');
+      // startConflictFix re-opens the merge unconditionally before dispatching, so a
+      // fresh conflict is live — never committed.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      // The issue was never marked resolved: the never-answered branch skips
+      // completeMergeHostSide entirely, so no mergeStatus write happens for it.
+      expect(h.getIssueMergeStatus()).toBe('conflict');
+      // The half-resolved edit was discarded by the abort, not carried into the
+      // fresh conflict the re-merge reopens.
+      expect(await readFile(conflictedFile, 'utf8')).not.toBe('half-resolved\n');
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        conflictRetries: Record<string, number>;
+      };
+      // A fresh fixer was dispatched...
+      expect(state.fixInvocationId).toBe('fix-inv-1');
+      // ...and the refund plus the recharge net to exactly one real attempt.
+      expect(state.conflictRetries['ISSUE-1']).toBe(1);
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }

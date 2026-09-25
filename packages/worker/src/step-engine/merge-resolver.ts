@@ -13,7 +13,7 @@ import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import { updateOwnedStep } from './step-ownership.js';
-import { runIsLive } from './run-wait.js';
+import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -676,6 +676,10 @@ export async function resolveMergePhase(
 
   // --- resolving: drive the fix-agent loop ---
   if (state.phase === 'resolving') {
+    // Set whenever (1) itself just aborted the live merge: mergeCommitted cannot tell
+    // that apart from a genuine commit (no MERGE_HEAD, no unmerged paths, either way),
+    // so (2) must not re-derive "committed" from git state on the same pass.
+    let justAborted = false;
     // (1) Ingest an in-flight fix agent.
     if (state.fixInvocationId) {
       const inv = await db.query.cliInvocations.findFirst({
@@ -684,49 +688,67 @@ export async function resolveMergePhase(
       if (!inv || runIsLive(inv)) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
-      // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
-      // not recover this run — abort the live merge and fail instead of spending the
-      // remaining conflictRetries re-dispatching against a dead provider. "Retry with
-      // AI" re-creates the conflict on demand once the provider is back.
-      if (isFatalProviderFailure(inv.errorMessage)) {
+      const fix = parseFixResult(inv);
+      if (runNeverAnswered(inv) && !fix) {
+        // A fixer that never answered may have left the merge half-resolved, so its
+        // edits are discarded and it is dispatched again without spending an attempt.
         await db
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
         await gitRun(state.mergeDir, ['merge', '--abort']);
-        const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
-        return {
-          resolved: false,
-          result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
-        };
-      }
-      await db
-        .update(schema.cliInvocations)
-        .set({ consumedAt: new Date() })
-        .where(eq(schema.cliInvocations.id, inv.id));
-      // The agent may have signaled it cannot confidently resolve → ask the user.
-      const fix = parseFixResult(inv);
-      if (fix?.status === 'uncertain') {
-        const question =
-          fix.question?.trim() || 'The agent is unsure how to resolve this conflict.';
-        await recordMergeQuestion(db, params.taskId, current.id, question);
+        justAborted = true;
         state = {
           ...state,
           fixInvocationId: null,
-          phase: 'awaiting-guidance',
-          pendingQuestion: { uncertainty: question, askedAt: new Date().toISOString() },
+          conflictRetries: Math.max(0, state.conflictRetries - 1),
         };
         await saveMergeState(db, current.id, state);
-        return parkForGuidance(db, current, spec, state);
+      } else {
+        // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
+        // not recover this run — abort the live merge and fail instead of spending the
+        // remaining conflictRetries re-dispatching against a dead provider. "Retry with
+        // AI" re-creates the conflict on demand once the provider is back.
+        if (isFatalProviderFailure(inv.errorMessage)) {
+          await db
+            .update(schema.cliInvocations)
+            .set({ consumedAt: new Date() })
+            .where(eq(schema.cliInvocations.id, inv.id));
+          await gitRun(state.mergeDir, ['merge', '--abort']);
+          const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
+          return {
+            resolved: false,
+            result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
+          };
+        }
+        await db
+          .update(schema.cliInvocations)
+          .set({ consumedAt: new Date() })
+          .where(eq(schema.cliInvocations.id, inv.id));
+        // The agent may have signaled it cannot confidently resolve → ask the user.
+        if (fix?.status === 'uncertain') {
+          const question =
+            fix.question?.trim() || 'The agent is unsure how to resolve this conflict.';
+          await recordMergeQuestion(db, params.taskId, current.id, question);
+          state = {
+            ...state,
+            fixInvocationId: null,
+            phase: 'awaiting-guidance',
+            pendingQuestion: { uncertainty: question, askedAt: new Date().toISOString() },
+          };
+          await saveMergeState(db, current.id, state);
+          return parkForGuidance(db, current, spec, state);
+        }
+        const committed = await completeMergeHostSide(state.mergeDir, commitEnv);
+        state = { ...state, fixInvocationId: null };
+        if (committed) {
+          return finishMerge(db, stepDef, current, ctx, params, state);
+        }
+        // Markers remain → abort this attempt; the dispatch decision below retries or halts.
+        await gitRun(state.mergeDir, ['merge', '--abort']);
+        justAborted = true;
+        await saveMergeState(db, current.id, state);
       }
-      const committed = await completeMergeHostSide(state.mergeDir, commitEnv);
-      state = { ...state, fixInvocationId: null };
-      if (committed) {
-        return finishMerge(db, stepDef, current, ctx, params, state);
-      }
-      // Markers remain → abort this attempt; the dispatch decision below retries or halts.
-      await gitRun(state.mergeDir, ['merge', '--abort']);
-      await saveMergeState(db, current.id, state);
     }
 
     // (2) Dispatch decision. Abort the live merge before halting so a failed phase
@@ -757,7 +779,7 @@ export async function resolveMergePhase(
       };
     }
     // Recreate the live merge if it isn't open (after an abort or a crash).
-    if (await mergeCommitted(state.mergeDir)) {
+    if (!justAborted && (await mergeCommitted(state.mergeDir))) {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
