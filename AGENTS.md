@@ -359,7 +359,10 @@ executor), and so does a fan-out's reservation: the row is locked while it is st
 in the transaction that inserts. A Retry supersedes a step's runs and deletes its agent rows before
 it writes the row, and that write waits on the lock, so its reset sweeps a second time once the rows
 are written (`resetRowsForRerun`, and `resetStepAndDownstream` worker-side): what a pass recorded
-before the Retry took the row is ended there, and a pass after it is refused. A pass a Stop cut off
+before the Retry took the row is ended there, and a pass after it is refused. A run swept that way
+can still be queued by the pass that recorded it, so its cli-exec job starts it only by a
+compare-and-swap on `ended_at` and `superseded_at`: the Retry's sandbox kill ran before that job
+had a container. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
