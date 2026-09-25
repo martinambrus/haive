@@ -15,3 +15,11 @@ export function runNeverAnswered(inv: {
 }): boolean {
   return isFreeRedispatch(inv) || inv.supersededAt != null;
 }
+
+/** Exited 0 with no error text: the only run whose edits a merge commits as its answer. */
+export function runFinishedCleanly(inv: {
+  exitCode: number | null;
+  errorMessage: string | null;
+}): boolean {
+  return inv.exitCode === 0 && !inv.errorMessage?.trim();
+}

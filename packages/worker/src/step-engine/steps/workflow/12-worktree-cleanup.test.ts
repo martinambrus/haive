@@ -147,6 +147,8 @@ function makeDb(
     invocation?: {
       id: string;
       endedAt: Date | null;
+      exitCode?: number | null;
+      errorMessage?: string | null;
       rawOutput?: string;
       /** Set by a Retry that superseded this run before it ever started. */
       supersededAt?: Date | null;
@@ -444,7 +446,7 @@ describe('12 merge phase + apply (real git)', () => {
         skipReason: null,
         pushed: false,
       };
-      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date() } });
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date(), exitCode: 0 } });
       const ctx = mkCtx(parent, h.db);
       const merge = await resolveMergePhase(
         h.db as never,
@@ -458,6 +460,49 @@ describe('12 merge phase + apply (real git)', () => {
       expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toBe('resolved\n');
       // Merge committed → MERGE_HEAD gone.
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('commits nothing a fixer left when it did not finish cleanly', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      // The agent removed the markers, then exited 1 without saying whether it was done.
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      await writeFile(path.join(parent, 'base.txt'), 'half-resolved\n', 'utf8');
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({
+        invocation: { id: 'inv1', endedAt: new Date(), exitCode: 1, errorMessage: 'exited 1' },
+      });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+        ctx,
+        mkParams(h.db, { providers: [], deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(merge.resolved).toBe(false);
+      expect(h.getState()?.merged).toBe(false);
+      // Nothing it left reached main, and the attempt it was charged stays spent.
+      expect(await git(parent, ['show', 'main:base.txt'])).not.toBe('half-resolved');
+      expect(h.getState()?.conflictRetries).toBeGreaterThanOrEqual(1);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
@@ -837,7 +882,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
         mergeStage: 'base-sync',
         baseSyncRounds: 1,
       };
-      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date() } });
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date(), exitCode: 0 } });
       const ctx = mkCtx(parent, h.db);
       const merge = await resolveMergePhase(
         h.db as never,
@@ -1052,6 +1097,7 @@ describe('12 merge clarification', () => {
         invocation: {
           id: 'inv1',
           endedAt: new Date(),
+          exitCode: 0,
           rawOutput: '{"status":"uncertain","question":"Which side wins for base.txt?"}',
         },
       });
