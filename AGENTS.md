@@ -284,7 +284,8 @@ is left to that pass. A finished row is the job that died between ending the ste
 task on, and its advance takes the duplicate-delivery branch below, which re-drives the hand-off. A
 current row that FAILED is the job that died between failing the step and failing the task; no
 advance can run it again, since every write refuses a failed row, so the sweep fails the task at
-the epoch it read, as that job would have. A
+the epoch it read through that job's own hand-off (`finishFailedStep`), which also records the
+failure's hint, arms its allowance watch and logs `step.failed`. A
 START on the queue is no such job (`taskIdsOwedAStep`): it only claims a task still waiting to
 start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
 task for that long and then do nothing.

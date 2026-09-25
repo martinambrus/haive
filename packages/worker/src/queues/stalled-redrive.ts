@@ -3,8 +3,8 @@ import { schema, type Database } from '@haive/database';
 import { logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
   enqueueAdvance,
+  finishFailedStep,
   getTaskQueue,
-  markTaskFailed,
   retrying,
   REDRIVE_RETRY_DELAYS_MS,
 } from './task-queue.js';
@@ -17,6 +17,14 @@ import {
 
 const log = logger.child({ module: 'stalled-redrive' });
 
+export interface FailedStep {
+  taskId: string;
+  epoch: number;
+  stepId: string;
+  rowId: string;
+  message: string;
+}
+
 export interface StalledRedriveDeps {
   enqueueAdvance: (
     taskId: string,
@@ -26,7 +34,7 @@ export interface StalledRedriveDeps {
     epoch: number,
   ) => Promise<void>;
   /** Fail a running task at `epoch`, as the lost hand-off of its failed step would have. */
-  failTask: (db: Database, taskId: string, message: string, epoch: number) => Promise<boolean>;
+  failTask: (db: Database, failed: FailedStep) => Promise<boolean>;
   /** Every task id a task-queue job still owes a step, or null when the queue could not be read. */
   queuedTaskIds: () => Promise<Set<string> | null>;
   redriveRetryDelaysMs?: number[];
@@ -63,7 +71,15 @@ async function readTaskQueueTaskIds(): Promise<Set<string> | null> {
 
 export const defaultDeps: StalledRedriveDeps = {
   enqueueAdvance,
-  failTask: (db, taskId, message, epoch) => markTaskFailed(db, taskId, message, epoch, ['running']),
+  failTask: (db, f) =>
+    finishFailedStep(
+      db,
+      { taskId: f.taskId, orchestrationEpoch: f.epoch },
+      f.stepId,
+      { id: f.rowId },
+      f.message,
+      ['running'],
+    ),
   queuedTaskIds: readTaskQueueTaskIds,
 };
 
@@ -173,6 +189,7 @@ export async function redriveStalledTasks(
       stepId: schema.tasks.currentStepId,
       round: schema.tasks.currentRound,
       epoch: schema.tasks.orchestrationEpoch,
+      rowId: schema.taskSteps.id,
       rowStatus: schema.taskSteps.status,
       rowError: schema.taskSteps.errorMessage,
     })
@@ -207,12 +224,17 @@ export async function redriveStalledTasks(
     if (c.stepId === null) continue; // excluded by isNotNull above; narrows the type
     if (queued.has(c.taskId)) continue;
     try {
-      if (c.rowStatus === 'failed') {
+      if (c.rowStatus === 'failed' && c.rowId !== null) {
         // Its job died between failing the step and failing the task, and every write refuses a
         // failed row, so no advance could run it again.
-        if (await deps.failTask(db, c.taskId, c.rowError ?? 'the step failed', c.epoch)) {
-          redriven++;
-        }
+        const failed: FailedStep = {
+          taskId: c.taskId,
+          epoch: c.epoch,
+          stepId: c.stepId,
+          rowId: c.rowId,
+          message: c.rowError ?? 'the step failed',
+        };
+        if (await deps.failTask(db, failed)) redriven++;
       } else if (await redriveTask(db, { ...c, stepId: c.stepId }, deps, cutoff)) redriven++;
     } catch (err) {
       log.error({ err, taskId: c.taskId }, 'stalled task redrive failed');

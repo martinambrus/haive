@@ -7,7 +7,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
+import { redriveStalledTasks, type FailedStep } from '../src/queues/stalled-redrive.js';
 
 const log = logger.child({ module: 'stalled-redrive-smoke' });
 
@@ -140,10 +140,10 @@ async function main(): Promise<void> {
       round: number;
       epoch: number;
     }[] = [];
-    const failures: { taskId: string; message: string; epoch: number }[] = [];
+    const failures: FailedStep[] = [];
     const deps = {
-      failTask: async (_db: unknown, taskId: string, message: string, epoch: number) => {
-        failures.push({ taskId, message, epoch });
+      failTask: async (_db: unknown, f: FailedStep) => {
+        failures.push(f);
         return true;
       },
       enqueueAdvance: async (
@@ -225,11 +225,21 @@ async function main(): Promise<void> {
       'a done row that finished recently is left to its own hand-off',
       (await epochOf(freshDoneRowTaskId)) === 3,
     );
+    const [failedRow] = await db
+      .select({ id: schema.taskSteps.id })
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.taskId, failedRowTaskId));
     check(
-      'a stale failed current row fails its task at its epoch, with the step error',
+      'a stale failed current row fails its task at its epoch, through its own row and error',
       JSON.stringify(failures.filter((f) => f.taskId === failedRowTaskId)) ===
         JSON.stringify([
-          { taskId: failedRowTaskId, message: 'cli invocation failed: boom', epoch: 3 },
+          {
+            taskId: failedRowTaskId,
+            epoch: 3,
+            stepId: 'smoke-step',
+            rowId: failedRow?.id,
+            message: 'cli invocation failed: boom',
+          },
         ]) && advances.every((a) => a.taskId !== failedRowTaskId),
       failures,
     );
