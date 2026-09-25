@@ -1,7 +1,10 @@
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { promisify } from 'node:util';
+import { describe, it, expect, vi } from 'vitest';
+import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
   parseCoderResult,
@@ -23,8 +26,15 @@ import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
 import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import { StepSupersededError } from './step-ownership.js';
+import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
+
+// Wraps the real dispatcher so one test can stub a single call.
+vi.mock('../orchestrator/dispatcher.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../orchestrator/dispatcher.js')>();
+  return { ...actual, resolveTaskDispatch: vi.fn(actual.resolveTaskDispatch) };
+});
 
 type DagIssue = Parameters<typeof issueSpecText>[1];
 
@@ -860,5 +870,290 @@ describe('replannerPrompt trusted region is structurally closed', () => {
   it('leaves a benign levels array byte-identical to plain JSON', () => {
     const out = replannerPrompt(benignPlan, benign, []);
     expect(out).toContain('Current dependency levels: [["ISSUE-001"],["ISSUE-002"]]');
+  });
+});
+
+describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it started', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  async function git(dir: string, args: string[]): Promise<void> {
+    await exec('git', args, { cwd: dir, env: GIT_ENV });
+  }
+  async function gitCode(dir: string, args: string[]): Promise<number> {
+    try {
+      await exec('git', args, { cwd: dir, env: GIT_ENV });
+      return 0;
+    } catch (e) {
+      return (e as { code?: number }).code ?? 1;
+    }
+  }
+
+  /** An integration repo on `main` mid-merge with `main--ISSUE-1`, conflicted and left
+   *  open, exactly as startConflictFix leaves it before dispatching a fix agent. */
+  async function setupConflictedIntegration(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dag-merge-wait-'));
+    await git(dir, ['init', '-b', 'main']);
+    await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'initial']);
+    await git(dir, ['checkout', '-b', 'main--ISSUE-1']);
+    await writeFile(path.join(dir, 'base.txt'), 'issue-edit\n', 'utf8');
+    await git(dir, ['commit', '-am', 'issue edit']);
+    await git(dir, ['checkout', 'main']);
+    await writeFile(path.join(dir, 'base.txt'), 'main-edit\n', 'utf8');
+    await git(dir, ['commit', '-am', 'main edit']);
+    await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'main--ISSUE-1']); // conflicts, left open
+    return dir;
+  }
+
+  /** A fake db for one DAG level/issue/plan. One thenable chain covers every `.select()`
+   *  shape used before runLevelMerge's fix-in-flight check. */
+  function makeDagMergeWaitDb(opts: {
+    invocation: { id: string; endedAt: Date | null; supersededAt: Date | null } | undefined;
+    integrationDir: string;
+    autoResolveConflicts: boolean;
+  }) {
+    let stepStatus = 'running';
+    let stepErrorMessage: string | null = null;
+    let levelMergeState: unknown = {
+      activeConflict: 'ISSUE-1',
+      fixInvocationId: opts.invocation?.id ?? null,
+      conflictRetries: {},
+    };
+    const planRow = {
+      id: 'plan1',
+      mode: 'dag',
+      reviewEnabled: false,
+      autoResolveConflicts: opts.autoResolveConflicts,
+    };
+    const issueRow = {
+      id: 'issue1',
+      dagPlanId: 'plan1',
+      issueKey: 'ISSUE-1',
+      level: 0,
+      title: 'Fix the conflict',
+      outcome: 'completed',
+      resolution: null,
+      cliInvocationId: null,
+      worktreePath: '/does/not/matter',
+      mergeStatus: 'conflict',
+      branchName: 'main--ISSUE-1',
+      debtItems: [],
+    };
+
+    function chain(result: unknown) {
+      const c = {
+        where: () => c,
+        orderBy: () => c,
+        limit: () => Promise.resolve(result),
+        then: (resolve: (v: unknown) => void, reject?: (e: unknown) => void) =>
+          Promise.resolve(result).then(resolve, reject),
+      };
+      return c;
+    }
+    function resultsFor(table: unknown): unknown[] {
+      if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
+      if (table === schema.taskDagLevels) {
+        return [
+          {
+            id: 'level1',
+            dagPlanId: 'plan1',
+            level: 0,
+            checkpointedAt: null,
+            mergeState: levelMergeState,
+          },
+        ];
+      }
+      if (table === schema.taskDagIssues) return [issueRow];
+      if (table === schema.taskSteps) {
+        // loadPreviousStepOutput('01-worktree-setup'): the integration worktree.
+        return [
+          {
+            detectOutput: null,
+            output: {
+              worktreePath: opts.integrationDir,
+              branchName: 'main',
+              sandboxWorktreePath: opts.integrationDir,
+            },
+            iterations: [],
+          },
+        ];
+      }
+      return [];
+    }
+
+    const db = {
+      query: {
+        taskDagPlans: { findFirst: async () => planRow },
+        tasks: { findFirst: async () => undefined },
+        users: { findFirst: async () => undefined },
+        cliInvocations: { findFirst: async () => opts.invocation },
+        userStepCliPreferences: { findFirst: async () => undefined },
+      },
+      select: () => ({ from: (table: unknown) => chain(resultsFor(table)) }),
+      insert: (table: unknown) => ({
+        values: () => ({
+          returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
+        }),
+      }),
+      update: (table: unknown) => ({
+        set: (patch: Record<string, unknown>) => {
+          const apply = () => {
+            if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
+              levelMergeState = patch.mergeState;
+            }
+            if (table === schema.taskSteps) {
+              if ('status' in patch) stepStatus = patch.status as string;
+              if ('errorMessage' in patch) {
+                stepErrorMessage = (patch.errorMessage as string | null) ?? null;
+              }
+            }
+          };
+          return {
+            where: (cond: unknown) => ({
+              returning: async () => {
+                if (table === schema.taskSteps) {
+                  const values = conditionValues(cond);
+                  const guarded = values.includes('pending') && values.includes('skipped');
+                  if (guarded && ['pending', 'skipped', 'failed'].includes(stepStatus)) return [];
+                }
+                apply();
+                return table === schema.taskSteps
+                  ? [{ id: 'step1', status: stepStatus, errorMessage: stepErrorMessage }]
+                  : [{}];
+              },
+              then: (resolve: (v: unknown) => void) => {
+                apply();
+                resolve(undefined);
+              },
+            }),
+          };
+        },
+      }),
+    };
+    return {
+      db,
+      getStepStatus: () => stepStatus,
+      getStepError: () => stepErrorMessage,
+      getLevelMergeState: () => levelMergeState,
+    };
+  }
+
+  it('is recognised as over rather than waited on forever once supersededAt is set', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: false,
+      });
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-wait' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        ctx,
+        params as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) {
+        expect(result.result.status).toBe('failed');
+        expect((result.result as { error?: string }).error).toContain('Merge halted');
+      }
+      expect(h.getStepStatus()).toBe('failed');
+      // The stale mid-merge was aborted rather than left open forever, and the cleared
+      // in-flight marker was persisted rather than left naming the dead run.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(
+        0,
+      );
+      expect(
+        (h.getLevelMergeState() as { fixInvocationId: string | null }).fixInvocationId,
+      ).toBeNull();
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('auto-resolve dispatch saves fixInvocationId before the enqueue that can fail', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: true,
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+        async () =>
+          ({
+            mode: 'cli',
+            providerId: 'p1',
+            providerName: 'p1',
+            adapter: null,
+            provider: null,
+            invocation: { kind: 'cli', spec: {} },
+            effectivePrompt: undefined,
+            effort: null,
+            reason: 'test stub',
+          }) as never,
+      );
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-dispatch' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: {
+          enqueueCliInvocation: async () => {
+            throw new Error('queue unavailable');
+          },
+        },
+      };
+      await expect(
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          ctx,
+          params as never,
+        ),
+      ).rejects.toThrow('queue unavailable');
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        activeConflict: string | null;
+      };
+      expect(state.fixInvocationId).toBe('fix-inv-1');
+      expect(state.activeConflict).toBe('ISSUE-1');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
   });
 });

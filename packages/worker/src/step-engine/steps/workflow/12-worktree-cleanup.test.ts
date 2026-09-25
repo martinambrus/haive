@@ -3,13 +3,42 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { MergeResolveState } from '@haive/database';
 import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
+
+// Pre-existing tests pass no providers, which this answers with skip as the real
+// dispatcher does; the real one needs ConfigService and the adapter registry.
+vi.mock('../../../orchestrator/dispatcher.js', () => ({
+  resolveTaskDispatch: vi.fn(
+    async (_db: unknown, _taskId: string, opts: { providers: unknown[] }) =>
+      opts.providers && opts.providers.length > 0
+        ? {
+            mode: 'cli',
+            providerId: 'p1',
+            providerName: 'p1',
+            adapter: null,
+            provider: null,
+            invocation: { kind: 'cli', spec: {} },
+            effectivePrompt: undefined,
+            effort: null,
+            reason: 'test stub',
+          }
+        : {
+            mode: 'skip',
+            providerId: null,
+            providerName: null,
+            adapter: null,
+            provider: null,
+            invocation: null,
+            reason: 'no providers',
+          },
+  ),
+}));
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -115,7 +144,13 @@ const logger = { info: () => {}, warn: () => {}, error: () => {} };
 // (undefined -> fallback identity).
 function makeDb(
   opts: {
-    invocation?: { id: string; endedAt: Date | null; rawOutput?: string };
+    invocation?: {
+      id: string;
+      endedAt: Date | null;
+      rawOutput?: string;
+      /** Set by a Retry that superseded this run before it ever started. */
+      supersededAt?: Date | null;
+    };
     /** Row findWorktreePathClaimant sees: another live task holding the same worktree. */
     worktreeSharer?: { id: string; title: string; status: string };
     /** Rows buildSquashCommitMessage lists in the squash commit's body. */
@@ -123,6 +158,9 @@ function makeDb(
     /** A Retry reset the row while the pass ran: a write carrying the ownership guard matches
      *  nothing. */
     rowTaken?: boolean;
+    /** Rejects the fix-agent invocation insert, as the one-live-per-step unique index does
+     *  when a concurrent advance already dispatched one. */
+    insertRejects?: unknown;
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -161,15 +199,22 @@ function makeDb(
     }),
     insert: () => ({
       values: () => ({
-        returning: async () => [{ id: 'inv1' }],
+        returning: async () => {
+          if (opts.insertRejects) throw opts.insertRejects;
+          return [{ id: 'inv1' }];
+        },
         then: (resolve: (v: unknown) => void) => resolve(undefined),
       }),
     }),
-    // buildSquashCommitMessage's DAG-issue lookup (select -> from -> where -> orderBy).
+    // One chain answers both shapes: buildSquashCommitMessage awaits orderBy directly,
+    // loadOutstandingMergeGuidance continues to limit(1).
     select: () => ({
       from: () => ({
         where: () => ({
-          orderBy: async () => opts.dagIssues ?? [],
+          orderBy: () => ({
+            limit: async () => [],
+            then: (resolve: (v: unknown) => void) => resolve(opts.dagIssues ?? []),
+          }),
         }),
       }),
     }),
@@ -444,6 +489,117 @@ describe('12 merge phase + apply (real git)', () => {
       expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
       expect(h.getState()?.merged).toBe(true);
       expect(h.getState()?.pushed).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('12 merge fix-agent dispatch', () => {
+  // A working provider for the mocked dispatcher above: opts.providers.length > 0 is
+  // its whole test for "dispatch a cli invocation" vs. "skip, no provider".
+  const withProvider = { providers: [{ id: 'p1', enabled: true }] };
+
+  it('a fix invocation superseded before it ever started no longer waits forever', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      // Live mid-merge; the fix agent dispatched into it was superseded before it ever
+      // started, so endedAt is still null, the shape a merely-slow run also has.
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() } });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+        ctx,
+        // No provider, so once the stale run is recognised as over the retry halts
+        // instead of looping.
+        mkParams(h.db),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) {
+        expect(merge.result.status).toBe('failed');
+        expect((merge.result as { error?: string }).error).toContain('CLI provider');
+      }
+      // The stale mid-merge was aborted rather than left open forever.
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('names the invocation in the saved state before enqueuing it, not after', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      const h = makeDb();
+      const ctx = mkCtx(parent, h.db);
+      const failingDeps = {
+        enqueueCliInvocation: async () => {
+          throw new Error('queue unavailable');
+        },
+      };
+      await expect(
+        resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }),
+          ctx,
+          mkParams(h.db, { ...withProvider, deps: failingDeps }),
+        ),
+      ).rejects.toThrow('queue unavailable');
+      // The invocation id was recorded in the persisted state BEFORE the enqueue that
+      // failed, so a crash right there still leaves the run tracked rather than orphaned.
+      expect(h.getState()?.fixInvocationId).toBe('inv1');
+      expect(h.getState()?.phase).toBe('resolving');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a concurrent dispatch parks on the winner instead of failing the step', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      // The one-live-per-step unique index rejects our insert: a concurrent advance
+      // already dispatched a fix agent for this step.
+      const conflict = Object.assign(new Error('duplicate key value violates unique constraint'), {
+        cause: Object.assign(new Error('duplicate'), { code: '23505' }),
+      });
+      const h = makeDb({ insertRejects: conflict });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        ctx,
+        mkParams(h.db, { ...withProvider, deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) expect(merge.result.status).toBe('waiting_cli');
+      // Neither aborted the winner's live merge...
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      // ...nor overwrote the state the winner is expected to have saved (still naming no
+      // fix invocation of our own).
+      expect(h.getState()?.fixInvocationId).toBeNull();
+      expect(h.getState()?.phase).toBe('resolving');
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

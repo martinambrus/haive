@@ -27,6 +27,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { updateOwnedStep } from './step-ownership.js';
+import { runIsLive } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
@@ -557,7 +558,14 @@ async function startConflictFix(
   { status: 'waiting'; row: TaskStepRow } | { status: 'halt'; row: TaskStepRow; error: string }
 > {
   await gitRun(m.integration.path, ['merge', '--no-ff', '--no-edit', target.branchName!], m.gitEnv);
-  const dispatched = await dispatchMergeFixAgent(m, target);
+  // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
+  // does, so no run can start that mergeState does not name.
+  const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
+    state.activeConflict = target.issueKey;
+    state.fixInvocationId = invId;
+    state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+    await saveMergeState(m.db, m.level.id, state);
+  });
   if (dispatched.kind === 'already_live') {
     // A concurrent advance already dispatched the fix agent for this step (the
     // one-live-per-step index rejected ours). The winner owns the in-progress merge and
@@ -575,10 +583,7 @@ async function startConflictFix(
     await clearAiFix(m.db, m.current.id);
     return haltConflicts(m, [target], 'no CLI provider for merge resolution');
   }
-  state.activeConflict = target.issueKey;
-  state.fixInvocationId = dispatched.invId;
-  state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
-  await saveMergeState(m.db, m.level.id, state);
+  // 'ok': the onInserted hook above already saved state.fixInvocationId.
   await clearAiFix(m.db, m.current.id);
   const waiting = await setStepStatus(m.db, m.current.id, {
     status: 'waiting_cli',
@@ -593,7 +598,11 @@ async function startConflictFix(
 type MergeFixDispatch =
   { kind: 'ok'; invId: string } | { kind: 'no_provider' } | { kind: 'already_live' };
 
-async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<MergeFixDispatch> {
+async function dispatchMergeFixAgent(
+  m: MergeArgs,
+  issue: DagIssueRow,
+  onInserted: (invocationId: string) => Promise<void>,
+): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
   const prompt = await augmentPromptWithTerseness(
     buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
@@ -640,6 +649,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
   }
   const invId = inv[0]?.id;
   if (!invId) return { kind: 'no_provider' };
+  await onInserted(invId);
   await deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: params.taskId,
@@ -676,7 +686,9 @@ async function runLevelMerge(
     const inv = await db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, state.fixInvocationId),
     });
-    if (!inv || inv.endedAt === null) return { status: 'waiting', row: m.current };
+    if (!inv || runIsLive(inv)) {
+      return { status: 'waiting', row: m.current };
+    }
     await db
       .update(schema.cliInvocations)
       .set({ consumedAt: new Date() })
@@ -1232,7 +1244,7 @@ async function resolveReviewPhase(
     const inv = await ra.db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, latest.cliInvocationId),
     });
-    if (!inv || inv.endedAt === null) continue; // in flight
+    if (!inv || runIsLive(inv)) continue; // in flight
     await ingestReviewRun(ra, issue, latest, inv);
   }
 
@@ -1763,7 +1775,9 @@ async function resolveEscalationPhase(
     const inv = await ea.db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, ea.plan.replannerInvocationId),
     });
-    if (!inv || inv.endedAt === null) return { status: 'waiting', row: ea.current };
+    if (!inv || runIsLive(inv)) {
+      return { status: 'waiting', row: ea.current };
+    }
     const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
     const action = await ingestReplanner(ea, inv, failedNow);
     if (action === 'abort') {
@@ -1804,7 +1818,7 @@ async function resolveEscalationPhase(
       const inv = await ea.db.query.cliInvocations.findFirst({
         where: eq(schema.cliInvocations.id, latest.cliInvocationId),
       });
-      if (!inv || inv.endedAt === null) {
+      if (!inv || runIsLive(inv)) {
         inFlight = true;
         continue;
       }
@@ -2186,7 +2200,7 @@ export async function resolveDagPhase(
         const inv = await db.query.cliInvocations.findFirst({
           where: eq(schema.cliInvocations.id, issue.cliInvocationId),
         });
-        if (!inv || inv.endedAt === null) {
+        if (!inv || runIsLive(inv)) {
           anyInFlight = true;
           continue;
         }
