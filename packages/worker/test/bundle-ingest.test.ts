@@ -3,9 +3,30 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
-import { describe, expect, it, afterEach, beforeEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({
+  classified: null as unknown,
+  user: '00000000-0000-4000-8000-0000000000a1',
+}));
+
+// Parsing proper reads the repository's CLI providers through a join; the classifier it starts
+// from is the part the extracted layout decides, so that is what the stub runs.
+vi.mock('../src/bundle-parser/index.js', () => ({
+  parseBundle: async (bundleId: string, _db: unknown, _logger: unknown, root: string) => {
+    const { classifyBundle } = await import('../src/bundle-parser/classifier.js');
+    h.classified = await classifyBundle(root, `${h.user}/${bundleId}/extracted`);
+    return { items: [], ambiguous: [], dropped: [] };
+  },
+  persistBundleItems: async () => ({ inserted: 0, updated: 0, removed: 0 }),
+}));
+
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import type { Database } from '@haive/database';
+import type { ClassifiedBundle } from '../src/bundle-parser/classifier.js';
 import { extractArchive, gitClone } from '../src/repo/clone.js';
-import { bundleArchiveRel, gitRevParseHead } from '../src/repo/bundle-ingest.js';
+import { bundleArchiveRel, gitRevParseHead, handleIngestZip } from '../src/repo/bundle-ingest.js';
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -79,6 +100,59 @@ describe('bundle-ingest: zip extraction', () => {
 
     expect((await readdir(dest)).sort()).toEqual(['agents', 'skills']);
     expect(await readdir(path.join(dest, 'agents'))).toContain('foo.md');
+  });
+});
+
+describe('handleIngestZip', () => {
+  const BUNDLE = '00000000-0000-4000-8000-0000000000b1';
+
+  async function ingest(files: Record<string, string>): Promise<ClassifiedBundle> {
+    const zip = new JSZip();
+    for (const [name, body] of Object.entries(files)) zip.file(name, body);
+    await mkdir(path.join(tmpRoot, h.user, BUNDLE), { recursive: true });
+    const archivePath = path.join(tmpRoot, h.user, BUNDLE, 'source.zip');
+    await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+    const fake = createFakeDb({ customBundles: schema.customBundles });
+    fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: h.user,
+      repositoryId: '00000000-0000-4000-8000-0000000000c1',
+      name: 'bundle',
+      sourceType: 'zip',
+      archivePath,
+      archiveFormat: 'zip',
+      storageRoot: '',
+    });
+    h.classified = null;
+    await handleIngestZip(
+      { bundleId: BUNDLE, userId: h.user } as never,
+      fake.db as unknown as Database,
+      tmpRoot,
+    );
+    return h.classified as ClassifiedBundle;
+  }
+
+  const agent = '---\nname: reviewer\ndescription: reviews\n---\nbody\n';
+
+  it('keeps a lone agents/ folder, which carries what makes its files agents', async () => {
+    const out = await ingest({ 'agents/reviewer.md': agent });
+    expect(out.agents).toEqual([
+      { kind: 'agent', sourceFormat: 'claude-md', sourcePath: 'agents/reviewer.md' },
+    ]);
+  });
+
+  it('keeps a lone .gemini/ folder, so its agents stay gemini agents', async () => {
+    const out = await ingest({ '.gemini/agents/reviewer.md': agent });
+    expect(out.agents).toEqual([
+      { kind: 'agent', sourceFormat: 'gemini-md', sourcePath: '.gemini/agents/reviewer.md' },
+    ]);
+  });
+
+  it('still unwraps a folder the bundle was zipped in, so item paths do not move', async () => {
+    const out = await ingest({ 'my-bundle/agents/reviewer.md': agent });
+    expect(out.agents).toEqual([
+      { kind: 'agent', sourceFormat: 'claude-md', sourcePath: 'agents/reviewer.md' },
+    ]);
   });
 });
 

@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-10 merged (#301-#311); PR 11 (an upgrade or rollback
-> deletes a file only while it holds Haive's bytes, judged at the delete) is in review. Tracked in
-> the status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-11 merged (#301-#311); PR 14 (a bundle zip with one
+> top-level folder keeps it when that folder is a bundle root) is in review. Tracked in the status
+> table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 

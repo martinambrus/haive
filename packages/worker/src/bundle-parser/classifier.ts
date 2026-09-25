@@ -86,6 +86,13 @@ async function walk(
   return { files, dirs };
 }
 
+/** A top-level folder whose NAME is part of what classifies the files below it, so an archive
+ *  holding only that folder must not be unwrapped to its contents. */
+export function isBundleRootDir(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === 'agents' || lower === 'skills' || lower.startsWith('.');
+}
+
 function detectAgentFormat(rel: string): CustomBundleItemSourceFormat | null {
   const lower = rel.toLowerCase();
   if (lower.endsWith('.toml')) {
