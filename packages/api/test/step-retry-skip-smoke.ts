@@ -282,12 +282,151 @@ async function main(): Promise<void> {
       throw new Error("expected resume to supersede the later round's live invocation");
     }
 
+    // Every other action that moves the task back to a step resets what it leaves active in the
+    // same way, and queues its advance at the epoch it moved the task to.
+    const leaveLaterRoundActive = async () => {
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'waiting_cli' })
+        .where(eq(schema.taskSteps.id, laterRound.id));
+      const [run] = await db
+        .insert(schema.cliInvocations)
+        .values({ taskId: task.id, taskStepId: laterRound.id, mode: 'cli', prompt: 'smoke' })
+        .returning();
+      if (!run) throw new Error('live invocation insert failed');
+      return run;
+    };
+    const taskEpoch = async () =>
+      (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) }))!.orchestrationEpoch;
+    const queuedEpochs = async (forStepId: string) =>
+      (await getTaskQueue().getJobs(['wait', 'prioritized', 'delayed']))
+        .map((j) => j.data as { taskId?: string; stepId?: string; epoch?: number })
+        .filter((d) => d.taskId === task.id && d.stepId === forStepId)
+        .map((d) => d.epoch);
+    const assertMovedTask = async (label: string, run: { id: string }, epochBefore: number) => {
+      const later = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, laterRound.id),
+      });
+      if (later?.status !== 'pending') {
+        throw new Error(`${label}: expected the later round's step reset, got ${later?.status}`);
+      }
+      const runAfterAction = await db.query.cliInvocations.findFirst({
+        where: eq(schema.cliInvocations.id, run.id),
+      });
+      if (!runAfterAction?.supersededAt) {
+        throw new Error(`${label}: expected the later round's live invocation superseded`);
+      }
+      const epochAfter = await taskEpoch();
+      if (epochAfter !== epochBefore + 1) {
+        throw new Error(
+          `${label}: expected the epoch bumped once, ${epochBefore} -> ${epochAfter}`,
+        );
+      }
+      return epochAfter;
+    };
+    // Exactly once: the pre-bump reset and the post-bump sweep must not both report one row.
+    const leftActiveOnce = (payload: unknown, stepId: string): boolean =>
+      (
+        (payload as { leftActive?: { stepId?: string; round?: number }[] } | null)?.leftActive ?? []
+      ).filter((r) => r.stepId === stepId).length === 1;
+
+    // 1d. A loop step resumed from its failed pass.
+    const [loopStep] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task.id,
+        stepId: 'loop-step',
+        stepIndex: 4,
+        title: 'Loop step',
+        status: 'failed',
+        iterationCount: 1,
+        endedAt: now,
+      })
+      .returning();
+    if (!loopStep) throw new Error('loop step insert failed');
+
+    // Resume it from round 0, keeping its completed iteration. Moves the task the same
+    // way retry does: what it leaves active elsewhere is reset, and the epoch bumps once.
+    const epochBefore1d = await taskEpoch();
+    const run1d = await leaveLaterRoundActive();
+    const resumeLoopRes = await app.request(`/tasks/${task.id}/steps/loop-step/action`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'resume', round: 0 }),
+    });
+    assertStatus('POST /resume on loop-step', resumeLoopRes.status, 200);
+    const epochAfter1d = await assertMovedTask('resume loop-step', run1d, epochBefore1d);
+    const loopAfterResume = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, loopStep.id),
+    });
+    if (loopAfterResume?.status !== 'running') {
+      throw new Error(`expected loop-step running after resume, got ${loopAfterResume?.status}`);
+    }
+    const loopEpochs1d = await queuedEpochs('loop-step');
+    if (!loopEpochs1d.includes(epochAfter1d)) {
+      throw new Error(
+        `expected a queued job for loop-step carrying epoch ${epochAfter1d}, got ${JSON.stringify(loopEpochs1d)}`,
+      );
+    }
+    const resumeLoopEvents = await db
+      .select()
+      .from(schema.taskEvents)
+      .where(eq(schema.taskEvents.taskId, task.id));
+    const resumeLoopEvent = resumeLoopEvents.find((e) => {
+      if (e.eventType !== 'step.resume') return false;
+      const payload = e.payload as { fromIteration?: number };
+      return payload.fromIteration !== undefined && leftActiveOnce(e.payload, 'later-round-step');
+    });
+    if (!resumeLoopEvent) {
+      throw new Error('expected a step.resume event with fromIteration listing later-round-step');
+    }
+
+    // 1e. retry_ai on the same loop step from a fresh failure: same reset shape, a
+    //     different event type.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'loop kaboom again' })
+      .where(eq(schema.taskSteps.id, loopStep.id));
+    const epochBefore1e = await taskEpoch();
+    const run1e = await leaveLaterRoundActive();
+    const retryAiRes = await app.request(`/tasks/${task.id}/steps/loop-step/action`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'retry_ai', round: 0 }),
+    });
+    assertStatus('POST /retry_ai on loop-step', retryAiRes.status, 200);
+    const epochAfter1e = await assertMovedTask('retry_ai loop-step', run1e, epochBefore1e);
+    const loopAfterRetryAi = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, loopStep.id),
+    });
+    if (loopAfterRetryAi?.status !== 'running') {
+      throw new Error(`expected loop-step running after retry_ai, got ${loopAfterRetryAi?.status}`);
+    }
+    const loopEpochs1e = await queuedEpochs('loop-step');
+    if (!loopEpochs1e.includes(epochAfter1e)) {
+      throw new Error(
+        `expected a queued job for loop-step carrying epoch ${epochAfter1e}, got ${JSON.stringify(loopEpochs1e)}`,
+      );
+    }
+    const retryAiEvents = await db
+      .select()
+      .from(schema.taskEvents)
+      .where(eq(schema.taskEvents.taskId, task.id));
+    const retryAiEvent = retryAiEvents.find(
+      (e) => e.eventType === 'step.retry_ai' && leftActiveOnce(e.payload, 'later-round-step'),
+    );
+    if (!retryAiEvent) {
+      throw new Error('expected a step.retry_ai event listing later-round-step in leftActive');
+    }
+
     // 2. Mark 03b-business-requirements failed again, then skip it
     await db
       .update(schema.taskSteps)
       .set({ status: 'failed', errorMessage: 'kaboom again' })
       .where(eq(schema.taskSteps.id, failedStep.id));
 
+    const epochBefore2 = await taskEpoch();
+    const run2 = await leaveLaterRoundActive();
     const skipRes = await app.request(`/tasks/${task.id}/steps/03b-business-requirements/action`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
@@ -321,6 +460,19 @@ async function main(): Promise<void> {
     if (taskAfterSkip.errorMessage !== null) {
       throw new Error('skip should clear the task errorMessage');
     }
+    const epochAfter2 = await assertMovedTask('skip 03b-business-requirements', run2, epochBefore2);
+    const skipEpochs = await queuedEpochs('03b-business-requirements');
+    if (!skipEpochs.includes(epochAfter2)) {
+      throw new Error(
+        `expected a queued job for 03b-business-requirements carrying epoch ${epochAfter2}, got ${JSON.stringify(skipEpochs)}`,
+      );
+    }
+    const skipLeftActiveEvent = (
+      await db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, task.id))
+    ).find((e) => e.eventType === 'step.skip' && leftActiveOnce(e.payload, 'later-round-step'));
+    if (!skipLeftActiveEvent) {
+      throw new Error('expected a step.skip event listing later-round-step in leftActive');
+    }
 
     // 3. Retry is allowed on any status by design (see steps.ts: "Any status is
     //    retryable"). Retrying a pending step is a no-op-shaped reset back to
@@ -340,6 +492,70 @@ async function main(): Promise<void> {
     });
     if (badAction.status < 400) {
       throw new Error(`expected 4xx for unknown action, got ${badAction.status}`);
+    }
+
+    // 6. A CLI switch on a failed step moves the task exactly like retry/resume/skip do.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'middle kaboom' })
+      .where(eq(schema.taskSteps.id, middleStep.id));
+    const epochBefore6 = await taskEpoch();
+    const run6 = await leaveLaterRoundActive();
+    const cliProviderRes6 = await app.request(`/tasks/${task.id}/steps/middle-step/cli-provider`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: null, round: 0 }),
+    });
+    assertStatus('PATCH cli-provider on failed step', cliProviderRes6.status, 200);
+    const epochAfter6 = await assertMovedTask(
+      'cli-provider on failed middle-step',
+      run6,
+      epochBefore6,
+    );
+    const middleAfter6 = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, middleStep.id),
+    });
+    if (middleAfter6?.status !== 'pending') {
+      throw new Error(
+        `expected middle-step pending after cli-provider switch, got ${middleAfter6?.status}`,
+      );
+    }
+    const middleEpochs6 = await queuedEpochs('middle-step');
+    if (!middleEpochs6.includes(epochAfter6)) {
+      throw new Error(
+        `expected a queued job for middle-step carrying epoch ${epochAfter6}, got ${JSON.stringify(middleEpochs6)}`,
+      );
+    }
+
+    // 6b. The same change on a pending step resets nothing else and leaves the epoch alone —
+    //     a CLI switch on a pending row resets nothing else.
+    const epochBefore6b = await taskEpoch();
+    const run6b = await leaveLaterRoundActive();
+    const cliProviderRes6b = await app.request(`/tasks/${task.id}/steps/middle-step/cli-provider`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: null, round: 0 }),
+    });
+    assertStatus('PATCH cli-provider on pending step', cliProviderRes6b.status, 200);
+    const laterAfter6b = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, laterRound.id),
+    });
+    if (laterAfter6b?.status !== 'waiting_cli') {
+      throw new Error(
+        `expected the later round's step untouched by a pending-step CLI switch, got ${laterAfter6b?.status}`,
+      );
+    }
+    const run6bAfter = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, run6b.id),
+    });
+    if (run6bAfter?.supersededAt) {
+      throw new Error(
+        "expected the later round's live invocation NOT superseded by a pending-step CLI switch",
+      );
+    }
+    const epochAfter6b = await taskEpoch();
+    if (epochAfter6b !== epochBefore6b) {
+      throw new Error(`expected the epoch unchanged, ${epochBefore6b} -> ${epochAfter6b}`);
     }
 
     // 5. Task events recorded
