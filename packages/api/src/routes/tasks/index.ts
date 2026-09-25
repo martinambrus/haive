@@ -57,7 +57,7 @@ import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { HttpError, type AppEnv } from '../../context.js';
-import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
+import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
   clearTaskPause,
   settleActiveSteps,
@@ -1111,6 +1111,7 @@ taskRoutes.post('/:id/action', async (c) => {
           errorMessage: null,
           // full task restart → fresh auto-resume budget
           allowanceAutoResumeCount: 0,
+          ...CLEAR_ALLOWANCE_WATCH,
           // Retrying a paused task means "run it". Leaving the hold set would restart the task
           // straight into the pause park, with Retry apparently doing nothing.
           pausedAt: null,

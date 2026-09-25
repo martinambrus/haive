@@ -389,6 +389,9 @@ epoch the pass ran under: `handleResult` does nothing once the task has moved on
 makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
 landing after that check stands: pointing the task at the next step, parking it on a form, a run or a
 fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
+The allowance watch a failure arms is fenced the same way, and only while the task still reads
+`failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
+watch as every other exit from `failed` does.
 Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
 own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
 points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
