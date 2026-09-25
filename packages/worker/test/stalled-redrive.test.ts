@@ -1,6 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
+
+const stubs = vi.hoisted(() => ({ finishFailedStep: vi.fn(async (..._args: unknown[]) => true) }));
+
+vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  finishFailedStep: stubs.finishFailedStep,
+}));
+
+import {
+  defaultDeps,
+  redriveStalledTasks,
+  taskIdsOwedAStep,
+  type FailedStep,
+} from '../src/queues/stalled-redrive.js';
 
 function tableNameOf(table: unknown): string {
   if (table && typeof table === 'object') {
@@ -58,6 +71,9 @@ interface Candidate {
   stepId: string;
   round: number;
   epoch: number;
+  rowId?: string | null;
+  rowStatus?: string | null;
+  rowError?: string | null;
 }
 
 /** One SELECT returning `candidates` verbatim, then a fenceResults-driven `transaction()` (the
@@ -119,7 +135,11 @@ async function captureQuery(): Promise<{ joinCond: unknown; whereCond: unknown }
   } as unknown as Database;
   await redriveStalledTasks(
     db,
-    { enqueueAdvance: async () => undefined, queuedTaskIds: async () => new Set() },
+    {
+      enqueueAdvance: async () => undefined,
+      queuedTaskIds: async () => new Set(),
+      failTask: async () => false,
+    },
     { staleMs: 300_000 },
   );
   return { joinCond, whereCond };
@@ -144,6 +164,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, stepId, round, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -178,6 +199,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -211,6 +233,7 @@ describe('redriveStalledTasks', () => {
           advances.push(args);
         },
         queuedTaskIds: async () => new Set(['task-1']),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -237,6 +260,7 @@ describe('redriveStalledTasks', () => {
           advances.push(args);
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
       },
       { staleMs: 300_000 },
     );
@@ -271,6 +295,7 @@ describe('redriveStalledTasks', () => {
           advances.push({ taskId, epoch });
         },
         queuedTaskIds: async () => new Set(),
+        failTask: async () => false,
         redriveRetryDelaysMs: [0, 0],
       },
       { staleMs: 300_000 },
@@ -295,10 +320,91 @@ describe('redriveStalledTasks', () => {
     const db = makeDb([candidate], recorded);
     const redriven = await redriveStalledTasks(
       db,
-      { enqueueAdvance: async () => undefined, queuedTaskIds: async () => null },
+      {
+        enqueueAdvance: async () => undefined,
+        queuedTaskIds: async () => null,
+        failTask: async () => false,
+      },
       { staleMs: 300_000 },
     );
     expect(redriven).toBe(0);
     expect(recorded).toEqual([]);
+  });
+});
+
+describe('a running task whose current step failed', () => {
+  it('is failed at its epoch with the step error, and nothing is queued for it', async () => {
+    const recorded: RecordedUpdate[] = [];
+    const candidate: Candidate = {
+      taskId: 'task-1',
+      userId: 'user-1',
+      stepId: 'step-a',
+      round: 0,
+      epoch: 3,
+      rowId: 'row-1',
+      rowStatus: 'failed',
+      rowError: 'cli invocation failed: boom',
+    };
+    const db = makeDb([candidate], recorded);
+    const failed: FailedStep[] = [];
+    const advances: unknown[] = [];
+    const redriven = await redriveStalledTasks(
+      db,
+      {
+        enqueueAdvance: async (...args) => {
+          advances.push(args);
+        },
+        queuedTaskIds: async () => new Set(),
+        failTask: async (_db, f) => {
+          failed.push(f);
+          return true;
+        },
+      },
+      { staleMs: 300_000 },
+    );
+    expect(redriven).toBe(1);
+    expect(failed).toEqual([
+      {
+        taskId: 'task-1',
+        epoch: 3,
+        stepId: 'step-a',
+        rowId: 'row-1',
+        message: 'cli invocation failed: boom',
+      },
+    ]);
+    expect(advances).toEqual([]);
+  });
+
+  it('fails it through the step hand-off, and only while it is still running', async () => {
+    const db = {} as Database;
+    await defaultDeps.failTask(db, {
+      taskId: 'task-1',
+      epoch: 3,
+      stepId: 'step-a',
+      rowId: 'row-1',
+      message: 'boom',
+    });
+    expect(stubs.finishFailedStep).toHaveBeenCalledWith(
+      db,
+      { taskId: 'task-1', orchestrationEpoch: 3 },
+      'step-a',
+      { id: 'row-1' },
+      'boom',
+      ['running'],
+    );
+  });
+});
+
+describe('taskIdsOwedAStep', () => {
+  it('counts an advance, a cancel and a job of any other kind, but never a START', () => {
+    const owed = taskIdsOwedAStep([
+      { name: 'advance-step', data: { taskId: 'advancing' } },
+      { name: 'cancel-task', data: { taskId: 'cancelling' } },
+      // A START a dead worker left active: after its claim the task is running, and START refuses it.
+      { name: 'start-task', data: { taskId: 'claimed' } },
+      { name: 'cleanup-repo-rag', data: { repositoryId: 'repo-1' } },
+      undefined,
+    ]);
+    expect([...owed].sort()).toEqual(['advancing', 'cancelling']);
   });
 });

@@ -2,7 +2,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
@@ -107,6 +107,7 @@ import {
 import { getCliExecQueue } from './cli-exec-queue.js';
 import {
   StepSupersededError,
+  TERMINAL_TASK_STATUSES,
   lockOwnedStep,
   taskWriteTarget,
   updateOwnedStep,
@@ -151,6 +152,10 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
 interface HeldTask {
   ctx?: ResolvedTaskContext;
+  /** The epoch the job read the task at, before resolving the rest of its context. */
+  readEpoch?: number;
+  /** A START's claim landed, so the task is one this job started. */
+  claimed?: boolean;
 }
 
 interface ResolvedTaskContext {
@@ -252,11 +257,13 @@ async function buildRunAppRunList(
 async function resolveTaskContext(
   db: Database,
   taskId: string,
+  held?: HeldTask,
 ): Promise<ResolvedTaskContext | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
   });
   if (!task) return null;
+  if (held) held.readEpoch = task.orchestrationEpoch ?? 0;
 
   let repoPath: string | null = null;
   if (task.repositoryId) {
@@ -327,8 +334,24 @@ async function appendEvent(
   });
 }
 
-async function markTaskRunning(db: Database, taskId: string): Promise<void> {
-  await db
+/** A task nobody has started yet: created, or queued by the start action or a task Retry. */
+const STARTABLE_TASK_STATUSES = ['created', 'queued'] as const satisfies readonly TaskStatus[];
+
+/** START's claim: the task goes running, pointed at its first step, only while it is still
+ *  startable at the epoch START read; false when anything else holds it and nothing was written. */
+async function claimTaskStart(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  first: StepDefinition,
+): Promise<boolean> {
+  const currentStepIndex = await resolveCurrentStepIndex(
+    db,
+    ctx.taskId,
+    first.metadata.id,
+    0,
+    computeGlobalStepIndex(first.metadata.workflowType, first.metadata.index),
+  );
+  const [claimed] = await db
     .update(schema.tasks)
     .set({
       status: 'running',
@@ -343,9 +366,20 @@ async function markTaskRunning(db: Database, taskId: string): Promise<void> {
       // completedAt - startedAt (the api and the task page both end the span at
       // `completedAt ?? now`) instead of ticking. Same clear markTaskRunningWithStep documents.
       completedAt: null,
+      currentStepId: first.metadata.id,
+      currentStepIndex,
+      currentRound: 0,
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(
+      and(
+        eq(schema.tasks.id, ctx.taskId),
+        inArray(schema.tasks.status, [...STARTABLE_TASK_STATUSES]),
+        eq(schema.tasks.orchestrationEpoch, ctx.orchestrationEpoch),
+      ),
+    )
+    .returning({ id: schema.tasks.id });
+  return claimed !== undefined;
 }
 
 /** current_step_index mirrors the current step's run_seq (buildRunList position — the
@@ -549,13 +583,15 @@ export async function markTaskCompleted(
   }
 }
 
-/** Fail the task. With `epoch`, only while the task is still at it, as a step's own failure is;
- *  false when it had moved on and nothing was written. */
-async function markTaskFailed(
+/** Fail the task, never one that was cancelled or completed. With `epoch`, only while the task is
+ *  still at it, as a step's own failure is, and with `statuses` only from one of them; false when
+ *  nothing was written. */
+export async function markTaskFailed(
   db: Database,
   taskId: string,
   message: string,
   epoch?: number,
+  statuses?: readonly TaskStatus[],
 ): Promise<boolean> {
   const [failed] = await db
     .update(schema.tasks)
@@ -566,9 +602,12 @@ async function markTaskFailed(
       updatedAt: new Date(),
     })
     .where(
-      epoch === undefined
-        ? eq(schema.tasks.id, taskId)
-        : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)),
+      and(
+        eq(schema.tasks.id, taskId),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        ...(epoch === undefined ? [] : [eq(schema.tasks.orchestrationEpoch, epoch)]),
+        ...(statuses ? [inArray(schema.tasks.status, [...statuses])] : []),
+      ),
     )
     .returning({ id: schema.tasks.id });
   if (!failed) return false;
@@ -1087,6 +1126,192 @@ const workerDeps: WorkerDeps = {
   },
 };
 
+/** A failed step's hand-off: fail the task at the epoch its pass ran under (and only from
+ *  `statuses`, when given), then record what the failure was and arm its recovery. Nothing retries
+ *  that record once the task is failed, so each part is written whatever became of the other. */
+export async function finishFailedStep(
+  db: Database,
+  task: { taskId: string; orchestrationEpoch: number },
+  stepId: string,
+  row: { id: string },
+  error: string,
+  statuses?: readonly TaskStatus[],
+): Promise<boolean> {
+  if (!(await markTaskFailed(db, task.taskId, error, task.orchestrationEpoch, statuses))) {
+    return false;
+  }
+  try {
+    await recordFailedStepHint(db, task.taskId, stepId, row);
+  } catch (err) {
+    logger.warn({ err, taskId: task.taskId, stepId }, 'failed-step hint not recorded');
+  }
+  try {
+    await appendEvent(db, task.taskId, row.id, 'step.failed', { stepId, error });
+  } catch (err) {
+    logger.warn({ err, taskId: task.taskId, stepId }, 'step.failed event not recorded');
+  }
+  return true;
+}
+
+async function recordFailedStepHint(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  row: { id: string },
+): Promise<void> {
+  // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
+  // server failure, attach a structured errorHint so the UI shows an
+  // "outage — retry when the provider recovers" banner instead of implying a code
+  // defect. Read from the failing INVOCATION's errorMessage (the raw fatal headline
+  // lives there; the step message may be prefixed e.g. "cli invocation failed: …"),
+  // so this works for the DAG, single-terminal, and merge fail paths alike. Auth is
+  // left to its existing textual message + the cli_login_required hint.
+  const endedInvs = await db
+    .select({
+      errorMessage: schema.cliInvocations.errorMessage,
+      cliProviderId: schema.cliInvocations.cliProviderId,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, row.id),
+        isNotNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+        isNotNull(schema.cliInvocations.errorMessage),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.endedAt))
+    .limit(50);
+  const outage = endedInvs
+    .map((r) => ({
+      reason: fatalClassFromMessage(r.errorMessage),
+      cliProviderId: r.cliProviderId,
+    }))
+    .find((r) => r.reason === 'rate_limit' || r.reason === 'server_error');
+  if (outage?.reason) {
+    let providerName: string | undefined;
+    if (outage.cliProviderId) {
+      const prov = await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, outage.cliProviderId),
+        columns: { name: true },
+      });
+      providerName = prov?.name ?? undefined;
+    }
+    try {
+      await db
+        .update(schema.taskSteps)
+        .set({
+          errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+    } catch (err) {
+      logger.warn({ err, taskId, stepId }, 'provider-outage hint not recorded');
+    }
+
+    // Provider-outage watch: arm a SILENT watch on the task so the usage poller can act
+    // once the provider recovers. No event/notification here — the task-failed
+    // notification already told the user it stopped. Gated by the global watch mode:
+    // 'off' means the admin wants no monitoring at all, so nothing is armed and the
+    // poller has nothing to find (the errorHint banner above still writes either way).
+    const watchMode = parseAllowanceWatchMode(
+      await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE).catch((err: unknown) => {
+        logger.warn({ err, taskId }, 'allowance watch mode unreadable; arming as if unset');
+        return null;
+      }),
+    );
+    const armedAt = new Date();
+    if (
+      watchMode !== 'off' &&
+      outage.reason === 'rate_limit' &&
+      outage.cliProviderId &&
+      providerName &&
+      providerName in USAGE_PROVIDERS
+    ) {
+      // Rate limit: capture the window the task is blocked until (latest reset over the
+      // exhausted windows) so the poller can fire on the authoritative vendor reset,
+      // not just a %-drop.
+      const [snap] = await db
+        .select({
+          fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
+          fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
+          sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
+          sevenDayResetAt: schema.usageWindowSnapshots.sevenDayResetAt,
+          dailyPct: schema.usageWindowSnapshots.dailyPct,
+          dailyResetAt: schema.usageWindowSnapshots.dailyResetAt,
+        })
+        .from(schema.usageWindowSnapshots)
+        .where(eq(schema.usageWindowSnapshots.providerId, outage.cliProviderId))
+        .limit(1)
+        .catch((err: unknown) => {
+          logger.warn({ err, taskId }, 'usage snapshot unreadable; arming with no reset time');
+          return [];
+        });
+      const resetAt = snap ? constrainingResetAt(snap) : null;
+      await db
+        .update(schema.tasks)
+        .set({
+          awaitingAllowanceProviderId: outage.cliProviderId,
+          awaitingProviderReason: 'rate_limit',
+          awaitingProviderSince: armedAt,
+          allowanceResetAt: resetAt,
+          allowanceReplenishedAt: null,
+          updatedAt: armedAt,
+        })
+        .where(eq(schema.tasks.id, taskId));
+      // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
+      // to a full 5-min tick late. Both are best-effort (the repeatable tick is the floor).
+      await enqueueUsagePollTick();
+      if (resetAt && resetAt.getTime() > Date.now()) {
+        await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
+      }
+    } else if (watchMode !== 'off' && outage.reason === 'server_error' && outage.cliProviderId) {
+      // Server error: no quota meter to read, so recovery is judged by serverErrorVerdict
+      // (cool-off, plus a post-failure OK usage snapshot where one is readable). That works
+      // for every CLI, so unlike the rate-limit arm this is NOT gated on USAGE_PROVIDERS.
+      const cooloffEnd = new Date(armedAt.getTime() + SERVER_ERROR_COOLOFF_MS);
+      await db
+        .update(schema.tasks)
+        .set({
+          awaitingAllowanceProviderId: outage.cliProviderId,
+          awaitingProviderReason: 'server_error',
+          awaitingProviderSince: armedAt,
+          allowanceResetAt: cooloffEnd,
+          allowanceReplenishedAt: null,
+          updatedAt: armedAt,
+        })
+        .where(eq(schema.tasks.id, taskId));
+      // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
+      await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
+    }
+  } else {
+    // Budget-timeout hint: the step's CLI was SIGKILLed at its budget on every rung of
+    // the escalating ladder, so the failure is "this pass needs more time", not a code
+    // defect or an outage. Surfacing it structurally lets the UI offer a retry with a
+    // user-chosen budget instead of the same doomed ladder.
+    //
+    // NOT read from endedInvs above: that query excludes superseded rows, and every
+    // re-dispatched timeout IS superseded — it would always report one attempt. The
+    // step runner's own counter is the single source of truth for how many rungs
+    // burned, so the hint and the dispatch that produced it cannot disagree.
+    const timeouts = await trailingTimeoutInfo(db, row.id);
+    if (timeouts.attempts > 0) {
+      await db
+        .update(schema.taskSteps)
+        .set({
+          errorHint: {
+            type: 'cli_timeout',
+            stepId,
+            lastBudgetMinutes: timeouts.lastBudgetMinutes ?? 0,
+            attempts: timeouts.attempts,
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+    }
+  }
+}
+
 /** A write handleResult makes to the row a pass left, through the pass's own ownership check:
  *  false, having written nothing, once a Retry or a Skip took the row. */
 async function writeOwnedRow(
@@ -1515,155 +1740,7 @@ export async function handleResult(
       return;
     }
     case 'failed': {
-      if (!(await markTaskFailed(db, ctx.taskId, result.error, ctx.orchestrationEpoch))) return;
-      // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
-      // server failure, attach a structured errorHint so the UI shows an
-      // "outage — retry when the provider recovers" banner instead of implying a code
-      // defect. Read from the failing INVOCATION's errorMessage (the raw fatal headline
-      // lives there; the step message may be prefixed e.g. "cli invocation failed: …"),
-      // so this works for the DAG, single-terminal, and merge fail paths alike. Auth is
-      // left to its existing textual message + the cli_login_required hint.
-      const endedInvs = await db
-        .select({
-          errorMessage: schema.cliInvocations.errorMessage,
-          cliProviderId: schema.cliInvocations.cliProviderId,
-        })
-        .from(schema.cliInvocations)
-        .where(
-          and(
-            eq(schema.cliInvocations.taskStepId, result.row.id),
-            isNotNull(schema.cliInvocations.endedAt),
-            isNull(schema.cliInvocations.supersededAt),
-            isNotNull(schema.cliInvocations.errorMessage),
-          ),
-        )
-        .orderBy(desc(schema.cliInvocations.endedAt))
-        .limit(50);
-      const outage = endedInvs
-        .map((r) => ({
-          reason: fatalClassFromMessage(r.errorMessage),
-          cliProviderId: r.cliProviderId,
-        }))
-        .find((r) => r.reason === 'rate_limit' || r.reason === 'server_error');
-      if (outage?.reason) {
-        let providerName: string | undefined;
-        if (outage.cliProviderId) {
-          const prov = await db.query.cliProviders.findFirst({
-            where: eq(schema.cliProviders.id, outage.cliProviderId),
-            columns: { name: true },
-          });
-          providerName = prov?.name ?? undefined;
-        }
-        await db
-          .update(schema.taskSteps)
-          .set({
-            errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.taskSteps.id, result.row.id));
-
-        // Provider-outage watch: arm a SILENT watch on the task so the usage poller can act
-        // once the provider recovers. No event/notification here — the task-failed
-        // notification already told the user it stopped. Gated by the global watch mode:
-        // 'off' means the admin wants no monitoring at all, so nothing is armed and the
-        // poller has nothing to find (the errorHint banner above still writes either way).
-        const watchMode = parseAllowanceWatchMode(
-          await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
-        );
-        const armedAt = new Date();
-        if (
-          watchMode !== 'off' &&
-          outage.reason === 'rate_limit' &&
-          outage.cliProviderId &&
-          providerName &&
-          providerName in USAGE_PROVIDERS
-        ) {
-          // Rate limit: capture the window the task is blocked until (latest reset over the
-          // exhausted windows) so the poller can fire on the authoritative vendor reset,
-          // not just a %-drop.
-          const [snap] = await db
-            .select({
-              fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
-              fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
-              sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
-              sevenDayResetAt: schema.usageWindowSnapshots.sevenDayResetAt,
-              dailyPct: schema.usageWindowSnapshots.dailyPct,
-              dailyResetAt: schema.usageWindowSnapshots.dailyResetAt,
-            })
-            .from(schema.usageWindowSnapshots)
-            .where(eq(schema.usageWindowSnapshots.providerId, outage.cliProviderId))
-            .limit(1);
-          const resetAt = snap ? constrainingResetAt(snap) : null;
-          await db
-            .update(schema.tasks)
-            .set({
-              awaitingAllowanceProviderId: outage.cliProviderId,
-              awaitingProviderReason: 'rate_limit',
-              awaitingProviderSince: armedAt,
-              allowanceResetAt: resetAt,
-              allowanceReplenishedAt: null,
-              updatedAt: armedAt,
-            })
-            .where(eq(schema.tasks.id, ctx.taskId));
-          // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
-          // to a full 5-min tick late. Both are best-effort (the repeatable tick is the floor).
-          await enqueueUsagePollTick();
-          if (resetAt && resetAt.getTime() > Date.now()) {
-            await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
-          }
-        } else if (
-          watchMode !== 'off' &&
-          outage.reason === 'server_error' &&
-          outage.cliProviderId
-        ) {
-          // Server error: no quota meter to read, so recovery is judged by serverErrorVerdict
-          // (cool-off, plus a post-failure OK usage snapshot where one is readable). That works
-          // for every CLI, so unlike the rate-limit arm this is NOT gated on USAGE_PROVIDERS.
-          const cooloffEnd = new Date(armedAt.getTime() + SERVER_ERROR_COOLOFF_MS);
-          await db
-            .update(schema.tasks)
-            .set({
-              awaitingAllowanceProviderId: outage.cliProviderId,
-              awaitingProviderReason: 'server_error',
-              awaitingProviderSince: armedAt,
-              allowanceResetAt: cooloffEnd,
-              allowanceReplenishedAt: null,
-              updatedAt: armedAt,
-            })
-            .where(eq(schema.tasks.id, ctx.taskId));
-          // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
-          await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
-        }
-      } else {
-        // Budget-timeout hint: the step's CLI was SIGKILLed at its budget on every rung of
-        // the escalating ladder, so the failure is "this pass needs more time", not a code
-        // defect or an outage. Surfacing it structurally lets the UI offer a retry with a
-        // user-chosen budget instead of the same doomed ladder.
-        //
-        // NOT read from endedInvs above: that query excludes superseded rows, and every
-        // re-dispatched timeout IS superseded — it would always report one attempt. The
-        // step runner's own counter is the single source of truth for how many rungs
-        // burned, so the hint and the dispatch that produced it cannot disagree.
-        const timeouts = await trailingTimeoutInfo(db, result.row.id);
-        if (timeouts.attempts > 0) {
-          await db
-            .update(schema.taskSteps)
-            .set({
-              errorHint: {
-                type: 'cli_timeout',
-                stepId,
-                lastBudgetMinutes: timeouts.lastBudgetMinutes ?? 0,
-                attempts: timeouts.attempts,
-              },
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.taskSteps.id, result.row.id));
-        }
-      }
-      await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {
-        stepId,
-        error: result.error,
-      });
+      await finishFailedStep(db, ctx, stepId, result.row, result.error);
       return;
     }
   }
@@ -1785,15 +1862,12 @@ async function handleStartTask(
   payload: TaskJobPayload,
   held?: HeldTask,
 ): Promise<void> {
-  const ctx = await resolveTaskContext(db, payload.taskId);
+  const ctx = await resolveTaskContext(db, payload.taskId, held);
   if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
   }
-  await markTaskRunning(db, ctx.taskId);
-  await appendEvent(db, ctx.taskId, null, 'task.running', {});
-
   const steps = await buildRunList(ctx, db);
   const first = steps[0];
   if (!first) {
@@ -1802,9 +1876,21 @@ async function handleStartTask(
       ctx.taskId,
       `no steps registered for workflow ${ctx.workflowType}`,
       ctx.orchestrationEpoch,
+      STARTABLE_TASK_STATUSES,
     );
     return;
   }
+  // A START redelivered or queued twice finds the task already started, and must not restart it.
+  if (!(await claimTaskStart(db, ctx, first))) {
+    logger.info(
+      { taskId: ctx.taskId, taskStatus: ctx.status, epoch: ctx.orchestrationEpoch },
+      'start-task skipped: the task is no longer waiting to start',
+    );
+    return;
+  }
+  if (held) held.claimed = true;
+  await appendEvent(db, ctx.taskId, null, 'task.running', {});
+
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
   // entirely — without this a task created (or retried) while paused would run its whole first
   // step. Hand the first step to the normal advance path instead and let that gate park it,
@@ -3230,10 +3316,17 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
     ) {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
-      const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
-      await markTaskFailed(db, taskId, message, epoch).catch((cleanupErr) => {
-        logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
-      });
+      const epoch =
+        held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch ?? held.readEpoch;
+      // A START that claimed nothing holds no task: it fails only one nobody has started, and none
+      // when it read no epoch, since it cannot tell a Retry's newer generation from its own.
+      const unclaimed = job.name === TASK_JOB_NAMES.START && !held.claimed;
+      if (!unclaimed || epoch !== undefined) {
+        const statuses = unclaimed ? STARTABLE_TASK_STATUSES : undefined;
+        await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
+          logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
+        });
+      }
     }
     throw err;
   }

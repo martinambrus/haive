@@ -275,11 +275,34 @@ redelivered after it was applied. A submission, a retry and a first run still fl
   was.
 
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
-missing, or `pending` and not parked, while the task queue holds no job for it, is re-driven by
-`redriveStalledTasks` (`queues/stalled-redrive.ts`): once at boot after the reconcile, whose own
-re-drive enqueue can still be lost, and every minute for a task idle five minutes, for a hand-off
-lost between boots. It bumps the epoch under the task row's lock and re-checks the row in the same
-statement, so a step a pass claimed since the candidate read is left to that pass.
+missing, `pending` and not parked, or finished (`done`/`skipped`) with nothing after it, while the
+task queue holds no job for it, is re-driven by `redriveStalledTasks` (`queues/stalled-redrive.ts`):
+once at boot after the reconcile, whose own re-drive enqueue can still be lost, and every minute for
+a task idle five minutes, for a hand-off lost between boots. It bumps the epoch under the task row's
+lock and re-checks the row in the same statement, so a step a pass claimed since the candidate read
+is left to that pass. A finished row is the job that died between ending the step and pointing the
+task on, and its advance takes the duplicate-delivery branch below, which re-drives the hand-off. A
+current row that FAILED is the job that died between failing the step and failing the task; no
+advance can run it again, since every write refuses a failed row, so the sweep fails the task at
+the epoch it read through that job's own hand-off (`finishFailedStep`), which also records the
+failure's hint, arms its allowance watch and logs `step.failed`. A
+START on the queue is no such job (`taskIdsOwedAStep`): it only claims a task still waiting to
+start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
+task for that long and then do nothing.
+
+**START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
+`running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
+finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
+queued, a task a repository deletion cancelled — logs and returns, where it used to restart the
+task from its first step or revive a cancelled one. The pointer is load-bearing: a task Retry
+leaves it on the step that failed, so under a pause the advance START queues for a first step
+already `done` read the chain as moved and was dropped, leaving a `running` task nothing drove. A
+START that throws before its claim fails the task only while it is still `created` or `queued` at
+the epoch it read, since a Retry can re-queue the task in between, and fails nothing when it could
+not read the task at all; `markTaskFailed` never writes over `cancelled` or `completed` from any
+caller. Once START has claimed, its redelivery is
+no longer a recovery path: a START that dies after the claim is recovered by the reconcile and the
+re-driver above, as any advance is.
 
 **A duplicate delivery re-drives the hand-off the step finished with.** An advance that finds its
 row already `done`, while the task still points at that step and round, re-drives the hand-off from

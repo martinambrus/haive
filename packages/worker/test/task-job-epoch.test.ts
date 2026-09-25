@@ -1,7 +1,8 @@
 import type { Job } from 'bullmq';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { configService, TASK_JOB_NAMES } from '@haive/shared';
 import {
+  finishFailedStep,
   handleResult,
   processTaskJob,
   resolveFixLoopGate,
@@ -10,6 +11,7 @@ import {
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
+import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -36,6 +38,41 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   if ('value' in obj && 'encoder' in obj) acc.push(obj.value);
   const chunks = obj.queryChunks;
   if (Array.isArray(chunks)) for (const c of chunks) conditionValues(c, acc);
+  return acc;
+}
+
+interface Comparison {
+  column: string;
+  op: string;
+  values: unknown[];
+}
+
+/** Each comparison a drizzle condition makes: the column it names, its operator and the values it
+ *  binds (`eq`, `ne`, `inArray` and `notInArray` alike). */
+function comparisons(node: unknown, acc: Comparison[] = []): Comparison[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) comparisons(item, acc);
+    return acc;
+  }
+  const chunks = (node as { queryChunks?: unknown }).queryChunks;
+  if (!Array.isArray(chunks)) return acc;
+  const column = chunks.find(
+    (c): c is { name: string } =>
+      !!c && typeof c === 'object' && 'columnType' in c && typeof c.name === 'string',
+  );
+  const op = chunks
+    .map((c) =>
+      !!c && typeof c === 'object' && !('encoder' in c) && 'value' in c && Array.isArray(c.value)
+        ? c.value.join('').trim()
+        : '',
+    )
+    .find((text) => text !== '');
+  if (column && op) {
+    acc.push({ column: column.name, op, values: conditionValues(chunks) });
+    return acc;
+  }
+  for (const c of chunks) comparisons(c, acc);
   return acc;
 }
 
@@ -73,16 +110,38 @@ const h = vi.hoisted(() => {
     taskHolds: [] as { epochs: unknown[]; landed: boolean }[],
     /** Every patch written to a step row. */
     stepPatches: [] as Record<string, unknown>[],
+    /** Every patch a task write landed. */
+    landedTaskPatches: [] as Record<string, unknown>[],
+    taskType: 'workflow',
+    currentStepId: 'epoch-job-step',
+    /** Set when the task's repository is gone, so the job cannot resolve the task. */
+    repoGone: false,
+    /** Set when the task row itself cannot be read. */
+    taskReadFails: false,
+    /** What a read of a step's ended runs answers, newest first. */
+    endedRuns: [] as Record<string, unknown>[],
+    /** Set to fail the step's error-hint write and the usage-snapshot read. */
+    hintWriteFails: false,
+    snapshotReadFails: false,
+    /** Patches of task writes awaited without `.returning()`. */
+    plainTaskPatches: [] as Record<string, unknown>[],
   };
   return { state };
 });
 
-/** Whether a fenced task write or read matches the task: at its epoch, and not refusing the
- *  status it is at (every task condition here names statuses only to refuse them). */
-function taskMatches(values: unknown[]): { epochs: unknown[]; landed: boolean } {
-  const epochs = values.filter((v) => typeof v === 'number');
-  const refused = values.includes(h.state.taskStatus);
-  const landed = (epochs.length === 0 || epochs.includes(h.state.taskEpoch)) && !refused;
+/** Whether a task write or read matches the task: every comparison it makes on the status or the
+ *  epoch holds for the task as it stands. */
+function taskMatches(cond: unknown): { epochs: unknown[]; landed: boolean } {
+  const epochs = conditionValues(cond).filter((v) => typeof v === 'number');
+  const status = h.state.taskStatus;
+  const landed = comparisons(cond).every(({ column, op, values }) => {
+    if (column === 'orchestration_epoch') return values[0] === h.state.taskEpoch;
+    if (column !== 'status') return true;
+    if (op === '=') return values[0] === status;
+    if (op === 'in') return values.includes(status);
+    if (op === 'not in') return !values.includes(status);
+    throw new Error(`the fake does not model status ${op}`);
+  });
   return { epochs, landed };
 }
 
@@ -90,10 +149,11 @@ const db = {
   query: {
     tasks: {
       findFirst: async () => {
+        if (h.state.taskReadFails) throw new Error('the task read failed');
         const task = {
           id: 'task-1',
           userId: 'user-1',
-          type: 'workflow',
+          type: h.state.taskType,
           repositoryId: 'repo-1',
           status: h.state.taskStatus,
           orchestrationEpoch: h.state.taskEpoch,
@@ -101,7 +161,7 @@ const db = {
           cliProviderId: null,
           ignoreSavedStepClis: false,
           executionPath: null,
-          currentStepId: 'epoch-job-step',
+          currentStepId: h.state.currentStepId,
           currentRound: 0,
           maxFixRounds: h.state.maxFixRounds,
         };
@@ -109,7 +169,11 @@ const db = {
         return task;
       },
     },
-    repositories: { findFirst: async () => ({ storagePath: '/tmp/repo', localPath: null }) },
+    repositories: {
+      findFirst: async () =>
+        h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
+    },
+    cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
   },
   select: (fields?: Record<string, unknown>) => {
     h.state.onSelect();
@@ -122,6 +186,9 @@ const db = {
           // hand-off and the park.
           return Object.assign(Promise.resolve([]), {
             limit: async () => {
+              if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
+                throw new Error('the usage snapshot read failed');
+              }
               if (fields && 'pausedAt' in fields) {
                 return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
               }
@@ -132,13 +199,16 @@ const db = {
             },
             for: async () => {
               if (name === 'tasks') {
-                const held = taskMatches(conditionValues(cond));
+                const held = taskMatches(cond);
                 h.state.taskHolds.push(held);
                 return held.landed ? [{ id: 'task-1' }] : [];
               }
               return h.state.sourceOwned ? [{ id: 'ts-1' }] : [];
             },
-            orderBy: async () => h.state.requestedEvents,
+            orderBy: () => {
+              const rows = name === 'cli_invocations' ? h.state.endedRuns : h.state.requestedEvents;
+              return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+            },
           });
         },
       }),
@@ -154,6 +224,15 @@ const db = {
       if (tableNameOf(table) === 'task_steps') h.state.stepPatches.push(patch);
       return {
         where: (cond: unknown) => ({
+          then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
+            if (tableNameOf(table) === 'tasks') h.state.plainTaskPatches.push(patch);
+            const failed = tableNameOf(table) === 'task_steps' && 'errorHint' in patch;
+            return (
+              failed && h.state.hintWriteFails
+                ? Promise.reject(new Error('the hint write failed'))
+                : Promise.resolve(undefined)
+            ).then(resolve, reject);
+          },
           returning: async () => {
             const values = conditionValues(cond);
             // A step row written under the ownership guard lands only while the pass still owns it.
@@ -161,8 +240,9 @@ const db = {
               const guarded = values.includes('pending') && values.includes('skipped');
               return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
             }
-            const write = taskMatches(values);
+            const write = taskMatches(cond);
             h.state.taskWrites.push(write);
+            if (write.landed) h.state.landedTaskPatches.push(patch);
             return write.landed ? [{ id: 'task-1' }] : [];
           },
         }),
@@ -259,6 +339,16 @@ afterEach(() => {
   h.state.admission = { decision: 'admit' };
   h.state.taskHolds = [];
   h.state.stepPatches = [];
+  h.state.landedTaskPatches = [];
+  h.state.taskType = 'workflow';
+  h.state.currentStepId = 'epoch-job-step';
+  h.state.repoGone = false;
+  h.state.taskReadFails = false;
+  h.state.endedRuns = [];
+  h.state.hintWriteFails = false;
+  h.state.snapshotReadFails = false;
+  h.state.plainTaskPatches = [];
+  vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
 });
@@ -301,6 +391,66 @@ describe('a task job that fails', () => {
     await expect(processTaskJob(job, 'tok')).rejects.toThrow('the job went no further');
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     expect(cleanup).not.toHaveBeenCalled();
+  });
+});
+
+describe("a failed step's hand-off", () => {
+  it('records the step failure even when its hint cannot be read', async () => {
+    setContainerCleanupRunner(vi.fn(async () => 0));
+    // Every read throws here, the hint's lookup of the step's failed runs among them.
+    await expect(
+      finishFailedStep(
+        db as never,
+        { taskId: 'task-1', orchestrationEpoch: 5 },
+        'epoch-job-step',
+        { id: 'ts-1' },
+        'boom',
+      ),
+    ).resolves.toBe(true);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+    expect(h.state.events).toContain('step.failed');
+  });
+
+  const finish = () =>
+    finishFailedStep(
+      db as never,
+      { taskId: 'task-1', orchestrationEpoch: 5 },
+      'epoch-job-step',
+      { id: 'ts-1' },
+      'cli invocation failed',
+    );
+  const armed = () => h.state.plainTaskPatches.filter((p) => 'awaitingProviderReason' in p);
+  const outage = (reason: 'rate_limit' | 'server_error') => {
+    setContainerCleanupRunner(vi.fn(async () => 0));
+    h.state.readsAnswer = true;
+    h.state.endedRuns = [
+      { errorMessage: `${PROVIDER_FATAL_HEADLINES[reason]}: 429`, cliProviderId: 'prov-1' },
+    ];
+  };
+
+  it('arms the allowance watch though the hint write failed', async () => {
+    outage('server_error');
+    h.state.hintWriteFails = true;
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  it('arms it as if unset when its mode cannot be read', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockRejectedValue(new Error('config unreadable'));
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  it('arms it with no reset time when the usage snapshot cannot be read', async () => {
+    outage('rate_limit');
+    h.state.snapshotReadFails = true;
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([
+      expect.objectContaining({ awaitingProviderReason: 'rate_limit', allowanceResetAt: null }),
+    ]);
   });
 });
 
@@ -864,5 +1014,155 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('a START job', () => {
+  const start = () =>
+    ({
+      id: 'job-start',
+      name: TASK_JOB_NAMES.START,
+      data: { taskId: 'task-1', userId: 'user-1' },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    }) as unknown as Job;
+
+  it.each(['created', 'queued'])('claims a %s task and runs its first step', async (status) => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = status;
+    await processTaskJob(start(), 'tok');
+    expect(h.state.taskWrites[0]).toEqual({ epochs: [5], landed: true });
+    expect(h.state.landedTaskPatches[0]).toMatchObject({
+      status: 'running',
+      currentStepId: 'epoch-chain-first',
+      currentRound: 0,
+    });
+    expect(h.state.events).toContain('task.running');
+    expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(advanceStep).mock.lastCall?.[0]).toMatchObject({
+      stepDef: { metadata: { id: 'epoch-chain-first' } },
+      epoch: 5,
+    });
+  });
+
+  it.each(['running', 'waiting_user', 'failed', 'cancelled', 'completed'])(
+    'does nothing to a %s task',
+    async (status) => {
+      h.state.readsAnswer = true;
+      h.state.taskType = 'epoch_chain';
+      h.state.taskStatus = status;
+      await processTaskJob(start(), 'tok');
+      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.events).toEqual([]);
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it('claims nothing once the task moved to another epoch after START read it', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'queued';
+    // After the context read and before the claim, as a cancel's epoch bump would land.
+    h.state.onSelect = () => {
+      h.state.taskEpoch = 6;
+    };
+    await processTaskJob(start(), 'tok');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+  });
+
+  it('fails nothing when it cannot resolve a task that was cancelled', async () => {
+    const cleanup = vi.fn(async () => 0);
+    setContainerCleanupRunner(cleanup);
+    // Deleting a repository cancels its open tasks, so a START still queued finds no repository.
+    h.state.taskStatus = 'cancelled';
+    h.state.repoGone = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it('fails nothing a Retry re-queued while a START that read it failed could not resolve it', async () => {
+    h.state.taskStatus = 'failed';
+    h.state.repoGone = true;
+    // The Retry lands once START has read the task and before its repository read throws.
+    h.state.onRead = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+  });
+
+  it('fails nothing a Retry re-queued while a START that read it failed was before its claim', async () => {
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'failed';
+    // The Retry lands once START has read the task, and the claim's own read then throws.
+    h.state.onRead = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the job went no further');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+  });
+
+  it('fails nothing when it could not read the task at all', async () => {
+    // Queued, as a Retry leaves it: with no epoch read, this START cannot tell that generation
+    // from the one it was sent for.
+    h.state.taskStatus = 'queued';
+    h.state.taskReadFails = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the task read failed');
+    expect(h.state.taskWrites).toEqual([]);
+  });
+
+  it('fails a task still waiting to start when it cannot resolve it', async () => {
+    h.state.taskStatus = 'queued';
+    h.state.repoGone = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+  });
+
+  it('points a paused, retried task at its first step, so a first step already done hands off', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'queued';
+    h.state.pausedAt = new Date();
+    // The step the task failed on, where a task Retry leaves the pointer.
+    h.state.currentStepId = 'epoch-chain-runtime';
+    await processTaskJob(start(), 'tok');
+    expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+      stepId: 'epoch-chain-first',
+      round: 0,
+      epoch: 5,
+    });
+
+    // The claim's write as the database applied it, then the advance START queued.
+    h.state.taskStatus = 'running';
+    h.state.currentStepId = String(h.state.landedTaskPatches[0]?.currentStepId);
+    h.state.pausedAt = null;
+    h.state.existingRow = {
+      id: 'ts-1',
+      stepId: 'epoch-chain-first',
+      round: 0,
+      status: 'done',
+      output: null,
+      errorMessage: null,
+      formValues: null,
+    };
+    h.state.add.mockClear();
+    const advance = {
+      id: 'job-advance',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId: 'epoch-chain-first', round: 0, epoch: 5 },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    } as unknown as Job;
+    await processTaskJob(advance, 'tok');
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: 'epoch-chain-next', epoch: 5 });
   });
 });

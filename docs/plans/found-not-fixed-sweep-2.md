@@ -1,7 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PR 1 (install from the lockfile as committed) is in review.
-> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PR 1 merged (#301); PR 2 (START claims the task, or does
+> nothing) is in review. Tracked in the status table of `docs/plans/README.md`, which each PR
+> updates.
 
 ## Context
 
