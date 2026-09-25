@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   blockedByActiveStepMessage,
   failedTaskRefusesAdvance,
+  gateAnswerSentAfterFailure,
   isStaleSubmit,
   staleSubmitAction,
 } from './_advance-guards.js';
@@ -82,5 +83,43 @@ describe('failedTaskRefusesAdvance', () => {
     for (const task of ['running', 'waiting_user', 'paused', 'queued']) {
       expect(failedTaskRefusesAdvance(task, 'failed', false)).toBe(false);
     }
+  });
+
+  it('lets a fix-loop gate answer sent after the failure through onto a done row', () => {
+    expect(failedTaskRefusesAdvance('failed', 'done', false, true)).toBe(false);
+  });
+
+  it('keeps out a done row with no gate answer sent after the failure', () => {
+    expect(failedTaskRefusesAdvance('failed', 'done', false, false)).toBe(true);
+  });
+
+  it('only a done row qualifies for the gate-answer exception', () => {
+    expect(failedTaskRefusesAdvance('failed', 'running', false, true)).toBe(true);
+  });
+});
+
+describe('gateAnswerSentAfterFailure', () => {
+  it('is true when the job was sent after the task failed', () => {
+    expect(gateAnswerSentAfterFailure(true, new Date(1000), 2000)).toBe(true);
+  });
+
+  it('is false when the job was sent before the task failed', () => {
+    expect(gateAnswerSentAfterFailure(true, new Date(2000), 1000)).toBe(false);
+  });
+
+  it('is false when the two times are equal', () => {
+    expect(gateAnswerSentAfterFailure(true, new Date(1000), 1000)).toBe(false);
+  });
+
+  it('is false with no recorded failure time', () => {
+    expect(gateAnswerSentAfterFailure(true, null, 2000)).toBe(false);
+  });
+
+  it('is false with no job timestamp', () => {
+    expect(gateAnswerSentAfterFailure(true, new Date(1000), undefined)).toBe(false);
+  });
+
+  it('is false when the job carries no gate answer', () => {
+    expect(gateAnswerSentAfterFailure(false, new Date(1000), 2000)).toBe(false);
   });
 });

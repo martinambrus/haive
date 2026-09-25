@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Queue } from 'bullmq';
+import { Queue, type JobsOptions } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -199,6 +199,7 @@ async function main(): Promise<void> {
       round: number,
       stepIndex: number,
       output: unknown,
+      formValues?: Record<string, unknown>,
     ) => {
       await db.insert(schema.taskSteps).values({
         taskId,
@@ -209,6 +210,7 @@ async function main(): Promise<void> {
         status: 'done',
         output,
         endedAt: new Date(),
+        ...(formValues ? { formValues } : {}),
       });
     };
 
@@ -217,15 +219,20 @@ async function main(): Promise<void> {
       stepId: string,
       round: number,
       formValues?: Record<string, unknown>,
+      jobOpts?: JobsOptions,
     ) =>
-      queue!.add(TASK_JOB_NAMES.ADVANCE_STEP, {
-        taskId,
-        userId: userId!,
-        stepId,
-        round,
-        epoch: 1,
-        ...(formValues ? { formValues } : {}),
-      });
+      queue!.add(
+        TASK_JOB_NAMES.ADVANCE_STEP,
+        {
+          taskId,
+          userId: userId!,
+          stepId,
+          round,
+          epoch: 1,
+          ...(formValues ? { formValues } : {}),
+        },
+        jobOpts,
+      );
 
     // --- Case 1: fix loop -------------------------------------------------------------
     // 07b's fixLoop fires on any non-VALID verdict with no churn files.
@@ -267,16 +274,22 @@ async function main(): Promise<void> {
         events,
       );
 
-      const targetRows = await db
-        .select({ status: schema.taskSteps.status })
-        .from(schema.taskSteps)
-        .where(
-          and(
-            eq(schema.taskSteps.taskId, taskId),
-            eq(schema.taskSteps.stepId, '07-phase-2-implement'),
-            eq(schema.taskSteps.round, 1),
-          ),
-        );
+      // The pointer moves before the target's advance creates its row.
+      const targetRows = await pollUntil(
+        async () =>
+          db
+            .select({ status: schema.taskSteps.status })
+            .from(schema.taskSteps)
+            .where(
+              and(
+                eq(schema.taskSteps.taskId, taskId),
+                eq(schema.taskSteps.stepId, '07-phase-2-implement'),
+                eq(schema.taskSteps.round, 1),
+              ),
+            ),
+        (rows) => rows.length > 0,
+        'fix-loop case: 07-phase-2-implement round 1 row',
+      );
       check(
         'fix-loop: 07-phase-2-implement round 1 row was materialized',
         targetRows.length > 0,
@@ -326,16 +339,22 @@ async function main(): Promise<void> {
         events,
       );
 
-      const targetRows = await db
-        .select({ status: schema.taskSteps.status })
-        .from(schema.taskSteps)
-        .where(
-          and(
-            eq(schema.taskSteps.taskId, taskId),
-            eq(schema.taskSteps.stepId, '03b-business-requirements'),
-            eq(schema.taskSteps.round, 1),
-          ),
-        );
+      // The pointer moves before the target's advance creates its row.
+      const targetRows = await pollUntil(
+        async () =>
+          db
+            .select({ status: schema.taskSteps.status })
+            .from(schema.taskSteps)
+            .where(
+              and(
+                eq(schema.taskSteps.taskId, taskId),
+                eq(schema.taskSteps.stepId, '03b-business-requirements'),
+                eq(schema.taskSteps.round, 1),
+              ),
+            ),
+        (rows) => rows.length > 0,
+        'revise case: 03b-business-requirements round 1 row',
+      );
       check(
         'revise: 03b-business-requirements round 1 row was reset/materialized',
         targetRows.length > 0,
@@ -463,6 +482,164 @@ async function main(): Promise<void> {
         'gate accept: the gate row stayed done (not re-parked)',
         gateRow[0]?.status === 'done',
         gateRow,
+      );
+    }
+
+    // --- Case 6: gate answer sent after the failure reopens the task --------------------
+    // The task failed while the gate waited; the Accept sent afterward still resolves it.
+    {
+      const taskId = await makeTask('gate accept after failure dup', {
+        status: 'failed',
+        completedAt: new Date(Date.now() - 60_000),
+        executionPath: 'quick_bugfix',
+        currentStepId: '07b-phase-4-validate',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+        verdict: 'ISSUES_FOUND',
+        findingsSummary: 'smoke-forced blocking finding',
+      });
+      await enqueueDuplicate(taskId, '07b-phase-4-validate', 0, {
+        [FIX_LOOP_ACTION_FIELD]: 'accept',
+      });
+
+      const task = await pollUntil(
+        () => loadTask(db, taskId),
+        (t) => t.currentStepId === '07c-ddev-reconcile' && t.currentRound === 0,
+        'gate-accept-after-failure case: task advancing to 07c-ddev-reconcile at round 0',
+      );
+      check(
+        'gate accept after failure: task status is no longer failed',
+        task.status !== 'failed',
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.accepted'),
+          ),
+        );
+      check(
+        'gate accept after failure: a fix_loop.accepted event was recorded',
+        events.length > 0,
+        events,
+      );
+    }
+
+    // --- Case 7: a failure after the answer stands ---------------------------------------
+    // The gate answer was sent before the task failed (a Stop overtook it), so it stays refused.
+    {
+      const taskId = await makeTask('gate accept before failure dup', {
+        status: 'failed',
+        completedAt: new Date(),
+        executionPath: 'quick_bugfix',
+        currentStepId: '07b-phase-4-validate',
+        currentRound: 0,
+      });
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+        verdict: 'ISSUES_FOUND',
+        findingsSummary: 'smoke-forced blocking finding',
+      });
+      const job = await enqueueDuplicate(
+        taskId,
+        '07b-phase-4-validate',
+        0,
+        { [FIX_LOOP_ACTION_FIELD]: 'accept' },
+        { timestamp: Date.now() - 120_000 },
+      );
+      const state = await pollUntil(
+        () => job.getState(),
+        (s) => s === 'completed' || s === 'failed',
+        'gate-accept-before-failure case: duplicate advance job settling',
+      );
+      if (state === 'failed') {
+        check('gate accept before failure: the duplicate advance job did not fail', false, state);
+      }
+
+      const task = await loadTask(db, taskId);
+      check(
+        'gate accept before failure: task status stayed failed',
+        task?.status === 'failed',
+        task,
+      );
+      check(
+        'gate accept before failure: pointer stayed at 07b-phase-4-validate round 0',
+        task?.currentStepId === '07b-phase-4-validate' && task?.currentRound === 0,
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.accepted'),
+          ),
+        );
+      check(
+        'gate accept before failure: no fix_loop.accepted event was recorded',
+        events.length === 0,
+        events,
+      );
+    }
+
+    // --- Case 8: the pickup guard reads the job's own answer, never the row's saved one ------
+    // A duplicate carrying no answer must not reopen a failed task through a done row's saved accept.
+    {
+      const taskId = await makeTask('gate saved-answer ignored dup', {
+        status: 'failed',
+        completedAt: new Date(Date.now() - 60_000),
+        executionPath: 'quick_bugfix',
+        currentStepId: '07b-phase-4-validate',
+        currentRound: 0,
+      });
+      await insertDoneStep(
+        taskId,
+        '07b-phase-4-validate',
+        0,
+        7.7,
+        {
+          verdict: 'ISSUES_FOUND',
+          findingsSummary: 'smoke-forced blocking finding',
+        },
+        { [FIX_LOOP_ACTION_FIELD]: 'accept' },
+      );
+      const job = await enqueueDuplicate(taskId, '07b-phase-4-validate', 0);
+      const state = await pollUntil(
+        () => job.getState(),
+        (s) => s === 'completed' || s === 'failed',
+        'gate-saved-answer case: duplicate advance job settling',
+      );
+      if (state === 'failed') {
+        check('gate saved answer: the duplicate advance job did not fail', false, state);
+      }
+
+      const task = await loadTask(db, taskId);
+      check('gate saved answer: task status stayed failed', task?.status === 'failed', task);
+      check(
+        'gate saved answer: pointer stayed at 07b-phase-4-validate round 0',
+        task?.currentStepId === '07b-phase-4-validate' && task?.currentRound === 0,
+        task,
+      );
+
+      const events = await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.accepted'),
+          ),
+        );
+      check(
+        'gate saved answer: no fix_loop.accepted event was recorded',
+        events.length === 0,
+        events,
       );
     }
 
