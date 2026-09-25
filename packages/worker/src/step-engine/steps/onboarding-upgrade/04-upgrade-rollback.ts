@@ -18,11 +18,13 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   readFileOrEmpty,
   removeIfHaives,
   resolveBundleItemId,
   safeDiskRel,
+  type UpgradeApplyOutput,
 } from './02-upgrade-apply.js';
 
 function isRollback(ctx: StepContext): Promise<boolean> {
@@ -75,6 +77,10 @@ interface NewArtifactToUndo {
   /** What the upgrade wrote. Absent on a payload detected before it was recorded, which then
    *  deletes nothing. */
   writtenHash?: string;
+  /** Whether the file itself was missing, where the upgrade recorded it. */
+  fileCreated?: boolean;
+  /** The live row the upgrade retired where nothing stood, put back live. */
+  retiredRowId?: string;
 }
 
 interface RollbackDetect {
@@ -82,6 +88,9 @@ interface RollbackDetect {
   rolledBackFromTaskId: string;
   targets: RollbackTarget[];
   newArtifactsToUndo: NewArtifactToUndo[];
+  /** Paths the upgrade rewrote with the bytes standing there, which no row recorded: only its row
+   *  is retired. Absent from a payload detected before the upgrade recorded its writes. */
+  unrecordedRewrites?: { diskPath: string; upgradeArtifactId: string }[];
   warnings: string[];
 }
 
@@ -235,12 +244,32 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       warnings.push('no live rows attributable to the prior upgrade task; nothing to revert');
     }
 
-    // For each upgrade row, find the immediately-prior (now-superseded) row
-    // for the same disk_path. Take the most-recently-superseded one. If none
-    // exists, the upgrade introduced a new file — rollback deletes it.
+    // 02 records where nothing stood and which rows it retired. A payload from before that record
+    // falls back to the most recently superseded row at a path, and to deleting where there is none.
+    const applied = (await loadPreviousStepOutput(ctx.db, priorTaskId, '02-upgrade-apply'))
+      ?.output as Pick<UpgradeApplyOutput, 'createdPaths' | 'retiredRowIds'> | null | undefined;
+    const createdByPath =
+      applied?.createdPaths && applied.retiredRowIds
+        ? new Map(applied.createdPaths.map((c) => [c.diskPath, c]))
+        : null;
+    const retiredRowIds = createdByPath ? (applied?.retiredRowIds ?? []) : null;
+
     const targets: RollbackTarget[] = [];
     const newArtifactsToUndo: NewArtifactToUndo[] = [];
+    const unrecordedRewrites: { diskPath: string; upgradeArtifactId: string }[] = [];
     for (const upgradeRow of upgradeRows) {
+      const created = createdByPath?.get(upgradeRow.diskPath);
+      if (created) {
+        newArtifactsToUndo.push({
+          diskPath: upgradeRow.diskPath,
+          templateKind: upgradeRow.templateKind,
+          upgradeArtifactId: upgradeRow.id,
+          writtenHash: upgradeRow.writtenHash,
+          fileCreated: created.fileCreated,
+          retiredRowId: created.retiredRowId ?? undefined,
+        });
+        continue;
+      }
       const priorCandidates = await ctx.db
         .select({
           id: schema.onboardingArtifacts.id,
@@ -257,6 +286,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
             eq(schema.onboardingArtifacts.repositoryId, repositoryId),
             eq(schema.onboardingArtifacts.diskPath, upgradeRow.diskPath),
             ne(schema.onboardingArtifacts.id, upgradeRow.id),
+            retiredRowIds ? inArray(schema.onboardingArtifacts.id, retiredRowIds) : undefined,
           ),
         )
         // 02 retires a live row and inserts the baseline it captured in one instant, and the
@@ -267,6 +297,14 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         )
         .limit(1);
       const prior = priorCandidates[0];
+      if (!prior && createdByPath) {
+        // Something stood there that no row recorded, and 02 records one for any bytes but its own.
+        unrecordedRewrites.push({
+          diskPath: upgradeRow.diskPath,
+          upgradeArtifactId: upgradeRow.id,
+        });
+        continue;
+      }
       if (!prior) {
         newArtifactsToUndo.push({
           diskPath: upgradeRow.diskPath,
@@ -298,6 +336,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       rolledBackFromTaskId: priorTaskId,
       targets,
       newArtifactsToUndo,
+      unrecordedRewrites,
       warnings,
     };
   },
@@ -331,9 +370,22 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // been deleted (e.g. user replaced the ZIP). bundleItemId is FK-enforced,
     // so we resolve all candidate ids against custom_bundle_items first and
     // only set the linkage for items that still exist.
+    const putBackIds = detected.newArtifactsToUndo.flatMap((u) =>
+      u.retiredRowId ? [u.retiredRowId] : [],
+    );
+    const retiredRows =
+      putBackIds.length > 0
+        ? await ctx.db
+            .select()
+            .from(schema.onboardingArtifacts)
+            .where(inArray(schema.onboardingArtifacts.id, putBackIds))
+        : [];
     const candidateBundleItemIds = new Set<string>();
-    for (const target of detected.targets) {
-      const id = extractBundleItemId(target.templateId);
+    for (const templateId of [
+      ...detected.targets.map((t) => t.templateId),
+      ...retiredRows.map((r) => r.templateId),
+    ]) {
+      const id = extractBundleItemId(templateId);
       if (id) candidateBundleItemIds.add(id);
     }
     const liveBundleItemIds = new Set<string>();
@@ -418,6 +470,30 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           continue;
         }
         const removal = await removeIfHaives(ctx.repoPath, rel, item, item.writtenHash);
+        // A row the upgrade retired where it found nothing goes back live, so the path reads as
+        // before: deleted by the person, or never installed.
+        const retired = retiredRows.find((r) => r.id === item.retiredRowId);
+        if (retired) {
+          rowsToInsert.push({
+            userId: ctx.userId,
+            repositoryId: detected.repositoryId,
+            taskId: ctx.taskId,
+            diskPath: retired.diskPath,
+            templateId: retired.templateId,
+            templateKind: retired.templateKind,
+            templateSchemaVersion: retired.templateSchemaVersion,
+            templateContentHash: retired.templateContentHash,
+            writtenHash: retired.writtenHash,
+            writtenContent: retired.writtenContent,
+            lastObservedDiskHash: retired.lastObservedDiskHash,
+            userModified: retired.userModified,
+            formValuesSnapshot: retired.formValuesSnapshot,
+            sourceStepId: '04-upgrade-rollback',
+            source: 'rollback' as const,
+            haiveVersion,
+            bundleItemId: resolveBundleItemId(retired.templateId, liveBundleItemIds),
+          });
+        }
         if (removal.outcome === 'kept') {
           // The upgrade's row is still undone; what stands there now stays.
           warnings.push(removal.refusal);
@@ -436,8 +512,11 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // insert (in addition to the explicit upgrade row ids and the new-artifact
     // undo ids), then insert. Wrapped in a single transaction so a
     // half-applied state is impossible.
+    const rewriteIds = (detected.unrecordedRewrites ?? []).map((u) => u.upgradeArtifactId);
+    revertedCount += rewriteIds.length;
+
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
-    const allRowsToSupersede = [...upgradeRowIds, ...undoneNewArtifactIds];
+    const allRowsToSupersede = [...upgradeRowIds, ...undoneNewArtifactIds, ...rewriteIds];
     if (allRowsToSupersede.length > 0 || insertPaths.length > 0) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();

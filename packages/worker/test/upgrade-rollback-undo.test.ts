@@ -111,6 +111,65 @@ describe('rolling back a file an upgrade introduced', () => {
     await expect(lstat(join(root, 'AGENTS.md'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('puts back live the row the upgrade retired where the file was missing', async () => {
+    const { root, fake, ctx, detected } = await setup();
+    const retired = fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: PRIOR_TASK,
+      diskPath: REL,
+      templateId: 'agent.new',
+      templateKind: 'agent',
+      templateSchemaVersion: 1,
+      templateContentHash: 'older-template',
+      writtenHash: 'older-bytes',
+      writtenContent: 'OLDER\n',
+      source: 'onboarding',
+      supersededAt: new Date(),
+    });
+    const undo = { ...detected.newArtifactsToUndo[0]!, retiredRowId: retired.id };
+    await upgradeRollbackStep.apply(ctx, {
+      detected: { ...detected, newArtifactsToUndo: [undo] },
+    } as never);
+    await expect(lstat(join(root, REL))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null)).toEqual([
+      expect.objectContaining({
+        diskPath: REL,
+        source: 'rollback',
+        templateContentHash: 'older-template',
+        writtenHash: 'older-bytes',
+        writtenContent: 'OLDER\n',
+      }),
+    ]);
+  });
+
+  const createdAgents = async (agents: string) => {
+    const { root, ctx, detected } = await setup();
+    await writeFile(join(root, 'AGENTS.md'), agents, 'utf8');
+    const region = normalizeContent(extractRegion(agents, CLI_RULES_START, CLI_RULES_END)!);
+    const undo = {
+      ...detected.newArtifactsToUndo[0]!,
+      diskPath: 'AGENTS.md',
+      templateKind: CLI_RULES_TEMPLATE_KIND,
+      writtenHash: sha256Hex(region),
+      fileCreated: true,
+    };
+    await upgradeRollbackStep.apply(ctx, {
+      detected: { ...detected, newArtifactsToUndo: [undo] },
+    } as never);
+    return join(root, 'AGENTS.md');
+  };
+
+  it('takes away an AGENTS.md the upgrade created for the rules region', async () => {
+    const path = await createdAgents(`${CLI_RULES_START}\nRULES\n${CLI_RULES_END}\n`);
+    await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('but only the region once something else was written to that AGENTS.md', async () => {
+    const path = await createdAgents(`${CLI_RULES_START}\nRULES\n${CLI_RULES_END}\n\n# Added\n`);
+    expect(await readFile(path, 'utf8')).toBe('\n\n# Added\n');
+  });
+
   it('never takes a file a person saved while its bytes were being judged', async () => {
     const { root, ctx, detected } = await setup();
     h.swap = { when: normalizeContent('HAIVE\n'), path: join(root, REL), content: 'MINE\n' };

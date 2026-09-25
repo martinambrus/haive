@@ -168,7 +168,7 @@ export type Removal = { outcome: 'removed' | 'absent' } | { outcome: 'kept'; ref
 export async function removeIfHaives(
   repoPath: string,
   rel: string,
-  entry: { diskPath: string; templateKind: string },
+  entry: { diskPath: string; templateKind: string; fileCreated?: boolean },
   writtenHash: string | null | undefined,
 ): Promise<Removal> {
   const haives = (text: string) => sha256Hex(normalizeContent(text)) === writtenHash;
@@ -179,6 +179,19 @@ export async function removeIfHaives(
         haives(data.toString('utf8')),
       );
       return result === 'kept' ? kept : { outcome: result };
+    }
+    if (entry.fileCreated) {
+      // A file created for the region goes whole while nothing but the region was written to it.
+      const whole = await removeFileIfNoFollow(repoPath, rel, (data) => {
+        const current = data.toString('utf8');
+        const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+        return (
+          region !== null &&
+          haives(region) &&
+          upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END).trim() === ''
+        );
+      });
+      if (whole !== 'kept') return { outcome: whole };
     }
     let noRegion = false;
     const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
@@ -272,6 +285,18 @@ export interface UpgradeApplyOutput {
   writtenPaths?: string[];
   /** Every repository path this run removed, for 03 to stage the removal. Optional likewise. */
   deletedPaths?: string[];
+  /** Every path this run wrote where nothing stood (no file, or for the rules region no region),
+   *  with the live row it retired there, so a rollback puts the absence back. Optional likewise. */
+  createdPaths?: CreatedPath[];
+  /** Every row this run retired or kept as a baseline: the only rows a rollback of it restores. */
+  retiredRowIds?: string[];
+}
+
+export interface CreatedPath {
+  diskPath: string;
+  /** Whether the file itself was missing, which for the rules region is more than the region. */
+  fileCreated: boolean;
+  retiredRowId: string | null;
 }
 
 async function resolvePlanFromStep(ctx: {
@@ -504,6 +529,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let deletedCount = 0;
     const writtenPaths: string[] = [];
     const deletedPaths: string[] = [];
+    const created: Omit<CreatedPath, 'retiredRowId'>[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -660,8 +686,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
-        const existing = await readFileOrEmpty(ctx.repoPath, rel);
+        const onDisk = await readTextNoFollow(ctx.repoPath, rel);
+        const existing = onDisk ?? '';
         const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
+        if (priorRegion === null) {
+          created.push({ diskPath: entry.diskPath, fileCreated: onDisk === null });
+        }
         if (
           priorRegion &&
           (entry.liveArtifactId === null ||
@@ -688,7 +718,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         );
       } else {
         const existing = await readTextNoFollow(ctx.repoPath, rel);
-        if (existing !== null) {
+        if (existing === null) {
+          created.push({ diskPath: entry.diskPath, fileCreated: true });
+        } else {
           const renderHash = sha256Hex(normalizeContent(entry.newContent));
           const existingHash = sha256Hex(normalizeContent(existing));
           const unrecorded =
@@ -701,7 +733,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 {
                   templateContentHash: entry.currentTemplateContentHash ?? '',
                   writtenHash: renderHash,
-                  content: entry.newContent,
                 },
                 { content: existing, hash: existingHash },
               ),
@@ -769,6 +800,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // plan attached. Wrapped in a single transaction so a half-applied state
     // is impossible.
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
+    const retiredShape = {
+      id: schema.onboardingArtifacts.id,
+      diskPath: schema.onboardingArtifacts.diskPath,
+    };
+    const retired: { id: string; diskPath: string }[] = [];
+    const baselineIds: string[] = [];
     if (
       rowsToSupersede.length > 0 ||
       insertPaths.length > 0 ||
@@ -778,27 +815,33 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
         if (rowsToSupersede.length > 0) {
-          await tx
-            .update(schema.onboardingArtifacts)
-            .set({ supersededAt: now, updatedAt: now })
-            .where(
-              and(
-                inArray(schema.onboardingArtifacts.id, rowsToSupersede),
-                isNull(schema.onboardingArtifacts.supersededAt),
-              ),
-            );
+          retired.push(
+            ...(await tx
+              .update(schema.onboardingArtifacts)
+              .set({ supersededAt: now, updatedAt: now })
+              .where(
+                and(
+                  inArray(schema.onboardingArtifacts.id, rowsToSupersede),
+                  isNull(schema.onboardingArtifacts.supersededAt),
+                ),
+              )
+              .returning(retiredShape)),
+          );
         }
         if (insertPaths.length > 0) {
-          await tx
-            .update(schema.onboardingArtifacts)
-            .set({ supersededAt: now, updatedAt: now })
-            .where(
-              and(
-                eq(schema.onboardingArtifacts.repositoryId, plan.repositoryId),
-                inArray(schema.onboardingArtifacts.diskPath, insertPaths),
-                isNull(schema.onboardingArtifacts.supersededAt),
-              ),
-            );
+          retired.push(
+            ...(await tx
+              .update(schema.onboardingArtifacts)
+              .set({ supersededAt: now, updatedAt: now })
+              .where(
+                and(
+                  eq(schema.onboardingArtifacts.repositoryId, plan.repositoryId),
+                  inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+                  isNull(schema.onboardingArtifacts.supersededAt),
+                ),
+              )
+              .returning(retiredShape)),
+          );
         }
         for (const k of keptInPlace) {
           await tx
@@ -815,9 +858,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           // Insert as already-superseded so the live upgrade row is the only
           // non-superseded row at this diskPath (the partial unique index holds)
           // while rollback can still find this as the prior baseline to restore.
-          await tx
+          const inserted = await tx
             .insert(schema.onboardingArtifacts)
-            .values(baselineRows.map((r) => ({ ...r, supersededAt: now, updatedAt: now })));
+            .values(baselineRows.map((r) => ({ ...r, supersededAt: now, updatedAt: now })))
+            .returning({ id: schema.onboardingArtifacts.id });
+          baselineIds.push(...inserted.map((r) => r.id));
         }
         if (rowsToInsert.length > 0) {
           await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
@@ -860,6 +905,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       rulesImportStubs,
       writtenPaths,
       deletedPaths,
+      createdPaths: created.map((c) => ({
+        ...c,
+        retiredRowId: retired.find((r) => r.diskPath === c.diskPath)?.id ?? null,
+      })),
+      retiredRowIds: [...retired.map((r) => r.id), ...baselineIds],
     };
   },
 };

@@ -331,20 +331,20 @@ async function readDiskContent(
  *  restores what was there; the render's hash, so an edited file is never taken as Haive's; and
  *  for an edited file its own hash as the template's, so the template reads as not installed. */
 export function backfillRecord(
-  r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash' | 'content'>,
-  disk: { content: string | null; hash: string | null },
+  r: Pick<ExpandedRendering, 'templateContentHash' | 'writtenHash'>,
+  disk: { content: string; hash: string },
 ): {
   templateContentHash: string;
   writtenHash: string;
   writtenContent: string;
-  lastObservedDiskHash: string | null;
+  lastObservedDiskHash: string;
   userModified: boolean;
 } {
-  const editedHash = disk.hash !== null && disk.hash !== r.writtenHash ? disk.hash : null;
+  const editedHash = disk.hash !== r.writtenHash ? disk.hash : null;
   return {
     templateContentHash: editedHash ?? r.templateContentHash,
     writtenHash: r.writtenHash,
-    writtenContent: disk.content ?? r.content,
+    writtenContent: disk.content,
     lastObservedDiskHash: disk.hash,
     userModified: editedHash !== null,
   };
@@ -560,7 +560,10 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
             userModified: !record.haiveWritten,
           };
         } else {
-          recorded = backfillRecord(r, await readDiskContent(ctx.repoPath, r.diskPath));
+          // Nor for a file missing from disk: a rollback would restore a row here as what stood before.
+          const disk = await readDiskContent(ctx.repoPath, r.diskPath);
+          if (disk.content === null || disk.hash === null) continue;
+          recorded = backfillRecord(r, { content: disk.content, hash: disk.hash });
         }
         rowsToInsert.push({
           userId: ctx.userId,
