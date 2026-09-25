@@ -34,6 +34,7 @@ import {
   removeFiles,
   rewriteAttachmentsManifest,
   settleExpansionAttempts,
+  settleExpansionIntents,
 } from '@haive/shared/attachments-fs';
 import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
@@ -240,9 +241,9 @@ async function createUniqueAttachment(
  * removes files, deletes rows and prunes the folders they emptied, so it can neither prune the folder
  * this name is being created in nor take a file of that name between the two.
  *
- * The claim is kept OUTSIDE the section: the driver can reject the transaction while its callback is
- * still running (a lost connection), and a file created after that has to be found and taken back
- * rather than left on disk with no row.
+ * The section's work is kept OUTSIDE it and awaited whole: the driver can reject the transaction
+ * while its callback is still running (a lost connection), and a file the callback creates after that
+ * has to be found and taken back rather than left on disk with no row.
  */
 async function claimAttachmentName(
   taskId: string,
@@ -250,20 +251,27 @@ async function claimAttachmentName(
   uploadsRel: string,
   relPath: string,
 ): Promise<{ rel: string; fh: FileHandle }> {
-  let claim = null as Promise<{ rel: string; fh: FileHandle }> | null;
+  let section = null as Promise<{ rel: string; fh: FileHandle }> | null;
+  const settled: string[] = [];
   try {
-    await withTaskAttachmentsLock(getDb(), taskId, async () => {
-      claim = createUniqueAttachment(anchor, uploadsRel, relPath);
-      await claim;
+    await withTaskAttachmentsLock(getDb(), taskId, (tx) => {
+      section = (async () => {
+        await settleExpansionIntents(tx, taskId, anchor, uploadsRel, settled);
+        return createUniqueAttachment(anchor, uploadsRel, relPath);
+      })();
+      return section;
     });
-    return await claim!;
+    return await section!;
   } catch (err) {
-    const claimed = claim === null ? null : await claim.catch(() => null);
+    const claimed = section === null ? null : await section.catch(() => null);
     if (claimed !== null) {
       await claimed.fh.close().catch(() => {});
       await removeNoFollow(anchor, `${uploadsRel}/${claimed.rel}`).catch(() => {});
     }
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
+  } finally {
+    // Outside the section: a staging dir can hold a whole extracted archive.
+    await removeExpansionStagings(anchor, uploadsRel, settled);
   }
 }
 

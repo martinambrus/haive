@@ -48,6 +48,7 @@ vi.mock('../repo/tool-spawn.js', async (importOriginal) => {
 // way Postgres does rather than with a quiet "not found".
 const TASK = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-0000000000a1';
+const REPO = '00000000-0000-4000-8000-0000000000b1';
 const t = schema.taskAttachments;
 
 const dirs: string[] = [];
@@ -64,13 +65,31 @@ afterEach(async () => {
  *  answers null for anything else, because the uploads dir itself sits under `.haive/` and is
  *  mounted read-write into the sandbox, so it can never be an anchor. The tracked path stays the
  *  OUTERMOST directory so the cleanup removes the lot. */
-async function setup() {
+async function setup(repo: Record<string, unknown> = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'haive-attach-'));
   dirs.push(root);
   const uploads = path.join(root, 'repo', '.haive', 'task-uploads', TASK);
   await mkdir(uploads, { recursive: true });
-  const fake = createFakeDb({ tasks: schema.tasks, taskAttachments: t });
-  fake.insert(schema.tasks, { id: TASK, userId: USER, type: 'plan_build', title: 'plan' });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskAttachments: t,
+    repositories: schema.repositories,
+  });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'repo',
+    source: 'upload',
+    storagePath: path.join(root, 'repo'),
+    ...repo,
+  });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    type: 'plan_build',
+    title: 'plan',
+    repositoryId: REPO,
+  });
   /** A row as the api writes one; its file is the caller's to create. */
   const attach = (filename: string, over: Record<string, unknown> = {}) =>
     fake.insert(t, {
@@ -327,6 +346,50 @@ describe('ensureArchivesExpanded', () => {
     expect(await exists(path.join(f.uploads, 'old'))).toBe(false);
     expect(await f.staging()).toEqual([]);
     expect(await readFile(path.join(f.uploads, 'brief.md'), 'utf8')).toBe('brief');
+  });
+
+  it('sweeps what attempts left once no attachment is left, from the repository root', async () => {
+    // No row is left to say where the uploads dir is, so it comes from the task's repository.
+    const f = await setup();
+    const attempt = (id: string, n: string) =>
+      path.join(
+        f.uploads,
+        `.expanding-${id}-${n.repeat(8)}-${n.repeat(4)}-4${n.repeat(3)}-8${n.repeat(3)}-${n.repeat(12)}`,
+      );
+    const settled = attempt('00000000-0000-4000-8000-0000000000e2', '4');
+    await mkdir(settled);
+    const died = attempt('00000000-0000-4000-8000-0000000000e3', '5');
+    await mkdir(died);
+    await writeFile(path.join(died, 'placed-as'), JSON.stringify({ dir: 'old', files: ['x.md'] }));
+    await mkdir(path.join(f.uploads, 'old'));
+    await writeFile(path.join(f.uploads, 'old', 'x.md'), 'orphan');
+
+    await f.expand();
+
+    expect(await f.staging()).toEqual([]);
+    expect(await exists(path.join(f.uploads, 'old'))).toBe(false);
+  });
+
+  it('sweeps nothing in a read-only local repository, where no upload is ever written', async () => {
+    const f = await setup({ source: 'local_path', writable: false });
+    const staging = path.join(
+      f.uploads,
+      '.expanding-00000000-0000-4000-8000-0000000000e4-66666666-6666-4666-8666-666666666666',
+    );
+    await mkdir(staging);
+    await writeFile(
+      path.join(staging, 'placed-as'),
+      JSON.stringify({ dir: 'mine', files: ['a.md'] }),
+    );
+    await mkdir(path.join(f.uploads, 'mine'));
+    await writeFile(path.join(f.uploads, 'mine', 'a.md'), 'the owner wrote this');
+
+    await f.expand();
+
+    expect(await f.staging()).toHaveLength(1);
+    expect(await readFile(path.join(f.uploads, 'mine', 'a.md'), 'utf8')).toBe(
+      'the owner wrote this',
+    );
   });
 
   it('takes nothing from a folder an interrupted attempt claimed but never moved into', async () => {

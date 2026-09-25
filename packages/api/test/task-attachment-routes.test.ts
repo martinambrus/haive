@@ -325,6 +325,96 @@ describe('task attachment routes', () => {
       expect(await modeOf(up('_ATTACHMENTS.md'))).toBe(0o644);
     });
 
+    it('settles an interrupted expansion before claiming a name it still names', async () => {
+      const archive = await seedFile('spec.zip', 'PK');
+      await interruptedExpansion(archive.id as string, 'spec', ['a.md', 'b.md']);
+      // Something in the sandbox removed one placed file, which frees its name for an upload.
+      await rm(up('spec/a.md'));
+      const res = await upload('spec/a.md', 'mine');
+      expect(res.status).toBe(201);
+      expect((res.body?.attachment as Row).filename).toBe('spec/a.md');
+      expect(await readFile(up('spec/a.md'), 'utf8')).toBe('mine');
+      // No intent is left to name the upload's path, so no later settle can take its file, and the
+      // settled attempt's staging dir is gone with it.
+      expect((await listing(up())).filter((n) => n.startsWith('.expanding-'))).toEqual([]);
+      expect(await listing(up('spec'))).toEqual(['a.md']);
+    });
+
+    it('takes back a name claimed after the driver gave up on its section', async () => {
+      const archive = await seedFile('spec.zip', 'PK');
+      await interruptedExpansion(archive.id as string, 'spec', ['a.md']);
+      // The transaction rejects while the section is still settling, and the section runs on to
+      // claim a name, as postgres.js allows.
+      const real = fake.db;
+      let section: Promise<unknown> = Promise.resolve();
+      h.db = {
+        ...real,
+        transaction: <R>(fn: (tx: typeof real) => Promise<R>) =>
+          new Promise<R>((resolve, reject) => {
+            const run = real.transaction((tx) =>
+              fn({
+                ...tx,
+                query: {
+                  ...tx.query,
+                  taskAttachments: {
+                    ...tx.query.taskAttachments,
+                    findMany: async (opts) => {
+                      reject(new Error('connection lost'));
+                      await new Promise((r) => setTimeout(r, 20));
+                      return tx.query.taskAttachments.findMany(opts);
+                    },
+                  },
+                },
+              }),
+            );
+            section = run.catch(() => {});
+            run.then(resolve, reject);
+          }),
+      };
+      const res = await upload('b.md', 'mine');
+      await section;
+      expect(res.status).toBe(500);
+      expect(await exists(up('b.md'))).toBe(false);
+      expect(filenames()).toEqual(['spec.zip']);
+      expect((await listing(up())).filter((n) => n.startsWith('.expanding-'))).toEqual([]);
+    });
+
+    it('removes the staging dirs it settled when a later settle fails', async () => {
+      const one = await seedFile('one.zip', 'PK');
+      const two = await seedFile('two.zip', 'PK');
+      await interruptedExpansion(one.id as string, 'one', ['a.md']);
+      await interruptedExpansion(two.id as string, 'two', ['a.md']);
+      // The second attempt's row lookup fails, after the first attempt has already lost its intent.
+      const real = fake.db;
+      let lookups = 0;
+      h.db = {
+        ...real,
+        transaction: <R>(fn: (tx: typeof real) => Promise<R>) =>
+          real.transaction((tx) =>
+            fn({
+              ...tx,
+              query: {
+                ...tx.query,
+                taskAttachments: {
+                  ...tx.query.taskAttachments,
+                  findMany: async (opts) => {
+                    lookups += 1;
+                    if (lookups === 2) throw new Error('connection lost');
+                    return tx.query.taskAttachments.findMany(opts);
+                  },
+                },
+              },
+            }),
+          ),
+      };
+      const res = await upload('b.md', 'mine');
+      expect(res.status).toBe(500);
+      expect(await exists(up('b.md'))).toBe(false);
+      const left = (await listing(up())).filter((n) => n.startsWith('.expanding-'));
+      expect(left).toHaveLength(1);
+      expect(await exists(up(`${left[0]}/placed-as`))).toBe(true);
+    });
+
     it('de-dupes within the file’s own folder, starting at (2)', async () => {
       const names: unknown[] = [];
       for (const [name, body] of [

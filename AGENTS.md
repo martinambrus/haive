@@ -1070,10 +1070,16 @@ INSIDE the callback, since postgres.js can reject the transaction while the call
 Every call first settles the attempts at archives deleted or stamped since, re-checked under the
 lock, so an archive attached a moment ago keeps its attempt in flight. A DELETE settles the attempts
 at the archives it removes in its own section (`settleExpansionAttempts`,
-`@haive/shared/attachments-fs`), because the worker finds the uploads dir only through a row, and
-once the last attachment is gone no later call can reach what an attempt left behind. Settling
+`@haive/shared/attachments-fs`), and a staging dir it then fails to remove is swept by the next
+expansion call. The worker finds the uploads dir through a row, so once the last attachment is gone
+it sweeps under the task repository's storage path, the one root an upload is ever written under,
+and never in a read-only local repository. Settling
 removes the intent inside the section, so no later settle acts on it twice — a name it freed is one
-an upload can take, and that upload's file has no row until its bytes are in. The staging dirs
+an upload can take, and that upload's file has no row until its bytes are in. An upload's claim
+settles every attempt that wrote its intent before it takes a name (`settleExpansionIntents`): a
+dead attempt's intent can still name a path free on disk, and settling it once the upload held that
+name would take the upload's file before its row existed. Their staging dirs go after its section,
+as a delete's do. The staging dirs
 themselves are removed AFTER the section (`removeExpansionStagings`), never inside it: one can hold
 a whole extracted archive, and removing it there would hold the lock and a pooled connection for as
 long as that takes.

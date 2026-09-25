@@ -25,12 +25,14 @@ import {
   ATTACHMENT_MAX_PATH_LENGTH,
   AttachmentPathError,
   detectAttachmentArchiveFormat,
+  isReadOnlyLocalRepo,
   isReservedAttachmentName,
   logger,
   reserveAttachmentDirs,
   sanitizeAttachmentPath,
   splitAttachmentPath,
   splitAttachmentStoredPath,
+  taskUploadsRel,
 } from '@haive/shared';
 import {
   EXPANSION_INTENT_FILE,
@@ -573,6 +575,26 @@ async function discardStaging(anchor: string, stagingRel: string): Promise<void>
   );
 }
 
+/** Where an upload for this task can only have been written, by the upload route's own rule: under
+ *  the storage path of a repository that is not a read-only local one. */
+async function uploadsRootOf(db: Database, taskId: string): Promise<string | null> {
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (!task?.repositoryId) return null;
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { source: true, writable: true, storagePath: true },
+    });
+    return repo?.storagePath && !isReadOnlyLocalRepo(repo) ? repo.storagePath : null;
+  } catch (err) {
+    log.warn({ err, taskId }, 'could not resolve the uploads dir for a sweep');
+    return null;
+  }
+}
+
 /**
  * Expand every not-yet-expanded archive attached to `taskId`.
  *
@@ -612,6 +634,13 @@ export async function ensureArchivesExpanded(
   // sits under `.haive/`, which the sandbox mounts read-write, so it can never be one. A row that does
   // not have that shape is refused rather than expanded from a guessed root.
   const split = rows.map((row) => splitAttachmentStoredPath(row, taskId)).find((s) => s !== null);
+  if (!split && rows.length === 0) {
+    // No row is left to say where the uploads dir is, and a delete of the last one may have left an
+    // attempt behind.
+    const root = await uploadsRootOf(db, taskId);
+    if (root) await sweepStaleAttempts(db, taskId, root, taskUploadsRel(taskId), new Set());
+    return EMPTY;
+  }
   if (!split) {
     if (archives.length > 0) {
       log.warn({ taskId, archive: archives[0]!.filename }, 'unrecognised attachment path layout');

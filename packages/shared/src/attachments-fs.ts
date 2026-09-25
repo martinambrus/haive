@@ -199,7 +199,7 @@ export async function readExpansionIntent(
  * name freed by it is one an upload can take, and that upload's file has no row until its bytes are
  * in. The staging dir does NOT go here — it can hold a whole extracted archive, bomb-sized included,
  * and removing it must not hold the lock and a pooled connection. `removeExpansionStagings` takes it
- * once the section is over.
+ * once the section is over. Answers whether there was an intent to settle.
  */
 export async function settleExpansionAttempt(
   tx: DbTx,
@@ -207,7 +207,7 @@ export async function settleExpansionAttempt(
   anchor: string,
   uploadsRel: string,
   staging: string,
-): Promise<void> {
+): Promise<boolean> {
   const stagingRel = `${uploadsRel}/${staging}`;
   const intent = await readExpansionIntent(anchor, stagingRel);
   if (intent !== null) {
@@ -234,6 +234,28 @@ export async function settleExpansionAttempt(
       await pruneAfter(anchor, uploadsRel, orphans);
     }
     await removeNoFollow(anchor, `${stagingRel}/${EXPANSION_INTENT_FILE}`).catch(() => {});
+  }
+  return intent !== null;
+}
+
+/** Settle every attempt that wrote its intent, inside an upload's claim section: a dead attempt's intent
+ *  can name a path free on disk, and settling it after the claim took that name would remove the upload.
+ *  Adds each staging dir to `settled` as soon as it is settled, so one settled before a later attempt
+ *  throws is still removed; one still extracting has no intent and is left alone. */
+export async function settleExpansionIntents(
+  tx: DbTx,
+  taskId: string,
+  anchor: string,
+  uploadsRel: string,
+  settled: string[],
+): Promise<void> {
+  for (const entry of (await readdirNoFollow(anchor, uploadsRel)) ?? []) {
+    if (
+      expansionAttemptArchiveId(entry.name) !== null &&
+      (await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name))
+    ) {
+      settled.push(entry.name);
+    }
   }
 }
 

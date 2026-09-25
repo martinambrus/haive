@@ -726,8 +726,8 @@ async function resolveLlmPhase(
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
   // An uploaded archive becomes the tree it contains before anything describes
   // the attachments — otherwise the notice below names a `.zip` no agent can
-  // open. Idempotent, never throws, and one indexed query when the task has no
-  // attachments, which is the usual case.
+  // open. Idempotent, never throws, and three indexed queries plus one directory
+  // read when the task has no attachments, which is the usual case.
   await ensureArchivesExpanded(db, params.taskId);
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
