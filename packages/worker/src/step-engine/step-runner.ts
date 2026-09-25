@@ -72,7 +72,13 @@ import {
 import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
-import { StepSupersededError, openPendingStep, updateOwnedStep } from './step-ownership.js';
+import {
+  StepSupersededError,
+  assertOwnsStep,
+  insertOwnedRun,
+  openPendingStep,
+  updateOwnedStep,
+} from './step-ownership.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona } from './steps/_retrieval-guidance.js';
@@ -834,30 +840,25 @@ async function resolveLlmPhase(
   // countTrailingOrphans (the sibling counter for the re-dispatch cap) has always been called
   // pre-insert for the same reason.
   const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
-  const inserted = await insertInvocationOrNull(() =>
-    db
-      .insert(schema.cliInvocations)
-      .values({
-        taskId: params.taskId,
-        taskStepId: current.id,
-        cliProviderId: plan.providerId,
-        effort: plan.effort ?? null,
-        mode,
-        prompt: plan.effectivePrompt ?? prompt,
-        agentTitle: roleLabel,
-        steerable,
-      })
-      .returning(),
+  const invRow = await insertInvocationOrNull(() =>
+    insertOwnedRun(db, current.id, {
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
+      mode,
+      prompt: plan.effectivePrompt ?? prompt,
+      agentTitle: roleLabel,
+      steerable,
+    }),
   );
-  if (!inserted) {
+  if (!invRow) {
     ctx.logger.info(
       { taskStepId: current.id },
       'concurrent live invocation won the dispatch race; re-parking',
     );
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
-  const invRow = inserted[0];
-  if (!invRow) throw new Error('failed to insert cli_invocations row');
   // Setup that must not run unless THIS job won. The insert above IS the reservation — the
   // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
   // so everything destructive belongs on this side of it. `prepare` cannot: it runs before
@@ -1035,28 +1036,23 @@ async function resolveAiFixPhase(
   // insert for the reason spelled out in resolveLlmPhase — the fresh row would otherwise be the
   // newest non-timeout row and reset the streak to zero on every attempt.
   const fixBudget = await resolveDispatchTimeoutMs(db, current, undefined);
-  const inserted = await insertInvocationOrNull(() =>
-    db
-      .insert(schema.cliInvocations)
-      .values({
-        taskId: params.taskId,
-        taskStepId: current.id,
-        cliProviderId: plan.providerId,
-        effort: plan.effort ?? null,
-        mode: fixMode,
-        prompt: plan.effectivePrompt ?? prompt,
-      })
-      .returning(),
+  const invRow = await insertInvocationOrNull(() =>
+    insertOwnedRun(db, current.id, {
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
+      mode: fixMode,
+      prompt: plan.effectivePrompt ?? prompt,
+    }),
   );
-  if (!inserted) {
+  if (!invRow) {
     ctx.logger.info(
       { taskStepId: current.id },
       'concurrent live invocation won the dispatch race; re-parking (ai-fix)',
     );
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
-  const invRow = inserted[0];
-  if (!invRow) throw new Error('failed to insert ai-fix cli_invocations row');
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -1643,6 +1639,8 @@ async function reserveMiningAgents(
     });
   }
   if (values.length === 0) return new Map();
+  // The rows go in before the step's lock, in a Retry's own order: an insert can wait on an agent
+  // row the Retry is deleting.
   const reserved = await db.transaction(async (tx) => {
     const rows: { id: string; agentId: string; attempts: number; timeoutAttempts: number }[] = [];
     for (let i = 0; i < values.length; i += RESERVE_CHUNK) {
@@ -1661,6 +1659,7 @@ async function reserveMiningAgents(
           })),
       );
     }
+    await assertOwnsStep(tx, taskStepId);
     return rows;
   });
   return new Map(
@@ -1817,20 +1816,15 @@ async function dispatchMiningAgents(
         continue;
       }
 
-      const inv = await db
-        .insert(schema.cliInvocations)
-        .values({
-          taskId: params.taskId,
-          taskStepId: current.id,
-          cliProviderId: plan.providerId,
-          effort: plan.effort ?? null,
-          mode: 'agent_mining',
-          prompt: plan.effectivePrompt ?? prompt,
-          steerable: plan.invocation.spec.steerable === true,
-        })
-        .returning();
-      const invRow = inv[0];
-      if (!invRow) throw new Error('failed to insert cli_invocations row for agent mining');
+      const invRow = await insertOwnedRun(db, current.id, {
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        effort: plan.effort ?? null,
+        mode: 'agent_mining',
+        prompt: plan.effectivePrompt ?? prompt,
+        steerable: plan.invocation.spec.steerable === true,
+      });
       linking = { rowId: target.id, invocationId: invRow.id, linked: false };
 
       // The prior run may have failed in transport or produced output apply() could not use; the

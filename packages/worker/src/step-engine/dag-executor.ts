@@ -26,7 +26,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
-import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
 import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
@@ -628,26 +628,21 @@ async function dispatchMergeFixAgent(
   // The merge-fix agent is a per-step SINGLETON, so the one-live-per-step index rejects a
   // second concurrent dispatch. Surface that distinctly instead of throwing (which would
   // fail the step) or reporting no_provider (which would abort the winner's merge).
-  let inv: { id: string }[];
+  let invId: string;
   try {
-    inv = await db
-      .insert(schema.cliInvocations)
-      .values({
-        taskId: params.taskId,
-        taskStepId: current.id,
-        cliProviderId: plan.providerId,
-        effort: plan.effort ?? null,
-        mode: 'cli',
-        agentTitle: issueAgentTitle(issue, 'Merge fix'),
-        prompt: plan.effectivePrompt ?? prompt,
-      })
-      .returning({ id: schema.cliInvocations.id });
+    ({ id: invId } = await insertOwnedRun(db, current.id, {
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
+      mode: 'cli',
+      agentTitle: issueAgentTitle(issue, 'Merge fix'),
+      prompt: plan.effectivePrompt ?? prompt,
+    }));
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: 'already_live' };
     throw err;
   }
-  const invId = inv[0]?.id;
-  if (!invId) return { kind: 'no_provider' };
   await onInserted(invId);
   await deps.enqueueCliInvocation({
     invocationId: invId,
@@ -973,26 +968,21 @@ async function spawnReviewAgent(
     },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
-  const inv = await ra.db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: ra.taskId,
-      taskStepId: ra.current.id,
-      cliProviderId: plan.providerId,
-      effort: plan.effort ?? null,
-      // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
-      // concurrent invocations on the ONE 06c step, so it must be exempt from the
-      // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
-      mode: 'dag_parallel',
-      agentTitle: issueAgentTitle(
-        issue,
-        iteration > 0 ? `${REVIEW_ROLE_LABEL[role]} ${iteration}` : REVIEW_ROLE_LABEL[role],
-      ),
-      prompt: plan.effectivePrompt ?? fullPrompt,
-    })
-    .returning({ id: schema.cliInvocations.id });
-  const invId = inv[0]?.id;
-  if (!invId) return null;
+  const { id: invId } = await insertOwnedRun(ra.db, ra.current.id, {
+    taskId: ra.taskId,
+    taskStepId: ra.current.id,
+    cliProviderId: plan.providerId,
+    effort: plan.effort ?? null,
+    // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
+    // concurrent invocations on the ONE 06c step, so it must be exempt from the
+    // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
+    mode: 'dag_parallel',
+    agentTitle: issueAgentTitle(
+      issue,
+      iteration > 0 ? `${REVIEW_ROLE_LABEL[role]} ${iteration}` : REVIEW_ROLE_LABEL[role],
+    ),
+    prompt: plan.effectivePrompt ?? fullPrompt,
+  });
   await ra.db.insert(schema.dagAgentRuns).values({
     dagIssueId: issue.id,
     taskId: ra.taskId,
@@ -1740,25 +1730,20 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
   // is not an error: the winner already inserted its invocation AND stamped
   // plan.replannerInvocationId, so report success and let the caller park on it. Throwing
   // here instead would fail the whole step on a duplicate advance.
-  let inv: { id: string }[];
+  let invId: string;
   try {
-    inv = await ea.db
-      .insert(schema.cliInvocations)
-      .values({
-        taskId: ea.taskId,
-        taskStepId: ea.current.id,
-        cliProviderId: plan.providerId,
-        effort: plan.effort ?? null,
-        mode: 'cli',
-        prompt: plan.effectivePrompt ?? prompt,
-      })
-      .returning({ id: schema.cliInvocations.id });
+    ({ id: invId } = await insertOwnedRun(ea.db, ea.current.id, {
+      taskId: ea.taskId,
+      taskStepId: ea.current.id,
+      cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
+      mode: 'cli',
+      prompt: plan.effectivePrompt ?? prompt,
+    }));
   } catch (err) {
     if (isUniqueViolation(err)) return true; // a replanner is already in flight
     throw err;
   }
-  const invId = inv[0]?.id;
-  if (!invId) return false;
   await ea.db
     .update(schema.taskDagPlans)
     .set({ replannerInvocationId: invId, updatedAt: new Date() })
@@ -2192,23 +2177,18 @@ export async function resolveDagPhase(
             .where(eq(schema.taskDagIssues.id, issue.id));
           continue;
         }
-        const inv = await db
-          .insert(schema.cliInvocations)
-          .values({
-            taskId: ctx.taskId,
-            taskStepId: current.id,
-            cliProviderId: planDispatch.providerId,
-            effort: planDispatch.effort ?? null,
-            // 'dag_parallel', not 'cli': N coders dispatch concurrently on the ONE
-            // 06c step, so they must be exempt from the one-live-per-step index (the
-            // per-issue barrier is task_dag_issues, not the singleton index).
-            mode: 'dag_parallel',
-            agentTitle: issueAgentTitle(issue, 'Coder'),
-            prompt: planDispatch.effectivePrompt ?? prompt,
-          })
-          .returning({ id: schema.cliInvocations.id });
-        const invId = inv[0]?.id;
-        if (!invId) throw new Error('06c-dag-execute: failed to insert cli_invocations row');
+        const { id: invId } = await insertOwnedRun(db, current.id, {
+          taskId: ctx.taskId,
+          taskStepId: current.id,
+          cliProviderId: planDispatch.providerId,
+          effort: planDispatch.effort ?? null,
+          // 'dag_parallel', not 'cli': N coders dispatch concurrently on the ONE
+          // 06c step, so they must be exempt from the one-live-per-step index (the
+          // per-issue barrier is task_dag_issues, not the singleton index).
+          mode: 'dag_parallel',
+          agentTitle: issueAgentTitle(issue, 'Coder'),
+          prompt: planDispatch.effectivePrompt ?? prompt,
+        });
         // Atomic claim: only the pass that flips pending→running owns the issue;
         // a concurrent re-entry that lost the race voids its orphan invocation.
         const claim = await db

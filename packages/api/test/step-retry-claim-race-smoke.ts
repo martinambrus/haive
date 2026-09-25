@@ -364,6 +364,57 @@ async function main(): Promise<void> {
       'the refused Retry leaves the epoch as it was',
       (await epochNow()) === epochBeforeRefusal,
     );
+
+    // 6. A pass records a run and an agent row under its row's lock, as insertOwnedRun and the
+    //    fan-out's reservation do, while a Retry is applied: the Retry's write to the row waits for
+    //    it, and its second sweep ends what the first could not see.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running', errorMessage: null, endedAt: null })
+      .where(eq(schema.taskSteps.id, retried!.id));
+    let recordedRunId: string | undefined;
+    const releaseRecord = await holdOpen(db, async (tx) => {
+      await tx
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, retried!.id))
+        .for('update');
+      const [run] = await tx
+        .insert(schema.cliInvocations)
+        .values({ taskId: taskId!, taskStepId: retried!.id, mode: 'agent_mining', prompt: 'x' })
+        .returning({ id: schema.cliInvocations.id });
+      recordedRunId = run!.id;
+      await tx
+        .insert(schema.taskStepAgentMinings)
+        .values({ taskStepId: retried!.id, agentId: 'late-agent', status: 'pending' });
+    });
+    settled = false;
+    action = post(stepAction, { action: 'retry', round: 0 }).finally(() => {
+      settled = true;
+    });
+    await sleep(1000);
+    check('the Retry waits for the pass recording a run', !settled);
+    await releaseRecord();
+    res = await action;
+    check('the Retry after the recording answers 200', res.status === 200, res.status);
+    const recordedRun = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, recordedRunId!),
+    });
+    check(
+      'the run recorded before the Retry took the row is superseded',
+      recordedRun?.supersededAt != null,
+      recordedRun,
+    );
+    const lateAgents = await db
+      .select({ id: schema.taskStepAgentMinings.id })
+      .from(schema.taskStepAgentMinings)
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, retried!.id),
+          eq(schema.taskStepAgentMinings.agentId, 'late-agent'),
+        ),
+      );
+    check('the agent row recorded with it is gone', lateAgents.length === 0, lateAgents);
   } catch (err) {
     exitCode = 1;
     log.error({ err }, 'smoke crashed');

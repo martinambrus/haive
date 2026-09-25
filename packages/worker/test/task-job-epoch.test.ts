@@ -4,6 +4,7 @@ import { configService, TASK_JOB_NAMES } from '@haive/shared';
 import {
   finishFailedStep,
   handleResult,
+  holdStepAdvance,
   processTaskJob,
   resolveFixLoopGate,
   setContainerCleanupRunner,
@@ -1075,6 +1076,28 @@ describe('a START job', () => {
       expect(h.state.add).not.toHaveBeenCalled();
     },
   );
+
+  it('runs its first step only once a pass still on it lets go', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'queued';
+    // A pass a Stop cut off is still on the first step when the Retry's START arrives.
+    const old = { taskId: 'task-1', stepId: 'epoch-chain-first', round: 0 };
+    const release = await holdStepAdvance(
+      { id: 'job-old', data: old, moveToDelayed: vi.fn() } as never,
+      undefined,
+    );
+    try {
+      const started = processTaskJob(start(), 'tok');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      release?.();
+      await started;
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    } finally {
+      release?.();
+    }
+  });
 
   it('claims nothing once the task moved to another epoch after START read it', async () => {
     h.state.readsAnswer = true;

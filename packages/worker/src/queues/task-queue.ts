@@ -1933,23 +1933,30 @@ async function handleStartTask(
     await enqueueAdvance(ctx.taskId, ctx.userId, first.metadata.id, 0, ctx.orchestrationEpoch);
     return;
   }
-  const providers = await loadProviders(db, ctx.userId);
-  const result = await advanceStep({
-    db,
-    taskId: ctx.taskId,
-    userId: ctx.userId,
-    repoPath: ctx.repoPath,
-    workspacePath: ctx.workspacePath,
-    cliProviderId: ctx.cliProviderId,
-    ignoreSavedStepClis: ctx.ignoreSavedStepClis,
-    stepDef: first,
-    // first === steps[0], so its run-list position (run_seq) is 0.
-    runSeq: 0,
-    providers,
-    deps: workerDeps,
-    epoch: ctx.orchestrationEpoch,
-  });
-  await handleResult(db, ctx, first.metadata.id, result);
+  // START runs its first step itself rather than through an advance, so it takes that step's hold
+  // too: a pass a Stop cut off can still be on the step when a Retry queues this START.
+  const release = await takeStepHold(`${ctx.taskId}:${first.metadata.id}:0`);
+  try {
+    const providers = await loadProviders(db, ctx.userId);
+    const result = await advanceStep({
+      db,
+      taskId: ctx.taskId,
+      userId: ctx.userId,
+      repoPath: ctx.repoPath,
+      workspacePath: ctx.workspacePath,
+      cliProviderId: ctx.cliProviderId,
+      ignoreSavedStepClis: ctx.ignoreSavedStepClis,
+      stepDef: first,
+      // first === steps[0], so its run-list position (run_seq) is 0.
+      runSeq: 0,
+      providers,
+      deps: workerDeps,
+      epoch: ctx.orchestrationEpoch,
+    });
+    await handleResult(db, ctx, first.metadata.id, result);
+  } finally {
+    release();
+  }
 }
 
 /** The runtime this step's admission must budget for, or null when it will spawn none.
@@ -3303,6 +3310,11 @@ export async function holdStepAdvance(
       throw new DelayedError();
     }
   }
+  return takeStepHold(key);
+}
+
+/** Take a step's hold in this process once the pass that has it lets go. */
+async function takeStepHold(key: string): Promise<() => void> {
   // Nothing may await between the last check and the add, or two waiters could both take it.
   while (advancingSteps.has(key)) {
     await new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS));

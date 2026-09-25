@@ -62,10 +62,18 @@ function makeMockDb(state: MockState): Database {
             // the dispatch threw and the step came back `failed`.
             then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
               allRows().then(onOk, onErr),
+            // The lock a run is recorded under: the row, while it is still the pass's own.
+            for: async () =>
+              tableName === 'task_steps' &&
+              state.taskStepRow.id &&
+              !['pending', 'skipped', 'failed'].includes(String(state.taskStepRow.status))
+                ? [{ id: state.taskStepRow.id }]
+                : [],
           }),
         };
       },
     }),
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     insert: (table: unknown) => {
       const tableName = tableNameOf(table);
       return {

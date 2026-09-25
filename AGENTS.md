@@ -350,12 +350,28 @@ like any other. A clarification answer is one of those, since it rides `task_eve
 job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
-reset. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+reset. A task Retry's START runs its first step itself rather than through an advance, so it takes
+that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
 merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
-Stop, which fails the row without moving the task's epoch). A pass a Stop cut off mid-apply then
-releases what the failed task holds (`settleFailedTask`), as its own failure would have. The cancel
-poll also stops a
+Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
+the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
+executor), and so does a fan-out's reservation: the row is locked while it is still the pass's own,
+in the transaction that inserts. The lock comes after the insert, the order a Retry takes them in
+(runs and agent rows, then steps), because an insert can wait on a run or an agent row the Retry is
+removing; the other order deadlocked the two. A Retry supersedes a step's runs and deletes its agent rows before
+it writes the row, and that write waits on the lock, so its reset sweeps a second time once the rows
+are written (`resetRowsForRerun`, and `resetStepAndDownstream` worker-side): what a pass recorded
+before the Retry took the row is ended there, and a pass after it is refused. A run swept that way
+can still be queued by the pass that recorded it, so its cli-exec job starts it only by a
+compare-and-swap on `ended_at` and `superseded_at`: the Retry's sandbox kill ran before that job
+had a container. That kill runs once, and it can land while a job is still preparing its sandbox, so
+the run is read again right before the container is created (`beforeRun`), as soon as it first
+prints, when it is certainly running and so either the kill found it or this read sees the
+supersede, and every few seconds after (`run-superseded.ts`); a run that reads superseded gets no
+sandbox or loses the one it has. A pass a Stop cut off
+mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
+have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
 hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
 a pass on its `pending` row, claiming or skipping it (`openPendingStep`, `step-ownership.ts`), land

@@ -12,7 +12,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
-import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
 import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
@@ -509,25 +509,20 @@ async function dispatchFixAgent(
   }
   // A per-step SINGLETON: the one-live-per-step index rejects a second concurrent
   // dispatch. Surface that distinctly rather than throwing or reporting no_provider.
-  let inv: { id: string }[];
+  let invId: string;
   try {
-    inv = await db
-      .insert(schema.cliInvocations)
-      .values({
-        taskId: params.taskId,
-        taskStepId: current.id,
-        cliProviderId: plan.providerId,
-        effort: plan.effort ?? null,
-        mode: 'cli',
-        prompt: plan.effectivePrompt ?? prompt,
-      })
-      .returning({ id: schema.cliInvocations.id });
+    ({ id: invId } = await insertOwnedRun(db, current.id, {
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
+      mode: 'cli',
+      prompt: plan.effectivePrompt ?? prompt,
+    }));
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: 'already_live' };
     throw err;
   }
-  const invId = inv[0]?.id;
-  if (!invId) return { kind: 'no_provider' };
   await onInserted(invId);
   await params.deps!.enqueueCliInvocation({
     invocationId: invId,

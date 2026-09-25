@@ -156,6 +156,8 @@ export interface SandboxRunSpec {
    *  run. Recovers a CLI's own log file from the `--rm` sandbox — agy logs
    *  provider-fatal errors there while exiting 0 with empty stdout. */
   captureDir?: { containerDir: string; fileName: string };
+  /** Asked right before the container is created; false starts none. */
+  beforeRun?: () => Promise<boolean>;
 }
 
 export interface SandboxRunnerOptions {
@@ -322,6 +324,18 @@ export async function runInSandbox(
     // POST /tasks resourceLimits was built for — applies here.
     const sandboxCaps = options.taskId ? await resolveRunnerCaps(options.taskId) : null;
 
+    if (spec.beforeRun && !(await spec.beforeRun())) {
+      return {
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        timedOut: false,
+        resolvedCommand,
+        wrapperId,
+        capturedLog: null,
+      };
+    }
     const result = await runner.run({
       image,
       cmd: [resolvedCommand, ...spec.args],

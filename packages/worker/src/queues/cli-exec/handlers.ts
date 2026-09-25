@@ -197,7 +197,7 @@ export async function handleCliExecJob(
   // Decided with the prompt at dispatch, recorded when the run starts: a job that never starts was
   // given nothing.
   const agentRules = agentRulesOf(payload.spec);
-  await db
+  const [started] = await db
     .update(schema.cliInvocations)
     // Run truly begins here. Overwrite any waiting copy a gate wrote while this was held
     // (markWaiting in agent-reserve.ts) with the live default, so a multi-invocation step's
@@ -208,7 +208,20 @@ export async function handleCliExecJob(
       statusMessage: STATUS_DEFAULT_MESSAGE,
       ...(agentRules ? { agentRules } : {}),
     })
-    .where(eq(schema.cliInvocations.id, row.id));
+    .where(
+      and(
+        eq(schema.cliInvocations.id, row.id),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
+    .returning({ id: schema.cliInvocations.id });
+  // A Retry or a Stop can supersede the run after the read above, and its sandbox kill runs before
+  // this job has a container to kill.
+  if (!started) {
+    log.info({ invocationId: payload.invocationId }, 'cli invocation superseded before it started');
+    return;
+  }
 
   // Work resumed: this invocation is now running, so close any waiting_cli park the step
   // accrued (initial queue wait, or a rate-limit/allowance park between waves) by folding

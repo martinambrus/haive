@@ -68,6 +68,8 @@ interface Write {
 function fakeDb(opts: {
   lockedRun?: { supersededAt: Date | null };
   summaryLands?: { stepId: string; round: number };
+  /** A Retry or a Stop superseded the run between the job's read and its start. */
+  supersededBeforeStart?: boolean;
 }) {
   const writes: Write[] = [];
   let txSeq = 0;
@@ -82,7 +84,14 @@ function fakeDb(opts: {
       set: (set: Record<string, unknown>) => ({
         where: (where: unknown) => {
           writes.push({ tx, table: tableNameOf(table), set, where });
-          const landed = 'summary' in set && opts.summaryLands ? [opts.summaryLands] : [];
+          const start = 'startedAt' in set && tableNameOf(table) === 'cli_invocations';
+          const landed = start
+            ? opts.supersededBeforeStart
+              ? []
+              : [{ id: RUN }]
+            : 'summary' in set && opts.summaryLands
+              ? [opts.summaryLands]
+              : [];
           return {
             then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
               Promise.resolve(undefined).then(res, rej),
@@ -135,6 +144,17 @@ beforeEach(() => {
   stubs.executeByKind.mockReset();
   stubs.resumeStepIfLinked.mockReset();
   stubs.recordLedgerEntry.mockReset();
+});
+
+describe('a cli run start', () => {
+  it('runs nothing once the run was superseded after the job read it', async () => {
+    const { db, writes } = fakeDb({ supersededBeforeStart: true });
+    await handleCliExecJob(db, base);
+    expect(stubs.executeByKind).not.toHaveBeenCalled();
+    expect(miningWrites(writes)).toEqual([]);
+    expect(runWrites(writes)).toHaveLength(1);
+    expect(conditionValues(runWrites(writes)[0]!.where)).toEqual([RUN]);
+  });
 });
 
 describe('a cli run completion', () => {
