@@ -415,6 +415,50 @@ async function main(): Promise<void> {
         ),
       );
     check('the agent row recorded with it is gone', lateAgents.length === 0, lateAgents);
+
+    // 7. A Stop is one transaction: while a pass holds a step row the Stop must fail, no reader sees
+    //    that step's run cancelled beside the step still running.
+    await db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, taskId));
+    const [stopped] = await db
+      .insert(schema.taskSteps)
+      .values({ taskId, stepId: 'stop-me', stepIndex: 12, title: 'Stop me', status: 'waiting_cli' })
+      .returning();
+    const [stoppedRun] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId, taskStepId: stopped!.id, mode: 'cli', prompt: 'x' })
+      .returning({ id: schema.cliInvocations.id });
+    const releaseStepRow = await holdOpen(db, async (tx) => {
+      await tx
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, stopped!.id))
+        .for('update');
+    });
+    settled = false;
+    action = post(`/tasks/${taskId}/cancel-active-cli`, {}).finally(() => {
+      settled = true;
+    });
+    await sleep(1000);
+    const runMidStop = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, stoppedRun!.id),
+    });
+    check('the Stop waits for the pass holding its step', !settled);
+    check(
+      'no reader sees the run cancelled while its step still waits on it',
+      runMidStop?.supersededAt == null && (await statusOf(stopped!.id)) === 'waiting_cli',
+      { run: runMidStop, step: await statusOf(stopped!.id) },
+    );
+    await releaseStepRow();
+    res = await action;
+    const runAfterStop = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, stoppedRun!.id),
+    });
+    check('the Stop answers 200', res.status === 200, res.status);
+    check(
+      'the Stop cancels the run and fails the step together',
+      runAfterStop?.supersededAt != null && (await statusOf(stopped!.id)) === 'failed',
+      { run: runAfterStop, step: await statusOf(stopped!.id) },
+    );
   } catch (err) {
     exitCode = 1;
     log.error({ err }, 'smoke crashed');
