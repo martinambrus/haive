@@ -147,6 +147,7 @@ async function main(): Promise<void> {
     state.stepIds = [failedStep.id, middleStep.id, lastStep.id];
 
     // 1. Retry the failed step
+    await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, task.id));
     const retryRes = await app.request(`/tasks/${task.id}/steps/03b-business-requirements/action`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
@@ -174,6 +175,11 @@ async function main(): Promise<void> {
     if (taskAfterRetry.currentStepId !== '03b-business-requirements') {
       throw new Error(
         `expected currentStepId=03b-business-requirements, got ${taskAfterRetry.currentStepId}`,
+      );
+    }
+    if (taskAfterRetry.currentRound !== 0) {
+      throw new Error(
+        `expected currentRound=0 for the retried row, got ${taskAfterRetry.currentRound}`,
       );
     }
 
@@ -281,6 +287,14 @@ async function main(): Promise<void> {
     if (!secondAfter?.supersededAt) {
       throw new Error("expected resume to supersede the later round's live invocation");
     }
+    const taskAfterFanoutResume = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, task.id),
+    });
+    if (taskAfterFanoutResume?.currentRound !== 0) {
+      throw new Error(
+        `expected currentRound=0 for the resumed row, got ${taskAfterFanoutResume?.currentRound}`,
+      );
+    }
 
     // Every other action that moves the task back to a step resets what it leaves active in the
     // same way, and queues its advance at the epoch it moved the task to.
@@ -347,6 +361,7 @@ async function main(): Promise<void> {
 
     // Resume it from round 0, keeping its completed iteration. Moves the task the same
     // way retry does: what it leaves active elsewhere is reset, and the epoch bumps once.
+    await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, task.id));
     const epochBefore1d = await taskEpoch();
     const run1d = await leaveLaterRoundActive();
     const resumeLoopRes = await app.request(`/tasks/${task.id}/steps/loop-step/action`, {
@@ -361,6 +376,13 @@ async function main(): Promise<void> {
     });
     if (loopAfterResume?.status !== 'running') {
       throw new Error(`expected loop-step running after resume, got ${loopAfterResume?.status}`);
+    }
+    const taskAfter1d = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) });
+    if (taskAfter1d?.currentRound !== 0) {
+      throw new Error(`expected currentRound=0 for loop-step, got ${taskAfter1d?.currentRound}`);
+    }
+    if (taskAfter1d?.currentStepId !== 'loop-step') {
+      throw new Error(`expected currentStepId=loop-step, got ${taskAfter1d?.currentStepId}`);
     }
     const loopEpochs1d = await queuedEpochs('loop-step');
     if (!loopEpochs1d.includes(epochAfter1d)) {

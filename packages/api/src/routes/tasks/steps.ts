@@ -219,7 +219,10 @@ const isLive = (r: { status: string }) => r.status === 'running' || r.status ===
 async function moveTaskToStep(
   tx: DbHandle,
   taskId: string,
-  step: Pick<typeof schema.taskSteps.$inferSelect, 'id' | 'stepId' | 'runSeq' | 'stepIndex'>,
+  step: Pick<
+    typeof schema.taskSteps.$inferSelect,
+    'id' | 'stepId' | 'runSeq' | 'stepIndex' | 'round'
+  >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
 ) {
@@ -233,6 +236,7 @@ async function moveTaskToStep(
       allowanceAutoResumeCount: 0,
       currentStepId: step.stepId,
       currentStepIndex: step.runSeq ?? step.stepIndex,
+      currentRound: step.round,
       orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
       ...CLEAR_ALLOWANCE_WATCH,
       updatedAt: now,
@@ -806,6 +810,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           // run_seq (run-monotonic order), not step_index — mirrors the worker's
           // resolveCurrentStepIndex so the "Step index" label reflects true run order.
           currentStepIndex: step.runSeq ?? step.stepIndex,
+          currentRound: step.round,
           // Bump the orchestration epoch so any advance-step job still queued from
           // before this retry is skipped as stale (a retry stops in-flight work first).
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
@@ -990,6 +995,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             allowanceAutoResumeCount: 0,
             currentStepId: stepId,
             currentStepIndex: step.runSeq ?? step.stepIndex,
+            currentRound: step.round,
             // Bumped like a retry: this re-run invalidates any advance still queued against
             // the state it is replacing.
             orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
