@@ -199,6 +199,7 @@ async function main(): Promise<void> {
       })
       .returning();
 
+    let fixDispatches = 0;
     const enqueueCliInvocation = async (payload: CliExecJobPayload): Promise<void> => {
       const issue = await db.query.taskDagIssues.findFirst({
         where: eq(schema.taskDagIssues.cliInvocationId, payload.invocationId),
@@ -227,13 +228,20 @@ async function main(): Promise<void> {
       }
       // Merge-fix agent: EDIT the conflicted file only — a real sandboxed agent
       // cannot run git (worktree gitdir path is invalid there); the executor
-      // completes the merge host-side.
-      await writeFile(path.join(integrationWorktree, CONFLICT_FILE), 'resolved: 001 + 002\n');
+      // completes the merge host-side. The first one removes the markers and then fails, so
+      // what it left must not be committed and a second one is dispatched.
+      fixDispatches += 1;
+      const failed = fixDispatches === 1;
+      await writeFile(
+        path.join(integrationWorktree, CONFLICT_FILE),
+        failed ? 'half-resolved\n' : 'resolved: 001 + 002\n',
+      );
       await db
         .update(schema.cliInvocations)
         // Mirrors handlers.ts: a completed run started, whatever it returned.
         .set({
-          exitCode: 0,
+          exitCode: failed ? 1 : 0,
+          errorMessage: failed ? 'the fixer exited 1' : null,
           rawOutput: 'merge resolved',
           startedAt: new Date(),
           endedAt: new Date(),
@@ -303,11 +311,18 @@ async function main(): Promise<void> {
     }
     const content = readFileSync(path.join(integrationWorktree, CONFLICT_FILE), 'utf8');
     if (/<<<<<<<|>>>>>>>/.test(content)) throw new Error('conflict markers remain');
+    if (fixDispatches !== 2) {
+      throw new Error(`expected a second fixer after the one that failed, got ${fixDispatches}`);
+    }
+    if (content !== 'resolved: 001 + 002\n') {
+      throw new Error(`the failed fixer's edit was committed: ${JSON.stringify(content)}`);
+    }
 
     console.log(
       JSON.stringify({
         smoke: 'DAG_AUTO_RESOLVE_OK',
         outcomes: finalIssues.map((i) => ({ key: i.issueKey, merge: i.mergeStatus })),
+        fixDispatches,
       }),
     );
   } catch (err) {

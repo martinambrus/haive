@@ -13,7 +13,7 @@ import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
-import { runIsLive, runNeverAnswered } from './run-wait.js';
+import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -716,8 +716,11 @@ export async function resolveMergePhase(
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
+        // A fixer that crashed, timed out or failed on its own may have left a partial edit; a
+        // superseded one that answered keeps its answer.
+        const usable = inv.supersededAt != null || runFinishedCleanly(inv);
         // The agent may have signaled it cannot confidently resolve → ask the user.
-        if (fix?.status === 'uncertain') {
+        if (usable && fix?.status === 'uncertain') {
           const question =
             fix.question?.trim() || 'The agent is unsure how to resolve this conflict.';
           await recordMergeQuestion(db, params.taskId, current.id, question);
@@ -730,16 +733,14 @@ export async function resolveMergePhase(
           await saveMergeState(db, current.id, state);
           return parkForGuidance(db, current, spec, state);
         }
-        const committed = await completeMergeHostSide(
-          state.mergeDir,
-          commitEnv,
-          state.featureBranch,
-        );
+        const committed =
+          usable && (await completeMergeHostSide(state.mergeDir, commitEnv, state.featureBranch));
         state = { ...state, fixInvocationId: null };
         if (committed) {
           return finishMerge(db, stepDef, current, ctx, params, state);
         }
-        // Markers remain → abort this attempt; the dispatch decision below retries or halts.
+        // Unusable, or markers remain → abort this attempt; the dispatch decision below retries or
+        // halts, and the attempt stays spent.
         await gitRun(state.mergeDir, ['merge', '--abort']);
         await saveMergeState(db, current.id, state);
       }

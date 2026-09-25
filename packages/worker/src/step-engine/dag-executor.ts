@@ -27,7 +27,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
-import { runIsLive, runNeverAnswered } from './run-wait.js';
+import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
@@ -701,8 +701,11 @@ async function runLevelMerge(
       }
     } else if (target) {
       // The fix agent only edited the conflicted files; finish the merge here
-      // (verify markers gone, stage, commit) — git is unavailable in the sandbox.
-      const committed = await completeMergeHostSide(integration.path, gitEnv, target.branchName!);
+      // (verify markers gone, stage, commit) — git is unavailable in the sandbox — and only for a
+      // fixer that finished cleanly, since one that crashed may have left a partial edit.
+      const committed =
+        runFinishedCleanly(inv) &&
+        (await completeMergeHostSide(integration.path, gitEnv, target.branchName!));
       if (committed) {
         await db
           .update(schema.taskDagIssues)

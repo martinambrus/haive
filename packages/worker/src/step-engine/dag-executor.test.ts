@@ -918,7 +918,16 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
   /** A fake db for one DAG level/issue/plan. One thenable chain covers every `.select()`
    *  shape used before runLevelMerge's fix-in-flight check. */
   function makeDagMergeWaitDb(opts: {
-    invocation: { id: string; endedAt: Date | null; supersededAt: Date | null } | undefined;
+    invocation:
+      | {
+          id: string;
+          endedAt: Date | null;
+          supersededAt: Date | null;
+          startedAt?: Date | null;
+          exitCode?: number | null;
+          errorMessage?: string | null;
+        }
+      | undefined;
     integrationDir: string;
     autoResolveConflicts: boolean;
     conflictRetries?: Record<string, number>;
@@ -1118,6 +1127,72 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(
         (h.getLevelMergeState() as { fixInvocationId: string | null }).fixInvocationId,
       ).toBeNull();
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  /** Ingest a fixer that ended as `run` says, having written `edit` into the conflicted file. */
+  async function ingestEndedFixer(
+    run: { exitCode: number; errorMessage: string | null },
+    edit: string,
+  ) {
+    const integrationDir = await setupConflictedIntegration();
+    const h = makeDagMergeWaitDb({
+      invocation: {
+        id: 'inv1',
+        startedAt: new Date(),
+        endedAt: new Date(),
+        supersededAt: null,
+        ...run,
+      },
+      integrationDir,
+      autoResolveConflicts: false,
+      conflictRetries: { 'ISSUE-1': 1 },
+    });
+    await writeFile(path.join(integrationDir, 'base.txt'), edit, 'utf8');
+    const ctx = {
+      taskId: 'task1',
+      userId: 'user1',
+      repoPath: integrationDir,
+      sandboxWorkdir: integrationDir,
+      logger: logger.child({ test: 'dag-merge-ended-fixer' }),
+      emitProgress: async () => {},
+    } as unknown as StepContext;
+    const params = {
+      userId: 'user1',
+      taskId: 'task1',
+      cliProviderId: null,
+      ignoreSavedStepClis: false,
+      providers: [],
+      deps: { enqueueCliInvocation: async () => {} },
+    };
+    await resolveDagPhase(
+      h.db as never,
+      dagExecuteStep as never,
+      { id: 'step1', status: 'running', round: 0 } as never,
+      ctx,
+      params as never,
+    );
+    return { h, integrationDir };
+  }
+
+  it('commits nothing a fixer left when it did not finish cleanly, and keeps its attempt spent', async () => {
+    const { h, integrationDir } = await ingestEndedFixer(
+      { exitCode: 1, errorMessage: 'exited 1' },
+      'half-resolved\n',
+    );
+    try {
+      expect(h.getIssueMergeStatus()).toBe('conflict');
+      const { stdout: onMain } = await exec('git', ['show', 'main:base.txt'], {
+        cwd: integrationDir,
+      });
+      expect(onMain).toBe('main-edit\n');
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(
+        0,
+      );
+      const state = h.getLevelMergeState() as { conflictRetries: Record<string, number> };
+      expect(state.conflictRetries['ISSUE-1']).toBe(1);
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }
