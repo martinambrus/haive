@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { closesFence, fenceOpener } from '@haive/shared/markdown-fences';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 
 interface ActiveAgentsTarget {
@@ -162,14 +163,20 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
 }
 
 function stripOuterFence(raw: string): string {
-  // Unwrap only when the ENTIRE payload is a single ```/```markdown/```md fenced
-  // block. The old non-greedy inner match truncated a review that legitimately
-  // contains its own ``` code samples at the first inner fence; stripping just the
-  // outer wrapper leaves inner code blocks intact.
+  // Unwrap only when the first line opens a fence and the last line closes it. The lines between are
+  // kept as they are: a model's ```markdown wrapper holds ``` samples, which by CommonMark close it.
   const trimmed = raw.trim();
-  const open = /^```(?:markdown|md)?[ \t]*\n/.exec(trimmed);
-  if (!open || !trimmed.endsWith('```')) return trimmed;
-  return trimmed.slice(open[0].length, -3).trim();
+  const lines = trimmed.split('\n');
+  const opener = fenceOpener(lines[0]!);
+  if (
+    lines.length < 2 ||
+    !opener ||
+    !['', 'markdown', 'md'].includes(opener.info) ||
+    !closesFence(lines.at(-1)!, opener.run)
+  ) {
+    return trimmed;
+  }
+  return lines.slice(1, -1).join('\n').trim();
 }
 
 export function llmReviewMarkdown(raw: unknown, fallback: string): string {

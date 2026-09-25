@@ -421,3 +421,40 @@ describe('the affected-components section', () => {
     ]);
   });
 });
+
+describe('spec fences read by CommonMark rules', () => {
+  it('extracts a tilde mermaid fence and one whose info string goes on past the language', () => {
+    const md = [
+      '~~~mermaid',
+      'graph TD; A-->B',
+      '~~~',
+      '',
+      '```mermaid title="flow"',
+      'graph LR; C-->D',
+      '```',
+    ].join('\n');
+    expect(extractMermaidBlocks(md)).toHaveLength(2);
+  });
+
+  it('keeps fenced lines out of the summary, a four-backtick fence quoting a triple included', () => {
+    const md = [
+      'Intro line.',
+      '',
+      '````md',
+      '```',
+      'quoted code',
+      '```',
+      '````',
+      '',
+      '~~~',
+      'tilde code',
+      '~~~',
+      '',
+      'Outro line.',
+    ].join('\n');
+    const out = buildSpecSummary(md);
+    expect(out).not.toContain('quoted code');
+    expect(out).not.toContain('tilde code');
+    expect(out).toContain('Outro line.');
+  });
+});

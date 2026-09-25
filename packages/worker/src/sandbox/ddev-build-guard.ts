@@ -4,6 +4,7 @@ import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { DDEV_NGINX_INCLUDE_PREFIX } from './ddev-nginx-include-guard.js';
 import { DDEV_ENTRYPOINT_PREFIX } from './ddev-entrypoint-guard.js';
 import { DDEV_CONFIG_YAML_PREFIX } from './ddev-config-yaml-guard.js';
+import { scanFences } from '@haive/shared/markdown-fences';
 
 /**
  * Pre-flight check that the project's own DDEV image-build inputs can build at all, plus
@@ -171,9 +172,6 @@ export function findDdevBuildBreakage(files: DdevBuildFile[]): string | null {
   return null;
 }
 
-/** Fenced code blocks in a markdown document — body only, language tag ignored. */
-const MD_FENCE_RE = /^```[^\n]*\n(.*?)^```/gms;
-
 /**
  * A spec that PRESCRIBES a command the DDEV web image does not have, or null when it does not.
  *
@@ -192,8 +190,8 @@ const MD_FENCE_RE = /^```[^\n]*\n(.*?)^```/gms;
  * not a bring-up failure.
  */
 export function findDdevSpecBreakage(specText: string): string | null {
-  for (const match of specText.matchAll(MD_FENCE_RE)) {
-    const hit = findAbsentCommand(match[1] ?? '');
+  for (const fence of scanFences(specText.split('\n'))) {
+    const hit = findAbsentCommand(fence.content.join('\n'));
     if (hit) {
       return (
         `The spec prescribes \`${hit.command}\` in a build Dockerfile, which does not exist in ` +

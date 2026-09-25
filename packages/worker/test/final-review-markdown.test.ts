@@ -22,6 +22,22 @@ describe('llmReviewMarkdown', () => {
     expect(out).toContain('Done.');
   });
 
+  it('unwraps a four-backtick or a tilde wrapper, inner fences intact', () => {
+    const inner = ['# Review', '', '```ts', 'const x = 1;', '```'].join('\n');
+    expect(llmReviewMarkdown(['````markdown', inner, '````'].join('\n'), 'fb')).toBe(`${inner}\n`);
+    expect(llmReviewMarkdown(['~~~md', inner, '~~~'].join('\n'), 'fb')).toBe(`${inner}\n`);
+  });
+
+  it('keeps a reply whose last line is not a closing fence of its own', () => {
+    for (const reply of [
+      ['~~~markdown', '# Review', 'Use separator ~~~'].join('\n'),
+      ['~~~md', '# Review', '    ~~~'].join('\n'),
+      ['````markdown', '# Review', '```'].join('\n'),
+    ]) {
+      expect(llmReviewMarkdown(reply, FALLBACK)).toBe(`# Onboarding final review\n\n${reply}\n`);
+    }
+  });
+
   it('passes an unwrapped review through unchanged (plus trailing newline)', () => {
     const review = '# Onboarding final review\n\nAll good.';
     expect(llmReviewMarkdown(review, FALLBACK)).toBe(`${review}\n`);
