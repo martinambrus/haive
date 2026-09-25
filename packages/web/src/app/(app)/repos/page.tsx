@@ -228,7 +228,7 @@ export default function ReposPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-neutral-50">Repositories</h1>
           <p className="text-sm text-neutral-400">
@@ -381,15 +381,17 @@ function RepoCard(props: RepoCardProps) {
 
   return (
     <Card className="flex flex-col gap-3">
-      {/* Wraps rather than squeezing: the title column claims 18rem before the
-          actions get anything, so once both no longer fit the actions drop to their
-          own full-width line instead of collapsing the title to one letter per row.
-          Content-driven, so there is no breakpoint to keep in sync with the sidebar
-          width. */}
+      {/* Wraps rather than squeezing: the title column claims 18rem, or the whole row
+          where that is less, before the actions get anything, so once both no longer fit
+          the actions drop to their own full-width line instead of collapsing the title to
+          one letter per row. Content-driven, so there is no breakpoint to keep in sync
+          with the sidebar width. */}
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-[18rem] flex-1">
+        <div className="min-w-[min(18rem,100%)] flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="break-words text-lg font-semibold text-neutral-50">{repo.name}</h2>
+            <h2 className="text-lg font-semibold text-neutral-50 [overflow-wrap:anywhere]">
+              {repo.name}
+            </h2>
             <Badge variant={statusVariant(repo.status)}>{repo.status}</Badge>
             {notOnboarded && <Badge variant="warning">not onboarded yet</Badge>}
             {onboardingRunning && (

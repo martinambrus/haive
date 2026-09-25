@@ -152,4 +152,36 @@ test.describe('plan canvas', () => {
       await strangerCtx.dispose();
     }
   });
+
+  test('the plan page fits a phone and a tablet, a name with no break in it included', async ({
+    page,
+  }) => {
+    // The plan route is the heaviest in the app to compile.
+    test.setTimeout(240_000);
+    const sql = getSql();
+    let userId = '';
+    let repo = null as Awaited<ReturnType<typeof seedRepoFixture>> | null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'plan-phone' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'plan-phone');
+      await sql`update repositories set name = ${`phone_${'x'.repeat(48)}`} where id = ${repo.repoId}`;
+      await seedPlan(sql, repo.repoId, 'phone');
+
+      for (const width of [375, 768]) {
+        await page.setViewportSize({ width, height: 812 });
+        await page.goto(`/repos/${repo.repoId}/plan`);
+        await expect(page.getByRole('button', { name: 'Save plan' })).toBeVisible({
+          timeout: 120_000,
+        });
+        expect(
+          await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+          `nothing pushes the page sideways at ${width}px`,
+        ).toBeLessThanOrEqual(1);
+      }
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
 });

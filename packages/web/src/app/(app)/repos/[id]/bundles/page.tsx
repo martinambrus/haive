@@ -56,7 +56,7 @@ export default function ManageBundlesPage() {
           ← Back to repositories
         </Link>
       </div>
-      <h1 className="text-2xl font-semibold text-neutral-100">
+      <h1 className="text-2xl font-semibold text-neutral-100 [overflow-wrap:anywhere]">
         Bundles{repo ? ` — ${repo.name}` : ''}
       </h1>
       <p className="text-sm text-neutral-400">

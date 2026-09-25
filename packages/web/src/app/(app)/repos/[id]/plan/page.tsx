@@ -734,8 +734,11 @@ export default function PlanPage() {
     <div className="flex flex-col gap-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-semibold text-neutral-100">
-            Plan{repoName && <span className="text-neutral-500"> — {repoName}</span>}
+          <h1 className="flex flex-wrap items-center gap-2 text-lg font-semibold text-neutral-100">
+            Plan
+            {repoName && (
+              <span className="text-neutral-500 [overflow-wrap:anywhere]"> — {repoName}</span>
+            )}
             {/* An icon, not a red button: the weight of this belongs in the
                 confirmation, not in a control someone brushes past. Hidden
                 entirely when there is no plan — an affordance that deletes
@@ -756,7 +759,7 @@ export default function PlanPage() {
             {nodeCount} node{nodeCount === 1 ? '' : 's'}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {(nodeCount > 0 || snapshot?.lastError) && (
             <span
               title={snapshot?.lastError ?? 'Repository-backed plan snapshot status'}

@@ -103,7 +103,9 @@ export function PlanDeleteDialog({
           </p>
 
           <label className="flex flex-col gap-1 text-xs text-neutral-400">
-            Type <code className="select-all text-indigo-300">{repoName}</code> to confirm
+            Type{' '}
+            <code className="select-all text-indigo-300 [overflow-wrap:anywhere]">{repoName}</code>{' '}
+            to confirm
             <input
               autoFocus
               value={typed}
