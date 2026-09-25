@@ -59,9 +59,9 @@ export async function resolveAgentIsolationEnabled(): Promise<boolean> {
  * dev install's repositories, one `AGENTS.md` carries a legacy workflow's "FIRST: Read your full
  * agent definition from .claude/agents/{agent-name}.md".
  *
- * TRUE also means "could not be scanned": an unreadable entry point, a chain past the caps, or a
- * reference that leaves the tree. Both outcomes end isolation, which is the direction a context
- * control fails in — a truncated scan must never hide a referenced file.
+ * TRUE also means "could not be scanned": an unreadable entry point or a chain past the caps. Both
+ * outcomes end isolation, which is the direction a context control fails in — a truncated scan must
+ * never hide a referenced file.
  *
  * `native` readers do not expand `@` references, so theirs are not followed. Files are only
  * scanned, never pasted, so this returns a verdict and no bytes.
@@ -115,20 +115,24 @@ export async function instructionsNameAgentPath(args: {
 
     for (const match of text.matchAll(IMPORT_REFERENCE_RE)) {
       const target = resolveImport(rel, match[1]!);
-      if (target !== null) queue.push(target);
+      if (target === null) continue;
+      // The import IS the reference, however it is spelled: `@docs/../.claude/agents/x.md`.
+      if (promptNamesAgentPath(target, null)) return true;
+      queue.push(target);
     }
   }
   return false;
 }
 
-/** An `@` reference resolved against the file that makes it, or null when it leaves the tree.
- *  Absolute references are refused rather than reinterpreted: a `/etc/...` reference is not a
- *  repository path, and following one would read outside the invocation's tree. */
+/** An `@` reference resolved where the CLI resolves it, in the sandbox, against the directory of the
+ *  file that makes it: the rel it lands on inside the mounted tree, or null when it lands outside,
+ *  where nothing is the repository's to name. */
 function resolveImport(fromRel: string, reference: string): string | null {
-  if (reference.startsWith('/')) return null;
-  const joined = posix.normalize(posix.join(posix.dirname(fromRel), reference));
-  if (joined.startsWith('..') || joined.startsWith('/')) return null;
-  return normaliseRel(joined);
+  const target = reference.startsWith('/')
+    ? posix.normalize(reference)
+    : posix.join(posix.dirname(posix.join(SANDBOX_WORKDIR, fromRel)), reference);
+  if (!target.startsWith(`${SANDBOX_WORKDIR}/`)) return null;
+  return normaliseRel(target.slice(SANDBOX_WORKDIR.length + 1));
 }
 
 function normaliseRel(rel: string): string {

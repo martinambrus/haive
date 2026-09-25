@@ -232,6 +232,52 @@ describe('instructionsNameAgentPath', () => {
     }
   });
 
+  it('follows an @ import the way the CLI resolves it, inside the mount', async () => {
+    // Each reaches an agent definition in the sandbox, and none names one as written.
+    const cases: Record<string, string>[] = [
+      { 'CLAUDE.md': '@../workdir/.claude/agents/x.md\n' },
+      {
+        'CLAUDE.md': '@/haive/workdir/docs/guide.md\n',
+        'docs/guide.md': 'See .claude/agents/x.md',
+      },
+      { 'CLAUDE.md': '@docs/../.claude/agents/x.md\n' },
+    ];
+    const answers: boolean[] = [];
+    for (const files of cases) {
+      const root = await tree({ ...files, '.claude/agents/x.md': 'You review code.' });
+      try {
+        answers.push(
+          await instructionsNameAgentPath({
+            workerTree: root,
+            rulesFile: 'CLAUDE.md',
+            rulesFileMode: 'import',
+          }),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+    expect(answers).toEqual([true, true, true]);
+  });
+
+  it('does not follow a worktree import up to the repository root, which is not mounted', async () => {
+    const root = await tree({
+      '.haive/worktrees/wt/CLAUDE.md': '@../../../AGENTS.md\n',
+      'AGENTS.md': 'Read .claude/agents/reviewer.md before you start.',
+    });
+    try {
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: join(root, '.haive/worktrees/wt'),
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an @ import that leaves the tree', async () => {
     const root = await tree({ 'CLAUDE.md': '@../outside.md\n@/etc/passwd\n' });
     try {
