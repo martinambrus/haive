@@ -1197,13 +1197,17 @@ async function recordFailedStepHint(
       });
       providerName = prov?.name ?? undefined;
     }
-    await db
-      .update(schema.taskSteps)
-      .set({
-        errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.taskSteps.id, row.id));
+    try {
+      await db
+        .update(schema.taskSteps)
+        .set({
+          errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+    } catch (err) {
+      logger.warn({ err, taskId, stepId }, 'provider-outage hint not recorded');
+    }
 
     // Provider-outage watch: arm a SILENT watch on the task so the usage poller can act
     // once the provider recovers. No event/notification here — the task-failed
@@ -1211,7 +1215,10 @@ async function recordFailedStepHint(
     // 'off' means the admin wants no monitoring at all, so nothing is armed and the
     // poller has nothing to find (the errorHint banner above still writes either way).
     const watchMode = parseAllowanceWatchMode(
-      await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
+      await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE).catch((err: unknown) => {
+        logger.warn({ err, taskId }, 'allowance watch mode unreadable; arming as if unset');
+        return null;
+      }),
     );
     const armedAt = new Date();
     if (
@@ -1235,7 +1242,11 @@ async function recordFailedStepHint(
         })
         .from(schema.usageWindowSnapshots)
         .where(eq(schema.usageWindowSnapshots.providerId, outage.cliProviderId))
-        .limit(1);
+        .limit(1)
+        .catch((err: unknown) => {
+          logger.warn({ err, taskId }, 'usage snapshot unreadable; arming with no reset time');
+          return [];
+        });
       const resetAt = snap ? constrainingResetAt(snap) : null;
       await db
         .update(schema.tasks)

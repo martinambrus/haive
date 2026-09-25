@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { configService, TASK_JOB_NAMES } from '@haive/shared';
 import {
   finishFailedStep,
   handleResult,
@@ -11,6 +11,7 @@ import {
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
+import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -117,6 +118,13 @@ const h = vi.hoisted(() => {
     repoGone: false,
     /** Set when the task row itself cannot be read. */
     taskReadFails: false,
+    /** What a read of a step's ended runs answers, newest first. */
+    endedRuns: [] as Record<string, unknown>[],
+    /** Set to fail the step's error-hint write and the usage-snapshot read. */
+    hintWriteFails: false,
+    snapshotReadFails: false,
+    /** Patches of task writes awaited without `.returning()`. */
+    plainTaskPatches: [] as Record<string, unknown>[],
   };
   return { state };
 });
@@ -165,6 +173,7 @@ const db = {
       findFirst: async () =>
         h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
     },
+    cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
   },
   select: (fields?: Record<string, unknown>) => {
     h.state.onSelect();
@@ -177,6 +186,9 @@ const db = {
           // hand-off and the park.
           return Object.assign(Promise.resolve([]), {
             limit: async () => {
+              if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
+                throw new Error('the usage snapshot read failed');
+              }
               if (fields && 'pausedAt' in fields) {
                 return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
               }
@@ -193,7 +205,10 @@ const db = {
               }
               return h.state.sourceOwned ? [{ id: 'ts-1' }] : [];
             },
-            orderBy: async () => h.state.requestedEvents,
+            orderBy: () => {
+              const rows = name === 'cli_invocations' ? h.state.endedRuns : h.state.requestedEvents;
+              return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+            },
           });
         },
       }),
@@ -209,6 +224,15 @@ const db = {
       if (tableNameOf(table) === 'task_steps') h.state.stepPatches.push(patch);
       return {
         where: (cond: unknown) => ({
+          then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
+            if (tableNameOf(table) === 'tasks') h.state.plainTaskPatches.push(patch);
+            const failed = tableNameOf(table) === 'task_steps' && 'errorHint' in patch;
+            return (
+              failed && h.state.hintWriteFails
+                ? Promise.reject(new Error('the hint write failed'))
+                : Promise.resolve(undefined)
+            ).then(resolve, reject);
+          },
           returning: async () => {
             const values = conditionValues(cond);
             // A step row written under the ownership guard lands only while the pass still owns it.
@@ -320,6 +344,11 @@ afterEach(() => {
   h.state.currentStepId = 'epoch-job-step';
   h.state.repoGone = false;
   h.state.taskReadFails = false;
+  h.state.endedRuns = [];
+  h.state.hintWriteFails = false;
+  h.state.snapshotReadFails = false;
+  h.state.plainTaskPatches = [];
+  vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
 });
@@ -380,6 +409,48 @@ describe("a failed step's hand-off", () => {
     ).resolves.toBe(true);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
     expect(h.state.events).toContain('step.failed');
+  });
+
+  const finish = () =>
+    finishFailedStep(
+      db as never,
+      { taskId: 'task-1', orchestrationEpoch: 5 },
+      'epoch-job-step',
+      { id: 'ts-1' },
+      'cli invocation failed',
+    );
+  const armed = () => h.state.plainTaskPatches.filter((p) => 'awaitingProviderReason' in p);
+  const outage = (reason: 'rate_limit' | 'server_error') => {
+    setContainerCleanupRunner(vi.fn(async () => 0));
+    h.state.readsAnswer = true;
+    h.state.endedRuns = [
+      { errorMessage: `${PROVIDER_FATAL_HEADLINES[reason]}: 429`, cliProviderId: 'prov-1' },
+    ];
+  };
+
+  it('arms the allowance watch though the hint write failed', async () => {
+    outage('server_error');
+    h.state.hintWriteFails = true;
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  it('arms it as if unset when its mode cannot be read', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockRejectedValue(new Error('config unreadable'));
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  it('arms it with no reset time when the usage snapshot cannot be read', async () => {
+    outage('rate_limit');
+    h.state.snapshotReadFails = true;
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([
+      expect.objectContaining({ awaitingProviderReason: 'rate_limit', allowanceResetAt: null }),
+    ]);
   });
 });
 
