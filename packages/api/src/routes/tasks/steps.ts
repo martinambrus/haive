@@ -231,8 +231,6 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  // Skip revives an ended task as Retry does; the other callers refuse one, so a cancellation stands.
-  options: { reviveEnded?: boolean } = {},
 ) {
   await resetRowsForRerun(tx, taskId, leftActive, now);
   const [bumped] = await tx
@@ -249,21 +247,22 @@ async function moveTaskToStep(
       ...CLEAR_ALLOWANCE_WATCH,
       updatedAt: now,
     })
-    .where(
-      options.reviveEnded
-        ? eq(schema.tasks.id, taskId)
-        : and(
-            eq(schema.tasks.id, taskId),
-            notInArray(schema.tasks.status, ['cancelled', 'completed']),
-          ),
-    )
+    .where(unendedTask(taskId))
     .returning({ epoch: schema.tasks.orchestrationEpoch });
-  if (!bumped) {
-    throw new HttpError(409, 'The task has ended and cannot be moved back to a step');
-  }
+  if (!bumped) throw new HttpError(409, ENDED_TASK_MESSAGE);
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now);
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
+}
+
+/** A cancelled or completed task is not moved back to a step, as the task page offers no step
+ *  action on one; the refusal throws inside the action's transaction, before any kill. */
+const ENDED_TASK_MESSAGE = 'The task has ended and cannot be moved back to a step';
+function unendedTask(taskId: string) {
+  return and(
+    eq(schema.tasks.id, taskId),
+    notInArray(schema.tasks.status, ['cancelled', 'completed']),
+  );
 }
 
 /** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
@@ -835,9 +834,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           ...CLEAR_ALLOWANCE_WATCH,
           updatedAt: now,
         })
-        .where(eq(schema.tasks.id, id))
+        .where(unendedTask(id))
         .returning({ epoch: schema.tasks.orchestrationEpoch });
-      newEpoch = bumped[0]?.epoch ?? 0;
+      if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
+      newEpoch = bumped[0].epoch;
       const late = await rowsActivatedMeanwhile(tx, id, []);
       await resetRowsForRerun(tx, id, late, now);
       await tx.insert(schema.taskEvents).values({
@@ -1020,9 +1020,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             ...CLEAR_ALLOWANCE_WATCH,
             updatedAt: now,
           })
-          .where(eq(schema.tasks.id, id))
+          .where(unendedTask(id))
           .returning({ epoch: schema.tasks.orchestrationEpoch });
-        newEpoch = bumped[0]?.epoch ?? newEpoch;
+        if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
+        newEpoch = bumped[0].epoch;
         const late = await rowsActivatedMeanwhile(tx, id, [step.id]);
         await resetRowsForRerun(tx, id, late, now);
         await tx.insert(schema.taskEvents).values({
@@ -1287,7 +1288,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      const result = await moveTaskToStep(tx, id, step, leftActive, now, { reviveEnded: true });
+      const result = await moveTaskToStep(tx, id, step, leftActive, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
