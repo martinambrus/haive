@@ -286,9 +286,20 @@ current row that FAILED is the job that died between failing the step and failin
 advance can run it again, since every write refuses a failed row, so the sweep fails the task at
 the epoch it read through that job's own hand-off (`finishFailedStep`), which also records the
 failure's hint, arms its allowance watch and logs `step.failed`. A
-START on the queue is no such job (`taskIdsOwedAStep`): it only claims a task still waiting to
+START on the queue is no such job (`taskQueueOwed`): it only claims a task still waiting to
 start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
 task for that long and then do nothing.
+
+The same sweep covers the two other jobs that can be lost with nothing to notice. A task left
+`queued` past the cutoff with no START on the queue gets one, which the claim makes safe to
+duplicate; `created` is left alone, since a deferred-start draft waits there on purpose, so a
+POST /tasks whose own START was lost stays `created` until someone acts. And a `waiting_cli`
+current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
+running and no task-queue job, is recovered exactly as boot recovers a parked step
+(`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
+ended, since a live worker may be starting younger ones. A step whose old runs all still have a job
+(a pause, the per-task cap and the runtime reserve all hold jobs `delayed`) is left to them. The
+lost run never started, so its re-dispatch charges no orphan budget.
 
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
