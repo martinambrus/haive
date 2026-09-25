@@ -2,6 +2,7 @@ import type { Job } from 'bullmq';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import {
+  finishFailedStep,
   handleResult,
   processTaskJob,
   resolveFixLoopGate,
@@ -361,6 +362,24 @@ describe('a task job that fails', () => {
     await expect(processTaskJob(job, 'tok')).rejects.toThrow('the job went no further');
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     expect(cleanup).not.toHaveBeenCalled();
+  });
+});
+
+describe("a failed step's hand-off", () => {
+  it('records the step failure even when its hint cannot be read', async () => {
+    setContainerCleanupRunner(vi.fn(async () => 0));
+    // Every read throws here, the hint's lookup of the step's failed runs among them.
+    await expect(
+      finishFailedStep(
+        db as never,
+        { taskId: 'task-1', orchestrationEpoch: 5 },
+        'epoch-job-step',
+        { id: 'ts-1' },
+        'boom',
+      ),
+    ).resolves.toBe(true);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+    expect(h.state.events).toContain('step.failed');
   });
 });
 

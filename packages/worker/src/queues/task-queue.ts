@@ -1127,7 +1127,8 @@ const workerDeps: WorkerDeps = {
 };
 
 /** A failed step's hand-off: fail the task at the epoch its pass ran under (and only from
- *  `statuses`, when given), then record what the failure was and arm its recovery. */
+ *  `statuses`, when given), then record what the failure was and arm its recovery. Nothing retries
+ *  that record once the task is failed, so each part is written whatever became of the other. */
 export async function finishFailedStep(
   db: Database,
   task: { taskId: string; orchestrationEpoch: number },
@@ -1139,6 +1140,25 @@ export async function finishFailedStep(
   if (!(await markTaskFailed(db, task.taskId, error, task.orchestrationEpoch, statuses))) {
     return false;
   }
+  try {
+    await recordFailedStepHint(db, task.taskId, stepId, row);
+  } catch (err) {
+    logger.warn({ err, taskId: task.taskId, stepId }, 'failed-step hint not recorded');
+  }
+  try {
+    await appendEvent(db, task.taskId, row.id, 'step.failed', { stepId, error });
+  } catch (err) {
+    logger.warn({ err, taskId: task.taskId, stepId }, 'step.failed event not recorded');
+  }
+  return true;
+}
+
+async function recordFailedStepHint(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  row: { id: string },
+): Promise<void> {
   // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
   // server failure, attach a structured errorHint so the UI shows an
   // "outage — retry when the provider recovers" banner instead of implying a code
@@ -1227,7 +1247,7 @@ export async function finishFailedStep(
           allowanceReplenishedAt: null,
           updatedAt: armedAt,
         })
-        .where(eq(schema.tasks.id, task.taskId));
+        .where(eq(schema.tasks.id, taskId));
       // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
       // to a full 5-min tick late. Both are best-effort (the repeatable tick is the floor).
       await enqueueUsagePollTick();
@@ -1249,7 +1269,7 @@ export async function finishFailedStep(
           allowanceReplenishedAt: null,
           updatedAt: armedAt,
         })
-        .where(eq(schema.tasks.id, task.taskId));
+        .where(eq(schema.tasks.id, taskId));
       // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
       await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
     }
@@ -1279,8 +1299,6 @@ export async function finishFailedStep(
         .where(eq(schema.taskSteps.id, row.id));
     }
   }
-  await appendEvent(db, task.taskId, row.id, 'step.failed', { stepId, error });
-  return true;
 }
 
 /** A write handleResult makes to the row a pass left, through the pass's own ownership check:
