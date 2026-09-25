@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { and, asc, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import {
   configService,
   secretsService,
@@ -116,6 +116,78 @@ async function pollUntil<T>(
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   throw new Error(`timeout waiting for ${label}`);
+}
+
+/** A submit queued before the form's park is dropped while the task waits (case A), and parks
+ *  the form again when the pass that parked it died before marking the task waiting (case B). */
+async function verifyStaleSubmitHandling(
+  db: Database,
+  queue: Queue<TaskJobPayload>,
+  taskId: string,
+  userId: string,
+  row: typeof schema.taskSteps.$inferSelect,
+  formValues: Record<string, unknown>,
+): Promise<void> {
+  const waitingStartedAt = row.waitingStartedAt;
+  if (row.formValues !== null || waitingStartedAt === null) {
+    throw new Error('stale-submit precondition failed: expected a freshly parked, unanswered form');
+  }
+  const staleTimestamp = waitingStartedAt.getTime() - 60_000;
+  const { stepId, round } = row;
+
+  const dropJob = await queue.add(
+    TASK_JOB_NAMES.ADVANCE_STEP,
+    { taskId, userId, stepId, round, formValues },
+    { timestamp: staleTimestamp },
+  );
+  await pollUntil(
+    () => dropJob.getState(),
+    (s) => s === 'completed',
+    'stale-submit drop job',
+  );
+  const [afterDrop] = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(eq(schema.taskSteps.id, row.id))
+    .limit(1);
+  const taskAfterDrop = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+  if (
+    afterDrop?.status !== 'waiting_form' ||
+    afterDrop.formValues !== null ||
+    afterDrop.waitingStartedAt?.getTime() !== waitingStartedAt.getTime() ||
+    taskAfterDrop?.status !== 'waiting_user'
+  ) {
+    throw new Error(
+      'stale-submit case A failed: a submit older than the park was applied instead of dropped',
+    );
+  }
+
+  // Case B: a pass that parks a form and dies before marking the task waiting leaves the task
+  // `running`. Force that state by hand and check the same stale submit re-parks instead.
+  await db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, taskId));
+  const reparkJob = await queue.add(
+    TASK_JOB_NAMES.ADVANCE_STEP,
+    { taskId, userId, stepId, round, formValues },
+    { timestamp: staleTimestamp },
+  );
+  await pollUntil(
+    () => reparkJob.getState(),
+    (s) => s === 'completed',
+    'stale-submit repark job',
+  );
+  await pollUntil(
+    async () => (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) })) ?? null,
+    (tt) => tt.status === 'waiting_user',
+    'task reparked to waiting_user after a stale submit found it running',
+  );
+  const [afterRepark] = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(eq(schema.taskSteps.id, row.id))
+    .limit(1);
+  if (afterRepark?.status !== 'waiting_form' || afterRepark.formValues !== null) {
+    throw new Error('stale-submit case B failed: the form did not stay parked with no answers');
+  }
 }
 
 async function createFixtureRepo(): Promise<string> {
@@ -306,6 +378,7 @@ async function main(): Promise<void> {
     let lastKey: string | null = null;
     let iterations = 0;
     let sawGate = false;
+    let staleSubmitChecked = false;
     while (iterations < 80) {
       iterations += 1;
       const t = await pollUntil(
@@ -363,6 +436,13 @@ async function main(): Promise<void> {
           schemaFields.filter((f) => f.default !== undefined).map((f) => [f.id, f.default]),
         );
         log.info({ stepId, round, values }, 'submitting form defaults for unlisted step');
+      }
+
+      if (!staleSubmitChecked) {
+        staleSubmitChecked = true;
+        if (!row)
+          throw new Error(`no waiting_form row for ${key} to drive the stale-submit checks`);
+        await verifyStaleSubmitHandling(db, state.queue, task.id, userId, row, values);
       }
 
       await state.queue.add(TASK_JOB_NAMES.ADVANCE_STEP, {
