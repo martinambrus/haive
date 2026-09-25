@@ -1,8 +1,8 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-22 and 5c merged (#267-#280, #282-#286, #288-#291); PR 21b
-> (the task title strip hides by its own width) is in review. Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-24. PRs 1-22, 21b and 5c merged (#267-#280, #282-#286, #288-#291,
+> #294); PR 23 (skip the optional ssh2 and cpu-features native builds) is in review. Tracked in the
+> status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
