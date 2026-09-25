@@ -1,4 +1,17 @@
-import { and, asc, eq, inArray, isNotNull, isNull, like, or } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { schema, type Database } from '../src/index.js';
 import { withTaskAttachmentsLock } from '../src/task-attachments-lock.js';
@@ -59,6 +72,56 @@ describe('the fake database', () => {
     expect(() => fake.compileWhere(t, eq(t.id, 'nope'))).toThrow(
       /invalid input syntax for type uuid/,
     );
+  });
+
+  it('never matches a NULL with a comparison or an exclusion, as Postgres does not', () => {
+    const { fake, row } = setup();
+    const a = fake.insert(t, row('a.md', { sizeBytes: 1 }));
+    fake.insert(t, row('b.md', { sizeBytes: 5, description: 'kept', expandedFromId: a.id }));
+    const match = (cond: unknown): unknown[] =>
+      fake
+        .rows(t)
+        .filter(fake.compileWhere(t, cond))
+        .map((r) => r.filename);
+
+    expect(match(gt(t.sizeBytes, 1))).toEqual(['b.md']);
+    expect(match(gt(t.sizeBytes, 0))).toEqual(['a.md', 'b.md']);
+    expect(match(ne(t.filename, 'a.md'))).toEqual(['b.md']);
+    expect(match(ne(t.description, 'other'))).toEqual(['b.md']);
+    expect(match(notInArray(t.filename, ['b.md', 'c.md']))).toEqual(['a.md']);
+    expect(match(notInArray(t.expandedFromId, [TASK]))).toEqual(['b.md']);
+    expect(() => fake.compileWhere(t, notInArray(t.filename, []))).toThrow(/unsupported condition/);
+
+    // JavaScript reads `null > -1` as true.
+    const capped = fake
+      .rows(schema.tasks)
+      .filter(fake.compileWhere(schema.tasks, gt(schema.tasks.memoryLimitMb, -1)));
+    expect(capped).toEqual([]);
+  });
+
+  it('increments a column in an update and projects what it returns', async () => {
+    const { fake, row } = setup();
+    const a = fake.insert(t, row('a.md', { sizeBytes: 3 }));
+    fake.insert(t, row('b.md', { sizeBytes: 7 }));
+
+    const back = await fake.db
+      .update(t)
+      .set({ sizeBytes: sql`${t.sizeBytes} + 1`, description: 'bumped' })
+      .where(eq(t.id, a.id as string))
+      .returning({ size: t.sizeBytes });
+
+    expect(back).toEqual([{ size: 4 }]);
+    expect(fake.rows(t).map((r) => [r.sizeBytes, r.description])).toEqual([
+      [4, 'bumped'],
+      [7, null],
+    ]);
+    // Another table's column is not this row's to read.
+    const other = sql`${schema.tasks.orchestrationEpoch} + 1`;
+    await fake.db
+      .update(t)
+      .set({ sizeBytes: other })
+      .where(eq(t.id, a.id as string));
+    expect(fake.rows(t)[0]!.sizeBytes).toBe(other);
   });
 
   it('compares a json column by value, as Postgres compares jsonb, and never to NULL', () => {

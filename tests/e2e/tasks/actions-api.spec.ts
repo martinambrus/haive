@@ -153,7 +153,7 @@ test.describe('step retry API', () => {
       fixture = await seedTaskFixture(sql, userId, 'step-retry-done');
 
       // Mutate fixture: step 0 done w/ form data + output, step 1 done w/ form
-      // data + output, step 2 pending. Task → completed.
+      // data + output, step 2 pending. The task stays failed: a step action refuses a completed one.
       await sql`
         update task_steps set status = 'done',
           form_schema = ${JSON.stringify({ title: 'old' })}::jsonb,
@@ -171,7 +171,6 @@ test.describe('step retry API', () => {
           ended_at = now()
         where id = ${fixture.middleStepId}
       `;
-      await setTaskStatus(sql, fixture.taskId, 'completed');
 
       const res = await page.request.post(
         `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,

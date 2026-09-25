@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-5 and 7 merged (#301-#306); PR 6 (an advance for a step
-> the task has moved past is dropped) is in review. Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-7 merged (#301-#307); PR 8 (step actions refuse a
+> cancelled or completed task) is in review. Tracked in the status table of `docs/plans/README.md`,
+> which each PR updates.
 
 ## Context
 
