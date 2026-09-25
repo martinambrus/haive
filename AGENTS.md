@@ -313,7 +313,8 @@ sandboxes only once that has committed: a refused action then leaves every run a
 run's completion finds its invocation already superseded.
 The loop Resume, `retry_ai`, Skip and a CLI switch on a failed or parked step take the task back
 to their step the same way, through one helper (`moveTaskToStep`), and queue their advance at
-the epoch it moved to; a CLI switch on a `pending` row resets nothing else.
+the epoch it moved to; a CLI switch on a `pending` row only invalidates its cached form, since
+the task has either not reached that row or already queued the advance that claims it.
 The task retry settles its
 rows again after its bump, since answering a parked form revives the task and can open a row in
 between. That settle locks every active row before it writes (`settleActiveSteps`): a pass that got

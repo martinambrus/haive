@@ -527,10 +527,12 @@ async function main(): Promise<void> {
       );
     }
 
-    // 6b. The same change on a pending step resets nothing else and leaves the epoch alone —
-    //     a CLI switch on a pending row resets nothing else.
+    // 6b. The same change on a pending step only invalidates it: nothing else is reset, the epoch
+    //     stays, a failed task stays failed and no advance is queued for it.
+    await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, task.id));
     const epochBefore6b = await taskEpoch();
     const run6b = await leaveLaterRoundActive();
+    const queuedBefore6b = await queuedEpochs('middle-step');
     const cliProviderRes6b = await app.request(`/tasks/${task.id}/steps/middle-step/cli-provider`, {
       method: 'PATCH',
       headers: { cookie, 'content-type': 'application/json' },
@@ -556,6 +558,16 @@ async function main(): Promise<void> {
     const epochAfter6b = await taskEpoch();
     if (epochAfter6b !== epochBefore6b) {
       throw new Error(`expected the epoch unchanged, ${epochBefore6b} -> ${epochAfter6b}`);
+    }
+    const taskAfter6b = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) });
+    if (taskAfter6b?.status !== 'failed') {
+      throw new Error(`expected the task to stay failed, got ${taskAfter6b?.status}`);
+    }
+    const queuedAfter6b = await queuedEpochs('middle-step');
+    if (queuedAfter6b.length !== queuedBefore6b.length) {
+      throw new Error(
+        `expected no new queued job for middle-step, had ${queuedBefore6b.length}, now ${queuedAfter6b.length}`,
+      );
     }
 
     // 5. Task events recorded

@@ -1684,7 +1684,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
   ) {
     // A failed or parked step is re-run on the new CLI, which takes the task back to it as a
-    // Retry does, so what the task leaves active elsewhere is reset.
+    // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
+    // invalidated: the task has either not reached it, where an advance queued from here would
+    // run it out of order, or already queued the advance that claims it.
     const movesTask = step.status !== 'pending';
     const leftActive = movesTask
       ? rowsLeftActive(
@@ -1738,17 +1740,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         })
         .where(eq(schema.taskSteps.id, step.id));
       if (movesTask) return moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
-      // Mirror the retry/resume handlers: a failed task must leave the failed state
-      // and shed its stale top-level error when its failed step is reset + re-run via
-      // a provider/model change, else the task page keeps showing the old error after
-      // the re-run passes.
-      await tx
-        .update(schema.tasks)
-        .set({ status: 'running', errorMessage: null, updatedAt: now })
-        .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
-      return { epoch: task.orchestrationEpoch, leftActive };
+      return null;
     });
-    if (redrive.leftActive.some(isLive)) {
+    if (redrive?.leftActive.some(isLive)) {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for a CLI switch');
     }
