@@ -387,7 +387,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         repositoryId: d.repositoryId,
       });
       const said = typeof args.llmOutput === 'string' ? args.llmOutput.trim() : '';
-      const committed = await completeMergeHostSide(d.worktreePath, identity);
+      const committed = await completeMergeHostSide(d.worktreePath, identity, `origin/${d.branch}`);
       const left = await conflictedPaths(d.worktreePath);
       result.resolved = committed && left.length === 0;
       result.summary = result.resolved

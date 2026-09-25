@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
-import type { MergeResolveState } from '@haive/database';
+import { schema, type MergeResolveState } from '@haive/database';
 import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
@@ -207,16 +207,30 @@ function makeDb(
       }),
     }),
     // One chain answers both shapes: buildSquashCommitMessage awaits orderBy directly,
-    // loadOutstandingMergeGuidance continues to limit(1).
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          orderBy: () => ({
-            limit: async () => [],
-            then: (resolve: (v: unknown) => void) => resolve(opts.dagIssues ?? []),
+    // loadOutstandingMergeGuidance continues to limit(1). lockOwnedStep's ownership probe
+    // (select({id}).from(taskSteps).where(owned(id)).for('update')) is a third, distinguished
+    // by its columns argument, and honours the same ownership guard as the update mock above.
+    select: (cols?: unknown) => ({
+      from: (table?: unknown) => {
+        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
+          return {
+            where: () => ({
+              for: async () =>
+                status === 'pending' || status === 'skipped' || status === 'failed'
+                  ? []
+                  : [{ id: 'step1' }],
+            }),
+          };
+        }
+        return {
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => [],
+              then: (resolve: (v: unknown) => void) => resolve(opts.dagIssues ?? []),
+            }),
           }),
-        }),
-      }),
+        };
+      },
     }),
   };
   return { db, getState: () => mergeState, getStatus: () => status };
@@ -638,6 +652,49 @@ describe('12 merge fix-agent dispatch', () => {
       // The half-resolved edit never reached completeMergeHostSide, so the merge
       // did not land.
       expect(h.getState()?.merged).not.toBe(true);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a run superseded by a Retry that already reset the step row: rejects without dispatching, aborting or touching merge state', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        rowTaken: true,
+      });
+      const ctx = mkCtx(parent, h.db);
+      await expect(
+        resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+          ctx,
+          mkParams(h.db, { ...withProvider, deps: { enqueueCliInvocation: async () => {} } }),
+        ),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      // The Retry already reset the row before this pass reached it, so nothing here may
+      // act on the merge: the abort, the dispatch and the state write all sit after the check.
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      expect(h.getState()).toBeNull();
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

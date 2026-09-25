@@ -26,7 +26,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
-import { updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
 import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
@@ -688,6 +688,7 @@ async function runLevelMerge(
     if (!inv || runIsLive(inv)) {
       return { status: 'waiting', row: m.current };
     }
+    if (inv.supersededAt != null) await assertOwnsStep(db, m.current.id);
     await db
       .update(schema.cliInvocations)
       .set({ consumedAt: new Date() })
@@ -706,7 +707,7 @@ async function runLevelMerge(
     } else if (target) {
       // The fix agent only edited the conflicted files; finish the merge here
       // (verify markers gone, stage, commit) — git is unavailable in the sandbox.
-      const committed = await completeMergeHostSide(integration.path, gitEnv);
+      const committed = await completeMergeHostSide(integration.path, gitEnv, target.branchName!);
       if (committed) {
         await db
           .update(schema.taskDagIssues)
@@ -1277,6 +1278,7 @@ async function resolveReviewPhase(
       where: eq(schema.cliInvocations.id, latest.cliInvocationId),
     });
     if (!inv || runIsLive(inv)) continue; // in flight
+    if (inv.supersededAt != null) await assertOwnsStep(ra.db, ra.current.id);
     await ingestReviewRun(ra, issue, latest, inv);
   }
 
@@ -1828,6 +1830,7 @@ export async function resolveEscalationPhase(
     if (!inv || runIsLive(inv)) {
       return { status: 'waiting', row: ea.current };
     }
+    if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
     // A replanner that never answered is not an attempt: free the slot and let escalation
     // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
     if (runNeverAnswered(inv)) {
@@ -1890,6 +1893,7 @@ export async function resolveEscalationPhase(
         inFlight = true;
         continue;
       }
+      if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
       const action = await ingestAdvisor(ea, issue, latest, inv);
       if (action === 'retry') inFlight = true;
       else if (action === 'split') reloop = true;
@@ -2272,6 +2276,7 @@ export async function resolveDagPhase(
           anyInFlight = true;
           continue;
         }
+        if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never

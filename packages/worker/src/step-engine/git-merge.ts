@@ -10,14 +10,16 @@ import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted
 // (git is unavailable there), then the host verifies the markers are gone, stages,
 // and commits.
 
-/** True once a live merge in `worktreePath` is committed with no unmerged paths
- *  (MERGE_HEAD gone). */
-export async function mergeCommitted(worktreePath: string): Promise<boolean> {
+/** True once `branch` is merged into `worktreePath`'s HEAD: an aborted merge also leaves no
+ *  MERGE_HEAD and nothing unmerged, so what marks a commit is that the branch is in HEAD. */
+export async function mergeCommitted(worktreePath: string, branch: string): Promise<boolean> {
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code === 0) return false; // merge still open (not committed)
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
   const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
-  return !unmerged;
+  if (unmerged) return false;
+  const ancestor = await gitRun(worktreePath, ['merge-base', '--is-ancestor', branch, 'HEAD']);
+  return ancestor.code === 0;
 }
 
 /** Build the conflict-resolution agent's prompt. `title` is an optional
@@ -58,9 +60,10 @@ export function buildMergeFixPrompt(branch: string, title?: string, guidance?: s
 export async function completeMergeHostSide(
   worktreePath: string,
   gitEnv: Record<string, string>,
+  branch: string,
 ): Promise<boolean> {
   // Fast path: already committed (e.g. an environment where git did work).
-  if (await mergeCommitted(worktreePath)) return true;
+  if (await mergeCommitted(worktreePath, branch)) return true;
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code !== 0) return false; // merge no longer open and not committed
   const unmerged = await gitRun(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
@@ -90,7 +93,7 @@ export async function completeMergeHostSide(
   if (add.code !== 0) return false;
   const commit = await gitRun(worktreePath, ['commit', '--no-edit'], gitEnv);
   if (commit.code !== 0) return false;
-  return mergeCommitted(worktreePath);
+  return mergeCommitted(worktreePath, branch);
 }
 
 /** Collapse a merge that has ALREADY landed in `worktreePath` into a single commit on

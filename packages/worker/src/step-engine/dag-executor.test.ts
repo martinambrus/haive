@@ -922,8 +922,11 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     integrationDir: string;
     autoResolveConflicts: boolean;
     conflictRetries?: Record<string, number>;
+    /** A Retry reset the row while the pass ran: lockOwnedStep's ownership probe matches
+     *  nothing, same as the update guard below. */
+    stepRowStatus?: string;
   }) {
-    let stepStatus = 'running';
+    let stepStatus = opts.stepRowStatus ?? 'running';
     let stepErrorMessage: string | null = null;
     let issueMergeStatus = 'conflict';
     let levelMergeState: unknown = {
@@ -1001,7 +1004,22 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         cliInvocations: { findFirst: async () => opts.invocation },
         userStepCliPreferences: { findFirst: async () => undefined },
       },
-      select: () => ({ from: (table: unknown) => chain(resultsFor(table)) }),
+      // lockOwnedStep's ownership probe (select({id}).from(taskSteps).where(owned(id)).for(
+      // 'update')) is distinguished by its columns argument and honours the same ownership
+      // guard as the update mock below; every other select keeps the generic chain.
+      select: (cols?: unknown) => ({
+        from: (table: unknown) => {
+          if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
+            return {
+              where: () => ({
+                for: async () =>
+                  ['pending', 'skipped', 'failed'].includes(stepStatus) ? [] : [{ id: 'step1' }],
+              }),
+            };
+          }
+          return chain(resultsFor(table));
+        },
+      }),
       insert: (table: unknown) => ({
         values: () => ({
           returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
@@ -1235,6 +1253,52 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(state.fixInvocationId).toBe('fix-inv-1');
       // ...and the refund plus the recharge net to exactly one real attempt.
       expect(state.conflictRetries['ISSUE-1']).toBe(1);
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a run superseded by a Retry that already reset the step row: rejects without dispatching, aborting or touching merge state', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: true,
+        stepRowStatus: 'pending',
+      });
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-not-owned' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      const before = h.getLevelMergeState();
+      await expect(
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          ctx,
+          params as never,
+        ),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      // The Retry already reset the row before this pass reached it, so nothing here may
+      // act on the merge: the abort, the dispatch and the state write all sit after the check.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      expect(h.getLevelMergeState()).toEqual(before);
+      expect(h.getIssueMergeStatus()).toBe('conflict');
+      expect(h.getStepStatus()).toBe('pending');
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }
@@ -1537,6 +1601,9 @@ describe('resolveEscalationPhase: a replanner run that never answered', () => {
         query: {
           cliInvocations: { findFirst: async () => replannerInv },
         },
+        // lockOwnedStep's ownership probe: this test is not about losing the row, so it
+        // always finds it owned.
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [{ id: 'step1' }] }) }) }),
         update: (table: unknown) => ({
           set: (patch: Record<string, unknown>) => ({
             where: (cond: unknown) => {

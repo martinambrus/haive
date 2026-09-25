@@ -12,7 +12,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
-import { updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
 import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
@@ -676,10 +676,6 @@ export async function resolveMergePhase(
 
   // --- resolving: drive the fix-agent loop ---
   if (state.phase === 'resolving') {
-    // Set whenever (1) itself just aborted the live merge: mergeCommitted cannot tell
-    // that apart from a genuine commit (no MERGE_HEAD, no unmerged paths, either way),
-    // so (2) must not re-derive "committed" from git state on the same pass.
-    let justAborted = false;
     // (1) Ingest an in-flight fix agent.
     if (state.fixInvocationId) {
       const inv = await db.query.cliInvocations.findFirst({
@@ -688,6 +684,7 @@ export async function resolveMergePhase(
       if (!inv || runIsLive(inv)) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
+      if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
       const fix = parseFixResult(inv);
       if (runNeverAnswered(inv) && !fix) {
         // A fixer that never answered may have left the merge half-resolved, so its
@@ -697,7 +694,6 @@ export async function resolveMergePhase(
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
         await gitRun(state.mergeDir, ['merge', '--abort']);
-        justAborted = true;
         state = {
           ...state,
           fixInvocationId: null,
@@ -739,14 +735,17 @@ export async function resolveMergePhase(
           await saveMergeState(db, current.id, state);
           return parkForGuidance(db, current, spec, state);
         }
-        const committed = await completeMergeHostSide(state.mergeDir, commitEnv);
+        const committed = await completeMergeHostSide(
+          state.mergeDir,
+          commitEnv,
+          state.featureBranch,
+        );
         state = { ...state, fixInvocationId: null };
         if (committed) {
           return finishMerge(db, stepDef, current, ctx, params, state);
         }
         // Markers remain → abort this attempt; the dispatch decision below retries or halts.
         await gitRun(state.mergeDir, ['merge', '--abort']);
-        justAborted = true;
         await saveMergeState(db, current.id, state);
       }
     }
@@ -779,7 +778,7 @@ export async function resolveMergePhase(
       };
     }
     // Recreate the live merge if it isn't open (after an abort or a crash).
-    if (!justAborted && (await mergeCommitted(state.mergeDir))) {
+    if (await mergeCommitted(state.mergeDir, state.featureBranch)) {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
