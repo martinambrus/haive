@@ -27,7 +27,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { updateOwnedStep } from './step-ownership.js';
-import { runIsLive } from './run-wait.js';
+import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
@@ -36,7 +36,6 @@ import {
   type SpecView,
 } from './steps/workflow/_spec-artifact.js';
 import {
-  isFreeRedispatch,
   isFatalProviderFailure,
   isCliTimeoutFailure,
   cliTimeoutBudgetMinutes,
@@ -1069,7 +1068,7 @@ export async function ingestReviewRun(
 
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
-  if (run.role !== 'reviewer' && !fixed.parsed && isFreeRedispatch(inv)) {
+  if (run.role !== 'reviewer' && !fixed.parsed && runNeverAnswered(inv)) {
     const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     const ok = await spawnReviewAgent(
       ra,
@@ -1098,9 +1097,9 @@ export async function ingestReviewRun(
         exitCode: inv.exitCode,
         errorMessage: inv.errorMessage,
       });
-      // Free re-dispatch when the reviewer was preempted or never started — same reasoning as
-      // the coder path: neither must spend an infrastructure-recovery budget.
-      const free = isFreeRedispatch(inv);
+      // Free when the reviewer never answered (preempted, never started or superseded), as on
+      // the coder path: none of those may spend an infrastructure-recovery budget.
+      const free = runNeverAnswered(inv);
       if (cls === 'transient' && (free || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
         await ra.db
           .update(schema.taskDagIssues)
@@ -1572,8 +1571,8 @@ export async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
-  // An advisor that never ran must not be charged an attempt or read as ESCALATE_TO_REPLAN.
-  if (isFreeRedispatch(inv)) {
+  // An advisor that never answered must not be charged an attempt or read as ESCALATE_TO_REPLAN.
+  if (runNeverAnswered(inv)) {
     const ok = await spawnReviewAgent(
       ea,
       issue,
@@ -1819,9 +1818,9 @@ export async function resolveEscalationPhase(
     if (!inv || runIsLive(inv)) {
       return { status: 'waiting', row: ea.current };
     }
-    // A replanner that never ran is not an attempt: free the slot and let escalation
+    // A replanner that never answered is not an attempt: free the slot and let escalation
     // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
-    if (isFreeRedispatch(inv)) {
+    if (runNeverAnswered(inv)) {
       await ea.db
         .update(schema.taskDagPlans)
         .set({ replannerInvocationId: null, updatedAt: new Date() })
@@ -2273,11 +2272,11 @@ export async function resolveDagPhase(
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,
           });
-          // Preemption is a scheduling decision Haive made, not an environment problem, and a
-          // run that never started ran nothing, so both re-dispatch for free. Charging them here
-          // would let a busy machine drive a healthy issue to DAG_INFRA_EXHAUSTED and halt the
-          // task with a misleading "raise RUNTIME_MEMORY_MB" diagnosis.
-          const free = isFreeRedispatch(inv);
+          // A run Haive preempted, one that never started and one a Retry, Resume or Stop
+          // superseded are no failure of the coder's, so all three re-dispatch for free. Charging
+          // them would let a busy machine drive a healthy issue to DAG_INFRA_EXHAUSTED and halt
+          // the task with a misleading "raise RUNTIME_MEMORY_MB" diagnosis.
+          const free = runNeverAnswered(inv);
           // A coder SIGKILLed at its own budget needs MORE TIME, not another identical run.
           // Without this it burns every infra retry at the budget that just killed it and its
           // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three
