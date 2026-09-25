@@ -26,6 +26,7 @@ import {
   removeFileIfNoFollow,
   removeNoFollow,
   renameNoFollow,
+  rewriteFileIfNoFollow,
   updateFileNoFollow,
   writeFileNoFollow,
 } from '../src/fs-safe.js';
@@ -473,11 +474,49 @@ describe('fs-safe write primitives', () => {
           await writeFile(file, 'PERSON', 'utf8');
           return false;
         }),
-      ).rejects.toThrow(/could not be put back \(EEXIST\); it is at src\/\.a\.txt\.haive-rm-/);
+      ).rejects.toThrow(/could not be put back \(EEXIST\); it is at src\/\.a\.txt\.haive-park-/);
       expect(await readFile(file, 'utf8')).toBe('PERSON');
       const parked = (await readdir(path.join(root, 'src'))).filter((n) => n !== 'a.txt');
       expect(parked).toHaveLength(1);
       expect(await readFile(path.join(root, 'src', parked[0]!), 'utf8')).toBe('hello');
+    });
+  });
+
+  describe('rewriteFileIfNoFollow', () => {
+    const upper = (data: Buffer) => Buffer.from(data.toString('utf8').toUpperCase(), 'utf8');
+
+    it('rewrites a file on its own inode, and leaves one its edit refuses as it was', async () => {
+      const file = path.join(root, 'src', 'a.txt');
+      const ino = (await stat(file)).ino;
+      expect(await rewriteFileIfNoFollow(root, 'src/a.txt', () => null)).toBe('kept');
+      expect(await readFile(file, 'utf8')).toBe('hello');
+      expect(await rewriteFileIfNoFollow(root, 'src/a.txt', upper)).toBe('rewritten');
+      expect(await readFile(file, 'utf8')).toBe('HELLO');
+      expect((await stat(file)).ino).toBe(ino);
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      expect(await readdir(path.join(root, 'src'))).toEqual(['a.txt']);
+    });
+
+    it('reports an absent file, and keeps a link, a directory and an oversized file unread', async () => {
+      const never = () => expect.unreachable();
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'src', 'link.txt'));
+      await mkdir(path.join(root, 'src', 'dir'));
+      expect(await rewriteFileIfNoFollow(root, 'src/none.txt', never)).toBe('absent');
+      expect(await rewriteFileIfNoFollow(root, 'src/link.txt', never)).toBe('kept');
+      expect(await rewriteFileIfNoFollow(root, 'src/dir', never)).toBe('kept');
+      expect(await rewriteFileIfNoFollow(root, 'src/a.txt', never, { maxBytes: 2 })).toBe('kept');
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('never overwrites a file saved at the path while the old one is judged', async () => {
+      const file = path.join(root, 'src', 'a.txt');
+      await expect(
+        rewriteFileIfNoFollow(root, 'src/a.txt', async (data) => {
+          await writeFile(file, 'PERSON', 'utf8');
+          return upper(data);
+        }),
+      ).rejects.toThrow(/could not be put back \(EEXIST\); it is at src\/\.a\.txt\.haive-park-/);
+      expect(await readFile(file, 'utf8')).toBe('PERSON');
     });
   });
 

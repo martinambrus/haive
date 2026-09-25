@@ -3,8 +3,8 @@ import {
   isPathContainmentError,
   readTextNoFollow,
   removeFileIfNoFollow,
+  rewriteFileIfNoFollow,
   toSafeRel,
-  updateFileNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -180,19 +180,16 @@ export async function removeIfHaives(
       );
       return result === 'kept' ? kept : { outcome: result };
     }
-    let edited = false;
-    const result = await updateFileNoFollow(repoPath, rel, (current) => {
-      if (current === null) return null;
+    let noRegion = false;
+    const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
+      const current = data.toString('utf8');
       const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
-      if (region === null) return null;
-      if (!haives(region)) {
-        edited = true;
-        return null;
-      }
-      return upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END);
+      noRegion = region === null;
+      if (region === null || !haives(region)) return null;
+      return Buffer.from(upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END), 'utf8');
     });
-    if (edited) return kept;
-    return { outcome: result === 'updated' ? 'removed' : 'absent' };
+    if (result === 'rewritten') return { outcome: 'removed' };
+    return result === 'absent' || noRegion ? { outcome: 'absent' } : kept;
   } catch (err) {
     if (isPathContainmentError(err)) {
       if (['link', 'not-directory', 'not-regular-file'].includes(err.reason)) return kept;

@@ -26,7 +26,14 @@ vi.mock('@haive/shared', async (importOriginal) => {
 
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { CLI_RULES_TEMPLATE_KIND, normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 
@@ -110,5 +117,25 @@ describe('rolling back a file an upgrade introduced', () => {
     await upgradeRollbackStep.apply(ctx, { detected } as never);
     expect(h.swap).toBeNull();
     expect(await readFile(join(root, REL), 'utf8')).toBe('MINE\n');
+  });
+
+  it('never overwrites an AGENTS.md saved while its rules region was being judged', async () => {
+    const { root, ctx, detected } = await setup();
+    const agents = `# Notes\n\n${CLI_RULES_START}\nRULES\n${CLI_RULES_END}\n`;
+    await writeFile(join(root, 'AGENTS.md'), agents, 'utf8');
+    const region = normalizeContent(extractRegion(agents, CLI_RULES_START, CLI_RULES_END)!);
+    const undo = detected.newArtifactsToUndo[0]!;
+    detected.newArtifactsToUndo = [
+      {
+        ...undo,
+        diskPath: 'AGENTS.md',
+        templateKind: CLI_RULES_TEMPLATE_KIND,
+        writtenHash: sha256Hex(region),
+      },
+    ];
+    h.swap = { when: region, path: join(root, 'AGENTS.md'), content: 'MINE\n' };
+    await upgradeRollbackStep.apply(ctx, { detected } as never);
+    expect(h.swap).toBeNull();
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe('MINE\n');
   });
 });
