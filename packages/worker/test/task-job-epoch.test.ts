@@ -990,6 +990,18 @@ describe('a START job', () => {
     expect(cleanup).not.toHaveBeenCalled();
   });
 
+  it('fails nothing a Retry re-queued while a START that read it failed was before its claim', async () => {
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'failed';
+    // The Retry lands once START has read the task, and the claim's own read then throws.
+    h.state.onRead = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the job went no further');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+  });
+
   it('fails a task still waiting to start when it cannot resolve it', async () => {
     h.state.taskStatus = 'queued';
     h.state.repoGone = true;

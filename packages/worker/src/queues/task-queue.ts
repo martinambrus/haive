@@ -152,6 +152,8 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
 interface HeldTask {
   ctx?: ResolvedTaskContext;
+  /** A START's claim landed, so the task is one this job started. */
+  claimed?: boolean;
 }
 
 interface ResolvedTaskContext {
@@ -1819,6 +1821,7 @@ async function handleStartTask(
   held?: HeldTask,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
+  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
@@ -1843,7 +1846,7 @@ async function handleStartTask(
     );
     return;
   }
-  if (held) held.ctx = ctx;
+  if (held) held.claimed = true;
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
 
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
@@ -3274,7 +3277,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
       // A START that claimed nothing holds no task, so it fails only one nobody has started.
       const statuses =
-        job.name === TASK_JOB_NAMES.START && !held.ctx ? STARTABLE_TASK_STATUSES : undefined;
+        job.name === TASK_JOB_NAMES.START && !held.claimed ? STARTABLE_TASK_STATUSES : undefined;
       await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
         logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
       });
