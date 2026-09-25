@@ -2489,12 +2489,21 @@ restored file is offered again at the next upgrade rather than classified `uncha
 stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
 is invisible there once a sibling rendering has one; the next upgrade still offers it.
 
-**An upgrade or a rollback deletes a file only while it holds what Haive wrote there.**
-`deleteRefusalAt` (02) compares the bytes on disk at APPLY time, hashed the way the plan compares
-them (`pathContentHash`: the whole file, or the rules region alone), with the row's `writtenHash`.
-Apply time, because the form parks between the plan and the apply. A link or a directory standing
-there is kept the same way, since neither is what Haive wrote; only a read that could not run
-fails, which leaves the row for the next attempt. A row alone proves nothing:
+**An upgrade or a rollback deletes a file only while it holds what Haive wrote there, judged on
+the bytes it deletes.** `removeIfHaives` (02, shared by 04) hashes them the way the plan compares
+them (the whole file, or the rules region alone) against the row's `writtenHash`, at APPLY time,
+because the form parks between the plan and the apply. A file is judged on the inode it takes:
+`removeFileIfNoFollow` (`@haive/shared/fs-safe`) moves it to a private name in its directory first,
+so a save landing meanwhile makes a new file the delete never touches, and puts a refused one back
+without replacing a file written since. The rules region is stripped the same way
+(`rewriteFileIfNoFollow`): rewritten on the parked inode and put back, since a strip over the file at
+its path overwrote a save that landed between its read and its write. A file with no region, or no
+AGENTS.md at all, is left as it is; the strip used to write that absence as an empty AGENTS.md,
+which 03 then committed. Only a writer that already held the file open can still land between the
+judge and the act, and nothing short of a lock it takes too can exclude one. A link or a directory
+standing there is kept the same way, since neither is what Haive
+wrote; only a read that could not run fails, which leaves the row for the next attempt. A row
+alone proves nothing:
 `12-post-onboarding` records one even for a file 07 skipped. 02's obsolete removal keeps such a file,
 warns, and leaves its row live. 04's undo of a file the upgrade introduced keeps one edited or replaced
 since, warns, and retires the upgrade's row all the same. 04 also reads only the rows the upgrade WROTE

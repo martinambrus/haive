@@ -1,4 +1,4 @@
-import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -19,8 +19,8 @@ import {
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import {
-  deleteRefusalAt,
   readFileOrEmpty,
+  removeIfHaives,
   resolveBundleItemId,
   safeDiskRel,
 } from './02-upgrade-apply.js';
@@ -417,24 +417,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           warnings.push(`refusing to undo ${item.diskPath}: not a path inside the repository`);
           continue;
         }
-        const refusal = await deleteRefusalAt(ctx.repoPath, rel, item, item.writtenHash);
-        if (refusal !== null) {
+        const removal = await removeIfHaives(ctx.repoPath, rel, item, item.writtenHash);
+        if (removal.outcome === 'kept') {
           // The upgrade's row is still undone; what stands there now stays.
-          warnings.push(refusal);
+          warnings.push(removal.refusal);
           undoneNewArtifactIds.push(item.upgradeArtifactId);
           continue;
-        }
-        if (item.templateKind === CLI_RULES_TEMPLATE_KIND) {
-          // The upgrade introduced the cli-rules region; undo removes just the
-          // region, not the shared AGENTS.md file.
-          const existing = await readFileOrEmpty(ctx.repoPath, rel);
-          await writeFileNoFollow(
-            ctx.repoPath,
-            rel,
-            upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
-          );
-        } else {
-          await removeNoFollow(ctx.repoPath, rel);
         }
         undoneNewArtifactIds.push(item.upgradeArtifactId);
         revertedCount += 1;
