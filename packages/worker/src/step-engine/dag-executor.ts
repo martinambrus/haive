@@ -1046,8 +1046,8 @@ async function acceptWithDebt(
 
 /** Fold one finished review-loop agent into the issue state, spawning the next
  *  agent (a fix-coder after a reviewer's fix_required, or a re-review after a
- *  fix-coder) until the issue resolves. */
-async function ingestReviewRun(
+ *  fix-coder) until the issue resolves. Exported for the unit test. */
+export async function ingestReviewRun(
   ra: ReviewArgs,
   issue: DagIssueRow,
   run: typeof schema.dagAgentRuns.$inferSelect,
@@ -1147,6 +1147,20 @@ async function ingestReviewRun(
   // fix-coder finished → re-review. Its similar sites and concerns are kept as a level coder's are;
   // the review decides the rest.
   const fixed = parseCoderResult(inv);
+  // A fix coder that never ran left no result; re-dispatch it rather than reviewing unchanged code.
+  if (!fixed.parsed && isFreeRedispatch(inv)) {
+    const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const ok = await spawnReviewAgent(
+      ra,
+      issue,
+      'coder',
+      issue.innerIteration,
+      fixCoderPrompt(issue, storedVerdict.success ? storedVerdict.data.issues : [], spec),
+      ['tool_use', 'file_write'],
+    );
+    if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
+    return;
+  }
   if (fixed.similarSites.length > 0) {
     await ra.db
       .update(schema.taskDagIssues)
@@ -1531,9 +1545,10 @@ async function skipIssue(db: Database, issue: DagIssueRow): Promise<void> {
 }
 
 /** Fold one finished issue-advisor run into the issue + return the action taken
- *  ('retry' spawned a fix coder, 'split' added sub-issues, 'accept' resolved with
- *  debt, 'escalate' left it for the replanner). */
-async function ingestAdvisor(
+ *  ('retry' put an agent in flight, a fix coder or the advisor again when it never ran,
+ *  'split' added sub-issues, 'accept' resolved with debt, 'escalate' left it for the
+ *  replanner). Exported for the unit test. */
+export async function ingestAdvisor(
   ea: EscalationArgs,
   issue: DagIssueRow,
   run: typeof schema.dagAgentRuns.$inferSelect,
@@ -1548,6 +1563,22 @@ async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
+  // An advisor that never ran must not be charged an attempt or read as ESCALATE_TO_REPLAN.
+  if (isFreeRedispatch(inv)) {
+    const ok = await spawnReviewAgent(
+      ea,
+      issue,
+      'issue_advisor',
+      issue.advisorInvocations,
+      advisorPrompt(issue, (await issueSpecText(ea.specView, issue)).text),
+      ['tool_use'],
+    );
+    if (!ok) {
+      await escalateIssueToReplan(ea.db, issue, 'no advisor provider available');
+      return 'escalate';
+    }
+    return 'retry';
+  }
   const out = parseAdvisor(inv);
   await ea.db
     .update(schema.taskDagIssues)
@@ -1766,8 +1797,9 @@ async function reReadLevelIssues(ea: EscalationArgs): Promise<DagIssueRow[]> {
 
 /** Handle a level's failed issues: issue-advisor (middle loop) then replanner
  *  (outer loop). Returns 'ok' (no failures left → merge), 'waiting' (an agent is
- *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. */
-async function resolveEscalationPhase(
+ *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. Exported for
+ *  the unit test. */
+export async function resolveEscalationPhase(
   ea: EscalationArgs,
 ): Promise<{ status: 'ok' | 'waiting' | 'reloop' | 'aborted'; row: TaskStepRow; error?: string }> {
   // A plan-level replanner in flight?
@@ -1777,6 +1809,24 @@ async function resolveEscalationPhase(
     });
     if (!inv || runIsLive(inv)) {
       return { status: 'waiting', row: ea.current };
+    }
+    // A replanner that never ran is not an attempt: free the slot and let escalation
+    // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
+    if (isFreeRedispatch(inv)) {
+      await ea.db
+        .update(schema.taskDagPlans)
+        .set({ replannerInvocationId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.taskDagPlans.id, ea.plan.id),
+            eq(schema.taskDagPlans.replannerInvocationId, inv.id),
+          ),
+        );
+      await ea.db
+        .update(schema.cliInvocations)
+        .set({ consumedAt: new Date() })
+        .where(eq(schema.cliInvocations.id, inv.id));
+      return { status: 'reloop', row: ea.current };
     }
     const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
     const action = await ingestReplanner(ea, inv, failedNow);

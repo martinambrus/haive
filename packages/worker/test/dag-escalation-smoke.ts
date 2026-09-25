@@ -229,7 +229,13 @@ async function main(): Promise<void> {
       const finish = (out: unknown) =>
         db
           .update(schema.cliInvocations)
-          .set({ exitCode: 0, rawOutput: fence(out), endedAt: new Date() })
+          .set({
+            // Mirrors handlers.ts: a completed run started, whatever it returned.
+            startedAt: new Date(),
+            exitCode: 0,
+            rawOutput: fence(out),
+            endedAt: new Date(),
+          })
           .where(eq(schema.cliInvocations.id, payload.invocationId));
 
       const issue = await db.query.taskDagIssues.findFirst({

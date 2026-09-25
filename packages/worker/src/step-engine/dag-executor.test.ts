@@ -20,6 +20,9 @@ import {
   parseAdvisor,
   parseReplanner,
   resolveDagPhase,
+  ingestReviewRun,
+  ingestAdvisor,
+  resolveEscalationPhase,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
@@ -1155,5 +1158,232 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }
+  });
+});
+
+/** A fake db for spawnReviewAgent's write path: tracks every insert/update by table so a
+ *  test can assert what was (and was not) written, without modelling every table's shape.
+ *  Ledger/terseness augmentation reads no table this db provides and degrade to a no-op
+ *  (augmentPromptWithLedger catches its own read failure). */
+function makeSpawnDb() {
+  const inserts: { table: unknown; values: Record<string, unknown> }[] = [];
+  const updates: { table: unknown; patch: Record<string, unknown>; cond: unknown }[] = [];
+  let nextInvId = 0;
+  const db = {
+    query: {
+      userStepCliRolePreferences: { findFirst: async () => undefined },
+      userStepCliPreferences: { findFirst: async () => undefined },
+    },
+    insert: (table: unknown) => ({
+      values: (values: Record<string, unknown>) => {
+        const record = () => inserts.push({ table, values });
+        return {
+          returning: async () => {
+            record();
+            return table === schema.cliInvocations ? [{ id: `spawned-inv-${++nextInvId}` }] : [{}];
+          },
+          then: (resolve: (v: unknown) => void) => {
+            record();
+            resolve(undefined);
+          },
+        };
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: (cond: unknown) => {
+          updates.push({ table, patch, cond });
+          return { then: (resolve: (v: unknown) => void) => resolve(undefined) };
+        },
+      }),
+    }),
+  };
+  return { db, inserts, updates };
+}
+
+const workingDispatchPlan = () =>
+  ({
+    mode: 'cli',
+    providerId: 'p1',
+    providerName: 'p1',
+    adapter: null,
+    provider: null,
+    invocation: { kind: 'cli', spec: {} },
+    effectivePrompt: undefined,
+    effort: null,
+    reason: 'test stub',
+  }) as never;
+
+describe('ingestReviewRun: a fix coder that never started', () => {
+  it('re-dispatches the coder at the same iteration instead of reviewing unchanged code', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      stuckCount: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      errorMessage: null,
+      reviewerVerdict: {
+        verdict: 'fix_required',
+        criteria_results: [],
+        issues: [
+          {
+            severity: 'medium',
+            file: 'a.ts',
+            description: 'stale cache bug',
+            suggestion: 'invalidate on write',
+          },
+        ],
+      },
+    } as never;
+    const run = { id: 'run-1' } as never;
+    const neverStarted = inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: null,
+      startedAt: null,
+    });
+
+    await ingestReviewRun(ra, issue, run, neverStarted);
+
+    // No stuckCount/innerIteration/reviewStatus/reviewerVerdict change: the counters the
+    // fix_required branch would have bumped stay untouched.
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+    const coderInv = inserts.find((i) => i.table === schema.cliInvocations);
+    const runInsert = inserts.find((i) => i.table === schema.dagAgentRuns);
+    expect(coderInv?.values.mode).toBe('dag_parallel');
+    expect(coderInv?.values.agentTitle).toContain('Fix coder');
+    // The stored verdict's issues were read and threaded into the re-dispatch, not dropped.
+    expect(coderInv?.values.prompt).toContain('stale cache bug');
+    expect(runInsert?.values.role).toBe('coder');
+    expect(runInsert?.values.iteration).toBe(1);
+    // Exactly one agent was spawned — a reviewer was never dispatched against unchanged code.
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(1);
+  });
+});
+
+describe('ingestAdvisor: an advisor that never started', () => {
+  it('re-dispatches the advisor for free instead of escalating on missing output', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const ea = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: {} as never,
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      advisorInvocations: 1,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    const run = { id: 'run-1' } as never;
+    const neverStarted = inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: null,
+      startedAt: null,
+    });
+
+    const result = await ingestAdvisor(ea, issue, run, neverStarted);
+
+    expect(result).toBe('retry');
+    // advisorInvocations is never charged for a run that never ran.
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+    const advisorInv = inserts.find((i) => i.table === schema.cliInvocations);
+    expect(advisorInv?.values.mode).toBe('dag_parallel');
+    expect(advisorInv?.values.agentTitle).toContain('Advisor');
+  });
+});
+
+describe('resolveEscalationPhase: a replanner run that never started', () => {
+  it('clears the plan cursor by compare-and-set instead of aborting via ingestReplanner', async () => {
+    const planUpdates: { patch: Record<string, unknown>; cond: unknown }[] = [];
+    const invUpdates: { patch: Record<string, unknown>; cond: unknown }[] = [];
+    const replannerInv = inv({
+      id: 'replanner-inv-1',
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: null,
+      startedAt: null,
+      endedAt: new Date(),
+      supersededAt: null,
+    } as never);
+    const db = {
+      query: {
+        cliInvocations: { findFirst: async () => replannerInv },
+      },
+      update: (table: unknown) => ({
+        set: (patch: Record<string, unknown>) => ({
+          where: (cond: unknown) => {
+            if (table === schema.taskDagPlans) planUpdates.push({ patch, cond });
+            if (table === schema.cliInvocations) invUpdates.push({ patch, cond });
+            return { then: (resolve: (v: unknown) => void) => resolve(undefined) };
+          },
+        }),
+      }),
+    };
+    const ea = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1', status: 'running' } as never,
+      params: {} as never,
+      stepDef: {} as never,
+      providers: [],
+      deps: {} as never,
+      taskId: 'task1',
+      specView: {} as never,
+      attachmentsNotice: '',
+      plan: { id: 'plan1', replannerInvocationId: 'replanner-inv-1', replannerInvocations: 1 },
+    } as never;
+
+    const result = await resolveEscalationPhase(ea);
+
+    expect(result.status).toBe('reloop');
+    expect(planUpdates).toHaveLength(1);
+    // Compare-and-set: cleared only while the plan still names THIS invocation.
+    expect(conditionValues(planUpdates[0]!.cond)).toEqual(
+      expect.arrayContaining(['plan1', 'replanner-inv-1']),
+    );
+    expect(planUpdates[0]!.patch).toMatchObject({ replannerInvocationId: null });
+    // A run that never ran is not an attempt: ingestReplanner's charge never happened.
+    expect(planUpdates[0]!.patch).not.toHaveProperty('replannerInvocations');
+    expect(invUpdates).toHaveLength(1);
+    expect(invUpdates[0]!.patch).toHaveProperty('consumedAt');
   });
 });

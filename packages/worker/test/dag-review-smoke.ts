@@ -238,6 +238,8 @@ async function main(): Promise<void> {
         db
           .update(schema.cliInvocations)
           .set({
+            // Mirrors handlers.ts: a completed run started, whatever it returned.
+            startedAt: new Date(),
             exitCode: 0,
             rawOutput: typeof out === 'string' ? out : fence(out),
             endedAt: new Date(),
