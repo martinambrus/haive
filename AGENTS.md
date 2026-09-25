@@ -310,7 +310,12 @@ claim that committed before the bump is on the rows the reset reads after it: th
 fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, NOWAIT,
 since they hold the task row, answering 503 when a pass is mid-write). Both kill the task's CLI
 sandboxes only once that has committed: a refused action then leaves every run alive, and a dying
-run's completion finds its invocation already superseded. The task retry settles its
+run's completion finds its invocation already superseded.
+The loop Resume, `retry_ai`, Skip and a CLI switch on a failed or parked step take the task back
+to their step the same way, through one helper (`moveTaskToStep`), and queue their advance at
+the epoch it moved to; a CLI switch on a `pending` row only invalidates its cached form, since
+the task has either not reached that row or already queued the advance that claims it.
+The task retry settles its
 rows again after its bump, since answering a parked form revives the task and can open a row in
 between. That settle locks every active row before it writes (`settleActiveSteps`): a pass that got
 in before the bump can still move its row from a form to `running` between two unlocked writes and

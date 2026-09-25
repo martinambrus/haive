@@ -209,6 +209,57 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
   }
 }
 
+/** A row whose CLI may still be running in a sandbox. */
+const isLive = (r: { status: string }) => r.status === 'running' || r.status === 'waiting_cli';
+
+/** Take the task back to `step` for an action that re-runs it where it stands: reset the rows the
+ *  task leaves active, point the task at the step under a new epoch, then reset what a pass
+ *  activated before that bump. Runs in the action's transaction, after the step's own writes; the
+ *  caller kills sandboxes only once that commits, as Retry does, since the sweep can refuse it. */
+async function moveTaskToStep(
+  tx: DbHandle,
+  taskId: string,
+  step: Pick<
+    typeof schema.taskSteps.$inferSelect,
+    'id' | 'stepId' | 'runSeq' | 'stepIndex' | 'round'
+  >,
+  leftActive: (typeof schema.taskSteps.$inferSelect)[],
+  now: Date,
+  // Skip revives an ended task as Retry does; the other callers refuse one, so a cancellation stands.
+  options: { reviveEnded?: boolean } = {},
+) {
+  await resetRowsForRerun(tx, taskId, leftActive, now);
+  const [bumped] = await tx
+    .update(schema.tasks)
+    .set({
+      status: 'running',
+      errorMessage: null,
+      completedAt: null,
+      allowanceAutoResumeCount: 0,
+      currentStepId: step.stepId,
+      currentStepIndex: step.runSeq ?? step.stepIndex,
+      currentRound: step.round,
+      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+      ...CLEAR_ALLOWANCE_WATCH,
+      updatedAt: now,
+    })
+    .where(
+      options.reviveEnded
+        ? eq(schema.tasks.id, taskId)
+        : and(
+            eq(schema.tasks.id, taskId),
+            notInArray(schema.tasks.status, ['cancelled', 'completed']),
+          ),
+    )
+    .returning({ epoch: schema.tasks.orchestrationEpoch });
+  if (!bumped) {
+    throw new HttpError(409, 'The task has ended and cannot be moved back to a step');
+  }
+  const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
+  await resetRowsForRerun(tx, taskId, late, now);
+  return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
+}
+
 /** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
  *
  *  The fan-out arm of `resume` marks the dead terminals and hands back to the worker — but
@@ -771,6 +822,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           // run_seq (run-monotonic order), not step_index — mirrors the worker's
           // resolveCurrentStepIndex so the "Step index" label reflects true run order.
           currentStepIndex: step.runSeq ?? step.stepIndex,
+          currentRound: step.round,
           // Bump the orchestration epoch so any advance-step job still queued from
           // before this retry is skipped as stale (a retry stops in-flight work first).
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
@@ -955,6 +1007,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             allowanceAutoResumeCount: 0,
             currentStepId: stepId,
             currentStepIndex: step.runSeq ?? step.stepIndex,
+            currentRound: step.round,
             // Bumped like a retry: this re-run invalidates any advance still queued against
             // the state it is replacing.
             orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
@@ -1024,59 +1077,61 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         'not_resumable',
       );
     }
-    if (step.status === 'running' || step.status === 'waiting_cli') {
+    // A row still active elsewhere is reset, as a Retry resets one: the resume moves the task back
+    // to this step, and a row left active makes the worker refuse the advance queued below.
+    const leftActive = rowsLeftActive(
+      await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+      [step.id],
+    );
+    const now = new Date();
+    const moved = await db.transaction(async (tx) => {
+      // Supersede ONLY the failed pass's invocation (latest non-superseded,
+      // non-consumed). Prior passes are already consumed; with this superseded,
+      // resolveLlmPhase sees no live invocation and re-enqueues pass N afresh.
+      await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, step.id),
+            isNull(schema.cliInvocations.supersededAt),
+            isNull(schema.cliInvocations.consumedAt),
+          ),
+        );
+      // Preserve detectOutput / formSchema / formValues / iterations / iterationCount
+      // / output so advanceStep skips detect + form and the loop resumes at
+      // upcomingIteration = iterations.length with the now-selected provider.
+      await tx
+        .update(schema.taskSteps)
+        .set({
+          status: 'running',
+          errorMessage: null,
+          errorHint: null,
+          endedAt: null,
+          // Re-opening a closed row: bill the gap since it closed as idle, not work.
+          idleMs: CLOSED_GAP_INTO_IDLE_MS,
+          statusMessage: null,
+          updatedAt: now,
+        })
+        .where(eq(schema.taskSteps.id, step.id));
+      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      await tx.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: step.id,
+        eventType: 'step.resume',
+        payload: {
+          stepId,
+          fromIteration: step.iterationCount,
+          leftActive: result.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
+          note: body.note ?? null,
+        },
+      });
+      return result;
+    });
+    if (isLive(step) || moved.leftActive.some(isLive)) {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for resume');
     }
-    const now = new Date();
-    // Supersede ONLY the failed pass's invocation (latest non-superseded,
-    // non-consumed). Prior passes are already consumed; with this superseded,
-    // resolveLlmPhase sees no live invocation and re-enqueues pass N afresh.
-    await db
-      .update(schema.cliInvocations)
-      .set({ supersededAt: now })
-      .where(
-        and(
-          eq(schema.cliInvocations.taskStepId, step.id),
-          isNull(schema.cliInvocations.supersededAt),
-          isNull(schema.cliInvocations.consumedAt),
-        ),
-      );
-    // Preserve detectOutput / formSchema / formValues / iterations / iterationCount
-    // / output so advanceStep skips detect + form and the loop resumes at
-    // upcomingIteration = iterations.length with the now-selected provider.
-    await db
-      .update(schema.taskSteps)
-      .set({
-        status: 'running',
-        errorMessage: null,
-        errorHint: null,
-        endedAt: null,
-        // Re-opening a closed row: bill the gap since it closed as idle, not work.
-        idleMs: CLOSED_GAP_INTO_IDLE_MS,
-        statusMessage: null,
-        updatedAt: now,
-      })
-      .where(eq(schema.taskSteps.id, step.id));
-    await db
-      .update(schema.tasks)
-      // completedAt: null — a prior failure stamped it; leaving it set freezes the
-      // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
-      .set({
-        status: 'running',
-        errorMessage: null,
-        completedAt: null,
-        // reset the auto-resume thrash counter: a manual action gives a fresh budget
-        allowanceAutoResumeCount: 0,
-        ...CLEAR_ALLOWANCE_WATCH,
-        updatedAt: now,
-      })
-      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
-    await appendTaskEvent(db, id, step.id, 'step.resume', {
-      stepId,
-      fromIteration: step.iterationCount,
-      note: body.note ?? null,
-    });
     // Stamp the epoch (here and on the other recovery actions below) so a task-level retry
     // that bumps it invalidates this job instead of letting it run against the restarted
     // task. An UNSTAMPED job is exempt from the worker's epoch guard, which is how a stale
@@ -1090,7 +1145,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         userId,
         stepId,
         round: step.round,
-        epoch: task.orchestrationEpoch,
+        epoch: moved.epoch,
       } as TaskJobPayload,
       {
         attempts: 3,
@@ -1125,47 +1180,56 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       priorError: step.errorMessage ?? '',
       priorOutput: (lastInv[0]?.rawOutput ?? '').slice(-2000),
     };
-    // Supersede the failed pass's invocation, then preserve detect/form/values
-    // and set the fix marker so advanceStep runs the fix agent next.
-    await db
-      .update(schema.cliInvocations)
-      .set({ supersededAt: now })
-      .where(
-        and(
-          eq(schema.cliInvocations.taskStepId, step.id),
-          isNull(schema.cliInvocations.supersededAt),
-          isNull(schema.cliInvocations.consumedAt),
-        ),
-      );
-    await db
-      .update(schema.taskSteps)
-      .set({
-        status: 'running',
-        errorMessage: null,
-        errorHint: null,
-        endedAt: null,
-        // Re-opening a closed row: bill the gap since it closed as idle, not work.
-        idleMs: CLOSED_GAP_INTO_IDLE_MS,
-        statusMessage: null,
-        aiFixContext,
-        updatedAt: now,
-      })
-      .where(eq(schema.taskSteps.id, step.id));
-    await db
-      .update(schema.tasks)
-      // completedAt: null — a prior failure stamped it; leaving it set freezes the
-      // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
-      .set({
-        status: 'running',
-        errorMessage: null,
-        completedAt: null,
-        // reset the auto-resume thrash counter: a manual action gives a fresh budget
-        allowanceAutoResumeCount: 0,
-        ...CLEAR_ALLOWANCE_WATCH,
-        updatedAt: now,
-      })
-      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
-    await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
+    // Moves the task back to this step, so what it leaves active elsewhere is reset as a Retry
+    // resets it.
+    const leftActive = rowsLeftActive(
+      await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+      [step.id],
+    );
+    const moved = await db.transaction(async (tx) => {
+      // Supersede the failed pass's invocation, then preserve detect/form/values
+      // and set the fix marker so advanceStep runs the fix agent next.
+      await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, step.id),
+            isNull(schema.cliInvocations.supersededAt),
+            isNull(schema.cliInvocations.consumedAt),
+          ),
+        );
+      await tx
+        .update(schema.taskSteps)
+        .set({
+          status: 'running',
+          errorMessage: null,
+          errorHint: null,
+          endedAt: null,
+          // Re-opening a closed row: bill the gap since it closed as idle, not work.
+          idleMs: CLOSED_GAP_INTO_IDLE_MS,
+          statusMessage: null,
+          aiFixContext,
+          updatedAt: now,
+        })
+        .where(eq(schema.taskSteps.id, step.id));
+      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      await tx.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: step.id,
+        eventType: 'step.retry_ai',
+        payload: {
+          stepId,
+          leftActive: result.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
+          note: body.note ?? null,
+        },
+      });
+      return result;
+    });
+    if (moved.leftActive.some(isLive)) {
+      const killed = await killTaskSandboxes(id);
+      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for retry_ai');
+    }
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
       {
@@ -1173,7 +1237,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         userId,
         stepId,
         round: step.round,
-        epoch: task.orchestrationEpoch,
+        epoch: moved.epoch,
       } as TaskJobPayload,
       {
         attempts: 3,
@@ -1195,11 +1259,17 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
       throw new HttpError(409, `Cannot skip step in status ${step.status}`);
     }
+    // The walk resumes after this step, so what the task leaves active elsewhere is reset as a
+    // Retry resets it: kept active, it makes the worker refuse the advance queued below.
+    const leftActive = rowsLeftActive(
+      await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+      [step.id],
+    );
     const now = new Date();
     const closedIdleMs = step.waitingStartedAt
       ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
       : 0;
-    await db.transaction(async (tx) => {
+    const moved = await db.transaction(async (tx) => {
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1211,27 +1281,23 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, { reviveEnded: true });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
         eventType: 'step.skip',
-        payload: { stepId, note: body.note ?? null },
+        payload: {
+          stepId,
+          leftActive: result.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
+          note: body.note ?? null,
+        },
       });
-      await tx
-        .update(schema.tasks)
-        // completedAt: null — a prior failure stamped it; leaving it set freezes the
-        // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
-        .set({
-          status: 'running',
-          errorMessage: null,
-          completedAt: null,
-          // reset the auto-resume thrash counter: a manual action gives a fresh budget
-          allowanceAutoResumeCount: 0,
-          ...CLEAR_ALLOWANCE_WATCH,
-          updatedAt: now,
-        })
-        .where(eq(schema.tasks.id, id));
+      return result;
     });
+    if (moved.leftActive.some(isLive)) {
+      const killed = await killTaskSandboxes(id);
+      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for skip');
+    }
     // The api can't see unmaterialized future steps, so it can't compute the next
     // step. Enqueue an advance for the SKIPPED step; the worker sees it is already
     // terminal and advances to the next step via the registry run list — the same
@@ -1243,7 +1309,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         userId,
         stepId,
         round: step.round,
-        epoch: task.orchestrationEpoch,
+        epoch: moved.epoch,
       } as TaskJobPayload,
       {
         attempts: 3,
@@ -1548,6 +1614,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       status: true,
       iterationCount: true,
       round: true,
+      runSeq: true,
+      stepIndex: true,
       // Timing fields for the carried_* fold when this change resets the step below.
       startedAt: true,
       endedAt: true,
@@ -1627,76 +1695,90 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
   // for a mid-loop step (iterationCount > 0) so swapping the CLI before Resume
   // keeps the completed passes + the form instead of restarting the step.
-  let invalidated = false;
+  let redrive: { epoch: number; leftActive: (typeof schema.taskSteps.$inferSelect)[] } | null =
+    null;
   if (
     step.iterationCount === 0 &&
     (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
   ) {
-    // A failed step still carries its ended cli_invocation. Without superseding
-    // it here, the re-advance below makes resolveLlmPhase re-read that old
-    // invocation and re-surface its error (and its provider) instead of
-    // dispatching the newly-selected CLI — so changing the provider on a failed
-    // step appears to do nothing (the old CLI's terminal flashes, then its error
-    // returns). Mirror the retry handler: supersede live invocations + drop
-    // agent minings. Done before the status reset so a failure here leaves the
-    // step failed (safe) rather than pending with a stale live invocation.
-    await db
-      .update(schema.cliInvocations)
-      .set({ supersededAt: new Date() })
-      .where(
-        and(
-          eq(schema.cliInvocations.taskStepId, step.id),
-          isNull(schema.cliInvocations.supersededAt),
-        ),
-      );
-    await db
-      .delete(schema.taskStepAgentMinings)
-      .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
+    // A failed or parked step is re-run on the new CLI, which takes the task back to it as a
+    // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
+    // invalidated: the task has either not reached it, where an advance queued from here would
+    // run it out of order, or already queued the advance that claims it.
+    const movesTask = step.status !== 'pending';
+    const leftActive = movesTask
+      ? rowsLeftActive(
+          await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+          [step.id],
+        )
+      : [];
     // Fold the finishing run's timing into carried_* before zeroing, so switching the
     // CLI and re-running the step keeps its accrued work/idle/effort (same as retry).
     // computeFoldContribution avoids carrying an orphaned open run's span as work.
     const now = new Date();
     const contrib = computeFoldContribution(step, now.getTime());
-    await db
-      .update(schema.taskSteps)
-      .set({
-        status: 'pending',
-        detectOutput: null,
-        formSchema: null,
-        statusMessage: null,
-        startedAt: null,
-        endedAt: null,
-        errorMessage: null,
-        idleMs: 0,
-        waitingStartedAt: null,
-        userActiveMs: 0,
-        carriedWorkMs: step.carriedWorkMs + contrib.workMs,
-        carriedIdleMs: step.carriedIdleMs + contrib.idleMs,
-        carriedUserActiveMs: step.carriedUserActiveMs + contrib.userActiveMs,
-        updatedAt: now,
-      })
-      .where(eq(schema.taskSteps.id, step.id));
-    // Mirror the retry/resume handlers: a failed task must leave the failed state
-    // and shed its stale top-level error when its failed step is reset + re-run via
-    // a provider/model change, else the task page keeps showing the old error after
-    // the re-run passes.
-    await db
-      .update(schema.tasks)
-      .set({ status: 'running', errorMessage: null, updatedAt: new Date() })
-      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
-    invalidated = true;
+    redrive = await db.transaction(async (tx) => {
+      // A failed step still carries its ended cli_invocation. Without superseding
+      // it here, the re-advance below makes resolveLlmPhase re-read that old
+      // invocation and re-surface its error (and its provider) instead of
+      // dispatching the newly-selected CLI — so changing the provider on a failed
+      // step appears to do nothing (the old CLI's terminal flashes, then its error
+      // returns). Mirror the retry handler: supersede live invocations + drop
+      // agent minings. Done before the status reset so a failure here leaves the
+      // step failed (safe) rather than pending with a stale live invocation.
+      await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, step.id),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        );
+      await tx
+        .delete(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
+      await tx
+        .update(schema.taskSteps)
+        .set({
+          status: 'pending',
+          detectOutput: null,
+          formSchema: null,
+          statusMessage: null,
+          startedAt: null,
+          endedAt: null,
+          errorMessage: null,
+          idleMs: 0,
+          waitingStartedAt: null,
+          userActiveMs: 0,
+          carriedWorkMs: step.carriedWorkMs + contrib.workMs,
+          carriedIdleMs: step.carriedIdleMs + contrib.idleMs,
+          carriedUserActiveMs: step.carriedUserActiveMs + contrib.userActiveMs,
+          updatedAt: now,
+        })
+        .where(eq(schema.taskSteps.id, step.id));
+      if (movesTask) return moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
+      return null;
+    });
+    if (redrive?.leftActive.some(isLive)) {
+      const killed = await killTaskSandboxes(id);
+      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for a CLI switch');
+    }
   }
 
   await appendTaskEvent(db, id, step.id, 'step.cli_provider_preference_changed', {
     stepId,
     cliProviderId: body.cliProviderId,
     by: userId,
+    ...(redrive && redrive.leftActive.length > 0
+      ? { leftActive: redrive.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })) }
+      : {}),
   });
 
   // Re-enqueue the step so the worker re-runs detect/form against the new
   // CLI. Without this the step would sit in 'pending' forever and the user
   // would be stuck (no form to fill, no job in flight).
-  if (invalidated) {
+  if (redrive) {
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
       {
@@ -1704,7 +1786,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         userId,
         stepId,
         round: step.round,
-        epoch: task.orchestrationEpoch,
+        epoch: redrive.epoch,
       } as TaskJobPayload,
       {
         attempts: 3,
