@@ -58,7 +58,11 @@ import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
-import { clearTaskPause, stopActiveCliInvocations } from '../../lib/task-control.js';
+import {
+  clearTaskPause,
+  settleActiveSteps,
+  stopActiveCliInvocations,
+} from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -1077,10 +1081,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await stopActiveCliInvocations(db, id, { failTask: false });
       // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
       // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
-      await db
-        .update(schema.taskSteps)
-        .set({ status: 'pending', waitingStartedAt: null, updatedAt: new Date() })
-        .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.status, 'waiting_form')));
+      await settleActiveSteps(db, id);
       // Wipe the transient wait notes ("Waiting for a free runtime slot…", "Queued — machine at
       // capacity…") off every pending row. A retry replays from step 0 and the fix loop restarts
       // at round 1, so rows materialized by a previous, longer run (rounds 2+) are orphaned at
@@ -1117,6 +1118,10 @@ taskRoutes.post('/:id/action', async (c) => {
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, id));
+      // Answering a parked form revives the task, so its pass can open a row between the settle
+      // above and the bump. None can at the old epoch after it, so settle once more.
+      await stopActiveCliInvocations(db, id, { failTask: false });
+      await settleActiveSteps(db, id);
       await appendTaskEvent(db, id, null, 'task.retried', { by: userId });
       await getTaskQueue().add(TASK_JOB_NAMES.START, { taskId: id, userId } as TaskJobPayload, {
         attempts: 3,

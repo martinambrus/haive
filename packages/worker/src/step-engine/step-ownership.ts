@@ -5,6 +5,32 @@ import { schema, type Database } from '@haive/database';
 type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
+/** Statuses a task never comes back from. Cancel is the user's final word and completion is
+ *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
+ *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
+export const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
+
+/** A job's write to the task under the epoch the job holds. It lands only while the task is still
+ *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. A job may
+ *  revive a task that was already failed when it picked it up (`reviveFailed`), which the pickup
+ *  guard allows only for an answer to a form still parked, since answering it reopens the task. */
+export interface TaskFence {
+  epoch: number;
+  reviveFailed?: boolean;
+}
+
+export function taskWriteTarget(taskId: string, fence?: TaskFence) {
+  const refused = fence !== undefined && !fence.reviveFailed;
+  return and(
+    eq(schema.tasks.id, taskId),
+    notInArray(schema.tasks.status, [
+      ...TERMINAL_TASK_STATUSES,
+      ...(refused ? (['failed'] as const) : []),
+    ]),
+    ...(fence ? [eq(schema.tasks.orchestrationEpoch, fence.epoch)] : []),
+  );
+}
+
 const owned = (id: string) =>
   and(
     eq(schema.taskSteps.id, id),
@@ -49,4 +75,40 @@ export async function lockOwnedStep(db: Database | DbHandle, id: string): Promis
     .where(owned(id))
     .for('update');
   return rows.length > 0;
+}
+
+class ClaimOvertaken extends Error {}
+
+/** Open a pass on its `pending` row (claim it, or skip it). With the job's epoch, the fence is read
+ *  FOR SHARE after the flip, so a reset's uncommitted epoch bump holds it and then refuses it. */
+export async function openPendingStep(
+  db: Database,
+  taskId: string,
+  epoch: number | null | undefined,
+  id: string,
+  patch: PgUpdateSetSource<typeof schema.taskSteps>,
+): Promise<TaskStepRow | null> {
+  const flip = (h: Database | DbHandle) =>
+    h
+      .update(schema.taskSteps)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.status, 'pending')))
+      .returning();
+  if (epoch == null) return (await flip(db))[0] ?? null;
+  try {
+    return await db.transaction(async (tx) => {
+      const [claimed] = await flip(tx);
+      if (!claimed) return null;
+      const held = await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(taskWriteTarget(taskId, { epoch }))
+        .for('share');
+      if (held.length === 0) throw new ClaimOvertaken();
+      return claimed;
+    });
+  } catch (err) {
+    if (err instanceof ClaimOvertaken) return null;
+    throw err;
+  }
 }

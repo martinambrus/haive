@@ -3,6 +3,8 @@ import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
 
+type DbHandle = Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0];
+
 /** Who initiated a stop. The owner sees the resulting message on their own task page, so this is
  *  not cosmetic — see the `by` local below. */
 export type StopActor = 'user' | 'admin';
@@ -55,47 +57,7 @@ export async function stopActiveCliInvocations(
       })
       .where(eq(schema.cliInvocations.id, inv.id));
   }
-  // Fail whatever step is stuck in running/waiting_cli. This covers BOTH a CLI
-  // step (whose invocation we just superseded) AND a frozen deterministic step
-  // with no live invocation — otherwise un-stoppable because there is nothing
-  // in cli_invocations to cancel. Steps run one-at-a-time per task, so this only
-  // ever hits the single active step.
-  //
-  // A step parked on the runtime-admission gate is `pending`, not running/waiting_cli, and it
-  // owns no invocation — so before this it matched nothing, `stopped` came back empty, the
-  // failTask branch below never fired, and Stop was a silent no-op while the 15s park poll
-  // kept re-parking the step forever. The park marker is what identifies that row precisely
-  // (an ordinary not-yet-run downstream step has status pending with a NULL marker, and must
-  // not be failed).
-  const stopped = await db
-    .update(schema.taskSteps)
-    .set({
-      status: 'failed',
-      errorMessage: `Stopped by ${by}`,
-      endedAt: now,
-      statusMessage: null,
-      // Fold an outstanding park into idle_ms before closing the row — see the same fold in
-      // cancelTaskRow (api/lib/cancel-task.ts) for why stamping ended_at alone silently turns
-      // a recorded park back into work, and why the int4 clamp is load-bearing.
-      // Caveat accepted: a step re-entered from waiting_cli keeps that status through its
-      // apply phase (step-runner.ts only flips pending -> running), so stopping mid-apply
-      // books that sliver as idle. Apply windows are sub-minute here (777 such rows total
-      // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
-      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
-      waitingStartedAt: null,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, taskId),
-        or(
-          inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
-          and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
-        ),
-      ),
-    )
-    .returning({ id: schema.taskSteps.id });
+  const stopped = await failStuckSteps(db, taskId, by, now);
   if (opts.failTask && (active.length > 0 || stopped.length > 0)) {
     // Drop the task to `failed` (restartable) from any non-terminal state — incl.
     // `waiting_user`, which a half-finished step transition can leave behind.
@@ -128,6 +90,80 @@ export async function stopActiveCliInvocations(
   // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
   const killed = await killTaskSandboxes(taskId);
   return { killed, cancelled: active.length, stopped: stopped.length };
+}
+
+/** Leave none of a restarting task's steps active: fail the stuck ones and re-offer a parked form
+ *  rather than fail it. A pass can move a row between those two writes, so every active row is
+ *  locked first and both land in one transaction. */
+export async function settleActiveSteps(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+): Promise<void> {
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    await tx
+      .select({ id: schema.taskSteps.id })
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, taskId),
+          inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
+        ),
+      )
+      .for('update');
+    await failStuckSteps(tx, taskId, 'user', now);
+    await tx
+      .update(schema.taskSteps)
+      .set({ status: 'pending', waitingStartedAt: null, updatedAt: now })
+      .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
+  });
+}
+
+/** Fail whatever step is stuck in running/waiting_cli. This covers BOTH a CLI step (whose
+ *  invocation the caller superseded) AND a frozen deterministic step with no live invocation —
+ *  otherwise un-stoppable because there is nothing in cli_invocations to cancel.
+ *
+ *  A step parked on the runtime-admission gate is `pending`, not running/waiting_cli, and it
+ *  owns no invocation — so before this it matched nothing, `stopped` came back empty, the
+ *  failTask branch never fired, and Stop was a silent no-op while the 15s park poll kept
+ *  re-parking the step forever. The park marker is what identifies that row precisely (an
+ *  ordinary not-yet-run downstream step has status pending with a NULL marker, and must not be
+ *  failed). */
+function failStuckSteps(
+  db: ReturnType<typeof getDb> | DbHandle,
+  taskId: string,
+  by: string,
+  now: Date,
+) {
+  return db
+    .update(schema.taskSteps)
+    .set({
+      status: 'failed',
+      errorMessage: `Stopped by ${by}`,
+      endedAt: now,
+      statusMessage: null,
+      // Fold an outstanding park into idle_ms before closing the row — see the same fold in
+      // cancelTaskRow (api/lib/cancel-task.ts) for why stamping ended_at alone silently turns
+      // a recorded park back into work, and why the int4 clamp is load-bearing.
+      // Caveat accepted: a step re-entered from waiting_cli keeps that status through its
+      // apply phase (step-runner.ts only flips pending -> running), so stopping mid-apply
+      // books that sliver as idle. Apply windows are sub-minute here (777 such rows total
+      // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
+      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+      waitingStartedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        or(
+          inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+          and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
+        ),
+      ),
+    )
+    .returning({ id: schema.taskSteps.id });
 }
 
 /** Release a per-task pause. Clearing the column is the whole operation — the worker's

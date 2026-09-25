@@ -301,9 +301,20 @@ releases what the failed task holds (`settleFailedTask`), as its own failure wou
 poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
 hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The two writes that open
-a pass on its `pending` row, claiming or skipping it (`openRow`), land only while it is still
-`pending`, so a Skip stands. A Retry leaves the row `pending` too, so the claim then reads the task's
-epoch and gives the row back if a Retry overtook it. The recap goes to the ledger, or to a recap run,
+a pass on its `pending` row, claiming or skipping it (`openPendingStep`, `step-ownership.ts`), land
+only while it is still `pending`, so a Skip stands. A Retry leaves the row `pending` too, so the same
+transaction then reads the task under the job's fence (`taskWriteTarget`: its epoch, and not failed
+or finished) FOR SHARE and rolls the flip back when the fence fails. A reset's epoch bump in flight
+holds that read until it commits, so no row is ever activated at an epoch a reset has moved past. A
+claim that committed before the bump is on the rows the reset reads after it: the api Retry and the
+fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, NOWAIT,
+since they hold the task row, answering 503 when a pass is mid-write). Both kill the task's CLI
+sandboxes only once that has committed: a refused action then leaves every run alive, and a dying
+run's completion finds its invocation already superseded. The task retry settles its
+rows again after its bump, since answering a parked form revives the task and can open a row in
+between. That settle locks every active row before it writes (`settleActiveSteps`): a pass that got
+in before the bump can still move its row from a form to `running` between two unlocked writes and
+escape both. The recap goes to the ledger, or to a recap run,
 only after the outcome has landed and only while the row still reads `done`: the ledger entry is
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
 since a Retry's reset supersedes only the runs that already exist. That check narrows the window

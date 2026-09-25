@@ -72,7 +72,7 @@ import {
 import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
-import { StepSupersededError, updateOwnedStep } from './step-ownership.js';
+import { StepSupersededError, openPendingStep, updateOwnedStep } from './step-ownership.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona } from './steps/_retrieval-guidance.js';
@@ -2176,7 +2176,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
-        const updated = await openRow(db, taskId, params.epoch, row.id, {
+        const updated = await openPendingStep(db, taskId, params.epoch, row.id, {
           status: 'skipped',
           endedAt: new Date(),
         });
@@ -2193,7 +2193,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // the totals the moment the step started; without clearing it, `pending` + marker (the
       // park's signature) would keep reading as queued. No-op when nothing was parked.
       await foldCliParkOnResume(db, current.id);
-      const claimed = await openRow(db, taskId, params.epoch, current.id, {
+      const claimed = await openPendingStep(db, taskId, params.epoch, current.id, {
         status: 'running',
         startedAt: new Date(),
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
@@ -3179,35 +3179,6 @@ export async function upsertRow(
 /** Every write a pass makes to its row, through the ownership check (`updateOwnedStep`). */
 function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<TaskStepRow> {
   return updateOwnedStep(db, id, patch);
-}
-
-/** The writes that open a pass on its `pending` row: claiming it, or skipping it outright. Each
- *  lands only while the row is still `pending`, so a Skip that took it meanwhile stands. A Retry
- *  leaves it `pending` too, so the task's epoch is read after the claim, and a claim a Retry
- *  overtook is given back as the reset left it. Null when the pass lost the row either way. */
-async function openRow(
-  db: Database,
-  taskId: string,
-  epoch: number | null | undefined,
-  id: string,
-  patch: UpdatePatch,
-): Promise<TaskStepRow | null> {
-  const [claimed] = await db
-    .update(schema.taskSteps)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.status, 'pending')))
-    .returning();
-  if (!claimed || epoch == null) return claimed ?? null;
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { orchestrationEpoch: true },
-  });
-  if (!task || task.orchestrationEpoch === epoch) return claimed;
-  await db
-    .update(schema.taskSteps)
-    .set({ status: 'pending', startedAt: null, endedAt: null, updatedAt: new Date() })
-    .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.updatedAt, claimed.updatedAt)));
-  return null;
 }
 
 const STEP_SUMMARY_TIMEOUT_MS = 60_000;
