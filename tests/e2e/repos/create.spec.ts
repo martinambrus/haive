@@ -64,10 +64,11 @@ test.describe('repos create UI', () => {
 
       await expect(page.getByRole('heading', { level: 2, name: repoName })).toBeVisible();
     } finally {
+      let reposGone = true;
       for (const id of createdRepoIds) {
-        await deleteRepoViaApi(sql, page.request, id);
+        if (!(await deleteRepoViaApi(sql, page.request, id))) reposGone = false;
       }
-      if (userId) await cleanupUser(sql, userId);
+      if (userId && reposGone) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
     }
   });
@@ -118,10 +119,11 @@ test.describe('repos create UI', () => {
 
       await expect(page.getByRole('heading', { level: 2, name: repoName })).toBeVisible();
     } finally {
+      let reposGone = true;
       for (const id of createdRepoIds) {
-        await deleteRepoViaApi(sql, page.request, id);
+        if (!(await deleteRepoViaApi(sql, page.request, id))) reposGone = false;
       }
-      if (userId) await cleanupUser(sql, userId);
+      if (userId && reposGone) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
     }
   });

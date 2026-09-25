@@ -106,27 +106,34 @@ export async function cleanupRepoFixture(sql: postgres.Sql, repoId: string): Pro
 
 /**
  * Delete a repository through the api, which also has the worker remove its checkout; a row deleted
- * by SQL leaves the tree on disk. The api refuses while a clone holds the root, so that is waited
- * out first. `request` must carry the owner's session.
+ * by SQL leaves the tree on disk. The api refuses while a clone holds the root, so a refusal is
+ * retried until the deadline. Answers whether the row is gone: keep the user of one that is not,
+ * since deleting the user cascades to the row and strands its checkout. `request` must carry the
+ * owner's session.
  */
 export async function deleteRepoViaApi(
   sql: postgres.Sql,
   request: APIRequestContext,
   repoId: string,
-): Promise<void> {
+): Promise<boolean> {
   const deadline = Date.now() + 120_000;
   for (;;) {
     const rows = await sql<{ status: string; claimed: Date | null }[]>`
       select status, root_claimed_at as claimed from repositories where id = ${repoId}
     `;
-    if (rows.length === 0) return;
+    if (rows.length === 0) return true;
     const settled = rows[0]!.status !== 'cloning' && rows[0]!.claimed === null;
-    if (settled || Date.now() >= deadline) break;
+    const expired = Date.now() >= deadline;
+    if (settled || expired) {
+      const res = await request.delete(`${API_BASE}/repos/${repoId}`);
+      if (res.status() === 200) return true;
+      if (res.status() !== 409 || expired) {
+        expect.soft(res.status(), `delete of repository ${repoId}: ${await res.text()}`).toBe(200);
+        return false;
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  const res = await request.delete(`${API_BASE}/repos/${repoId}`);
-  expect.soft(res.status(), `delete of repository ${repoId}: ${await res.text()}`).toBe(200);
-  if (res.status() !== 200) await sql`delete from repositories where id = ${repoId}`;
 }
 
 /** Delete a user's CLI providers through the api before the user goes, so the worker is asked to
