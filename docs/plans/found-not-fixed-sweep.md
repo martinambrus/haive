@@ -1,8 +1,8 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-23, 25, 21b and 5c merged (#267-#280, #282-#286,
-> #288-#291, #294-#296); PR 24 (group the Dependabot updates) is in review. Tracked in the status
-> table of `docs/plans/README.md`, which each PR updates.
+> **SHIPPED** 2026-09-25. PRs 1-25, 5c, 21b and 24b merged (#267-#280, #282-#286, #288-#291,
+> #294-#296, #299, #300). The checkpoints below stay open until their events. Tracked in the status
+> table of `docs/plans/README.md`.
 
 ## Context
 
@@ -288,6 +288,9 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
 24. **ci(dependabot): grouped updates** (merged before 2026-09-25 16:19Z by the user's call).
     - **npm**: `tiptap`, `react`, prod minor+patch and dev minor+patch groups; ignore `drizzle-orm`
       and `drizzle-kit`, both hand-bumped because the kit refuses an older orm.
+    - **24b** (#300): the catch-alls name `*`. Dependabot gives a dependency several groups match to the
+      most specific, and a group with no pattern outranks `@tiptap/*`: #299 left `tiptap` empty
+      and put the react packages in two groups each.
     - **actions**: a `docker/*` group of its own, plus minor+patch.
     - **docker**: minor+patch.
     - Then land the group PRs one at a time. For web-affecting groups, check the task page, the plan
@@ -357,8 +360,9 @@ Verified on main 2026-09-24. Handover, before any PR here starts:
 - **Release-action bumps** (`setup-buildx` 4.4.1, `build-push` 7.4.0) and the production image stages
   CI never builds: exercised by the next real release's first rc.
 - **Dependabot's first npm run after 2026-09-25 16:19Z**, when next 16.3.6 clears pnpm's three-day
-  release age: it finishes clean, opens group PRs instead of one per package, and proposes no
-  drizzle bump. The actions and docker groups show in the runs PR 24's merge triggers.
+  release age: it finishes clean, opens group PRs instead of one per package, keeps the
+  `@tiptap` and react packages out of `production` and `development`, and proposes no drizzle
+  bump. The actions groups were confirmed in the run #299's merge triggered.
 - **Rows already in `onboarding_run_checkpoints`**: the invariant-citation effect, the fs-safe
   workflow checks, the per-run `agent_rules` stamp, and #229's upgrade check.
 
