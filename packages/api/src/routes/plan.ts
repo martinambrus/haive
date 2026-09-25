@@ -320,7 +320,7 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
         Promise.all(
           paths.map((rel) => gitRead(repoRoot, ['ls-files', '--error-unmatch', '--', rel])),
         ),
-        gitRead(repoRoot, ['status', '--porcelain', '--', ...paths]),
+        gitRead(repoRoot, ['--no-optional-locks', 'status', '--porcelain', '--', ...paths]),
         gitRead(repoRoot, ['branch', '--show-current']),
         gitRead(repoRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']),
       ]);

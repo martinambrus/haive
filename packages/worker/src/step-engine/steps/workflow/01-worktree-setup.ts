@@ -216,7 +216,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    const status = await gitRun(ctx.repoPath, ['status', '--porcelain']);
+    const status = await gitRun(ctx.repoPath, ['--no-optional-locks', 'status', '--porcelain']);
     // Never PROPOSE a name that already exists here. `git worktree add <path> <branch>`
     // adopts an existing branch and its commits instead of forking the base 00a-sync-base
     // freshened, and when that branch's worktree is still registered the new task silently

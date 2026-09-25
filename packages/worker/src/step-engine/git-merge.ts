@@ -15,7 +15,7 @@ import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted
 export async function mergeCommitted(worktreePath: string): Promise<boolean> {
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code === 0) return false; // merge still open (not committed)
-  const status = await gitRun(worktreePath, ['status', '--porcelain']);
+  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
   const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
   return !unmerged;
 }

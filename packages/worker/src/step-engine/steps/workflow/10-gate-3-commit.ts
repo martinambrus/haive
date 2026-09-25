@@ -148,7 +148,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         outOfScopeInsightsOmitted: insights.omitted,
       };
     }
-    const status = await gitRun(workspacePath, ['status', '--porcelain']);
+    const status = await gitRun(workspacePath, ['--no-optional-locks', 'status', '--porcelain']);
     if (status.code !== 0) {
       throw new Error(
         `git status failed in ${workspacePath}: ${status.stderr.trim() || status.stdout.trim()}`,

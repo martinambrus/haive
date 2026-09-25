@@ -51,6 +51,7 @@ export async function buildKnowledgeDiffArtifact(
 ): Promise<string> {
   const pathspecs = opts.pathspecs ?? [KB_DIR];
   const statusRes = await gitRun(workspacePath, [
+    '--no-optional-locks',
     'status',
     '--porcelain',
     '-z',
