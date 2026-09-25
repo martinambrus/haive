@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { expect, type APIRequestContext } from '@playwright/test';
 import postgres from 'postgres';
+import { API_BASE } from './auth.js';
 
 const DEFAULT_URL = 'postgres://haive:haive_dev_password@localhost:5432/haive';
 
@@ -100,6 +102,45 @@ export async function seedRepoFixture(
 
 export async function cleanupRepoFixture(sql: postgres.Sql, repoId: string): Promise<void> {
   await sql`delete from repositories where id = ${repoId}`;
+}
+
+/**
+ * Delete a repository through the api, which also has the worker remove its checkout; a row deleted
+ * by SQL leaves the tree on disk. The api refuses while a clone holds the root, so that is waited
+ * out first. `request` must carry the owner's session.
+ */
+export async function deleteRepoViaApi(
+  sql: postgres.Sql,
+  request: APIRequestContext,
+  repoId: string,
+): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const rows = await sql<{ status: string; claimed: Date | null }[]>`
+      select status, root_claimed_at as claimed from repositories where id = ${repoId}
+    `;
+    if (rows.length === 0) return;
+    const settled = rows[0]!.status !== 'cloning' && rows[0]!.claimed === null;
+    if (settled || Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  const res = await request.delete(`${API_BASE}/repos/${repoId}`);
+  expect.soft(res.status(), `delete of repository ${repoId}: ${await res.text()}`).toBe(200);
+  if (res.status() !== 200) await sql`delete from repositories where id = ${repoId}`;
+}
+
+/** Delete a user's CLI providers through the api before the user goes, so the worker is asked to
+ *  remove any image one built. `request` must carry that user's session. */
+export async function deleteProvidersViaApi(
+  sql: postgres.Sql,
+  request: APIRequestContext,
+  userId: string,
+): Promise<void> {
+  const rows = await sql<{ id: string }[]>`select id from cli_providers where user_id = ${userId}`;
+  for (const { id } of rows) {
+    const res = await request.delete(`${API_BASE}/cli-providers/${id}`);
+    expect.soft(res.status(), `delete of provider ${id}: ${await res.text()}`).toBe(200);
+  }
 }
 
 export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<void> {

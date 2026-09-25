@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from '../helpers/db.js';
+import { cleanupUser, deleteRepoViaApi, getSql } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 interface FsEntry {
@@ -65,7 +65,7 @@ test.describe('repos create UI', () => {
       await expect(page.getByRole('heading', { level: 2, name: repoName })).toBeVisible();
     } finally {
       for (const id of createdRepoIds) {
-        await sql`delete from repositories where id = ${id}`;
+        await deleteRepoViaApi(sql, page.request, id);
       }
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
@@ -119,7 +119,7 @@ test.describe('repos create UI', () => {
       await expect(page.getByRole('heading', { level: 2, name: repoName })).toBeVisible();
     } finally {
       for (const id of createdRepoIds) {
-        await sql`delete from repositories where id = ${id}`;
+        await deleteRepoViaApi(sql, page.request, id);
       }
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
