@@ -48,13 +48,12 @@ describe('the fake database', () => {
     expect(match(and(eq(t.id, b.id as string)))).toEqual(['b.md']);
     expect(match(isNull(t.expandedFromId))).toEqual(['a.md']);
     expect(match(and(eq(t.taskId, TASK2), isNotNull(t.expandedFromId)))).toEqual(['b.md']);
+    expect(match(or(eq(t.taskId, TASK), eq(t.taskId, TASK2)))).toEqual(['a.md', 'b.md']);
+    expect(
+      match(and(or(eq(t.taskId, TASK2), isNull(t.expandedFromId)), isNotNull(t.expandedFromId))),
+    ).toEqual(['b.md']);
 
-    for (const cond of [
-      or(eq(t.taskId, TASK), eq(t.taskId, TASK2)),
-      like(t.filename, 'a%'),
-      eq(schema.tasks.id, TASK),
-      inArray(t.id, []),
-    ]) {
+    for (const cond of [like(t.filename, 'a%'), eq(schema.tasks.id, TASK), inArray(t.id, [])]) {
       expect(() => fake.compileWhere(t, cond)).toThrow(/unsupported condition/);
     }
     expect(() => fake.compileWhere(t, eq(t.id, 'nope'))).toThrow(

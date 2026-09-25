@@ -9,9 +9,10 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  *
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
- * wrong folder. It supports exactly the conditions callers build — `and` of `eq` / `inArray` /
- * `isNull` / `isNotNull` — and throws on anything else, so a drizzle upgrade or a new query shape
- * fails loudly instead of matching every row. The foreign-key cascade is read off the schema.
+ * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` /
+ * `inArray` / `isNull` / `isNotNull` — and throws on anything else, so a drizzle upgrade or a new
+ * query shape fails loudly instead of matching every row. The foreign-key cascade is read off the
+ * schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
  * a savepoint. There is no isolation: a write is visible to every reader the moment it is made,
@@ -141,6 +142,14 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       ) {
         const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
         return (row) => parts.every((part) => part(row));
+      }
+      if (
+        ch.length >= 3 &&
+        ch.length % 2 === 1 &&
+        ch.every((c, i) => (i % 2 === 1 ? text(c) === ' or ' : is(c, SQL)))
+      ) {
+        const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
+        return (row) => parts.some((part) => part(row));
       }
       const [col, op, val] = ch;
       const key = is(col, Column) ? keyOf.get(col) : undefined;
