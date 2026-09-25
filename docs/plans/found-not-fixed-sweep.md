@@ -1,8 +1,8 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-23, 21b and 5c merged (#267-#280, #282-#286, #288-#291,
-> #294, #295); PR 25 (a wave consumes only the rows its apply folded) is in review. Tracked in the
-> status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-24. PRs 1-23, 25, 21b and 5c merged (#267-#280, #282-#286,
+> #288-#291, #294-#296); PR 24 (group the Dependabot updates) is in review. Tracked in the status
+> table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
@@ -42,7 +42,8 @@ is the shipped agent-rules plan), with a README status row that each PR updates.
 
 ## PRs, in order
 
-Dependencies: 7 needs 4-6. 19 needs 18. 24 lands after 2026-09-25 16:19Z. 25 lands after #263.
+Dependencies: 7 needs 4-6. 19 needs 18. 25 lands after #263. 24 lands before 2026-09-25 16:19Z
+by the user's call, so the first Dependabot npm run after that time checks it.
 Everything else is independent. 1-3 go first so later PRs get a trustworthy CI signal.
 
 ### CI and e2e signal
@@ -284,7 +285,7 @@ Everything else is independent. 1-3 go first so later PRs get a trustworthy CI s
       runs, and Docker is only ever reached over the unix socket.
     - After `pnpm docker rebuild`: `git diff --exit-code pnpm-lock.yaml`, and no gyp lines in the
       install log.
-24. **ci(dependabot): grouped updates** (merge after 2026-09-25 16:19Z, once the npm run is clean).
+24. **ci(dependabot): grouped updates** (merged before 2026-09-25 16:19Z by the user's call).
     - **npm**: `tiptap`, `react`, prod minor+patch and dev minor+patch groups; ignore `drizzle-orm`
       and `drizzle-kit`, both hand-bumped because the kit refuses an older orm.
     - **actions**: a `docker/*` group of its own, plus minor+patch.
@@ -355,7 +356,9 @@ Verified on main 2026-09-24. Handover, before any PR here starts:
 
 - **Release-action bumps** (`setup-buildx` 4.4.1, `build-push` 7.4.0) and the production image stages
   CI never builds: exercised by the next real release's first rc.
-- **Dependabot's npm run**: clean after 2026-09-25 16:19Z. This gates PR 24.
+- **Dependabot's first npm run after 2026-09-25 16:19Z**, when next 16.3.6 clears pnpm's three-day
+  release age: it finishes clean, opens group PRs instead of one per package, and proposes no
+  drizzle bump. The actions and docker groups show in the runs PR 24's merge triggers.
 - **Rows already in `onboarding_run_checkpoints`**: the invariant-citation effect, the fs-safe
   workflow checks, the per-run `agent_rules` stamp, and #229's upgrade check.
 
