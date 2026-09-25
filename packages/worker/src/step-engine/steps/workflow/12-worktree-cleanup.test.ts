@@ -9,6 +9,7 @@ import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } f
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
 import { StepSupersededError } from '../../step-ownership.js';
+import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
@@ -746,6 +747,27 @@ describe('12 merge fix-agent dispatch', () => {
     }
   });
 
+  it('asks the fixer to say whether it resolved the conflict or is unsure', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      const h = makeDb();
+      await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db, { ...withProvider, deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      const call = vi.mocked(resolveTaskDispatch).mock.calls.at(-1);
+      const prompt = (call?.[2] as { input: { prompt: string } }).input.prompt;
+      expect(prompt).toContain('{"status": "resolved"}');
+      expect(prompt).toContain('{"status": "uncertain", "question":');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('names the invocation in the saved state before enqueuing it, not after', async () => {
     const { parent, wt } = await setupWorktree();
     try {
@@ -1073,6 +1095,56 @@ describe('12 worktree cleanup form (push gating)', () => {
 });
 
 describe('12 merge clarification', () => {
+  it("reads the fixer's answer past JSON it quoted from a conflicted file", async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const h = makeDb({
+        invocation: {
+          id: 'inv1',
+          endedAt: new Date(),
+          exitCode: 0,
+          rawOutput: [
+            'Both sides of package.json read:',
+            '```json',
+            '{"name": "app", "version": "1.2.0"}',
+            '```',
+            '```json',
+            '{"status": "uncertain", "question": "Which version wins for package.json?"}',
+            '```',
+          ].join('\n'),
+        },
+      });
+      await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+        mkCtx(parent, h.db),
+        mkParams(h.db, { providers: [], deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(h.getState()?.phase).toBe('awaiting-guidance');
+      expect(h.getState()?.pendingQuestion?.uncertainty).toContain('package.json');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('agent uncertainty parks the step for user guidance', async () => {
     const { parent, wt } = await setupWorktree();
     try {

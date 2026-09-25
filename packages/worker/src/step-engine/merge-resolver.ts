@@ -16,7 +16,7 @@ import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownershi
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
-import { parseJsonLoose } from './steps/_fenced-json.js';
+import { parseJsonLooseValidated } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { overrideOr } from './dispatch-timeout.js';
@@ -105,16 +105,32 @@ export async function loadOutstandingMergeGuidance(db: Database, taskId: string)
   return ((latest.payload as { answer?: string } | null)?.answer ?? '').trim();
 }
 
-/** Parse the fix agent's structured output. Null when it emitted no parseable signal. */
+/** What the fix agent is asked to end with. Appended here and not to the shared fix prompt: the DAG
+ *  merger reads no result and has no one to ask. */
+const FIX_RESULT_CONTRACT = [
+  '',
+  'When you stop, end your reply with ONE fenced json block saying how it went:',
+  '```json',
+  '{"status": "resolved"}',
+  '```',
+  'If a conflict needs a decision the code cannot settle (which side is meant to win), do not',
+  'guess: leave that file as it is and end with',
+  '```json',
+  '{"status": "uncertain", "question": "<one concrete question for the developer>"}',
+  '```',
+].join('\n');
+
+/** Parse the fix agent's structured output: the last block that fits, so JSON it quoted from a
+ *  conflicted file before its answer cannot hide the answer. Null when none does. */
 function parseFixResult(inv: {
   rawOutput?: string | null;
 }): { status: 'resolved' | 'uncertain'; question?: string } | null {
   const raw = inv.rawOutput ?? '';
   if (!raw) return null;
-  const json = parseJsonLoose(raw);
-  if (json == null) return null;
-  const parsed = mergeFixResultSchema.safeParse(json);
-  return parsed.success ? parsed.data : null;
+  return parseJsonLooseValidated(raw, (candidate) => {
+    const parsed = mergeFixResultSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : null;
+  });
 }
 
 /** Persist the clarification form and park the step in waiting_form. The clarification
@@ -485,7 +501,7 @@ async function dispatchFixAgent(
       featureBranch: state.featureBranch,
       conflictFiles: await conflictFiles(state.mergeDir),
       guidance,
-    }),
+    }) + FIX_RESULT_CONTRACT,
   );
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
