@@ -9,6 +9,10 @@ export function rehypeImageLinks({ urlTransform }: { urlTransform: UrlTransform 
   };
 }
 
+export function imageLabel(alt: string): string {
+  return alt ? `image: ${alt}` : 'image';
+}
+
 function replaceImages(parent: Root | Element, inLink: boolean, urlTransform: UrlTransform): void {
   const { children } = parent;
   for (let i = 0; i < children.length; i++) {
@@ -26,7 +30,7 @@ function imageReplacement(
 ): ElementContent {
   const alt = typeof img.properties.alt === 'string' ? img.properties.alt.trim() : '';
   if (inLink) return { type: 'text', value: alt || 'image' };
-  const label: ElementContent = { type: 'text', value: alt ? `image: ${alt}` : 'image' };
+  const label: ElementContent = { type: 'text', value: imageLabel(alt) };
   const href = urlTransform(String(img.properties.src ?? ''), 'src', img);
   if (!href) return label;
   return {
