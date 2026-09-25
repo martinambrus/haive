@@ -260,9 +260,8 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         dumpWorkerPath = dump.dumpPath;
         // The dump lives in the haive_repos volume (_uploads/...); inside the
         // runner that volume is mounted at /repos, so translate the worker path.
-        if (dump.dumpPath.startsWith(REPO_STORAGE_ROOT + '/')) {
-          dumpRunnerPath = '/repos' + dump.dumpPath.slice(REPO_STORAGE_ROOT.length);
-        }
+        const upload = splitUploadPath(REPO_STORAGE_ROOT, dump.dumpPath);
+        if (upload) dumpRunnerPath = `/repos/${upload.rel}`;
       }
     }
 

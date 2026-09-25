@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { splitUploadPath } from '../src/repo/worktree-paths.js';
+import { splitRepoStoragePath, splitUploadPath } from '../src/repo/worktree-paths.js';
 
 const ROOT = '/var/lib/haive/repos';
 
@@ -73,5 +73,32 @@ describe('splitUploadPath', () => {
     // `.catch` — so the throw would be swallowed and read as "nothing to do".
     expect(splitUploadPath(ROOT, `${ROOT}/_uploads/../db.sql`)).toBeNull();
     expect(splitUploadPath(ROOT, `${ROOT}/_uploads/u1/..`)).toBeNull();
+  });
+});
+
+describe('splitRepoStoragePath', () => {
+  it('splits the path a repo handler wrote into its user directory and repository', () => {
+    expect(splitRepoStoragePath(ROOT, `${ROOT}/u1/r1`)).toEqual({
+      anchor: `${ROOT}/u1`,
+      rel: 'r1',
+    });
+  });
+
+  it('accepts a storage root spelled with a trailing slash, or relatively', () => {
+    expect(splitRepoStoragePath(`${ROOT}/`, `${ROOT}/u1/r1`)).toEqual({
+      anchor: `${ROOT}/u1`,
+      rel: 'r1',
+    });
+    expect(splitRepoStoragePath('./data/repos', 'data/repos/u1/r1')).toEqual({
+      anchor: 'data/repos/u1',
+      rel: 'r1',
+    });
+  });
+
+  it('refuses a local repository and any other depth under the root', () => {
+    expect(splitRepoStoragePath(ROOT, '/host-fs/project')).toBeNull();
+    expect(splitRepoStoragePath(ROOT, `${ROOT}/u1`)).toBeNull();
+    expect(splitRepoStoragePath(ROOT, `${ROOT}/u1/r1/.haive`)).toBeNull();
+    expect(splitRepoStoragePath(ROOT, `${ROOT}/u1/..`)).toBeNull();
   });
 });

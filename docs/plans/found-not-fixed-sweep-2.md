@@ -1,7 +1,7 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-11 and 14 merged (#301-#312); PR 15 (a sibling build never
-> marks a tag ready while a forced rebuild of it runs) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-25. PRs 1-11, 14 and 15 merged (#301-#313); PR 18 (the two
+> storage-root checks accept any spelling of the root) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context
