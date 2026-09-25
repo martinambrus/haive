@@ -9,8 +9,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
-    # A dependency joins the first group it matches, so the named groups come
-    # before the catch-alls. A major outside a named group gets its own PR.
+    # A dependency several groups match joins the most specific. The catch-alls name "*", the least
+    # specific pattern, since a group with none would outrank "@tiptap/*". Majors get their own PRs.
     groups:
       # The @tiptap packages share one @tiptap/core and only work at one version.
       # Bumped one per PR, each leaves a second core in the tree and the web
@@ -26,9 +26,13 @@ updates:
           - "@types/react"
           - "@types/react-dom"
       production:
+        patterns:
+          - "*"
         dependency-type: production
         update-types: ["minor", "patch"]
       development:
+        patterns:
+          - "*"
         dependency-type: development
         update-types: ["minor", "patch"]
     # Bumped together by hand: drizzle-kit refuses an older drizzle-orm, and the
