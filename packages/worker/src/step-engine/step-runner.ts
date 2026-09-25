@@ -1639,8 +1639,9 @@ async function reserveMiningAgents(
     });
   }
   if (values.length === 0) return new Map();
+  // The rows go in before the step's lock, in a Retry's own order: an insert can wait on an agent
+  // row the Retry is deleting.
   const reserved = await db.transaction(async (tx) => {
-    await assertOwnsStep(tx, taskStepId);
     const rows: { id: string; agentId: string; attempts: number; timeoutAttempts: number }[] = [];
     for (let i = 0; i < values.length; i += RESERVE_CHUNK) {
       rows.push(
@@ -1658,6 +1659,7 @@ async function reserveMiningAgents(
           })),
       );
     }
+    await assertOwnsStep(tx, taskStepId);
     return rows;
   });
   return new Map(

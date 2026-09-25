@@ -7,7 +7,11 @@ import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { openPendingStep } from '../src/step-engine/step-ownership.js';
+import {
+  StepSupersededError,
+  insertOwnedRun,
+  openPendingStep,
+} from '../src/step-engine/step-ownership.js';
 
 const log = logger.child({ module: 'claim-fence-smoke' });
 
@@ -108,6 +112,64 @@ async function main(): Promise<void> {
     await reset;
     check('the claim is refused once the bump commits', (await claim) === null);
     check('the refused claim leaves its row pending', (await statusOf(racing!.id)) === 'pending');
+
+    // A pass records a run while a Retry, in its own order, supersedes the step's live run and then
+    // resets the row. The record's insert waits on that run's index entry until the Retry commits.
+    const [owned] = await db
+      .insert(schema.taskSteps)
+      .values({ ...step('owned', 3), status: 'running' as const })
+      .returning({ id: schema.taskSteps.id });
+    const [live] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: task!.id, taskStepId: owned!.id, mode: 'cli', prompt: 'live' })
+      .returning({ id: schema.cliInvocations.id });
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => (releaseRetry = resolve));
+    let supersededLive!: () => void;
+    const supersedeWritten = new Promise<void>((resolve) => (supersededLive = resolve));
+    const outcome = (err: unknown) => {
+      const e = err as { code?: string; cause?: { code?: string } };
+      return `error: ${e.cause?.code ?? e.code ?? String(err)}`;
+    };
+    const retry = db
+      .transaction(async (tx) => {
+        await tx
+          .update(schema.cliInvocations)
+          .set({ supersededAt: new Date() })
+          .where(eq(schema.cliInvocations.id, live!.id));
+        supersededLive();
+        await retryGate;
+        await tx
+          .update(schema.taskSteps)
+          .set({ status: 'pending' })
+          .where(eq(schema.taskSteps.id, owned!.id));
+      })
+      .then(() => 'committed', outcome);
+    await supersedeWritten;
+    const recorded = insertOwnedRun(db, owned!.id, {
+      taskId: task!.id,
+      taskStepId: owned!.id,
+      mode: 'cli',
+      prompt: 'late',
+    }).then(
+      () => 'recorded',
+      (err: unknown) => (err instanceof StepSupersededError ? 'refused' : outcome(err)),
+    );
+    await sleep(500);
+    releaseRetry();
+    const retried = await retry;
+    check('a Retry beside a pass recording a run commits', retried === 'committed', retried);
+    const record = await recorded;
+    check('the pass whose row the Retry took records no run', record === 'refused', record);
+    const runsLeft = await db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.taskStepId, owned!.id));
+    check(
+      'only the superseded run is left on the row',
+      runsLeft.length === 1 && runsLeft[0]!.id === live!.id,
+      runsLeft,
+    );
 
     // A Stop fails the task without moving the epoch.
     await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, task!.id));

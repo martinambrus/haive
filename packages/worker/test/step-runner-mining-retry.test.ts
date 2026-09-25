@@ -83,6 +83,8 @@ interface MockState {
   miningInsertStatements?: number;
   /** The transaction each of those statements ran in, 0 for none. */
   miningInsertTransactions?: number[];
+  /** Each insert and each lock on the step row, in order, with the transaction it ran in. */
+  ops?: string[];
   openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
@@ -163,7 +165,12 @@ function makeMockDb(state: MockState): Database {
             Promise.resolve(found).then(res, rej),
           limit: async () => found,
           orderBy: () => thenable(found),
-          for: async () => found,
+          for: async () => {
+            if (tableNameOf(table) === 'task_steps') {
+              (state.ops ??= []).push(`lock:task_steps@${state.openTransaction ?? 0}`);
+            }
+            return found;
+          },
         });
         // A read that asks for the step row as finished finds nothing once it is not, and a lock
         // on it as the pass's own finds nothing once a Retry, a Skip or a Stop took it.
@@ -187,6 +194,7 @@ function makeMockDb(state: MockState): Database {
     insert: (table: unknown) => {
       const tableName = tableNameOf(table);
       const values = (v: Record<string, unknown> | Record<string, unknown>[]) => {
+        (state.ops ??= []).push(`insert:${tableName}@${state.openTransaction ?? 0}`);
         if (tableName === 'task_step_agent_minings') {
           state.miningInsertStatements = (state.miningInsertStatements ?? 0) + 1;
           (state.miningInsertTransactions ??= []).push(state.openTransaction ?? 0);
@@ -266,8 +274,13 @@ function makeMockDb(state: MockState): Database {
       state.transactions = (state.transactions ?? 0) + 1;
       const outer = state.openTransaction;
       state.openTransaction = state.transactions;
+      const inserted = state.inserts.length;
       try {
         return await fn(db);
+      } catch (err) {
+        // A transaction that throws takes back what it inserted.
+        state.inserts.length = inserted;
+        throw err;
       } finally {
         state.openTransaction = outer;
       }
@@ -1915,6 +1928,22 @@ describe('a fan-out reserved before any agent is sent', () => {
       deps: { enqueueCliInvocation: enqueue },
     });
   }
+
+  it('takes the step lock after its inserts, the order a Retry takes them in', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(makeMockDb(state), waveStep([], ['refute-a', 'refute-b']), []);
+
+    // A lock taken first would wait on the step behind a Retry that holds the row an insert waits on.
+    const ops = state.ops ?? [];
+    expect(ops.slice(0, 3)).toEqual([
+      'insert:task_step_agent_minings@1',
+      'lock:task_steps@1',
+      'insert:cli_invocations@2',
+    ]);
+    expect(ops.indexOf('lock:task_steps@2')).toBeGreaterThan(
+      ops.indexOf('insert:cli_invocations@2'),
+    );
+  });
 
   it('reserves every agent in one transaction before the first run is recorded', async () => {
     const state = freshState([miningRow('peer-reviewer', 1)]);

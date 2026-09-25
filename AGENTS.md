@@ -356,7 +356,9 @@ while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Ski
 Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
 the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
 executor), and so does a fan-out's reservation: the row is locked while it is still the pass's own,
-in the transaction that inserts. A Retry supersedes a step's runs and deletes its agent rows before
+in the transaction that inserts. The lock comes after the insert, the order a Retry takes them in
+(runs and agent rows, then steps), because an insert can wait on a run or an agent row the Retry is
+removing; the other order deadlocked the two. A Retry supersedes a step's runs and deletes its agent rows before
 it writes the row, and that write waits on the lock, so its reset sweeps a second time once the rows
 are written (`resetRowsForRerun`, and `resetStepAndDownstream` worker-side): what a pass recorded
 before the Retry took the row is ended there, and a pass after it is refused. A run swept that way
