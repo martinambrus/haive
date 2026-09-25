@@ -16,8 +16,8 @@ export type RootClaimKind = 'reset' | 'rebuild' | 'edit' | 'verify';
  *
  * The honest cost of a claim over a lock: an advisory lock dies with its connection, a row does
  * not, so a process killed mid-write leaves this set. Bounded rather than permanent, and visible
- * in one column — unlike `repositories.status`, whose `cloning` has no reconciler anywhere and
- * strands a repository for good.
+ * in one column — unlike `repositories.status`, whose stranded `cloning` waits for the worker's
+ * boot reconciler.
  *
  * This is a LEASE, not a deadline on the work. A fixed expiry cannot tell a dead holder from a
  * slow one, and both exist here: `gitClone` has no timeout and `copyTree` is unbounded by
