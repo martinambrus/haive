@@ -26,7 +26,8 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
-import { updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
+import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
@@ -35,7 +36,6 @@ import {
   type SpecView,
 } from './steps/workflow/_spec-artifact.js';
 import {
-  isFreeRedispatch,
   isFatalProviderFailure,
   isCliTimeoutFailure,
   cliTimeoutBudgetMinutes,
@@ -557,7 +557,14 @@ async function startConflictFix(
   { status: 'waiting'; row: TaskStepRow } | { status: 'halt'; row: TaskStepRow; error: string }
 > {
   await gitRun(m.integration.path, ['merge', '--no-ff', '--no-edit', target.branchName!], m.gitEnv);
-  const dispatched = await dispatchMergeFixAgent(m, target);
+  // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
+  // does, so no run can start that mergeState does not name.
+  const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
+    state.activeConflict = target.issueKey;
+    state.fixInvocationId = invId;
+    state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+    await saveMergeState(m.db, m.level.id, state);
+  });
   if (dispatched.kind === 'already_live') {
     // A concurrent advance already dispatched the fix agent for this step (the
     // one-live-per-step index rejected ours). The winner owns the in-progress merge and
@@ -575,10 +582,7 @@ async function startConflictFix(
     await clearAiFix(m.db, m.current.id);
     return haltConflicts(m, [target], 'no CLI provider for merge resolution');
   }
-  state.activeConflict = target.issueKey;
-  state.fixInvocationId = dispatched.invId;
-  state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
-  await saveMergeState(m.db, m.level.id, state);
+  // 'ok': the onInserted hook above already saved state.fixInvocationId.
   await clearAiFix(m.db, m.current.id);
   const waiting = await setStepStatus(m.db, m.current.id, {
     status: 'waiting_cli',
@@ -593,7 +597,11 @@ async function startConflictFix(
 type MergeFixDispatch =
   { kind: 'ok'; invId: string } | { kind: 'no_provider' } | { kind: 'already_live' };
 
-async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<MergeFixDispatch> {
+async function dispatchMergeFixAgent(
+  m: MergeArgs,
+  issue: DagIssueRow,
+  onInserted: (invocationId: string) => Promise<void>,
+): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
   const prompt = await augmentPromptWithTerseness(
     buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
@@ -640,6 +648,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
   }
   const invId = inv[0]?.id;
   if (!invId) return { kind: 'no_provider' };
+  await onInserted(invId);
   await deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: params.taskId,
@@ -676,16 +685,29 @@ async function runLevelMerge(
     const inv = await db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, state.fixInvocationId),
     });
-    if (!inv || inv.endedAt === null) return { status: 'waiting', row: m.current };
+    if (!inv || runIsLive(inv)) {
+      return { status: 'waiting', row: m.current };
+    }
+    if (inv.supersededAt != null) await assertOwnsStep(db, m.current.id);
     await db
       .update(schema.cliInvocations)
       .set({ consumedAt: new Date() })
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
-    if (target) {
+    if (runNeverAnswered(inv)) {
+      // A fixer that never answered may have left the merge half-resolved, so its
+      // edits are discarded and it is dispatched again without spending an attempt.
+      await gitRun(integration.path, ['merge', '--abort']);
+      if (target) {
+        state.conflictRetries[target.issueKey] = Math.max(
+          0,
+          (state.conflictRetries[target.issueKey] ?? 1) - 1,
+        );
+      }
+    } else if (target) {
       // The fix agent only edited the conflicted files; finish the merge here
       // (verify markers gone, stage, commit) — git is unavailable in the sandbox.
-      const committed = await completeMergeHostSide(integration.path, gitEnv);
+      const committed = await completeMergeHostSide(integration.path, gitEnv, target.branchName!);
       if (committed) {
         await db
           .update(schema.taskDagIssues)
@@ -1034,23 +1056,47 @@ async function acceptWithDebt(
 
 /** Fold one finished review-loop agent into the issue state, spawning the next
  *  agent (a fix-coder after a reviewer's fix_required, or a re-review after a
- *  fix-coder) until the issue resolves. */
-async function ingestReviewRun(
+ *  fix-coder) until the issue resolves. Exported for the unit test. */
+export async function ingestReviewRun(
   ra: ReviewArgs,
   issue: DagIssueRow,
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
   const spec = (await issueSpecText(ra.specView, issue)).text;
-  await ra.db
-    .update(schema.dagAgentRuns)
-    .set({
-      status: 'done',
-      consumedAt: new Date(),
-      endedAt: new Date(),
-      rawOutput: inv.rawOutput ?? null,
-    })
-    .where(eq(schema.dagAgentRuns.id, run.id));
+  const consume = async (): Promise<void> => {
+    await ra.db
+      .update(schema.dagAgentRuns)
+      .set({
+        status: 'done',
+        consumedAt: new Date(),
+        endedAt: new Date(),
+        rawOutput: inv.rawOutput ?? null,
+      })
+      .where(eq(schema.dagAgentRuns.id, run.id));
+  };
+  const fixed = parseCoderResult(inv);
+
+  // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
+  // after it — so the replacement is named (claim) before the old run is marked done.
+  if (run.role !== 'reviewer' && !fixed.parsed && runNeverAnswered(inv)) {
+    const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const ok = await spawnReviewAgent(
+      ra,
+      issue,
+      'coder',
+      issue.innerIteration,
+      fixCoderPrompt(issue, storedVerdict.success ? storedVerdict.data.issues : [], spec),
+      ['tool_use', 'file_write'],
+      consume,
+    );
+    if (!ok) {
+      await consume();
+      await setResolution(ra.db, issue, 'failed_unrecoverable');
+    }
+    return;
+  }
+  await consume();
 
   if (run.role === 'reviewer') {
     const verdict = parseReviewerOutput(inv);
@@ -1062,9 +1108,9 @@ async function ingestReviewRun(
         exitCode: inv.exitCode,
         errorMessage: inv.errorMessage,
       });
-      // Free re-dispatch when the reviewer was preempted or never started — same reasoning as
-      // the coder path: neither must spend an infrastructure-recovery budget.
-      const free = isFreeRedispatch(inv);
+      // Free when the reviewer never answered (preempted, never started or superseded), as on
+      // the coder path: none of those may spend an infrastructure-recovery budget.
+      const free = runNeverAnswered(inv);
       if (cls === 'transient' && (free || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
         await ra.db
           .update(schema.taskDagIssues)
@@ -1134,7 +1180,6 @@ async function ingestReviewRun(
   }
   // fix-coder finished → re-review. Its similar sites and concerns are kept as a level coder's are;
   // the review decides the rest.
-  const fixed = parseCoderResult(inv);
   if (fixed.similarSites.length > 0) {
     await ra.db
       .update(schema.taskDagIssues)
@@ -1232,7 +1277,8 @@ async function resolveReviewPhase(
     const inv = await ra.db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, latest.cliInvocationId),
     });
-    if (!inv || inv.endedAt === null) continue; // in flight
+    if (!inv || runIsLive(inv)) continue; // in flight
+    if (inv.supersededAt != null) await assertOwnsStep(ra.db, ra.current.id);
     await ingestReviewRun(ra, issue, latest, inv);
   }
 
@@ -1519,9 +1565,10 @@ async function skipIssue(db: Database, issue: DagIssueRow): Promise<void> {
 }
 
 /** Fold one finished issue-advisor run into the issue + return the action taken
- *  ('retry' spawned a fix coder, 'split' added sub-issues, 'accept' resolved with
- *  debt, 'escalate' left it for the replanner). */
-async function ingestAdvisor(
+ *  ('retry' put an agent in flight, a fix coder or the advisor again when it never ran,
+ *  'split' added sub-issues, 'accept' resolved with debt, 'escalate' left it for the
+ *  replanner). Exported for the unit test. */
+export async function ingestAdvisor(
   ea: EscalationArgs,
   issue: DagIssueRow,
   run: typeof schema.dagAgentRuns.$inferSelect,
@@ -1536,6 +1583,22 @@ async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
+  // An advisor that never answered must not be charged an attempt or read as ESCALATE_TO_REPLAN.
+  if (runNeverAnswered(inv)) {
+    const ok = await spawnReviewAgent(
+      ea,
+      issue,
+      'issue_advisor',
+      issue.advisorInvocations,
+      advisorPrompt(issue, (await issueSpecText(ea.specView, issue)).text),
+      ['tool_use'],
+    );
+    if (!ok) {
+      await escalateIssueToReplan(ea.db, issue, 'no advisor provider available');
+      return 'escalate';
+    }
+    return 'retry';
+  }
   const out = parseAdvisor(inv);
   await ea.db
     .update(schema.taskDagIssues)
@@ -1754,8 +1817,9 @@ async function reReadLevelIssues(ea: EscalationArgs): Promise<DagIssueRow[]> {
 
 /** Handle a level's failed issues: issue-advisor (middle loop) then replanner
  *  (outer loop). Returns 'ok' (no failures left → merge), 'waiting' (an agent is
- *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. */
-async function resolveEscalationPhase(
+ *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. Exported for
+ *  the unit test. */
+export async function resolveEscalationPhase(
   ea: EscalationArgs,
 ): Promise<{ status: 'ok' | 'waiting' | 'reloop' | 'aborted'; row: TaskStepRow; error?: string }> {
   // A plan-level replanner in flight?
@@ -1763,7 +1827,28 @@ async function resolveEscalationPhase(
     const inv = await ea.db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, ea.plan.replannerInvocationId),
     });
-    if (!inv || inv.endedAt === null) return { status: 'waiting', row: ea.current };
+    if (!inv || runIsLive(inv)) {
+      return { status: 'waiting', row: ea.current };
+    }
+    if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
+    // A replanner that never answered is not an attempt: free the slot and let escalation
+    // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
+    if (runNeverAnswered(inv)) {
+      await ea.db
+        .update(schema.taskDagPlans)
+        .set({ replannerInvocationId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.taskDagPlans.id, ea.plan.id),
+            eq(schema.taskDagPlans.replannerInvocationId, inv.id),
+          ),
+        );
+      await ea.db
+        .update(schema.cliInvocations)
+        .set({ consumedAt: new Date() })
+        .where(eq(schema.cliInvocations.id, inv.id));
+      return { status: 'reloop', row: ea.current };
+    }
     const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
     const action = await ingestReplanner(ea, inv, failedNow);
     if (action === 'abort') {
@@ -1804,10 +1889,11 @@ async function resolveEscalationPhase(
       const inv = await ea.db.query.cliInvocations.findFirst({
         where: eq(schema.cliInvocations.id, latest.cliInvocationId),
       });
-      if (!inv || inv.endedAt === null) {
+      if (!inv || runIsLive(inv)) {
         inFlight = true;
         continue;
       }
+      if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
       const action = await ingestAdvisor(ea, issue, latest, inv);
       if (action === 'retry') inFlight = true;
       else if (action === 'split') reloop = true;
@@ -2186,10 +2272,11 @@ export async function resolveDagPhase(
         const inv = await db.query.cliInvocations.findFirst({
           where: eq(schema.cliInvocations.id, issue.cliInvocationId),
         });
-        if (!inv || inv.endedAt === null) {
+        if (!inv || runIsLive(inv)) {
           anyInFlight = true;
           continue;
         }
+        if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
@@ -2200,11 +2287,11 @@ export async function resolveDagPhase(
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,
           });
-          // Preemption is a scheduling decision Haive made, not an environment problem, and a
-          // run that never started ran nothing, so both re-dispatch for free. Charging them here
-          // would let a busy machine drive a healthy issue to DAG_INFRA_EXHAUSTED and halt the
-          // task with a misleading "raise RUNTIME_MEMORY_MB" diagnosis.
-          const free = isFreeRedispatch(inv);
+          // A run Haive preempted, one that never started and one a Retry, Resume or Stop
+          // superseded are no failure of the coder's, so all three re-dispatch for free. Charging
+          // them would let a busy machine drive a healthy issue to DAG_INFRA_EXHAUSTED and halt
+          // the task with a misleading "raise RUNTIME_MEMORY_MB" diagnosis.
+          const free = runNeverAnswered(inv);
           // A coder SIGKILLed at its own budget needs MORE TIME, not another identical run.
           // Without this it burns every infra retry at the budget that just killed it and its
           // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three

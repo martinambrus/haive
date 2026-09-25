@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { schema, type Database, type MergeResolveState } from '@haive/database';
+import { schema, isUniqueViolation, type Database, type MergeResolveState } from '@haive/database';
 import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
@@ -12,7 +12,8 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
-import { updateOwnedStep } from './step-ownership.js';
+import { assertOwnsStep, updateOwnedStep } from './step-ownership.js';
+import { runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -457,9 +458,13 @@ async function conflictFiles(mergeDir: string): Promise<string[]> {
     .filter(Boolean);
 }
 
-/** Dispatch one conflict-resolution agent into the merge worktree's sandbox.
- *  Mirrors dispatchMergeFixAgent in dag-executor.ts. Returns the invocation id, or
- *  null when no CLI provider can run it. */
+/** Outcome of dispatching the conflict-resolution agent. `already_live` means a
+ *  concurrent advance already holds the one-live-per-step slot; PARK on it. */
+type FixAgentDispatch =
+  { kind: 'ok'; invId: string } | { kind: 'no_provider' } | { kind: 'already_live' };
+
+/** Dispatch one conflict-resolution agent into the merge worktree's sandbox. Mirrors
+ *  dispatchMergeFixAgent in dag-executor.ts, `onInserted` included. */
 async function dispatchFixAgent(
   db: Database,
   stepDef: StepDefinition,
@@ -468,7 +473,8 @@ async function dispatchFixAgent(
   spec: MergeResolveSpec,
   state: MergeResolveState,
   guidance: string,
-): Promise<string | null> {
+  onInserted: (invocationId: string) => Promise<void>,
+): Promise<FixAgentDispatch> {
   // Keep this exact value paired between prompt planning and queue payload: an
   // empty override is the repo root (real `.git` directory), while a transient
   // --base worktree receives the zero-byte gitfile boundary.
@@ -498,20 +504,31 @@ async function dispatchFixAgent(
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
     invokeOpts: { cwd: state.sandboxMergeDir, effortLevel: preferredEffort ?? undefined },
   });
-  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
-  const inv = await db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: params.taskId,
-      taskStepId: current.id,
-      cliProviderId: plan.providerId,
-      effort: plan.effort ?? null,
-      mode: 'cli',
-      prompt: plan.effectivePrompt ?? prompt,
-    })
-    .returning({ id: schema.cliInvocations.id });
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+    return { kind: 'no_provider' };
+  }
+  // A per-step SINGLETON: the one-live-per-step index rejects a second concurrent
+  // dispatch. Surface that distinctly rather than throwing or reporting no_provider.
+  let inv: { id: string }[];
+  try {
+    inv = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        effort: plan.effort ?? null,
+        mode: 'cli',
+        prompt: plan.effectivePrompt ?? prompt,
+      })
+      .returning({ id: schema.cliInvocations.id });
+  } catch (err) {
+    if (isUniqueViolation(err)) return { kind: 'already_live' };
+    throw err;
+  }
   const invId = inv[0]?.id;
-  if (!invId) return null;
+  if (!invId) return { kind: 'no_provider' };
+  await onInserted(invId);
   await params.deps!.enqueueCliInvocation({
     invocationId: invId,
     taskId: params.taskId,
@@ -526,7 +543,7 @@ async function dispatchFixAgent(
     spec: plan.invocation.spec,
     timeoutMs: overrideOr(current, spec.timeoutMs ?? MERGE_FIX_TIMEOUT_MS),
   });
-  return invId;
+  return { kind: 'ok', invId };
 }
 
 function halt(db: Database, current: TaskStepRow, message: string): Promise<TaskStepRow> {
@@ -664,52 +681,73 @@ export async function resolveMergePhase(
       const inv = await db.query.cliInvocations.findFirst({
         where: eq(schema.cliInvocations.id, state.fixInvocationId),
       });
-      if (!inv || inv.endedAt === null) {
+      if (!inv || runIsLive(inv)) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
-      // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
-      // not recover this run — abort the live merge and fail instead of spending the
-      // remaining conflictRetries re-dispatching against a dead provider. "Retry with
-      // AI" re-creates the conflict on demand once the provider is back.
-      if (isFatalProviderFailure(inv.errorMessage)) {
+      if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
+      const fix = parseFixResult(inv);
+      if (runNeverAnswered(inv) && !fix) {
+        // A fixer that never answered may have left the merge half-resolved, so its
+        // edits are discarded and it is dispatched again without spending an attempt.
         await db
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
         await gitRun(state.mergeDir, ['merge', '--abort']);
-        const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
-        return {
-          resolved: false,
-          result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
-        };
-      }
-      await db
-        .update(schema.cliInvocations)
-        .set({ consumedAt: new Date() })
-        .where(eq(schema.cliInvocations.id, inv.id));
-      // The agent may have signaled it cannot confidently resolve → ask the user.
-      const fix = parseFixResult(inv);
-      if (fix?.status === 'uncertain') {
-        const question =
-          fix.question?.trim() || 'The agent is unsure how to resolve this conflict.';
-        await recordMergeQuestion(db, params.taskId, current.id, question);
         state = {
           ...state,
           fixInvocationId: null,
-          phase: 'awaiting-guidance',
-          pendingQuestion: { uncertainty: question, askedAt: new Date().toISOString() },
+          conflictRetries: Math.max(0, state.conflictRetries - 1),
         };
         await saveMergeState(db, current.id, state);
-        return parkForGuidance(db, current, spec, state);
+      } else {
+        // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
+        // not recover this run — abort the live merge and fail instead of spending the
+        // remaining conflictRetries re-dispatching against a dead provider. "Retry with
+        // AI" re-creates the conflict on demand once the provider is back.
+        if (isFatalProviderFailure(inv.errorMessage)) {
+          await db
+            .update(schema.cliInvocations)
+            .set({ consumedAt: new Date() })
+            .where(eq(schema.cliInvocations.id, inv.id));
+          await gitRun(state.mergeDir, ['merge', '--abort']);
+          const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
+          return {
+            resolved: false,
+            result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
+          };
+        }
+        await db
+          .update(schema.cliInvocations)
+          .set({ consumedAt: new Date() })
+          .where(eq(schema.cliInvocations.id, inv.id));
+        // The agent may have signaled it cannot confidently resolve → ask the user.
+        if (fix?.status === 'uncertain') {
+          const question =
+            fix.question?.trim() || 'The agent is unsure how to resolve this conflict.';
+          await recordMergeQuestion(db, params.taskId, current.id, question);
+          state = {
+            ...state,
+            fixInvocationId: null,
+            phase: 'awaiting-guidance',
+            pendingQuestion: { uncertainty: question, askedAt: new Date().toISOString() },
+          };
+          await saveMergeState(db, current.id, state);
+          return parkForGuidance(db, current, spec, state);
+        }
+        const committed = await completeMergeHostSide(
+          state.mergeDir,
+          commitEnv,
+          state.featureBranch,
+        );
+        state = { ...state, fixInvocationId: null };
+        if (committed) {
+          return finishMerge(db, stepDef, current, ctx, params, state);
+        }
+        // Markers remain → abort this attempt; the dispatch decision below retries or halts.
+        await gitRun(state.mergeDir, ['merge', '--abort']);
+        await saveMergeState(db, current.id, state);
       }
-      const committed = await completeMergeHostSide(state.mergeDir, commitEnv);
-      state = { ...state, fixInvocationId: null };
-      if (committed) {
-        return finishMerge(db, stepDef, current, ctx, params, state);
-      }
-      // Markers remain → abort this attempt; the dispatch decision below retries or halts.
-      await gitRun(state.mergeDir, ['merge', '--abort']);
-      await saveMergeState(db, current.id, state);
     }
 
     // (2) Dispatch decision. Abort the live merge before halting so a failed phase
@@ -740,7 +778,7 @@ export async function resolveMergePhase(
       };
     }
     // Recreate the live merge if it isn't open (after an abort or a crash).
-    if (await mergeCommitted(state.mergeDir)) {
+    if (await mergeCommitted(state.mergeDir, state.featureBranch)) {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
@@ -752,8 +790,38 @@ export async function resolveMergePhase(
       );
     }
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
-    const invId = await dispatchFixAgent(db, stepDef, current, params, spec, state, guidance);
-    if (!invId) {
+    // A const alias so the closure below keeps TypeScript's narrowing of `state` to
+    // non-null (a `let` loses that narrowing across a function boundary).
+    const priorState = state;
+    // onInserted runs after the insert and before the enqueue, so no run can start that
+    // `state` does not name.
+    const dispatched = await dispatchFixAgent(
+      db,
+      stepDef,
+      current,
+      params,
+      spec,
+      state,
+      guidance,
+      async (invId) => {
+        state = {
+          ...priorState,
+          fixInvocationId: invId,
+          conflictRetries: priorState.conflictRetries + 1,
+        };
+        await saveMergeState(db, current.id, state);
+      },
+    );
+    if (dispatched.kind === 'already_live') {
+      // A concurrent advance already dispatched and saved its own fixInvocationId; PARK
+      // on it rather than abort its merge or overwrite its state.
+      const row = await setStepStatus(db, current.id, {
+        status: 'waiting_cli',
+        statusMessage: `Resolving merge conflict (${state.featureBranch} → ${state.baseBranch}) with AI…`,
+      });
+      return { resolved: false, result: { status: 'waiting_cli', row } };
+    }
+    if (dispatched.kind === 'no_provider') {
       await gitRun(state.mergeDir, ['merge', '--abort']);
       const row = await halt(
         db,
@@ -765,8 +833,7 @@ export async function resolveMergePhase(
         result: { status: 'failed', row, error: row.errorMessage ?? 'no provider' },
       };
     }
-    state = { ...state, fixInvocationId: invId, conflictRetries: state.conflictRetries + 1 };
-    await saveMergeState(db, current.id, state);
+    // 'ok': the onInserted hook above already saved state.fixInvocationId.
     const row = await setStepStatus(db, current.id, {
       status: 'waiting_cli',
       statusMessage: `Resolving merge conflict (${state.featureBranch} → ${state.baseBranch}) with AI…`,

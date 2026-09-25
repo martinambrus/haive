@@ -1,7 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { promisify } from 'node:util';
+import { describe, it, expect, vi } from 'vitest';
+import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
   parseCoderResult,
@@ -17,14 +20,24 @@ import {
   parseAdvisor,
   parseReplanner,
   resolveDagPhase,
+  ingestReviewRun,
+  ingestAdvisor,
+  resolveEscalationPhase,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
 import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import { StepSupersededError } from './step-ownership.js';
+import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
+
+// Wraps the real dispatcher so one test can stub a single call.
+vi.mock('../orchestrator/dispatcher.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../orchestrator/dispatcher.js')>();
+  return { ...actual, resolveTaskDispatch: vi.fn(actual.resolveTaskDispatch) };
+});
 
 type DagIssue = Parameters<typeof issueSpecText>[1];
 
@@ -861,4 +874,774 @@ describe('replannerPrompt trusted region is structurally closed', () => {
     const out = replannerPrompt(benignPlan, benign, []);
     expect(out).toContain('Current dependency levels: [["ISSUE-001"],["ISSUE-002"]]');
   });
+});
+
+describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it started', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  async function git(dir: string, args: string[]): Promise<void> {
+    await exec('git', args, { cwd: dir, env: GIT_ENV });
+  }
+  async function gitCode(dir: string, args: string[]): Promise<number> {
+    try {
+      await exec('git', args, { cwd: dir, env: GIT_ENV });
+      return 0;
+    } catch (e) {
+      return (e as { code?: number }).code ?? 1;
+    }
+  }
+
+  /** An integration repo on `main` mid-merge with `main--ISSUE-1`, conflicted and left
+   *  open, exactly as startConflictFix leaves it before dispatching a fix agent. */
+  async function setupConflictedIntegration(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dag-merge-wait-'));
+    await git(dir, ['init', '-b', 'main']);
+    await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'initial']);
+    await git(dir, ['checkout', '-b', 'main--ISSUE-1']);
+    await writeFile(path.join(dir, 'base.txt'), 'issue-edit\n', 'utf8');
+    await git(dir, ['commit', '-am', 'issue edit']);
+    await git(dir, ['checkout', 'main']);
+    await writeFile(path.join(dir, 'base.txt'), 'main-edit\n', 'utf8');
+    await git(dir, ['commit', '-am', 'main edit']);
+    await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'main--ISSUE-1']); // conflicts, left open
+    return dir;
+  }
+
+  /** A fake db for one DAG level/issue/plan. One thenable chain covers every `.select()`
+   *  shape used before runLevelMerge's fix-in-flight check. */
+  function makeDagMergeWaitDb(opts: {
+    invocation: { id: string; endedAt: Date | null; supersededAt: Date | null } | undefined;
+    integrationDir: string;
+    autoResolveConflicts: boolean;
+    conflictRetries?: Record<string, number>;
+    /** A Retry reset the row while the pass ran: lockOwnedStep's ownership probe matches
+     *  nothing, same as the update guard below. */
+    stepRowStatus?: string;
+  }) {
+    let stepStatus = opts.stepRowStatus ?? 'running';
+    let stepErrorMessage: string | null = null;
+    let issueMergeStatus = 'conflict';
+    let levelMergeState: unknown = {
+      activeConflict: 'ISSUE-1',
+      fixInvocationId: opts.invocation?.id ?? null,
+      conflictRetries: opts.conflictRetries ?? {},
+    };
+    const planRow = {
+      id: 'plan1',
+      mode: 'dag',
+      reviewEnabled: false,
+      autoResolveConflicts: opts.autoResolveConflicts,
+    };
+    const issueRow = {
+      id: 'issue1',
+      dagPlanId: 'plan1',
+      issueKey: 'ISSUE-1',
+      level: 0,
+      title: 'Fix the conflict',
+      outcome: 'completed',
+      resolution: null,
+      cliInvocationId: null,
+      worktreePath: '/does/not/matter',
+      mergeStatus: 'conflict',
+      branchName: 'main--ISSUE-1',
+      debtItems: [],
+    };
+
+    function chain(result: unknown) {
+      const c = {
+        where: () => c,
+        orderBy: () => c,
+        limit: () => Promise.resolve(result),
+        then: (resolve: (v: unknown) => void, reject?: (e: unknown) => void) =>
+          Promise.resolve(result).then(resolve, reject),
+      };
+      return c;
+    }
+    function resultsFor(table: unknown): unknown[] {
+      if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
+      if (table === schema.taskDagLevels) {
+        return [
+          {
+            id: 'level1',
+            dagPlanId: 'plan1',
+            level: 0,
+            checkpointedAt: null,
+            mergeState: levelMergeState,
+          },
+        ];
+      }
+      if (table === schema.taskDagIssues) return [issueRow];
+      if (table === schema.taskSteps) {
+        // loadPreviousStepOutput('01-worktree-setup'): the integration worktree.
+        return [
+          {
+            detectOutput: null,
+            output: {
+              worktreePath: opts.integrationDir,
+              branchName: 'main',
+              sandboxWorktreePath: opts.integrationDir,
+            },
+            iterations: [],
+          },
+        ];
+      }
+      return [];
+    }
+
+    const db = {
+      query: {
+        taskDagPlans: { findFirst: async () => planRow },
+        tasks: { findFirst: async () => undefined },
+        users: { findFirst: async () => undefined },
+        cliInvocations: { findFirst: async () => opts.invocation },
+        userStepCliPreferences: { findFirst: async () => undefined },
+      },
+      // lockOwnedStep's ownership probe (select({id}).from(taskSteps).where(owned(id)).for(
+      // 'update')) is distinguished by its columns argument and honours the same ownership
+      // guard as the update mock below; every other select keeps the generic chain.
+      select: (cols?: unknown) => ({
+        from: (table: unknown) => {
+          if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
+            return {
+              where: () => ({
+                for: async () =>
+                  ['pending', 'skipped', 'failed'].includes(stepStatus) ? [] : [{ id: 'step1' }],
+              }),
+            };
+          }
+          return chain(resultsFor(table));
+        },
+      }),
+      insert: (table: unknown) => ({
+        values: () => ({
+          returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
+        }),
+      }),
+      update: (table: unknown) => ({
+        set: (patch: Record<string, unknown>) => {
+          const apply = () => {
+            if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
+              levelMergeState = patch.mergeState;
+            }
+            if (table === schema.taskDagIssues && patch && 'mergeStatus' in patch) {
+              issueMergeStatus = patch.mergeStatus as string;
+            }
+            if (table === schema.taskSteps) {
+              if ('status' in patch) stepStatus = patch.status as string;
+              if ('errorMessage' in patch) {
+                stepErrorMessage = (patch.errorMessage as string | null) ?? null;
+              }
+            }
+          };
+          return {
+            where: (cond: unknown) => ({
+              returning: async () => {
+                if (table === schema.taskSteps) {
+                  const values = conditionValues(cond);
+                  const guarded = values.includes('pending') && values.includes('skipped');
+                  if (guarded && ['pending', 'skipped', 'failed'].includes(stepStatus)) return [];
+                }
+                apply();
+                return table === schema.taskSteps
+                  ? [{ id: 'step1', status: stepStatus, errorMessage: stepErrorMessage }]
+                  : [{}];
+              },
+              then: (resolve: (v: unknown) => void) => {
+                apply();
+                resolve(undefined);
+              },
+            }),
+          };
+        },
+      }),
+    };
+    return {
+      db,
+      getStepStatus: () => stepStatus,
+      getStepError: () => stepErrorMessage,
+      getLevelMergeState: () => levelMergeState,
+      getIssueMergeStatus: () => issueMergeStatus,
+    };
+  }
+
+  it('is recognised as over rather than waited on forever once supersededAt is set', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: false,
+      });
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-wait' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        ctx,
+        params as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) {
+        expect(result.result.status).toBe('failed');
+        expect((result.result as { error?: string }).error).toContain('Merge halted');
+      }
+      expect(h.getStepStatus()).toBe('failed');
+      // The stale mid-merge was aborted rather than left open forever, and the cleared
+      // in-flight marker was persisted rather than left naming the dead run.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(
+        0,
+      );
+      expect(
+        (h.getLevelMergeState() as { fixInvocationId: string | null }).fixInvocationId,
+      ).toBeNull();
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('auto-resolve dispatch saves fixInvocationId before the enqueue that can fail', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: true,
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+        async () =>
+          ({
+            mode: 'cli',
+            providerId: 'p1',
+            providerName: 'p1',
+            adapter: null,
+            provider: null,
+            invocation: { kind: 'cli', spec: {} },
+            effectivePrompt: undefined,
+            effort: null,
+            reason: 'test stub',
+          }) as never,
+      );
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-dispatch' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: {
+          enqueueCliInvocation: async () => {
+            throw new Error('queue unavailable');
+          },
+        },
+      };
+      await expect(
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          ctx,
+          params as never,
+        ),
+      ).rejects.toThrow('queue unavailable');
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        activeConflict: string | null;
+      };
+      expect(state.fixInvocationId).toBe('fix-inv-1');
+      expect(state.activeConflict).toBe('ISSUE-1');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a fix run that started and was superseded: aborts, dispatches again under auto-resolve, conflict counter unchanged net', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: true,
+        conflictRetries: { 'ISSUE-1': 1 },
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+        async () =>
+          ({
+            mode: 'cli',
+            providerId: 'p1',
+            providerName: 'p1',
+            adapter: null,
+            provider: null,
+            invocation: { kind: 'cli', spec: {} },
+            effectivePrompt: undefined,
+            effort: null,
+            reason: 'test stub',
+          }) as never,
+      );
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-superseded' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      // A superseded fixer that removed the conflict markers but never finished:
+      // the abort must discard this half-resolved edit, not let it pass as resolved.
+      const conflictedFile = path.join(integrationDir, 'base.txt');
+      await writeFile(conflictedFile, 'half-resolved\n', 'utf8');
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        ctx,
+        params as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) expect(result.result.status).toBe('waiting_cli');
+      // startConflictFix re-opens the merge unconditionally before dispatching, so a
+      // fresh conflict is live — never committed.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      // The issue was never marked resolved: the never-answered branch skips
+      // completeMergeHostSide entirely, so no mergeStatus write happens for it.
+      expect(h.getIssueMergeStatus()).toBe('conflict');
+      // The half-resolved edit was discarded by the abort, not carried into the
+      // fresh conflict the re-merge reopens.
+      expect(await readFile(conflictedFile, 'utf8')).not.toBe('half-resolved\n');
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        conflictRetries: Record<string, number>;
+      };
+      // A fresh fixer was dispatched...
+      expect(state.fixInvocationId).toBe('fix-inv-1');
+      // ...and the refund plus the recharge net to exactly one real attempt.
+      expect(state.conflictRetries['ISSUE-1']).toBe(1);
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a run superseded by a Retry that already reset the step row: rejects without dispatching, aborting or touching merge state', async () => {
+    const integrationDir = await setupConflictedIntegration();
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: true,
+        stepRowStatus: 'pending',
+      });
+      const ctx = {
+        taskId: 'task1',
+        userId: 'user1',
+        repoPath: integrationDir,
+        sandboxWorkdir: integrationDir,
+        logger: logger.child({ test: 'dag-merge-not-owned' }),
+        emitProgress: async () => {},
+      } as unknown as StepContext;
+      const params = {
+        userId: 'user1',
+        taskId: 'task1',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      };
+      const before = h.getLevelMergeState();
+      await expect(
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          ctx,
+          params as never,
+        ),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      // The Retry already reset the row before this pass reached it, so nothing here may
+      // act on the merge: the abort, the dispatch and the state write all sit after the check.
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      expect(h.getLevelMergeState()).toEqual(before);
+      expect(h.getIssueMergeStatus()).toBe('conflict');
+      expect(h.getStepStatus()).toBe('pending');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** A fake db for spawnReviewAgent's write path: tracks every insert/update by table so a
+ *  test can assert what was (and was not) written, without modelling every table's shape.
+ *  Ledger/terseness augmentation reads no table this db provides and degrade to a no-op
+ *  (augmentPromptWithLedger catches its own read failure). */
+function makeSpawnDb() {
+  // seq orders inserts and updates on one shared clock, so a test can assert which of two
+  // writes to different tables (or the same one) actually happened first.
+  let seq = 0;
+  const inserts: { table: unknown; values: Record<string, unknown>; seq: number }[] = [];
+  const updates: { table: unknown; patch: Record<string, unknown>; cond: unknown; seq: number }[] =
+    [];
+  let nextInvId = 0;
+  const db = {
+    query: {
+      userStepCliRolePreferences: { findFirst: async () => undefined },
+      userStepCliPreferences: { findFirst: async () => undefined },
+    },
+    insert: (table: unknown) => ({
+      values: (values: Record<string, unknown>) => {
+        const record = () => inserts.push({ table, values, seq: ++seq });
+        return {
+          returning: async () => {
+            record();
+            return table === schema.cliInvocations ? [{ id: `spawned-inv-${++nextInvId}` }] : [{}];
+          },
+          then: (resolve: (v: unknown) => void) => {
+            record();
+            resolve(undefined);
+          },
+        };
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: (cond: unknown) => {
+          updates.push({ table, patch, cond, seq: ++seq });
+          return { then: (resolve: (v: unknown) => void) => resolve(undefined) };
+        },
+      }),
+    }),
+  };
+  return { db, inserts, updates };
+}
+
+const workingDispatchPlan = () =>
+  ({
+    mode: 'cli',
+    providerId: 'p1',
+    providerName: 'p1',
+    adapter: null,
+    provider: null,
+    invocation: { kind: 'cli', spec: {} },
+    effectivePrompt: undefined,
+    effort: null,
+    reason: 'test stub',
+  }) as never;
+
+const NEVER_STARTED = 'never started';
+const STARTED_THEN_SUPERSEDED = 'started, then superseded by a Retry';
+
+describe('ingestReviewRun: a fix coder that never answered', () => {
+  it.each([
+    [NEVER_STARTED, inv({ rawOutput: null, parsedOutput: null, exitCode: null, startedAt: null })],
+    [
+      STARTED_THEN_SUPERSEDED,
+      inv({
+        rawOutput: null,
+        parsedOutput: null,
+        exitCode: 137,
+        startedAt: new Date(),
+        supersededAt: new Date(),
+      } as never),
+    ],
+  ])(
+    're-dispatches the coder at the same iteration instead of reviewing unchanged code (%s)',
+    async (_label, neverAnswered) => {
+      const { db, inserts, updates } = makeSpawnDb();
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+      const ra = {
+        db,
+        issues: [],
+        level: {} as never,
+        current: { id: 'step1' } as never,
+        params: {
+          userId: 'user1',
+          taskId: 'task1',
+          cliProviderId: null,
+          ignoreSavedStepClis: false,
+        },
+        stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+        taskId: 'task1',
+        specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+        attachmentsNotice: '',
+      } as never;
+      const issue = {
+        id: 'issue1',
+        issueKey: 'ISSUE-1',
+        title: 'Fix the flaky cache',
+        innerIteration: 1,
+        stuckCount: 0,
+        branchName: 'main--ISSUE-1',
+        worktreePath: '/does/not/matter',
+        sandboxWorktreePath: '/does/not/matter',
+        filesModified: [],
+        similarSites: [],
+        errorMessage: null,
+        reviewerVerdict: {
+          verdict: 'fix_required',
+          criteria_results: [],
+          issues: [
+            {
+              severity: 'medium',
+              file: 'a.ts',
+              description: 'stale cache bug',
+              suggestion: 'invalidate on write',
+            },
+          ],
+        },
+      } as never;
+      const run = { id: 'run-1' } as never;
+
+      await ingestReviewRun(ra, issue, run, neverAnswered);
+
+      // No stuckCount/innerIteration/reviewStatus/reviewerVerdict change: the counters the
+      // fix_required branch would have bumped stay untouched.
+      expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+      const coderInv = inserts.find((i) => i.table === schema.cliInvocations);
+      const runInsert = inserts.find((i) => i.table === schema.dagAgentRuns);
+      expect(coderInv?.values.mode).toBe('dag_parallel');
+      expect(coderInv?.values.agentTitle).toContain('Fix coder');
+      // The stored verdict's issues were read and threaded into the re-dispatch, not dropped.
+      expect(coderInv?.values.prompt).toContain('stale cache bug');
+      expect(runInsert?.values.role).toBe('coder');
+      expect(runInsert?.values.iteration).toBe(1);
+      // Exactly one agent was spawned — a reviewer was never dispatched against unchanged code.
+      expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(1);
+      // The replacement run must be recorded before the old one is marked consumed, so a
+      // crash in between leaves a coder — not a bare consume — as the issue's latest run.
+      const consumeUpdate = updates.find(
+        (u) => u.table === schema.dagAgentRuns && (u.patch as { consumedAt?: unknown }).consumedAt,
+      );
+      expect(runInsert!.seq).toBeLessThan(consumeUpdate!.seq);
+    },
+  );
+});
+
+describe('ingestReviewRun: a reviewer that started, produced no verdict, and was superseded', () => {
+  it('re-dispatches the reviewer without charging reviewInfraRetries', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      stuckCount: 0,
+      reviewInfraRetries: 1,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    const run = { id: 'run-1', role: 'reviewer' } as never;
+    const supersededReviewer = inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: 137,
+      startedAt: new Date(),
+      supersededAt: new Date(),
+    } as never);
+
+    await ingestReviewRun(ra, issue, run, supersededReviewer);
+
+    const issueUpdate = updates.find((u) => u.table === schema.taskDagIssues);
+    // Superseded is a free re-dispatch: the reviewer's own infra-retry budget is untouched.
+    expect(issueUpdate?.patch).toMatchObject({ reviewInfraRetries: 1 });
+    const reviewerInv = inserts.find((i) => i.table === schema.cliInvocations);
+    expect(reviewerInv?.values.agentTitle).toContain('Reviewer');
+  });
+});
+
+describe('ingestAdvisor: an advisor that never answered', () => {
+  it.each([
+    [NEVER_STARTED, inv({ rawOutput: null, parsedOutput: null, exitCode: null, startedAt: null })],
+    [
+      STARTED_THEN_SUPERSEDED,
+      inv({
+        rawOutput: null,
+        parsedOutput: null,
+        exitCode: 137,
+        startedAt: new Date(),
+        supersededAt: new Date(),
+      } as never),
+    ],
+  ])(
+    're-dispatches the advisor for free instead of escalating on missing output (%s)',
+    async (_label, neverAnswered) => {
+      const { db, inserts, updates } = makeSpawnDb();
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+      const ea = {
+        db,
+        issues: [],
+        level: {} as never,
+        current: { id: 'step1' } as never,
+        params: {
+          userId: 'user1',
+          taskId: 'task1',
+          cliProviderId: null,
+          ignoreSavedStepClis: false,
+        },
+        stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+        taskId: 'task1',
+        specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+        attachmentsNotice: '',
+        plan: {} as never,
+      } as never;
+      const issue = {
+        id: 'issue1',
+        issueKey: 'ISSUE-1',
+        title: 'Fix the flaky cache',
+        advisorInvocations: 1,
+        branchName: 'main--ISSUE-1',
+        worktreePath: '/does/not/matter',
+        sandboxWorktreePath: '/does/not/matter',
+        errorMessage: null,
+        reviewerVerdict: null,
+      } as never;
+      const run = { id: 'run-1' } as never;
+
+      const result = await ingestAdvisor(ea, issue, run, neverAnswered);
+
+      expect(result).toBe('retry');
+      // advisorInvocations is never charged for a run that never answered.
+      expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+      const advisorInv = inserts.find((i) => i.table === schema.cliInvocations);
+      expect(advisorInv?.values.mode).toBe('dag_parallel');
+      expect(advisorInv?.values.agentTitle).toContain('Advisor');
+    },
+  );
+});
+
+describe('resolveEscalationPhase: a replanner run that never answered', () => {
+  it.each([
+    [
+      NEVER_STARTED,
+      inv({
+        id: 'replanner-inv-1',
+        rawOutput: null,
+        parsedOutput: null,
+        exitCode: null,
+        startedAt: null,
+        endedAt: new Date(),
+        supersededAt: null,
+      } as never),
+    ],
+    [
+      STARTED_THEN_SUPERSEDED,
+      inv({
+        id: 'replanner-inv-1',
+        rawOutput: null,
+        parsedOutput: null,
+        exitCode: 137,
+        startedAt: new Date(),
+        endedAt: new Date(),
+        supersededAt: new Date(),
+      } as never),
+    ],
+  ])(
+    'clears the plan cursor by compare-and-set instead of aborting via ingestReplanner (%s)',
+    async (_label, replannerInv) => {
+      const planUpdates: { patch: Record<string, unknown>; cond: unknown }[] = [];
+      const invUpdates: { patch: Record<string, unknown>; cond: unknown }[] = [];
+      const db = {
+        query: {
+          cliInvocations: { findFirst: async () => replannerInv },
+        },
+        // lockOwnedStep's ownership probe: this test is not about losing the row, so it
+        // always finds it owned.
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [{ id: 'step1' }] }) }) }),
+        update: (table: unknown) => ({
+          set: (patch: Record<string, unknown>) => ({
+            where: (cond: unknown) => {
+              if (table === schema.taskDagPlans) planUpdates.push({ patch, cond });
+              if (table === schema.cliInvocations) invUpdates.push({ patch, cond });
+              return { then: (resolve: (v: unknown) => void) => resolve(undefined) };
+            },
+          }),
+        }),
+      };
+      const ea = {
+        db,
+        issues: [],
+        level: {} as never,
+        current: { id: 'step1', status: 'running' } as never,
+        params: {} as never,
+        stepDef: {} as never,
+        providers: [],
+        deps: {} as never,
+        taskId: 'task1',
+        specView: {} as never,
+        attachmentsNotice: '',
+        plan: { id: 'plan1', replannerInvocationId: 'replanner-inv-1', replannerInvocations: 1 },
+      } as never;
+
+      const result = await resolveEscalationPhase(ea);
+
+      expect(result.status).toBe('reloop');
+      expect(planUpdates).toHaveLength(1);
+      // Compare-and-set: cleared only while the plan still names THIS invocation.
+      expect(conditionValues(planUpdates[0]!.cond)).toEqual(
+        expect.arrayContaining(['plan1', 'replanner-inv-1']),
+      );
+      expect(planUpdates[0]!.patch).toMatchObject({ replannerInvocationId: null });
+      // A run that never answered is not an attempt: ingestReplanner's charge never happened.
+      expect(planUpdates[0]!.patch).not.toHaveProperty('replannerInvocations');
+      expect(invUpdates).toHaveLength(1);
+      expect(invUpdates[0]!.patch).toHaveProperty('consumedAt');
+    },
+  );
 });

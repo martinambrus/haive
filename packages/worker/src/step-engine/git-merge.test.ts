@@ -78,11 +78,11 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
     try {
       // Start the conflicting merge: non-zero exit, MERGE_HEAD live, markers in file.
       expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).not.toBe(0);
-      expect(await mergeCommitted(dir)).toBe(false);
+      expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
       // Simulate the fix agent: write resolved content (no markers).
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
-      expect(await completeMergeHostSide(dir, COMMIT_ENV)).toBe(true);
-      expect(await mergeCommitted(dir)).toBe(true);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await mergeCommitted(dir, 'feature/x')).toBe(true);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toBe('resolved\n');
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -94,8 +94,22 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
     try {
       await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       // Leave the markers in place → completion must refuse.
-      expect(await completeMergeHostSide(dir, COMMIT_ENV)).toBe(false);
-      expect(await mergeCommitted(dir)).toBe(false);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an aborted merge does not read as committed', async () => {
+    const dir = await setupConflict();
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await gitCode(dir, ['merge', '--abort']);
+      // No MERGE_HEAD and nothing unmerged — indistinguishable from a real commit
+      // without the ancestry check, since `feature/x` was never merged into HEAD.
+      expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

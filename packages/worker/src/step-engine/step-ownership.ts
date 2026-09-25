@@ -77,6 +77,12 @@ export async function lockOwnedStep(db: Database | DbHandle, id: string): Promis
   return rows.length > 0;
 }
 
+/** A Retry or Resume supersedes a step's runs in the transaction that takes the step, so a pass
+ *  that finds its own run superseded acts on it only while it still owns its row. */
+export async function assertOwnsStep(db: Database | DbHandle, id: string): Promise<void> {
+  if (!(await lockOwnedStep(db, id))) throw new StepSupersededError(id);
+}
+
 class ClaimOvertaken extends Error {}
 
 /** Open a pass on its `pending` row (claim it, or skip it). With the job's epoch, the fence is read

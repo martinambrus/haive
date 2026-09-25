@@ -39,7 +39,7 @@ describe('a git status Haive runs', () => {
   it('leaves .git/index alone', async () => {
     const dir = await staleStatRepo();
     const before = await indexStamp(dir);
-    expect(await mergeCommitted(dir)).toBe(true);
+    expect(await mergeCommitted(dir, 'main')).toBe(true);
     expect(await indexStamp(dir)).toBe(before);
   });
 
