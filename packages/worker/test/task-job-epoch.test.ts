@@ -986,8 +986,20 @@ describe('a START job', () => {
     h.state.taskStatus = 'cancelled';
     h.state.repoGone = true;
     await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
-    expect(h.state.taskWrites).toEqual([{ epochs: [], landed: false }]);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it('fails nothing a Retry re-queued while a START that read it failed could not resolve it', async () => {
+    h.state.taskStatus = 'failed';
+    h.state.repoGone = true;
+    // The Retry lands once START has read the task and before its repository read throws.
+    h.state.onRead = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
   });
 
   it('fails nothing a Retry re-queued while a START that read it failed was before its claim', async () => {
@@ -1006,7 +1018,7 @@ describe('a START job', () => {
     h.state.taskStatus = 'queued';
     h.state.repoGone = true;
     await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
-    expect(h.state.taskWrites).toEqual([{ epochs: [], landed: true }]);
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
   });
 
   it('points a paused, retried task at its first step, so a first step already done hands off', async () => {

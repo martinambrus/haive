@@ -152,6 +152,8 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** The task a job resolved, so its catch can fail it at the epoch the job holds it at. */
 interface HeldTask {
   ctx?: ResolvedTaskContext;
+  /** The epoch the job read the task at, before resolving the rest of its context. */
+  readEpoch?: number;
   /** A START's claim landed, so the task is one this job started. */
   claimed?: boolean;
 }
@@ -255,11 +257,13 @@ async function buildRunAppRunList(
 async function resolveTaskContext(
   db: Database,
   taskId: string,
+  held?: HeldTask,
 ): Promise<ResolvedTaskContext | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
   });
   if (!task) return null;
+  if (held) held.readEpoch = task.orchestrationEpoch ?? 0;
 
   let repoPath: string | null = null;
   if (task.repositoryId) {
@@ -1820,7 +1824,7 @@ async function handleStartTask(
   payload: TaskJobPayload,
   held?: HeldTask,
 ): Promise<void> {
-  const ctx = await resolveTaskContext(db, payload.taskId);
+  const ctx = await resolveTaskContext(db, payload.taskId, held);
   if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
@@ -3274,7 +3278,8 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
     ) {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
-      const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
+      const epoch =
+        held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch ?? held.readEpoch;
       // A START that claimed nothing holds no task, so it fails only one nobody has started.
       const statuses =
         job.name === TASK_JOB_NAMES.START && !held.claimed ? STARTABLE_TASK_STATUSES : undefined;
