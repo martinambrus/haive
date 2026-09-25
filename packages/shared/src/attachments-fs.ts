@@ -240,14 +240,15 @@ export async function settleExpansionAttempt(
 
 /** Settle every attempt that wrote its intent, inside an upload's claim section: a dead attempt's intent
  *  can name a path free on disk, and settling it after the claim took that name would remove the upload.
- *  Answers the staging dirs it settled; one still extracting has no intent and is left alone. */
+ *  Adds each staging dir to `settled` as soon as it is settled, so one settled before a later attempt
+ *  throws is still removed; one still extracting has no intent and is left alone. */
 export async function settleExpansionIntents(
   tx: DbTx,
   taskId: string,
   anchor: string,
   uploadsRel: string,
-): Promise<string[]> {
-  const settled: string[] = [];
+  settled: string[],
+): Promise<void> {
   for (const entry of (await readdirNoFollow(anchor, uploadsRel)) ?? []) {
     if (
       expansionAttemptArchiveId(entry.name) !== null &&
@@ -256,7 +257,6 @@ export async function settleExpansionIntents(
       settled.push(entry.name);
     }
   }
-  return settled;
 }
 
 /** Settle every expansion attempt at the given archives but `keep`, inside a section holding the

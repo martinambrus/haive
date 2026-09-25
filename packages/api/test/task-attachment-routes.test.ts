@@ -379,6 +379,42 @@ describe('task attachment routes', () => {
       expect((await listing(up())).filter((n) => n.startsWith('.expanding-'))).toEqual([]);
     });
 
+    it('removes the staging dirs it settled when a later settle fails', async () => {
+      const one = await seedFile('one.zip', 'PK');
+      const two = await seedFile('two.zip', 'PK');
+      await interruptedExpansion(one.id as string, 'one', ['a.md']);
+      await interruptedExpansion(two.id as string, 'two', ['a.md']);
+      // The second attempt's row lookup fails, after the first attempt has already lost its intent.
+      const real = fake.db;
+      let lookups = 0;
+      h.db = {
+        ...real,
+        transaction: <R>(fn: (tx: typeof real) => Promise<R>) =>
+          real.transaction((tx) =>
+            fn({
+              ...tx,
+              query: {
+                ...tx.query,
+                taskAttachments: {
+                  ...tx.query.taskAttachments,
+                  findMany: async (opts) => {
+                    lookups += 1;
+                    if (lookups === 2) throw new Error('connection lost');
+                    return tx.query.taskAttachments.findMany(opts);
+                  },
+                },
+              },
+            }),
+          ),
+      };
+      const res = await upload('b.md', 'mine');
+      expect(res.status).toBe(500);
+      expect(await exists(up('b.md'))).toBe(false);
+      const left = (await listing(up())).filter((n) => n.startsWith('.expanding-'));
+      expect(left).toHaveLength(1);
+      expect(await exists(up(`${left[0]}/placed-as`))).toBe(true);
+    });
+
     it('de-dupes within the file’s own folder, starting at (2)', async () => {
       const names: unknown[] = [];
       for (const [name, body] of [

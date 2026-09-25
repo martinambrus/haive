@@ -252,11 +252,11 @@ async function claimAttachmentName(
   relPath: string,
 ): Promise<{ rel: string; fh: FileHandle }> {
   let section = null as Promise<{ rel: string; fh: FileHandle }> | null;
-  let settled: string[] = [];
+  const settled: string[] = [];
   try {
     await withTaskAttachmentsLock(getDb(), taskId, (tx) => {
       section = (async () => {
-        settled = await settleExpansionIntents(tx, taskId, anchor, uploadsRel);
+        await settleExpansionIntents(tx, taskId, anchor, uploadsRel, settled);
         return createUniqueAttachment(anchor, uploadsRel, relPath);
       })();
       return section;
