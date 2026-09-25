@@ -82,6 +82,7 @@ import { assertPastedPersonasStillAllowed, resolveSecretMasks } from './secret-m
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { consumePreemptionMark } from './preempt-mark.js';
+import { isRunSuperseded, SUPERSEDED_RUN_ERROR, watchSupersededRun } from './run-superseded.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
 import {
   dropMasksUnderAgentDirs,
@@ -1554,6 +1555,22 @@ export function createSandboxSpawner(
       runnerOptions.noProxyHosts = appReach.noProxyHosts;
     }
     const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
+    // A Retry or a Stop kills the task's sandboxes once, and this one may not exist yet then.
+    if (invocationId && (await isRunSuperseded(invocationId))) {
+      return {
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        timedOut: false,
+        error: SUPERSEDED_RUN_ERROR,
+      };
+    }
+    const superseded = invocationId ? watchSupersededRun(invocationId) : null;
+    const signal =
+      superseded && opts.signal
+        ? AbortSignal.any([opts.signal, superseded.signal])
+        : (superseded?.signal ?? opts.signal);
     const result = await runInSandbox(
       {
         command: spec.command,
@@ -1578,7 +1595,7 @@ export function createSandboxSpawner(
         timeoutMs: opts.timeoutMs,
         onStdoutChunk: wrapStreamCallback(invocationId, 'stdout', opts.onStdoutChunk),
         onStderrChunk: wrapStreamCallback(invocationId, 'stderr', opts.onStderrChunk),
-        signal: opts.signal,
+        signal,
         interactive: spec.steerable === true,
         stdinInitial: spec.stdinInitial,
         stdinPrompt: spec.stdinPrompt,
@@ -1588,7 +1605,7 @@ export function createSandboxSpawner(
         captureDir: spec.captureFile,
       },
       runnerOptions,
-    );
+    ).finally(() => superseded?.stop());
     return {
       exitCode: result.exitCode,
       stdout: result.stdout,
@@ -1611,9 +1628,11 @@ export function createSandboxSpawner(
         result.error ??
         (result.timedOut
           ? `${CLI_TIMEOUT_HEADLINE} (${Math.round((opts.timeoutMs ?? 0) / 60_000)}m).`
-          : invocationId && (await consumePreemptionMark(invocationId))
-            ? `${CLI_PREEMPTED_HEADLINE}. The step re-runs automatically; nothing is lost but this round's work.`
-            : undefined),
+          : superseded?.signal.aborted
+            ? SUPERSEDED_RUN_ERROR
+            : invocationId && (await consumePreemptionMark(invocationId))
+              ? `${CLI_PREEMPTED_HEADLINE}. The step re-runs automatically; nothing is lost but this round's work.`
+              : undefined),
       capturedLog: result.capturedLog,
     };
   };
