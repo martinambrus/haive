@@ -1,8 +1,8 @@
 # Found-not-fixed sweep: every open entry gets a fix, an owner or a recorded reason
 
-> **IN PROGRESS** since 2026-09-24. PRs 1-20 and 5c merged (#267-#280, #282-#286, #288, #289); PR 21
-> (the task page fits a phone) is in review. Tracked in the status table of `docs/plans/README.md`,
-> which each PR updates.
+> **IN PROGRESS** since 2026-09-24. PRs 1-21 and 5c merged (#267-#280, #282-#286, #288-#290); PR 22
+> (the 501-file archive tests get a measured timeout) is in review. Tracked in the status table of
+> `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
