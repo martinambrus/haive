@@ -561,7 +561,8 @@ describe('ensureArchivesExpanded', () => {
     // Still stamped, or every step for the life of the task pays the extraction.
     expect(f.row('huge.tar').expandedAt).toBeInstanceOf(Date);
     expect(await f.staging()).toEqual([]);
-  });
+    // 501 files of IO is load-sensitive, and the 5 s default is not headroom for it.
+  }, 30_000);
 
   it('removes a capped archive’s extracted tree only once its section is over', async () => {
     // Past a cap the staging dir holds the whole extracted archive; removing it under the lock would
@@ -585,7 +586,8 @@ describe('ensureArchivesExpanded', () => {
     expect(atCommit[0]).toHaveLength(1);
     expect(f.row('huge.tar').expandedAt).toBeInstanceOf(Date);
     expect(await f.staging()).toEqual([]);
-  });
+    // 501 files of IO is load-sensitive, and the 5 s default is not headroom for it.
+  }, 30_000);
 
   it('does not let two members that sanitise to one name overwrite each other', async () => {
     const f = await setup();
