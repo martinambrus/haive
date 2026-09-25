@@ -1558,14 +1558,17 @@ export default function TaskDetailPage() {
           {task.repository && (
             <Badge
               variant="default"
-              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300"
+              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300 max-sm:hidden"
             >
               <FolderGit2 className="h-3 w-3" />
               {task.repository.name}
             </Badge>
           )}
           {task.executionPath && (
-            <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0 gap-1">
+            <Badge
+              variant={executionPathVariant(task.executionPath)}
+              className="shrink-0 gap-1 max-sm:hidden"
+            >
               <Route className="h-3 w-3" />
               {EXECUTION_PATH_LABELS[task.executionPath]}
             </Badge>
@@ -1582,7 +1585,7 @@ export default function TaskDetailPage() {
           <HeaderUsageChip
             providerIds={usageProviderIds}
             providers={providers}
-            className="ml-auto"
+            className="ml-auto max-md:hidden"
           />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
@@ -1712,12 +1715,16 @@ export default function TaskDetailPage() {
               </div>
             </>
           )}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
+          <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center gap-2">
             {/* The same chip the fixed title strip carries, because the strip only exists once
                   the header has scrolled away — at the top of the page, which is where a run is
                   started and where a dead token has to be repaired, there was no reading of what
                   allowance is left. */}
-            <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
+            <HeaderUsageChip
+              providerIds={usageProviderIds}
+              providers={providers}
+              className="max-w-full flex-wrap"
+            />
             <ActionMenu
               items={[
                 // A task created but never enqueued — the plan builder does that so
@@ -2803,10 +2810,10 @@ function HeaderPaceChip({
         <>
           {' / '}
           {aiSegmentMs > 0 && (
-            <>
+            <span className="max-sm:hidden">
               <span className="text-neutral-400">{formatHoursMinutes(aiSegmentMs)}</span>
               {' / '}
-            </>
+            </span>
           )}
           <span className={confirmedHours > 0 ? undefined : 'text-neutral-400'}>
             {formatHoursMinutes(budgetMs)}
@@ -3337,7 +3344,7 @@ function TaskTotalTime({
               return (
                 <div
                   key={`${p.provider}-${p.costBasis}`}
-                  className="flex items-center justify-between gap-3 text-xs"
+                  className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs"
                   title={`${p.invocations} invocation(s) — input ${p.inputTokens.toLocaleString()} / output ${p.outputTokens.toLocaleString()} / cache ${cache.toLocaleString()}`}
                 >
                   <span className="flex items-center gap-2">
@@ -3354,7 +3361,7 @@ function TaskTotalTime({
                       </span>
                     )}
                   </span>
-                  <span className="flex items-center gap-3 font-mono text-neutral-400">
+                  <span className="flex flex-wrap items-center gap-x-3 font-mono text-neutral-400">
                     <span>in {formatTokens(p.inputTokens)}</span>
                     <span>out {formatTokens(p.outputTokens)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>
@@ -3721,8 +3728,8 @@ function StepCardImpl({
           </div>
         </div>
       )}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>
           <h3 className="text-base font-semibold text-neutral-100">{step.title}</h3>
           <Badge variant={stepStatusVariant(step.status)}>{step.status}</Badge>
@@ -3750,7 +3757,7 @@ function StepCardImpl({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Surface B stamp pinned to the right, just left of the action buttons
               (centering read as random since each step's left content differs). */}
           <StepUsageStamp step={step} />
