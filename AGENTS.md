@@ -267,7 +267,9 @@ redelivered after it was applied. A submission, a retry and a first run still fl
   owes are ended too. The task's epoch is then fenced by a compare-and-swap on the state read, and
   the step is re-driven at the new epoch, so every advance queued before the restart is stale. A
   step the task has moved past is requeued rather than re-driven, and every run it still has is
-  superseded: one that ended later would resume it at whatever epoch the task was at by then.
+  superseded: one that ended later would resume it at whatever epoch the task was at by then. An
+  advance for it queued before the restart is dropped once it finds the task pointing elsewhere,
+  since every advance that carries no answer is queued for the step the task points at.
 - A `running` step the task is on is decided by `bootRecoveryAction`. With agent work behind it (a
   finished loop pass, an agent row, or a run of its own nothing superseded), it is a parked step
   whose park write was lost. It is demoted to `waiting_cli`, guarded on `running`, and recovered

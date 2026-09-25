@@ -2072,6 +2072,24 @@ async function handleAdvanceStep(
     return;
   }
 
+  // Every advance with no answer is queued for the step the task points at, so one for a step and
+  // round it has moved past is left over, such as one queued before a restart for a row boot
+  // requeued as abandoned, and must not claim that row and point the task back at it.
+  if (payload.formValues == null && advanceChainHasMoved(ctx, payload.stepId, round)) {
+    await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
+    logger.warn(
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        round,
+        currentStepId: ctx.currentStepId,
+        currentRound: ctx.currentRound,
+      },
+      'advance-step skipped: the task has moved past this step',
+    );
+    return;
+  }
+
   // Concurrency guard: only one step of a task may execute at a time. A stale or
   // re-delivered advance-step — e.g. a queued job that survived a Retry/reset and
   // is replayed on worker restart — must NOT run a step while another is already
