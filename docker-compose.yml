@@ -122,6 +122,10 @@ services:
       # cannot guess which origins you meant to allow, and reflecting any of them back with
       # `credentials: true` is not a default worth shipping.
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:${HAIVE_WEB_PORT:-3000}}
+      # The same pair the web service hands the browser, so the api knows the origin its own
+      # pages (the proxied editor) call it from even when a reverse proxy rewrites Host.
+      HAIVE_API_PORT: ${HAIVE_API_PORT:-3001}
+      HAIVE_PUBLIC_API_URL: ${HAIVE_PUBLIC_API_URL:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
       REDIS_URL: redis://redis:6379
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}

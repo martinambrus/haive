@@ -21,7 +21,7 @@ import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { isForeignOrigin, webOrigin } from '../lib/request-origin.js';
+import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 // Reverse-proxies the in-task code-server editor through the authenticated api,
 // exactly mirroring how the terminal/VNC routes proxy into per-task containers.
@@ -124,7 +124,7 @@ export function installIdeWebSocket(server: Server): void {
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(WS_PATH_PREFIX)) return;
-    if (isForeignOrigin(req.headers.origin, req.headers.host, webOrigin())) {
+    if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
       rejectUpgrade(socket, 403, 'Forbidden');
       return;
     }

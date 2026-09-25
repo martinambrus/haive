@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
 
 const TASK = '11111111-2222-3333-4444-555555555555';
@@ -55,6 +55,27 @@ describe('a state-changing request', () => {
   it('is the only kind refused: a read from another page still answers', async () => {
     const res = await app.request('/health', { headers: { origin: 'http://localhost:5173' } });
     expect(res.status).toBe(200);
+  });
+});
+
+describe('behind a proxy that rewrites Host', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const post = (app: ReturnType<typeof createApiApp>, origin: string) =>
+    app.request('/no-such-route', { method: 'POST', headers: { host: 'api:3001', origin } });
+
+  it("the api's configured public origin goes through, and another page is still refused", async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com/base/');
+    const app = createApiApp('https://haive.example.com');
+    expect((await post(app, 'https://api.example.com')).status).toBe(404);
+    expect((await post(app, 'https://evil.example.com')).status).toBe(403);
+  });
+
+  it("with no public URL, the app's host on the api's published port goes through", async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
+    vi.stubEnv('HAIVE_API_PORT', '3001');
+    const app = createApiApp('https://haive.example.com');
+    expect((await post(app, 'https://haive.example.com:3001')).status).toBe(404);
+    expect((await post(app, 'https://haive.example.com:8080')).status).toBe(403);
   });
 });
 

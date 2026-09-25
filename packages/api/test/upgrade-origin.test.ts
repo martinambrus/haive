@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installTerminalWebSocket } from '../src/routes/terminal.js';
 import { installTerminalShellWebSocket } from '../src/routes/terminal-shell.js';
 import { installCliStreamWebSocket } from '../src/routes/cli-stream.js';
@@ -36,6 +36,7 @@ const HANDLERS: Array<{ file: string; install: (s: Server) => void; path: string
 let server: Server | null = null;
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
   server = null;
 });
@@ -48,13 +49,18 @@ async function listen(install: (s: Server) => void): Promise<number> {
 }
 
 /** The status line a raw WebSocket handshake gets back. */
-function handshake(port: number, path: string, origin?: string): Promise<string> {
+function handshake(
+  port: number,
+  path: string,
+  origin?: string,
+  host = `127.0.0.1:${port}`,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     const socket = connect(port, '127.0.0.1', () => {
       const lines = [
         `GET ${path} HTTP/1.1`,
-        `Host: 127.0.0.1:${port}`,
+        `Host: ${host}`,
         'Connection: Upgrade',
         'Upgrade: websocket',
         'Sec-WebSocket-Version: 13',
@@ -82,6 +88,14 @@ describe('a WebSocket handshake', () => {
       for (const origin of ['http://localhost:3000', `http://127.0.0.1:${port}`, undefined]) {
         expect(await handshake(port, h.path, origin)).toBe('HTTP/1.1 401 Unauthorized');
       }
+    });
+
+    it(`from the api's public origin behind a proxy that rewrites Host reaches auth (${h.file})`, async () => {
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com');
+      const port = await listen(h.install);
+      expect(await handshake(port, h.path, 'https://api.example.com', 'api:3001')).toBe(
+        'HTTP/1.1 401 Unauthorized',
+      );
     });
   }
 

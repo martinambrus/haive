@@ -30,7 +30,7 @@ import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
-import { isForeignOrigin, webOrigin } from '../lib/request-origin.js';
+import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 const log = logger.child({ module: 'cli-login-banner-ws' });
 
@@ -224,7 +224,7 @@ export function installCliLoginBannerWebSocket(
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
-    if (isForeignOrigin(req.headers.origin, req.headers.host, webOrigin())) {
+    if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
       rejectUpgrade(socket, 403, 'Forbidden');
       return;
     }

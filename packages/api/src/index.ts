@@ -5,7 +5,7 @@ import { cors } from 'hono/cors';
 import { logger } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { HttpError, type AppEnv } from './context.js';
-import { isForeignOrigin } from './lib/request-origin.js';
+import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
@@ -60,10 +60,11 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
     }),
   );
 
+  const trusted = trustedOrigins(webOrigin);
   app.use('*', async (c, next) => {
     if (
       !SAFE_METHODS.has(c.req.method) &&
-      isForeignOrigin(c.req.header('origin'), c.req.header('host'), webOrigin)
+      isForeignOrigin(c.req.header('origin'), c.req.header('host'), trusted)
     ) {
       throw new HttpError(403, 'Refused a request from another page');
     }
