@@ -76,12 +76,15 @@ test.describe('app layout and navigation', () => {
   // The dashboard's own actions are "All tasks" and "Advanced statistics" — there is no
   // repositories card on it at all. This asserted "Manage repositories" and "Manage tasks",
   // neither of which the page has rendered for some time.
-  test('dashboard actions link to /tasks and /stats', async ({ page }) => {
+  test('dashboard actions link to /tasks and /stats, even while statistics do not load', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
     try {
       const email = uniqueEmail('dash-cards');
       userId = (await registerUser(sql, page.request, { email })).userId;
+      await page.route('**/stats/summary**', (route) => route.abort());
 
       await page.goto('/dashboard');
 
