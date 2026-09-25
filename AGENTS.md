@@ -274,6 +274,13 @@ redelivered after it was applied. A submission, a retry and a first run still fl
   like the parked ones. Without agent work it is reset and re-run, as a deterministic step always
   was.
 
+**A running task that nothing drives is taken over.** A `running` task whose current step row is
+missing, or `pending` and not parked, while the task queue holds no job for it, is re-driven by
+`redriveStalledTasks` (`queues/stalled-redrive.ts`): once at boot after the reconcile, whose own
+re-drive enqueue can still be lost, and every minute for a task idle five minutes, for a hand-off
+lost between boots. It bumps the epoch under the task row's lock and re-checks the row in the same
+statement, so a step a pass claimed since the candidate read is left to that pass.
+
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
 apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
 both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance

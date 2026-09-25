@@ -31,6 +31,7 @@ import {
   reconcileOrphanedSteps,
   startTaskWorker,
 } from './queues/task-queue.js';
+import { defaultDeps, redriveStalledTasks, StalledTaskSweeper } from './queues/stalled-redrive.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
@@ -95,6 +96,10 @@ async function main(): Promise<void> {
   // here while it runs, and a queued advance could flip a step this pass then resets.
   await reconcileOrphanedSteps(getDb()).catch((err) => {
     logger.warn({ err }, 'orphaned-step reconciliation on boot failed');
+  });
+  // At boot the queue read already names every job that exists, so no staleness window is needed.
+  await redriveStalledTasks(getDb(), defaultDeps, { staleMs: 0 }).catch((err) => {
+    logger.warn({ err }, 'stalled-task redrive on boot failed');
   });
 
   const repoWorker = startRepoWorker(repoStoragePath);
@@ -218,6 +223,9 @@ async function main(): Promise<void> {
   // an idle +1 task sat behind a neutral task with two agents running, purely on enqueue order.
   const cliPriorityDecaySweeper = new CliPriorityDecaySweeper({ db: getDb() });
   cliPriorityDecaySweeper.start();
+  // Periodic sibling of the boot-time redrive above.
+  const stalledTaskSweeper = new StalledTaskSweeper({ db: getDb() });
+  stalledTaskSweeper.start();
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
   // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,
@@ -238,6 +246,7 @@ async function main(): Promise<void> {
     runtimeRunnerReaper.stop();
     agentPreemptionSweeper.stop();
     cliPriorityDecaySweeper.stop();
+    stalledTaskSweeper.stop();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     await terminalManager.stop().catch((err) => {
