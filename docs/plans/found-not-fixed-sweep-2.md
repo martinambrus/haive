@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-2 merged (#301-#302); PR 3 (one re-driver for a lost START
-> and a lost cli-exec job) is in review. Tracked in the status table of `docs/plans/README.md`,
-> which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-3 merged (#301, #302 and #304); PR 7 (the allowance watch
+> is armed only on the failure it belongs to, and a task Retry clears it) is in review. Tracked in
+> the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
