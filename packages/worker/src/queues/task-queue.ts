@@ -2,7 +2,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
@@ -106,7 +106,9 @@ import { getCliExecQueue } from './cli-exec-queue.js';
 import {
   StepSupersededError,
   lockOwnedStep,
+  taskWriteTarget,
   updateOwnedStep,
+  type TaskFence,
 } from '../step-engine/step-ownership.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
@@ -366,32 +368,6 @@ async function resolveCurrentStepIndex(
     )
     .limit(1);
   return rows[0]?.runSeq ?? fallbackIndex;
-}
-
-/** Statuses a task never comes back from. Cancel is the user's final word and completion is
- *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
- *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
-const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
-
-/** A job's write to the task under the epoch the job holds. It lands only while the task is still
- *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. A job may
- *  revive a task that was already failed when it picked it up (`reviveFailed`), which the pickup
- *  guard allows only for an answer to a form still parked, since answering it reopens the task. */
-interface TaskFence {
-  epoch: number;
-  reviveFailed?: boolean;
-}
-
-function taskWriteTarget(taskId: string, fence?: TaskFence) {
-  const refused = fence !== undefined && !fence.reviveFailed;
-  return and(
-    eq(schema.tasks.id, taskId),
-    notInArray(schema.tasks.status, [
-      ...TERMINAL_TASK_STATUSES,
-      ...(refused ? (['failed'] as const) : []),
-    ]),
-    ...(fence ? [eq(schema.tasks.orchestrationEpoch, fence.epoch)] : []),
-  );
 }
 
 /** Park the task on a step. With a fence, only while it holds, as for markTaskRunningWithStep. */

@@ -52,14 +52,38 @@ function refusedByRowGuard(cond: unknown, status: unknown): boolean {
   return values.includes('pending') && status !== 'pending';
 }
 
+/** The claim's task fence, evaluated against the mock task row: its epoch and a status outside the
+ *  refused set. */
+function taskFenceHolds(cond: unknown, task: Record<string, unknown> | null): boolean {
+  if (!task) return false;
+  const values = conditionValues(cond);
+  const epoch = values.find((v) => typeof v === 'number');
+  const refused = values.filter((v) => typeof v === 'string' && v !== task.id);
+  return (
+    (epoch === undefined || epoch === task.orchestrationEpoch) && !refused.includes(task.status)
+  );
+}
+
 function makeMockDb(state: MockState): Database {
   let nextId = 1;
   const db = {
+    // Rolls the mock back on a throw, as Postgres rolls the claim's flip back.
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const row = { ...state.taskStepRow };
+      const writes = state.updates.length;
+      try {
+        return await fn(db);
+      } catch (err) {
+        state.taskStepRow = row;
+        state.updates.length = writes;
+        throw err;
+      }
+    },
     select: () => ({
       from: (table: unknown) => {
         const tableName = tableNameOf(table);
         return {
-          where: () => ({
+          where: (cond: unknown) => ({
             limit: async () => {
               if (tableName === 'task_steps') {
                 return state.taskStepRow.id ? [state.taskStepRow] : [];
@@ -67,6 +91,10 @@ function makeMockDb(state: MockState): Database {
               return [];
             },
             orderBy: () => ({ limit: async () => [] }),
+            for: async () =>
+              tableName === 'tasks' && taskFenceHolds(cond, state.taskRow)
+                ? [{ id: state.taskRow!.id }]
+                : [],
           }),
         };
       },
@@ -690,7 +718,7 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     orchestrationEpoch: epoch,
   });
 
-  it('gives the row back when a Retry landed while shouldRun ran', async () => {
+  it('refuses the claim when a Retry landed while shouldRun ran, keeping no flip', async () => {
     const state = freshState();
     state.taskRow = atEpoch(5);
     // The Retry's reset leaves the row `pending`, so only the epoch says it happened.
@@ -702,9 +730,10 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect(detected).toEqual([]);
     expect(state.taskStepRow.status).toBe('pending');
     expect(state.taskStepRow.startedAt).toBeNull();
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
   });
 
-  it('gives back the skip shouldRun chose when a Retry landed meanwhile', async () => {
+  it('refuses the skip shouldRun chose when a Retry landed meanwhile', async () => {
     const state = freshState();
     state.taskRow = atEpoch(5);
     const { def } = guardedStep(() => {
@@ -714,6 +743,21 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
     expect(state.taskStepRow.status).toBe('pending');
     expect(state.taskStepRow.endedAt).toBeNull();
+    expect(state.updates.filter((u) => u.patch.status === 'skipped')).toEqual([]);
+  });
+
+  it('refuses the claim on a task a Stop failed at the same epoch', async () => {
+    const state = freshState();
+    state.taskRow = atEpoch(5);
+    // A Stop fails the task without moving the epoch.
+    const { def, detected } = guardedStep(() => {
+      state.taskRow!.status = 'failed';
+    });
+
+    expect((await runAtEpoch(state, def, 5)).status).toBe('superseded');
+    expect(detected).toEqual([]);
+    expect(state.taskStepRow.status).toBe('pending');
+    expect(state.updates.filter((u) => u.patch.status === 'running')).toEqual([]);
   });
 
   it('leaves a Skip that landed while shouldRun ran in place', async () => {
