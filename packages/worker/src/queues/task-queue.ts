@@ -2,7 +2,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
@@ -107,6 +107,7 @@ import {
 import { getCliExecQueue } from './cli-exec-queue.js';
 import {
   StepSupersededError,
+  TERMINAL_TASK_STATUSES,
   lockOwnedStep,
   taskWriteTarget,
   updateOwnedStep,
@@ -327,8 +328,24 @@ async function appendEvent(
   });
 }
 
-async function markTaskRunning(db: Database, taskId: string): Promise<void> {
-  await db
+/** A task nobody has started yet: created, or queued by the start action or a task Retry. */
+const STARTABLE_TASK_STATUSES = ['created', 'queued'] as const satisfies readonly TaskStatus[];
+
+/** START's claim: the task goes running, pointed at its first step, only while it is still
+ *  startable at the epoch START read; false when anything else holds it and nothing was written. */
+async function claimTaskStart(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  first: StepDefinition,
+): Promise<boolean> {
+  const currentStepIndex = await resolveCurrentStepIndex(
+    db,
+    ctx.taskId,
+    first.metadata.id,
+    0,
+    computeGlobalStepIndex(first.metadata.workflowType, first.metadata.index),
+  );
+  const [claimed] = await db
     .update(schema.tasks)
     .set({
       status: 'running',
@@ -343,9 +360,20 @@ async function markTaskRunning(db: Database, taskId: string): Promise<void> {
       // completedAt - startedAt (the api and the task page both end the span at
       // `completedAt ?? now`) instead of ticking. Same clear markTaskRunningWithStep documents.
       completedAt: null,
+      currentStepId: first.metadata.id,
+      currentStepIndex,
+      currentRound: 0,
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(
+      and(
+        eq(schema.tasks.id, ctx.taskId),
+        inArray(schema.tasks.status, [...STARTABLE_TASK_STATUSES]),
+        eq(schema.tasks.orchestrationEpoch, ctx.orchestrationEpoch),
+      ),
+    )
+    .returning({ id: schema.tasks.id });
+  return claimed !== undefined;
 }
 
 /** current_step_index mirrors the current step's run_seq (buildRunList position — the
@@ -549,13 +577,15 @@ export async function markTaskCompleted(
   }
 }
 
-/** Fail the task. With `epoch`, only while the task is still at it, as a step's own failure is;
- *  false when it had moved on and nothing was written. */
+/** Fail the task, never one that was cancelled or completed. With `epoch`, only while the task is
+ *  still at it, as a step's own failure is, and with `statuses` only from one of them; false when
+ *  nothing was written. */
 async function markTaskFailed(
   db: Database,
   taskId: string,
   message: string,
   epoch?: number,
+  statuses?: readonly TaskStatus[],
 ): Promise<boolean> {
   const [failed] = await db
     .update(schema.tasks)
@@ -566,9 +596,12 @@ async function markTaskFailed(
       updatedAt: new Date(),
     })
     .where(
-      epoch === undefined
-        ? eq(schema.tasks.id, taskId)
-        : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)),
+      and(
+        eq(schema.tasks.id, taskId),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        ...(epoch === undefined ? [] : [eq(schema.tasks.orchestrationEpoch, epoch)]),
+        ...(statuses ? [inArray(schema.tasks.status, [...statuses])] : []),
+      ),
     )
     .returning({ id: schema.tasks.id });
   if (!failed) return false;
@@ -1786,14 +1819,10 @@ async function handleStartTask(
   held?: HeldTask,
 ): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
-  if (held && ctx) held.ctx = ctx;
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
   }
-  await markTaskRunning(db, ctx.taskId);
-  await appendEvent(db, ctx.taskId, null, 'task.running', {});
-
   const steps = await buildRunList(ctx, db);
   const first = steps[0];
   if (!first) {
@@ -1802,9 +1831,21 @@ async function handleStartTask(
       ctx.taskId,
       `no steps registered for workflow ${ctx.workflowType}`,
       ctx.orchestrationEpoch,
+      STARTABLE_TASK_STATUSES,
     );
     return;
   }
+  // A START redelivered or queued twice finds the task already started, and must not restart it.
+  if (!(await claimTaskStart(db, ctx, first))) {
+    logger.info(
+      { taskId: ctx.taskId, taskStatus: ctx.status, epoch: ctx.orchestrationEpoch },
+      'start-task skipped: the task is no longer waiting to start',
+    );
+    return;
+  }
+  if (held) held.ctx = ctx;
+  await appendEvent(db, ctx.taskId, null, 'task.running', {});
+
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
   // entirely — without this a task created (or retried) while paused would run its whole first
   // step. Hand the first step to the normal advance path instead and let that gate park it,
@@ -3231,7 +3272,10 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     ) {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
       const epoch = held.ctx?.orchestrationEpoch ?? (job.data as TaskJobPayload).epoch;
-      await markTaskFailed(db, taskId, message, epoch).catch((cleanupErr) => {
+      // A START that claimed nothing holds no task, so it fails only one nobody has started.
+      const statuses =
+        job.name === TASK_JOB_NAMES.START && !held.ctx ? STARTABLE_TASK_STATUSES : undefined;
+      await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
         logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
       });
     }

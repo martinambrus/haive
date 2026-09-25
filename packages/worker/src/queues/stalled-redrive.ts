@@ -1,11 +1,11 @@
-import { and, eq, exists, isNotNull, isNull, lt, not, or, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, isNotNull, isNull, lt, not, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { enqueueAdvance, getTaskQueue, retrying, REDRIVE_RETRY_DELAYS_MS } from './task-queue.js';
 
 /**
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
- * or any hand-off lost between boots, left `pending`/missing with nothing to drive it.
+ * or any hand-off lost between boots, left `pending`/missing, or finished with nothing after it.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -49,6 +49,18 @@ export const defaultDeps: StalledRedriveDeps = {
   enqueueAdvance,
   queuedTaskIds: readTaskQueueTaskIds,
 };
+
+/** A current row that shows the task's hand-off was lost: pending and not parked, or finished
+ *  (a job that died between the row's end and pointing the task on), and idle since `cutoff`. */
+function redrivableRow(cutoff: Date) {
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    or(
+      and(eq(schema.taskSteps.status, 'pending'), isNull(schema.taskSteps.waitingStartedAt)),
+      inArray(schema.taskSteps.status, ['done', 'skipped']),
+    ),
+  )!;
+}
 
 interface StalledCandidate {
   taskId: string;
@@ -97,14 +109,7 @@ async function redriveTask(
                     eq(schema.taskSteps.taskId, c.taskId),
                     eq(schema.taskSteps.stepId, c.stepId),
                     eq(schema.taskSteps.round, c.round),
-                    not(
-                      // and() always has 3 args here, so it never returns undefined.
-                      and(
-                        eq(schema.taskSteps.status, 'pending'),
-                        isNull(schema.taskSteps.waitingStartedAt),
-                        lt(schema.taskSteps.updatedAt, cutoff),
-                      )!,
-                    ),
+                    not(redrivableRow(cutoff)),
                   ),
                 ),
             ),
@@ -135,8 +140,8 @@ async function redriveTask(
   return true;
 }
 
-/** One pass: re-drives each running task whose current step row is missing, or pending and not
- *  parked, while the task queue holds no job for it. */
+/** One pass: re-drives each running task whose current step row is missing, pending and not
+ *  parked, or finished, while the task queue holds no job for it. */
 export async function redriveStalledTasks(
   db: Database,
   deps: StalledRedriveDeps = defaultDeps,
@@ -165,14 +170,7 @@ export async function redriveStalledTasks(
         eq(schema.tasks.status, 'running'),
         isNotNull(schema.tasks.currentStepId),
         lt(schema.tasks.updatedAt, cutoff),
-        or(
-          isNull(schema.taskSteps.id),
-          and(
-            eq(schema.taskSteps.status, 'pending'),
-            isNull(schema.taskSteps.waitingStartedAt),
-            lt(schema.taskSteps.updatedAt, cutoff),
-          ),
-        ),
+        or(isNull(schema.taskSteps.id), redrivableRow(cutoff)),
       ),
     );
   if (candidates.length === 0) return 0;

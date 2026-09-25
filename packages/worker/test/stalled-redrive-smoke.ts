@@ -3,7 +3,7 @@
  * fence's race-closing re-check. Throwaway users/tasks, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
       opts: {
         taskStatus?: 'running' | 'waiting_user';
         taskUpdatedAt?: Date;
-        stepStatus?: 'pending' | 'waiting_cli';
+        stepStatus?: 'pending' | 'waiting_cli' | 'done' | 'skipped' | 'failed';
         stepUpdatedAt?: Date;
         waitingStartedAt?: Date | null;
         noStepRow?: boolean;
@@ -107,6 +107,14 @@ async function main(): Promise<void> {
     const waitingUserTaskId = await makeTask('waiting-user', { taskStatus: 'waiting_user' });
     const freshStepRowTaskId = await makeTask('fresh-step-row', { stepUpdatedAt: new Date() });
     const raceTaskId = await makeTask('race');
+    const doneRowTaskId = await makeTask('done-row', { stepStatus: 'done' });
+    const skippedRowTaskId = await makeTask('skipped-row', { stepStatus: 'skipped' });
+    const freshDoneRowTaskId = await makeTask('fresh-done-row', {
+      stepStatus: 'done',
+      stepUpdatedAt: new Date(),
+    });
+    const failedRowTaskId = await makeTask('failed-row', { stepStatus: 'failed' });
+    const doneRaceTaskId = await makeTask('done-race', { stepStatus: 'done' });
 
     const epochOf = async (id: string) =>
       (
@@ -134,14 +142,14 @@ async function main(): Promise<void> {
         advances.push({ taskId, userId: advUserId, stepId, round, epoch });
       },
       // Simulates a step claimed by another pass between the candidates SELECT and this pass's
-      // fence: flips the race task's step row live, after the SELECT already ran.
+      // fence: flips the race tasks' step rows live, after the SELECT already ran.
       queuedTaskIds: async () => {
         await db
           .update(schema.taskSteps)
           .set({ status: 'running', updatedAt: new Date() })
           .where(
             and(
-              eq(schema.taskSteps.taskId, raceTaskId),
+              inArray(schema.taskSteps.taskId, [raceTaskId, doneRaceTaskId]),
               eq(schema.taskSteps.stepId, 'smoke-step'),
               eq(schema.taskSteps.round, 0),
             ),
@@ -183,6 +191,30 @@ async function main(): Promise<void> {
     check(
       'a step claimed between the SELECT and the fence is left alone',
       (await epochOf(raceTaskId)) === 3 && advances.every((a) => a.taskId !== raceTaskId),
+    );
+    for (const [name, id] of [
+      ['done', doneRowTaskId],
+      ['skipped', skippedRowTaskId],
+    ] as const) {
+      const own = advances.filter((a) => a.taskId === id);
+      check(
+        `a stale ${name} current row, its hand-off lost, is re-driven once at the new epoch`,
+        (await epochOf(id)) === 4 &&
+          own.length === 1 &&
+          own[0]?.stepId === 'smoke-step' &&
+          own[0]?.round === 0 &&
+          own[0]?.epoch === 4,
+        { epoch: await epochOf(id), own },
+      );
+    }
+    check(
+      'a done row that finished recently is left to its own hand-off',
+      (await epochOf(freshDoneRowTaskId)) === 3,
+    );
+    check('a stale failed current row is left alone', (await epochOf(failedRowTaskId)) === 3);
+    check(
+      'a finished row taken live between the SELECT and the fence is left alone',
+      (await epochOf(doneRaceTaskId)) === 3 && advances.every((a) => a.taskId !== doneRaceTaskId),
     );
 
     // The fence write above also refreshed the redriven task's updated_at, so a second pass finds

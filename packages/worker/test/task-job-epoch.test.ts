@@ -39,6 +39,41 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+interface Comparison {
+  column: string;
+  op: string;
+  values: unknown[];
+}
+
+/** Each comparison a drizzle condition makes: the column it names, its operator and the values it
+ *  binds (`eq`, `ne`, `inArray` and `notInArray` alike). */
+function comparisons(node: unknown, acc: Comparison[] = []): Comparison[] {
+  if (!node || typeof node !== 'object') return acc;
+  if (Array.isArray(node)) {
+    for (const item of node) comparisons(item, acc);
+    return acc;
+  }
+  const chunks = (node as { queryChunks?: unknown }).queryChunks;
+  if (!Array.isArray(chunks)) return acc;
+  const column = chunks.find(
+    (c): c is { name: string } =>
+      !!c && typeof c === 'object' && 'columnType' in c && typeof c.name === 'string',
+  );
+  const op = chunks
+    .map((c) =>
+      !!c && typeof c === 'object' && !('encoder' in c) && 'value' in c && Array.isArray(c.value)
+        ? c.value.join('').trim()
+        : '',
+    )
+    .find((text) => text !== '');
+  if (column && op) {
+    acc.push({ column: column.name, op, values: conditionValues(chunks) });
+    return acc;
+  }
+  for (const c of chunks) comparisons(c, acc);
+  return acc;
+}
+
 /** A running task at epoch 5 behind a db whose task writes land only while the epoch they name,
  *  if any, is still the task's. `onSelect` stands in for whatever the job does next. */
 const h = vi.hoisted(() => {
@@ -73,16 +108,29 @@ const h = vi.hoisted(() => {
     taskHolds: [] as { epochs: unknown[]; landed: boolean }[],
     /** Every patch written to a step row. */
     stepPatches: [] as Record<string, unknown>[],
+    /** Every patch a task write landed. */
+    landedTaskPatches: [] as Record<string, unknown>[],
+    taskType: 'workflow',
+    currentStepId: 'epoch-job-step',
+    /** Set when the task's repository is gone, so the job cannot resolve the task. */
+    repoGone: false,
   };
   return { state };
 });
 
-/** Whether a fenced task write or read matches the task: at its epoch, and not refusing the
- *  status it is at (every task condition here names statuses only to refuse them). */
-function taskMatches(values: unknown[]): { epochs: unknown[]; landed: boolean } {
-  const epochs = values.filter((v) => typeof v === 'number');
-  const refused = values.includes(h.state.taskStatus);
-  const landed = (epochs.length === 0 || epochs.includes(h.state.taskEpoch)) && !refused;
+/** Whether a task write or read matches the task: every comparison it makes on the status or the
+ *  epoch holds for the task as it stands. */
+function taskMatches(cond: unknown): { epochs: unknown[]; landed: boolean } {
+  const epochs = conditionValues(cond).filter((v) => typeof v === 'number');
+  const status = h.state.taskStatus;
+  const landed = comparisons(cond).every(({ column, op, values }) => {
+    if (column === 'orchestration_epoch') return values[0] === h.state.taskEpoch;
+    if (column !== 'status') return true;
+    if (op === '=') return values[0] === status;
+    if (op === 'in') return values.includes(status);
+    if (op === 'not in') return !values.includes(status);
+    throw new Error(`the fake does not model status ${op}`);
+  });
   return { epochs, landed };
 }
 
@@ -93,7 +141,7 @@ const db = {
         const task = {
           id: 'task-1',
           userId: 'user-1',
-          type: 'workflow',
+          type: h.state.taskType,
           repositoryId: 'repo-1',
           status: h.state.taskStatus,
           orchestrationEpoch: h.state.taskEpoch,
@@ -101,7 +149,7 @@ const db = {
           cliProviderId: null,
           ignoreSavedStepClis: false,
           executionPath: null,
-          currentStepId: 'epoch-job-step',
+          currentStepId: h.state.currentStepId,
           currentRound: 0,
           maxFixRounds: h.state.maxFixRounds,
         };
@@ -109,7 +157,10 @@ const db = {
         return task;
       },
     },
-    repositories: { findFirst: async () => ({ storagePath: '/tmp/repo', localPath: null }) },
+    repositories: {
+      findFirst: async () =>
+        h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
+    },
   },
   select: (fields?: Record<string, unknown>) => {
     h.state.onSelect();
@@ -132,7 +183,7 @@ const db = {
             },
             for: async () => {
               if (name === 'tasks') {
-                const held = taskMatches(conditionValues(cond));
+                const held = taskMatches(cond);
                 h.state.taskHolds.push(held);
                 return held.landed ? [{ id: 'task-1' }] : [];
               }
@@ -161,8 +212,9 @@ const db = {
               const guarded = values.includes('pending') && values.includes('skipped');
               return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
             }
-            const write = taskMatches(values);
+            const write = taskMatches(cond);
             h.state.taskWrites.push(write);
+            if (write.landed) h.state.landedTaskPatches.push(patch);
             return write.landed ? [{ id: 'task-1' }] : [];
           },
         }),
@@ -259,6 +311,10 @@ afterEach(() => {
   h.state.admission = { decision: 'admit' };
   h.state.taskHolds = [];
   h.state.stepPatches = [];
+  h.state.landedTaskPatches = [];
+  h.state.taskType = 'workflow';
+  h.state.currentStepId = 'epoch-job-step';
+  h.state.repoGone = false;
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
 });
@@ -864,5 +920,122 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('a START job', () => {
+  const start = () =>
+    ({
+      id: 'job-start',
+      name: TASK_JOB_NAMES.START,
+      data: { taskId: 'task-1', userId: 'user-1' },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    }) as unknown as Job;
+
+  it.each(['created', 'queued'])('claims a %s task and runs its first step', async (status) => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = status;
+    await processTaskJob(start(), 'tok');
+    expect(h.state.taskWrites[0]).toEqual({ epochs: [5], landed: true });
+    expect(h.state.landedTaskPatches[0]).toMatchObject({
+      status: 'running',
+      currentStepId: 'epoch-chain-first',
+      currentRound: 0,
+    });
+    expect(h.state.events).toContain('task.running');
+    expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(advanceStep).mock.lastCall?.[0]).toMatchObject({
+      stepDef: { metadata: { id: 'epoch-chain-first' } },
+      epoch: 5,
+    });
+  });
+
+  it.each(['running', 'waiting_user', 'failed', 'cancelled', 'completed'])(
+    'does nothing to a %s task',
+    async (status) => {
+      h.state.readsAnswer = true;
+      h.state.taskType = 'epoch_chain';
+      h.state.taskStatus = status;
+      await processTaskJob(start(), 'tok');
+      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.events).toEqual([]);
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it('claims nothing once the task moved to another epoch after START read it', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'queued';
+    // After the context read and before the claim, as a cancel's epoch bump would land.
+    h.state.onSelect = () => {
+      h.state.taskEpoch = 6;
+    };
+    await processTaskJob(start(), 'tok');
+    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+  });
+
+  it('fails nothing when it cannot resolve a task that was cancelled', async () => {
+    const cleanup = vi.fn(async () => 0);
+    setContainerCleanupRunner(cleanup);
+    // Deleting a repository cancels its open tasks, so a START still queued finds no repository.
+    h.state.taskStatus = 'cancelled';
+    h.state.repoGone = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [], landed: false }]);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it('fails a task still waiting to start when it cannot resolve it', async () => {
+    h.state.taskStatus = 'queued';
+    h.state.repoGone = true;
+    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');
+    expect(h.state.taskWrites).toEqual([{ epochs: [], landed: true }]);
+  });
+
+  it('points a paused, retried task at its first step, so a first step already done hands off', async () => {
+    h.state.readsAnswer = true;
+    h.state.taskType = 'epoch_chain';
+    h.state.taskStatus = 'queued';
+    h.state.pausedAt = new Date();
+    // The step the task failed on, where a task Retry leaves the pointer.
+    h.state.currentStepId = 'epoch-chain-runtime';
+    await processTaskJob(start(), 'tok');
+    expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+      stepId: 'epoch-chain-first',
+      round: 0,
+      epoch: 5,
+    });
+
+    // The claim's write as the database applied it, then the advance START queued.
+    h.state.taskStatus = 'running';
+    h.state.currentStepId = String(h.state.landedTaskPatches[0]?.currentStepId);
+    h.state.pausedAt = null;
+    h.state.existingRow = {
+      id: 'ts-1',
+      stepId: 'epoch-chain-first',
+      round: 0,
+      status: 'done',
+      output: null,
+      errorMessage: null,
+      formValues: null,
+    };
+    h.state.add.mockClear();
+    const advance = {
+      id: 'job-advance',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId: 'epoch-chain-first', round: 0, epoch: 5 },
+      timestamp: Date.now(),
+      moveToDelayed: vi.fn(async () => undefined),
+    } as unknown as Job;
+    await processTaskJob(advance, 'tok');
+    expect(h.state.add).toHaveBeenCalledTimes(1);
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: 'epoch-chain-next', epoch: 5 });
   });
 });
