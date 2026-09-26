@@ -24,10 +24,12 @@ import {
   fixerLeftoversWarning,
   mergeCommitted,
   openMerge,
+  recordFixerLeftovers,
   relocateFixerChanges,
   squashMergeCommit,
   unmergedPaths,
 } from './git-merge.js';
+import type { Database } from '@haive/database';
 import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
 const exec = promisify(execFile);
@@ -792,6 +794,88 @@ describe('fixer leftovers (real git)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('takes a staged file whose name is not UTF-8 out of the index before the commit', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/odd-`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(odd, 'odd\n');
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unstaged.map((u) => u.path)).toContain('odd-\uFFFD.txt');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'])).not.toContain('odd-');
+      expect(await readFile(odd, 'utf8')).toBe('odd\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an earlier attempt of the task that was never reported, and only once', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const events: { payload: unknown }[] = [];
+    const db = {
+      insert: () => ({ values: async (v: { payload: unknown }) => void events.push(v) }),
+    } as unknown as Database;
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'first\n', 'utf8');
+      const first = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(first?.interrupted).toEqual([]);
+      // The worker stopped here, before inv1's event was written.
+      const spent = await relocateFixerChanges(
+        dir,
+        null,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(spent?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      await writeFile(path.join(dir, 'stray.txt'), 'second\n', 'utf8');
+      const second = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(second?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      expect(second?.folder).toMatch(/^\.haive\/merge-leftovers\/t1\/inv1-/);
+      expect(await readFile(path.join(dir, `${first!.folder}/files/stray.txt`), 'utf8')).toBe(
+        'first\n',
+      );
+      expect(fixerLeftoversWarning('t1', second!)).toContain('.haive/merge-leftovers/t1/inv1');
+      await recordFixerLeftovers(db, 't1', 's1', 'feature/x', second!);
+      expect(events[0]?.payload).toMatchObject({
+        interrupted: ['.haive/merge-leftovers/t1/inv1'],
+      });
+
+      await writeFile(path.join(dir, 'stray.txt'), 'third\n', 'utf8');
+      const third = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv3' },
+        noSecrets,
+      );
+      expect(third?.interrupted).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
