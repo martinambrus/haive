@@ -1,9 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-16, 18, 19, 21, 22, 23 and 24 merged (#301-#313 and
-> #315-#323); PR 17 (a repository cannot be deleted mid-clone, and the e2e suite deletes what it
-> clones) is in review. Tracked in the status table of `docs/plans/README.md`, which each PR
-> updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-19, 21, 22, 23 and 24 merged (#301-#323); PR 20 (RTK files
+> a blank scaffold seeded are taken back when RTK goes off) is in review. Tracked in the status
+> table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
