@@ -2571,9 +2571,10 @@ the upgrade. Switching RTK back on offers the settings files again, and the bann
 upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of a snapshot that
 recorded the choice read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders
-from too). 01 renders from such a snapshot ahead of one from before RTK (`pickRenderSnapshot`), so
-the banner and the plan read the same one, and a repository whose snapshots all predate RTK stays
-quiet. Only a re-onboarding writes the block.
+from too). 01 renders from such a snapshot ahead of one from before RTK (`pickRenderSnapshot`), and
+both take the newest (`newestArtifactsFirst`, `@haive/shared`), since an upgrade replaces only the
+paths it writes and rows from several runs stay live side by side, so the banner and the plan read
+the same one, and a repository whose snapshots all predate RTK stays quiet. Only a re-onboarding writes the block.
 
 **"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
 version declined, so the next upgrade offers only a newer one. On a live row it moves

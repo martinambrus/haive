@@ -9,6 +9,7 @@ import {
   CLI_RULES_TEMPLATE_ID,
   computeSetHash,
   getHaiveVersion,
+  newestArtifactsFirst,
   normalizeContent,
   rtkSettingsNeeded,
   sha256Hex,
@@ -58,12 +59,17 @@ export async function rulesImportGaps(
   return { missing, linked };
 }
 
-/** The providers a live snapshot that recorded an RTK choice names, the one 01's
+/** The providers the newest live snapshot that recorded an RTK choice names, the one 01's
  *  `pickRenderSnapshot` renders RTK from. None for a repository whose snapshots predate RTK. */
 export function recordedRtkProviders(
-  rows: ReadonlyArray<{ rtkRecorded: boolean | null; snapshotProviders: unknown }>,
+  rows: ReadonlyArray<{
+    id: string;
+    generatedAt: Date | null;
+    rtkRecorded: boolean | null;
+    snapshotProviders: unknown;
+  }>,
 ): string[] | null {
-  const row = rows.find((r) => r.rtkRecorded === true);
+  const row = newestArtifactsFirst(rows).find((r) => r.rtkRecorded === true);
   if (!row) return null;
   if (!Array.isArray(row.snapshotProviders)) return [];
   return row.snapshotProviders.flatMap((p: unknown) => {
@@ -150,6 +156,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   const liveArtifacts = await db
     .select({
+      id: schema.onboardingArtifacts.id,
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,

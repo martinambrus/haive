@@ -342,6 +342,23 @@ describe('upgrade-status and a repository that switched RTK back on', () => {
     }
   });
 
+  it('reads the providers of the newest recorded snapshot, whatever order the rows come in', async () => {
+    const rows = state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[];
+    const recorded = (row: Record<string, unknown>, id: string, at: number, name: string) => ({
+      ...row,
+      id,
+      generatedAt: new Date(at),
+      rtkRecorded: true,
+      snapshotProviders: [{ name }],
+    });
+    state.rows.set(schema.onboardingArtifacts, [
+      ...rows.map((r, i) => recorded(r, `older-${i}`, 1000, 'gemini')),
+      recorded(rows[0]!, 'newer', 2000, 'claude-code'),
+    ]);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([claudeRtk.templateId]);
+  });
+
   it('reads a settings file the off-upgrade kept as installed, not as missing', async () => {
     snapshots(true, [{ name: 'claude-code' }]);
     state.rows.get(schema.onboardingArtifacts)!.push({

@@ -72,6 +72,18 @@ export interface TemplateManifest<TCtx = unknown> {
   setHash: string;
 }
 
+/** Live artifact rows newest first, by when each was written and then by id, so every reader that
+ *  takes one snapshot from a repository's rows takes the same one. */
+export function newestArtifactsFirst<T extends { id: string; generatedAt: Date | null }>(
+  rows: readonly T[],
+): T[] {
+  return [...rows].sort(
+    (a, b) =>
+      (b.generatedAt?.getTime() ?? 0) - (a.generatedAt?.getTime() ?? 0) ||
+      (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+  );
+}
+
 export function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
 }

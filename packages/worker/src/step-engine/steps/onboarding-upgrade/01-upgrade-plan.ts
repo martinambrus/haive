@@ -13,6 +13,7 @@ import {
   extractRegion,
   getCliProviderMetadata,
   getHaiveVersion,
+  newestArtifactsFirst,
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
@@ -113,6 +114,7 @@ export interface LiveArtifactRow {
   formValuesSnapshot: Record<string, unknown> | null;
   sourceStepId: string;
   bundleItemId: string | null;
+  generatedAt: Date | null;
 }
 
 async function requireRepositoryId(ctx: StepContext): Promise<string> {
@@ -142,6 +144,7 @@ async function loadLiveArtifacts(
       formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
       sourceStepId: schema.onboardingArtifacts.sourceStepId,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
+      generatedAt: schema.onboardingArtifacts.generatedAt,
     })
     .from(schema.onboardingArtifacts)
     .where(
@@ -161,17 +164,19 @@ async function loadLiveArtifacts(
     formValuesSnapshot: (r.formValuesSnapshot ?? null) as Record<string, unknown> | null,
     sourceStepId: r.sourceStepId,
     bundleItemId: r.bundleItemId,
+    generatedAt: r.generatedAt ?? null,
   }));
 }
 
-/** The live snapshot to render from. One that recorded an RTK choice comes first, since a snapshot
- *  from before RTK would keep the repository's RTK switch from reaching the upgrade, and the
- *  upgrade banner reads the same one. */
+/** The live snapshot to render from: the newest that recorded an RTK choice, since a snapshot from
+ *  before RTK would keep the repository's RTK switch from reaching the upgrade, and the upgrade
+ *  banner reads the same one. */
 export function pickRenderSnapshot(
-  liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'formValuesSnapshot'>>,
+  liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
 ): Record<string, unknown> | null {
-  const recorded = liveRows.find((r) => typeof r.formValuesSnapshot?.rtkEnabled === 'boolean');
-  return (recorded ?? liveRows.find((r) => r.formValuesSnapshot))?.formValuesSnapshot ?? null;
+  const rows = newestArtifactsFirst(liveRows);
+  const recorded = rows.find((r) => typeof r.formValuesSnapshot?.rtkEnabled === 'boolean');
+  return (recorded ?? rows.find((r) => r.formValuesSnapshot))?.formValuesSnapshot ?? null;
 }
 
 /** Load the render context for this repository. Tries a live artifact's snapshot
