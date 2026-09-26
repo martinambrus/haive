@@ -1,8 +1,8 @@
 # Project state that travels between installations
 
 > **In progress** (2026-09-26). Track B of `found-not-fixed-sweep-3.md` (plan file
-> `compiled-noodling-squid`). Phase 0: B0.1 shipped (#326) and B0.2 shipped (#327), both
-> live-verified; B0.3 in review (#328).
+> `compiled-noodling-squid`). Phase 0 shipped, each live-verified: B0.1 (#326), B0.2 (#327) and
+> B0.3 (#328).
 
 ## Context
 
@@ -147,11 +147,14 @@ Phase 0 (live exposure, independent):
   loses nothing here.
 - **B0.3 fix(worker): the mirror import reads through fs-safe and applies `rtk_enabled`.**
   Control: a symlinked `tooling.json` is imported today, ignored after; `rtkEnabled:false` in the
-  mirror leaves the column true today. `fs-ratchet.json` `clone.ts` 10 → 9. **In review** #328. **As
-  built:** the three files are read through `readFileNoFollow` from the repository anchor with a 1
-  MiB cap, and `rtkEnabled` rides the tooling import, which runs only while `onboarding_tooling` is
-  NULL. A row imported before this keeps its column; B1.5 asks about it (Codex round 1). Control:
-  `smoke:mirror-import` fails 3 of 5 with main's `clone.ts` and passes 5 of 5.
+  mirror leaves the column true today. `fs-ratchet.json` `clone.ts` 10 → 9. **Shipped** #328
+  (`a52ece09`), live-verified on the dev stack: a folder import whose mirror said RTK off came in
+  with `rtk_enabled` false and its scope list, and one whose mirror files were links out of the
+  repository imported nothing and kept RTK on. **As built:** the three files are read through
+  `readFileNoFollow` from the repository anchor with a 1 MiB cap, and `rtkEnabled` rides the tooling
+  import, which runs only while `onboarding_tooling` is NULL. A row imported before this keeps its
+  column; B1.5 asks about it (Codex round 1). Control: `smoke:mirror-import` fails 3 of 5 with
+  main's `clone.ts` and passes 5 of 5.
 
 Phase 1 (the record):
 - **B1.1 test(worker): two-install round-trip smoke with a strict known-gap list.**
