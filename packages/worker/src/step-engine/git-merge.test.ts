@@ -1,14 +1,18 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
+  abortMerge,
+  abortOtherMerge,
   buildMergeFixPrompt,
   completeMergeHostSide,
   mergeCommitted,
+  openMerge,
   squashMergeCommit,
+  unmergedPaths,
 } from './git-merge.js';
 
 const exec = promisify(execFile);
@@ -110,6 +114,116 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       // without the ancestry check, since `feature/x` was never merged into HEAD.
       expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** A conflict on `name` beside `clean.txt`, which only `feature/x` changes, so the merge stages it. */
+async function setupNamedConflict(name: string): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-named-'));
+  await git(dir, ['init', '-b', 'main']);
+  await writeFile(path.join(dir, name), 'base\n', 'utf8');
+  await writeFile(path.join(dir, 'clean.txt'), 'one\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, name), 'feature\n', 'utf8');
+  await writeFile(path.join(dir, 'clean.txt'), 'two\n', 'utf8');
+  await git(dir, ['commit', '-am', 'feature edit']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, name), 'main\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main edit']);
+  return dir;
+}
+
+const mergeHead = (dir: string) => gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+
+describe('merge helpers (real git)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('checks the markers of a conflicted file whose name git quotes', async () => {
+    const dir = await setupNamedConflict('café "notes".txt');
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      expect(await unmergedPaths(dir)).toEqual(['café "notes".txt']);
+      // The markers are still in the file, so nothing may be committed.
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      expect(await mergeHead(dir)).toBe(0);
+      expect(await git(dir, ['show', 'HEAD:café "notes".txt'])).toBe('main\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('tells a conflict from a merge git refused', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, 'clean.txt'), 'uncommitted\n', 'utf8');
+      const refused = await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV);
+      expect(refused.kind).toBe('refused');
+      if (refused.kind === 'refused') expect(refused.detail).toContain('clean.txt');
+      expect(await mergeHead(dir)).not.toBe(0);
+      await git(dir, ['checkout', '--', 'clean.txt']);
+      expect((await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).kind).toBe('conflict');
+      expect((await openMerge(dir, 'nosuch', ['--no-edit'], COMMIT_ENV)).kind).toBe('refused');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts a merge after a fixer edited a file the merge staged', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await writeFile(path.join(dir, 'clean.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(dir, 'base.txt'), 'half-resolved\n', 'utf8');
+      // git alone refuses this abort and keeps the merge open.
+      expect(await gitCode(dir, ['merge', '--abort'])).not.toBe(0);
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(await mergeHead(dir)).not.toBe(0);
+      expect(await readFile(path.join(dir, 'clean.txt'), 'utf8')).toBe('one\n');
+      expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('puts nothing back in a host checkout and reports what blocks the abort', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
+    vi.stubEnv('HOST_REPO_ROOT', root);
+    vi.resetModules();
+    const hosted = await import('./git-merge.js');
+    const dir = await setupNamedConflict('base.txt');
+    const inHost = path.join(root, 'repo');
+    try {
+      await rename(dir, inHost);
+      await gitCode(inHost, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await writeFile(path.join(inHost, 'clean.txt'), 'their own edit\n', 'utf8');
+      const abort = await hosted.abortMerge(inHost);
+      expect(abort.ok).toBe(false);
+      if (!abort.ok) expect(abort.blocking).toEqual(['clean.txt']);
+      expect(await readFile(path.join(inHost, 'clean.txt'), 'utf8')).toBe('their own edit\n');
+      expect(await mergeHead(inHost)).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts a stale merge of another ref and keeps one of the ref about to be merged', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      expect(await abortOtherMerge(dir, 'feature/x')).toEqual({ ok: true });
+      expect(await mergeHead(dir)).toBe(0);
+      await git(dir, ['branch', 'other', 'main']);
+      expect(await abortOtherMerge(dir, 'other')).toEqual({ ok: true });
+      expect(await mergeHead(dir)).not.toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

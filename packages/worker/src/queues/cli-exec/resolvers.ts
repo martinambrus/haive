@@ -541,9 +541,9 @@ export async function resolveInvocationRepoMount(
 
   const storagePath = repo.storagePath ?? repo.localPath;
 
-  // Local-path repos are bound read-only end to end (host fs is :ro in the worker),
-  // so no worktree work happens there — mount the repo root read-only, same as
-  // resolveTaskRepoMount. Nothing to isolate.
+  // Local-path repos are mounted read-only into the sandbox (the worker's own `/host-fs`
+  // mount is read-write), so no agent edits a worktree there — mount the repo root
+  // read-only, same as resolveTaskRepoMount. Nothing to isolate.
   if (storagePath && storagePath.startsWith(HOST_REPO_ROOT + '/')) {
     const relativePart = storagePath.slice(HOST_REPO_ROOT.length);
     const hostPath = HOST_REPO_ROOT_REAL + relativePart;

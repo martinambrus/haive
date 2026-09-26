@@ -472,6 +472,31 @@ A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmi
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
 
+### Merge conflicts
+
+The DAG's level merge and the merge resolver (`12-worktree-cleanup`, `00a-sync-base`,
+`13-onboarding-push`) share the git core in `git-merge.ts`. Each fix agent edits the conflicted
+files, and the host verifies, stages and commits, so a fixer must never start from what an earlier one
+left. Four rules keep it that way, each MEASURED on git 2.43 and 2.54:
+
+- **Unmerged paths are read with `-z`** (`unmergedPaths`). Without it git quotes a name holding a quote
+  or a non-ASCII byte, the quoted name reads as a deleted file, and its conflict markers were committed.
+- **A conflict is told from a refused merge by MERGE_HEAD naming the merged ref** (`openMerge`). A
+  refusal (a local change or an untracked file in the way, a ref git cannot resolve) opens nothing and
+  exits with the codes a conflict does, and used to send fixers into a tree with no merge in it. It
+  now halts with git's own reason.
+- **`merge --abort` refuses once a file the merge staged is edited**, a fixer's edit to a cleanly
+  merged file, and used to leave that half merge for the next fixer. `abortMerge` puts those paths back
+  from the index and aborts again. An abort that still fails halts the step with a `merge.abort_failed`
+  event, and nothing is dispatched into the merge. A merge open for another ref is an earlier
+  attempt's and is aborted before a new one opens.
+- **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
+  `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
+  both halt and name what blocks them.
+
+The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
+a halt finishes the step on a Retry.
+
 ## CLI adapter system
 
 `packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so do `amp` and `codex` — codex only through its app-server, and only once that is verified for the task (`steeringTransportReady`) — see Steering below.

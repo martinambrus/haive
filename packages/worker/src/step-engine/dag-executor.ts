@@ -25,7 +25,15 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
-import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
+import {
+  abortFailureNote,
+  abortMerge,
+  abortOtherMerge,
+  buildMergeFixPrompt,
+  completeMergeHostSide,
+  openMerge,
+  type MergeAbort,
+} from './git-merge.js';
 import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
@@ -546,17 +554,87 @@ async function haltConflicts(
   return { status: 'halt', row, error: msg };
 }
 
+async function haltMerge(
+  m: MergeArgs,
+  msg: string,
+): Promise<{ status: 'halt'; row: TaskStepRow; error: string }> {
+  const row = await setStepStatus(m.db, m.current.id, {
+    status: 'failed',
+    errorMessage: msg,
+    endedAt: new Date(),
+  });
+  return { status: 'halt', row, error: msg };
+}
+
+/** A merge git refused opened nothing, so there is no conflict a fixer could resolve. */
+function haltRefused(m: MergeArgs, branch: string, detail: string) {
+  return haltMerge(
+    m,
+    `Merge halted — git refused to merge ${branch} into ${m.integration.branch}: ${detail}. Nothing was merged; clear what git names, then retry.`,
+  );
+}
+
+/** Halt on a merge that could not be aborted, since a fixer dispatched into it would start from
+ *  whatever the last one left. `why` is the halt the abort was part of, when there was one. */
+async function haltUnaborted(
+  m: MergeArgs,
+  branch: string,
+  abort: Extract<MergeAbort, { ok: false }>,
+  why?: string,
+) {
+  await m.db.insert(schema.taskEvents).values({
+    taskId: m.params.taskId,
+    taskStepId: m.current.id,
+    eventType: 'merge.abort_failed',
+    payload: {
+      featureBranch: branch,
+      baseBranch: m.integration.branch,
+      blocking: abort.blocking.slice(0, 20),
+      detail: abort.detail,
+    },
+  });
+  return haltMerge(
+    m,
+    `Merge halted${why ? ` — ${why}` : ''} on ${branch}. ${abortFailureNote(abort)}`,
+  );
+}
+
 /** Recreate the live conflict for `target` and dispatch one merge-fix agent into
- *  the integration worktree. Returns 'waiting' (agent in flight) or 'halt' (no
- *  provider). Shared by manual retry_ai and auto-resolve. */
+ *  the integration worktree. Returns 'waiting' (agent in flight), 'halt', or, when
+ *  the conflict no longer reproduces, the rest of the level merge's result. Shared
+ *  by manual retry_ai and auto-resolve. */
 async function startConflictFix(
   m: MergeArgs,
   state: LevelMergeState,
   target: DagIssueRow,
-): Promise<
-  { status: 'waiting'; row: TaskStepRow } | { status: 'halt'; row: TaskStepRow; error: string }
-> {
-  await gitRun(m.integration.path, ['merge', '--no-ff', '--no-edit', target.branchName!], m.gitEnv);
+): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
+  // No fixer is in flight here (the ingest runs first, and a step's advances run one at a time),
+  // so a merge still open is an earlier attempt's, and a fixer must start from a fresh one.
+  const stale = await abortMerge(m.integration.path);
+  if (!stale.ok) {
+    await clearAiFix(m.db, m.current.id);
+    return haltUnaborted(m, target.branchName!, stale);
+  }
+  const opened = await openMerge(m.integration.path, target.branchName!, ['--no-edit'], m.gitEnv);
+  if (opened.kind === 'refused') {
+    await clearAiFix(m.db, m.current.id);
+    return haltRefused(m, target.branchName!, opened.detail);
+  }
+  if (opened.kind === 'merged') {
+    // The conflict is gone (a branch merged since changed the integration branch): record it and
+    // carry on with the rest of the level.
+    await m.db
+      .update(schema.taskDagIssues)
+      .set({ mergeStatus: 'clean', mergedAt: new Date(), updatedAt: new Date() })
+      .where(eq(schema.taskDagIssues.id, target.id));
+    target.mergeStatus = 'clean';
+    await clearAiFix(m.db, m.current.id);
+    return runLevelMerge({
+      ...m,
+      level: { ...m.level, mergeState: state },
+      current: { ...m.current, aiFixContext: null },
+    });
+  }
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
   const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
@@ -578,8 +656,11 @@ async function startConflictFix(
     return { status: 'waiting', row: parked };
   }
   if (dispatched.kind === 'no_provider') {
-    await gitRun(m.integration.path, ['merge', '--abort']);
+    const aborted = await abortMerge(m.integration.path);
     await clearAiFix(m.db, m.current.id);
+    if (!aborted.ok) {
+      return haltUnaborted(m, target.branchName!, aborted, 'no CLI provider for merge resolution');
+    }
     return haltConflicts(m, [target], 'no CLI provider for merge resolution');
   }
   // 'ok': the onInserted hook above already saved state.fixInvocationId.
@@ -689,10 +770,13 @@ async function runLevelMerge(
       .set({ consumedAt: new Date() })
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
+    const branch = target?.branchName ?? state.activeConflict ?? 'the active conflict';
+    let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
     if (runNeverAnswered(inv)) {
       // A fixer that never answered may have left the merge half-resolved, so its
       // edits are discarded and it is dispatched again without spending an attempt.
-      await gitRun(integration.path, ['merge', '--abort']);
+      const aborted = await abortMerge(integration.path);
+      if (!aborted.ok) unaborted = aborted;
       if (target) {
         state.conflictRetries[target.issueKey] = Math.max(
           0,
@@ -713,7 +797,8 @@ async function runLevelMerge(
           .where(eq(schema.taskDagIssues.id, target.id));
         target.mergeStatus = 'resolved';
       } else {
-        await gitRun(integration.path, ['merge', '--abort']);
+        const aborted = await abortMerge(integration.path);
+        if (!aborted.ok) unaborted = aborted;
         // leave mergeStatus='conflict' for another retry
       }
     }
@@ -721,6 +806,7 @@ async function runLevelMerge(
     state.fixInvocationId = null;
     await saveMergeState(db, level.id, state);
     await clearAiFix(db, m.current.id);
+    if (unaborted) return haltUnaborted(m, branch, unaborted);
     m.current = await setStepStatus(db, m.current.id, { status: 'running' });
     // fall through to the merge pass + halt/ok decision
   } else if (m.current.aiFixContext) {
@@ -733,19 +819,19 @@ async function runLevelMerge(
   // 3. Merge pass: merge still-pending branches (mergeStatus null) in order.
   for (const issue of mergeable) {
     if (issue.mergeStatus !== null) continue; // clean | resolved | conflict already decided
-    const merge = await gitRun(
-      integration.path,
-      ['merge', '--no-ff', '--no-edit', issue.branchName!],
-      gitEnv,
-    );
-    if (merge.code === 0) {
+    const cleared = await abortOtherMerge(integration.path, issue.branchName!);
+    if (!cleared.ok) return haltUnaborted(m, issue.branchName!, cleared);
+    const opened = await openMerge(integration.path, issue.branchName!, ['--no-edit'], gitEnv);
+    if (opened.kind === 'refused') return haltRefused(m, issue.branchName!, opened.detail);
+    if (opened.kind === 'merged') {
       await db
         .update(schema.taskDagIssues)
         .set({ mergeStatus: 'clean', mergedAt: new Date(), updatedAt: new Date() })
         .where(eq(schema.taskDagIssues.id, issue.id));
       issue.mergeStatus = 'clean';
     } else {
-      await gitRun(integration.path, ['merge', '--abort']);
+      const aborted = await abortMerge(integration.path);
+      if (!aborted.ok) return haltUnaborted(m, issue.branchName!, aborted);
       await db
         .update(schema.taskDagIssues)
         .set({ mergeStatus: 'conflict', updatedAt: new Date() })

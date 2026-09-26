@@ -898,8 +898,13 @@ function makeDagMergeWaitDb(opts: {
   /** A Retry reset the row while the pass ran: lockOwnedStep's ownership probe matches
    *  nothing, same as the update guard below. */
   stepRowStatus?: string;
-  /** The issue as a coder left it, for section C. */
-  issue?: { outcome: string; cliInvocationId: string; infraRetries: number };
+  /** The issue as a coder left it, for section C, or still unmerged (`mergeStatus: null`). */
+  issue?: Partial<{
+    outcome: string;
+    cliInvocationId: string | null;
+    infraRetries: number;
+    mergeStatus: string | null;
+  }>;
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
 }) {
@@ -1081,7 +1086,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
 
   /** An integration repo on `main` mid-merge with `main--ISSUE-1`, conflicted and left
    *  open, exactly as startConflictFix leaves it before dispatching a fix agent. */
-  async function setupConflictedIntegration(): Promise<string> {
+  async function setupConflictedIntegration(issueAddsFile = false): Promise<string> {
     const dir = await mkdtemp(path.join(tmpdir(), 'dag-merge-wait-'));
     await git(dir, ['init', '-b', 'main']);
     await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
@@ -1089,7 +1094,11 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     await git(dir, ['commit', '-m', 'initial']);
     await git(dir, ['checkout', '-b', 'main--ISSUE-1']);
     await writeFile(path.join(dir, 'base.txt'), 'issue-edit\n', 'utf8');
-    await git(dir, ['commit', '-am', 'issue edit']);
+    // A file only the issue adds, so the merge stages it cleanly beside the conflict.
+    if (issueAddsFile) await writeFile(path.join(dir, 'issue.txt'), 'issue\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    // Named as commitIssueWork names it, which issueBranchHasChanges reads before a merge pass.
+    await git(dir, ['commit', '-m', 'ISSUE-1: issue edit']);
     await git(dir, ['checkout', 'main']);
     await writeFile(path.join(dir, 'base.txt'), 'main-edit\n', 'utf8');
     await git(dir, ['commit', '-am', 'main edit']);
@@ -1344,6 +1353,103 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(state.fixInvocationId).toBe('fix-inv-1');
       // ...and the refund plus the recharge net to exactly one real attempt.
       expect(state.conflictRetries['ISSUE-1']).toBe(1);
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  const mergeCtx = (integrationDir: string) =>
+    ({
+      taskId: 'task1',
+      userId: 'user1',
+      repoPath: integrationDir,
+      sandboxWorkdir: integrationDir,
+      logger: logger.child({ test: 'dag-merge-abort' }),
+      emitProgress: async () => {},
+    }) as unknown as StepContext;
+  const dispatchingParams = {
+    userId: 'user1',
+    taskId: 'task1',
+    cliProviderId: null,
+    ignoreSavedStepClis: false,
+    providers: [{ id: 'p1', enabled: true }],
+    deps: { enqueueCliInvocation: async () => {} },
+  };
+  const cliPlan = async () =>
+    ({
+      mode: 'cli',
+      providerId: 'p1',
+      providerName: 'p1',
+      adapter: null,
+      provider: null,
+      invocation: { kind: 'cli', spec: {} },
+      effectivePrompt: undefined,
+      effort: null,
+      reason: 'test stub',
+    }) as never;
+
+  it('a never-answered fixer that edited a file the merge staged: the next fixer starts from a fresh merge', async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    try {
+      const h = makeDagMergeWaitDb({
+        invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() },
+        integrationDir,
+        autoResolveConflicts: true,
+        conflictRetries: { 'ISSUE-1': 1 },
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      // issue.txt merged cleanly and is staged, and the fixer edited it anyway, which is exactly
+      // what makes `git merge --abort` refuse.
+      await writeFile(path.join(integrationDir, 'issue.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(integrationDir, 'base.txt'), 'half-resolved\n', 'utf8');
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        mergeCtx(integrationDir),
+        dispatchingParams as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) expect(result.result.status).toBe('waiting_cli');
+      expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe('issue\n');
+      expect(await readFile(path.join(integrationDir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a merge git refused in the merge pass halts with its reason and sends no fixer', async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    try {
+      await gitCode(integrationDir, ['merge', '--abort']);
+      // An untracked file where the issue adds one: git refuses the merge outright.
+      await writeFile(path.join(integrationDir, 'issue.txt'), 'mine\n', 'utf8');
+      const h = makeDagMergeWaitDb({
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: true,
+        issue: { mergeStatus: null },
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        mergeCtx(integrationDir),
+        dispatchingParams as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) {
+        expect(result.result.status).toBe('failed');
+        expect((result.result as { error?: string }).error).toContain(
+          'git refused to merge main--ISSUE-1 into main',
+        );
+      }
+      expect(h.issueUpdates.some((u) => u.mergeStatus === 'conflict')).toBe(false);
+      expect((h.getLevelMergeState() as { fixInvocationId: string | null }).fixInvocationId).toBe(
+        null,
+      );
+      expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe('mine\n');
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }
