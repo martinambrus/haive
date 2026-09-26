@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   applyTreeNoFollow,
@@ -10,6 +10,7 @@ import {
   openDirNoFollow,
   openFileNoFollow,
   readdirNoFollow,
+  readFileNoFollow,
   removeNoFollow,
   renameNoFollow,
   type EntryInfo,
@@ -115,6 +116,8 @@ export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
   });
 }
 
+const MIRROR_READ_CAP = 1024 * 1024;
+
 /** Restore onboarding-derived DB state from a repo's committed `.haive-data/`
  *  mirror (written at 12-post-onboarding), so a repo onboarded on one machine
  *  and cloned to another recovers its scope denylist + stack/tooling without
@@ -141,8 +144,12 @@ async function importHaiveDataMirror(
   if (!repo) return;
 
   const readJson = async <T>(rel: string): Promise<T | null> => {
+    const read = await readFileNoFollow(storagePath, rel, { maxBytes: MIRROR_READ_CAP }).catch(
+      () => null,
+    );
+    if (!read || read.truncated) return null;
     try {
-      return JSON.parse(await readFile(path.join(storagePath, rel), 'utf8')) as T;
+      return JSON.parse(read.data.toString('utf8')) as T;
     } catch {
       return null;
     }
@@ -151,6 +158,7 @@ async function importHaiveDataMirror(
   const updates: Partial<{
     onboardingEnvironment: Record<string, unknown>;
     onboardingTooling: Record<string, unknown>;
+    rtkEnabled: boolean;
     scopeExcludeGlobs: string[];
   }> = {};
 
@@ -171,6 +179,7 @@ async function importHaiveDataMirror(
         const held = holdImportedMcpServers(local);
         heldMcpServers = held?.importedMcpServerNames ?? null;
         tooling.tooling = held ?? local;
+        if (typeof local.rtkEnabled === 'boolean') updates.rtkEnabled = local.rtkEnabled;
       }
       updates.onboardingTooling = tooling as unknown as Record<string, unknown>;
     }
