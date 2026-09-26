@@ -105,6 +105,8 @@ interface PlanMergeDetect {
   fixBaseline?: FixBaseline | FixBaselineUnavailable | null;
   /** Set when that tree came from an earlier pass, whose fixer may have changed it since. */
   fixBaselineReused?: boolean;
+  /** The task that recorded it, which may be another conversation that left this merge open. */
+  fixBaselineOwner?: string;
 }
 
 interface PlanMergeApply {
@@ -315,13 +317,22 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       mergeOpen: open,
     };
     if (!open || found.conflicts.length === 0) return found;
-    const { baseline: fixBaseline, reused } = await planMergeFixBaseline(
+    const {
+      baseline: fixBaseline,
+      reused,
+      ownerTaskId,
+    } = await planMergeFixBaseline(
       ctx.db,
       { repositoryId, taskId: ctx.taskId, taskStepId: ctx.taskStepId, worktreePath },
       opened,
     );
     if (!needsAgentPass(found)) return found;
-    return { ...found, fixBaseline, ...(reused ? { fixBaselineReused: true } : {}) };
+    return {
+      ...found,
+      fixBaseline,
+      ...(reused ? { fixBaselineReused: true } : {}),
+      ...(ownerTaskId ? { fixBaselineOwner: ownerTaskId } : {}),
+    };
   },
 
   llm: {
@@ -344,7 +355,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       await moveAsideFixerLeftovers(
         ctx.db,
         d.worktreePath,
-        { baseline: d.fixBaseline, taskId: ctx.taskId, taskStepId: ctx.taskStepId },
+        {
+          baseline: d.fixBaseline,
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          ...(d.fixBaselineOwner ? { ownerTaskId: d.fixBaselineOwner } : {}),
+        },
         `origin/${d.branch}`,
       );
     },
@@ -445,7 +461,11 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       const leftovers = await relocateFixerChanges(
         d.worktreePath,
         d.fixBaseline,
-        { taskId: ctx.taskId, runId: args.llmInvocationId ?? randomUUID() },
+        {
+          taskId: ctx.taskId,
+          runId: args.llmInvocationId ?? randomUUID(),
+          ...(d.fixBaselineOwner ? { ownerTaskId: d.fixBaselineOwner } : {}),
+        },
         () => taskSecretMaskPolicy(ctx.db, ctx.taskId),
       );
       if (leftovers) {

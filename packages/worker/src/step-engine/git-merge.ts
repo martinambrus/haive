@@ -595,18 +595,20 @@ async function giveBack(
 }
 
 /** The folders of the task's attempts whose manifest stands without the mark its event leaves. */
-async function unreportedAttempts(root: string, taskFolder: string): Promise<string[]> {
-  const entries = (await readdirNoFollow(root, taskFolder).catch(() => null)) ?? [];
+async function unreportedAttempts(root: string, taskFolders: string[]): Promise<string[]> {
   const found: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const folder = `${taskFolder}/${entry.name}`;
-    const mark = await lstatNoFollow(root, `${folder}/${REPORTED_MARK}`).catch(() => undefined);
-    if (mark !== null) continue;
-    const text = await readTextNoFollow(root, `${folder}/manifest.json`, {
-      maxBytes: LISTING_BUFFER.maxBuffer,
-    }).catch(() => null);
-    if (text !== null && journaled(text)) found.push(folder);
+  for (const taskFolder of taskFolders) {
+    const entries = (await readdirNoFollow(root, taskFolder).catch(() => null)) ?? [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const folder = `${taskFolder}/${entry.name}`;
+      const mark = await lstatNoFollow(root, `${folder}/${REPORTED_MARK}`).catch(() => undefined);
+      if (mark !== null) continue;
+      const text = await readTextNoFollow(root, `${folder}/manifest.json`, {
+        maxBytes: LISTING_BUFFER.maxBuffer,
+      }).catch(() => null);
+      if (text !== null && journaled(text)) found.push(folder);
+    }
   }
   return found.sort();
 }
@@ -642,6 +644,39 @@ export function fixerIndexHeldNote(reason: string): string {
   return `A merge fixer staged changes outside the conflicted files, and they could not be taken back out of the index (${reason}), so nothing was committed; retry once the index is free.`;
 }
 
+/** What the fixer changed in the tree since `baseline`, or why git could not say. */
+async function changesSince(
+  dir: string,
+  baseline: FixBaseline,
+  secrets: SecretMaskSource,
+): Promise<
+  { raw: RawBytes; after: string; changes: ReturnType<typeof rawChanges> } | { error: string }
+> {
+  const masked = await readMaskPolicy(secrets);
+  if ('error' in masked) return { error: `the secret mask could not be read: ${masked.error}` };
+  const raw = await rawBytes(dir);
+  if ('error' in raw) return { error: `git could not read the tree: ${raw.error}` };
+  const ignored = await readIgnored(dir, baseline.ignored);
+  if ('error' in ignored) {
+    return { error: `git could not read what it ignored before it ran: ${ignored.error}` };
+  }
+  const after = await snapshotTree(dir, {
+    raw,
+    secrets: masked.policy,
+    since: { tree: baseline.tree, ignored },
+  });
+  if ('error' in after) return { error: `git could not read the tree: ${after.error}` };
+  if (after.tree === baseline.tree) return { raw, after: after.tree, changes: [] };
+  const diff = await gitRun(
+    dir,
+    ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after.tree],
+    undefined,
+    LISTING_BUFFER,
+  );
+  if (diff.code !== 0) return { error: gitDetail(diff) };
+  return { raw, after: after.tree, changes: rawChanges(diff.stdout) };
+}
+
 /** Move what a fixer changed outside the paths it was sent to resolve out of `dir`, into
  *  `<folder>/files/`, and put those paths back as the baseline had them, so neither the next fixer
  *  nor the merge commit inherits them. A path that cannot be moved (a link, a name git could not
@@ -652,13 +687,19 @@ export function fixerIndexHeldNote(reason: string): string {
 export async function relocateFixerChanges(
   dir: string,
   baseline: FixBaseline | FixBaselineUnavailable | null | undefined,
-  run: { taskId: string; runId: string },
+  run: { taskId: string; runId: string; ownerTaskId?: string },
   secrets: SecretMaskSource,
 ): Promise<FixerLeftovers | null> {
   if (isHostCheckout(dir)) return null;
   const { anchor: root, prefix } = workspaceAnchor(dir);
   const taskFolder = `${MERGE_LEFTOVERS_DIR}/${run.taskId}`;
-  const interrupted = await unreportedAttempts(root, taskFolder);
+  // A task that took over another's merge also reports what that task's relocations never did.
+  const interrupted = await unreportedAttempts(root, [
+    taskFolder,
+    ...(run.ownerTaskId && run.ownerTaskId !== run.taskId
+      ? [`${MERGE_LEFTOVERS_DIR}/${run.ownerTaskId}`]
+      : []),
+  ]);
   const base = `${taskFolder}/${run.runId}`;
   if (!baseline) {
     return interrupted.length === 0
@@ -691,21 +732,6 @@ export async function relocateFixerChanges(
   ) {
     return nothingChecked('the merge it was sent into is no longer open');
   }
-  const masked = await readMaskPolicy(secrets);
-  if ('error' in masked)
-    return nothingChecked(`the secret mask could not be read: ${masked.error}`);
-  const raw = await rawBytes(dir);
-  if ('error' in raw) return nothingChecked(`git could not read the tree: ${raw.error}`);
-  const ignored = await readIgnored(dir, baseline.ignored);
-  if ('error' in ignored) {
-    return nothingChecked(`git could not read what it ignored before it ran: ${ignored.error}`);
-  }
-  const after = await snapshotTree(dir, {
-    raw,
-    secrets: masked.policy,
-    since: { tree: baseline.tree, ignored },
-  });
-  if ('error' in after) return nothingChecked(`git could not read the tree: ${after.error}`);
   const tree = await lstatNoFollow(root, prefix.replace(/\/$/, ''), { strict: true }).catch(
     () => null,
   );
@@ -718,15 +744,11 @@ export async function relocateFixerChanges(
     c.dstMode !== GITLINK_MODE;
   const left: FixerLeftovers['left'] = [];
   const toMove: { path: string; status: string }[] = [];
-  if (after.tree !== baseline.tree) {
-    const diff = await gitRun(
-      dir,
-      ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after.tree],
-      undefined,
-      LISTING_BUFFER,
-    );
-    if (diff.code !== 0) return nothingChecked(gitDetail(diff));
-    for (const c of rawChanges(diff.stdout)) {
+  // A tree that cannot be read still has its index put back: the commit takes the whole index.
+  const changed = await changesSince(dir, baseline, secrets);
+  const treeUnchecked = 'error' in changed ? changed.error : undefined;
+  if (!('error' in changed)) {
+    for (const c of changed.changes) {
       if (!outside(c)) continue;
       if (c.path.includes('�')) {
         left.push({ path: c.path, reason: 'its name is not UTF-8' });
@@ -761,7 +783,7 @@ export async function relocateFixerChanges(
   const record = {
     dir: prefix.replace(/\/$/, '') || '.',
     baseline: baseline.tree,
-    after: after.tree,
+    after: 'error' in changed ? null : changed.after,
   };
   if (toMove.length > 0 || toUnstage.length > 0) {
     // Written before anything moves, so a restart part-way leaves what the next relocation reports.
@@ -779,7 +801,10 @@ export async function relocateFixerChanges(
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      return nothingChecked(`its leftovers could not be recorded: ${reason}`);
+      return {
+        ...nothingChecked(`its leftovers could not be recorded: ${reason}`),
+        ...(toUnstage.length > 0 ? { indexHeld: reason } : {}),
+      };
     }
   }
   const moved: string[] = [];
@@ -812,20 +837,23 @@ export async function relocateFixerChanges(
   }
   const putBack = restore.filter((p) => !occupied.has(p));
   const restored: string[] = [];
-  for (let i = 0; i < putBack.length; i += PATHSPEC_CHUNK) {
-    const chunk = putBack.slice(i, i + PATHSPEC_CHUNK);
-    const created = owner ? await missingParents(root, prefix, chunk) : [];
-    const res = await gitRun(
-      dir,
-      [...raw.args, 'restore', `--source=${baseline.tree}`, '--worktree', '--', ...chunk],
-      { ...raw.env, GIT_LITERAL_PATHSPECS: '1' },
-    );
-    if (res.code !== 0) {
-      for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });
-      continue;
+  if (!('error' in changed)) {
+    const { raw } = changed;
+    for (let i = 0; i < putBack.length; i += PATHSPEC_CHUNK) {
+      const chunk = putBack.slice(i, i + PATHSPEC_CHUNK);
+      const created = owner ? await missingParents(root, prefix, chunk) : [];
+      const res = await gitRun(
+        dir,
+        [...raw.args, 'restore', `--source=${baseline.tree}`, '--worktree', '--', ...chunk],
+        { ...raw.env, GIT_LITERAL_PATHSPECS: '1' },
+      );
+      if (res.code !== 0) {
+        for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });
+        continue;
+      }
+      restored.push(...chunk.filter((p) => deleted.has(p)));
+      if (owner) await giveBack(root, prefix, [...created, ...chunk], owner);
     }
-    restored.push(...chunk.filter((p) => deleted.has(p)));
-    if (owner) await giveBack(root, prefix, [...created, ...chunk], owner);
   }
   const unstaged: FixerLeftovers['unstaged'] = [];
   let indexHeld = indexUnchecked;
@@ -844,12 +872,13 @@ export async function relocateFixerChanges(
   if (putBack.length > 0 || unstaged.length > 0) {
     await gitRun(dir, ['update-index', '-q', '--refresh']);
   }
+  const unchecked = [treeUnchecked, indexUnchecked].filter(Boolean).join('; ') || undefined;
   const own =
     moved.length > 0 ||
     restored.length > 0 ||
     left.length > 0 ||
     unstaged.length > 0 ||
-    indexUnchecked !== undefined;
+    unchecked !== undefined;
   if (!own && interrupted.length === 0) return null;
   if (own) {
     const manifest = { journal: true, complete: true, ...record, moved, restored, left, unstaged };
@@ -864,7 +893,7 @@ export async function relocateFixerChanges(
     left,
     unstaged,
     restored,
-    ...(indexUnchecked ? { unchecked: indexUnchecked } : {}),
+    ...(unchecked ? { unchecked } : {}),
     ...(indexHeld ? { indexHeld } : {}),
     root,
     interrupted,

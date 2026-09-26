@@ -21,6 +21,8 @@ export interface RecordedFixBaseline {
   baseline: FixBaseline | FixBaselineUnavailable;
   taskId: string;
   taskStepId: string | null;
+  /** The task that recorded the baseline, when another has taken its merge over. */
+  ownerTaskId?: string;
 }
 
 async function revParse(dir: string, spec: string): Promise<string | null> {
@@ -71,10 +73,15 @@ export async function planMergeFixBaseline(
   db: Database,
   at: { repositoryId: string; taskId: string; taskStepId: string; worktreePath: string },
   opened: boolean,
-): Promise<{ baseline: FixBaseline | FixBaselineUnavailable | null; reused: boolean }> {
+): Promise<{
+  baseline: FixBaseline | FixBaselineUnavailable | null;
+  reused: boolean;
+  ownerTaskId?: string;
+}> {
   if (!opened) {
     const recorded = await recordedFixBaseline(db, at.repositoryId, at.worktreePath);
-    if (recorded) return { baseline: recorded.baseline, reused: true };
+    if (recorded)
+      return { baseline: recorded.baseline, reused: true, ownerTaskId: recorded.taskId };
   }
   const baseline = await captureFixBaseline(at.worktreePath, () =>
     taskSecretMaskPolicy(db, at.taskId),
@@ -102,7 +109,11 @@ export async function moveAsideFixerLeftovers(
   const leftovers = await relocateFixerChanges(
     worktreePath,
     recorded.baseline,
-    { taskId: recorded.taskId, runId: randomUUID() },
+    {
+      taskId: recorded.taskId,
+      runId: randomUUID(),
+      ...(recorded.ownerTaskId ? { ownerTaskId: recorded.ownerTaskId } : {}),
+    },
     () => taskSecretMaskPolicy(db, recorded.taskId),
   );
   if (leftovers) {

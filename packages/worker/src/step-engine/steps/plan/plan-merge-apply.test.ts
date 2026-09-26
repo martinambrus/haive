@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { planMergeStep } from './01-plan-merge.js';
 import { PLAN_MERGE_BASELINE_EVENT } from '../../../plan/merge-baseline.js';
-import type { FixBaseline } from '../../git-merge.js';
+import { relocateFixerChanges, type FixBaseline } from '../../git-merge.js';
 import type { StepContext } from '../../step-definition.js';
 
 const exec = promisify(execFile);
@@ -270,6 +270,30 @@ describe('plan merge: a fixer that did not finish', () => {
         }),
       }),
     ]);
+  });
+
+  it('reports what the conversation whose merge it resumes never reported', async () => {
+    const local = await unrelatedPair();
+    const { db, events } = fakeDb();
+    const first = await planMergeStep.detect!(contextFor(local, db));
+    const wt = first.worktreePath;
+    await writeFile(path.join(wt, 'notes.txt'), 'scratch\n', 'utf8');
+    // The first conversation's move stopped before its event: nothing reported it.
+    await relocateFixerChanges(
+      wt,
+      first.fixBaseline,
+      { taskId: 't1', runId: 'inv1' },
+      async () => null,
+    );
+
+    const next = { ...contextFor(local, db), taskId: 't2', taskStepId: 's2' } as StepContext;
+    const resumed = await planMergeStep.detect!(next);
+    expect(resumed.fixBaselineOwner).toBe('t1');
+    await planMergeStep.llm!.prepareWorkspace!({ ctx: next, detected: resumed, formValues: {} });
+    expect(events.find((e) => e.eventType === 'merge.fixer_leftovers')).toMatchObject({
+      taskId: 't2',
+      payload: { interrupted: ['.haive/merge-leftovers/t1/inv1'] },
+    });
   });
 
   it('records the tree afresh when it opens the merge again', async () => {

@@ -976,6 +976,51 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it('puts the index back though the tree cannot be read', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'staged by the fixer\n', 'utf8');
+      await git(dir, ['add', 'stray.txt']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        async () => {
+          throw new Error('mask unavailable');
+        },
+      );
+      expect(out?.unchecked).toContain('mask unavailable');
+      expect(out?.indexHeld).toBeUndefined();
+      expect(out?.unstaged.map((u) => u.path)).toContain('stray.txt');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('reports what the task whose merge it took over never did', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'first\n', 'utf8');
+      await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'second\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't2', runId: 'inv2', ownerTaskId: 't1' },
+        noSecrets,
+      );
+      expect(out?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      expect(out?.folder).toBe('.haive/merge-leftovers/t2/inv2');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
     vi.stubEnv('HOST_REPO_ROOT', root);
