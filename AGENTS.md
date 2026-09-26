@@ -265,7 +265,10 @@ redelivered after it was applied. A submission, a retry and a first run still fl
 such a job used to run only once that lock expired. `requeueOrphanedActiveJobs`
 (`queues/boot-requeue.ts`) moves each one back to waiting before this process starts a Worker, and
 only while `getWorkersCount()` reads 0: a connected worker may still be running them, and a count
-that cannot be read moves nothing. Every task job is moved; on cli-exec only an agent run and the
+that cannot be read moves nothing. The count is read once and nothing locks it, so like the reap and
+the reconcile around it this relies on the one worker per install compose runs (a fixed
+`container_name`): two workers booting together on one Redis could each read 0 and requeue a job the
+other had just taken. Every task job is moved; on cli-exec only an agent run and the
 version refresh are (`cliExecJobRequeuedAtBoot`), the kinds known safe to run again at once, and the
 rest wait out their lock as before. The reconcile below ends a parked step's started runs, so their
 jobs exit on the finalized row; any other started run runs again, as its lock's expiry would have
