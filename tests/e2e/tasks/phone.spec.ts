@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import type postgres from 'postgres';
 import {
   cleanupRepoFixture,
@@ -269,6 +269,57 @@ test.describe('task title strip', () => {
       });
       await page.waitForTimeout(1_000);
       expect(polls, 'a return to the tab asks once').toBe(1);
+    } finally {
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('a refresh that fails does not hide an answer still on its way', async ({ page }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    try {
+      await seedTaskPage(sql, page, 'task-usage-race', fx);
+
+      // The page counts its own calls, so the test knows when every request it made has reached
+      // the handler below, and which one the refresh made.
+      await page.addInitScript(() => {
+        const calls = { count: 0 };
+        (window as unknown as { usageCalls: typeof calls }).usageCalls = calls;
+        const fetch = window.fetch.bind(window);
+        window.fetch = (input, init) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (url.endsWith('/usage-window')) calls.count += 1;
+          return fetch(input, init);
+        };
+      });
+      const issued = () =>
+        page.evaluate(
+          () => (window as unknown as { usageCalls: { count: number } }).usageCalls.count,
+        );
+      const held: Route[] = [];
+      await page.route('**/usage-window', (route) => {
+        held.push(route);
+      });
+      await page.goto(`/tasks/${fx.taskId}`);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
+      await expect.poll(async () => held.length > 0 && held.length === (await issued())).toBe(true);
+
+      // A notification-settings change refreshes while the first load is still out; the
+      // refresh fails first, then the first load answers.
+      const before = held.length;
+      await page.evaluate(() =>
+        window.dispatchEvent(new Event('haive:notification-settings-changed')),
+      );
+      await expect.poll(() => held.length).toBe(before + 1);
+      await held.at(-1)!.abort();
+      for (const route of held.slice(0, -1)) await route.continue();
+
+      // Two meters in the header; the fixed strip adds two more if the page has scrolled.
+      await expect
+        .poll(() => page.locator('[title*="subscription usage"]').count())
+        .toBeGreaterThanOrEqual(2);
     } finally {
       await cleanupTaskPage(sql, fx);
       await sql.end({ timeout: 5 });

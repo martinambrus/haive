@@ -39,14 +39,19 @@ async function load(): Promise<void> {
   // A refresh can race a tick, and the older answer must not land last.
   if (id <= applied) return;
   if (next === null) {
-    // A failed poll keeps the last answer; a failed first load publishes an empty one, so a
-    // chip can name why it has nothing instead of loading forever.
-    if (current !== null) return;
-    next = { snapshots: [] };
+    // A failed poll keeps the last answer. A failed first load publishes an empty one, so a
+    // chip can name why it has nothing instead of loading forever, and an older request still
+    // on its way can replace it.
+    if (current === null) publish({ snapshots: [] });
+    return;
   }
   applied = id;
-  current = next;
-  for (const notify of subscribers) notify(current);
+  publish(next);
+}
+
+function publish(data: UsageWindowResponse): void {
+  current = data;
+  for (const notify of subscribers) notify(data);
 }
 
 // A reconnect done in another tab shows at once instead of up to a minute later. A return to the
