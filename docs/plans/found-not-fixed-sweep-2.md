@@ -1,7 +1,7 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-11, 14, 15, 18 and 22 merged (#301-#313, #315 and #320);
-> PR 13 (a rollback puts back absence) is in review. Tracked in the status table of
+> **IN PROGRESS** since 2026-09-25. PRs 1-11, 13, 14, 15, 18 and 22 merged (#301-#313, #315, #317
+> and #320); PR 23 (one usage poller per page) is in review. Tracked in the status table of
 > `docs/plans/README.md`, which each PR updates.
 
 ## Context
