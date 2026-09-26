@@ -260,6 +260,19 @@ continuation that finds its answers saved uses them as they are, and the row sta
 Values the job carries are ignored there, since a parked step's only source of them is a submit
 redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
 
+**Boot hands a dead worker's active jobs back before it starts its own.** BullMQ keeps a job
+`active` under its lock when its worker dies, and the task and cli-exec locks are 30 minutes, so
+such a job used to run only once that lock expired. `requeueOrphanedActiveJobs`
+(`queues/boot-requeue.ts`) moves each one back to waiting before this process starts a Worker, and
+only while `getWorkersCount()` reads 0: a connected worker may still be running them, and a count
+that cannot be read moves nothing. Every task job is moved; on cli-exec only an agent run and the
+version refresh are (`cliExecJobRequeuedAtBoot`), the kinds known safe to run again at once, and the
+rest wait out their lock as before. The reconcile below ends a parked step's started runs, so their
+jobs exit on the finalized row; any other started run runs again, as its lock's expiry would have
+made it. A move never counts toward
+`maxStalledCount`, so a job that kills the worker would come back at every boot: past
+`BOOT_REQUEUE_LIMIT` requeues of one job, it is left to its lock and BullMQ's own count.
+
 **Boot recovers a parked step and resets only a step that has nothing to lose.**
 `reconcileOrphanedSteps` runs before any queue starts:
 
