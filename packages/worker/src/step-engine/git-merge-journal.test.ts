@@ -48,6 +48,7 @@ describe('fixer leftovers journal (real git)', () => {
     try {
       await git(dir, ['init', '-b', 'main']);
       await git(dir, ['config', 'gc.auto', '0']);
+      await git(dir, ['config', 'maintenance.auto', 'false']);
       await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
       await git(dir, ['add', '-A']);
       await git(dir, ['commit', '-m', 'init']);
@@ -74,7 +75,7 @@ describe('fixer leftovers journal (real git)', () => {
         moving: ['stray.txt'],
       });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 });

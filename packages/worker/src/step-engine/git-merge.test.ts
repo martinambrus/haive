@@ -62,10 +62,19 @@ async function gitCode(dir: string, args: string[]): Promise<number> {
   }
 }
 
+/** git maintenance can outlive the command that started it and keep writing `.git/objects`, which a
+ *  teardown then races; the retries cover a writer nothing here turns off. */
+const REMOVE = { recursive: true, force: true, maxRetries: 5 } as const;
+async function initRepo(dir: string): Promise<void> {
+  await git(dir, ['init', '-b', 'main']);
+  await git(dir, ['config', 'gc.auto', '0']);
+  await git(dir, ['config', 'maintenance.auto', 'false']);
+}
+
 /** A repo on `main` whose `feature/x` diverges `base.txt` so a merge conflicts. */
 async function setupConflict(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -108,7 +117,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await mergeCommitted(dir, 'feature/x')).toBe(true);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toBe('resolved\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -120,7 +129,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
       expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -134,7 +143,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });
@@ -142,7 +151,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
 /** A conflict on `name` beside `clean.txt`, which only `feature/x` changes, so the merge stages it. */
 async function setupNamedConflict(name: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-named-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, name), 'base\n', 'utf8');
   await writeFile(path.join(dir, 'clean.txt'), 'one\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -182,7 +191,7 @@ async function setupMergeWithOwnWork(): Promise<string> {
  *  log nothing ignores. */
 async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-ignore-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, '.gitignore'), 'cache/\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -218,8 +227,7 @@ async function writeMany(
 /** 300 files conflicting in DEEP beside a directory/file conflict on `DEEP/foo`, left open. */
 async function setupWideConflict(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-wide-'));
-  await git(dir, ['init', '-b', 'main']);
-  await git(dir, ['config', 'gc.auto', '0']);
+  await initRepo(dir);
   await writeMany(dir, DEEP, 300, () => 'base\n');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -242,8 +250,7 @@ async function setupWideConflict(): Promise<string> {
 async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-'));
   const odd = Buffer.concat([Buffer.from(`${dir}/bad`), Buffer.from([0xff]), Buffer.from('.txt')]);
-  await git(dir, ['init', '-b', 'main']);
-  await git(dir, ['config', 'gc.auto', '0']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await writeFile(odd, 'odd base\n');
   await git(dir, ['add', '-A']);
@@ -278,7 +285,7 @@ async function headEntries(dir: string): Promise<Map<string, string>> {
  *  reports only the name it gave it; the merge of `feature/x` into `main` is left open. */
 async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -316,7 +323,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
       expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -370,7 +377,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await abortMerge(dir)).toEqual({ ok: true });
       expect(await read('dirt.txt')).toBe('person dirt\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -390,7 +397,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.moved).toEqual(['untouched.txt/cache']);
       expect(await readFile(path.join(dir, 'untouched.txt'), 'utf8')).toBe('untouched\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -414,7 +421,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.left.find((l) => l.path === 'untouched.txt/link')?.target).toBe('../base.txt');
       expect((await lstat(path.join(dir, 'untouched.txt', 'link'))).isSymbolicLink()).toBe(true);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -451,7 +458,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
       expect(await readFile(path.join(dir, 'mine.txt'), 'utf8')).toBe('mine\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -475,7 +482,7 @@ describe('fixer leftovers (real git)', () => {
       const blob = (await git(dir, ['hash-object', path.join(dir, 'cache', 'keep')])).trim();
       expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -497,7 +504,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await read('.haive/merge-leftovers/t1/inv1/files/app.log')).toBe('line1\nline2\n');
       expect(await read('app.log')).toBe('line1\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -521,7 +528,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.left).toEqual([expect.objectContaining({ reason: 'its name is not UTF-8' })]);
       expect(await readFile(odd, 'utf8')).toBe('odd\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -544,7 +551,7 @@ describe('fixer leftovers (real git)', () => {
         expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
         expect(await git(dir, ['show', 'HEAD:foo'])).toBe('file\n');
       } finally {
-        await rm(dir, { recursive: true, force: true });
+        await rm(dir, REMOVE);
       }
     },
   );
@@ -553,7 +560,7 @@ describe('fixer leftovers (real git)', () => {
   it('leaves a sibling holding the same blob out of a directory/file conflict it is not in', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-same-'));
     try {
-      await git(dir, ['init', '-b', 'main']);
+      await initRepo(dir);
       await writeFile(path.join(dir, 'foo'), 'a\n', 'utf8');
       await writeFile(path.join(dir, 'bar'), 'b\n', 'utf8');
       await git(dir, ['add', '-A']);
@@ -583,7 +590,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.moved).toEqual(['bar/inner']);
       expect(await readFile(path.join(dir, 'bar', 'inner'), 'utf8')).toBe('bar inner\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -597,7 +604,7 @@ describe('fixer leftovers (real git)', () => {
       await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
       const nested = path.join(dir, 'vendor', 'lib');
       await mkdir(nested, { recursive: true });
-      await git(nested, ['init', '-b', 'main']);
+      await initRepo(nested);
       await writeFile(path.join(nested, 'lib.txt'), 'lib\n', 'utf8');
       await git(nested, ['add', '-A']);
       await git(nested, ['commit', '-m', 'lib']);
@@ -621,7 +628,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await readFile(path.join(dir, '.haive-data', 'plan.json'), 'utf8')).toBe('{}\n');
       expect(await readFile(path.join(nested, 'lib.txt'), 'utf8')).toBe('lib\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -647,7 +654,7 @@ describe('fixer leftovers (real git)', () => {
       };
       expect(manifest.restored).toEqual(['untouched.txt']);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -673,7 +680,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
       expect(await readFile(path.join(dir, '.env'), 'utf8')).toBe(secret);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -705,7 +712,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await read('win.crlf')).toBe('one\r\ntwo\r\n');
       expect(await read('.haive/merge-leftovers/t1/inv1/files/notes.txt')).toBe('FIXER\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -725,7 +732,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.moved).toEqual(['untouched.txt']);
       expect((await lstat(path.join(dir, 'untouched.txt'))).mode & 0o111).toBe(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -744,7 +751,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.unchecked).toContain('nothing was recorded before it ran');
       expect(fixerLeftoversWarning('t1', out!)).toContain('Could not check');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -781,7 +788,7 @@ describe('fixer leftovers (real git)', () => {
           'lib/deep': 0,
         });
       } finally {
-        await rm(dir, { recursive: true, force: true });
+        await rm(dir, REMOVE);
       }
     },
   );
@@ -804,7 +811,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.moved).toEqual([]);
       expect(await readFile(path.join(dir, 'stray.txt'), 'utf8')).toBe('fixer scratch\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -827,7 +834,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
       expect(await gitCode(dir, ['cat-file', '-e', `HEAD:${DEEP}/f0.txt`])).not.toBe(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   }, 30_000);
 
@@ -854,7 +861,7 @@ describe('fixer leftovers (real git)', () => {
       expect(await git(dir, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'])).not.toContain('odd-');
       expect(await readFile(odd, 'utf8')).toBe('odd\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -909,7 +916,7 @@ describe('fixer leftovers (real git)', () => {
       );
       expect(third?.interrupted).toEqual([]);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -926,7 +933,7 @@ describe('fixer leftovers (real git)', () => {
       expect([...entries.keys()].sort()).toEqual(['bad\xff.txt', 'base.txt']);
       expect(await git(dir, ['cat-file', '-p', entries.get('bad\xff.txt')!])).toBe('odd feature\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -950,7 +957,7 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.unstaged).toEqual([]);
       expect(await git(dir, ['diff', '--cached', '--name-only'])).toContain('stray.txt');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -965,8 +972,8 @@ describe('fixer leftovers (real git)', () => {
       await rename(dir, inHost);
       expect(await hosted.captureFixBaseline(inHost, noSecrets)).toBeNull();
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(dir, { recursive: true, force: true });
+      await rm(root, REMOVE);
+      await rm(dir, REMOVE);
     }
   });
 });
@@ -989,7 +996,7 @@ describe('merge helpers (real git)', () => {
       await writeFile(path.join(dir, DEEP, 'foo', 'bar'), 'fixer edit\n', 'utf8');
       expect(await abortMerge(dir)).toEqual({ ok: true });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   }, 30_000);
 
@@ -1000,7 +1007,7 @@ describe('merge helpers (real git)', () => {
       expect(await abortMerge(dir)).toEqual({ ok: true });
       expect(await readFile(odd, 'utf8')).toBe('odd base\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1014,7 +1021,7 @@ describe('merge helpers (real git)', () => {
       expect(await mergeHead(dir)).toBe(0);
       expect(await git(dir, ['show', 'HEAD:café "notes".txt'])).toBe('main\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1030,7 +1037,7 @@ describe('merge helpers (real git)', () => {
       expect((await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).kind).toBe('conflict');
       expect((await openMerge(dir, 'nosuch', ['--no-edit'], COMMIT_ENV)).kind).toBe('refused');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1048,7 +1055,7 @@ describe('merge helpers (real git)', () => {
       expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
       expect(await abortMerge(dir)).toEqual({ ok: true });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1069,8 +1076,8 @@ describe('merge helpers (real git)', () => {
       expect(await readFile(path.join(inHost, 'clean.txt'), 'utf8')).toBe('their own edit\n');
       expect(await mergeHead(inHost)).toBe(0);
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(dir, { recursive: true, force: true });
+      await rm(root, REMOVE);
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1084,7 +1091,7 @@ describe('merge helpers (real git)', () => {
       expect(await abortOtherMerge(dir, 'other')).toEqual({ ok: true });
       expect(await mergeHead(dir)).not.toBe(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });
@@ -1092,7 +1099,7 @@ describe('merge helpers (real git)', () => {
 /** A repo on `main` with a `feature/x` that adds two commits and does NOT conflict. */
 async function setupCleanFeature(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gs-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -1129,7 +1136,7 @@ describe('squashMergeCommit (real git)', () => {
       // Nothing left staged or dirty.
       expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1142,7 +1149,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV)).toBeNull();
       expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(after);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1156,7 +1163,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -1172,7 +1179,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await count(dir, 'main')).toBe(2);
       expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: resumed');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });
