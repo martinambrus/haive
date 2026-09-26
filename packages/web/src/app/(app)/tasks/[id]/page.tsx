@@ -1560,10 +1560,11 @@ export default function TaskDetailPage() {
           {task.repository && (
             <Badge
               variant="default"
-              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300 @max-3xl:hidden"
+              className="min-w-0 shrink gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300 @max-3xl:hidden"
+              title={task.repository.name}
             >
-              <FolderGit2 className="h-3 w-3" />
-              {task.repository.name}
+              <FolderGit2 className="h-3 w-3 shrink-0" />
+              <span className="truncate">{task.repository.name}</span>
             </Badge>
           )}
           {task.executionPath && (
@@ -1695,8 +1696,12 @@ export default function TaskDetailPage() {
                   </Badge>
                 )}
                 {task.repository && (
-                  <Badge variant="info" className="shrink-0">
-                    repo: {task.repository.name}
+                  <Badge
+                    variant="info"
+                    className="max-w-full shrink-0"
+                    title={task.repository.name}
+                  >
+                    <span className="truncate">repo: {task.repository.name}</span>
                   </Badge>
                 )}
                 {/* Which model ANSWERED, not which one is configured — captured by the

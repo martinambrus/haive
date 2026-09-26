@@ -10,6 +10,18 @@ import {
 } from '../helpers/db.js';
 import { registerUser } from '../helpers/auth.js';
 
+/** A summary holding a before/after pair, which renders as a side-by-side diff. */
+const BEFORE_AFTER_SUMMARY = [
+  'Changed the retry loop.',
+  '',
+  '```before',
+  'const retries = options.retries ?? DEFAULT_RETRY_COUNT;',
+  '```',
+  '```after',
+  'const retries = Math.max(0, options.retries ?? DEFAULT_RETRY_COUNT);',
+  '```',
+].join('\n');
+
 interface TaskPageFixture {
   taskId: string;
   userId: string;
@@ -18,9 +30,10 @@ interface TaskPageFixture {
 
 /**
  * A running task carrying everything that competes for the header and the fixed title strip: a
- * repository and an execution path badge, a long title, two live usage meters (the current step's
- * default CLI and one of its seats on a second provider), and both estimates, which is the widest
- * those rows get. A finished step carries a duration and a round badge beside its title.
+ * repository whose name has no break in it and an execution path badge, a long title, two live
+ * usage meters (the current step's default CLI and one of its seats on a second provider), and both
+ * estimates, which is the widest those rows get. A finished step carries a duration and a round
+ * badge beside its title.
  *
  * Fills `fx` as it goes, so the cleanup removes whatever was created before a failure.
  */
@@ -32,6 +45,7 @@ async function seedTaskPage(
 ): Promise<void> {
   fx.userId = (await registerUser(sql, page.request, { prefix })).userId;
   fx.repoId = (await seedRepoFixture(sql, fx.userId, 'phone')).repoId;
+  await sql`update repositories set name = ${`phone_${'x'.repeat(48)}`} where id = ${fx.repoId}`;
   const [claude, codex] = [randomUUID(), randomUUID()];
   await sql`
     insert into cli_providers (id, user_id, name, label)
@@ -67,12 +81,12 @@ async function seedTaskPage(
   await sql`
     insert into task_steps (
       id, task_id, step_id, step_index, title, status, iteration_count, started_at, ended_at,
-      created_at, updated_at
+      summary, created_at, updated_at
     ) values
       (${randomUUID()}, ${fx.taskId}, '08b-test-management', 0, 'Phase 5b: Test management',
-       'done', 2, ${started}, ${ended}, ${started}, ${ended}),
+       'done', 2, ${started}, ${ended}, ${BEFORE_AFTER_SUMMARY}, ${started}, ${ended}),
       (${randomUUID()}, ${fx.taskId}, '08c-code-review', 1, 'Phase 6: Code review',
-       'running', 0, ${ended}, null, ${ended}, ${ended})
+       'running', 0, ${ended}, null, null, ${ended}, ${ended})
   `;
 }
 
@@ -129,6 +143,43 @@ test.describe('task page on a phone', () => {
       });
       expect(fit.outside, 'every item of the strip is inside it').toBe(0);
       expect(fit.height, 'the strip keeps to one line').toBeLessThan(48);
+    } finally {
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('a before/after pair leaves each half room to read', async ({ page }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    try {
+      await seedTaskPage(sql, page, 'task-phone-diff', fx);
+
+      await page.goto(`/tasks/${fx.taskId}`);
+      const step = page.locator('[data-step-id]', {
+        has: page.getByRole('heading', { name: 'Phase 5b: Test management' }),
+      });
+      await step.getByText('What the agent did').click();
+      const half = step.locator('pre', { hasText: 'DEFAULT_RETRY_COUNT' }).first();
+      await expect(half).toBeVisible();
+      expect(
+        (await half.boundingBox())!.width,
+        'a half shows a line of code, not a few characters of it',
+      ).toBeGreaterThan(200);
+      expect(
+        await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+        'the pair scrolls inside itself, not the page',
+      ).toBeLessThanOrEqual(1);
+
+      // A tablet with the sidebar open leaves the pair less room than a phone does.
+      await page.setViewportSize({ width: 768, height: 1024 });
+      await expect
+        .poll(async () => (await half.boundingBox())!.width, { message: 'the same holds at 768px' })
+        .toBeGreaterThan(200);
+      expect(
+        await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+        'the pair scrolls inside itself at 768px too',
+      ).toBeLessThanOrEqual(1);
     } finally {
       await cleanupTaskPage(sql, fx);
       await sql.end({ timeout: 5 });

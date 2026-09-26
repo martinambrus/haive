@@ -174,4 +174,28 @@ test.describe('repositories', () => {
       await sql.end({ timeout: 5 });
     }
   });
+
+  test('the list fits a phone, a name with no break in it included', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    let repo: RepoFixture | null = null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'repos-phone' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'phone');
+      const name = `phone_${'x'.repeat(48)}`;
+      await sql`update repositories set name = ${name} where id = ${repo.repoId}`;
+
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.goto('/repos');
+      await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
+      expect(
+        await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+        'nothing pushes the page sideways',
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
 });

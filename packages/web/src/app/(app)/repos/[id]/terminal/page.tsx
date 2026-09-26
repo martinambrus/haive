@@ -161,7 +161,7 @@ export default function RepoTerminalPage() {
       {!maximized && (
         <div key="title">
           <BackLink />
-          <h1 className="mt-1 text-2xl font-semibold text-neutral-100">
+          <h1 className="mt-1 text-2xl font-semibold text-neutral-100 [overflow-wrap:anywhere]">
             Terminal{repo ? ` — ${repo.name}` : ''}
           </h1>
         </div>

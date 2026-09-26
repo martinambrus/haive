@@ -9,22 +9,26 @@ import { buildDiffRows, type DiffCell } from './before-after-diff';
 export function BeforeAfterBlock({ before, after }: { before: string; after: string }) {
   const rows = buildDiffRows(before, after);
   return (
-    <div className="my-2 overflow-hidden rounded-md border border-neutral-800 text-xs">
-      <div className="grid grid-cols-2">
-        <div className="border-b border-r border-red-900 bg-red-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-red-300">
-          before
-        </div>
-        <div className="border-b border-green-900 bg-green-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-green-300">
-          after
-        </div>
-      </div>
-      <div className="overflow-auto bg-neutral-950 font-mono">
-        {rows.map((row, i) => (
-          <div key={i} className="grid grid-cols-2">
-            <DiffHalf cell={row.left} side="before" />
-            <DiffHalf cell={row.right} side="after" />
+    <div className="my-2 overflow-x-auto rounded-md border border-neutral-800 text-xs">
+      {/* Where there is less room than this, the pair scrolls as one rather than each half
+          squeezed to a few characters. */}
+      <div className="min-w-[36rem]">
+        <div className="grid grid-cols-2">
+          <div className="border-b border-r border-red-900 bg-red-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-red-300">
+            before
           </div>
-        ))}
+          <div className="border-b border-green-900 bg-green-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-green-300">
+            after
+          </div>
+        </div>
+        <div className="bg-neutral-950 font-mono">
+          {rows.map((row, i) => (
+            <div key={i} className="grid grid-cols-2">
+              <DiffHalf cell={row.left} side="before" />
+              <DiffHalf cell={row.right} side="after" />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
