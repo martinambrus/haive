@@ -2766,6 +2766,19 @@ for any other. What a rollback puts back stays in the repository's
 applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
 removal again rather than dropping out of the banner's view.
 
+**One upgrade or rollback runs at a time, and a rollback undoes the newest upgrade once.** Both are
+`onboarding_upgrade` tasks, and two side by side apply and revert the same files: an upgrade parked
+on 02's form applied over a rollback that ran meanwhile, and a second Roll back click queued a
+second revert of the same upgrade. POST /tasks and the rollback route insert either through
+`insertUpgradeTask` (`routes/upgrades.ts`), which refuses with 409, naming the live task, while
+another one of the repository is live, under a per-repository advisory lock so two clicks cannot
+both pass the check. The rollback step reverts the newest completed upgrade, so the route accepts a
+rollback only while that upgrade is the newest completed task of the two kinds
+(`latestUpgradeToRollBack`): after a rollback nothing is left to undo until another upgrade
+completes, and upgrade-status offers no rollback either. The banner opens the live task
+(`inProgressUpgradeTaskId`) where "Continue upgrade" used to start another, and hides Roll back while
+one runs.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as

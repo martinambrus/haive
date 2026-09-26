@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import {
   buildCliRulesBlockFromProviders,
   bundleAgentTemplateHash,
@@ -22,6 +22,7 @@ import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/sha
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { LIVE_TASK_STATUSES } from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -270,7 +271,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     )
     .limit(1);
   const hasPriorUpgrade =
-    liveUpgradeRow.length > 0 || (await lastUpgradeRemovedFiles(db, repositoryId));
+    (await latestUpgradeToRollBack(db, repositoryId)) !== null &&
+    (liveUpgradeRow.length > 0 || (await lastUpgradeRemovedFiles(db, repositoryId)));
 
   // "Upgrade in progress" iff there is a non-terminal onboarding-upgrade task
   // for this repo. The earlier heuristic (`hasPriorUpgrade && hasUpgradeAvailable`)
@@ -283,7 +285,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       and(
         eq(schema.tasks.repositoryId, repositoryId),
         eq(schema.tasks.type, 'onboarding_upgrade'),
-        inArray(schema.tasks.status, ['created', 'queued', 'running', 'paused', 'waiting_user']),
+        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
       ),
     )
     .limit(1);
@@ -540,6 +542,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     currentHaiveVersion,
     hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
+    inProgressUpgradeTaskId: inProgressUpgradeTask[0]?.id ?? null,
     ...(customChanges.length > 0 ? { customChanges } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
@@ -549,13 +552,13 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   return c.json(res);
 });
 
-/** Whether the most recent completed upgrade removed a file or region and nothing has rolled it back
- *  since. A removal leaves no live row, so an upgrade that only removed files has no other trace a
- *  rollback could be offered from. */
-export async function lastUpgradeRemovedFiles(
-  db: ReturnType<typeof getDb>,
+/** The upgrade a rollback would undo now: the most recent completed one, unless that was itself a
+ *  rollback. The rollback step reverts the newest completed upgrade, so one started after a rollback
+ *  would undo the same upgrade a second time. */
+export async function latestUpgradeToRollBack(
+  db: ReturnType<typeof getDb> | DbTx,
   repositoryId: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const [latest] = await db
     .select({ id: schema.tasks.id, metadata: schema.tasks.metadata })
     .from(schema.tasks)
@@ -568,12 +571,56 @@ export async function lastUpgradeRemovedFiles(
     )
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
-  if (!latest || (latest.metadata as { mode?: unknown } | null)?.mode === 'rollback') return false;
+  if (!latest || (latest.metadata as { mode?: unknown } | null)?.mode === 'rollback') return null;
+  return latest.id;
+}
+
+/** Insert an upgrade or a rollback task only while no other one of the repository is live, since two
+ *  running side by side apply and revert the same files. Serialised per repository, so two clicks
+ *  cannot both pass the check. */
+export async function insertUpgradeTask<T>(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  insert: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
+    );
+    const [live] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding_upgrade'),
+          inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
+        ),
+      )
+      .limit(1);
+    if (live) {
+      throw new HttpError(
+        409,
+        `An upgrade or rollback is already in progress for this repository (task ${live.id})`,
+      );
+    }
+    return insert(tx);
+  });
+}
+
+/** Whether the upgrade a rollback would undo removed a file or region. A removal leaves no live row,
+ *  so an upgrade that only removed files has no other trace a rollback could be offered from. */
+export async function lastUpgradeRemovedFiles(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const latest = await latestUpgradeToRollBack(db, repositoryId);
+  if (!latest) return false;
   const [applied] = await db
     .select({ output: schema.taskSteps.output })
     .from(schema.taskSteps)
     .where(
-      and(eq(schema.taskSteps.taskId, latest.id), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
+      and(eq(schema.taskSteps.taskId, latest), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
     )
     .limit(1);
   const removed = (applied?.output as { removedPaths?: unknown } | null)?.removedPaths;
@@ -596,35 +643,27 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
-  const priorUpgrade = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.userId, userId),
-        eq(schema.tasks.type, 'onboarding_upgrade'),
-        eq(schema.tasks.status, 'completed'),
-      ),
-    )
-    .orderBy(desc(schema.tasks.completedAt))
-    .limit(1);
-  if (priorUpgrade.length === 0) {
-    throw new HttpError(409, 'No completed upgrade task to roll back');
-  }
-
-  const inserted = await db
-    .insert(schema.tasks)
-    .values({
-      userId,
-      type: 'onboarding_upgrade',
-      title: `Rollback upgrade: ${repo.name}`,
-      description: 'Revert the most recent onboarding upgrade for this repository.',
-      repositoryId,
-      metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade[0]!.id },
-      status: 'created',
-    })
-    .returning();
+  const inserted = await insertUpgradeTask(db, repositoryId, async (tx) => {
+    const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
+    if (!priorUpgrade) {
+      throw new HttpError(
+        409,
+        'No completed upgrade to roll back: none has completed, or the last one was rolled back',
+      );
+    }
+    return tx
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: 'onboarding_upgrade',
+        title: `Rollback upgrade: ${repo.name}`,
+        description: 'Revert the most recent onboarding upgrade for this repository.',
+        repositoryId,
+        metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
+        status: 'created',
+      })
+      .returning();
+  });
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create rollback task');
 

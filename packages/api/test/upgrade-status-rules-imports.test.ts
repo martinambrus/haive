@@ -419,6 +419,25 @@ describe('upgrade-status and an upgrade that only removed files', () => {
     const body = await status();
     expect(body.isOnboarded).toBe(true);
     expect(body.hasInProgressUpgradeSession).toBe(true);
+    expect(body.inProgressUpgradeTaskId).toBe('upgrade-1');
+  });
+
+  // The rollback route refuses then: the step would undo the same upgrade a second time.
+  it('offers no rollback once the newest completed upgrade was a rollback, live rows or not', async () => {
+    state.rows.set(schema.tasks, [{ id: 'rollback-1', metadata: { mode: 'rollback' } }]);
+    state.rows.set(schema.onboardingArtifacts, [
+      {
+        templateId: 'agent.x',
+        templateSchemaVersion: 1,
+        templateContentHash: 'h1',
+        bundleItemId: null,
+        haiveVersion: null,
+        generatedAt: null,
+      },
+    ]);
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasPriorUpgrade).toBe(false);
   });
 });
 

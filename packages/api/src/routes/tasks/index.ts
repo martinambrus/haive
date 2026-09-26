@@ -14,7 +14,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
@@ -85,6 +85,7 @@ import {
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
+import { insertUpgradeTask } from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -609,45 +610,50 @@ taskRoutes.post('/', async (c) => {
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
-  const inserted = await db
-    .insert(schema.tasks)
-    .values({
-      userId,
-      type: body.type,
-      title: body.title,
-      description: body.description ?? null,
-      repositoryId: body.repositoryId ?? null,
-      parentTaskId,
-      cliProviderId: body.cliProviderId ?? null,
-      summaryCliProviderId: body.summaryCliProviderId ?? null,
-      summaryLlmEnabled: body.summaryLlmEnabled ?? true,
-      summaryCliChoiceAt:
-        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
-          ? new Date()
-          : null,
-      // Presence, not value: naming the field states a choice, and an explicit null
-      // ("none" / "inherit") is exactly the choice the FK column cannot express. The
-      // New Task form always names all three; every other task spawner names none.
-      cliChoiceRecorded: body.cliProviderId !== undefined,
-      summaryCliChoiceRecorded:
-        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
-      dbUploadId: body.dbUploadId ?? null,
-      simplifyCode: body.simplifyCode ?? false,
-      adversarialQaLevel:
-        body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
-          ? body.adversarialQaLevel
-          : null,
-      broadAudit: body.broadAudit ?? true,
-      memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
-      cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
-      stepLoopLimits: body.stepLoopLimits ?? {},
-      autoContinue: body.autoContinue ?? true,
-      ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
-      metadata: Object.keys(metadata).length > 0 ? metadata : null,
-      estimatedTimeHours: body.estimatedTimeHours ?? null,
-      status: 'created',
-    })
-    .returning();
+  const insertTask = (handle: typeof db | DbTx) =>
+    handle
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: body.type,
+        title: body.title,
+        description: body.description ?? null,
+        repositoryId: body.repositoryId ?? null,
+        parentTaskId,
+        cliProviderId: body.cliProviderId ?? null,
+        summaryCliProviderId: body.summaryCliProviderId ?? null,
+        summaryLlmEnabled: body.summaryLlmEnabled ?? true,
+        summaryCliChoiceAt:
+          body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
+            ? new Date()
+            : null,
+        // Presence, not value: naming the field states a choice, and an explicit null
+        // ("none" / "inherit") is exactly the choice the FK column cannot express. The
+        // New Task form always names all three; every other task spawner names none.
+        cliChoiceRecorded: body.cliProviderId !== undefined,
+        summaryCliChoiceRecorded:
+          body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
+        dbUploadId: body.dbUploadId ?? null,
+        simplifyCode: body.simplifyCode ?? false,
+        adversarialQaLevel:
+          body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
+            ? body.adversarialQaLevel
+            : null,
+        broadAudit: body.broadAudit ?? true,
+        memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
+        cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
+        stepLoopLimits: body.stepLoopLimits ?? {},
+        autoContinue: body.autoContinue ?? true,
+        ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
+        metadata: Object.keys(metadata).length > 0 ? metadata : null,
+        estimatedTimeHours: body.estimatedTimeHours ?? null,
+        status: 'created',
+      })
+      .returning();
+  const inserted =
+    body.type === 'onboarding_upgrade'
+      ? await insertUpgradeTask(db, body.repositoryId!, insertTask)
+      : await insertTask(db);
 
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create task');
