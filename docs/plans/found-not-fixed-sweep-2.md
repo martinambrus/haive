@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-15, 18, 22, 23 and 24 merged (#301-#313, #315-#317 and
-> #319-#321); PR 19 (an upgrade can remove the RTK hook from an edited settings file) is in review.
-> Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-15, 18, 19, 22, 23 and 24 merged (#301-#313, #315-#317 and
+> #319-#322); PR 21 (the upgrade banner offers the RTK settings files again once RTK is back on) is
+> in review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
