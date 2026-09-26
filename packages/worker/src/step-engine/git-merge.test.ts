@@ -532,6 +532,36 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // U+FFFD is also what an undecodable byte reads as, so only the name's bytes can tell the two.
+  it('moves a file whose UTF-8 name holds U+FFFD like any other', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, 'kept-�.txt'), 'kept\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'odd name']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'kept-�.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(dir, 'new-�.txt'), 'new\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.left).toEqual([]);
+      expect(out?.moved.sort()).toEqual(['kept-�.txt', 'new-�.txt']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      const files = '.haive/merge-leftovers/t1/inv1/files';
+      expect(await read(`${files}/kept-�.txt`)).toBe('fixer edit\n');
+      expect(await read(`${files}/new-�.txt`)).toBe('new\n');
+      expect(await read('kept-�.txt')).toBe('kept\n');
+      await expect(lstat(path.join(dir, 'new-�.txt'))).rejects.toThrow('ENOENT');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   // git reports the moved file alone and stages the directory side, so keeping the file touches both.
   it.each(['main', 'feature/x'] as const)(
     'commits the file side of a directory/file conflict a fixer chose, the file on %s',
@@ -1080,6 +1110,47 @@ describe('merge helpers (real git)', () => {
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
       expect(await mergeHead(dir)).toBe(0);
       expect(await git(dir, ['show', 'HEAD:café "notes".txt'])).toBe('main\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('commits a resolved conflict whose UTF-8 name holds U+FFFD', async () => {
+    const dir = await setupNamedConflict('odd-�.txt');
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      expect(await unmergedPaths(dir)).toEqual(['odd-�.txt']);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      await writeFile(path.join(dir, 'odd-�.txt'), 'resolved\n', 'utf8');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:odd-�.txt'])).toBe('resolved\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('never commits a conflicted file whose name is not UTF-8', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-conflict-'));
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/bad`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      await initRepo(dir);
+      await writeFile(odd, 'base\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      await writeFile(odd, 'feature\n');
+      await git(dir, ['commit', '-am', 'feature']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(odd, 'main\n');
+      await git(dir, ['commit', '-am', 'main']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      // Its markers are still in the file, and its decoded name names no file to check them in.
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      expect(await mergeHead(dir)).toBe(0);
     } finally {
       await rm(dir, REMOVE);
     }

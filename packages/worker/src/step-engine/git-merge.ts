@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -101,6 +102,13 @@ function isHostCheckout(dir: string): boolean {
 /** A name as git listed it, read as latin1 to keep its bytes, decoded for a report. */
 function shown(name: string): string {
   return Buffer.from(name, 'latin1').toString('utf8');
+}
+
+/** A latin1 listing's name decoded, or null when its bytes are not UTF-8. Judged on the bytes:
+ *  U+FFFD is also what an undecodable byte reads as, and a valid name can hold it. */
+function utf8Name(name: string): string | null {
+  const bytes = Buffer.from(name, 'latin1');
+  return isUtf8(bytes) ? bytes.toString('utf8') : null;
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
@@ -671,7 +679,7 @@ async function changesSince(
     dir,
     ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after.tree],
     undefined,
-    LISTING_BUFFER,
+    LISTING,
   );
   if (diff.code !== 0) return { error: gitDetail(diff) };
   return { raw, after: after.tree, changes: rawChanges(diff.stdout) };
@@ -749,12 +757,14 @@ export async function relocateFixerChanges(
   const treeUnchecked = 'error' in changed ? changed.error : undefined;
   if (!('error' in changed)) {
     for (const c of changed.changes) {
-      if (!outside(c)) continue;
-      if (c.path.includes('�')) {
-        left.push({ path: c.path, reason: 'its name is not UTF-8' });
+      const name = utf8Name(c.path);
+      const p = name ?? shown(c.path);
+      if (!outside({ ...c, path: p })) continue;
+      if (name === null) {
+        left.push({ path: p, reason: 'its name is not UTF-8' });
         continue;
       }
-      toMove.push({ path: c.path, status: c.status });
+      toMove.push({ path: name, status: c.status });
     }
   }
   const toUnstage: { name: string; path: string; blob: string | null }[] = [];
@@ -1018,16 +1028,26 @@ export async function completeMergeHostSide(
   if (await mergeCommitted(worktreePath, branch)) return true;
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code !== 0) return false; // merge no longer open and not committed
-  const files = await unmergedPaths(worktreePath);
-  if (files === null) return false;
+  const listed = await gitRun(
+    worktreePath,
+    ['diff', '--name-only', '--diff-filter=U', '-z'],
+    undefined,
+    LISTING,
+  );
+  if (listed.code !== 0) return false;
+  const files: string[] = [];
+  for (const name of nulPaths(listed.stdout)) {
+    const decoded = utf8Name(name);
+    // A name that is not UTF-8 decodes to one naming no file, which would read as deleted.
+    if (decoded === null) return false;
+    files.push(decoded);
+  }
   const resolving = await resolvingPaths(worktreePath, files);
   if (resolving === null) return false;
   // The worktree is under `.haive/`, which the sandbox mounts read-write, so it is SPLIT rather
   // than used as the anchor: every path git reported is walked a component at a time.
   const { anchor, prefix } = workspaceAnchor(worktreePath);
   for (const f of files) {
-    // A name that is not UTF-8 decodes to one naming no file, which would read as deleted.
-    if (f.includes('\uFFFD')) return false;
     let content: string | null;
     try {
       content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });

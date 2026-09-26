@@ -543,19 +543,20 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   restore, since git rewrites the files and `merge --abort` refuses their stale stat data. git
   writes what it puts back as the worker, so those paths, and the directories git created for them,
   are handed back to the merge dir's owner; a directory that already stood keeps its own. `.haive/`,
-  `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name git could
-  not decode stays and is reported, a link with its target in the manifest, since a scratch worktree
-  removed later takes the link with it. A directory a fixer made where a file stood gives way to the
-  file only once everything in it has moved: git replaces such a directory whole and takes what is
-  left in it along, so one still holding something is kept and named. The recorded tree is spent
-  once used, and one whose merge a person finished or aborted meanwhile moves nothing: putting its
-  paths back would write merged files into a tree with no merge open. A tree git could not record is
-  reported the same way rather than read as a fixer that changed nothing; the fixer is still sent,
-  since halting there would stop every merge whose scratch `add` fails (a clean filter the worker
-  lacks). Each relocation is a `merge.fixer_leftovers` event and a step warning. Its manifest is
-  written before anything moves and marked once that event is written (a `reported` file beside it),
-  so a relocation a restart cut short, or one whose event was never written, is reported by the
-  task's next relocation. A base worktree is removed without `--force`, so one still holding
+  `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
+  not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
+  removed later takes the link with it. A name is judged by its bytes, since a valid one can hold
+  U+FFFD, the character an undecodable byte reads as. A directory a fixer made where a file stood
+  gives way to the file only once everything in it has moved: git replaces such a directory whole
+  and takes what is left in it along, so one still holding something is kept and named. The recorded
+  tree is spent once used, and one whose merge a person finished or aborted meanwhile moves nothing:
+  putting its paths back would write merged files into a tree with no merge open. A tree git could
+  not record is reported the same way rather than read as a fixer that changed nothing; the fixer is
+  still sent, since halting there would stop every merge whose scratch `add` fails (a clean filter
+  the worker lacks). Each relocation is a `merge.fixer_leftovers` event and a step warning. Its
+  manifest is written before anything moves and marked once that event is written (a `reported` file
+  beside it), so a relocation a restart cut short, or one whose event was never written, is reported
+  by the task's next relocation. A base worktree is removed without `--force`, so one still holding
   something git will not discard is kept and named. The plan merge's agent pass (`01-plan-merge`) is
   handled the same way, its note going into the conversation rather than a step warning, since the
   revise loop resets the row every turn. Its recorded tree is kept for the whole merge rather than
