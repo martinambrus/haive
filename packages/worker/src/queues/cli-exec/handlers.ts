@@ -704,6 +704,18 @@ export async function handleBuildSandboxImageJob(
         previousDbTag,
         newTag: imageTag,
       });
+      // A provider deleted while this build ran had its image's removal left to the build.
+      const stillThere = await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider.id),
+        columns: { id: true },
+      });
+      if (!stillThere) {
+        await removeOrphanedPreviousImage(db, {
+          providerId: provider.id,
+          previousDbTag: imageTag,
+          newTag: null,
+        });
+      }
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
@@ -755,14 +767,14 @@ export async function handleBuildSandboxImageJob(
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
 
-/** Remove the image a deleted provider named, unless its tag is being built or another provider
- *  names it too. */
+/** Remove the image a deleted provider named, unless another provider names it too. One whose tag
+ *  is being built is left to that build, which removes it once it finds its provider gone. */
 export async function handleRemoveSandboxImageJob(
   db: Database,
   payload: SandboxImageRemoveJobPayload,
 ): Promise<void> {
   if (inFlightBuilds.has(payload.imageTag)) {
-    log.info(payload, "kept a deleted provider's sandbox image: its tag is being built");
+    log.info(payload, "left a deleted provider's sandbox image to the build of its tag");
     return;
   }
   await removeOrphanedPreviousImage(db, {

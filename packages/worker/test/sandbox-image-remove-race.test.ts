@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const docker = vi.hoisted(() => ({
   inspect: vi.fn(),
@@ -19,6 +19,7 @@ vi.mock('../src/sandbox/sandbox-core-image.js', () => ({
   SANDBOX_CORE_IMAGE_HEADLINE: 'x',
 }));
 
+import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -30,17 +31,26 @@ const TAG = 'haive-cli-claude:1.0.0';
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000b2';
 
+beforeEach(() => {
+  for (const f of Object.values(docker)) f.mockReset();
+});
+
+function withProvider() {
+  const fake = createFakeDb({ cliProviders: schema.cliProviders });
+  fake.insert(schema.cliProviders, {
+    id: PROVIDER,
+    userId: USER,
+    name: 'zai',
+    label: 'zai',
+    cliVersion: '1.0.0',
+    sandboxImageTag: null,
+  });
+  return fake;
+}
+
 describe("removing a deleted provider's image while another provider asks for its tag", () => {
   it('builds the tag again rather than marking a provider ready on the image being removed', async () => {
-    const fake = createFakeDb({ cliProviders: schema.cliProviders });
-    fake.insert(schema.cliProviders, {
-      id: PROVIDER,
-      userId: USER,
-      name: 'zai',
-      label: 'zai',
-      cliVersion: '1.0.0',
-      sandboxImageTag: null,
-    });
+    const fake = withProvider();
     let exists = true;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -77,5 +87,40 @@ describe("removing a deleted provider's image while another provider asks for it
       sandboxImageTag: TAG,
       sandboxImageBuildStatus: 'ready',
     });
+  });
+
+  it('removes the image of a provider deleted while it was built, once the build ends', async () => {
+    const fake = withProvider();
+    docker.inspect.mockResolvedValue({ exists: false });
+    docker.remove.mockResolvedValue({ ok: true, stderr: '' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    docker.build.mockImplementation(async () => {
+      await gate;
+      return {
+        exitCode: 0,
+        imageTag: TAG,
+        imageId: 'sha256:new',
+        durationMs: 1,
+        stderr: '',
+        timedOut: false,
+      };
+    });
+
+    const db = fake.db as unknown as Database;
+    const building = handleBuildSandboxImageJob(db, {
+      providerId: PROVIDER,
+      userId: USER,
+      force: true,
+    });
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
+    await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, PROVIDER));
+    await handleRemoveSandboxImageJob(db, { providerId: PROVIDER, imageTag: TAG });
+    expect(docker.remove).not.toHaveBeenCalled();
+    docker.inspect.mockResolvedValue({ exists: true, imageId: 'sha256:new' });
+    release();
+    await building;
+
+    expect(docker.remove).toHaveBeenCalledWith(TAG);
   });
 });
