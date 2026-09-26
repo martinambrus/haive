@@ -509,12 +509,17 @@ async function main(): Promise<void> {
 
     // ---- a rollback of the upgrade that removed it ------------------------------------------
     await finish(again.applyCtx, againApplied);
-    await rollback('rtk-off-upgrade-smoke again rollback');
+    const againRollback = await rollback('rtk-off-upgrade-smoke again rollback');
     check(
       'a rollback puts the removed settings file back, with a live row',
       (await readOrNull(SETTINGS)) === buildClaudeSettingsJson() &&
         (await liveRowsAt(SETTINGS)).length === 1,
       { now: await readOrNull(SETTINGS) },
+    );
+    check(
+      'and does not say it had nothing to revert',
+      !againRollback.warnings.some((w) => w.includes('nothing to revert')),
+      againRollback.warnings,
     );
     // An attempt that put the file back and failed before its rows: the retry finds its own restore.
     await db
@@ -655,11 +660,13 @@ async function main(): Promise<void> {
         reapplied.removedPaths,
       );
       await finish(secondSeeded.applyCtx, reapplied);
-      await rollback('rtk-off-upgrade-smoke seeded rollback', seeded);
+      const seededRollback = await rollback('rtk-off-upgrade-smoke seeded rollback', seeded);
       check(
         'a rollback puts back the file no row recorded',
         (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) ===
-          buildClaudeSettingsJson(),
+          buildClaudeSettingsJson() &&
+          !seededRollback.warnings.some((w) => w.includes('nothing to revert')),
+        seededRollback.warnings,
       );
       const [seededRepo] = await db
         .select({ applicable: schema.repositories.applicableTemplateIds })
@@ -691,10 +698,12 @@ async function main(): Promise<void> {
         { offered: parkedEntry?.entryId, removedPaths: parkedApplied.removedPaths },
       );
       await finish(parked.applyCtx, parkedApplied);
-      await rollback('rtk-off-upgrade-smoke seeded parked rollback', seeded);
+      const parkedRollback = await rollback('rtk-off-upgrade-smoke seeded parked rollback', seeded);
       check(
-        'and a rollback of that upgrade leaves it deleted',
-        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null,
+        'and a rollback of that upgrade leaves it deleted, saying it had nothing to revert',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null &&
+          parkedRollback.warnings.some((w) => w.includes('nothing to revert')),
+        parkedRollback.warnings,
       );
     } finally {
       await rm(seededPath, { recursive: true, force: true });

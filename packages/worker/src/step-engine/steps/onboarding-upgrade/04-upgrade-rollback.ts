@@ -249,9 +249,6 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           isNull(schema.onboardingArtifacts.supersededAt),
         ),
       );
-    if (upgradeRows.length === 0) {
-      warnings.push('no live rows attributable to the prior upgrade task; nothing to revert');
-    }
 
     // 02 records where nothing stood and which rows it retired. A payload from before that record
     // falls back to the most recently superseded row at a path, and to deleting where there is none.
@@ -362,6 +359,15 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         upgradeArtifactId: null,
         removed: true,
       });
+    }
+    if (
+      targets.length === 0 &&
+      newArtifactsToUndo.length === 0 &&
+      unrecordedRewrites.length === 0
+    ) {
+      warnings.push(
+        'no live rows or recorded removals attributable to the prior upgrade task; nothing to revert',
+      );
     }
 
     return {

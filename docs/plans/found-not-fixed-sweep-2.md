@@ -1,8 +1,7 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-19, 21, 22, 23 and 24 merged (#301-#323); PR 20 (RTK files
-> a blank scaffold seeded are taken back when RTK goes off) is in review. Tracked in the status
-> table of `docs/plans/README.md`, which each PR updates.
+> **SHIPPED** 2026-09-26. PRs 1-24 and 20b merged (#301-#325). The checkpoints below stay open
+> until their events. Tracked in the status table of `docs/plans/README.md`.
 
 ## Context
 
@@ -295,6 +294,9 @@ the silent-failure class and go before the rest.
     were on for a repo with no live rows, and a path whose bytes equal that render (or still hold the
     hook, with 19) becomes `obsolete` against that hash. Control: a second blank repo switched off
     before its first upgrade in `rtk-off-upgrade-smoke.ts` (today nothing is offered).
+    - **20b** (#325): a rollback that put a removal back no longer says it had nothing to revert. 04
+      warned whenever the upgrade wrote no live row, which an upgrade that only removed files never
+      does. Found by 20's live check.
 21. **fix(api): the banner offers the RTK files again when RTK is switched back on.** An rtk-config
     template counts as current while RTK is on, the enabled providers need it, and a live row's
     snapshot recorded an RTK choice (so repos from before RTK stay quiet). The claude-family and
