@@ -15,7 +15,11 @@ import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-ru
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { splitWorktreePath, WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
 import { resolveInvocationWorkerRoot } from './resolvers.js';
-import { secretMaskDeniesPath, secretMaskPolicy } from './secret-mask-policy.js';
+import {
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+  type SecretMaskPolicy,
+} from './secret-mask-policy.js';
 import { log } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
@@ -60,6 +64,32 @@ export async function resolveSecretMasks(
   const globallyEnabled = await configService.getBoolean(CONFIG_KEYS.SECRET_MASK_ENABLED, true);
   if (!globallyEnabled) return [];
 
+  const target = await maskedRepository(db, taskId);
+  if (!target) return [];
+  const { task, repo } = target;
+  if (!repo.secretMaskEnabled) return [];
+
+  // Scan EXACTLY what is mounted, and mask at the mount target — so the masked set can
+  // never drift from the mount. resolveInvocationWorkerRoot is the one definition of that
+  // path, shared with the other sandbox masks. computeSecretMasks stats the root and fails
+  // closed if it is unreadable — the sandbox binds the real tree regardless of what the
+  // worker can see.
+  const workerRoot = resolveInvocationWorkerRoot({
+    repoMountSubpath: repoMount?.subpath,
+    storagePath: repo.storagePath ?? repo.localPath,
+    userId: task.userId,
+    repositoryId: task.repositoryId,
+  });
+
+  return computeSecretMasks(
+    workerRoot,
+    { allow: repo.secretMaskAllow, denyExtend: repo.secretMaskDenyExtend },
+    repoMount?.target ?? SANDBOX_WORKDIR,
+  );
+}
+
+/** The task's repository row as masking reads it, or null for a task with no repository. */
+async function maskedRepository(db: Database, taskId: string) {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { userId: true, repositoryId: true },
@@ -69,7 +99,7 @@ export async function resolveSecretMasks(
   // on the same condition, so no repo tree reaches the sandbox and there is genuinely
   // nothing to mask.
   if (!task) throw new SecretMaskError(`secret-mask: task ${taskId} not found`);
-  if (!task.repositoryId) return [];
+  if (!task.repositoryId) return null;
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
@@ -90,25 +120,23 @@ export async function resolveSecretMasks(
       `secret-mask: repository ${task.repositoryId} for task ${taskId} not found`,
     );
   }
-  if (!repo.secretMaskEnabled) return [];
+  return { task: { userId: task.userId, repositoryId: task.repositoryId }, repo };
+}
 
-  // Scan EXACTLY what is mounted, and mask at the mount target — so the masked set can
-  // never drift from the mount. resolveInvocationWorkerRoot is the one definition of that
-  // path, shared with the other sandbox masks. computeSecretMasks stats the root and fails
-  // closed if it is unreadable — the sandbox binds the real tree regardless of what the
-  // worker can see.
-  const workerRoot = resolveInvocationWorkerRoot({
-    repoMountSubpath: repoMount?.subpath,
-    storagePath: repo.storagePath ?? repo.localPath,
-    userId: task.userId,
-    repositoryId: task.repositoryId,
-  });
-
-  return computeSecretMasks(
-    workerRoot,
-    { allow: repo.secretMaskAllow, denyExtend: repo.secretMaskDenyExtend },
-    repoMount?.target ?? SANDBOX_WORKDIR,
-  );
+/** The globs the sandbox would mask a task's repository with, whether masking is on or off, for a
+ *  writer that must keep those files out of what an agent could read later: with masking off the
+ *  agent reads them anyway, so leaving them out costs nothing. Null for a task with no repository. */
+export async function taskSecretMaskPolicy(
+  db: Database,
+  taskId: string,
+): Promise<SecretMaskPolicy | null> {
+  const target = await maskedRepository(db, taskId);
+  return target
+    ? secretMaskPolicy({
+        allow: target.repo.secretMaskAllow,
+        denyExtend: target.repo.secretMaskDenyExtend,
+      })
+    : null;
 }
 
 /**

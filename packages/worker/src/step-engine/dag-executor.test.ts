@@ -35,6 +35,10 @@ import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
 
 // Wraps the real dispatcher so one test can stub a single call.
+vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/secret-mask.js')>()),
+  taskSecretMaskPolicy: async () => null,
+}));
 vi.mock('../orchestrator/dispatcher.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../orchestrator/dispatcher.js')>();
   return { ...actual, resolveTaskDispatch: vi.fn(actual.resolveTaskDispatch) };
@@ -907,6 +911,8 @@ function makeDagMergeWaitDb(opts: {
   }>;
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
+  /** The same after this many reads, for a test that drives the phase more than once. */
+  checkpointAfterReads?: number;
 }) {
   let stepStatus = opts.stepRowStatus ?? 'running';
   let stepErrorMessage: string | null = null;
@@ -939,6 +945,7 @@ function makeDagMergeWaitDb(opts: {
     ...opts.issue,
   };
   const issueUpdates: Record<string, unknown>[] = [];
+  const events: { eventType?: string }[] = [];
   let levelReads = 0;
 
   function chain(result: unknown) {
@@ -955,7 +962,9 @@ function makeDagMergeWaitDb(opts: {
     if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
     if (table === schema.taskDagLevels) {
       levelReads += 1;
-      const done = opts.checkpointAfterFirstRead === true && levelReads > 1;
+      const done =
+        (opts.checkpointAfterFirstRead === true && levelReads > 1) ||
+        (opts.checkpointAfterReads !== undefined && levelReads > opts.checkpointAfterReads);
       return [
         {
           id: 'level1',
@@ -1010,9 +1019,13 @@ function makeDagMergeWaitDb(opts: {
       },
     }),
     insert: (table: unknown) => ({
-      values: () => ({
-        returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
-      }),
+      values: (v: { eventType?: string }) => {
+        if (table === schema.taskEvents) events.push(v);
+        return {
+          returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
+          then: (resolve: (v: unknown) => void) => resolve(undefined),
+        };
+      },
     }),
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => {
@@ -1060,6 +1073,7 @@ function makeDagMergeWaitDb(opts: {
     getLevelMergeState: () => levelMergeState,
     getIssueMergeStatus: () => issueMergeStatus,
     issueUpdates,
+    events,
   };
 }
 
@@ -1450,6 +1464,61 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         null,
       );
       expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe('mine\n');
+    } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a fixer's changes outside the conflict are moved aside, and the level merge commits only the merge", async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    try {
+      const opts: Parameters<typeof makeDagMergeWaitDb>[0] = {
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: true,
+        checkpointAfterReads: 2,
+      };
+      const h = makeDagMergeWaitDb(opts);
+      const pass = () =>
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          mergeCtx(integrationDir),
+          dispatchingParams as never,
+        );
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      const first = await pass();
+      expect(first.resolved).toBe(false);
+      await writeFile(path.join(integrationDir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(integrationDir, 'issue.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(integrationDir, 'notes.txt'), 'scratch\n', 'utf8');
+      opts.invocation = {
+        id: 'fix-inv-1',
+        startedAt: new Date(),
+        endedAt: new Date(),
+        supersededAt: null,
+        exitCode: 0,
+        errorMessage: null,
+      };
+      await pass();
+      expect(h.getIssueMergeStatus()).toBe('resolved');
+      const show = async (spec: string) =>
+        (await exec('git', ['show', spec], { cwd: integrationDir })).stdout.toString();
+      expect(await show('HEAD:base.txt')).toBe('resolved\n');
+      expect(await show('HEAD:issue.txt')).toBe('issue\n');
+      expect(await gitCode(integrationDir, ['cat-file', '-e', 'HEAD:notes.txt'])).not.toBe(0);
+      const files = path.join(
+        integrationDir,
+        '.haive',
+        'merge-leftovers',
+        'task1',
+        'fix-inv-1',
+        'files',
+      );
+      expect(await readFile(path.join(files, 'notes.txt'), 'utf8')).toBe('scratch\n');
+      expect(await readFile(path.join(files, 'issue.txt'), 'utf8')).toBe('fixer edit\n');
+      expect(h.events.map((e) => e.eventType)).toContain('merge.fixer_leftovers');
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }

@@ -30,11 +30,22 @@ import {
   abortMerge,
   abortOtherMerge,
   buildMergeFixPrompt,
+  captureFixBaseline,
   completeMergeHostSide,
+  fixerLeftoversWarning,
   openMerge,
+  recordFixerLeftovers,
+  relocateFixerChanges,
+  type FixBaseline,
+  type FixBaselineUnavailable,
   type MergeAbort,
 } from './git-merge.js';
-import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
+import {
+  addStepWarning,
+  assertOwnsStep,
+  insertOwnedRun,
+  updateOwnedStep,
+} from './step-ownership.js';
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
@@ -54,6 +65,7 @@ import {
   DAG_INFRA_EXHAUSTED_MARKER,
 } from './dag-failure-class.js';
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
+import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { overrideOr, overrideOrLearned, escalatedTimeoutMs } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import { loadPlanImpactContext, planImpactBlock } from './steps/workflow/_plan-impact.js';
@@ -486,6 +498,8 @@ interface LevelMergeState {
   fixInvocationId: string | null;
   /** Per-issueKey count of LLM resolution attempts. */
   conflictRetries: Record<string, number>;
+  /** The tree the in-flight fixer was sent into (null = none recorded). */
+  fixBaseline: FixBaseline | FixBaselineUnavailable | null;
 }
 
 function readMergeState(level: DagLevelRow): LevelMergeState {
@@ -494,6 +508,7 @@ function readMergeState(level: DagLevelRow): LevelMergeState {
     activeConflict: ms?.activeConflict ?? null,
     fixInvocationId: ms?.fixInvocationId ?? null,
     conflictRetries: ms?.conflictRetries ?? {},
+    fixBaseline: ms?.fixBaseline ?? null,
   };
 }
 
@@ -635,12 +650,16 @@ async function startConflictFix(
       current: { ...m.current, aiFixContext: null },
     });
   }
+  const fixBaseline = await captureFixBaseline(m.integration.path, () =>
+    taskSecretMaskPolicy(m.db, m.params.taskId),
+  );
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
   const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
     state.activeConflict = target.issueKey;
     state.fixInvocationId = invId;
     state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+    state.fixBaseline = fixBaseline;
     await saveMergeState(m.db, m.level.id, state);
   });
   if (dispatched.kind === 'already_live') {
@@ -771,6 +790,26 @@ async function runLevelMerge(
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
     const branch = target?.branchName ?? state.activeConflict ?? 'the active conflict';
+    const leftovers = await relocateFixerChanges(
+      integration.path,
+      state.fixBaseline,
+      { taskId: m.params.taskId, runId: inv.id },
+      () => taskSecretMaskPolicy(db, m.params.taskId),
+    );
+    if (state.fixBaseline) {
+      // Spent once used: a later pass comparing it with a tree the merge has since left would put
+      // the merge's files back.
+      state.fixBaseline = null;
+      await saveMergeState(db, level.id, state);
+    }
+    if (leftovers) {
+      await recordFixerLeftovers(db, m.params.taskId, m.current.id, branch, leftovers);
+      m.current = await addStepWarning(
+        db,
+        m.current,
+        fixerLeftoversWarning(m.params.taskId, leftovers),
+      );
+    }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
     if (runNeverAnswered(inv)) {
       // A fixer that never answered may have left the merge half-resolved, so its

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -8,7 +9,14 @@ import {
 } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { completeMergeHostSide } from '../../git-merge.js';
+import {
+  completeMergeHostSide,
+  fixerLeftoversWarning,
+  recordFixerLeftovers,
+  relocateFixerChanges,
+  type FixBaseline,
+  type FixBaselineUnavailable,
+} from '../../git-merge.js';
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
@@ -27,7 +35,9 @@ import {
   reconcilePlanMirror,
   writePlanMirror,
 } from '../../../plan/mirror.js';
+import { moveAsideFixerLeftovers, planMergeFixBaseline } from '../../../plan/merge-baseline.js';
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
+import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
 import { WORKTREE_SUBDIR } from '../../../repo/worktree-paths.js';
 
@@ -90,6 +100,8 @@ interface PlanMergeDetect {
   pendingGuidance: string | null;
   /** True while the merge is live in the worktree. */
   mergeOpen: boolean;
+  /** The tree the agent is sent into on an answer pass; absent on a collect pass. */
+  fixBaseline?: FixBaseline | FixBaselineUnavailable | null;
 }
 
 interface PlanMergeApply {
@@ -199,7 +211,8 @@ function buildPrompt(d: PlanMergeDetect): string {
       : []),
     '',
     'Resolve EVERY conflict by EDITING those files: remove the <<<<<<< / ======= / >>>>>>>',
-    'markers and leave the content you want to keep.',
+    'markers and leave the content you want to keep. Change no other file: only the conflicted',
+    'files are committed.',
     'Do NOT run git — it is unavailable here; the orchestrator stages and commits the merge',
     'after you finish. Do NOT run tests or any other commands.',
     '',
@@ -265,6 +278,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     });
     await ensurePlanMergeWorktree(ctx.repoPath);
     let open = await mergeIsOpen(worktreePath);
+    let opened = false;
     let unrelated = false;
     if (!open) {
       await fetchOrigin({
@@ -279,12 +293,13 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       if (gap.behind > 0) {
         const attempt = await mergeOriginInto(worktreePath, branch, gap.unrelated, identity);
         open = !attempt.clean;
+        opened = open;
       }
     } else {
       unrelated = (await divergence(ctx.repoPath, branch)).unrelated;
     }
 
-    return {
+    const found: PlanMergeDetect = {
       repositoryId,
       branch,
       worktreePath,
@@ -296,6 +311,13 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       pendingGuidance: last?.role === 'user' ? last.body : null,
       mergeOpen: open,
     };
+    if (!open || found.conflicts.length === 0) return found;
+    const fixBaseline = await planMergeFixBaseline(
+      ctx.db,
+      { repositoryId, taskId: ctx.taskId, taskStepId: ctx.taskStepId, worktreePath },
+      opened,
+    );
+    return needsAgentPass(found) ? { ...found, fixBaseline } : found;
   },
 
   llm: {
@@ -307,6 +329,18 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // Nothing unresolved, or the budget for this conflict set is spent — either way
     // there is nothing to ask an agent, and form() offers the complementary form.
     skipIf: ({ detected }) => !needsAgentPass(detected as PlanMergeDetect),
+    // Each fixer starts from the tree the merge left, whatever an earlier one that failed, was
+    // stopped or was re-dispatched left behind.
+    prepareWorkspace: async ({ ctx, detected }) => {
+      const d = detected as PlanMergeDetect;
+      if (!d.fixBaseline || 'unavailable' in d.fixBaseline) return;
+      await moveAsideFixerLeftovers(
+        ctx.db,
+        d.worktreePath,
+        { baseline: d.fixBaseline, taskId: ctx.taskId, taskStepId: ctx.taskStepId },
+        `origin/${d.branch}`,
+      );
+    },
     buildPrompt: ({ detected }) => buildPrompt(detected as PlanMergeDetect),
     bypassStub: () => 'test bypass — no change',
   },
@@ -401,12 +435,32 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         repositoryId: d.repositoryId,
       });
       const said = typeof args.llmOutput === 'string' ? args.llmOutput.trim() : '';
+      const leftovers = await relocateFixerChanges(
+        d.worktreePath,
+        d.fixBaseline,
+        { taskId: ctx.taskId, runId: args.llmInvocationId ?? randomUUID() },
+        () => taskSecretMaskPolicy(ctx.db, ctx.taskId),
+      );
+      if (leftovers) {
+        await recordFixerLeftovers(
+          ctx.db,
+          ctx.taskId,
+          ctx.taskStepId,
+          `origin/${d.branch}`,
+          leftovers,
+        );
+      }
       const committed = await completeMergeHostSide(d.worktreePath, identity, `origin/${d.branch}`);
       const left = await conflictedPaths(d.worktreePath);
       result.resolved = committed && left.length === 0;
-      result.summary = result.resolved
-        ? said || `Resolved ${d.conflicts.length} file(s).`
-        : `Still unresolved: ${left.join(', ') || 'the merge did not commit'}.`;
+      result.summary = [
+        result.resolved
+          ? said || `Resolved ${d.conflicts.length} file(s).`
+          : `Still unresolved: ${left.join(', ') || 'the merge did not commit'}.`,
+        leftovers ? fixerLeftoversWarning(ctx.taskId, leftovers) : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
       await recordMessage(
         ctx.db,
         ctx.taskId,
