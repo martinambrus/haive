@@ -1,3 +1,5 @@
+import { normalizeContent } from './manifest.js';
+
 /** Hook commands invoked by each CLI's runtime when an RTK-managed event
  *  fires. Mirrors rtk's own `CLAUDE_HOOK_COMMAND` / gemini hook command. */
 export const RTK_HOOK_CLAUDE_COMMAND = 'rtk hook claude';
@@ -103,6 +105,17 @@ export function withoutRtkHookEntry(templateId: string, text: string): string | 
   else delete hooks[hook.eventKey];
   if (Object.keys(hooks).length === 0) delete root.hooks;
   return serialize(root);
+}
+
+/** Whether a settings file still holds what its RTK template wrote: the render, or its hook, which
+ *  is what an upgrade with RTK off offers to take out of a file no row records. */
+export function holdsRtkSettings(templateId: string, text: string): boolean {
+  const file = RTK_SETTINGS_FILES.find((f) => f.templateId === templateId);
+  if (!file) return false;
+  return (
+    normalizeContent(text) === normalizeContent(file.render()) ||
+    withoutRtkHookEntry(templateId, text) !== null
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

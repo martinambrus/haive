@@ -1,9 +1,10 @@
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import {
+  buildClaudeSettingsJson,
   buildCliRulesBlockFromProviders,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
@@ -18,6 +19,7 @@ const { state } = vi.hoisted(() => ({
     userId: 'user-1',
     repo: null as Record<string, unknown> | null,
     rows: new Map<unknown, unknown[]>(),
+    onboarded: false,
   },
 }));
 
@@ -27,7 +29,7 @@ vi.mock('../src/db.js', () => ({
   getDb: () => ({
     query: {
       repositories: { findFirst: async () => state.repo },
-      tasks: { findFirst: async () => null },
+      tasks: { findFirst: async () => (state.onboarded ? { id: 'onboarding-1' } : null) },
     },
     select: () => ({
       from: (table: unknown) => {
@@ -409,5 +411,111 @@ describe('upgrade-status and an upgrade that only removed files', () => {
     const body = await status();
     expect(body.isOnboarded).toBe(true);
     expect(body.hasPriorUpgrade).toBe(true);
+  });
+});
+
+describe('upgrade-status and the RTK settings files no row records', () => {
+  let repo: string;
+  const settings = (text: string) => writeFile(path.join(repo, '.claude/settings.json'), text);
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-rtk-settings-'));
+    await mkdir(path.join(repo, '.claude'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+      source: 'blank',
+    };
+    inSync([claude]);
+    // Rows elsewhere, from a snapshot that recorded RTK: 01 follows the switch and probes.
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows.get(schema.onboardingArtifacts)!.map((a, i) => ({
+        ...(a as object),
+        id: `row-${i}`,
+        diskPath: `.claude/agents/row-${i}.md`,
+        hasSnapshot: true,
+        rtkRecorded: true,
+      })),
+    );
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('offers the upgrade for the settings file a blank scaffold seeded', async () => {
+    await settings(buildClaudeSettingsJson());
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('and for one edited around its hook', async () => {
+    const edited = JSON.parse(buildClaudeSettingsJson()) as Record<string, unknown>;
+    edited.theme = 'dark';
+    await settings(`${JSON.stringify(edited, null, 2)}\n`);
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+  });
+
+  it('not for a settings file without the hook', async () => {
+    await settings('{\n  "theme": "dark"\n}\n');
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('not while RTK is on', async () => {
+    await settings(buildClaudeSettingsJson());
+    state.repo = { ...state.repo, rtkEnabled: true };
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+  });
+
+  it('not for a path a live row records', async () => {
+    await settings(buildClaudeSettingsJson());
+    const rows = state.rows.get(schema.onboardingArtifacts)!;
+    rows.push({ ...(rows[0] as object), id: 'settings-row', diskPath: '.claude/settings.json' });
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+  });
+
+  it('not where the plan renders from snapshots that predate RTK', async () => {
+    await settings(buildClaudeSettingsJson());
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows
+        .get(schema.onboardingArtifacts)!
+        .map((a) => ({ ...(a as object), rtkRecorded: false })),
+    );
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('not for a repository that was not blank and has rows of its own', async () => {
+    await settings(buildClaudeSettingsJson());
+    state.repo = { ...state.repo, source: 'git' };
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+  });
+
+  it('for a repository with no rows whose onboarding recorded the choice, and not otherwise', async () => {
+    await settings(buildClaudeSettingsJson());
+    state.onboarded = true;
+    state.repo = { ...state.repo, source: 'git' };
+    state.rows.set(schema.onboardingArtifacts, []);
+    state.rows.set(schema.tasks, [{ id: 'onboarding-1', metadata: null }]);
+    state.rows.set(schema.taskSteps, [{ recorded: true }]);
+    expect((await status()).rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+    state.rows.set(schema.taskSteps, [{ recorded: false }]);
+    expect((await status()).rtkSettingsLeftovers).toBeUndefined();
   });
 });

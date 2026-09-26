@@ -2588,9 +2588,10 @@ out from it would restore it. Nothing records the ones a blank scaffold seeds (a
 and INIT has none), nor any of a repository with no rows at all, so for those 01 renders the RTK
 templates as if RTK were on, for every CLI in the catalog since the scaffold seeded them for the
 CLIs enabled then, and offers a file still holding that render, or its hook, as `obsolete` against
-the render's hash. A blank repository is covered whatever other rows it has, since 07 skips
-the seeded file and 12 records no row for it; any other repository's rows are taken as the whole
-record. One someone edited is kept by that rule, so the form offers instead to
+the render's hash. A blank repository is probed whatever other rows it has, skipping only the
+paths a live row records: onboarding records one for a seeded file only when it renders that
+template itself, with RTK on and the file's CLIs still enabled. Any other repository's rows are
+taken as the whole record. One someone edited is kept by that rule, so the form offers instead to
 take the hook out of it, unticked (`withoutRtkHookEntry`): only hook items whose command is exactly
 RTK's go, with the entries and lists they leave empty, and the file keeps its own indent and line
 endings. A file that parsing and writing back would change anywhere else (an integer past 2^53,
@@ -2610,8 +2611,12 @@ after it (`stripRtkBlocks`). A link is refused and reported, as is a file past t
 plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
 stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
 holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
-repository and reports the files still holding a block (`rtkBlockLeftovers`), so the banner offers
-the upgrade. Switching RTK back on offers the settings files again, and the banner says so: the
+repository and reports the files still holding a block (`rtkBlockLeftovers`), and the settings
+files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): it looks where 01
+looks, reads RTK's choice through the same snapshots, and judges each file by the predicate 01
+uses (`holdsRtkSettings`), so the banner offers the upgrade, and never one whose plan offers
+nothing. A repository never onboarded gets neither, since POST /tasks refuses it an upgrade.
+Switching RTK back on offers the settings files again, and the banner says so: the
 upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of a snapshot that
 recorded the choice read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders

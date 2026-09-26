@@ -9,15 +9,17 @@ import {
   CLI_RULES_TEMPLATE_ID,
   computeSetHash,
   getHaiveVersion,
+  holdsRtkSettings,
   newestArtifactsFirst,
   normalizeContent,
+  RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
   type TaskJobPayload,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -78,6 +80,61 @@ export function recordedRtkProviders(
   });
 }
 
+/** Whether 01's render context follows the repository's RTK switch, which it does only when the
+ *  snapshot it renders from recorded a choice: the newest live one, else the 07 detect output of
+ *  the last completed onboarding, else, for a blank repository, the scaffold's own. */
+async function rtkChoiceFollowsLive(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  liveRows: ReadonlyArray<{ hasSnapshot: boolean | null; rtkRecorded: boolean | null }>,
+  source: string,
+): Promise<boolean> {
+  if (liveRows.some((r) => r.hasSnapshot === true)) {
+    return liveRows.some((r) => r.rtkRecorded === true);
+  }
+  const [onboarding] = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+    )
+    .orderBy(desc(schema.tasks.completedAt))
+    .limit(1);
+  if (!onboarding) return source === 'blank';
+  const [generate] = await db
+    .select({
+      recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
+    })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, onboarding.id),
+        eq(schema.taskSteps.stepId, '07-generate-files'),
+      ),
+    )
+    .limit(1);
+  return generate?.recorded === true;
+}
+
+/** The RTK settings files no live row records that still hold RTK's render or hook, which 01 offers
+ *  for removal once RTK is off. A link, and a file that cannot be read, claim nothing, as there. */
+async function rtkSettingsLeftovers(
+  root: string,
+  recorded: ReadonlySet<string>,
+): Promise<string[]> {
+  const found: string[] = [];
+  for (const file of RTK_SETTINGS_FILES) {
+    if (recorded.has(file.diskPath)) continue;
+    const text = await readTextNoFollow(root, file.diskPath).catch(() => null);
+    if (text !== null && holdsRtkSettings(file.templateId, text)) found.push(file.diskPath);
+  }
+  return found;
+}
+
 /**
  * Report whether an upgrade is available for a repository by comparing the
  * installed artifact fingerprints against the worker-synced manifest cache.
@@ -95,6 +152,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       storagePath: true,
       localPath: true,
       rtkEnabled: true,
+      source: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -157,12 +215,16 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const liveArtifacts = await db
     .select({
       id: schema.onboardingArtifacts.id,
+      diskPath: schema.onboardingArtifacts.diskPath,
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
       generatedAt: schema.onboardingArtifacts.generatedAt,
+      hasSnapshot: sql<
+        boolean | null
+      >`jsonb_typeof(${schema.onboardingArtifacts.formValuesSnapshot}) = 'object'`,
       rtkRecorded: sql<
         boolean | null
       >`jsonb_typeof(${schema.onboardingArtifacts.formValuesSnapshot} -> 'rtkEnabled') = 'boolean'`,
@@ -412,11 +474,20 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
   const root = repo.storagePath ?? repo.localPath;
   const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
+  // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
+  const rtkSettingsLeft =
+    !repo.rtkEnabled &&
+    root &&
+    (repo.source === 'blank' || liveArtifacts.length === 0) &&
+    (await rtkChoiceFollowsLive(db, repositoryId, liveArtifacts, repo.source))
+      ? await rtkSettingsLeftovers(root, new Set(liveArtifacts.map((a) => a.diskPath)))
+      : [];
 
   const hasUpgradeAvailable =
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
     missingRulesImports.length > 0 ||
-    rtkBlockLeftovers.length > 0;
+    rtkBlockLeftovers.length > 0 ||
+    rtkSettingsLeft.length > 0;
 
   // Group `custom.<bundleId>.*` changes by bundle so the banner can render
   // "Bundle X: N changed items" alongside Haive template counts. Bundles with
@@ -462,6 +533,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
     ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),
+    ...(rtkSettingsLeft.length > 0 ? { rtkSettingsLeftovers: rtkSettingsLeft } : {}),
   };
   return c.json(res);
 });

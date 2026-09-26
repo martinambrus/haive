@@ -14,6 +14,7 @@ import {
   extractRegion,
   getCliProviderMetadata,
   getHaiveVersion,
+  holdsRtkSettings,
   newestArtifactsFirst,
   normalizeContent,
   sha256Hex,
@@ -43,7 +44,6 @@ import {
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
-import { withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 
 export type UpgradePlanBucket =
   'unchanged' | 'clean_update' | 'conflict' | 'new_artifact' | 'user_deleted' | 'obsolete';
@@ -535,8 +535,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     for (const r of unrecordedRtk) {
       const disk = await readDiskContent(ctx.repoPath, r.diskPath);
       if (disk.content === null || disk.hash === null) continue;
+      if (!holdsRtkSettings(r.templateId, disk.content)) continue;
       const holdsRender = disk.hash === r.writtenHash;
-      if (!holdsRender && withoutRtkHookEntry(r.templateId, disk.content) === null) continue;
       entries.push({
         entryId: `e${counterByBucket++}:${r.diskPath}`,
         bucket: 'obsolete',
