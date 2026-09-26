@@ -1819,9 +1819,10 @@ Deleting a provider removes the image it named. The api never touches Docker, so
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a
 rebuild's old image goes through (`removeOrphanedPreviousImage`): kept while any other provider
 names the tag, and only once a build of that tag running here has ended, whatever it ended in, since
-it may have been this provider's own. A build that did not succeed also leaves the tag its provider
-named before, which only the build knew, so it removes that too when it finds its provider gone.
-That check and the removal take their
+it may have been this provider's own. A build whose provider is gone once it ends, whatever it ended
+in, removes both the tag it built and the one its provider named before, under the same check: a
+provider deleted before its build registered left the removal nothing to wait for, and only the
+build knew the tag it was replacing. That check and the removal take their
 turn per tag with a build's cache hit (`withImageTagLock`): a removal that read no provider naming
 the tag otherwise deleted the image a cache hit had just marked a provider ready on, and a rebuild
 removing its old tag raced a sibling switching to that tag the same way. A removal that could not

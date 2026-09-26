@@ -162,4 +162,50 @@ describe("removing a deleted provider's image while another provider asks for it
     await deleteDuringBuild(heldBuild(1, older, standing));
     expect(standing.has(older)).toBe(false);
   });
+
+  it('removes the image of a provider deleted before its build registered', async () => {
+    const fake = withProvider();
+    const standing = new Set<string>();
+    let releaseInspect!: () => void;
+    const inspectGate = new Promise<void>((resolve) => (releaseInspect = resolve));
+    let firstInspect = true;
+    docker.inspect.mockImplementation(async (tag: string) => {
+      if (firstInspect) {
+        firstInspect = false;
+        await inspectGate;
+      }
+      return standing.has(tag) ? { exists: true, imageId: `sha256:${tag}` } : { exists: false };
+    });
+    docker.remove.mockImplementation(async (tag: string) => {
+      standing.delete(tag);
+      return { ok: true, stderr: '' };
+    });
+    let removalDone!: () => void;
+    const afterRemoval = new Promise<void>((resolve) => (removalDone = resolve));
+    docker.build.mockImplementation(async () => {
+      await afterRemoval;
+      standing.add(TAG);
+      return {
+        exitCode: 0,
+        imageTag: TAG,
+        imageId: `sha256:${TAG}`,
+        durationMs: 1,
+        stderr: '',
+        timedOut: false,
+      };
+    });
+
+    const db = fake.db as unknown as Database;
+    const building = handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER });
+    await vi.waitFor(() => expect(docker.inspect).toHaveBeenCalled());
+    await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, PROVIDER));
+    const removing = handleRemoveSandboxImageJob(db, { providerId: PROVIDER, imageTag: TAG }).then(
+      removalDone,
+    );
+    releaseInspect();
+    await Promise.all([building, removing]);
+
+    expect(docker.build).toHaveBeenCalledTimes(1);
+    expect(standing.has(TAG)).toBe(false);
+  });
 });

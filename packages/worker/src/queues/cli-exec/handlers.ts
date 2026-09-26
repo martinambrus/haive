@@ -695,11 +695,9 @@ export async function handleBuildSandboxImageJob(
     started.then(settle, settle);
   }
 
-  let succeeded = false;
   try {
     const result = await build;
     if (result.exitCode === 0) {
-      succeeded = true;
       await markProvidersReady(db, imageTag, provider.id, shared);
       await removeOrphanedPreviousImage(db, {
         providerId: provider.id,
@@ -750,26 +748,26 @@ export async function handleBuildSandboxImageJob(
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
   } finally {
-    // The tag a build that did not succeed was replacing stays behind, and for a provider deleted
-    // meanwhile nothing but this build knows it.
-    if (!succeeded && previousDbTag && previousDbTag !== imageTag) {
-      await db.query.cliProviders
-        .findFirst({ where: eq(schema.cliProviders.id, provider.id), columns: { id: true } })
-        .then((stillThere) =>
-          stillThere
-            ? undefined
-            : removeOrphanedPreviousImage(db, {
-                providerId: provider.id,
-                previousDbTag,
-                newTag: null,
-              }),
-        )
-        .catch((err: unknown) =>
-          log.warn(
-            { err, providerId: provider.id, previousDbTag },
-            'previous image cleanup failed',
-          ),
-        );
+    // A provider deleted before this build registered, or while it ran, may have had its removal
+    // find no build to wait for, and a build that did not succeed leaves the tag it was replacing.
+    try {
+      const stillThere = await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider.id),
+        columns: { id: true },
+      });
+      if (!stillThere) {
+        for (const tag of new Set([imageTag, previousDbTag])) {
+          if (tag) {
+            await removeOrphanedPreviousImage(db, {
+              providerId: provider.id,
+              previousDbTag: tag,
+              newTag: null,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log.warn({ err, providerId: provider.id }, "could not remove a deleted provider's images");
     }
   }
 }
