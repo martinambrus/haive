@@ -230,9 +230,14 @@ export function UpgradeAvailableBanner({
     );
   }
 
+  // A rollback, or an upgrade whose apply already cleared the drift, is live with nothing to review.
   return (
     <div className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
-      <Badge variant="success">Up to date</Badge>
+      {status.hasInProgressUpgradeSession ? (
+        <Badge variant="default">Upgrade in progress</Badge>
+      ) : (
+        <Badge variant="success">Up to date</Badge>
+      )}
       <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
       {versionLine && <span>{versionLine}</span>}
       {linkedNote}
@@ -240,6 +245,11 @@ export function UpgradeAvailableBanner({
         <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
           Manage bundles
         </Link>
+        {status.inProgressUpgradeTaskId && (
+          <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
+            Open task
+          </Button>
+        )}
         {canRollBack && (
           <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
             Roll back last upgrade
