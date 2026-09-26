@@ -578,7 +578,10 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   record taking in what one left. A merge a pass opens is recorded afresh, since an earlier merge of
   the same two commits was another tree. A conversation that resumes another's merge also reports
   what that one's relocations never did. Nothing is recorded under `HOST_REPO_ROOT`: the sandbox
-  mounts a local-path repository read-only, so no fixer can write there.
+  mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
+  code, so it moves nothing aside: a task's worktree is removed whole, a fixer's changes with the
+  rest of the task's work, a same-branch root is left as the fixer left it, merge still open, and a
+  plan merge's scratch worktree waits for the next pass or a Save or Pull, as above.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
