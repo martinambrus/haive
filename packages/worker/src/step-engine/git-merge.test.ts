@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -148,6 +148,8 @@ async function setupMergeWithOwnWork(): Promise<string> {
   const dir = await setupNamedConflict('base.txt');
   await writeFile(path.join(dir, 'untouched.txt'), 'untouched\n', 'utf8');
   await writeFile(path.join(dir, 'dirt.txt'), 'dirt\n', 'utf8');
+  await mkdir(path.join(dir, 'lib', 'deep'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'keep\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'main only']);
   await writeFile(path.join(dir, 'dirt.txt'), 'person dirt\n', 'utf8');
@@ -223,6 +225,27 @@ describe('fixer leftovers (real git)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  // git writes what it puts back as this process, where the sandbox user owned what stood there.
+  it.runIf(process.getuid?.() === 0)(
+    'hands what it puts back to the owner of the tree, directories git recreated included',
+    async () => {
+      const dir = await setupMergeWithOwnWork();
+      try {
+        await exec('chown', ['-R', '1000:1000', dir]);
+        const baseline = await captureFixBaseline(dir);
+        await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+        await rm(path.join(dir, 'lib'), { recursive: true });
+        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+        expect(await readFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'utf8')).toBe('keep\n');
+        for (const rel of ['untouched.txt', 'lib', 'lib/deep', 'lib/deep/keep.txt']) {
+          expect((await lstat(path.join(dir, rel))).uid, rel).toBe(1000);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('moves nothing once the merge it was sent into was finished by hand', async () => {
     const dir = await setupMergeWithOwnWork();

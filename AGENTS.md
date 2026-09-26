@@ -508,8 +508,10 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   so neither a stray nor a person's own uncommitted work at a same-branch root is swept into it, where
   `add -A` took both. A person's own edit made there while the fixer ran cannot be told from the fixer's
   and is moved with it. The index is refreshed after the restore, since git rewrites the files and
-  `merge --abort` refuses their stale stat data. `.haive/`, `.haive-data/` (other writers keep them)
-  and gitlinks are never moved; a link or a name git could not decode stays and is reported. The recorded
+  `merge --abort` refuses their stale stat data. git writes what it puts back as the worker, so those
+  paths, and any directory recreated for them, are handed back to the merge dir's owner. `.haive/`,
+  `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name git could not
+  decode stays and is reported. The recorded
   tree is spent once used, and one whose merge a person finished or aborted meanwhile moves nothing:
   putting its paths back would write merged files into a tree with no merge open. Each relocation is a
   `merge.fixer_leftovers` event and a step warning. A base worktree is removed without `--force`, so

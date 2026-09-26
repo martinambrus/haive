@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
 import {
+  chownNoFollow,
   isPathContainmentError,
   lstatNoFollow,
   readTextNoFollow,
@@ -228,6 +229,24 @@ function rawChanges(
   return changes;
 }
 
+/** git writes the restored files, and any directory it recreated for them, as this process, where
+ *  the sandbox user owned what stood there; they are handed back to the tree's owner. */
+async function giveBack(
+  anchor: string,
+  prefix: string,
+  paths: string[],
+  owner: { uid: number; gid: number },
+): Promise<void> {
+  const entries = new Set<string>();
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 1; i <= parts.length; i += 1) entries.add(parts.slice(0, i).join('/'));
+  }
+  for (const e of entries) {
+    await chownNoFollow(anchor, `${prefix}${e}`, owner).catch(() => undefined);
+  }
+}
+
 /** Move what a fixer changed outside the paths it was sent to resolve out of `dir`, into
  *  `<folder>/files/`, and put those paths back as the baseline had them, so neither the next fixer
  *  nor the merge commit inherits them. A path that cannot be moved (a link, a name git could not
@@ -261,8 +280,10 @@ export async function relocateFixerChanges(
   const diff = await gitRun(dir, ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after]);
   if (diff.code !== 0) return { folder, moved: [], left: [], unchecked: gitDetail(diff) };
   const { anchor, prefix } = workspaceAnchor(dir);
-  const root = await lstatNoFollow(anchor, '', { strict: true }).catch(() => null);
-  const owner = root ? { uid: root.stats.uid, gid: root.stats.gid } : undefined;
+  const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
+    () => null,
+  );
+  const owner = tree ? { uid: tree.stats.uid, gid: tree.stats.gid } : undefined;
   const conflicted = new Set(baseline.unmerged);
   const moved: string[] = [];
   const left: FixerLeftovers['left'] = [];
@@ -298,6 +319,8 @@ export async function relocateFixerChanges(
     );
     if (res.code !== 0) {
       for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });
+    } else if (owner) {
+      await giveBack(anchor, prefix, chunk, owner);
     }
   }
   if (restore.length > 0) await gitRun(dir, ['update-index', '-q', '--refresh']);
