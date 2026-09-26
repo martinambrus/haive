@@ -170,6 +170,32 @@ describe('a file the reset cannot put back', () => {
   });
 });
 
+describe('a save that takes the name back while the old file is judged', () => {
+  it('is kept, and keeps the directory around it', async () => {
+    const rel = '.claude/workflow-config.json';
+    const root = await repoWith({ [rel]: OURS });
+    const provenance = {
+      writtenHashes: new Map<string, string>(),
+      haiveDirs: new Set<string>(),
+      haiveEntries: new Map([[rel, hashOfOurs()]]),
+    };
+    // The first hash is the verdict and changes nothing; the second is the parked copy's judge.
+    h.swap = {
+      when: normalizeContent(OURS),
+      path: path.join(root, rel),
+      content: OURS,
+      then: { when: normalizeContent(OURS), path: path.join(root, rel), content: MINE },
+    };
+    const outcome = await resetOnboardingArtifacts(root, provenance);
+    expect(h.swap).toBeNull();
+
+    expect(await readFile(path.join(root, rel), 'utf8')).toBe(MINE);
+    expect(outcome.skipped).toContainEqual({ path: rel, reason: 'edited since Haive wrote it' });
+    expect(outcome.removed).not.toContain(rel);
+    expect(outcome.removed).not.toContain('.claude');
+  });
+});
+
 describe('the reset reads no claimed file past the size cap', () => {
   // Twice the cap, so a whole read and a capped one (the cap plus the newline normalizing adds)
   // cannot be mistaken for each other.

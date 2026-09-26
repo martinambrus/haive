@@ -2286,15 +2286,16 @@ holding the same bytes with no 07 record is kept and reported, and one edited si
 edited. An edited `.claude/RTK.md` used to be deleted on the path-only claim.
 
 **A claimed file is removed only while it still holds the bytes that made the claim.** The verdict
-is read before the removal, so a save landing between the two was deleted as Haive's. Every file
-the reset removes on its own, the settings pass included, goes through `removeFileIfNoFollow`
-against the row's or the step's hash, as an upgrade's delete does; one that no longer matches is
-kept and reported as edited, and its directory stays around it. One whose name a save took while it
-was judged cannot go back, so it stays under its private name (`ParkedFileError`, carrying the
-errno) and the reset reports where it is and carries on. That is no failure to read the tree, so it
-never counts toward the floor below that refuses a walk which touched nothing. A claim with no hash behind it is
-still taken by its path, and so is everything in a directory the reset removes whole: a save into
-one of those at that moment can still be lost.
+is read before the removal, so a save landing between the two was deleted as Haive's. Every file the
+reset removes on its own, the settings pass included, goes through `removeFileIfNoFollow` against
+the row's or the step's hash, as an upgrade's delete does; one that no longer matches is kept and
+reported as edited, and its directory stays around it. So is a file a save put at the name while the
+old one was judged, though the old one goes. One whose name a save took while it was judged and
+refused cannot go back, so it stays under its private name (`ParkedFileError`, carrying the errno)
+and the reset reports where it is and carries on. That is no failure to read the tree, so it never
+counts toward the floor below that refuses a walk which touched nothing. A claim with no hash behind
+it is still taken by its path, and so is everything in a directory the reset removes whole: a save
+into one of those at that moment can still be lost.
 
 Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
 one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the

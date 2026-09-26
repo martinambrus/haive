@@ -1945,13 +1945,15 @@ export async function resetOnboardingArtifacts(
         (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
         { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
-      if (result === 'removed') {
+      // A save that took the name back while the old file was judged is the person's file.
+      const retaken = result === 'removed' && (await lstatNoFollow(root, rel)) !== null;
+      if (result === 'removed' && !retaken) {
         removed.push(rel);
         vacatedPaths.add(rel);
-      } else if (result === 'kept') {
+      } else if (result === 'kept' || retaken) {
         skipped.push({ path: rel, reason: claimRefusalReason('edited') });
       }
-      stayed = result === 'kept';
+      stayed = result === 'kept' || retaken;
     });
     return stayed;
   };
