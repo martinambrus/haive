@@ -75,11 +75,13 @@ describe('deciding the MCP servers held from an imported mirror', () => {
     expect(tooling(fake)).toEqual({ ragMode: 'none' });
   });
 
-  it('decides nothing when another field of the same request is refused', async () => {
-    const fake = setup();
-    const res = await patch({ repoMcpServersAction: 'accept', reviewDimensions: [] });
-    expect(res.status).toBe(400);
-    expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual(pending);
+  it('decides only in a request of its own', async () => {
+    for (const other of [{ reviewDimensions: [] }, { ragEmbedAction: 'rebuild_index' }]) {
+      const fake = setup();
+      const res = await patch({ repoMcpServersAction: 'accept', ...other });
+      expect(res.status).toBe(400);
+      expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual(pending);
+    }
   });
 
   it('answers 409 when nothing is waiting', async () => {
