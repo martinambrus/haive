@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { schema, type Database } from '@haive/database';
@@ -20,6 +21,7 @@ import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.j
 import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
 import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
+import { holdImportedMcpServers } from './sandbox/mcp-config.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
 
@@ -71,6 +73,8 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'reconcileStrandedCloningRepos', kind: 'convergent', run: reconcileStrandedCloningRepos },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
+  // Convergent: a row it held, and one accepted or discarded since, never matches again.
+  { id: 'holdImportedMcpServerLists', kind: 'convergent', run: holdImportedMcpServerLists },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
   // After the schema backfill has canonicalised the facets those keys are derived from — it runs
   // on the global-KB connection at first use, which `withGlobalKb` here triggers.
@@ -484,6 +488,54 @@ async function flagHashIndexedRestoredRepos(db: Database): Promise<void> {
     // Boot path: a failure here must not stop the worker starting. The cost of skipping
     // is a degraded ranking, not a broken one.
     log.error({ err }, 'failed to flag hash-indexed restored repos');
+  }
+}
+
+/** Hold the MCP servers a tooling record brought from another install's mirror before the import
+ *  held them. A record this install's own 04 wrote equals that run's `output.tooling`. */
+export async function holdImportedMcpServerLists(db: Database): Promise<void> {
+  const repos = await db.query.repositories.findMany({
+    columns: { id: true, onboardingTooling: true },
+  });
+  const installKey = await configService.getEncryptionKey().catch(() => null);
+  for (const repo of repos) {
+    const stored = repo.onboardingTooling;
+    if (!stored) continue;
+    const mirror = stored as unknown as OnboardingToolingMirror;
+    const tooling = mirror.tooling;
+    if (!tooling || typeof tooling !== 'object' || Array.isArray(tooling)) continue;
+    const held = holdImportedMcpServers(tooling, installKey);
+    if (!held) continue;
+    const localRuns = await db
+      .select({ output: schema.taskSteps.output })
+      .from(schema.taskSteps)
+      .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repo.id),
+          eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+        ),
+      );
+    if (
+      localRuns.some((r) =>
+        isDeepStrictEqual((r.output as { tooling?: unknown } | null)?.tooling, tooling),
+      )
+    ) {
+      continue;
+    }
+    const updated = await db
+      .update(schema.repositories)
+      .set({ onboardingTooling: { ...mirror, tooling: held } })
+      .where(
+        and(eq(schema.repositories.id, repo.id), eq(schema.repositories.onboardingTooling, stored)),
+      )
+      .returning({ id: schema.repositories.id });
+    if (updated.length > 0) {
+      log.warn(
+        { repositoryId: repo.id, servers: held.importedMcpServerNames },
+        'imported MCP servers held until accepted on this install',
+      );
+    }
   }
 }
 

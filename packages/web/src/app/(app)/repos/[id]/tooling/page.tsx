@@ -53,6 +53,7 @@ interface ToolingConfig {
   ragEmbedDegradedAt: string | null;
   ragEmbedDegradedReason: string | null;
   ragEmbedLexicalOnly: boolean;
+  pendingRepoMcpServers: string[] | null;
 }
 
 /** One learned guidance item currently appended to a step's prompt for this repo. */
@@ -134,6 +135,19 @@ export default function RepoToolingPage() {
   const [archiving, setArchiving] = useState<string | null>(null);
   const [ragEmbedBusy, setRagEmbedBusy] = useState<string | null>(null);
   const [ragEmbedNote, setRagEmbedNote] = useState<string | null>(null);
+  const [mcpDecisionBusy, setMcpDecisionBusy] = useState<'accept' | 'discard' | null>(null);
+
+  async function decideRepoMcpServers(action: 'accept' | 'discard') {
+    setMcpDecisionBusy(action);
+    try {
+      await api.patch(`/repositories/${repositoryId}/tooling`, { repoMcpServersAction: action });
+      setConfig(await api.get<ToolingConfig>(`/repositories/${repositoryId}/tooling-config`));
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to record the MCP server decision');
+    } finally {
+      setMcpDecisionBusy(null);
+    }
+  }
 
   /** RAG embed-health actions are verbs with side effects, not form fields, so they
    *  PATCH on their own rather than riding the page's Save button. */
@@ -299,6 +313,53 @@ export default function RepoToolingPage() {
         <p className="text-sm text-neutral-500">Loading...</p>
       ) : (
         <>
+          {config.pendingRepoMcpServers && (
+            <Card className="border-amber-500/40 bg-amber-950/20">
+              <h2 className="text-lg font-semibold text-amber-200">
+                MCP servers waiting for your decision
+              </h2>
+              <p className="mt-1 text-xs text-amber-100/80">
+                This repository&apos;s committed Haive data (<code>.haive-data/tooling.json</code>)
+                names {config.pendingRepoMcpServers.length} MCP server definition
+                {config.pendingRepoMcpServers.length === 1 ? '' : 's'} that{' '}
+                {config.pendingRepoMcpServers.length === 1 ? 'was' : 'were'} not set up on this
+                installation. Each definition is a command the CLI will EXECUTE, so none of them
+                runs until you accept them here. Accept only if you recognise them, and read the
+                file first if you did not add them yourself.
+              </p>
+              {config.pendingRepoMcpServers.length > 0 && (
+                <p className="mt-2 break-words text-xs text-amber-100">
+                  {config.pendingRepoMcpServers.slice(0, 20).map((name, i) => (
+                    <span key={name}>
+                      {i > 0 && ', '}
+                      <code>{name}</code>
+                    </span>
+                  ))}
+                  {config.pendingRepoMcpServers.length > 20 &&
+                    ` and ${config.pendingRepoMcpServers.length - 20} more`}
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={mcpDecisionBusy !== null}
+                  onClick={() => void decideRepoMcpServers('accept')}
+                >
+                  {mcpDecisionBusy === 'accept' ? 'Working...' : 'Use these servers'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={mcpDecisionBusy !== null}
+                  onClick={() => void decideRepoMcpServers('discard')}
+                >
+                  {mcpDecisionBusy === 'discard' ? 'Working...' : 'Discard'}
+                </Button>
+              </div>
+            </Card>
+          )}
+
           <Card>
             <h2 className="text-lg font-semibold text-neutral-100">RTK proxy</h2>
             <div className="mt-3 flex items-center gap-2">

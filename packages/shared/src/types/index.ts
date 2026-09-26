@@ -323,6 +323,14 @@ export const ONBOARDING_TOOLING_SCHEMA_VERSION = 1;
  *  mirror (they do not travel between machines). Kept in the DB column for LOCAL use. */
 export const ONBOARDING_TOOLING_INFRA_KEYS = ['ragConnectionString', 'ollamaUrl'] as const;
 
+/** This install's decision about MCP servers that arrived in another install's committed
+ *  mirror. Never committed, and never taken from a committed mirror. */
+export const ONBOARDING_TOOLING_CONSENT_KEYS = [
+  'importedMcpSettingsJson',
+  'importedMcpServerNames',
+  'acceptedMcpSettingsMark',
+] as const;
+
 /** Repo-level snapshot of an onboarded repo's detected+confirmed ENVIRONMENT.
  *  Persisted on `repositories.onboarding_environment` and mirrored to
  *  `.haive-data/environment.json`. Stores the RAW structures the stack resolvers

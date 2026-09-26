@@ -22,6 +22,7 @@ import {
   getHaiveVersion,
   HAIVE_DATA_FILES,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_CONSENT_KEYS,
   ONBOARDING_TOOLING_INFRA_KEYS,
   unmanagedAgentsDir,
 } from '@haive/shared';
@@ -413,7 +414,9 @@ async function writeHaiveDataMirror(
   const tooling = repo.onboardingTooling as OnboardingToolingMirror | null;
   if (tooling?.tooling) {
     const stripped: Record<string, unknown> = { ...tooling.tooling };
-    for (const k of ONBOARDING_TOOLING_INFRA_KEYS) delete stripped[k];
+    for (const k of [...ONBOARDING_TOOLING_INFRA_KEYS, ...ONBOARDING_TOOLING_CONSENT_KEYS]) {
+      delete stripped[k];
+    }
     const mirror: OnboardingToolingMirror = {
       schemaVersion: tooling.schemaVersion,
       tooling: stripped,

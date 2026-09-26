@@ -2443,6 +2443,21 @@ epoch every term is byte-identical to what it was, which is why none of this nee
 Left alone deliberately: `landPlanMerge`'s `git merge --ff-only` in the root, which refuses rather
 than overwriting local changes and only touches paths differing between HEAD and target.
 
+**A committed MCP server list is not consent on another install.** `12-post-onboarding` commits
+`.haive-data/tooling.json`, and `loadUserMcpServers` hands its `mcpSettingsJson` to every CLI, so a
+clone used to run whatever servers the repository named, past the explicit opt-in 04 asks for
+(`keepRepoMcpServers`). `importHaiveDataMirror` now moves a list holding anything but Haive's own
+definitions to `importedMcpSettingsJson`, which nothing reads, and the tooling page asks: accept
+puts it back, discard drops it. A server counts as Haive's only when its definition EQUALS Haive's
+under that name (`mcpServersNeedingConsent`), since a file can put any command under
+`chrome-devtools`. The three keys (`ONBOARDING_TOOLING_CONSENT_KEYS`) are this install's decision:
+stripped from an incoming mirror and never committed. Acceptance is an HMAC of the list keyed with
+the install's encryption key (`mcpAcceptanceMark`), never a plain hash: an older release's import
+stored the committed tooling verbatim, so a file could carry a matching hash of its own list.
+`holdImportedMcpServerLists` holds such rows at boot. A record this install's own 04 wrote equals
+that run's `output.tooling`, so only one matching no local 04 run is held, and the mark keeps an
+accepted list from being held again.
+
 ## Onboarding template versioning
 
 Deterministic onboarding artifacts (agent specs, slash commands, `workflow-config.json`, Drupal LSP plugin files, the `agents/README.md` index) are registered as `TemplateItem`s in `packages/worker/src/step-engine/template-manifest.ts`. Every item has:

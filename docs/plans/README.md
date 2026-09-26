@@ -127,6 +127,8 @@ unreachable for the input the plan was about.
 | `agent-rules-followups` | Found-not-fixed follow-ups from the agent-rules series (12 PRs) | **Shipped** 2026-09-24: PR 1 #249, PR 2 #250, PR 3 #252, PR 4 #256, PR 5 #254, PR 6 #260, PR 7 #258, PR 8 #261, PR 9 #265, PR 10 #255, PR 11 #262, PR 12 #253. |
 | `found-not-fixed-sweep` | The found-not-fixed list cleared: fixes, a handover of seven recovery items, recorded reasons (25 PRs) | **Shipped** 2026-09-25: PRs 1-25, 5c, 21b and 24b (#267-#280, #282-#286, #288-#291, #294-#296, #299, #300). The seven recovery items went to the parallel recovery series. Open checkpoints: the release-action bumps (next rc) and Dependabot's first npm run after 2026-09-25 16:19Z. |
 | `found-not-fixed-sweep-2` | The consolidated found-not-fixed list, including the recovery session's hand-over: fixes and recorded reasons (24 PRs) | **Shipped** 2026-09-26: PRs 1-24 and 20b (#301-#325). Open checkpoints: Dependabot's first npm run after 2026-09-25 16:19Z and the release-action bumps (next rc). |
+| `found-not-fixed-sweep-3` | The next found-not-fixed list: orchestration, the merge fixer, upgrade and rollback, storage and images, web and the e2e harness (Track A); Track B is `two-install-project-sync` | **In progress** 2026-09-26: Phase 0 B0.1 in review. |
+| `two-install-project-sync` | Project state that travels between installations: a committed per-unit record, three-way sync with conflicts asked, the plan, checkout moves, repository-level CLI set and rules block | **In progress** 2026-09-26: B0.1 (imported MCP servers inert until accepted) in review; B0.2, B0.3 and phases 1-5 not started. |
 
 ## Cross-plan dependencies
 
