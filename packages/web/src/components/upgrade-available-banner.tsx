@@ -199,7 +199,7 @@ export function UpgradeAvailableBanner({
           </span>
           {versionLine && <span className="text-xs text-neutral-500">{versionLine}</span>}
           {linkedNote}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
               {submitting ? 'Starting...' : primaryLabel}
             </Button>
@@ -232,7 +232,7 @@ export function UpgradeAvailableBanner({
 
   // A rollback, or an upgrade whose apply already cleared the drift, is live with nothing to review.
   return (
-    <div className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
+    <div className="flex flex-wrap items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
       {status.hasInProgressUpgradeSession ? (
         <Badge variant="default">Upgrade in progress</Badge>
       ) : (
@@ -241,7 +241,7 @@ export function UpgradeAvailableBanner({
       <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
       {versionLine && <span>{versionLine}</span>}
       {linkedNote}
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex flex-wrap items-center gap-3">
         <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
           Manage bundles
         </Link>
