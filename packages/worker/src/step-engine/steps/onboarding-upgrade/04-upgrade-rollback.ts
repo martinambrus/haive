@@ -594,10 +594,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
     if (snapshot) {
-      const applicableExpanded = expandManifestFor(
-        snapshot as unknown as TemplateRenderContext,
-        manifest,
-      );
+      // What the rollback put back is installed again, so it is compared again whatever the snapshot
+      // renders: a file restored after RTK went off would otherwise drop out of the banner's view.
+      const applicableExpanded = [
+        ...expandManifestFor(snapshot as unknown as TemplateRenderContext, manifest),
+        ...rowsToInsert,
+      ];
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 

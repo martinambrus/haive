@@ -661,6 +661,15 @@ async function main(): Promise<void> {
         (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) ===
           buildClaudeSettingsJson(),
       );
+      const [seededRepo] = await db
+        .select({ applicable: schema.repositories.applicableTemplateIds })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, seededId));
+      check(
+        'and the template it put back applies again, so the banner can offer it',
+        seededRepo?.applicable?.includes(RTK_ITEM) === true,
+        seededRepo?.applicable,
+      );
     } finally {
       await rm(seededPath, { recursive: true, force: true });
     }

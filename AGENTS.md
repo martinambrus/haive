@@ -2570,7 +2570,9 @@ An apply retried after its removal ran finds the file gone, and records the byte
 there, since they were Haive's and are what the earlier attempt removed. What already holds the
 restore is an earlier attempt of the same rollback, which a retry takes as put back. Such an
 upgrade can leave no live row at all, so upgrade-status offers its rollback from what 02 recorded
-(`lastUpgradeRemovedFiles`) until a rollback completes after it.
+(`lastUpgradeRemovedFiles`) until a rollback completes after it. What a rollback puts back stays in
+the repository's applicable set whatever its snapshot renders, so a file restored after RTK went off
+is offered for removal again rather than dropping out of the banner's view.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
