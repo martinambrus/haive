@@ -297,6 +297,26 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
     expect(await headTree()).not.toContain('GEMINI.md');
   });
 
+  it('keeps an RTK settings file the repository ignores out of the commit, though 02 wrote it', async () => {
+    await writeFile(join(repo, '.gitignore'), '.claude/settings.json\n.gemini/settings.json\n');
+    await run('git', ['-C', repo, 'add', '.gitignore']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'ignore']);
+    for (const dir of ['.claude', '.gemini']) {
+      await mkdir(join(repo, dir), { recursive: true });
+      await writeFile(join(repo, dir, 'settings.json'), '{}\n');
+    }
+    const out = await applyWith({
+      writtenPaths: ['.claude/settings.json', '.gemini/settings.json'],
+    });
+    expect(out.commitPerformed).toBe(false);
+    const warnings = out.warnings.join('\n');
+    expect(warnings).toContain('.claude/settings.json is ignored by git');
+    expect(warnings).toContain('.gemini/settings.json is ignored by git');
+    const tree = await headTree();
+    expect(tree).not.toContain('.claude');
+    expect(tree).not.toContain('.gemini');
+  });
+
   it('commits the removal of a file 02 deleted, and skips a path git never tracked', async () => {
     await mkdir(join(repo, '.claude'), { recursive: true });
     await writeFile(join(repo, '.claude', 'settings.json'), '{}\n');

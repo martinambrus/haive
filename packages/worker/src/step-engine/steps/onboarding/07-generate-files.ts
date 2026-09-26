@@ -35,13 +35,11 @@ import {
 } from './_agent-templates.js';
 import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import {
-  buildClaudeSettingsJson,
-  buildGeminiSettingsJson,
   buildRtkAwarenessBlock,
-  hasClaudeFamily,
-  hasGemini,
+  buildRtkTemplateItems,
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
+  type RtkRenderInputs,
 } from './_rtk-templates.js';
 import { ensureRulesImportStub, isLinkToAgentsMd, planRulesFiles } from './_rules-files.js';
 
@@ -976,25 +974,23 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // RTK opt-in. The per-CLI hook settings files (.claude/settings.json,
     // .gemini/settings.json) are the only manifest-tracked RTK artifacts —
     // dedicated single-purpose files, so the upgrade path's whole-file
-    // overwrite/delete is safe. They mirror the surviving rtk-config
-    // TemplateItems in `_rtk-templates.ts` 1:1 so step 12 records them and
-    // toggling rtk off makes the next upgrade offer them for removal. The RTK
+    // overwrite/delete is safe. They are the rtk-config TemplateItems' own
+    // renderings (`_rtk-templates.ts`), so step 12 records them and toggling
+    // rtk off makes the next upgrade offer them for removal. The RTK
     // awareness markdown is inlined into AGENTS.md (non-manifest, like
     // project-info and cli-rules; that upgrade strips it by its markers) so
     // every CLI reads it — native AGENTS.md readers do not expand `@` refs, and
     // CLAUDE.md/GEMINI.md stay a lone `@AGENTS.md` import.
     if (detected.rtkEnabled) {
       const enabled = detected.enabledCliProviders ?? [];
-      // Predicates come from _rtk-templates.ts rather than being restated here: this used to
-      // carry its own copy of the family list, and the copy is what let it fall behind by
-      // one provider (ollama) without anything failing.
-      const rtkCtx = { rtkEnabled: detected.rtkEnabled, enabledCliProviders: enabled };
-
-      if (hasClaudeFamily(rtkCtx)) {
-        await writeIfAllowed('.claude/settings.json', buildClaudeSettingsJson());
-      }
-      if (hasGemini(rtkCtx)) {
-        await writeIfAllowed('.gemini/settings.json', buildGeminiSettingsJson());
+      const rtkCtx: RtkRenderInputs = {
+        rtkEnabled: detected.rtkEnabled,
+        enabledCliProviders: enabled,
+      };
+      for (const item of buildRtkTemplateItems<RtkRenderInputs>()) {
+        for (const rendering of item.render(rtkCtx)) {
+          await writeIfAllowed(rendering.diskPath, rendering.content);
+        }
       }
       if (enabled.length > 0) {
         await appendOrCreate(

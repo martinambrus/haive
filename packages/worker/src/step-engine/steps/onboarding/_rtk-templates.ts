@@ -25,23 +25,6 @@ export interface RtkRenderInputs {
   enabledCliProviders: ReadonlyArray<{ name: CliProviderName }>;
 }
 
-/** Which providers get the project-level `.claude/settings.json` rtk hook: the family
- *  `RTK_SETTINGS_READERS` names. 07-generate-files.ts calls this rather than keeping its own copy,
- *  since a second list is how ollama once went missing from one of them. */
-export function hasClaudeFamily(ctx: RtkRenderInputs): boolean {
-  return rtkSettingsNeeded(
-    'rtk.claude-settings',
-    ctx.enabledCliProviders.map((p) => p.name),
-  );
-}
-
-export function hasGemini(ctx: RtkRenderInputs): boolean {
-  return rtkSettingsNeeded(
-    'rtk.gemini-settings',
-    ctx.enabledCliProviders.map((p) => p.name),
-  );
-}
-
 /** Marker-wrapped RTK awareness block inlined into AGENTS.md — the single
  *  rules source every CLI reads (codex/amp/antigravity natively; claude/zai/
  *  gemini via `@AGENTS.md`). Inlined rather than an `@RTK.md` reference because

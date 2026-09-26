@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { logger, normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  buildClaudeSettingsJson,
+  buildGeminiSettingsJson,
+  logger,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { AgentRenderTarget } from '../src/step-engine/steps/onboarding/_agent-templates.js';
 import {
@@ -143,6 +149,49 @@ describe('generateFilesStep.apply — recorded write hashes', () => {
     expect(out.wroteFileHashes?.[CONFIG]).toBeUndefined();
     // Untouched, which is the behaviour the absent hash describes.
     expect(await readFile(path.join(repo, CONFIG), 'utf8')).toBe('{"mine":true}');
+  });
+
+  it('writes the RTK settings files for the enabled CLIs, and records their hashes', async () => {
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: {
+        ...detect(),
+        rtkEnabled: true,
+        enabledCliProviders: [
+          { name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' },
+          { name: 'gemini', rulesFile: 'GEMINI.md', rulesFileMode: 'import' },
+          { name: 'codex', rulesFile: 'AGENTS.md', rulesFileMode: 'native' },
+        ],
+      },
+      formValues: {},
+    });
+
+    for (const [rel, body] of [
+      ['.claude/settings.json', buildClaudeSettingsJson()],
+      ['.gemini/settings.json', buildGeminiSettingsJson()],
+    ] as const) {
+      expect(await readFile(path.join(repo, rel), 'utf8')).toBe(body);
+      expect(out.wroteFileHashes?.[rel]).toBe(sha256Hex(normalizeContent(body)));
+    }
+  });
+
+  it('writes no RTK settings file with RTK off', async () => {
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: {
+        ...detect(),
+        enabledCliProviders: [
+          { name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' },
+          { name: 'gemini', rulesFile: 'GEMINI.md', rulesFileMode: 'import' },
+        ],
+      },
+      formValues: {},
+    });
+
+    expect(out.wroteFiles).not.toContain('.claude/settings.json');
+    expect(out.wroteFiles).not.toContain('.gemini/settings.json');
   });
 
   it('records no hash for a root rules file, which holds the user’s own text', async () => {

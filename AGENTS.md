@@ -2684,10 +2684,12 @@ process's output buffer and a file past it would read as "missing"; a check that
 reason other than a missing HEAD stages nothing. It never stages rules files by name beyond that, so a person's uncommitted edits
 elsewhere stay out of the upgrade commit; a stub that IS staged goes in whole, the same file-level
 granularity AGENTS.md already had. A link is staged through its own check (`isLinkToAgentsMd`),
-since `hasWorkspaceEntry` refuses every link. A rules file git ignores is left out on every route,
-AGENTS.md included, and reported (`dropIgnoredRulesFiles`), and `12-post-onboarding` applies the
-same filter to the rules files it stages by name: the stage runs `git add -f` for `.haive/install.json`'s sake, which
-would otherwise commit a personal CLAUDE.md the repository deliberately keeps out of history. The
+since `hasWorkspaceEntry` refuses every link. A rules file or an RTK settings file
+(`RTK_SETTINGS_PATHS`) git ignores is left out on every route, AGENTS.md included, and reported
+(`dropIgnoredRulesFiles`), and `12-post-onboarding` applies the same filter to what it stages: the
+stage runs `git add -f` for `.haive/install.json`'s sake, which would otherwise commit a personal
+CLAUDE.md or settings file the repository deliberately keeps out of history. 12 stages a settings
+file only through its live artifact row, never by name, so one Haive did not record stays out. The
 check runs after any `git init`, since before it there is no repository to ask.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
