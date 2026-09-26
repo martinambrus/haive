@@ -215,8 +215,8 @@ test.describe('task title strip', () => {
           await page.setViewportSize({ width, height: 500 });
           await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
           await expect(strip).toBeVisible();
-          // The strip's own usage chip fetches when the strip mounts; hidden or not, its two
-          // meters are in the DOM once it has loaded.
+          // The strip's own usage chip reads the page's usage poll; hidden or not, its two
+          // meters are in the DOM once that has loaded.
           await expect(strip.locator('[title*="subscription usage"]')).toHaveCount(2);
           const fit = await strip.evaluate((el) => ({
             overflow: el.scrollWidth - el.clientWidth,
@@ -231,6 +231,35 @@ test.describe('task title strip', () => {
         }
       }
       expect(misfits, 'the strip holds all its items and a readable title').toEqual([]);
+    } finally {
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('the header, the strip and the usage alerts share one poll', async ({ page }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    try {
+      await seedTaskPage(sql, page, 'task-usage-poll', fx);
+
+      await page.clock.install();
+      await page.setViewportSize({ width: 1920, height: 500 });
+      await page.goto(`/tasks/${fx.taskId}`);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await expect(
+        page.locator('[data-fixed-title-strip] [title*="subscription usage"]'),
+      ).toHaveCount(2);
+
+      let polls = 0;
+      page.on('request', (request) => {
+        if (new URL(request.url()).pathname === '/usage-window') polls += 1;
+      });
+      await page.clock.fastForward('01:00');
+      // Every consumer's minute tick has fired by now; this gives its request time to leave.
+      await page.waitForTimeout(1_000);
+      expect(polls, 'one /usage-window request a minute for the whole page').toBe(1);
     } finally {
       await cleanupTaskPage(sql, fx);
       await sql.end({ timeout: 5 });
