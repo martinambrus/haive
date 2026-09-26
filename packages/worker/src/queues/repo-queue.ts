@@ -11,6 +11,7 @@ import {
   handleInit,
   handleScan,
 } from '../repo/clone.js';
+import { handleRefresh } from '../repo/refresh.js';
 
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
@@ -29,6 +30,8 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           await handleCopyLocal(payload, db, repoStorageRoot);
         } else if (job.name === REPO_JOB_NAMES.INIT) {
           await handleInit(payload, db, repoStorageRoot);
+        } else if (job.name === REPO_JOB_NAMES.REFRESH) {
+          await handleRefresh(payload, db, repoStorageRoot);
         } else {
           throw new Error(`Unknown repo job: ${job.name}`);
         }

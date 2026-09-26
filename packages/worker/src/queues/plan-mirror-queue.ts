@@ -2,6 +2,7 @@ import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
   PLAN_MIRROR_JOB_NAMES,
   QUEUE_NAMES,
   logger,
@@ -252,17 +253,6 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
   }
 }
 
-/** Task states that hold the checkout. A pull under a live worktree is how a
- *  running step loses its tree, so it is refused rather than risked. `created` is
- *  absent deliberately: a task that was never enqueued holds nothing. */
-const IN_FLIGHT_TASK_STATES = [
-  'queued',
-  'running',
-  'paused',
-  'waiting_user',
-  'waiting_pr',
-] as const;
-
 /**
  * The only direction that reads the repository INTO the database.
  *
@@ -289,7 +279,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     .where(
       and(
         eq(schema.tasks.repositoryId, repo.id),
-        inArray(schema.tasks.status, [...IN_FLIGHT_TASK_STATES]),
+        inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
       ),
     )
     .limit(1);

@@ -15,7 +15,13 @@ import {
   type EntryInfo,
 } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
-import { acquireRootClaim, readLiveRootClaim, schema, type Database } from '@haive/database';
+import {
+  acquireRootClaim,
+  readLiveRootClaim,
+  schema,
+  type Database,
+  type RootClaimKind,
+} from '@haive/database';
 import {
   logger,
   HAIVE_DATA_FILES,
@@ -196,7 +202,7 @@ async function importHaiveDataMirror(
   }
 }
 
-async function persistDetection(
+export async function persistDetection(
   db: Database,
   repositoryId: string,
   storagePath: string,
@@ -256,7 +262,7 @@ export async function handleScan(payload: RepoJobPayload, db: Database): Promise
  *  *contents* of src instead of nesting src under its basename. Symlinks are
  *  preserved as-is (not followed), so a symlink in the user's tree cannot leak
  *  a host file into the volume during the copy. */
-function copyTree(src: string, dest: string): Promise<void> {
+export function copyTree(src: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn('cp', ['-a', `${src}/.`, dest]);
     let stderr = '';
@@ -295,12 +301,13 @@ function copyTree(src: string, dest: string): Promise<void> {
  * `cloning` for good, since it is `persistDetection` at the end of a SUCCESSFUL run that writes
  * `ready`.
  */
-async function withRootClaim<T>(
+export async function withRootClaim<T>(
   db: Database,
   repositoryId: string,
   run: () => Promise<T>,
+  kind: RootClaimKind = 'rebuild',
 ): Promise<T> {
-  const claim = await acquireRootClaim(db, repositoryId, 'rebuild');
+  const claim = await acquireRootClaim(db, repositoryId, kind);
   if (claim === null) {
     const held = await readLiveRootClaim(db, repositoryId);
     throw new Error(

@@ -199,6 +199,9 @@ export const REPO_JOB_NAMES = {
    *  (worktrees, attachments, the .haive-data mirror) works on a project that
    *  does not exist yet. */
   INIT: 'init-repo',
+  /** Bring an existing checkout up to its source by fetch and fast-forward; a checkout that is
+   *  not usable is moved aside and cloned or copied again. */
+  REFRESH: 'refresh-repo',
 } as const;
 
 export const BUNDLE_JOB_NAMES = {
