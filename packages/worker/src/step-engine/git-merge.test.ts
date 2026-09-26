@@ -930,6 +930,30 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it('says the merge must not be committed when what a fixer staged cannot be unstaged', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'staged by the fixer\n', 'utf8');
+      await git(dir, ['add', 'stray.txt']);
+      await rm(path.join(dir, 'stray.txt'));
+      // Another git process holds the index for the whole relocation.
+      await writeFile(path.join(dir, '.git', 'index.lock'), '');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      await rm(path.join(dir, '.git', 'index.lock'));
+      expect(out?.indexHeld).toContain('index.lock');
+      expect(out?.unstaged).toEqual([]);
+      expect(await git(dir, ['diff', '--cached', '--name-only'])).toContain('stray.txt');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
     vi.stubEnv('HOST_REPO_ROOT', root);

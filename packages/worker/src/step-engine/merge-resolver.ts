@@ -16,6 +16,7 @@ import {
   abortOtherMerge,
   captureFixBaseline,
   completeMergeHostSide,
+  fixerIndexHeldNote,
   fixerLeftoversWarning,
   mergeCommitted,
   mergeOpenFor,
@@ -789,9 +790,9 @@ export async function resolveMergePhase(
         { taskId: params.taskId, runId: inv.id },
         () => taskSecretMaskPolicy(db, params.taskId),
       );
-      if (state.fixBaseline) {
-        // Spent once used: a later pass comparing it with a tree the merge has since left would
-        // put the merge's files back.
+      // Spent once used: a later pass comparing it with a tree the merge has since left would put
+      // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
+      if (state.fixBaseline && !leftovers?.indexHeld) {
         state = { ...state, fixBaseline: null };
         await saveMergeState(db, current.id, state);
       }
@@ -802,6 +803,9 @@ export async function resolveMergePhase(
           current,
           fixerLeftoversWarning(params.taskId, leftovers),
         );
+      }
+      if (leftovers?.indexHeld) {
+        return haltFailed(db, current, fixerIndexHeldNote(leftovers.indexHeld), 'merge index held');
       }
       const fix = parseFixResult(inv);
       if (runNeverAnswered(inv) && !fix) {

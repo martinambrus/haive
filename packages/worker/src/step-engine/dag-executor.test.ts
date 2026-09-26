@@ -39,6 +39,18 @@ vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/secret-mask.js')>()),
   taskSecretMaskPolicy: async () => null,
 }));
+// A relocation whose index cannot be restored, while the index itself stays usable for the commit.
+const relocation = vi.hoisted(() => ({ holdIndex: false }));
+vi.mock('./git-merge.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./git-merge.js')>();
+  return {
+    ...real,
+    relocateFixerChanges: async (...args: Parameters<typeof real.relocateFixerChanges>) => {
+      const out = await real.relocateFixerChanges(...args);
+      return relocation.holdIndex && out ? { ...out, indexHeld: 'index.lock held' } : out;
+    },
+  };
+});
 vi.mock('../orchestrator/dispatcher.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../orchestrator/dispatcher.js')>();
   return { ...actual, resolveTaskDispatch: vi.fn(actual.resolveTaskDispatch) };
@@ -1520,6 +1532,48 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(await readFile(path.join(files, 'issue.txt'), 'utf8')).toBe('fixer edit\n');
       expect(h.events.map((e) => e.eventType)).toContain('merge.fixer_leftovers');
     } finally {
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('halts the level without committing, and keeps the recorded tree, while the index holds what a fixer staged', async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    relocation.holdIndex = true;
+    try {
+      const opts: Parameters<typeof makeDagMergeWaitDb>[0] = {
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: true,
+        checkpointAfterReads: 2,
+      };
+      const h = makeDagMergeWaitDb(opts);
+      const pass = () =>
+        resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          mergeCtx(integrationDir),
+          dispatchingParams as never,
+        );
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      expect((await pass()).resolved).toBe(false);
+      await writeFile(path.join(integrationDir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(integrationDir, 'notes.txt'), 'scratch\n', 'utf8');
+      opts.invocation = {
+        id: 'fix-inv-1',
+        startedAt: new Date(),
+        endedAt: new Date(),
+        supersededAt: null,
+        exitCode: 0,
+        errorMessage: null,
+      };
+      await pass();
+      expect(h.getStepStatus()).toBe('failed');
+      expect(h.getIssueMergeStatus()).not.toBe('resolved');
+      expect((h.getLevelMergeState() as { fixBaseline: unknown }).fixBaseline).toBeTruthy();
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+    } finally {
+      relocation.holdIndex = false;
       await rm(integrationDir, { recursive: true, force: true });
     }
   });

@@ -191,6 +191,35 @@ describe('plan merge: a fixer that did not finish', () => {
     expect(await gitCode(wt, ['cat-file', '-e', 'HEAD:notes.txt'])).not.toBe(0);
   });
 
+  it('commits nothing while the index holds what a fixer staged outside the conflict', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const ctx = contextFor(local, db);
+    const detected = await planMergeStep.detect!(ctx);
+    const wt = detected.worktreePath;
+    await writeFile(path.join(wt, 'README.md'), '# vareska\n\nboth sides\n', 'utf8');
+    await writeFile(path.join(wt, 'notes.txt'), 'scratch\n', 'utf8');
+    await git(wt, ['add', 'notes.txt']);
+    await rm(path.join(wt, 'notes.txt'));
+    const lock = path.join(local, '.git', 'worktrees', 'plan-merge', 'index.lock');
+    await writeFile(lock, '');
+    try {
+      await expect(
+        planMergeStep.apply(ctx, {
+          detected,
+          formValues: {},
+          llmOutput: 'Kept both sides.',
+          llmInvocationId: 'inv1',
+          iteration: 0,
+          previousIterations: [],
+        }),
+      ).rejects.toThrow('could not be taken back out of the index');
+    } finally {
+      await rm(lock, { force: true });
+    }
+    expect(await gitCode(wt, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+  });
+
   it('keeps a tree git could not record, so what a failed fixer left is reported', async () => {
     const local = await unrelatedPair();
     const { db, events, flags } = fakeDb();

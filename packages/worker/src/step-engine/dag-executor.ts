@@ -32,6 +32,7 @@ import {
   buildMergeFixPrompt,
   captureFixBaseline,
   completeMergeHostSide,
+  fixerIndexHeldNote,
   fixerLeftoversWarning,
   openMerge,
   recordFixerLeftovers,
@@ -796,9 +797,9 @@ async function runLevelMerge(
       { taskId: m.params.taskId, runId: inv.id },
       () => taskSecretMaskPolicy(db, m.params.taskId),
     );
-    if (state.fixBaseline) {
-      // Spent once used: a later pass comparing it with a tree the merge has since left would put
-      // the merge's files back.
+    // Spent once used: a later pass comparing it with a tree the merge has since left would put
+    // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
+    if (state.fixBaseline && !leftovers?.indexHeld) {
       state.fixBaseline = null;
       await saveMergeState(db, level.id, state);
     }
@@ -809,6 +810,9 @@ async function runLevelMerge(
         m.current,
         fixerLeftoversWarning(m.params.taskId, leftovers),
       );
+    }
+    if (leftovers?.indexHeld) {
+      return haltMerge(m, `Merge halted on ${branch}. ${fixerIndexHeldNote(leftovers.indexHeld)}`);
     }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
     if (runNeverAnswered(inv)) {

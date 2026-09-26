@@ -11,6 +11,7 @@ import type { Database } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   completeMergeHostSide,
+  fixerIndexHeldNote,
   fixerLeftoversWarning,
   recordFixerLeftovers,
   relocateFixerChanges,
@@ -450,6 +451,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
           leftovers,
         );
       }
+      if (leftovers?.indexHeld) throw new Error(fixerIndexHeldNote(leftovers.indexHeld));
       const committed = await completeMergeHostSide(d.worktreePath, identity, `origin/${d.branch}`);
       const left = await conflictedPaths(d.worktreePath);
       result.resolved = committed && left.length === 0;

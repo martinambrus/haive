@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
 import {
   captureFixBaseline,
+  fixerIndexHeldNote,
   recordFixerLeftovers,
   relocateFixerChanges,
   type FixBaseline,
@@ -107,6 +108,7 @@ export async function moveAsideFixerLeftovers(
   if (leftovers) {
     await recordFixerLeftovers(db, recorded.taskId, recorded.taskStepId, branch, leftovers);
   }
+  if (leftovers?.indexHeld) throw new Error(fixerIndexHeldNote(leftovers.indexHeld));
 }
 
 /** What fixers left in a merge a conversation left open, moved aside before it is discarded. */

@@ -497,6 +497,9 @@ export interface FixerLeftovers {
   restored: string[];
   /** Set when git could not say what the fixer changed, so part or all of it went unchecked. */
   unchecked?: string;
+  /** Set when the index could not be read or what the fixer staged could not be taken out of it:
+   *  the commit takes the whole index, so the merge must not be committed. */
+  indexHeld?: string;
   /** The repository root `folder` is relative to. */
   root: string;
   /** Earlier attempts of the task whose manifest was never marked reported: a relocation a restart
@@ -621,8 +624,20 @@ async function unstageExactly(
   source: string,
   names: string[],
 ): Promise<string | null> {
-  const res = await gitWithPathspecs(dir, ['restore', '--staged', `--source=${source}`], names);
-  return res.code === 0 ? null : gitDetail(res);
+  let failure: string | null = null;
+  // Another git process holding the index lock for a moment fails one attempt, not the merge.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await new Promise((wake) => setTimeout(wake, 250));
+    const res = await gitWithPathspecs(dir, ['restore', '--staged', `--source=${source}`], names);
+    if (res.code === 0) return null;
+    failure = gitDetail(res);
+  }
+  return failure;
+}
+
+/** Why the merge was not committed when its index still held what a fixer staged. */
+export function fixerIndexHeldNote(reason: string): string {
+  return `A merge fixer staged changes outside the conflicted files, and they could not be taken back out of the index (${reason}), so nothing was committed; retry once the index is free.`;
 }
 
 /** Move what a fixer changed outside the paths it was sent to resolve out of `dir`, into
@@ -811,12 +826,14 @@ export async function relocateFixerChanges(
     if (owner) await giveBack(root, prefix, [...created, ...chunk], owner);
   }
   const unstaged: FixerLeftovers['unstaged'] = [];
+  let indexHeld = indexUnchecked;
   if (toUnstage.length > 0) {
     const failure = await unstageExactly(
       dir,
       baseline.index,
       toUnstage.map((u) => u.name),
     );
+    if (failure !== null) indexHeld = failure;
     for (const { path: p, blob } of toUnstage) {
       if (failure === null) unstaged.push({ path: p, blob });
       else left.push({ path: p, reason: `still staged: ${failure}` });
@@ -846,6 +863,7 @@ export async function relocateFixerChanges(
     unstaged,
     restored,
     ...(indexUnchecked ? { unchecked: indexUnchecked } : {}),
+    ...(indexHeld ? { indexHeld } : {}),
     root,
     interrupted,
   };

@@ -18,6 +18,18 @@ vi.mock('../../../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../queues/cli-exec/secret-mask.js')>()),
   taskSecretMaskPolicy: async () => null,
 }));
+// A relocation whose index cannot be restored, while the index itself stays usable for the commit.
+const relocation = vi.hoisted(() => ({ holdIndex: false }));
+vi.mock('../../git-merge.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../git-merge.js')>();
+  return {
+    ...real,
+    relocateFixerChanges: async (...args: Parameters<typeof real.relocateFixerChanges>) => {
+      const out = await real.relocateFixerChanges(...args);
+      return relocation.holdIndex && out ? { ...out, indexHeld: 'index.lock held' } : out;
+    },
+  };
+});
 vi.mock('../../../orchestrator/dispatcher.js', () => ({
   resolveTaskDispatch: vi.fn(
     async (_db: unknown, _taskId: string, opts: { providers: unknown[] }) =>
@@ -809,6 +821,30 @@ describe('12 merge fix-agent dispatch', () => {
       expect(h.events.map((e) => e.eventType)).toContain('merge.fixer_leftovers');
       expect(h.getWarning()).toContain('.haive/merge-leftovers/t1/');
     } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('halts without committing, and keeps the recorded tree, while the index holds what a fixer staged', async () => {
+    const { parent, wt } = await setupWorktree();
+    relocation.holdIndex = true;
+    try {
+      await divergeBase(parent, wt);
+      const { h, second } = await fixerRound(
+        parent,
+        det(wt),
+        async (dir) => {
+          await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+          await writeFile(path.join(dir, 'notes.txt'), 'scratch\n', 'utf8');
+        },
+        { endedAt: new Date(), exitCode: 0 },
+      );
+      expect(second).toMatchObject({ resolved: false, result: { status: 'failed' } });
+      expect(h.getStatus()).toBe('failed');
+      expect(h.getState()?.fixBaseline).toBeTruthy();
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+    } finally {
+      relocation.holdIndex = false;
       await rm(parent, { recursive: true, force: true });
     }
   });
