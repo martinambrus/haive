@@ -15,7 +15,12 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
-import { schema, type Database } from '@haive/database';
+import {
+  isUniqueViolationOf,
+  ONE_LIVE_UPGRADE_INDEX,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
   CONFIG_KEYS,
@@ -457,30 +462,42 @@ async function markTaskRunningWithStep(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  const [pointed] = await db
-    .update(schema.tasks)
-    .set({
-      status: 'running',
-      currentStepId: stepId,
-      currentStepIndex,
-      currentRound: round,
-      // Clear any stale terminal fields. A worker restart mid-run fails the
-      // orphaned step (markTaskFailed), which stamps completedAt + errorMessage
-      // and status=failed; the auto-resume then re-enters here to flip back to
-      // running. Left unset, the stale completedAt freezes the UI wall clock at
-      // failure-minus-start (and kills the live tick, since ticking keys on
-      // !completedAt), and the stale errorMessage leaks onto the running task.
-      completedAt: null,
-      errorMessage: null,
-      updatedAt: new Date(),
-    })
-    // …but never on a CANCELLED or COMPLETED task. Clearing completedAt is what makes this write
-    // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
-    // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
-    // the allowance auto-resume legitimately revives a failed task through here.
-    .where(taskWriteTarget(taskId, fence))
-    .returning({ id: schema.tasks.id });
-  return pointed !== undefined;
+  try {
+    const [pointed] = await db
+      .update(schema.tasks)
+      .set({
+        status: 'running',
+        currentStepId: stepId,
+        currentStepIndex,
+        currentRound: round,
+        // Clear any stale terminal fields. A worker restart mid-run fails the
+        // orphaned step (markTaskFailed), which stamps completedAt + errorMessage
+        // and status=failed; the auto-resume then re-enters here to flip back to
+        // running. Left unset, the stale completedAt freezes the UI wall clock at
+        // failure-minus-start (and kills the live tick, since ticking keys on
+        // !completedAt), and the stale errorMessage leaks onto the running task.
+        completedAt: null,
+        errorMessage: null,
+        updatedAt: new Date(),
+      })
+      // …but never on a CANCELLED or COMPLETED task. Clearing completedAt is what makes this write
+      // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
+      // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
+      // the allowance auto-resume legitimately revives a failed task through here.
+      .where(taskWriteTarget(taskId, fence))
+      .returning({ id: schema.tasks.id });
+    return pointed !== undefined;
+  } catch (err) {
+    if (!fence?.reviveFailed || !isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) throw err;
+    logger.info(
+      { taskId, stepId },
+      'revive refused: another upgrade or rollback of the repository is live',
+    );
+    await appendEvent(db, taskId, null, 'upgrade.revive_refused', { stepId }).catch(
+      () => undefined,
+    );
+    return false;
+  }
 }
 
 class ParkOvertaken extends Error {}

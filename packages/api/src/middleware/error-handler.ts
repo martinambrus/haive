@@ -1,5 +1,6 @@
 import type { ErrorHandler } from 'hono';
 import { ZodError } from 'zod';
+import { isUniqueViolationOf, ONE_LIVE_UPGRADE_INDEX } from '@haive/database';
 import { logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -20,6 +21,13 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
         })),
       },
       400,
+    );
+  }
+  // Every route that revives a failed task reaches this index, so it answers here once.
+  if (isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) {
+    return c.json(
+      { error: 'An upgrade or rollback is already in progress for this repository', code: null },
+      409,
     );
   }
   logger.error({ err }, 'Unhandled API error');

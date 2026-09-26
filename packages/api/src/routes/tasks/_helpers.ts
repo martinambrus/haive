@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
   CLI_DISPATCH_STEPS,
@@ -1213,7 +1213,7 @@ export async function resolveWorkspaceRoot(
 }
 
 export async function appendTaskEvent(
-  db: ReturnType<typeof getDb>,
+  db: ReturnType<typeof getDb> | DbTx,
   taskId: string,
   taskStepId: string | null,
   eventType: string,

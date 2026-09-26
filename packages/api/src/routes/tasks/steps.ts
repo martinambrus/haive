@@ -48,6 +48,7 @@ import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
+import { refuseBesideLiveUpgrade } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
@@ -666,9 +667,13 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, status: true, type: true, repositoryId: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
+  if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
+    await refuseBesideLiveUpgrade(db, task.repositoryId);
+  }
 
   // Target the row awaiting submission: filter to waiting_form + the latest round, so a
   // round > 0 parked form (a fix-loop escalation gate or a manual-mode fix round) is

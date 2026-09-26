@@ -33,6 +33,9 @@ export const upgradeStatusResponseSchema = z.object({
    *  exists for this repo. Drives whether the "Roll back last upgrade"
    *  button is shown — there's nothing to revert to without a prior upgrade. */
   hasPriorUpgrade: z.boolean(),
+  /** The live upgrade or rollback task, which the banner opens rather than starting a second one.
+   *  Absent from older servers. */
+  inProgressUpgradeTaskId: z.string().uuid().nullable().optional(),
   /** Per-bundle drift breakdown. Optional for backwards compatibility; older
    *  servers may omit it entirely. */
   customChanges: z.array(upgradeStatusBundleChangeSchema).optional(),

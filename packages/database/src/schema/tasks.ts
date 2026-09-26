@@ -114,6 +114,9 @@ export const agentMiningStatusEnum = pgEnum('agent_mining_status', [
 
 // --- Tasks ---------------------------------------------------------------
 
+/** At most one live `onboarding_upgrade` task per repository (migration 0168). */
+export const ONE_LIVE_UPGRADE_INDEX = 'tasks_one_live_upgrade_per_repo_idx';
+
 export const tasks = pgTable(
   'tasks',
   {
@@ -449,6 +452,13 @@ export const tasks = pgTable(
     // The CLI retention sweep's task subquery (terminal status + completed_at < cutoff),
     // which had no index at all and ran hourly.
     index('tasks_status_completed_at_idx').on(table.status, table.completedAt),
+    // An upgrade and a rollback side by side apply and revert the same files, so a Retry must not
+    // revive one beside another either. The statuses are the api's LIVE_TASK_STATUSES.
+    uniqueIndex(ONE_LIVE_UPGRADE_INDEX)
+      .on(table.repositoryId)
+      .where(
+        sql`${table.type} = 'onboarding_upgrade' and ${table.status} in ('created', 'queued', 'running', 'paused', 'waiting_user', 'waiting_pr')`,
+      ),
   ],
 );
 

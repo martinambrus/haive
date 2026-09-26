@@ -14,7 +14,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
@@ -85,6 +85,7 @@ import {
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
+import { insertUpgradeTask } from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -609,70 +610,87 @@ taskRoutes.post('/', async (c) => {
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
-  const inserted = await db
-    .insert(schema.tasks)
-    .values({
-      userId,
-      type: body.type,
-      title: body.title,
-      description: body.description ?? null,
-      repositoryId: body.repositoryId ?? null,
-      parentTaskId,
-      cliProviderId: body.cliProviderId ?? null,
-      summaryCliProviderId: body.summaryCliProviderId ?? null,
-      summaryLlmEnabled: body.summaryLlmEnabled ?? true,
-      summaryCliChoiceAt:
-        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
-          ? new Date()
-          : null,
-      // Presence, not value: naming the field states a choice, and an explicit null
-      // ("none" / "inherit") is exactly the choice the FK column cannot express. The
-      // New Task form always names all three; every other task spawner names none.
-      cliChoiceRecorded: body.cliProviderId !== undefined,
-      summaryCliChoiceRecorded:
-        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
-      dbUploadId: body.dbUploadId ?? null,
-      simplifyCode: body.simplifyCode ?? false,
-      adversarialQaLevel:
-        body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
-          ? body.adversarialQaLevel
-          : null,
-      broadAudit: body.broadAudit ?? true,
-      memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
-      cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
-      stepLoopLimits: body.stepLoopLimits ?? {},
-      autoContinue: body.autoContinue ?? true,
-      ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
-      metadata: Object.keys(metadata).length > 0 ? metadata : null,
-      estimatedTimeHours: body.estimatedTimeHours ?? null,
-      status: 'created',
-    })
-    .returning();
+  const insertTask = (handle: typeof db | DbTx) =>
+    handle
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: body.type,
+        title: body.title,
+        description: body.description ?? null,
+        repositoryId: body.repositoryId ?? null,
+        parentTaskId,
+        cliProviderId: body.cliProviderId ?? null,
+        summaryCliProviderId: body.summaryCliProviderId ?? null,
+        summaryLlmEnabled: body.summaryLlmEnabled ?? true,
+        summaryCliChoiceAt:
+          body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
+            ? new Date()
+            : null,
+        // Presence, not value: naming the field states a choice, and an explicit null
+        // ("none" / "inherit") is exactly the choice the FK column cannot express. The
+        // New Task form always names all three; every other task spawner names none.
+        cliChoiceRecorded: body.cliProviderId !== undefined,
+        summaryCliChoiceRecorded:
+          body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
+        dbUploadId: body.dbUploadId ?? null,
+        simplifyCode: body.simplifyCode ?? false,
+        adversarialQaLevel:
+          body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
+            ? body.adversarialQaLevel
+            : null,
+        broadAudit: body.broadAudit ?? true,
+        memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
+        cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
+        stepLoopLimits: body.stepLoopLimits ?? {},
+        autoContinue: body.autoContinue ?? true,
+        ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
+        metadata: Object.keys(metadata).length > 0 ? metadata : null,
+        estimatedTimeHours: body.estimatedTimeHours ?? null,
+        status: 'created',
+      })
+      .returning();
+  const firstRow = (rows: (typeof schema.tasks.$inferSelect)[]) => {
+    const [row] = rows;
+    if (!row) throw new HttpError(500, 'Failed to create task');
+    return row;
+  };
+  // Every write after the insert that can fail, before the task is `queued`. An upgrade takes them
+  // inside its insert's transaction: a `created` one left behind would block the repository's next
+  // upgrade and rollback, and nothing starts or ends a `created` task.
+  const settle = async (handle: typeof db | DbTx, created: typeof schema.tasks.$inferSelect) => {
+    if (planLinks && planNodes.length > 0) {
+      await handle
+        .insert(schema.planNodeTasks)
+        .values(planNodes.map((n) => ({ nodeId: n.id, taskId: created.id, role: planLinks.role })))
+        .onConflictDoNothing();
+    }
+    await appendTaskEvent(handle, created.id, null, 'task.created', { userId });
+    return markQueuedForStart(handle, created.id);
+  };
+  let task: typeof schema.tasks.$inferSelect;
+  let queued: typeof schema.tasks.$inferSelect | undefined;
+  if (body.type === 'onboarding_upgrade') {
+    ({ task, queued } = await insertUpgradeTask(db, body.repositoryId!, async (tx) => {
+      const row = firstRow(await insertTask(tx));
+      return { task: row, queued: await settle(tx, row) };
+    }));
+  } else {
+    task = firstRow(await insertTask(db));
+    queued = await settle(db, task);
+  }
 
-  const task = inserted[0];
-  if (!task) throw new HttpError(500, 'Failed to create task');
-
-  if (planLinks && planNodes.length > 0) {
-    await db
-      .insert(schema.planNodeTasks)
-      .values(planNodes.map((n) => ({ nodeId: n.id, taskId: task.id, role: planLinks.role })))
-      .onConflictDoNothing();
-
-    // `implements` ONLY. Taskable means "one task could implement this", which is
-    // the opposite of what a slice-link says — marking a 5,000-line container
-    // taskable because something touched part of it would offer it as a unit of
-    // work forever after. One patch rather than one per node: each is its own
-    // transaction and its own mirror bump.
-    if (planLinks.role === 'implements') {
-      if (await markPlanNodesTaskable(db, planNodes, body.repositoryId!)) {
-        await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
-      }
+  // `implements` ONLY. Taskable means "one task could implement this", which is
+  // the opposite of what a slice-link says — marking a 5,000-line container
+  // taskable because something touched part of it would offer it as a unit of
+  // work forever after. One patch rather than one per node: each is its own
+  // transaction and its own mirror bump.
+  if (planLinks?.role === 'implements' && planNodes.length > 0) {
+    if (await markPlanNodesTaskable(db, planNodes, body.repositoryId!)) {
+      await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
     }
   }
 
-  await appendTaskEvent(db, task.id, null, 'task.created', { userId });
-
-  const queued = await markQueuedForStart(db, task.id);
   if (queued) await enqueueStart(task.id, userId);
 
   return c.json({ task: queued ?? task }, 201);

@@ -24,6 +24,8 @@ interface UpgradeStatusResponse {
   currentHaiveVersion: string;
   hasInProgressUpgradeSession: boolean;
   hasPriorUpgrade: boolean;
+  /** The live upgrade or rollback task; older API versions omit it. */
+  inProgressUpgradeTaskId?: string | null;
   /** Optional per-bundle drift breakdown from the server. Older API versions
    *  omit it entirely; treat undefined as zero custom drift. */
   customChanges?: UpgradeStatusBundleChange[];
@@ -71,6 +73,10 @@ export function UpgradeAvailableBanner({
 
   async function handleUpgrade() {
     if (submitting) return;
+    if (status?.inProgressUpgradeTaskId) {
+      router.push(`/tasks/${status.inProgressUpgradeTaskId}`);
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await api.post<{ task: { id: string } }>('/tasks', {
@@ -126,6 +132,8 @@ export function UpgradeAvailableBanner({
         ? `On v${status.installedHaiveVersion}${runningDevBuild ? ' (dev build)' : ''}`
         : null;
 
+  // The api refuses a rollback while an upgrade or another rollback runs.
+  const canRollBack = status.hasPriorUpgrade && !status.hasInProgressUpgradeSession;
   const linkedFiles = status.linkedRulesFiles ?? [];
   const linkedNote =
     linkedFiles.length > 0 ? (
@@ -195,7 +203,7 @@ export function UpgradeAvailableBanner({
             <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
               {submitting ? 'Starting...' : primaryLabel}
             </Button>
-            {status.hasPriorUpgrade && (
+            {canRollBack && (
               <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
                 Roll back last upgrade
               </Button>
@@ -222,9 +230,14 @@ export function UpgradeAvailableBanner({
     );
   }
 
+  // A rollback, or an upgrade whose apply already cleared the drift, is live with nothing to review.
   return (
     <div className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
-      <Badge variant="success">Up to date</Badge>
+      {status.hasInProgressUpgradeSession ? (
+        <Badge variant="default">Upgrade in progress</Badge>
+      ) : (
+        <Badge variant="success">Up to date</Badge>
+      )}
       <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
       {versionLine && <span>{versionLine}</span>}
       {linkedNote}
@@ -232,7 +245,12 @@ export function UpgradeAvailableBanner({
         <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
           Manage bundles
         </Link>
-        {status.hasPriorUpgrade && (
+        {status.inProgressUpgradeTaskId && (
+          <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
+            Open task
+          </Button>
+        )}
+        {canRollBack && (
           <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
             Roll back last upgrade
           </Button>

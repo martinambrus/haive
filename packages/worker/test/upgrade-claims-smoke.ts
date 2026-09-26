@@ -407,6 +407,11 @@ async function main(): Promise<void> {
     });
 
     // ---- a second upgrade: two retired templates, and two files new to it ------------------
+    // One live upgrade or rollback per repository: the rollback ends before the next starts.
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, rollbackTask!.id));
     const [fresh, freshEdited, freshLinked] = seeded.filter(
       (p) =>
         p.endsWith('.md') &&

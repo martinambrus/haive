@@ -2766,6 +2766,30 @@ for any other. What a rollback puts back stays in the repository's
 applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
 removal again rather than dropping out of the banner's view.
 
+**One upgrade or rollback runs at a time, and a rollback undoes the newest upgrade once.** Both are
+`onboarding_upgrade` tasks, and two side by side apply and revert the same files: an upgrade parked
+on 02's form applied over a rollback that ran meanwhile, and a second Roll back click queued a
+second revert of the same upgrade. POST /tasks and the rollback route insert either through
+`insertUpgradeTask` (`routes/upgrades.ts`), which refuses with 409, naming the live task, while
+another one of the repository is live, under a per-repository advisory lock so two clicks cannot
+both pass the check. The rollback step reverts the newest completed upgrade, so the route accepts a
+rollback only while that upgrade is the newest completed task of the two kinds
+(`latestUpgradeToRollBack`): after a rollback nothing is left to undo until another upgrade
+completes, and upgrade-status offers no rollback either. The banner offers the live task
+(`inProgressUpgradeTaskId`) whether or not drift is left to review, where "Continue upgrade" used to
+start another, and hides Roll back while one runs. A check at creation cannot see a Retry of one
+that failed, which revived it beside the next, so the rule is also an index
+(`tasks_one_live_upgrade_per_repo_idx`, migration 0168): one live `onboarding_upgrade` task per
+repository, whoever writes the status. The api answers its violation 409 in `errorHandler`,
+whichever route revived the task. The worker revives one whose parked form is answered, and a
+refusal there would drop the answer, so the submit route refuses such an answer before storing it; a
+revival the worker still loses to a race reads as the task not pointed and records
+`upgrade.revive_refused`. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test. Both
+create routes write the task, its event and its move to `queued` in one transaction, since no sweep
+starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
+and rollback. The migration fails the ones an older release left that way before it builds the
+index, and then keeps each repository's newest live one.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
