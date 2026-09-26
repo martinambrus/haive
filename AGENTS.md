@@ -2573,10 +2573,11 @@ finds an earlier attempt's baseline, and records the removal; the second drops i
 rollback leaves the file deleted. A removal that keeps the file drops its baseline too. What
 already holds the restore is an earlier attempt of the same rollback, which a retry takes as put
 back. Such an upgrade can leave no live row at all, so upgrade-status offers its rollback from
-what 02 recorded (`lastUpgradeRemovedFiles`) until a rollback completes after it. What a rollback
-puts back stays in the repository's applicable set whatever its snapshot renders, so a file
-restored after RTK went off is offered for removal again rather than dropping out of the banner's
-view.
+what 02 recorded (`lastUpgradeRemovedFiles`) until a rollback completes after it, and answers for
+such a repository as onboarded, since POST /tasks starts an upgrade only on an onboarded one and
+the banner shows nothing for any other. What a rollback puts back stays in the repository's
+applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
+removal again rather than dropping out of the banner's view.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays

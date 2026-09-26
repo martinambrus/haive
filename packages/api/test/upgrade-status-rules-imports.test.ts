@@ -34,6 +34,7 @@ vi.mock('../src/db.js', () => ({
         const q = {
           where: () => q,
           innerJoin: () => q,
+          orderBy: () => q,
           limit: () => q,
           then: (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) =>
             Promise.resolve(state.rows.get(table) ?? []).then(resolve, reject),
@@ -374,5 +375,39 @@ describe('upgrade-status and a repository that switched RTK back on', () => {
     const body = await status();
     expect(body.changedTemplateIds).toEqual([]);
     expect(body.hasUpgradeAvailable).toBe(false);
+  });
+});
+
+describe('upgrade-status and an upgrade that only removed files', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-removed-'));
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: [],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+    // No live row and no completed onboarding: the upgrade removed the only files a row recorded.
+    state.rows = new Map<unknown, unknown[]>([
+      [
+        schema.templateManifestCache,
+        [{ templateId: 'agent.x', schemaVersion: 1, contentHash: 'h1', setHash: 's' }],
+      ],
+      [schema.tasks, [{ id: 'upgrade-1', metadata: null }]],
+      [schema.taskSteps, [{ output: { removedPaths: ['.claude/settings.json'] } }]],
+    ]);
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('answers as onboarded, so the banner offers its rollback', async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasPriorUpgrade).toBe(true);
   });
 });
