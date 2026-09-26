@@ -12,6 +12,7 @@ import {
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
   RTK_SLIM,
+  withoutRtkHookEntry,
   type RtkRenderInputs,
 } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 
@@ -219,6 +220,109 @@ describe('insertRtkHookEntry', () => {
     const arr = (root.hooks as { PreToolUse: unknown }).PreToolUse;
     expect(Array.isArray(arr)).toBe(true);
     expect((arr as unknown[]).length).toBe(1);
+  });
+});
+
+describe('withoutRtkHookEntry', () => {
+  const CLAUDE = 'rtk.claude-settings';
+  const json = (value: unknown, indent: string | number = 2) =>
+    `${JSON.stringify(value, null, indent)}\n`;
+  const rtkEntry = (command = RTK_HOOK_CLAUDE_COMMAND) => ({
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command }],
+  });
+
+  it("takes out the hook and what it leaves empty, keeping the person's own keys", () => {
+    const edited = json({ model: 'ours', hooks: { PreToolUse: [rtkEntry()] } });
+    expect(withoutRtkHookEntry(CLAUDE, edited)).toBe(json({ model: 'ours' }));
+  });
+
+  it("keeps the person's own hooks, in the same entry and beside it", () => {
+    const theirs = { type: 'command', command: 'lint --fix' };
+    const edited = json({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: RTK_HOOK_CLAUDE_COMMAND }, theirs],
+          },
+          { matcher: 'Edit', hooks: [theirs] },
+        ],
+        PostToolUse: [{ matcher: 'Bash', hooks: [theirs] }],
+      },
+    });
+    expect(withoutRtkHookEntry(CLAUDE, edited)).toBe(
+      json({
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Bash', hooks: [theirs] },
+            { matcher: 'Edit', hooks: [theirs] },
+          ],
+          PostToolUse: [{ matcher: 'Bash', hooks: [theirs] }],
+        },
+      }),
+    );
+  });
+
+  it("removes only a command that is exactly RTK's, and only under its own event", () => {
+    const edited = json({
+      hooks: {
+        PreToolUse: [rtkEntry(`${RTK_HOOK_CLAUDE_COMMAND} --verbose`)],
+        PostToolUse: [rtkEntry()],
+      },
+    });
+    expect(withoutRtkHookEntry(CLAUDE, edited)).toBeNull();
+  });
+
+  it("keeps the file's indent, line endings and missing final newline", () => {
+    const edited = JSON.stringify(
+      { model: 'ours', hooks: { PreToolUse: [rtkEntry()] } },
+      null,
+      '\t',
+    ).replace(/\n/g, '\r\n');
+    expect(withoutRtkHookEntry(CLAUDE, edited)).toBe('{\r\n\t"model": "ours"\r\n}');
+    const compact = JSON.stringify({ model: 'ours', hooks: { PreToolUse: [rtkEntry()] } });
+    expect(withoutRtkHookEntry(CLAUDE, compact)).toBe('{"model":"ours"}');
+  });
+
+  it("takes gemini's hook out of BeforeTool", () => {
+    const edited = json({ ...JSON.parse(buildGeminiSettingsJson()), theme: 'dark' });
+    expect(withoutRtkHookEntry('rtk.gemini-settings', edited)).toBe(json({ theme: 'dark' }));
+    expect(withoutRtkHookEntry(CLAUDE, edited)).toBeNull();
+  });
+
+  it('answers null for a file that writing back would change beyond the hook', () => {
+    const hooks = { PreToolUse: [rtkEntry()] };
+    // Each is a canonical file with one value spelled the way a parse and a write would not keep.
+    const unsafe = [
+      json({ limit: 1, hooks }).replace('"limit": 1', '"limit": 9007199254740993'),
+      json({ ratio: 1, hooks }).replace('"ratio": 1', '"ratio": 1.0'),
+      json({ name: 'caf', hooks }).replace('"caf"', '"caf\\u00e9"'),
+      json({ model: 'b', hooks }).replace('"model": "b"', '"model": "a",\n  "model": "b"'),
+      json({ model: 'ours', hooks }).replace('"model": "ours"', '"model" : "ours"'),
+    ];
+    for (const text of unsafe) {
+      expect(JSON.parse(text)).toBeTruthy();
+      expect(withoutRtkHookEntry(CLAUDE, text)).toBeNull();
+    }
+  });
+
+  it('answers null for a file nested too deep to write back', () => {
+    const depth = 200_000;
+    const text = json({ hooks: { PreToolUse: [rtkEntry()] }, deep: 0 }).replace(
+      '"deep": 0',
+      `"deep": ${'['.repeat(depth)}${']'.repeat(depth)}`,
+    );
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(withoutRtkHookEntry(CLAUDE, text)).toBeNull();
+  });
+
+  it('answers null for a file that is not strict JSON, holds no hook, or another template', () => {
+    const withComment = `// ours\n${buildClaudeSettingsJson()}`;
+    expect(withoutRtkHookEntry(CLAUDE, withComment)).toBeNull();
+    expect(withoutRtkHookEntry(CLAUDE, json({ model: 'ours' }))).toBeNull();
+    expect(withoutRtkHookEntry(CLAUDE, json(['not', 'an', 'object']))).toBeNull();
+    expect(withoutRtkHookEntry('workflow-config', buildClaudeSettingsJson())).toBeNull();
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { buildClaudeSettingsJson } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 import type {
   UpgradePlanBucket,
   UpgradePlanEntry,
@@ -134,6 +135,39 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
     const field = schema.fields.find((f) => 'id' in f && f.id === 'selectedObsoleteRemovals');
     if (!field || field.type !== 'multi-select') throw new Error('not a multi-select');
     expect(field.options[0]?.details).toBeUndefined();
+  });
+
+  it('offers an edited RTK settings file for its hook to come out, instead of for deletion', () => {
+    const edited = buildClaudeSettingsJson().replace('{\n', '{\n  "model": "ours",\n');
+    const unedited = buildClaudeSettingsJson();
+    const rtk = (diskPath: string, templateId: string, currentContent: string) =>
+      entry('obsolete', diskPath, {
+        templateId,
+        templateKind: 'rtk-config',
+        currentContent,
+        newContent: null,
+        currentHash: currentContent === unedited ? 'render' : 'edited',
+        baselineWrittenHash: 'render',
+      });
+    const schema = callForm(
+      plan([
+        rtk('.claude/settings.json', 'rtk.claude-settings', edited),
+        rtk('.gemini/settings.json', 'rtk.gemini-settings', unedited),
+      ]),
+    );
+    const strip = schema.fields.find((f) => 'id' in f && f.id === 'selectedRtkHookStrips');
+    if (!strip || strip.type !== 'multi-select') throw new Error('not a multi-select');
+    expect(strip.defaults).toEqual([]);
+    expect(strip.options.map((o) => o.value)).toEqual(['e:.claude/settings.json']);
+    expect(strip.options[0]?.details).toEqual({
+      kind: 'diff',
+      baseline: edited,
+      current: '{\n  "model": "ours"\n}\n',
+      editable: false,
+    });
+    const removals = schema.fields.find((f) => 'id' in f && f.id === 'selectedObsoleteRemovals');
+    if (!removals || removals.type !== 'multi-select') throw new Error('not a multi-select');
+    expect(removals.options.map((o) => o.value)).toEqual(['e:.gemini/settings.json']);
   });
 
   it('options always carry editable=false for the read-only upgrade form', () => {

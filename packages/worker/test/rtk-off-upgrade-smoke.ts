@@ -8,7 +8,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger, RTK_REF_MARKER_END, RTK_REF_MARKER_START, type FormSchema } from '@haive/shared';
+import {
+  logger,
+  normalizeContent,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
+  sha256Hex,
+  type FormSchema,
+} from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { seedBlankScaffold } from '../src/repo/blank-scaffold.js';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
@@ -17,6 +24,7 @@ import {
   type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import {
   buildClaudeSettingsJson,
   buildRtkAwarenessBlock,
@@ -171,6 +179,40 @@ async function main(): Promise<void> {
     }
     const settingsEntry = (detected: UpgradePlanDetect) =>
       detected.entries.find((e) => e.diskPath === SETTINGS);
+    /** A rollback task of the most recent completed upgrade, run to the end. */
+    async function rollback(title: string) {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId,
+          type: 'onboarding_upgrade',
+          title,
+          status: 'running',
+          metadata: { mode: 'rollback' },
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: schema.tasks.id });
+      const [row] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '04-upgrade-rollback',
+          stepIndex: 4,
+          title,
+          status: 'running',
+        })
+        .returning({ id: schema.taskSteps.id });
+      const rollbackCtx = ctxFor(task!.id, row!.id);
+      const detected = await upgradeRollbackStep.detect!(rollbackCtx);
+      return upgradeRollbackStep.apply(rollbackCtx, {
+        detected,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      });
+    }
 
     // ---- RTK on: the backfill adopts the settings file, recording the choice -------------
     const first = await upgrade('rtk-off-upgrade-smoke first');
@@ -288,6 +330,121 @@ async function main(): Promise<void> {
       'the RTK settings template no longer applies to the repository',
       repoRow?.applicable !== null && !repoRow?.applicable?.includes(RTK_ITEM),
       repoRow?.applicable,
+    );
+
+    // ---- the hook taken out of the edited file, and a rollback that puts it back ------------
+    const strip = await upgrade('rtk-off-upgrade-smoke strip');
+    const stripEntryId = settingsEntry(strip.detected)!.entryId;
+    const stripField = strip.form?.fields.find((f) => f.id === 'selectedRtkHookStrips');
+    const ourKeyOnly = '{\n  "model": "ours"\n}\n';
+    check(
+      'the edited settings file is offered for its RTK hook to come out, unticked',
+      stripField?.type === 'multi-select' &&
+        (stripField.defaults ?? []).length === 0 &&
+        stripField.options.some(
+          (o) => o.value === stripEntryId && o.details?.current === ourKeyOnly,
+        ),
+      stripField,
+    );
+    const stripValues = defaultValues(strip.form);
+    stripValues.selectedNew = [];
+    stripValues.selectedRtkHookStrips = [stripEntryId];
+    const stripApplied = await upgradeApplyStep.apply(strip.applyCtx, {
+      detected: strip.plan,
+      formValues: stripValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      "only the hook comes out, the person's key stays, and the file is handed to the commit",
+      (await readOrNull(SETTINGS)) === ourKeyOnly &&
+        stripApplied.writtenPaths?.includes(SETTINGS) === true,
+      { now: await readOrNull(SETTINGS), writtenPaths: stripApplied.writtenPaths },
+    );
+    const [stripRow] = await db
+      .select({
+        source: schema.onboardingArtifacts.source,
+        writtenHash: schema.onboardingArtifacts.writtenHash,
+        writtenContent: schema.onboardingArtifacts.writtenContent,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, SETTINGS),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    check(
+      'its live row records what the file holds and claims none of it',
+      stripRow?.source === 'upgrade' &&
+        stripRow.writtenContent === ourKeyOnly &&
+        stripRow.writtenHash === sha256Hex(normalizeContent(buildClaudeSettingsJson())),
+      stripRow,
+    );
+    await db
+      .update(schema.taskSteps)
+      .set({ output: stripApplied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, strip.applyCtx.taskStepId));
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, strip.applyCtx.taskId));
+    await rollback('rtk-off-upgrade-smoke strip rollback');
+    check('a rollback puts the hook back', (await readOrNull(SETTINGS)) === editedSettings, {
+      now: await readOrNull(SETTINGS),
+    });
+
+    // ---- a retry after an attempt that took the hook out and failed before recording it ----
+    const retry = await upgrade('rtk-off-upgrade-smoke strip retry');
+    await writeFile(join(repoPath, SETTINGS), ourKeyOnly);
+    const retryValues = defaultValues(retry.form);
+    retryValues.selectedNew = [];
+    retryValues.selectedRtkHookStrips = [settingsEntry(retry.detected)!.entryId];
+    const retried = await upgradeApplyStep.apply(retry.applyCtx, {
+      detected: retry.plan,
+      formValues: retryValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'a retry records the edit an earlier attempt made, and hands the file to the commit',
+      (await readOrNull(SETTINGS)) === ourKeyOnly &&
+        retried.writtenPaths?.includes(SETTINGS) === true,
+      { writtenPaths: retried.writtenPaths, warnings: retried.warnings },
+    );
+    await db
+      .update(schema.taskSteps)
+      .set({ output: retried as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, retry.applyCtx.taskStepId));
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, retry.applyCtx.taskId));
+    await rollback('rtk-off-upgrade-smoke strip retry rollback');
+    check('and its rollback puts the hook back', (await readOrNull(SETTINGS)) === editedSettings, {
+      now: await readOrNull(SETTINGS),
+    });
+
+    // ---- a byte that is not UTF-8: decoding would write U+FFFD in its place ----------------
+    const notUtf8 = Buffer.from(editedSettings.replace('"ours"', '"oursé"'), 'latin1');
+    await writeFile(join(repoPath, SETTINGS), notUtf8);
+    const lossy = await upgrade('rtk-off-upgrade-smoke not utf-8');
+    const lossyValues = defaultValues(lossy.form);
+    lossyValues.selectedNew = [];
+    lossyValues.selectedRtkHookStrips = [settingsEntry(lossy.detected)!.entryId];
+    const lossyApplied = await upgradeApplyStep.apply(lossy.applyCtx, {
+      detected: lossy.plan,
+      formValues: lossyValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'a file that is not valid UTF-8 keeps every byte, and says why',
+      (await readFile(join(repoPath, SETTINGS))).equals(notUtf8) &&
+        lossyApplied.writtenPaths?.includes(SETTINGS) !== true &&
+        lossyApplied.warnings.some((w) => w.includes('not valid UTF-8')),
+      lossyApplied.warnings,
     );
 
     // ---- the same bytes Haive wrote, and a second upgrade ----------------------------------

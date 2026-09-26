@@ -39,6 +39,7 @@ import {
   stripRtkBlocks,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
+import { withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 import {
   backfillRecord,
   type UpgradePlanOutput,
@@ -49,13 +50,14 @@ const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
 
 /** Action the apply loop should take for a single plan entry. */
-export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'keep' | 'skip';
+export type ApplyAction = 'apply' | 'delete' | 'strip' | 'untrack' | 'keep' | 'skip';
 
 export interface ApplySelections {
   selectedUpdates: ReadonlySet<string>;
   selectedNew: ReadonlySet<string>;
   selectedReinstate: ReadonlySet<string>;
   selectedObsoleteRemovals: ReadonlySet<string>;
+  selectedRtkHookStrips: ReadonlySet<string>;
   conflictChoices: ReadonlyMap<string, ConflictChoice>;
 }
 
@@ -89,6 +91,9 @@ export function classifyApplyAction(
   const shouldDelete =
     entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
   if (shouldDelete) return 'delete';
+  if (entry.bucket === 'obsolete' && selections.selectedRtkHookStrips.has(entry.entryId)) {
+    return 'strip';
+  }
 
   const shouldUntrackDangling =
     entry.bucket === 'obsolete' &&
@@ -106,6 +111,14 @@ export function classifyApplyAction(
   if (shouldUntrackDangling) return 'untrack';
 
   return 'skip';
+}
+
+/** The file an edited, obsolete RTK settings entry would become with the RTK hook taken out, which
+ *  the form offers in place of a delete that would keep it. Null for every other entry. */
+export function rtkHookStripPreview(entry: UpgradePlanEntry): string | null {
+  if (entry.bucket !== 'obsolete' || entry.templateKind !== 'rtk-config') return null;
+  if (entry.currentContent === null || entry.currentHash === entry.baselineWrittenHash) return null;
+  return withoutRtkHookEntry(entry.templateId, entry.currentContent);
 }
 
 /** Resolve a candidate `bundle_item_id` to either the live row's id or null.
@@ -292,6 +305,15 @@ export interface UpgradeApplyOutput {
   retiredRowIds?: string[];
 }
 
+/** What a row records about the bytes at its path. */
+interface ArtifactRecord {
+  templateContentHash: string;
+  writtenHash: string;
+  writtenContent: string;
+  lastObservedDiskHash: string | null;
+  userModified: boolean;
+}
+
 export interface CreatedPath {
   diskPath: string;
   /** Whether the file itself was missing, which for the rules region is more than the region. */
@@ -437,13 +459,41 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         default: 'skip',
       });
     }
-    if (obsolete.length > 0) {
+    const strippable = obsolete.flatMap((e) => {
+      const stripped = rtkHookStripPreview(e);
+      return stripped === null ? [] : [{ entry: e, stripped }];
+    });
+    const removable = obsolete.filter((e) => !strippable.some((s) => s.entry === e));
+    if (removable.length > 0) {
       fields.push({
         type: 'multi-select',
         id: 'selectedObsoleteRemovals',
         label: 'Delete obsolete files',
-        description: `${obsolete.length} artifact(s) Haive no longer manages. Select to remove from disk.`,
-        options: toOptions(obsolete),
+        description: `${removable.length} artifact(s) Haive no longer manages. Select to remove from disk.`,
+        options: toOptions(removable),
+        defaults: [],
+      });
+    }
+    if (strippable.length > 0) {
+      fields.push({
+        type: 'multi-select',
+        id: 'selectedRtkHookStrips',
+        label: 'Remove the RTK hook from settings files you edited',
+        description:
+          `${strippable.length} RTK settings file(s) Haive no longer manages still hold its hook, ` +
+          'and your edits keep them from being deleted. Select one to take out the RTK hook alone; ' +
+          'the rest of the file stays.',
+        options: strippable.map(({ entry, stripped }) => ({
+          value: entry.entryId,
+          label: entry.diskPath,
+          group: templateKindLabel(entry.templateKind),
+          details: {
+            kind: 'diff' as const,
+            baseline: entry.currentContent,
+            current: stripped,
+            editable: false,
+          },
+        })),
         defaults: [],
       });
     }
@@ -512,6 +562,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const selectedObsoleteRemovals = new Set<string>(
       toStringArray(values.selectedObsoleteRemovals),
     );
+    const selectedRtkHookStrips = new Set<string>(toStringArray(values.selectedRtkHookStrips));
 
     const conflictChoices = new Map<string, ConflictChoice>();
     for (const e of plan.entries) {
@@ -560,11 +611,30 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       selectedNew,
       selectedReinstate,
       selectedObsoleteRemovals,
+      selectedRtkHookStrips,
       conflictChoices,
     };
 
     for (const entry of plan.entries) {
       const action = classifyApplyAction(entry, plan.entries, selections);
+      const artifactRow = (record: ArtifactRecord, source: 'upgrade' | 'backfill') => ({
+        userId: ctx.userId,
+        repositoryId: plan.repositoryId,
+        taskId: ctx.taskId,
+        diskPath: entry.diskPath,
+        templateId: entry.templateId,
+        templateKind: entry.templateKind,
+        templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+        ...record,
+        formValuesSnapshot: plan.renderCtxSnapshot,
+        sourceStepId: '02-upgrade-apply',
+        source,
+        haiveVersion,
+        bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
+      });
+      // What a path holds that its row does not record (no row, or bytes edited since) is kept as
+      // a superseded baseline before it is replaced, so a rollback of this upgrade restores it.
+      const baseline = (prior: ArtifactRecord) => baselineRows.push(artifactRow(prior, 'backfill'));
 
       if (action === 'skip') {
         skippedCount += 1;
@@ -645,6 +715,74 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         continue;
       }
 
+      if (action === 'strip') {
+        const rel = safeDiskRel(entry.diskPath);
+        if (rel === null) {
+          warnings.push(`refusing to edit ${entry.diskPath}: not a path inside the repository`);
+          skippedCount += 1;
+          continue;
+        }
+        // Taken from the bytes it replaces, so a save since the plan keeps its edits too.
+        const edit: { before?: string; after?: string; notUtf8?: boolean } = {};
+        try {
+          await rewriteFileIfNoFollow(ctx.repoPath, rel, (data) => {
+            const before = data.toString('utf8');
+            // A byte that is not UTF-8 decodes to U+FFFD, which would be written back in its place.
+            if (!Buffer.from(before, 'utf8').equals(data)) {
+              edit.notUtf8 = true;
+              return null;
+            }
+            const after = withoutRtkHookEntry(entry.templateId, before);
+            if (after === null) {
+              // An earlier attempt that edited the file and then failed left what the plan's bytes
+              // strip to, and the plan still holds what stood there before it.
+              const planned = entry.currentContent;
+              if (planned !== null && withoutRtkHookEntry(entry.templateId, planned) === before) {
+                edit.before = planned;
+                edit.after = before;
+              }
+              return null;
+            }
+            edit.before = before;
+            edit.after = after;
+            return Buffer.from(after, 'utf8');
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warnings.push(`failed to remove the RTK hook from ${entry.diskPath}: ${msg}`);
+          skippedCount += 1;
+          continue;
+        }
+        if (edit.notUtf8) {
+          warnings.push(
+            `did not remove the RTK hook from ${entry.diskPath}: it is not valid UTF-8, so writing it back would change more than the hook`,
+          );
+          skippedCount += 1;
+          continue;
+        }
+        if (edit.before === undefined || edit.after === undefined) {
+          warnings.push(
+            `did not remove the RTK hook from ${entry.diskPath}: it no longer holds one`,
+          );
+          skippedCount += 1;
+          continue;
+        }
+        // Both the bytes it held and the bytes it holds now are the person's, so neither row claims
+        // them: `writtenHash` stays the render's.
+        const recorded = {
+          templateContentHash: entry.baselineTemplateContentHash ?? '',
+          writtenHash: entry.baselineWrittenHash ?? '',
+        };
+        const record = (content: string) =>
+          backfillRecord(recorded, { content, hash: sha256Hex(normalizeContent(content)) });
+        baseline(record(edit.before));
+        rowsToInsert.push(artifactRow(record(edit.after), 'upgrade'));
+        if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
+        writtenPaths.push(rel);
+        appliedCount += 1;
+        continue;
+      }
+
       if (!entry.newContent) {
         warnings.push(`entry ${entry.diskPath} has no newContent; skipping`);
         skippedCount += 1;
@@ -659,30 +797,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         skippedCount += 1;
         continue;
       }
-      // What a path holds that its row does not record (no row, or bytes edited since) is kept as
-      // a superseded baseline before it is replaced, so a rollback of this upgrade restores it.
-      const baseline = (prior: {
-        templateContentHash: string;
-        writtenHash: string;
-        writtenContent: string;
-        lastObservedDiskHash: string | null;
-        userModified: boolean;
-      }) =>
-        baselineRows.push({
-          userId: ctx.userId,
-          repositoryId: plan.repositoryId,
-          taskId: ctx.taskId,
-          diskPath: entry.diskPath,
-          templateId: entry.templateId,
-          templateKind: entry.templateKind,
-          templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-          ...prior,
-          formValuesSnapshot: plan.renderCtxSnapshot,
-          sourceStepId: '02-upgrade-apply',
-          source: 'backfill' as const,
-          haiveVersion,
-          bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
-        });
       if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
@@ -747,25 +861,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
 
       const writtenHash = sha256Hex(normalizeContent(entry.newContent));
-      rowsToInsert.push({
-        userId: ctx.userId,
-        repositoryId: plan.repositoryId,
-        taskId: ctx.taskId,
-        diskPath: entry.diskPath,
-        templateId: entry.templateId,
-        templateKind: entry.templateKind,
-        templateSchemaVersion: entry.templateSchemaVersion ?? 1,
-        templateContentHash: entry.currentTemplateContentHash ?? '',
-        writtenHash,
-        writtenContent: entry.newContent,
-        lastObservedDiskHash: writtenHash,
-        userModified: false,
-        formValuesSnapshot: plan.renderCtxSnapshot,
-        sourceStepId: '02-upgrade-apply',
-        source: 'upgrade' as const,
-        haiveVersion,
-        bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
-      });
+      rowsToInsert.push(
+        artifactRow(
+          {
+            templateContentHash: entry.currentTemplateContentHash ?? '',
+            writtenHash,
+            writtenContent: entry.newContent,
+            lastObservedDiskHash: writtenHash,
+            userModified: false,
+          },
+          'upgrade',
+        ),
+      );
     }
 
     // Not an artifact, but without its `@AGENTS.md` line a claude-family CLI never loads AGENTS.md.
