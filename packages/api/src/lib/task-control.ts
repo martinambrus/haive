@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
@@ -37,29 +37,12 @@ export async function stopActiveCliInvocations(
   // the dying cli-exec job's resume is a no-op and can't clobber the caller's
   // terminal state. One transaction, so no reader sees a run cancelled beside a step still
   // running, and a failure leaves every run as it was and kills nothing.
-  const cancelRuns = (tx: DbHandle) =>
-    tx
-      .update(schema.cliInvocations)
-      .set({
-        exitCode: 137,
-        errorMessage: `CLI cancelled by ${by}`,
-        endedAt: now,
-        supersededAt: now,
-      })
-      .where(
-        and(
-          eq(schema.cliInvocations.taskId, taskId),
-          isNull(schema.cliInvocations.endedAt),
-          isNull(schema.cliInvocations.supersededAt),
-        ),
-      )
-      .returning({ id: schema.cliInvocations.id });
   const { cancelled, stopped } = await db.transaction(async (tx) => {
-    const first = await cancelRuns(tx);
+    const first = await cancelLiveRuns(tx, taskId, by, now);
     const failed = await failStuckSteps(tx, taskId, by, now);
     // A pass records a run only under its row's lock, so the step writes above waited for any run
     // being recorded, and this ends it.
-    const late = await cancelRuns(tx);
+    const late = await cancelLiveRuns(tx, taskId, by, now);
     const runs = first.length + late.length;
     if (opts.failTask && (runs > 0 || failed.length > 0)) {
       // Drop the task to `failed` (restartable) from any non-terminal state — incl.
@@ -95,6 +78,62 @@ export async function stopActiveCliInvocations(
   // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
   const killed = await killTaskSandboxes(taskId);
   return { killed, cancelled, stopped };
+}
+
+/** End and supersede every live run of the task. Inside the caller's transaction, since a second
+ *  connection there would wait on that transaction's own locks. */
+export function cancelLiveRuns(tx: DbHandle, taskId: string, by: string, now: Date) {
+  return tx
+    .update(schema.cliInvocations)
+    .set({
+      exitCode: 137,
+      errorMessage: `CLI cancelled by ${by}`,
+      endedAt: now,
+      supersededAt: now,
+    })
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, taskId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
+    .returning({ id: schema.cliInvocations.id });
+}
+
+/** A park's live wait added to idle_ms, clamped since idle_ms is int4 (see cancelTaskRow). */
+const parkFoldedIntoIdle = () =>
+  sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`;
+
+/** Put a restarting task's parked rows, other than `exclude`, back to `pending` with what they
+ *  held: a form keeps its schema and answers, a runtime park its detection. */
+export async function reofferParkedSteps(
+  tx: DbHandle,
+  taskId: string,
+  now: Date,
+  exclude: readonly string[],
+) {
+  const parked = and(
+    eq(schema.taskSteps.taskId, taskId),
+    or(
+      eq(schema.taskSteps.status, 'waiting_form'),
+      and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
+    ),
+    ...(exclude.length > 0 ? [notInArray(schema.taskSteps.id, [...exclude])] : []),
+  );
+  await tx.select({ id: schema.taskSteps.id }).from(schema.taskSteps).where(parked).for('update');
+  return tx
+    .update(schema.taskSteps)
+    .set({
+      status: 'pending',
+      idleMs: parkFoldedIntoIdle(),
+      waitingStartedAt: null,
+      statusMessage: null,
+      updatedAt: now,
+    })
+    .where(parked)
+    .returning({ id: schema.taskSteps.id });
 }
 
 /** Leave none of a restarting task's steps active: fail the stuck ones and re-offer a parked form
@@ -154,8 +193,7 @@ function failStuckSteps(
       // apply phase (step-runner.ts only flips pending -> running), so stopping mid-apply
       // books that sliver as idle. Apply windows are sub-minute here (777 such rows total
       // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
-      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+      idleMs: parkFoldedIntoIdle(),
       waitingStartedAt: null,
       updatedAt: now,
     })

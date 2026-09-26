@@ -225,14 +225,14 @@ async function main(): Promise<void> {
     res = await action;
     check('the task retry answers 200', res.status === 200, res.status);
     check(
-      'the task retry leaves the answered row inactive',
-      (await statusOf(parked!.id)) === 'failed',
+      'the task retry resets the answered row downstream of its step',
+      (await statusOf(parked!.id)) === 'pending',
       await statusOf(parked!.id),
     );
 
-    // 3b. A pass at the old epoch activates rows after the task retry's first settle: a claim and a
+    // 3b. A pass at the old epoch activates rows while the task retry is applied: a claim and a
     //     form it parked, holding the task row as a claim does, so the bump waits for them. The
-    //     settle after the bump takes both.
+    //     sweep after the bump takes both.
     await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, taskId));
     const [lateClaim, lateForm] = await db
       .insert(schema.taskSteps)
@@ -259,12 +259,12 @@ async function main(): Promise<void> {
     res = await action;
     check('the second task retry answers 200', res.status === 200, res.status);
     check(
-      'the settle after the bump fails the row claimed at the old epoch',
-      (await statusOf(lateClaim!.id)) === 'failed',
+      'the sweep after the bump resets the row claimed at the old epoch',
+      (await statusOf(lateClaim!.id)) === 'pending',
       await statusOf(lateClaim!.id),
     );
     check(
-      'the settle after the bump re-offers the form parked at the old epoch',
+      'the sweep after the bump resets the form parked at the old epoch',
       (await statusOf(lateForm!.id)) === 'pending',
       await statusOf(lateForm!.id),
     );
