@@ -14,6 +14,10 @@ import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-defi
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
 // dispatcher does; the real one needs ConfigService and the adapter registry.
+vi.mock('../../../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../queues/cli-exec/secret-mask.js')>()),
+  taskSecretMaskPolicy: async () => null,
+}));
 vi.mock('../../../orchestrator/dispatcher.js', () => ({
   resolveTaskDispatch: vi.fn(
     async (_db: unknown, _taskId: string, opts: { providers: unknown[] }) =>

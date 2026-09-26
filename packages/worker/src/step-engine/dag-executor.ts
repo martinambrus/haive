@@ -65,6 +65,7 @@ import {
   DAG_INFRA_EXHAUSTED_MARKER,
 } from './dag-failure-class.js';
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
+import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { overrideOr, overrideOrLearned, escalatedTimeoutMs } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import { loadPlanImpactContext, planImpactBlock } from './steps/workflow/_plan-impact.js';
@@ -649,7 +650,9 @@ async function startConflictFix(
       current: { ...m.current, aiFixContext: null },
     });
   }
-  const fixBaseline = await captureFixBaseline(m.integration.path);
+  const fixBaseline = await captureFixBaseline(m.integration.path, () =>
+    taskSecretMaskPolicy(m.db, m.params.taskId),
+  );
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
   const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
@@ -787,10 +790,12 @@ async function runLevelMerge(
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
     const branch = target?.branchName ?? state.activeConflict ?? 'the active conflict';
-    const leftovers = await relocateFixerChanges(integration.path, state.fixBaseline, {
-      taskId: m.params.taskId,
-      runId: inv.id,
-    });
+    const leftovers = await relocateFixerChanges(
+      integration.path,
+      state.fixBaseline,
+      { taskId: m.params.taskId, runId: inv.id },
+      () => taskSecretMaskPolicy(db, m.params.taskId),
+    );
     if (state.fixBaseline) {
       // Spent once used: a later pass comparing it with a tree the merge has since left would put
       // the merge's files back.

@@ -18,6 +18,7 @@ import {
   squashMergeCommit,
   unmergedPaths,
 } from './git-merge.js';
+import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -143,6 +144,7 @@ async function setupNamedConflict(name: string): Promise<string> {
 }
 
 const mergeHead = (dir: string) => gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+const noSecrets = async () => null;
 
 /** setupNamedConflict('base.txt') plus two files only `main` has, one of them left edited by the
  *  person, and an untracked file of theirs; the merge is left open on the conflict. */
@@ -233,7 +235,7 @@ describe('fixer leftovers (real git)', () => {
   it("moves a fixer's changes out and puts the tree back as it was sent in", async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       expect(baseline).toMatchObject({ resolving: ['base.txt'] });
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await writeFile(path.join(dir, 'clean.txt'), 'fixer on staged\n', 'utf8');
@@ -246,7 +248,12 @@ describe('fixer leftovers (real git)', () => {
       await writeFile(path.join(dir, '.haive-data', 'note.md'), 'haive own\n', 'utf8');
       await symlink('base.txt', path.join(dir, 'link-stray'));
 
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       const folder = '.haive/merge-leftovers/t1/inv1';
       expect(out?.folder).toBe(folder);
       expect(out?.moved.sort()).toEqual([
@@ -282,11 +289,16 @@ describe('fixer leftovers (real git)', () => {
   it('puts a file back over the directory a fixer made in its place', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await rm(path.join(dir, 'untouched.txt'));
       await mkdir(path.join(dir, 'untouched.txt'));
       await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved).toEqual(['untouched.txt/cache']);
       expect(await readFile(path.join(dir, 'untouched.txt'), 'utf8')).toBe('untouched\n');
     } finally {
@@ -298,12 +310,17 @@ describe('fixer leftovers (real git)', () => {
   it('keeps a directory standing where a file was while it holds what could not be moved', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await rm(path.join(dir, 'untouched.txt'));
       await mkdir(path.join(dir, 'untouched.txt'));
       await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
       await symlink('../base.txt', path.join(dir, 'untouched.txt', 'link'));
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved).toEqual(['untouched.txt/cache']);
       expect(out?.left.map((l) => l.path).sort()).toEqual(['untouched.txt', 'untouched.txt/link']);
       expect(out?.left.find((l) => l.path === 'untouched.txt/link')?.target).toBe('../base.txt');
@@ -317,12 +334,17 @@ describe('fixer leftovers (real git)', () => {
   it('takes what a fixer staged outside the conflict out of the index before the commit', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
       await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
       await git(dir, ['add', '-A']);
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved.sort()).toEqual(['stray.txt', 'untouched.txt']);
       expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
         'dirt.txt',
@@ -349,10 +371,15 @@ describe('fixer leftovers (real git)', () => {
   it('leaves what git ignored when the fixer was sent in, whatever rules it leaves', async () => {
     const { dir, kept } = await setupIgnoreConflict();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(path.join(dir, '.gitignore'), 'ours/\ntheirs/\n', 'utf8');
       await writeFile(path.join(dir, 'cache', 'new'), 'new under cache\n', 'utf8');
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out).toBeNull();
       expect(await readFile(path.join(dir, 'cache', 'keep'), 'utf8')).toBe(kept);
       expect(await readFile(path.join(dir, 'cache', 'new'), 'utf8')).toBe('new under cache\n');
@@ -368,10 +395,15 @@ describe('fixer leftovers (real git)', () => {
   it('compares a recorded file that a rule the fixer added now hides', async () => {
     const { dir } = await setupIgnoreConflict();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(path.join(dir, '.gitignore'), 'cache/\nours/\ntheirs/\n*.log\n', 'utf8');
       await writeFile(path.join(dir, 'app.log'), 'line1\nline2\n', 'utf8');
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved).toEqual(['app.log']);
       const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
       expect(await read('.haive/merge-leftovers/t1/inv1/files/app.log')).toBe('line1\nline2\n');
@@ -389,9 +421,14 @@ describe('fixer leftovers (real git)', () => {
       Buffer.from('.txt'),
     ]);
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(odd, 'odd\n');
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.unchecked).toBeUndefined();
       expect(out?.left).toEqual([expect.objectContaining({ reason: 'its name is not UTF-8' })]);
       expect(await readFile(odd, 'utf8')).toBe('odd\n');
@@ -408,12 +445,12 @@ describe('fixer leftovers (real git)', () => {
       try {
         const [moved] = await unmergedPaths(dir).then((u) => u ?? []);
         expect(moved).toBeDefined();
-        const baseline = await captureFixBaseline(dir);
+        const baseline = await captureFixBaseline(dir, noSecrets);
         expect(baseline).toMatchObject({ resolving: [moved, 'foo'] });
         await rm(path.join(dir, 'foo'), { recursive: true });
         await rename(path.join(dir, moved!), path.join(dir, 'foo'));
         expect(
-          await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }),
+          await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets),
         ).toBeNull();
         expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
         expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
@@ -446,10 +483,15 @@ describe('fixer leftovers (real git)', () => {
       await git(dir, ['commit', '-am', 'foo like bar']);
       await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       const unmerged = (await unmergedPaths(dir)) ?? [];
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       expect(baseline).toMatchObject({ resolving: [...unmerged, 'foo'] });
       await writeFile(path.join(dir, 'bar', 'inner'), 'fixer on bar\n', 'utf8');
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved).toEqual(['bar/inner']);
       expect(await readFile(path.join(dir, 'bar', 'inner'), 'utf8')).toBe('bar inner\n');
     } finally {
@@ -461,7 +503,7 @@ describe('fixer leftovers (real git)', () => {
   it("takes Haive's own paths and gitlinks a fixer staged back out of the index", async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await mkdir(path.join(dir, '.haive-data'));
       await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
@@ -472,7 +514,12 @@ describe('fixer leftovers (real git)', () => {
       await git(nested, ['add', '-A']);
       await git(nested, ['commit', '-m', 'lib']);
       await git(dir, ['add', '-A']);
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.moved).toEqual([]);
       expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
         '.haive-data/plan.json',
@@ -494,9 +541,14 @@ describe('fixer leftovers (real git)', () => {
   it('reports a deleted file it put back, even when nothing else changed', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await rm(path.join(dir, 'untouched.txt'));
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.restored).toEqual(['untouched.txt']);
       expect(out?.moved).toEqual([]);
       expect(fixerLeftoversWarning('t1', out!)).toContain('they were put back');
@@ -511,13 +563,76 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // At a same-branch root the fixer's sandbox holds `.git`, so a masked file must not become a blob.
+  it('keeps a file the sandbox masks out of every object the snapshots write', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const secret = `SECRET=${randomUUID()}\n`;
+      await writeFile(path.join(dir, '.env'), secret, 'utf8');
+      const blob = (await git(dir, ['hash-object', '.env'])).trim();
+      const masked = async () => secretMaskPolicy({});
+      const baseline = await captureFixBaseline(dir, masked);
+      expect(baseline).toHaveProperty('tree');
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        masked,
+      );
+      expect(out?.moved).toEqual(['stray.txt']);
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+      expect(await readFile(path.join(dir, '.env'), 'utf8')).toBe(secret);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A clean filter or a line-ending conversion would record, and put back, other bytes than these.
+  it('puts back the bytes a file held, whatever filter or line ending applies to it', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await writeFile(
+        path.join(dir, '.gitattributes'),
+        '*.txt filter=lossy\n*.crlf text=auto\n',
+        'utf8',
+      );
+      await git(dir, ['config', 'filter.lossy.clean', 'sed s/ORIGINAL/CLEANED/']);
+      await git(dir, ['config', 'filter.lossy.smudge', 'cat']);
+      await writeFile(path.join(dir, 'notes.txt'), 'ORIGINAL\n', 'utf8');
+      await writeFile(path.join(dir, 'win.crlf'), 'one\r\ntwo\r\n', 'utf8');
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'notes.txt'), 'FIXER\n', 'utf8');
+      await writeFile(path.join(dir, 'win.crlf'), 'fixer\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved.sort()).toEqual(['notes.txt', 'win.crlf']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('notes.txt')).toBe('ORIGINAL\n');
+      expect(await read('win.crlf')).toBe('one\r\ntwo\r\n');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/notes.txt')).toBe('FIXER\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports a baseline git could not record rather than checking nothing', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
       await git(dir, ['merge', '--abort']);
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       expect(baseline).toEqual({ unavailable: 'git could not read the merge' });
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.unchecked).toContain('nothing was recorded before it ran');
       expect(fixerLeftoversWarning('t1', out!)).toContain('Could not check');
     } finally {
@@ -533,11 +648,11 @@ describe('fixer leftovers (real git)', () => {
       try {
         await exec('chown', ['-R', '1000:1000', dir]);
         await exec('chown', ['0:0', path.join(dir, 'lib', 'deep')]);
-        const baseline = await captureFixBaseline(dir);
+        const baseline = await captureFixBaseline(dir, noSecrets);
         await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
         await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'fixer on keep\n', 'utf8');
         await rm(path.join(dir, 'lib', 'other'), { recursive: true });
-        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
         expect(await readFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'utf8')).toBe('keep\n');
         expect(await readFile(path.join(dir, 'lib', 'other', 'gone.txt'), 'utf8')).toBe('gone\n');
         const owners = [
@@ -566,12 +681,17 @@ describe('fixer leftovers (real git)', () => {
   it('moves nothing once the merge it was sent into was finished by hand', async () => {
     const dir = await setupMergeWithOwnWork();
     try {
-      const baseline = await captureFixBaseline(dir);
+      const baseline = await captureFixBaseline(dir, noSecrets);
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
       await git(dir, ['add', 'base.txt']);
       await git(dir, ['commit', '--no-edit']);
-      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
       expect(out?.unchecked).toBeTruthy();
       expect(out?.moved).toEqual([]);
       expect(await readFile(path.join(dir, 'stray.txt'), 'utf8')).toBe('fixer scratch\n');
@@ -589,7 +709,7 @@ describe('fixer leftovers (real git)', () => {
     const inHost = path.join(root, 'repo');
     try {
       await rename(dir, inHost);
-      expect(await hosted.captureFixBaseline(inHost)).toBeNull();
+      expect(await hosted.captureFixBaseline(inHost, noSecrets)).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(dir, { recursive: true, force: true });

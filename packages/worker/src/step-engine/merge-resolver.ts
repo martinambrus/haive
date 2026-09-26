@@ -36,6 +36,7 @@ import {
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
+import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { parseJsonLooseValidated } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
@@ -782,10 +783,12 @@ export async function resolveMergePhase(
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
       if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
-      const leftovers = await relocateFixerChanges(state.mergeDir, state.fixBaseline, {
-        taskId: params.taskId,
-        runId: inv.id,
-      });
+      const leftovers = await relocateFixerChanges(
+        state.mergeDir,
+        state.fixBaseline,
+        { taskId: params.taskId, runId: inv.id },
+        () => taskSecretMaskPolicy(db, params.taskId),
+      );
       if (state.fixBaseline) {
         // Spent once used: a later pass comparing it with a tree the merge has since left would
         // put the merge's files back.
@@ -902,7 +905,9 @@ export async function resolveMergePhase(
       if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
     }
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
-    const fixBaseline = await captureFixBaseline(state.mergeDir);
+    const fixBaseline = await captureFixBaseline(state.mergeDir, () =>
+      taskSecretMaskPolicy(db, params.taskId),
+    );
     // A const alias so the closure below keeps TypeScript's narrowing of `state` to
     // non-null (a `let` loses that narrowing across a function boundary).
     const priorState = state;

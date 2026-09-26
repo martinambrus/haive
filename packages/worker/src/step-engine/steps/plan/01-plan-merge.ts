@@ -37,6 +37,7 @@ import {
   writePlanMirror,
 } from '../../../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
+import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
 import { WORKTREE_SUBDIR } from '../../../repo/worktree-paths.js';
 
@@ -309,7 +310,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       mergeOpen: open,
     };
     return needsAgentPass(found)
-      ? { ...found, fixBaseline: await captureFixBaseline(worktreePath) }
+      ? {
+          ...found,
+          fixBaseline: await captureFixBaseline(worktreePath, () =>
+            taskSecretMaskPolicy(ctx.db, ctx.taskId),
+          ),
+        }
       : found;
   },
 
@@ -416,10 +422,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         repositoryId: d.repositoryId,
       });
       const said = typeof args.llmOutput === 'string' ? args.llmOutput.trim() : '';
-      const leftovers = await relocateFixerChanges(d.worktreePath, d.fixBaseline, {
-        taskId: ctx.taskId,
-        runId: args.llmInvocationId ?? randomUUID(),
-      });
+      const leftovers = await relocateFixerChanges(
+        d.worktreePath,
+        d.fixBaseline,
+        { taskId: ctx.taskId, runId: args.llmInvocationId ?? randomUUID() },
+        () => taskSecretMaskPolicy(ctx.db, ctx.taskId),
+      );
       if (leftovers) {
         await recordFixerLeftovers(
           ctx.db,

@@ -13,6 +13,10 @@ import {
   renameNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import {
+  secretMaskDeniesPath,
+  type SecretMaskPolicy,
+} from '../queues/cli-exec/secret-mask-policy.js';
 import { ensureGitExcludeEntry } from '../repo/git-init.js';
 import { gitRun, type GitRunResult } from '../repo/git-push.js';
 import { HOST_REPO_ROOT } from '../repo/worktree-git-boundary.js';
@@ -244,53 +248,79 @@ async function readIgnored(dir: string, blob: string): Promise<Set<string> | { e
   );
 }
 
+/** Where the globs the sandbox masks with come from. Read at each snapshot, so a file created since
+ *  the baseline is judged too. */
+export type SecretMaskSource = () => Promise<SecretMaskPolicy | null>;
+
+async function readMaskPolicy(
+  source: SecretMaskSource,
+): Promise<{ policy: SecretMaskPolicy | null } | { error: string }> {
+  try {
+    return { policy: await source() };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+type RawBytes = { args: string[]; env: Record<string, string> };
+
+/** Attributes read from the empty tree, and no autocrlf, so a snapshot stores a file's bytes as
+ *  they are and a restore writes them back as they were: a clean filter or a line-ending
+ *  conversion would record, and put back, other bytes than the fixer found. GIT_ATTR_SOURCE needs
+ *  git 2.40; an older git applies the attributes as before. */
+async function rawBytes(dir: string): Promise<RawBytes | { error: string }> {
+  const empty = await gitRun(dir, ['hash-object', '-t', 'tree', '/dev/null']);
+  if (empty.code !== 0) return { error: gitDetail(empty) };
+  return { args: ['-c', 'core.autocrlf=false'], env: { GIT_ATTR_SOURCE: empty.stdout.trim() } };
+}
+
 /** The worktree as one git tree, untracked files included and ignored ones left out. Built in a
- *  scratch index, since the merge's own index holds the conflict. Read against a baseline, every
- *  path the baseline holds is read as it stands, whatever the ignore rules say now, and a file new
- *  since counts only when git ignored it neither then nor now: a fixer's `.gitignore` edit turns
- *  no ignored file into a new one and hides no recorded one. */
+ *  scratch index, since the merge's own index holds the conflict. An untracked file the sandbox
+ *  masks is left out too: at a same-branch root the fixer's sandbox holds `.git`, and could read a
+ *  masked file back from the blob a snapshot wrote. Read against a baseline, every path the
+ *  baseline holds is read as it stands, whatever the ignore rules say now, and a file new since
+ *  counts only when git ignored it neither then nor now: a fixer's `.gitignore` edit turns no
+ *  ignored file into a new one and hides no recorded one. */
 async function snapshotTree(
   dir: string,
-  since?: { tree: string; ignored: ReadonlySet<string> },
+  opts: {
+    raw: RawBytes;
+    secrets: SecretMaskPolicy | null;
+    since?: { tree: string; ignored: ReadonlySet<string> };
+  },
 ): Promise<TreeResult> {
+  const { raw, secrets, since } = opts;
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
   const listName = `haive-merge-snapshot-${randomUUID()}`;
   try {
-    for (const args of since
-      ? [
-          ['read-tree', since.tree],
-          ['add', '-u'],
-        ]
-      : [
-          ['read-tree', 'HEAD'],
-          ['add', '-A'],
-        ]) {
-      const res = await gitRun(dir, args, env);
-      if (res.code !== 0) return { error: gitDetail(res) };
-    }
-    if (since) {
-      const others = await gitRun(
-        dir,
-        ['ls-files', '-z', '-o', '--exclude-standard'],
-        env,
-        LISTING,
+    const read = await gitRun(dir, ['read-tree', since?.tree ?? 'HEAD'], env);
+    if (read.code !== 0) return { error: gitDetail(read) };
+    const update = await gitRun(dir, [...raw.args, 'add', '-u'], { ...env, ...raw.env });
+    if (update.code !== 0) return { error: gitDetail(update) };
+    const others = await gitRun(dir, ['ls-files', '-z', '-o', '--exclude-standard'], env, LISTING);
+    if (others.code !== 0) return { error: gitDetail(others) };
+    const added = others.stdout
+      .split('\0')
+      .filter(
+        (p) =>
+          p !== '' &&
+          !(since && covered(since.ignored, p)) &&
+          !(secrets && secretMaskDeniesPath(secrets, Buffer.from(p, 'latin1').toString('utf8'))),
       );
-      if (others.code !== 0) return { error: gitDetail(others) };
-      const added = others.stdout.split('\0').filter((p) => p !== '' && !covered(since.ignored, p));
-      if (added.length > 0) {
-        await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(added.join('\0'), 'latin1'));
-        const res = await gitRun(
-          dir,
-          [
-            'add',
-            `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`,
-            '--pathspec-file-nul',
-          ],
-          { ...env, GIT_LITERAL_PATHSPECS: '1' },
-        );
-        if (res.code !== 0) return { error: gitDetail(res) };
-      }
+    if (added.length > 0) {
+      await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(added.join('\0'), 'latin1'));
+      const res = await gitRun(
+        dir,
+        [
+          ...raw.args,
+          'add',
+          `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`,
+          '--pathspec-file-nul',
+        ],
+        { ...env, ...raw.env, GIT_LITERAL_PATHSPECS: '1' },
+      );
+      if (res.code !== 0) return { error: gitDetail(res) };
     }
     const tree = await gitRun(dir, ['write-tree'], env);
     return tree.code === 0 ? { tree: tree.stdout.trim() } : { error: gitDetail(tree) };
@@ -405,6 +435,7 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
  *  relocation reports it rather than reading the fixer's changes as none. */
 export async function captureFixBaseline(
   dir: string,
+  secrets: SecretMaskSource,
 ): Promise<FixBaseline | FixBaselineUnavailable | null> {
   if (isHostCheckout(dir)) return null;
   // `.haive/` holds other tasks' worktrees and earlier leftovers; excluded, no snapshot reads them.
@@ -418,7 +449,13 @@ export async function captureFixBaseline(
   if (head === null || mergeHead === null || resolving === null) {
     return { unavailable: 'git could not read the merge' };
   }
-  const tree = await snapshotTree(dir);
+  const masked = await readMaskPolicy(secrets);
+  if ('error' in masked) {
+    return { unavailable: `the secret mask could not be read: ${masked.error}` };
+  }
+  const raw = await rawBytes(dir);
+  if ('error' in raw) return { unavailable: `git could not record the tree: ${raw.error}` };
+  const tree = await snapshotTree(dir, { raw, secrets: masked.policy });
   if ('error' in tree) return { unavailable: `git could not record the tree: ${tree.error}` };
   const ignored = await recordIgnored(dir);
   if ('error' in ignored) {
@@ -538,6 +575,7 @@ export async function relocateFixerChanges(
   dir: string,
   baseline: FixBaseline | FixBaselineUnavailable | null | undefined,
   run: { taskId: string; runId: string },
+  secrets: SecretMaskSource,
 ): Promise<FixerLeftovers | null> {
   if (!baseline || isHostCheckout(dir)) return null;
   const folder = `${MERGE_LEFTOVERS_DIR}/${run.taskId}/${run.runId}`;
@@ -560,11 +598,20 @@ export async function relocateFixerChanges(
   ) {
     return nothingChecked('the merge it was sent into is no longer open');
   }
+  const masked = await readMaskPolicy(secrets);
+  if ('error' in masked)
+    return nothingChecked(`the secret mask could not be read: ${masked.error}`);
+  const raw = await rawBytes(dir);
+  if ('error' in raw) return nothingChecked(`git could not read the tree: ${raw.error}`);
   const ignored = await readIgnored(dir, baseline.ignored);
   if ('error' in ignored) {
     return nothingChecked(`git could not read what it ignored before it ran: ${ignored.error}`);
   }
-  const after = await snapshotTree(dir, { tree: baseline.tree, ignored });
+  const after = await snapshotTree(dir, {
+    raw,
+    secrets: masked.policy,
+    since: { tree: baseline.tree, ignored },
+  });
   if ('error' in after) return nothingChecked(`git could not read the tree: ${after.error}`);
   const { anchor, prefix } = workspaceAnchor(dir);
   const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
@@ -629,8 +676,8 @@ export async function relocateFixerChanges(
     const created = owner ? await missingParents(anchor, prefix, chunk) : [];
     const res = await gitRun(
       dir,
-      ['restore', `--source=${baseline.tree}`, '--worktree', '--', ...chunk],
-      { GIT_LITERAL_PATHSPECS: '1' },
+      [...raw.args, 'restore', `--source=${baseline.tree}`, '--worktree', '--', ...chunk],
+      { ...raw.env, GIT_LITERAL_PATHSPECS: '1' },
     );
     if (res.code !== 0) {
       for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });

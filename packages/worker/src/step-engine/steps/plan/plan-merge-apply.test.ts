@@ -73,6 +73,7 @@ function fakeDb() {
       }),
     }),
     query: {
+      tasks: { findFirst: async () => ({ userId: 'u1', repositoryId: 'r1' }) },
       repositories: { findFirst: async () => ({ credentialsSecretId: null }) },
       users: { findFirst: async () => ({ gitName: 'T', gitEmail: 't@haive.local' }) },
     },
