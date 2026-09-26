@@ -1,59 +1,26 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api, type CliProviderName, type Task, type UsageWindowSnapshot } from '@/lib/api-client';
+import { type CliProviderName, type Task } from '@/lib/api-client';
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
 import { UsageBars, usageTooltip, usageWindowsOf } from '@/components/usage-meter';
 import { selectStripMeters } from '@/components/usage-strip-select';
 import { UsagePendingChip, UsageReconnectAction } from '@/components/usage-reconnect-action';
+import { refreshUsageWindow, useUsageWindow } from '@/lib/use-usage-window';
 
 /** Subscription meters above the task list: how much allowance is left on each CLI the
  *  VISIBLE rows use, so the answer to "can these tasks still run?" is on the page you are
  *  already looking at. One meter per subscription, not per task — the same Claude login
  *  backs 25 provider rows, and repeating its number down the list would say nothing extra.
  *
- *  Polls on the usage cadence (~60s), not the list's 3s cadence: the worker's usage poller
+ *  Reads the page's one usage poll (~60s), not the list's 3s cadence: the worker's usage poller
  *  only writes every ~5 minutes, so anything faster is wasted requests against a number
  *  that has not moved. Renders nothing until it has both the rows and a readable snapshot. */
 export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
-  const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
-  const [allowanceKeys, setAllowanceKeys] = useState<Record<string, string> | undefined>(undefined);
+  const usage = useUsageWindow();
+  const snapshots = usage?.snapshots ?? null;
+  const allowanceKeys = usage?.alert?.allowanceKeys;
   const [now, setNow] = useState(() => Date.now());
-  /** Bumped when a repair completes in this tab — see UsageReconnectAction's onRepaired. */
-  const [repairNonce, setRepairNonce] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      api
-        .get<{
-          snapshots: UsageWindowSnapshot[];
-          alert?: { allowanceKeys?: Record<string, string> };
-        }>('/usage-window')
-        .then((d) => {
-          if (cancelled) return;
-          setSnapshots(d.snapshots);
-          setAllowanceKeys(d.alert?.allowanceKeys);
-        })
-        .catch(() => {
-          if (!cancelled) setSnapshots([]);
-        });
-    void load();
-    const t = setInterval(() => void load(), 60_000);
-    // Refetch on focus so returning from a reconnect done in another tab updates the meters
-    // promptly instead of waiting out the tick. Mirrors the task header chip.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void load();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onVisible);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onVisible);
-    };
-  }, [repairNonce]);
 
   // Only drives the relative reset labels ("resets 19:30"), so a slow tick is plenty.
   useEffect(() => {
@@ -89,7 +56,7 @@ export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
               providerLabel={null}
               displayName={name}
               className="flex shrink-0 items-center gap-1 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
-              onRepaired={() => setRepairNonce((n) => n + 1)}
+              onRepaired={refreshUsageWindow}
             />
           );
         }

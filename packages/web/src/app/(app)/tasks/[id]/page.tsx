@@ -111,6 +111,7 @@ import {
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, taskTitleOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
+import { refreshUsageWindow, useUsageWindow } from '@/lib/use-usage-window';
 
 /** Pick the live-browser surface for a step: the URL info box when the user chose
  *  `direct` (test in your own browser) mode, else the in-app VNC panel when the
@@ -2844,7 +2845,7 @@ const HEADER_METER_LIMIT = 2;
 /**
  * Subscription usage chips: each window's REMAINING percentage for the CLIs the current
  * step runs on (used = vendor-reported; remaining = 100 - used, matching the vendor's own
- * "% left" view). Polls /usage-window gently (~60s); dims a stale reading. Each window is
+ * "% left" view). Reads the page's one /usage-window poll (~60s); dims a stale reading. Each window is
  * coloured independently on its own remaining headroom.
  *
  * PLURAL because a fan-out step resolves a provider per SEAT — 08c-code-review can spend
@@ -2868,47 +2869,12 @@ function HeaderUsageChip({
    *  Actions menu, where an ml-auto would open a gap between the two instead. */
   className?: string;
 }) {
-  const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
-  const [allowanceKeys, setAllowanceKeys] = useState<Record<string, string> | undefined>(undefined);
+  const usage = useUsageWindow();
+  const snapshots = usage?.snapshots ?? null;
+  // Without it every provider row is its own allowance, so one Claude login backing a seat and
+  // the step default would print two identical meters side by side.
+  const allowanceKeys = usage?.alert?.allowanceKeys;
   const [now, setNow] = useState(() => Date.now());
-  /** Bumped when a repair completes in this tab — see UsageReconnectAction's onRepaired. */
-  const [repairNonce, setRepairNonce] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      api
-        .get<{
-          snapshots: UsageWindowSnapshot[];
-          alert?: { allowanceKeys?: Record<string, string> };
-        }>('/usage-window')
-        .then((d) => {
-          if (cancelled) return;
-          setSnapshots(d.snapshots);
-          // Rides along on the response the chip already fetches. Without it every provider
-          // row is its own allowance, so one Claude login backing a seat and the step default
-          // would print two identical meters side by side.
-          setAllowanceKeys(d.alert?.allowanceKeys);
-        })
-        .catch(() => {
-          if (!cancelled) setSnapshots([]);
-        });
-    void load();
-    const t = setInterval(() => void load(), 60_000);
-    // Refetch when the tab regains focus so returning from a reconnect (done in another
-    // tab) updates the chip promptly instead of waiting up to 60s for the next tick.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void load();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onVisible);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onVisible);
-    };
-  }, [repairNonce]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000);
@@ -2955,7 +2921,7 @@ function HeaderUsageChip({
           providerLabel={row?.label ?? null}
           displayName={who}
           className={chipClass('text-amber-400 hover:text-amber-300')}
-          onRepaired={() => setRepairNonce((n) => n + 1)}
+          onRepaired={refreshUsageWindow}
         />
       );
     }

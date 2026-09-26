@@ -8,9 +8,9 @@ import {
   type CliProviderName,
   type NotificationSettings,
   type Task,
-  type UsageWindowSnapshot,
 } from '@/lib/api-client';
 import { CLI_USAGE_LABEL, resetSuffix } from '@/lib/usage-format';
+import { refreshUsageWindow, useUsageWindow } from '@/lib/use-usage-window';
 import { playChime } from './chime';
 import { ToastStack, type AttentionToast } from './toast-stack';
 import {
@@ -26,10 +26,6 @@ import {
 import { WINDOW_LABEL, detectUsageAlerts, usageEpisodeKey, type UsageAlert } from './usage-alerts';
 
 const POLL_MS = 5_000;
-/** The usage channel runs on its own, much slower cadence: the worker's poller only
- *  refreshes a snapshot every ~5 min, so polling it at the 5s task rate would be 60
- *  wasted requests per reading. */
-const USAGE_POLL_MS = 60_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 
 /** The task poll is a CHANGE DETECTOR, so it pages by change, not by creation.
@@ -532,52 +528,33 @@ export function NotificationProvider() {
     markSeen(key);
   }, []);
 
-  // Usage-depletion channel. Independent of the task poll: its own (slower) cadence,
-  // its own endpoint, its own episode keys. The server AND-s the admin global, the
-  // usage-window global and this user's opt-out into `alert.enabled`, and reports which
-  // CLIs have live work in `alert.activeProviderIds`, so one fetch answers "should I
+  // Usage-depletion channel, on the page's one /usage-window poll. The server AND-s the admin
+  // global, the usage-window global and this user's opt-out into `alert.enabled`, and reports
+  // which CLIs have live work in `alert.activeProviderIds`, so one fetch answers "should I
   // warn?", "at what threshold?" and "is anything actually spending this allowance?".
+  const usage = useUsageWindow();
   useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const data = await api.get<{
-          snapshots: UsageWindowSnapshot[];
-          alert?: {
-            enabled: boolean;
-            thresholdPct: number;
-            activeProviderIds?: string[];
-            allowanceKeys?: Record<string, string>;
-          };
-        }>('/usage-window');
-        if (cancelled || !data.alert?.enabled) return;
-        const alerts = detectUsageAlerts(data.snapshots, {
-          thresholdPct: data.alert.thresholdPct,
-          now: Date.now(),
-          // Absent (older api) reads as "nothing is running", which silences the channel
-          // rather than warning off an activity set we cannot see.
-          activeProviderIds: data.alert.activeProviderIds ?? [],
-          // providerId -> the credential set it spends, so rows fronting one subscription
-          // collapse into a single alert. Absent (older api) degrades to per-row alerts.
-          allowanceKeys: data.alert.allowanceKeys,
-        });
-        for (const alert of alerts) handleUsageAlert(alert);
-      } catch {
-        // offline or auth refresh in flight — try again next tick
-      }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), USAGE_POLL_MS);
-    // Re-poll when the user flips their opt-out on the settings page, so re-enabling
-    // takes effect at once instead of up to a minute later.
-    const onChanged = () => void poll();
+    if (!usage?.alert?.enabled) return;
+    const alerts = detectUsageAlerts(usage.snapshots, {
+      thresholdPct: usage.alert.thresholdPct,
+      now: Date.now(),
+      // Absent (older api) reads as "nothing is running", which silences the channel
+      // rather than warning off an activity set we cannot see.
+      activeProviderIds: usage.alert.activeProviderIds ?? [],
+      // providerId -> the credential set it spends, so rows fronting one subscription
+      // collapse into a single alert. Absent (older api) degrades to per-row alerts.
+      allowanceKeys: usage.alert.allowanceKeys,
+    });
+    for (const alert of alerts) handleUsageAlert(alert);
+  }, [usage, handleUsageAlert]);
+
+  // Re-poll when the user flips their opt-out on the settings page, so re-enabling
+  // takes effect at once instead of up to a minute later.
+  useEffect(() => {
+    const onChanged = () => refreshUsageWindow();
     window.addEventListener(SETTINGS_CHANGED_EVENT, onChanged);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      window.removeEventListener(SETTINGS_CHANGED_EVENT, onChanged);
-    };
-  }, [handleUsageAlert]);
+    return () => window.removeEventListener(SETTINGS_CHANGED_EVENT, onChanged);
+  }, []);
 
   return (
     <ToastStack
