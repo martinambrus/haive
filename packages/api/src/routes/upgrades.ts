@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  TASK_JOB_NAMES,
   buildCliRulesBlockFromProviders,
   bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
@@ -15,7 +14,6 @@ import {
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
-  type TaskJobPayload,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
@@ -24,7 +22,7 @@ import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/sha
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { getTaskQueue } from '../queues.js';
+import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
 
@@ -630,14 +628,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create rollback task');
 
-  const queue = getTaskQueue();
-  const payload: TaskJobPayload = { taskId: task.id, userId };
-  await queue.add(TASK_JOB_NAMES.START, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, userId);
 
   const res: RollbackUpgradeResponse = { taskId: task.id };
   return c.json(res, 201);

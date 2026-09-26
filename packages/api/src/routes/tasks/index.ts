@@ -64,6 +64,7 @@ import {
   stopActiveCliInvocations,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
+import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -671,16 +672,10 @@ taskRoutes.post('/', async (c) => {
 
   await appendTaskEvent(db, task.id, null, 'task.created', { userId });
 
-  const queue = getTaskQueue();
-  const payload: TaskJobPayload = { taskId: task.id, userId };
-  await queue.add(TASK_JOB_NAMES.START, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  const queued = await markQueuedForStart(db, task.id);
+  if (queued) await enqueueStart(task.id, userId);
 
-  return c.json({ task }, 201);
+  return c.json({ task: queued ?? task }, 201);
 });
 
 // Feature/area autocomplete: distinct `metadata.feature` values previously used
@@ -1040,19 +1035,11 @@ taskRoutes.post('/:id/action', async (c) => {
       // atomically, so a second click matches no row and enqueues nothing —
       // guarding with a read-then-write instead would let two clicks both pass
       // the read and put the same task on the queue twice.
-      const [claimed] = await db
-        .update(schema.tasks)
-        .set({ status: 'queued', updatedAt: new Date() })
-        .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'created')))
-        .returning({ id: schema.tasks.id });
-      if (!claimed) return c.json({ ok: true, started: false, status: task.status });
+      if (!(await markQueuedForStart(db, id))) {
+        return c.json({ ok: true, started: false, status: task.status });
+      }
       await appendTaskEvent(db, id, null, 'task.started', { by: userId });
-      await getTaskQueue().add(TASK_JOB_NAMES.START, { taskId: id, userId } as TaskJobPayload, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      });
+      await enqueueStart(id, userId);
       return c.json({ ok: true, started: true, status: 'queued' });
     }
     case 'cancel':
@@ -1151,10 +1138,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await stopActiveCliInvocations(db, id, { failTask: false });
       await settleActiveSteps(db, id);
       await appendTaskEvent(db, id, null, 'task.retried', { by: userId });
-      await getTaskQueue().add(TASK_JOB_NAMES.START, { taskId: id, userId } as TaskJobPayload, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-      });
+      await enqueueStart(id, userId);
       return c.json({ ok: true, status: 'queued' });
     }
     case 'pause': {

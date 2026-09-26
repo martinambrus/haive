@@ -1,8 +1,7 @@
 import { schema } from '@haive/database';
-import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getTaskQueue } from '../queues.js';
 import { HttpError } from '../context.js';
+import { enqueueStart, markQueuedForStart } from './task-start.js';
 
 /** Insert the task row and enqueue it. Mirrors global-kb's enrich endpoint —
  *  the established "UI button -> LLM work" path. */
@@ -52,15 +51,6 @@ export async function spawnPlanTask(args: {
 
   if (args.enqueue === false) return task.id;
 
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.START,
-    { taskId: task.id, userId: args.userId } satisfies TaskJobPayload,
-    {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    },
-  );
+  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, args.userId);
   return task.id;
 }
