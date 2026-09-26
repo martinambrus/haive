@@ -364,6 +364,8 @@ export const CLI_EXEC_JOB_NAMES = {
   INVOKE: 'cli-invoke',
   PROBE: 'cli-probe',
   BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
+  /** Remove a deleted provider's sandbox image, unless another provider still uses its tag. */
+  REMOVE_SANDBOX_IMAGE: 'cli-remove-sandbox-image',
   REFRESH_VERSIONS: 'cli-refresh-versions',
   LOGIN_CREATE: 'cli-login-create',
   SIGN_OUT: 'cli-sign-out',
@@ -452,6 +454,11 @@ export interface SandboxImageBuildJobPayload {
   providerId: string;
   userId: string;
   force?: boolean;
+}
+
+export interface SandboxImageRemoveJobPayload {
+  providerId: string;
+  imageTag: string;
 }
 
 export interface SandboxImageBuildResult {

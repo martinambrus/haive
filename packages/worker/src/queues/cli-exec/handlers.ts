@@ -30,6 +30,7 @@ import {
   type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
+  type SandboxImageRemoveJobPayload,
   type OllamaProvisionJobPayload,
   type OllamaProvisionResult,
 } from '@haive/shared';
@@ -90,7 +91,12 @@ import {
   resumeStepIfLinked,
   STATUS_DEFAULT_MESSAGE,
 } from './resolvers.js';
-import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
+import {
+  markProvidersReady,
+  probeCliPath,
+  removeOrphanedPreviousImage,
+  withImageTagLock,
+} from './images.js';
 import { resolveInvocationCost } from './invocation-cost.js';
 import {
   codexAppServerFallbackWarning,
@@ -660,9 +666,12 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   if (!payload.force) {
-    const existing = await defaultDockerRunner.inspect(imageTag);
-    if (existing.exists) {
+    const cached = await withImageTagLock(imageTag, async () => {
+      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return false;
       await markProvidersReady(db, imageTag, provider.id, shared);
+      return true;
+    });
+    if (cached) {
       await removeOrphanedPreviousImage(db, {
         providerId: provider.id,
         previousDbTag,
@@ -738,6 +747,28 @@ export async function handleBuildSandboxImageJob(
       .where(eq(schema.cliProviders.id, provider.id));
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
+  } finally {
+    // A provider deleted before this build registered, or while it ran, may have had its removal
+    // find no build to wait for, and a build that did not succeed leaves the tag it was replacing.
+    try {
+      const stillThere = await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider.id),
+        columns: { id: true },
+      });
+      if (!stillThere) {
+        for (const tag of new Set([imageTag, previousDbTag])) {
+          if (tag) {
+            await removeOrphanedPreviousImage(db, {
+              providerId: provider.id,
+              previousDbTag: tag,
+              newTag: null,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log.warn({ err, providerId: provider.id }, "could not remove a deleted provider's images");
+    }
   }
 }
 
@@ -745,6 +776,27 @@ export async function handleBuildSandboxImageJob(
  *  inline dispatch build both run in: a provider that needs an image another is building joins
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
+
+/** Remove the image a deleted provider named, unless another provider names it too. A build of the
+ *  tag in flight is waited out first, whatever it ends in, since it may have been this provider's. */
+export async function handleRemoveSandboxImageJob(
+  db: Database,
+  payload: SandboxImageRemoveJobPayload,
+): Promise<void> {
+  const building = inFlightBuilds.get(payload.imageTag);
+  if (building) {
+    log.info(payload, "waiting for the build of a deleted provider's tag before removing it");
+    await building.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+  await removeOrphanedPreviousImage(db, {
+    providerId: payload.providerId,
+    previousDbTag: payload.imageTag,
+    newTag: null,
+  });
+}
 
 /** One docker build of `resolution`'s tag. The builder alone removes the image the tag named
  *  before, since a provider that joined the build has nothing of its own to replace. */
@@ -1430,6 +1482,9 @@ export async function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE) {
         return handleBuildSandboxImageJob(db, job.data as SandboxImageBuildJobPayload);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE) {
+        return handleRemoveSandboxImageJob(db, job.data as SandboxImageRemoveJobPayload);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
         return handleRefreshCliVersionsJob(db);

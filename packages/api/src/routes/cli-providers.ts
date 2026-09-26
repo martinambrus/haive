@@ -14,6 +14,7 @@ import {
   inheritsDefaultRules,
   isOllamaCloudModel,
   isRunnableCliVersion,
+  logger,
   normalizeCliArgsArray,
   secretsService,
   setCliProviderSecretRequestSchema,
@@ -27,6 +28,7 @@ import {
   type OllamaProvisionJobPayload,
   type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
+  type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
 import { z } from 'zod';
@@ -235,6 +237,7 @@ async function enqueueOllamaProvisionForProvider(
 }
 
 export const cliProviderRoutes = new Hono<AppEnv>();
+const log = logger.child({ module: 'cli-providers' });
 
 /** `rulesInherited` lets the provider form show the live default, which follows template edits,
  *  instead of the possibly stale copy of it stored on the row. */
@@ -541,8 +544,22 @@ cliProviderRoutes.delete('/:id', async (c) => {
   const result = await db
     .delete(schema.cliProviders)
     .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
-    .returning({ id: schema.cliProviders.id });
+    .returning({ id: schema.cliProviders.id, imageTag: schema.cliProviders.sandboxImageTag });
   if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
+  const imageTag = result[0]!.imageTag;
+  if (imageTag) {
+    const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
+    // The provider is gone either way, and a removal never queued only leaves its image behind.
+    // Not awaited: the queue waits for redis rather than failing, which would hold this answer.
+    void getCliExecQueue()
+      .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
+        removeOnComplete: true,
+        removeOnFail: 50,
+      })
+      .catch((err: unknown) =>
+        log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
+      );
+  }
   return c.json({ ok: true });
 });
 

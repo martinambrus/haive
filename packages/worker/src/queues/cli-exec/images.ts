@@ -508,9 +508,27 @@ export async function markProvidersReady(
     .where(eq(schema.cliProviders.id, providerId));
 }
 
+const tagTurns = new Map<string, Promise<void>>();
+
+/** Run `fn` once every earlier call for `tag` in this process has settled. A removal reads that no
+ *  provider names the tag before it removes the image, and a cache hit marked ready in between
+ *  would be left naming an image that is gone. */
+export function withImageTagLock<T>(tag: string, fn: () => Promise<T>): Promise<T> {
+  const turn = (tagTurns.get(tag) ?? Promise.resolve()).then(fn);
+  const settled = turn.then(
+    () => {},
+    () => {},
+  );
+  tagTurns.set(tag, settled);
+  void settled.then(() => {
+    if (tagTurns.get(tag) === settled) tagTurns.delete(tag);
+  });
+  return turn;
+}
+
 export async function removeOrphanedPreviousImage(
   db: Database,
-  args: { providerId: string; previousDbTag: string | null; newTag: string },
+  args: { providerId: string; previousDbTag: string | null; newTag: string | null },
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<{
   removed: boolean;
@@ -519,33 +537,35 @@ export async function removeOrphanedPreviousImage(
   const { previousDbTag, newTag, providerId } = args;
   if (!previousDbTag) return { removed: false, reason: 'no-previous' };
   if (previousDbTag === newTag) return { removed: false, reason: 'same-tag' };
-  const stillInUse = await db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.sandboxImageTag, previousDbTag),
-    columns: { id: true },
-  });
-  if (stillInUse) {
-    log.info(
-      { providerId, previousDbTag, newTag, otherProviderId: stillInUse.id },
-      'keeping previous sandbox image, still referenced by another provider',
+  return withImageTagLock(previousDbTag, async () => {
+    const stillInUse = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.sandboxImageTag, previousDbTag),
+      columns: { id: true },
+    });
+    if (stillInUse) {
+      log.info(
+        { providerId, previousDbTag, newTag, otherProviderId: stillInUse.id },
+        'keeping previous sandbox image, still referenced by another provider',
+      );
+      return { removed: false, reason: 'still-in-use' };
+    }
+    const inspected = await runner.inspect(previousDbTag);
+    if (!inspected.exists) return { removed: false, reason: 'missing' };
+    const removeResult = await runner.remove(previousDbTag);
+    if (removeResult.ok) {
+      log.info({ providerId, previousDbTag, newTag }, 'removed orphaned previous sandbox image');
+      return { removed: true, reason: 'removed' };
+    }
+    log.warn(
+      {
+        providerId,
+        previousDbTag,
+        newTag,
+        stderr: removeResult.stderr,
+        error: removeResult.error,
+      },
+      'failed to remove orphaned previous sandbox image',
     );
-    return { removed: false, reason: 'still-in-use' };
-  }
-  const inspected = await runner.inspect(previousDbTag);
-  if (!inspected.exists) return { removed: false, reason: 'missing' };
-  const removeResult = await runner.remove(previousDbTag);
-  if (removeResult.ok) {
-    log.info({ providerId, previousDbTag, newTag }, 'removed orphaned previous sandbox image');
-    return { removed: true, reason: 'removed' };
-  }
-  log.warn(
-    {
-      providerId,
-      previousDbTag,
-      newTag,
-      stderr: removeResult.stderr,
-      error: removeResult.error,
-    },
-    'failed to remove orphaned previous sandbox image',
-  );
-  return { removed: false, reason: 'remove-failed' };
+    return { removed: false, reason: 'remove-failed' };
+  });
 }

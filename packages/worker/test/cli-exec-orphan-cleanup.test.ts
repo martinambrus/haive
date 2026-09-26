@@ -125,6 +125,18 @@ describe('removeOrphanedPreviousImage', () => {
     expect(removeCalls).toEqual(['haive-cli-sandbox:provider-p1-oldhash']);
   });
 
+  it("removes a deleted provider's image, which has no new tag", async () => {
+    const db = makeDb(undefined);
+    const { runner, removeCalls } = makeRunner({ exists: true, removeOk: true });
+    const result = await removeOrphanedPreviousImage(
+      db,
+      { providerId: 'p1', previousDbTag: 'haive-cli-sandbox:provider-p1-oldhash', newTag: null },
+      runner,
+    );
+    expect(result).toEqual({ removed: true, reason: 'removed' });
+    expect(removeCalls).toEqual(['haive-cli-sandbox:provider-p1-oldhash']);
+  });
+
   it('reports remove-failed when the docker remove call fails (image in use, etc.)', async () => {
     const db = makeDb(undefined);
     const { runner, inspectCalls, removeCalls } = makeRunner({ exists: true, removeOk: false });
