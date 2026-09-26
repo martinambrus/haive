@@ -10,7 +10,6 @@ import {
 import type { Database } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
-  captureFixBaseline,
   completeMergeHostSide,
   fixerLeftoversWarning,
   recordFixerLeftovers,
@@ -36,6 +35,7 @@ import {
   reconcilePlanMirror,
   writePlanMirror,
 } from '../../../plan/mirror.js';
+import { moveAsideFixerLeftovers, planMergeFixBaseline } from '../../../plan/merge-baseline.js';
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
@@ -278,6 +278,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     });
     await ensurePlanMergeWorktree(ctx.repoPath);
     let open = await mergeIsOpen(worktreePath);
+    let opened = false;
     let unrelated = false;
     if (!open) {
       await fetchOrigin({
@@ -292,6 +293,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       if (gap.behind > 0) {
         const attempt = await mergeOriginInto(worktreePath, branch, gap.unrelated, identity);
         open = !attempt.clean;
+        opened = open;
       }
     } else {
       unrelated = (await divergence(ctx.repoPath, branch)).unrelated;
@@ -309,14 +311,13 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       pendingGuidance: last?.role === 'user' ? last.body : null,
       mergeOpen: open,
     };
-    return needsAgentPass(found)
-      ? {
-          ...found,
-          fixBaseline: await captureFixBaseline(worktreePath, () =>
-            taskSecretMaskPolicy(ctx.db, ctx.taskId),
-          ),
-        }
-      : found;
+    if (!open || found.conflicts.length === 0) return found;
+    const fixBaseline = await planMergeFixBaseline(
+      ctx.db,
+      { repositoryId, taskId: ctx.taskId, taskStepId: ctx.taskStepId, worktreePath },
+      opened,
+    );
+    return needsAgentPass(found) ? { ...found, fixBaseline } : found;
   },
 
   llm: {
@@ -328,6 +329,18 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // Nothing unresolved, or the budget for this conflict set is spent — either way
     // there is nothing to ask an agent, and form() offers the complementary form.
     skipIf: ({ detected }) => !needsAgentPass(detected as PlanMergeDetect),
+    // Each fixer starts from the tree the merge left, whatever an earlier one that failed, was
+    // stopped or was re-dispatched left behind.
+    prepareWorkspace: async ({ ctx, detected }) => {
+      const d = detected as PlanMergeDetect;
+      if (!d.fixBaseline || 'unavailable' in d.fixBaseline) return;
+      await moveAsideFixerLeftovers(
+        ctx.db,
+        d.worktreePath,
+        { baseline: d.fixBaseline, taskId: ctx.taskId, taskStepId: ctx.taskStepId },
+        `origin/${d.branch}`,
+      );
+    },
     buildPrompt: ({ detected }) => buildPrompt(detected as PlanMergeDetect),
     bypassStub: () => 'test bypass — no change',
   },

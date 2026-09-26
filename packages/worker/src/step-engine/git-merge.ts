@@ -49,7 +49,12 @@ function nulPaths(out: string): string[] {
 /** The paths still unmerged in `dir`, or null when git could not list them. Read with `-z`: without
  *  it git quotes a name holding a quote or a non-ASCII byte, and the quoted form names no file. */
 export async function unmergedPaths(dir: string): Promise<string[] | null> {
-  const res = await gitRun(dir, ['diff', '--name-only', '--diff-filter=U', '-z']);
+  const res = await gitRun(
+    dir,
+    ['diff', '--name-only', '--diff-filter=U', '-z'],
+    undefined,
+    LISTING_BUFFER,
+  );
   return res.code === 0 ? nulPaths(res.stdout) : null;
 }
 
@@ -96,8 +101,8 @@ function isHostCheckout(dir: string): boolean {
 /** Paths the merge staged and something edited since, which is what makes `merge --abort` refuse. */
 async function stagedThenEdited(dir: string): Promise<string[] | null> {
   const [staged, edited, unmerged] = await Promise.all([
-    gitRun(dir, ['diff', '--cached', '--name-only', '-z']),
-    gitRun(dir, ['diff', '--name-only', '-z']),
+    gitRun(dir, ['diff', '--cached', '--name-only', '-z'], undefined, LISTING_BUFFER),
+    gitRun(dir, ['diff', '--name-only', '-z'], undefined, LISTING_BUFFER),
     unmergedPaths(dir),
   ]);
   if (staged.code !== 0 || edited.code !== 0 || unmerged === null) return null;
@@ -181,9 +186,11 @@ export interface FixBaselineUnavailable {
 
 type TreeResult = { tree: string } | { error: string };
 
+/** A listing names every path it covers, so on a large merge it outgrows execFile's 1 MiB default. */
+const LISTING_BUFFER = { maxBuffer: 64 * 1024 * 1024 } as const;
 /** Listings name every file, and latin1 keeps each byte of a name as one character, so a name that
  *  is not UTF-8 compares and is written back as it was read. */
-const LISTING = { maxBuffer: 64 * 1024 * 1024, encoding: 'latin1' } as const;
+const LISTING = { ...LISTING_BUFFER, encoding: 'latin1' } as const;
 
 /** True when `p`, or a directory holding it, is one of `entries`. */
 function covered(entries: ReadonlySet<string>, p: string): boolean {
@@ -339,7 +346,12 @@ async function snapshotTree(
  *  conflicted paths left as HEAD has them. Built from the changes alone, so it costs what the merge
  *  changed rather than what the repository holds. */
 async function stagedTree(dir: string): Promise<TreeResult> {
-  const changes = await gitRun(dir, ['diff-index', '--cached', '-z', '--no-renames', 'HEAD']);
+  const changes = await gitRun(
+    dir,
+    ['diff-index', '--cached', '-z', '--no-renames', 'HEAD'],
+    undefined,
+    LISTING_BUFFER,
+  );
   if (changes.code !== 0) return { error: gitDetail(changes) };
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
@@ -380,9 +392,7 @@ async function stagedTree(dir: string): Promise<TreeResult> {
  *  side changed it since the merge base: git takes the directory cleanly where it did not. */
 async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[] | null> {
   if (unmerged.length === 0) return [];
-  const listed = await gitRun(dir, ['ls-files', '-u', '-z'], undefined, {
-    maxBuffer: LISTING.maxBuffer,
-  });
+  const listed = await gitRun(dir, ['ls-files', '-u', '-z'], undefined, LISTING_BUFFER);
   if (listed.code !== 0) return null;
   const stages = new Map<string, Map<string, string>>();
   for (const record of listed.stdout.split('\0')) {
@@ -405,9 +415,8 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
       const siblings = await gitRun(
         dir,
         ['ls-tree', '-z', side, ...(parent ? ['--', parent] : [])],
-        {
-          GIT_LITERAL_PATHSPECS: '1',
-        },
+        { GIT_LITERAL_PATHSPECS: '1' },
+        LISTING_BUFFER,
       );
       if (siblings.code !== 0) return null;
       for (const entry of siblings.stdout.split('\0')) {
@@ -632,14 +641,12 @@ export async function relocateFixerChanges(
   const restore: string[] = [];
   const deleted = new Set<string>();
   if (after.tree !== baseline.tree) {
-    const diff = await gitRun(dir, [
-      'diff-tree',
-      '-r',
-      '-z',
-      '--no-renames',
-      baseline.tree,
-      after.tree,
-    ]);
+    const diff = await gitRun(
+      dir,
+      ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after.tree],
+      undefined,
+      LISTING_BUFFER,
+    );
     if (diff.code !== 0) return nothingChecked(gitDetail(diff));
     for (const c of rawChanges(diff.stdout)) {
       if (!outside(c)) continue;
@@ -691,13 +698,12 @@ export async function relocateFixerChanges(
   }
   const unstaged: FixerLeftovers['unstaged'] = [];
   let indexUnchecked: string | undefined;
-  const staged = await gitRun(dir, [
-    'diff-index',
-    '--cached',
-    '-z',
-    '--no-renames',
-    baseline.index,
-  ]);
+  const staged = await gitRun(
+    dir,
+    ['diff-index', '--cached', '-z', '--no-renames', baseline.index],
+    undefined,
+    LISTING_BUFFER,
+  );
   if (staged.code !== 0) {
     indexUnchecked = `git could not read the index: ${gitDetail(staged)}`;
   } else {
@@ -767,7 +773,7 @@ export async function relocateFixerChanges(
 export async function recordFixerLeftovers(
   db: Database,
   taskId: string,
-  taskStepId: string,
+  taskStepId: string | null,
   branch: string,
   leftovers: FixerLeftovers,
 ): Promise<void> {

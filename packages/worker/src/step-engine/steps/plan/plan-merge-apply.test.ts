@@ -6,6 +6,8 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { planMergeStep } from './01-plan-merge.js';
+import { PLAN_MERGE_BASELINE_EVENT } from '../../../plan/merge-baseline.js';
+import type { FixBaseline } from '../../git-merge.js';
 import type { StepContext } from '../../step-definition.js';
 
 const exec = promisify(execFile);
@@ -61,14 +63,25 @@ async function unrelatedPair(): Promise<string> {
   return local;
 }
 
+type Event = { taskId: string; taskStepId: string; eventType: string; payload: unknown };
+
 function fakeDb() {
-  const events: { eventType: string; payload: unknown }[] = [];
+  const events: Event[] = [];
+  // The one joined read is the recorded-tree lookup, newest first.
+  const recorded = (n: number) =>
+    events
+      .filter((e) => e.eventType === PLAN_MERGE_BASELINE_EVENT)
+      .reverse()
+      .slice(0, n);
   const db = {
     select: () => ({
       from: (table: unknown) => ({
         where: () => ({
           limit: async () => (table === schema.tasks ? [{ repositoryId: 'r1' }] : []),
           orderBy: async () => [],
+        }),
+        innerJoin: () => ({
+          where: () => ({ orderBy: () => ({ limit: async (n: number) => recorded(n) }) }),
         }),
       }),
     }),
@@ -78,12 +91,24 @@ function fakeDb() {
       users: { findFirst: async () => ({ gitName: 'T', gitEmail: 't@haive.local' }) },
     },
     insert: (table: unknown) => ({
-      values: async (v: { eventType: string; payload: unknown }) => {
+      values: async (v: Event) => {
         if (table === schema.taskEvents) events.push(v);
       },
     }),
   };
   return { db, events };
+}
+
+function contextFor(repoPath: string, db: unknown): StepContext {
+  return {
+    repoPath,
+    userId: 'u1',
+    taskId: 't1',
+    taskStepId: 's1',
+    cliProviderId: null,
+    db,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  } as unknown as StepContext;
 }
 
 describe('plan merge: the answer pass', () => {
@@ -119,5 +144,62 @@ describe('plan merge: the answer pass', () => {
     expect(await readFile(moved, 'utf8')).toBe('scratch\n');
     expect(events.map((e) => e.eventType)).toContain('merge.fixer_leftovers');
     expect(out.summary).toContain('.haive/merge-leftovers/t1/');
+  });
+});
+
+describe('plan merge: a fixer that did not finish', () => {
+  it('moves aside what it left before the next fixer is sent in', async () => {
+    const local = await unrelatedPair();
+    const { db, events } = fakeDb();
+    const ctx = contextFor(local, db);
+    const first = await planMergeStep.detect!(ctx);
+    expect(first.fixBaseline).toMatchObject({ resolving: ['README.md'] });
+    const wt = first.worktreePath;
+    // It staged a change outside the conflict, and its run failed: apply never ran.
+    await writeFile(path.join(wt, 'notes.txt'), 'scratch\n', 'utf8');
+    await git(wt, ['add', 'notes.txt']);
+
+    const retried = await planMergeStep.detect!(ctx);
+    expect(retried.fixBaseline).toEqual(first.fixBaseline);
+    await planMergeStep.llm!.prepareWorkspace!({ ctx, detected: retried, formValues: {} });
+    expect(await gitCode(wt, ['cat-file', '-e', ':notes.txt'])).not.toBe(0);
+    await expect(readFile(path.join(wt, 'notes.txt'), 'utf8')).rejects.toThrow();
+    const moved = events.find((e) => e.eventType === 'merge.fixer_leftovers');
+    expect(moved?.payload).toMatchObject({ moved: ['notes.txt'] });
+    const folder = (moved?.payload as { folder: string }).folder;
+    expect(await readFile(path.join(local, folder, 'files', 'notes.txt'), 'utf8')).toBe(
+      'scratch\n',
+    );
+
+    await writeFile(path.join(wt, 'README.md'), '# vareska\n\nboth sides\n', 'utf8');
+    const out = await planMergeStep.apply(ctx, {
+      detected: retried,
+      formValues: {},
+      llmOutput: 'Kept both sides.',
+      llmInvocationId: 'inv2',
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.resolved).toBe(true);
+    expect(await gitCode(wt, ['cat-file', '-e', 'HEAD:notes.txt'])).not.toBe(0);
+  });
+
+  it('records the tree afresh when it opens the merge again', async () => {
+    const local = await unrelatedPair();
+    const { db, events } = fakeDb();
+    const ctx = contextFor(local, db);
+    const first = await planMergeStep.detect!(ctx);
+    const wt = first.worktreePath;
+    await git(wt, ['merge', '--abort']);
+    await writeFile(path.join(wt, 'kept.txt'), 'here before the merge\n', 'utf8');
+
+    const again = await planMergeStep.detect!(ctx);
+    expect(again.mergeOpen).toBe(true);
+    expect((again.fixBaseline as FixBaseline).tree).not.toBe(
+      (first.fixBaseline as FixBaseline).tree,
+    );
+    expect(events.filter((e) => e.eventType === PLAN_MERGE_BASELINE_EVENT)).toHaveLength(2);
+    await planMergeStep.llm!.prepareWorkspace!({ ctx, detected: again, formValues: {} });
+    expect(await readFile(path.join(wt, 'kept.txt'), 'utf8')).toBe('here before the merge\n');
   });
 });

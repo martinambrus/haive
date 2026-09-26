@@ -45,13 +45,15 @@ const COMMIT_ENV: Record<string, string> = {
   GIT_COMMITTER_NAME: 'T',
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
+// A wide merge prints more than execFile's 1 MiB default, which kills git part-way through.
+const GIT_OPTS = { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 };
 async function git(dir: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
+  const { stdout } = await exec('git', args, { cwd: dir, ...GIT_OPTS });
   return stdout.toString();
 }
 async function gitCode(dir: string, args: string[]): Promise<number> {
   try {
-    await exec('git', args, { cwd: dir, env: GIT_ENV });
+    await exec('git', args, { cwd: dir, ...GIT_OPTS });
     return 0;
   } catch (e) {
     return (e as { code?: number }).code ?? 1;
@@ -194,6 +196,44 @@ async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
   await writeFile(path.join(dir, 'app.log'), 'line1\n', 'utf8');
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
   return { dir, kept };
+}
+
+/** Fifteen directories of 240-character names: 300 paths under it list past execFile's 1 MiB. */
+const DEEP = Array.from({ length: 15 }, (_, i) => String(i).padEnd(240, 'd')).join('/');
+
+async function writeMany(
+  dir: string,
+  sub: string,
+  count: number,
+  body: (i: number) => string,
+): Promise<void> {
+  await mkdir(path.join(dir, sub), { recursive: true });
+  for (let i = 0; i < count; i++) {
+    await writeFile(path.join(dir, sub, `f${i}.txt`), body(i), 'utf8');
+  }
+}
+
+/** 300 files conflicting in DEEP beside a directory/file conflict on `DEEP/foo`, left open. */
+async function setupWideConflict(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-wide-'));
+  await git(dir, ['init', '-b', 'main']);
+  await git(dir, ['config', 'gc.auto', '0']);
+  await writeMany(dir, DEEP, 300, () => 'base\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeMany(dir, DEEP, 300, (i) => `feature ${i}\n`);
+  await mkdir(path.join(dir, DEEP, 'foo'));
+  await writeFile(path.join(dir, DEEP, 'foo', 'bar'), 'bar\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  await writeMany(dir, DEEP, 300, (i) => `main ${i}\n`);
+  await writeFile(path.join(dir, DEEP, 'foo'), 'file\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'main']);
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
 }
 
 /** One side holds a file `foo` and the other a directory `foo/bar`, so git moves the file aside and
@@ -730,6 +770,29 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it("moves and unstages a fixer's changes whose listing passes 1 MiB", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeMany(dir, DEEP, 300, (i) => `stray ${i}\n`);
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toBeUndefined();
+      expect(out?.moved).toHaveLength(300);
+      expect(out?.unstaged).toHaveLength(302);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await gitCode(dir, ['cat-file', '-e', `HEAD:${DEEP}/f0.txt`])).not.toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
     vi.stubEnv('HOST_REPO_ROOT', root);
@@ -750,6 +813,23 @@ describe('fixer leftovers (real git)', () => {
 describe('merge helpers (real git)', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('reads, records and aborts a merge whose listings pass 1 MiB', async () => {
+    const dir = await setupWideConflict();
+    try {
+      const unmerged = await unmergedPaths(dir);
+      expect(unmerged).toHaveLength(301);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      expect(baseline).not.toHaveProperty('unavailable');
+      expect(baseline).toMatchObject({
+        resolving: expect.arrayContaining([`${DEEP}/f0.txt`, `${DEEP}/foo~HEAD`, `${DEEP}/foo`]),
+      });
+      await writeFile(path.join(dir, DEEP, 'foo', 'bar'), 'fixer edit\n', 'utf8');
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('checks the markers of a conflicted file whose name git quotes', async () => {

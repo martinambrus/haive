@@ -30,6 +30,7 @@ import {
   mergeOriginInto,
   removePlanMergeWorktree,
 } from '../plan/merge.js';
+import { moveAsideRecordedLeftovers } from '../plan/merge-baseline.js';
 
 const SWEEP_EVERY_MS = 10_000;
 const SWEEP_JOB_ID = 'plan-mirror-dirty-sweep';
@@ -125,7 +126,8 @@ async function flushCurrentPlanMirror(
  * and two owners for one mid-merge tree is how a half-resolved state outlives the
  * thing that made it.
  */
-async function integrateOrigin(args: {
+export async function integrateOrigin(args: {
+  repositoryId: string;
   repoPath: string;
   branch: string;
   userId: string;
@@ -148,6 +150,15 @@ async function integrateOrigin(args: {
 
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
   try {
+    // An abandoned conversation's open merge is discarded below, but not what its fixers left.
+    await moveAsideRecordedLeftovers(
+      db,
+      args.repositoryId,
+      worktree,
+      `origin/${args.branch}`,
+    ).catch((err) =>
+      logger.warn({ err, repositoryId: args.repositoryId }, 'plan merge leftovers kept'),
+    );
     const attempt = await mergeOriginInto(worktree, args.branch, gap.unrelated, args.identity);
     if (!attempt.clean) {
       await abortMerge(worktree);
@@ -209,6 +220,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
       // text would break silently on a git upgrade. Ahead/behind counts say the same
       // thing structurally.
       const integrated = await integrateOrigin({
+        repositoryId: repo.id,
         repoPath,
         branch,
         userId: payload.userId,
@@ -321,6 +333,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     // nothing could resolve one; it also meant a plan could never reach a repository
     // that had a README before Haive did.
     const integrated = await integrateOrigin({
+      repositoryId: repo.id,
       repoPath,
       branch,
       userId: payload.userId,
