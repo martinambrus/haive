@@ -343,14 +343,19 @@ async function snapshotTree(
     if (update.code !== 0) return { error: gitDetail(update) };
     const others = await gitRun(dir, ['ls-files', '-z', '-o', '--exclude-standard'], env, LISTING);
     if (others.code !== 0) return { error: gitDetail(others) };
-    const added = others.stdout
+    const listed = others.stdout
       .split('\0')
-      .filter(
-        (p) =>
-          p !== '' &&
-          !(since && covered(since.ignored, p)) &&
-          !(secrets && secretMaskDeniesPath(secrets, shown(p))),
-      );
+      .filter((p) => p !== '' && !(since && covered(since.ignored, p)));
+    const denied = new Set(
+      secrets ? listed.filter((p) => secretMaskDeniesPath(secrets, shown(p))) : [],
+    );
+    if (denied.size > 0) {
+      // The sandbox masks only what the merge's own index does not track, a file it added included.
+      const tracked = await gitRun(dir, ['ls-files', '-z'], undefined, LISTING);
+      if (tracked.code !== 0) return { error: gitDetail(tracked) };
+      for (const p of nulPaths(tracked.stdout)) denied.delete(p);
+    }
+    const added = listed.filter((p) => !denied.has(p));
     if (added.length > 0) {
       const res = await gitWithPathspecs(dir, [...raw.args, 'add'], added, { ...env, ...raw.env });
       if (res.code !== 0) return { error: gitDetail(res) };

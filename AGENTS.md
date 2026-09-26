@@ -516,10 +516,12 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   under a rule it dropped read as new and be moved, and hid a recorded file under a rule it added,
   which the restore then wrote over (MEASURED on git 2.43). So the tree taken once it ends starts
   from the recorded one, and only a file new since is judged by the rules it leaves. While secret
-  masking is on (the default), the deny-list's files (`.env`, `.env.*`) are read-only empty mounts
-  in the fixer's sandbox, so it cannot change those, and an untracked one is left out of both
-  snapshots, masking on or off: at a same-branch root the sandbox holds `.git`, where a snapshot's
-  blob would hand the fixer back what the mask hides. Both snapshots and the restore read
+  masking is on (the default), the deny-list's files (`.env`, `.env.*`) that the merge's own index
+  does not track are read-only empty mounts in the fixer's sandbox, so it cannot change those, and
+  such a file is left out of both snapshots, masking on or off: at a same-branch root the sandbox
+  holds `.git`, where a snapshot's blob would hand the fixer back what the mask hides. One the merge
+  added is tracked there, so the sandbox leaves it readable and both snapshots read it. Both
+  snapshots and the restore read
   `.gitattributes` from the empty tree (`GIT_ATTR_SOURCE`, git 2.40) with `core.autocrlf` off and
   `core.fileMode` on, so no clean filter or line-ending conversion stands between the bytes recorded
   and the bytes put back, and a change of the executable bit is seen where the repository ignores

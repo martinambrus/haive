@@ -751,6 +751,41 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // The sandbox masks only what the merge's own index does not track, and the merge tracks what it adds.
+  it('moves a fixer edit to a masked name the merge added', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-env-'));
+    try {
+      await initRepo(dir);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+      await writeFile(path.join(dir, '.env'), 'FROM=feature\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'feature']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
+      await git(dir, ['commit', '-am', 'main']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const masked = async () => secretMaskPolicy({});
+      const baseline = await captureFixBaseline(dir, masked);
+      await writeFile(path.join(dir, '.env'), 'FROM=fixer\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        masked,
+      );
+      expect(out?.moved).toEqual(['.env']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('.env')).toBe('FROM=feature\n');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/.env')).toBe('FROM=fixer\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   // A clean filter or a line-ending conversion would record, and put back, other bytes than these.
   it('puts back the bytes a file held, whatever filter or line ending applies to it', async () => {
     const dir = await setupMergeWithOwnWork();
