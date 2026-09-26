@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-15, 18, 19, 22, 23 and 24 merged (#301-#313, #315-#317 and
-> #319-#322); PR 21 (the upgrade banner offers the RTK settings files again once RTK is back on) is
-> in review. Tracked in the status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-15, 18, 19, 21, 22, 23 and 24 merged (#301-#313, #315-#317
+> and #319-#323); PR 16 (deleting a provider removes its own image) is in review. Tracked in the
+> status table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
