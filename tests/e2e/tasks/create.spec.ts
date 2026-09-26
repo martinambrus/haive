@@ -225,7 +225,7 @@ test.describe('tasks list and create', () => {
         task: { id: string; type: string; status: string };
       };
       expect(onboardingBody.task.type).toBe('onboarding');
-      expect(onboardingBody.task.status).toBe('created');
+      expect(onboardingBody.task.status).toBe('queued');
       createdIds.push(onboardingBody.task.id);
 
       // A workflow task REQUIRES a description — createTaskRequestSchema refines exactly that,
@@ -247,7 +247,7 @@ test.describe('tasks list and create', () => {
         task: { id: string; type: string; status: string };
       };
       expect(workflowBody.task.type).toBe('workflow');
-      expect(workflowBody.task.status).toBe('created');
+      expect(workflowBody.task.status).toBe('queued');
       createdIds.push(workflowBody.task.id);
 
       const rows = await sql<{ id: string; type: string }[]>`
