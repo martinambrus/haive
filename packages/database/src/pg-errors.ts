@@ -38,6 +38,16 @@ export function isUniqueViolation(err: unknown): boolean {
   return hasPgCode(err, UNIQUE_VIOLATION);
 }
 
+/** True when an error — or anything it wraps — is a unique_violation of the named index. */
+export function isUniqueViolationOf(err: unknown, index: string): boolean {
+  for (let e: unknown = err, depth = 0; e != null && depth < 5; depth++) {
+    const fields = e as { code?: unknown; constraint_name?: unknown };
+    if (fields.code === UNIQUE_VIOLATION && fields.constraint_name === index) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /**
  * True when an error — or anything it wraps — is a Postgres undefined_table (42P01),
  * i.e. the query named a relation that does not exist.

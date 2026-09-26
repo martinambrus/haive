@@ -2777,7 +2777,11 @@ rollback only while that upgrade is the newest completed task of the two kinds
 (`latestUpgradeToRollBack`): after a rollback nothing is left to undo until another upgrade
 completes, and upgrade-status offers no rollback either. The banner opens the live task
 (`inProgressUpgradeTaskId`) where "Continue upgrade" used to start another, and hides Roll back while
-one runs.
+one runs. A check at creation cannot see a Retry of one that failed, which revived it beside the
+next, so the rule is also an index (`tasks_one_live_upgrade_per_repo_idx`, migration 0168): one live
+`onboarding_upgrade` task per repository, whoever writes the status. The api answers its violation
+409 in `errorHandler`, whichever route revived the task, and the worker's revival reads it as the
+task not pointed. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
