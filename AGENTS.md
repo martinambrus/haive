@@ -2516,6 +2516,18 @@ since, warns, and retires the upgrade's row all the same. 04 also reads only the
 there, and read as new files they were deleted: on a first upgrade's rollback, that took every
 adopted file the person had declined.
 
+**A rollback puts back what stood before, absence included, from what 02 recorded.** Reading it off
+the rows failed three ways: a file missing before the upgrade came back from the row that recorded it,
+or from a backfill row written while it was missing; a row an old reset superseded was restored over
+bytes it never held; and a file already holding the render with no row was deleted as new. So 02
+records every path it wrote into nothing (`createdPaths`: no file, or for the rules region no region,
+with the live row it retired there) and every row it retired or kept as a baseline (`retiredRowIds`).
+04 removes a created path under the check above, an AGENTS.md it created for the region whole while
+nothing else was written to it, and puts the retired row back live, so a reinstated file reads as
+deleted again. Any other path restores the newest row the upgrade retired there, and a path with none
+held the bytes the upgrade wrote, so only its row is retired. 01's backfill records no row for a file
+missing from disk. An output from before the record falls back to reading the rows.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as

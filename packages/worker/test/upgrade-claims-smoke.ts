@@ -109,6 +109,12 @@ async function main(): Promise<void> {
     const keptBytes = `${await readFile(join(repoPath, keptEdit), 'utf8')}\nKept by hand.\n`;
     await writeFile(join(repoPath, keptEdit), keptBytes);
     const untouchedBytes = await readFile(join(repoPath, untouched), 'utf8');
+    // Removed before the first plan, so nothing stands there until the upgrade writes it.
+    const removedBefore = seeded.filter((p) => p.endsWith('.md')).at(-1);
+    if (!removedBefore || [edited, overwritten, keptEdit, untouched].includes(removedBefore)) {
+      throw new Error(`scaffold wrote too little: ${seeded.join(', ')}`);
+    }
+    await rm(join(repoPath, removedBefore));
     const handRegion = `${CLI_RULES_START}\nOur own rule, written by hand.\n${CLI_RULES_END}`;
     await writeFile(join(repoPath, CLI_RULES_DISK_PATH), `# Project\n\n${handRegion}\n`);
 
@@ -223,6 +229,10 @@ async function main(): Promise<void> {
     check('the backfill records no row for an offered edit', (await rowsAt(edited)).length === 0);
     check('nor for the hand-written region', (await rowsAt(CLI_RULES_DISK_PATH)).length === 0);
     check('but adopts the untouched file', (await rowsAt(untouched)).length === 1);
+    check(
+      'and records nothing for a file missing from disk',
+      (await rowsAt(removedBefore)).length === 0,
+    );
 
     // ---- 02: defaults, "overwrite" on the rules region and one file, one adoption declined -
     const applyCtx = ctxFor(applyRow!.id);
@@ -247,12 +257,17 @@ async function main(): Promise<void> {
     // Its backfill row stays live under this task, and a rollback must not read it as a new file.
     const untouchedId = detected.entries.find((e) => e.diskPath === untouched)!.entryId;
     values.selectedNew = (values.selectedNew as string[]).filter((id) => id !== untouchedId);
-    await upgradeApplyStep.apply(applyCtx, {
+    const applied = await upgradeApplyStep.apply(applyCtx, {
       detected: plan,
       formValues: values,
       iteration: 0,
       previousIterations: [],
     });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: applied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, applyRow!.id));
+    check('the missing file is written as new', (await readOrNull(removedBefore)) !== null);
 
     check(
       'the edited file is left as it was',
@@ -370,6 +385,11 @@ async function main(): Promise<void> {
         (await readOrNull(untouched)) === untouchedBytes,
       { restore: restoreOf(untouched)?.priorArtifactId ?? null, deletes: deletes(untouched) },
     );
+    check(
+      'and takes away a file missing before the upgrade',
+      (await readOrNull(removedBefore)) === null,
+      { restore: restoreOf(removedBefore)?.priorArtifactId ?? null },
+    );
     const restored = await upgradePlanStep.detect!(planCtx);
     const bucketAfter = (path: string) => restored.entries.find((e) => e.diskPath === path)?.bucket;
     check(
@@ -382,12 +402,15 @@ async function main(): Promise<void> {
     check('and the restored region', bucketAfter(CLI_RULES_DISK_PATH) === 'conflict', {
       bucket: bucketAfter(CLI_RULES_DISK_PATH),
     });
+    check('and the file taken away as new', bucketAfter(removedBefore) === 'new_artifact', {
+      bucket: bucketAfter(removedBefore),
+    });
 
     // ---- a second upgrade: two retired templates, and two files new to it ------------------
     const [fresh, freshEdited, freshLinked] = seeded.filter(
       (p) =>
         p.endsWith('.md') &&
-        ![edited, overwritten, keptEdit, untouched, CLI_RULES_DISK_PATH].includes(p),
+        ![edited, overwritten, keptEdit, untouched, removedBefore, CLI_RULES_DISK_PATH].includes(p),
     );
     if (!fresh || !freshEdited || !freshLinked)
       throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
@@ -415,7 +438,7 @@ async function main(): Promise<void> {
             isNull(schema.onboardingArtifacts.supersededAt),
           ),
         );
-    const [editedTracked, tracked] = seeded.filter(
+    const [editedTracked, tracked, rewritten] = seeded.filter(
       (p) =>
         p.endsWith('.md') &&
         ![
@@ -423,13 +446,14 @@ async function main(): Promise<void> {
           overwritten,
           keptEdit,
           untouched,
+          removedBefore,
           fresh,
           freshEdited,
           freshLinked,
           CLI_RULES_DISK_PATH,
         ].includes(p),
     );
-    if (!editedTracked || !tracked) {
+    if (!editedTracked || !tracked || !rewritten) {
       throw new Error(`scaffold wrote too few files: ${seeded.join(', ')}`);
     }
     const editedTrackedBytes = `${await readFile(join(repoPath, editedTracked), 'utf8')}\nOurs.\n`;
@@ -438,6 +462,20 @@ async function main(): Promise<void> {
     const trackedBytes = `${await readFile(join(repoPath, tracked), 'utf8')}\nOur change.\n`;
     await writeFile(join(repoPath, tracked), trackedBytes);
     await moveTemplate(tracked);
+    // A file deleted by hand where its row stays live, and one whose only rows an old reset
+    // superseded, the newest holding an older version, while the file still holds the render.
+    await rm(join(repoPath, untouched));
+    const rewrittenBytes = await readFile(join(repoPath, rewritten), 'utf8');
+    await db
+      .update(schema.onboardingArtifacts)
+      .set({ supersededAt: new Date(), writtenContent: '# An older version\n' })
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, rewritten),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
     const retired = (name: string) => `.claude/agents/${name}.md`;
     const retiredBytes = '# Retired\n\nHaive wrote this.\n';
     const retiredEditedBytes = `${retiredBytes}Edited since.\n`;
@@ -511,6 +549,8 @@ async function main(): Promise<void> {
     const secondBucket = (path: string) =>
       secondDetected.entries.find((e) => e.diskPath === path)?.bucket;
     const buckets = {
+      deleted: secondBucket(untouched),
+      rewritten: secondBucket(rewritten),
       gone: secondBucket(retired('retired-gone')),
       kept: secondBucket(retired('retired-kept')),
       linked: secondBucket(retired('retired-linked')),
@@ -520,7 +560,9 @@ async function main(): Promise<void> {
     };
     check(
       'the second plan retires the old files and adds the missing ones',
-      buckets.gone === 'obsolete' &&
+      buckets.deleted === 'user_deleted' &&
+        buckets.rewritten === 'new_artifact' &&
+        buckets.gone === 'obsolete' &&
         buckets.kept === 'obsolete' &&
         buckets.linked === 'obsolete' &&
         buckets.fresh === 'new_artifact' &&
@@ -551,12 +593,20 @@ async function main(): Promise<void> {
     secondValues.selectedObsoleteRemovals = secondDetected.entries
       .filter((e) => e.bucket === 'obsolete')
       .map((e) => e.entryId);
+    secondValues.selectedReinstate = secondDetected.entries
+      .filter((e) => e.diskPath === untouched)
+      .map((e) => e.entryId);
     const secondApplied = await upgradeApplyStep.apply(secondApplyCtx, {
       detected: secondPlan,
       formValues: secondValues,
       iteration: 0,
       previousIterations: [],
     });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: secondApplied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, secondApplyRow!.id));
+    check('the deleted file is reinstated', (await readOrNull(untouched)) === untouchedBytes);
     check(
       'an obsolete file still holding what Haive wrote is deleted',
       (await readOrNull(retired('retired-gone'))) === null,
@@ -657,6 +707,26 @@ async function main(): Promise<void> {
       "and the upgrade's rows at both are retired",
       (await upgradeRowsLive(freshEdited)) === 0 && (await upgradeRowsLive(freshLinked)) === 0,
     );
+    check(
+      'a reinstated file is taken away again',
+      (await readOrNull(untouched)) === null,
+      secondRollback.targets.find((t) => t.diskPath === untouched)?.priorArtifactId ?? null,
+    );
+    const afterSecond = await upgradePlanStep.detect!(secondPlanCtx);
+    const bucketAfterSecond = (path: string) =>
+      afterSecond.entries.find((e) => e.diskPath === path)?.bucket;
+    check('and reads as deleted again', bucketAfterSecond(untouched) === 'user_deleted', {
+      bucket: bucketAfterSecond(untouched),
+    });
+    check(
+      'a file the upgrade rewrote with the bytes it held keeps them',
+      (await readOrNull(rewritten)) === rewrittenBytes &&
+        (await liveRowsAt(rewritten)).length === 0,
+      { onDisk: (await readOrNull(rewritten))?.slice(0, 40) ?? null },
+    );
+    check('and reads as new again', bucketAfterSecond(rewritten) === 'new_artifact', {
+      bucket: bucketAfterSecond(rewritten),
+    });
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = (c: string) => c.repeat(64);

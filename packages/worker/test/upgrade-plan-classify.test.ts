@@ -298,16 +298,6 @@ describe('backfillRecord', () => {
     });
   });
 
-  it('records the render for a file missing from disk', () => {
-    expect(backfillRecord(render, { content: null, hash: null })).toEqual({
-      templateContentHash: 'h1',
-      writtenHash: 'wh-RENDER',
-      writtenContent: 'RENDER',
-      lastObservedDiskHash: null,
-      userModified: false,
-    });
-  });
-
   /** The next plan over a row holding `row`, with the edit still on disk and the template at `now`. */
   const next = (row: { templateContentHash: string; writtenHash: string }, now: string) =>
     classifyEntry({
