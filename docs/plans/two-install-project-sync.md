@@ -1,8 +1,8 @@
 # Project state that travels between installations
 
 > **In progress** (2026-09-26). Track B of `found-not-fixed-sweep-3.md` (plan file
-> `compiled-noodling-squid`). Phase 0: B0.1 shipped (#326, live-verified); B0.2 in review; B0.3
-> not started.
+> `compiled-noodling-squid`). Phase 0: B0.1 shipped (#326) and B0.2 shipped (#327), both
+> live-verified; B0.3 in review (#328).
 
 ## Context
 
@@ -137,10 +137,21 @@ Phase 0 (live exposure, independent):
   holding the checkout. No web change was needed: the repos page's Retry is the one caller, and its
   red status line carries the refusal. Controls: on main the unpushed commit is gone after a
   refresh; `smoke:repo-refresh` passes 14 of 14; `repo-refresh-tree.test.ts` fails 4 of 4 against
-  main's route.
+  main's route. **Shipped** #327 (`69369fee`), live-verified on the dev stack: a writable folder
+  import fast-forwarded to a new folder commit; with a commit of its own beside a new folder commit
+  it refused ("Not refreshed: this checkout has 1 commit that the folder it was imported from does
+  not, and the folder it was imported from has 1 commit it does not. Nothing was changed.") and kept
+  its commit as HEAD; a task holding the checkout and a blank repository each got 409. Codex round 1
+  (the task check is read once, and nothing that starts a task reads the claim) was answered in
+  AGENTS.md rather than with a gate: it is the window writer 1 leaves open for the reset, and it
+  loses nothing here.
 - **B0.3 fix(worker): the mirror import reads through fs-safe and applies `rtk_enabled`.**
   Control: a symlinked `tooling.json` is imported today, ignored after; `rtkEnabled:false` in the
-  mirror leaves the column true today. `fs-ratchet.json` `clone.ts` 10 → 9.
+  mirror leaves the column true today. `fs-ratchet.json` `clone.ts` 10 → 9. **In review** #328. **As
+  built:** the three files are read through `readFileNoFollow` from the repository anchor with a 1
+  MiB cap, and `rtkEnabled` rides the tooling import, which runs only while `onboarding_tooling` is
+  NULL. A row imported before this keeps its column; B1.5 asks about it (Codex round 1). Control:
+  `smoke:mirror-import` fails 3 of 5 with main's `clone.ts` and passes 5 of 5.
 
 Phase 1 (the record):
 - **B1.1 test(worker): two-install round-trip smoke with a strict known-gap list.**

@@ -1,7 +1,8 @@
 # Found-not-fixed sweep 3
 
-> **In progress** (2026-09-26). Phase 0 first: B0.1 shipped (#326), B0.2 in review; Track B's plan
-> and its Phase 0 status live in `two-install-project-sync.md`.
+> **In progress** (2026-09-26). Phase 0 first: B0.1 (#326) and B0.2 (#327) shipped, B0.3 (#328)
+> and B0.1b (#329, 04's MCP opt-in reaches the runtime) in review; Track B's plan and its Phase 0
+> status live in `two-install-project-sync.md`.
 
 ## Context
 
