@@ -168,6 +168,10 @@ Phase 1 (the record):
   change one setting differently → a pending conflict, the local value still in effect and that
   setting's file left as incoming (today the second import silently keeps one side); a contested
   render-context key refuses an upgrade; answering applies, rewrites the file and clears the row.
+  It also asks about the rows B0.3 could not repair: a repository imported before B0.3 whose
+  imported tooling says `rtkEnabled: false` while `rtk_enabled` still holds its default `true`, and
+  no local 04 run equals that tooling. The tooling page writes the column alone, so nothing says
+  whether a person switched RTK back on since; a migration would have to choose.
 - **B1.6 feat(worker,api): adopt the record's artifact ledger** [B1.5]. Nullable `task_id` + CHECK,
   backfill + marker rows, `foreign` bucket in 01/02, rollback eligibility vs `imported_at`,
   onboarding verdict counts imported claims. Control (smoke): after a fresh clone B has 0 rows, a
