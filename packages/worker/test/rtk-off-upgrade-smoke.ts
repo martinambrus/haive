@@ -395,6 +395,37 @@ async function main(): Promise<void> {
       now: await readOrNull(SETTINGS),
     });
 
+    // ---- a retry after an attempt that took the hook out and failed before recording it ----
+    const retry = await upgrade('rtk-off-upgrade-smoke strip retry');
+    await writeFile(join(repoPath, SETTINGS), ourKeyOnly);
+    const retryValues = defaultValues(retry.form);
+    retryValues.selectedNew = [];
+    retryValues.selectedRtkHookStrips = [settingsEntry(retry.detected)!.entryId];
+    const retried = await upgradeApplyStep.apply(retry.applyCtx, {
+      detected: retry.plan,
+      formValues: retryValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'a retry records the edit an earlier attempt made, and hands the file to the commit',
+      (await readOrNull(SETTINGS)) === ourKeyOnly &&
+        retried.writtenPaths?.includes(SETTINGS) === true,
+      { writtenPaths: retried.writtenPaths, warnings: retried.warnings },
+    );
+    await db
+      .update(schema.taskSteps)
+      .set({ output: retried as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, retry.applyCtx.taskStepId));
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, retry.applyCtx.taskId));
+    await rollback('rtk-off-upgrade-smoke strip retry rollback');
+    check('and its rollback puts the hook back', (await readOrNull(SETTINGS)) === editedSettings, {
+      now: await readOrNull(SETTINGS),
+    });
+
     // ---- a byte that is not UTF-8: decoding would write U+FFFD in its place ----------------
     const notUtf8 = Buffer.from(editedSettings.replace('"ours"', '"oursé"'), 'latin1');
     await writeFile(join(repoPath, SETTINGS), notUtf8);

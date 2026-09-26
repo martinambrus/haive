@@ -733,7 +733,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               return null;
             }
             const after = withoutRtkHookEntry(entry.templateId, before);
-            if (after === null) return null;
+            if (after === null) {
+              // An earlier attempt that edited the file and then failed left what the plan's bytes
+              // strip to, and the plan still holds what stood there before it.
+              const planned = entry.currentContent;
+              if (planned !== null && withoutRtkHookEntry(entry.templateId, planned) === before) {
+                edit.before = planned;
+                edit.after = before;
+              }
+              return null;
+            }
             edit.before = before;
             edit.after = after;
             return Buffer.from(after, 'utf8');

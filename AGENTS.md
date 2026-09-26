@@ -2554,7 +2554,9 @@ endings. A file that parsing and writing back would change anywhere else (an int
 all, is not offered. One that is not valid UTF-8 is kept at apply and says so, since writing its
 text back would put U+FFFD where the bytes it could not decode were. What it held becomes a superseded baseline and the new live row claims none of it
 (`writtenHash` stays the render's), so a rollback puts the hook back and no later upgrade or reset
-takes the file as Haive's. A plan whose RTK choice was the repository's live one
+takes the file as Haive's. A retry after an attempt that took the hook out and failed before
+recording it finds the file holding what the plan's bytes strip to, and records that edit with the
+plan's bytes as what it held. A plan whose RTK choice was the repository's live one
 (`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
 two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
 RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it
