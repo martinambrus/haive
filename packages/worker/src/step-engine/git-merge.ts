@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
 import {
+  chmodNoFollow,
   chownNoFollow,
   isPathContainmentError,
   lstatNoFollow,
@@ -541,6 +542,13 @@ function rawChanges(
   return changes;
 }
 
+/** The mode for a file git put back: git writes its default, so the file it replaced says how tight
+ *  it was, and the executable bits follow what git wrote wherever reading is allowed. */
+function putBackMode(replaced: number, written: number): number {
+  const rw = replaced & written & 0o666;
+  return rw | (((rw & 0o444) >> 2) & written & 0o111);
+}
+
 /** The directories a restore of `paths` will create: their parents that are missing now. */
 async function missingParents(anchor: string, prefix: string, paths: string[]): Promise<string[]> {
   const seen = new Set<string>();
@@ -820,8 +828,10 @@ export async function relocateFixerChanges(
   const moved: string[] = [];
   const restore: string[] = [];
   const deleted = new Set<string>();
+  const replacedModes = new Map<string, number>();
   for (const c of toMove) {
     if (c.status !== 'D') {
+      const was = await lstatNoFollow(root, `${prefix}${c.path}`).catch(() => null);
       try {
         await renameNoFollow(root, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
           noReplace: true,
@@ -834,6 +844,7 @@ export async function relocateFixerChanges(
         left.push(await leftEntry(root, prefix, c.path, reason));
         continue;
       }
+      if (was?.kind === 'file') replacedModes.set(c.path, was.stats.mode);
     }
     if (c.status === 'D') deleted.add(c.path);
     if (c.status !== 'A') restore.push(c.path);
@@ -863,6 +874,13 @@ export async function relocateFixerChanges(
       }
       restored.push(...chunk.filter((p) => deleted.has(p)));
       if (owner) await giveBack(root, prefix, [...created, ...chunk], owner);
+      for (const p of chunk) {
+        const was = replacedModes.get(p);
+        if (was === undefined) continue;
+        await chmodNoFollow(root, `${prefix}${p}`, (now) => putBackMode(was, now)).catch(
+          () => undefined,
+        );
+      }
     }
   }
   const unstaged: FixerLeftovers['unstaged'] = [];

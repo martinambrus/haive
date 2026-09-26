@@ -532,6 +532,43 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // git recreates a file it puts back with its default mode, where the one it replaced was tighter.
+  it('puts a file back no wider than the one it replaced', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, 'private.txt'), 'private\n', 'utf8');
+      await writeFile(path.join(dir, 'run.sh'), 'echo run\n', 'utf8');
+      await chmod(path.join(dir, 'run.sh'), 0o755);
+      await writeFile(path.join(dir, 'open.txt'), 'open\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'modes']);
+      await chmod(path.join(dir, 'private.txt'), 0o600);
+      await chmod(path.join(dir, 'run.sh'), 0o700);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'private.txt'), 'fixer\n', 'utf8');
+      await writeFile(path.join(dir, 'run.sh'), 'echo fixer\n', 'utf8');
+      await writeFile(path.join(dir, 'open.txt'), 'fixer\n', 'utf8');
+      await chmod(path.join(dir, 'open.txt'), 0o777);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved.sort()).toEqual(['open.txt', 'private.txt', 'run.sh']);
+      const mode = async (rel: string) => (await lstat(path.join(dir, rel))).mode & 0o7777;
+      expect(await readFile(path.join(dir, 'private.txt'), 'utf8')).toBe('private\n');
+      expect(await readFile(path.join(dir, 'run.sh'), 'utf8')).toBe('echo run\n');
+      expect(await mode('private.txt')).toBe(0o600);
+      expect(await mode('run.sh')).toBe(0o700);
+      // The merge wrote clean.txt, so it holds the mode git gives a file.
+      expect(await mode('open.txt')).toBe(await mode('clean.txt'));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   // U+FFFD is also what an undecodable byte reads as, so only the name's bytes can tell the two.
   it('moves a file whose UTF-8 name holds U+FFFD like any other', async () => {
     const dir = await setupNamedConflict('base.txt');

@@ -522,12 +522,18 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   blob would hand the fixer back what the mask hides. Both snapshots and the restore read
   `.gitattributes` from the empty tree (`GIT_ATTR_SOURCE`, git 2.40) with `core.autocrlf` off and
   `core.fileMode` on, so no clean filter or line-ending conversion stands between the bytes recorded
-  and the bytes put back, and a chmod is seen where the repository ignores modes (MEASURED on git
-  2.43 and 2.54: otherwise a lossy clean filter's output came back, and LF for CRLF). Once it ends,
+  and the bytes put back, and a change of the executable bit is seen where the repository ignores
+  modes (MEASURED on git 2.43 and 2.54: otherwise a lossy clean filter's output came back, and LF
+  for CRLF). That bit is the only permission git records, so a fixer's other permission changes are
+  neither compared nor reported: recording them would take a walk of the whole tree before and after
+  every fixer, and setting modes to git's view would widen a person's own 0600 files. Once it ends,
   on every outcome and before the merge is committed or aborted, whatever it changed outside those
   paths moves to `.haive/merge-leftovers/<task>/<run>/files/` beside a `manifest.json`, and the
-  paths are put back from the tree (`relocateFixerChanges`). A deletion there is put back too, and
-  reported like a move, since at a same-branch root it can be the person's own. The commit then
+  paths are put back from the tree (`relocateFixerChanges`). git recreates a file it puts back with
+  its default mode, so each keeps the permission bits of the file it replaced, never wider than git
+  wrote it, the executable bits following git where reading is allowed: a person's own 0600 file
+  came back 0644. A deletion there is put back too, and reported like a move, since at a same-branch
+  root it can be the person's own. The commit then
   stages only the paths the fixer was sent to resolve, so neither a stray nor a person's own
   uncommitted work at a same-branch root is swept into it, where `add -A` took both. What a fixer
   staged itself outside those paths is put back in the index as the merge had it, byte for byte so a
