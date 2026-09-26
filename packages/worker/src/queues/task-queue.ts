@@ -493,6 +493,9 @@ async function markTaskRunningWithStep(
       { taskId, stepId },
       'revive refused: another upgrade or rollback of the repository is live',
     );
+    await appendEvent(db, taskId, null, 'upgrade.revive_refused', { stepId }).catch(
+      () => undefined,
+    );
     return false;
   }
 }

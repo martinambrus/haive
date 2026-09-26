@@ -2781,8 +2781,10 @@ start another, and hides Roll back while one runs. A check at creation cannot se
 that failed, which revived it beside the next, so the rule is also an index
 (`tasks_one_live_upgrade_per_repo_idx`, migration 0168): one live `onboarding_upgrade` task per
 repository, whoever writes the status. The api answers its violation 409 in `errorHandler`,
-whichever route revived the task, and the worker's revival reads it as the task not pointed. Its
-statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test.
+whichever route revived the task. The worker revives one whose parked form is answered, and a
+refusal there would drop the answer, so the submit route refuses such an answer before storing it; a
+revival the worker still loses to a race reads as the task not pointed and records
+`upgrade.revive_refused`. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays

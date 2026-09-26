@@ -575,6 +575,30 @@ export async function latestUpgradeToRollBack(
   return latest.id;
 }
 
+/** Refuse with 409, naming the live task, while an upgrade or rollback of the repository runs. */
+export async function refuseBesideLiveUpgrade(
+  db: ReturnType<typeof getDb> | DbTx,
+  repositoryId: string,
+): Promise<void> {
+  const [live] = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding_upgrade'),
+        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
+      ),
+    )
+    .limit(1);
+  if (live) {
+    throw new HttpError(
+      409,
+      `An upgrade or rollback is already in progress for this repository (task ${live.id})`,
+    );
+  }
+}
+
 /** Insert an upgrade or a rollback task only while no other one of the repository is live, since two
  *  running side by side apply and revert the same files. Serialised per repository, so two clicks
  *  cannot both pass the check. */
@@ -587,23 +611,7 @@ export async function insertUpgradeTask<T>(
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
     );
-    const [live] = await tx
-      .select({ id: schema.tasks.id })
-      .from(schema.tasks)
-      .where(
-        and(
-          eq(schema.tasks.repositoryId, repositoryId),
-          eq(schema.tasks.type, 'onboarding_upgrade'),
-          inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
-        ),
-      )
-      .limit(1);
-    if (live) {
-      throw new HttpError(
-        409,
-        `An upgrade or rollback is already in progress for this repository (task ${live.id})`,
-      );
-    }
+    await refuseBesideLiveUpgrade(tx, repositoryId);
     return insert(tx);
   });
 }

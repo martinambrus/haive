@@ -155,7 +155,47 @@ async function main(): Promise<void> {
     }
     assertEq('a direct revival refused by the index', refused, true);
 
-    // --- 3. Once the live one ends, the failed one retries as before --------------------------
+    // --- 3. Nor does answering its parked form: the worker would revive it, so the api refuses --
+    const [parked] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId,
+        type: 'onboarding_upgrade',
+        title: 'upgrade failed while its form waited',
+        status: 'failed',
+        errorMessage: 'simulated failure',
+        currentStepId: '02-upgrade-apply',
+        completedAt: now,
+      })
+      .returning();
+    if (!parked) throw new Error('parked task insert failed');
+    state.taskIds.push(parked.id);
+    const [parkedRow] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: parked.id,
+        stepId: '02-upgrade-apply',
+        stepIndex: 2,
+        title: 'Apply',
+        status: 'waiting_form',
+        startedAt: now,
+        waitingStartedAt: now,
+      })
+      .returning();
+    if (!parkedRow) throw new Error('parked step insert failed');
+    assertEq(
+      'answering its form beside a live upgrade',
+      (await post(`/tasks/${parked.id}/steps/02-upgrade-apply/submit`, { values: {} })).status,
+      409,
+    );
+    const rowAfter = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, parkedRow.id),
+    });
+    assertEq('the answer was not stored', rowAfter?.formValues ?? null, null);
+    if (!rowAfter?.waitingStartedAt) throw new Error('the form was closed although refused');
+
+    // --- 4. Once the live one ends, the failed one retries as before --------------------------
     await db
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date() })
