@@ -121,6 +121,8 @@ const h = vi.hoisted(() => {
     taskReadFails: false,
     /** What a read of a step's ended runs answers, newest first. */
     endedRuns: [] as Record<string, unknown>[],
+    /** Every error hint written to a step row and not rolled back. */
+    hints: [] as Record<string, unknown>[],
     /** Set to fail the step's error-hint write and the usage-snapshot read. */
     hintWriteFails: false,
     snapshotReadFails: false,
@@ -221,6 +223,7 @@ const db = {
   update: (table: unknown) => ({
     set: (patch: Record<string, unknown>) => {
       if (tableNameOf(table) === 'task_steps') h.state.stepPatches.push(patch);
+      if (tableNameOf(table) === 'task_steps' && 'errorHint' in patch) h.state.hints.push(patch);
       return {
         where: (cond: unknown) => ({
           then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
@@ -235,6 +238,9 @@ const db = {
             const values = conditionValues(cond);
             // A step row written under the ownership guard lands only while the pass still owns it.
             if (tableNameOf(table) === 'task_steps') {
+              if ('errorHint' in patch && h.state.hintWriteFails) {
+                throw new Error('the hint write failed');
+              }
               const guarded = values.includes('pending') && values.includes('skipped');
               return guarded && !h.state.sourceOwned ? [] : [{ id: 'ts-1' }];
             }
@@ -247,7 +253,16 @@ const db = {
       };
     },
   }),
-  transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+  // A throw rolls back the hints the transaction wrote.
+  transaction: async (fn: (tx: unknown) => unknown) => {
+    const written = h.state.hints.length;
+    try {
+      return await fn(db);
+    } catch (err) {
+      h.state.hints.length = written;
+      throw err;
+    }
+  },
 };
 
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
@@ -337,6 +352,7 @@ afterEach(() => {
   h.state.admission = { decision: 'admit' };
   h.state.taskHolds = [];
   h.state.stepPatches = [];
+  h.state.hints = [];
   h.state.landedTaskPatches = [];
   h.state.taskType = 'workflow';
   h.state.currentStepId = 'epoch-job-step';
@@ -458,6 +474,34 @@ describe("a failed step's hand-off", () => {
     expect(armed()).toEqual([]);
     expect(h.state.taskWrites.slice(1)).toEqual([{ epochs: [5], landed: false }]);
     expect(pollTicks()).toEqual([]);
+  });
+
+  const hints = () => h.state.hints;
+
+  it('writes the outage hint on the failure it describes', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    await expect(finish()).resolves.toBe(true);
+    expect(hints()).toEqual([
+      expect.objectContaining({
+        errorHint: expect.objectContaining({
+          type: 'provider_unavailable',
+          reason: 'server_error',
+        }),
+      }),
+    ]);
+  });
+
+  // A Retry resets the row, and its reset clears a hint written before it but not one after.
+  it('writes no outage hint once a Retry moved the task on', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockResolvedValue('auto');
+    h.state.onSelect = () => {
+      h.state.taskStatus = 'queued';
+      h.state.taskEpoch = 6;
+    };
+    await expect(finish()).resolves.toBe(true);
+    expect(hints()).toEqual([]);
   });
 
   it('arms it with no reset time when the usage snapshot cannot be read', async () => {

@@ -1,7 +1,19 @@
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  notInArray,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
@@ -1194,6 +1206,37 @@ async function armAllowanceWatch(
   return armed !== undefined;
 }
 
+class HintOverruled extends Error {}
+
+/** A hint describes one outcome of one pass, so it lands only while that outcome stands: the row
+ *  as the pass left it, then the task held under the pass's fence, steps before task as a Retry
+ *  takes them. A reset clears a hint written before it, but not one written after. */
+async function writeStepHint(
+  db: Database,
+  row: SQL | undefined,
+  task: SQL | undefined,
+  errorHint: NonNullable<(typeof schema.taskSteps.$inferInsert)['errorHint']>,
+): Promise<void> {
+  try {
+    await db.transaction(async (tx) => {
+      const [written] = await tx
+        .update(schema.taskSteps)
+        .set({ errorHint, updatedAt: new Date() })
+        .where(row)
+        .returning({ id: schema.taskSteps.id });
+      if (!written) return;
+      const [held] = await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(task)
+        .for('share');
+      if (!held) throw new HintOverruled();
+    });
+  } catch (err) {
+    if (!(err instanceof HintOverruled)) throw err;
+  }
+}
+
 async function recordFailedStepHint(
   db: Database,
   taskId: string,
@@ -1201,6 +1244,12 @@ async function recordFailedStepHint(
   stepId: string,
   row: { id: string },
 ): Promise<void> {
+  const failedRow = and(eq(schema.taskSteps.id, row.id), eq(schema.taskSteps.status, 'failed'));
+  const failedTask = and(
+    eq(schema.tasks.id, taskId),
+    eq(schema.tasks.orchestrationEpoch, epoch),
+    eq(schema.tasks.status, 'failed'),
+  );
   // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
   // server failure, attach a structured errorHint so the UI shows an
   // "outage — retry when the provider recovers" banner instead of implying a code
@@ -1240,13 +1289,11 @@ async function recordFailedStepHint(
       providerName = prov?.name ?? undefined;
     }
     try {
-      await db
-        .update(schema.taskSteps)
-        .set({
-          errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.taskSteps.id, row.id));
+      await writeStepHint(db, failedRow, failedTask, {
+        type: 'provider_unavailable',
+        reason: outage.reason,
+        providerName,
+      });
     } catch (err) {
       logger.warn({ err, taskId, stepId }, 'provider-outage hint not recorded');
     }
@@ -1330,18 +1377,12 @@ async function recordFailedStepHint(
     // burned, so the hint and the dispatch that produced it cannot disagree.
     const timeouts = await trailingTimeoutInfo(db, row.id);
     if (timeouts.attempts > 0) {
-      await db
-        .update(schema.taskSteps)
-        .set({
-          errorHint: {
-            type: 'cli_timeout',
-            stepId,
-            lastBudgetMinutes: timeouts.lastBudgetMinutes ?? 0,
-            attempts: timeouts.attempts,
-          },
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.taskSteps.id, row.id));
+      await writeStepHint(db, failedRow, failedTask, {
+        type: 'cli_timeout',
+        stepId,
+        lastBudgetMinutes: timeouts.lastBudgetMinutes ?? 0,
+        attempts: timeouts.attempts,
+      });
     }
   }
 }
@@ -1419,18 +1460,17 @@ export async function handleResult(
           ? await miningTimeoutInfo(db, result.row.id)
           : await dagTimeoutInfo(db, result.row.id);
         if (mined.attempts > 0) {
-          await db
-            .update(schema.taskSteps)
-            .set({
-              errorHint: {
-                type: 'cli_timeout',
-                stepId,
-                lastBudgetMinutes: mined.lastBudgetMinutes ?? 0,
-                attempts: mined.attempts,
-              },
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.taskSteps.id, result.row.id));
+          await writeStepHint(
+            db,
+            and(eq(schema.taskSteps.id, result.row.id), eq(schema.taskSteps.status, 'done')),
+            taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }),
+            {
+              type: 'cli_timeout',
+              stepId,
+              lastBudgetMinutes: mined.lastBudgetMinutes ?? 0,
+              attempts: mined.attempts,
+            },
+          );
         }
       }
       // A step completed → real progress; clear the consecutive auto-resume counter so only

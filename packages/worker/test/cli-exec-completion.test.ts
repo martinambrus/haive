@@ -35,6 +35,7 @@ vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => ({
 }));
 
 import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
+import { CliLoginRequiredError } from '../src/queues/cli-exec/_shared.js';
 
 function tableNameOf(table: unknown): string {
   const sym = Object.getOwnPropertySymbols(table as object).find(
@@ -190,6 +191,33 @@ describe('a cli run completion', () => {
 
     expect(runWrites(writes).some((w) => w.set.exitCode === -1)).toBe(false);
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a login failure', () => {
+  const hint = {
+    type: 'cli_login_required',
+    providerId: 'p1',
+    providerName: 'claude-code',
+  } as const;
+  const hintWrites = (writes: Write[]) =>
+    writes.filter((w) => w.table === 'task_steps' && 'errorHint' in w.set);
+
+  it('leaves its hint on the step, locked with the run it describes', async () => {
+    stubs.executeByKind.mockRejectedValue(new CliLoginRequiredError('log in first', hint));
+    const { db, writes } = fakeDb({ lockedRun: { supersededAt: null } });
+    await expect(handleCliExecJob(db, base)).rejects.toThrow('log in first');
+    expect(hintWrites(writes)).toEqual([
+      expect.objectContaining({ set: expect.objectContaining({ errorHint: hint }) }),
+    ]);
+    expect(hintWrites(writes)[0]!.tx).not.toBeNull();
+  });
+
+  it('leaves no hint for a run a Retry superseded', async () => {
+    stubs.executeByKind.mockRejectedValue(new CliLoginRequiredError('log in first', hint));
+    const { db, writes } = fakeDb({ lockedRun: { supersededAt: new Date() } });
+    await expect(handleCliExecJob(db, base)).rejects.toThrow('log in first');
+    expect(hintWrites(writes)).toEqual([]);
   });
 });
 
