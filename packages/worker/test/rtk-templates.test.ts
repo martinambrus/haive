@@ -286,9 +286,25 @@ describe('withoutRtkHookEntry', () => {
   });
 
   it("takes gemini's hook out of BeforeTool", () => {
-    const edited = `${buildGeminiSettingsJson().slice(0, -2)},\n  "theme": "dark"\n}\n`;
+    const edited = json({ ...JSON.parse(buildGeminiSettingsJson()), theme: 'dark' });
     expect(withoutRtkHookEntry('rtk.gemini-settings', edited)).toBe(json({ theme: 'dark' }));
     expect(withoutRtkHookEntry(CLAUDE, edited)).toBeNull();
+  });
+
+  it('answers null for a file that writing back would change beyond the hook', () => {
+    const hooks = { PreToolUse: [rtkEntry()] };
+    // Each is a canonical file with one value spelled the way a parse and a write would not keep.
+    const unsafe = [
+      json({ limit: 1, hooks }).replace('"limit": 1', '"limit": 9007199254740993'),
+      json({ ratio: 1, hooks }).replace('"ratio": 1', '"ratio": 1.0'),
+      json({ name: 'caf', hooks }).replace('"caf"', '"caf\\u00e9"'),
+      json({ model: 'b', hooks }).replace('"model": "b"', '"model": "a",\n  "model": "b"'),
+      json({ model: 'ours', hooks }).replace('"model": "ours"', '"model" : "ours"'),
+    ];
+    for (const text of unsafe) {
+      expect(JSON.parse(text)).toBeTruthy();
+      expect(withoutRtkHookEntry(CLAUDE, text)).toBeNull();
+    }
   });
 
   it('answers null for a file that is not strict JSON, holds no hook, or another template', () => {

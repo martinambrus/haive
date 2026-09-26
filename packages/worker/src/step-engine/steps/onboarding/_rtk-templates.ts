@@ -130,8 +130,8 @@ const RTK_SETTINGS_HOOKS: Readonly<Record<string, { eventKey: string; command: s
 
 /** A settings file without the hook its RTK template wrote: every hook item whose command is exactly
  *  RTK's, and each entry, event list and `hooks` object that leaves empty, written back with the
- *  file's own indent, line endings and final newline. Null when it holds no such hook or is not
- *  strict JSON. */
+ *  file's own indent, line endings and final newline. Null when it holds no such hook, is not
+ *  strict JSON, or is a file that parsing and writing back would change anywhere else. */
 export function withoutRtkHookEntry(templateId: string, text: string): string | null {
   const hook = RTK_SETTINGS_HOOKS[templateId];
   if (!hook) return null;
@@ -141,6 +141,15 @@ export function withoutRtkHookEntry(templateId: string, text: string): string | 
   } catch {
     return null;
   }
+  const indent = /^[ \t]+(?=\S)/m.exec(text)?.[0] ?? '';
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const serialize = (value: unknown) => {
+    const body = JSON.stringify(value, null, indent).replace(/\n/g, eol);
+    return /\n$/.test(text) ? `${body}${eol}` : body;
+  };
+  // A value a parse cannot keep as written (an integer past 2^53, `1.0`, an escape, a repeated key)
+  // would be rewritten with the hook, so only a file that round-trips exactly is edited.
+  if (serialize(root) !== text) return null;
   if (!isRecord(root) || !isRecord(root.hooks)) return null;
   const hooks = root.hooks;
   const entries = hooks[hook.eventKey];
@@ -158,11 +167,7 @@ export function withoutRtkHookEntry(templateId: string, text: string): string | 
   if (kept.length > 0) hooks[hook.eventKey] = kept;
   else delete hooks[hook.eventKey];
   if (Object.keys(hooks).length === 0) delete root.hooks;
-
-  const indent = /^[ \t]+(?=\S)/m.exec(text)?.[0] ?? '';
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const body = JSON.stringify(root, null, indent).replace(/\n/g, eol);
-  return /\n$/.test(text) ? `${body}${eol}` : body;
+  return serialize(root);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -2549,7 +2549,8 @@ off, since the column defaults on. The RTK settings files (kind `rtk-config`) th
 out from it would restore it. One someone edited is kept by that rule, so the form offers instead to
 take the hook out of it, unticked (`withoutRtkHookEntry`): only hook items whose command is exactly
 RTK's go, with the entries and lists they leave empty, and the file keeps its own indent and line
-endings. What it held becomes a superseded baseline and the new live row claims none of it
+endings. A file that parsing and writing back would change anywhere else (an integer past 2^53,
+`1.0`, an escape, a repeated key, spacing of its own) is not offered. What it held becomes a superseded baseline and the new live row claims none of it
 (`writtenHash` stays the render's), so a rollback puts the hook back and no later upgrade or reset
 takes the file as Haive's. A plan whose RTK choice was the repository's live one
 (`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
