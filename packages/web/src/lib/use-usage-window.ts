@@ -23,14 +23,18 @@ const subscribers = new Set<(data: UsageWindowResponse | null) => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let issued = 0;
 let applied = 0;
+let inFlight = 0;
 
 async function load(): Promise<void> {
   const id = ++issued;
+  inFlight += 1;
   let next: UsageWindowResponse | null;
   try {
     next = await api.get<UsageWindowResponse>('/usage-window');
   } catch {
     next = null;
+  } finally {
+    inFlight -= 1;
   }
   // A refresh can race a tick, and the older answer must not land last.
   if (id <= applied) return;
@@ -45,9 +49,10 @@ async function load(): Promise<void> {
   for (const notify of subscribers) notify(current);
 }
 
-// A reconnect done in another tab shows at once instead of up to a minute later.
+// A reconnect done in another tab shows at once instead of up to a minute later. A return to the
+// tab raises visibilitychange and focus together, and one request answers both.
 function onVisible(): void {
-  if (document.visibilityState === 'visible') void load();
+  if (document.visibilityState === 'visible' && inFlight === 0) void load();
 }
 
 /** The latest /usage-window answer, shared by every consumer on the page; null until the

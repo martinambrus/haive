@@ -260,6 +260,15 @@ test.describe('task title strip', () => {
       // Every consumer's minute tick has fired by now; this gives its request time to leave.
       await page.waitForTimeout(1_000);
       expect(polls, 'one /usage-window request a minute for the whole page').toBe(1);
+
+      // A return to the tab raises both events at once.
+      polls = 0;
+      await page.evaluate(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        window.dispatchEvent(new Event('focus'));
+      });
+      await page.waitForTimeout(1_000);
+      expect(polls, 'a return to the tab asks once').toBe(1);
     } finally {
       await cleanupTaskPage(sql, fx);
       await sql.end({ timeout: 5 });
