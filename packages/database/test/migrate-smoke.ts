@@ -306,6 +306,83 @@ async function main(): Promise<void> {
     const run = await runMigrate(urlFor(name));
     check('wrong database: refuses a global-KB store by name', run.code === 2, { code: run.code });
   }
+
+  // 11. ONE LIVE UPGRADE — the index an older release's rows could hold shut: a `created` upgrade
+  //     is failed, and a repository with two live ones keeps its newest.
+  {
+    const db = await freshDatabase('one_live_upgrade');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-migrate-'));
+    try {
+      for (const file of (await readdir(MIGRATIONS)).filter((f) => f.endsWith('.sql'))) {
+        if (file < '0168_one_live_upgrade_per_repo.sql') {
+          await execFileAsync('cp', [path.join(MIGRATIONS, file), dir]);
+        }
+      }
+      const before = await runMigrate(urlFor(db), { HAIVE_MIGRATIONS_DIR: `${dir}/` });
+      check('one live upgrade: the corpus before it applies', before.code === 0, before.stderr);
+      const ids = await withDb(db, async (sql) => {
+        const [user] = await sql<{ id: string }[]>`
+          INSERT INTO users (email_encrypted, email_blind_index, password_hash)
+          VALUES ('one-live', 'one-live-idx', 'x') RETURNING id`;
+        const repo = async (name: string) =>
+          (
+            await sql<{ id: string }[]>`
+              INSERT INTO repositories (user_id, name, source)
+              VALUES (${user!.id}, ${name}, 'blank') RETURNING id`
+          )[0]!.id;
+        const task = async (repositoryId: string, type: string, status: string, ageMin: number) =>
+          (
+            await sql<{ id: string }[]>`
+              INSERT INTO tasks (user_id, repository_id, type, title, status, created_at)
+              VALUES (${user!.id}, ${repositoryId}, ${type}::workflow_type, 'smoke',
+                      ${status}::task_status, now() - make_interval(mins => ${ageMin}))
+              RETURNING id`
+          )[0]!.id;
+        const lone = await repo('lone');
+        const beside = await repo('beside');
+        const pair = await repo('pair');
+        return {
+          loneCreated: await task(lone, 'onboarding_upgrade', 'created', 1),
+          parked: await task(beside, 'onboarding_upgrade', 'waiting_user', 2),
+          createdAfter: await task(beside, 'onboarding_upgrade', 'created', 1),
+          older: await task(pair, 'onboarding_upgrade', 'running', 2),
+          newer: await task(pair, 'onboarding_upgrade', 'waiting_user', 1),
+          draft: await task(pair, 'plan_build', 'created', 1),
+        };
+      });
+      const run = await runMigrate(urlFor(db));
+      check('one live upgrade: exits 0', run.code === 0, run.stderr);
+      await withDb(db, async (sql) => {
+        const rows = await sql<{ id: string; status: string }[]>`SELECT id, status FROM tasks`;
+        const row = (id: string) => rows.find((r) => r.id === id);
+        check(
+          'one live upgrade: a lone created one is failed',
+          row(ids.loneCreated)?.status === 'failed',
+          rows,
+        );
+        check(
+          'one live upgrade: a created one never outranks a parked one',
+          row(ids.createdAfter)?.status === 'failed' && row(ids.parked)?.status === 'waiting_user',
+          rows,
+        );
+        check(
+          'one live upgrade: two live ones keep the newest',
+          row(ids.older)?.status === 'failed' && row(ids.newer)?.status === 'waiting_user',
+          rows,
+        );
+        check(
+          'one live upgrade: a created draft of another type is left alone',
+          row(ids.draft)?.status === 'created',
+          rows,
+        );
+        const [index] = await sql<{ reg: string | null }[]>`
+          SELECT to_regclass('public.tasks_one_live_upgrade_per_repo_idx')::text AS reg`;
+        check('one live upgrade: the index is built', index?.reg !== null, index);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 }
 
 try {

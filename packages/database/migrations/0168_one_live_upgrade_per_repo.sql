@@ -1,10 +1,14 @@
--- At most one live onboarding_upgrade task per repository. An upgrade and a rollback running side by
--- side apply and revert the same files, and a Retry of a failed one could revive it beside another
--- whatever the create routes checked.
---
--- A repository already holding more than one keeps its newest; the others are failed first, saying
--- why, since the index cannot be built over them. A failed task stays retryable once the live one
--- ends. Reverts with DROP INDEX.
+-- A `created` upgrade is an older release's creation that failed part-way; no sweep starts or ends
+-- one, so it would hold the index below against every later upgrade and rollback.
+UPDATE tasks
+SET status = 'failed',
+    error_message = 'This upgrade or rollback never started, because its creation did not finish; retry it to start it.',
+    completed_at = now(),
+    updated_at = now()
+WHERE type = 'onboarding_upgrade'
+  AND status = 'created';
+
+-- The index cannot be built over two live ones, so a repository keeps its newest.
 UPDATE tasks t
 SET status = 'failed',
     error_message = 'Another upgrade or rollback of this repository was in progress, so this one was stopped; retry it once that one ends.',
@@ -20,4 +24,5 @@ WHERE t.type = 'onboarding_upgrade'
       AND (n.created_at, n.id) > (t.created_at, t.id)
   );
 
+-- One live upgrade or rollback per repository, whoever writes the status. Reverts with DROP INDEX.
 CREATE UNIQUE INDEX IF NOT EXISTS "tasks_one_live_upgrade_per_repo_idx" ON "tasks" USING btree ("repository_id") WHERE "tasks"."type" = 'onboarding_upgrade' and "tasks"."status" in ('created', 'queued', 'running', 'paused', 'waiting_user', 'waiting_pr');
