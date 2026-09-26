@@ -140,8 +140,22 @@ async function main(): Promise<void> {
           ),
         );
 
+    /** One live upgrade or rollback per repository: the one in progress ends before the next. */
+    async function endLiveUpgrades(repoId: string) {
+      await db
+        .update(schema.tasks)
+        .set({ status: 'cancelled', completedAt: new Date() })
+        .where(
+          and(
+            eq(schema.tasks.repositoryId, repoId),
+            eq(schema.tasks.type, 'onboarding_upgrade'),
+            eq(schema.tasks.status, 'running'),
+          ),
+        );
+    }
     /** One upgrade task: 01 plans, its output stored where 02 reads it. */
     async function upgrade(title: string, repo = { id: repositoryId, path: repoPath }) {
+      await endLiveUpgrades(repo.id);
       const [task] = await db
         .insert(schema.tasks)
         .values({
@@ -193,6 +207,7 @@ async function main(): Promise<void> {
     }
     /** A rollback task of the most recent completed upgrade, run to the end. */
     async function rollback(title: string, repo = { id: repositoryId, path: repoPath }) {
+      await endLiveUpgrades(repo.id);
       const [task] = await db
         .insert(schema.tasks)
         .values({
