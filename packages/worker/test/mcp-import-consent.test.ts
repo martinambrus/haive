@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { decideImportedMcpServers, sha256Hex } from '@haive/shared';
+import { decideImportedMcpServers, mcpAcceptanceMark, sha256Hex } from '@haive/shared';
 import {
   DEFAULT_MCP_SETTINGS_JSON,
   holdImportedMcpServers,
   mcpServersNeedingConsent,
 } from '../src/sandbox/mcp-config.js';
 
+const KEY = 'a'.repeat(64);
 const managed = (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers: Record<string, unknown> })
   .mcpServers;
 const listWith = (extra: Record<string, unknown>) =>
@@ -37,7 +38,7 @@ describe('mcpServersNeedingConsent', () => {
 describe('holdImportedMcpServers', () => {
   it('holds a list with servers nobody here accepted, keeping every other key', () => {
     const json = listWith({ evil });
-    expect(holdImportedMcpServers({ ragMode: 'none', mcpSettingsJson: json })).toEqual({
+    expect(holdImportedMcpServers({ ragMode: 'none', mcpSettingsJson: json }, KEY)).toEqual({
       ragMode: 'none',
       importedMcpSettingsJson: json,
       importedMcpServerNames: ['evil'],
@@ -45,28 +46,44 @@ describe('holdImportedMcpServers', () => {
   });
 
   it('leaves Haive own servers and unreadable lists where they are', () => {
-    expect(holdImportedMcpServers({ mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON })).toBeNull();
-    expect(holdImportedMcpServers({ mcpSettingsJson: '{' })).toBeNull();
-    expect(holdImportedMcpServers({ ragMode: 'none' })).toBeNull();
+    expect(holdImportedMcpServers({ mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON }, KEY)).toBeNull();
+    expect(holdImportedMcpServers({ mcpSettingsJson: '{' }, KEY)).toBeNull();
+    expect(holdImportedMcpServers({ ragMode: 'none' }, KEY)).toBeNull();
+  });
+
+  it('takes no acceptance a committed mirror could have carried', () => {
+    const json = listWith({ evil });
+    for (const forged of [
+      { acceptedMcpSettingsSha256: sha256Hex(json) },
+      { acceptedMcpSettingsMark: sha256Hex(json) },
+      { acceptedMcpSettingsMark: mcpAcceptanceMark(json, 'b'.repeat(64)) },
+    ]) {
+      expect(
+        holdImportedMcpServers({ mcpSettingsJson: json, ...forged }, KEY)?.importedMcpServerNames,
+      ).toEqual(['evil']);
+    }
+    const marked = { mcpSettingsJson: json, acceptedMcpSettingsMark: mcpAcceptanceMark(json, KEY) };
+    expect(holdImportedMcpServers(marked, null)?.importedMcpServerNames).toEqual(['evil']);
   });
 
   it('holds a list other than the one accepted here', () => {
     const accepted = listWith({ evil });
     const changed = listWith({ evil, other: evil });
     expect(
-      holdImportedMcpServers({
-        mcpSettingsJson: changed,
-        acceptedMcpSettingsSha256: sha256Hex(accepted),
-      })?.importedMcpServerNames,
+      holdImportedMcpServers(
+        { mcpSettingsJson: changed, acceptedMcpSettingsMark: mcpAcceptanceMark(accepted, KEY) },
+        KEY,
+      )?.importedMcpServerNames,
     ).toEqual(['evil', 'other']);
   });
 
   it('converges once the held list is accepted or discarded', () => {
-    const tooling = holdImportedMcpServers({ mcpSettingsJson: listWith({ evil }) })!;
+    const tooling = holdImportedMcpServers({ mcpSettingsJson: listWith({ evil }) }, KEY)!;
     const mirror = { schemaVersion: 1, tooling };
-    const accepted = decideImportedMcpServers(mirror, 'accept')!;
+    const accepted = decideImportedMcpServers(mirror, 'accept', KEY)!;
     expect(accepted.tooling.mcpSettingsJson).toBe(listWith({ evil }));
-    expect(holdImportedMcpServers(accepted.tooling)).toBeNull();
-    expect(holdImportedMcpServers(decideImportedMcpServers(mirror, 'discard')!.tooling)).toBeNull();
+    expect(holdImportedMcpServers(accepted.tooling, KEY)).toBeNull();
+    const discarded = decideImportedMcpServers(mirror, 'discard', KEY)!;
+    expect(holdImportedMcpServers(discarded.tooling, KEY)).toBeNull();
   });
 });

@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   TOOL_INSTALL_METADATA,
+  configService,
   decideImportedMcpServers,
   pendingImportedMcpServers,
   userSecretsService,
@@ -547,31 +548,6 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     appAuthPassword?: string;
   };
 
-  if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
-    const current = await db.query.repositories.findFirst({
-      where: eq(schema.repositories.id, repositoryId),
-      columns: { onboardingTooling: true },
-    });
-    const decided = decideImportedMcpServers(current?.onboardingTooling, body.repoMcpServersAction);
-    if (!decided) throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
-    const written = await db
-      .update(schema.repositories)
-      .set({ onboardingTooling: decided as unknown as Record<string, unknown> })
-      .where(
-        and(
-          eq(schema.repositories.id, repositoryId),
-          sql`${schema.repositories.onboardingTooling} = ${JSON.stringify(current!.onboardingTooling)}::jsonb`,
-        ),
-      )
-      .returning({ id: schema.repositories.id });
-    if (written.length === 0) {
-      throw new HttpError(
-        409,
-        'The MCP server settings changed meanwhile; reload and decide again',
-      );
-    }
-  }
-
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
   if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
   if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
@@ -620,6 +596,40 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   if (body.appAuth !== undefined) {
     updates.appAuth = normalizeAppAuth(body.appAuth);
   }
+  if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
+    const current = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, repositoryId),
+      columns: { onboardingTooling: true },
+    });
+    const read = current?.onboardingTooling;
+    const decided = read
+      ? decideImportedMcpServers(
+          read,
+          body.repoMcpServersAction,
+          await configService.getEncryptionKey(),
+        )
+      : null;
+    if (!read || !decided) {
+      throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
+    }
+    const written = await db
+      .update(schema.repositories)
+      .set({ onboardingTooling: decided as unknown as Record<string, unknown> })
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.onboardingTooling, read),
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    if (written.length === 0) {
+      throw new HttpError(
+        409,
+        'The MCP server settings changed meanwhile; reload and decide again',
+      );
+    }
+  }
+
   // Credentials go to the encrypted per-user store, keyed per repository. An empty
   // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
   // the form without retyping the password does not wipe it.

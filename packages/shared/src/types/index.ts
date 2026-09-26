@@ -328,7 +328,7 @@ export const ONBOARDING_TOOLING_INFRA_KEYS = ['ragConnectionString', 'ollamaUrl'
 export const ONBOARDING_TOOLING_CONSENT_KEYS = [
   'importedMcpSettingsJson',
   'importedMcpServerNames',
-  'acceptedMcpSettingsSha256',
+  'acceptedMcpSettingsMark',
 ] as const;
 
 /** Repo-level snapshot of an onboarded repo's detected+confirmed ENVIRONMENT.

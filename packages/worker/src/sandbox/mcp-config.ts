@@ -1,5 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
-import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS, sha256Hex, type CliProviderName } from '@haive/shared';
+import {
+  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+  mcpAcceptanceMark,
+  type CliProviderName,
+} from '@haive/shared';
 
 const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
 
@@ -628,13 +632,15 @@ export function mcpServersNeedingConsent(json: string): string[] | null {
  *  the runtime reads. Null for Haive's own servers, an unreadable list, or the list accepted here. */
 export function holdImportedMcpServers(
   tooling: Record<string, unknown>,
+  installKey?: string | null,
 ): Record<string, unknown> | null {
   const json = tooling.mcpSettingsJson;
-  if (typeof json !== 'string' || tooling.acceptedMcpSettingsSha256 === sha256Hex(json)) {
+  if (typeof json !== 'string') return null;
+  if (installKey && tooling.acceptedMcpSettingsMark === mcpAcceptanceMark(json, installKey)) {
     return null;
   }
   const names = mcpServersNeedingConsent(json);
   if (!names?.length) return null;
-  const { mcpSettingsJson: _json, acceptedMcpSettingsSha256: _accepted, ...rest } = tooling;
+  const { mcpSettingsJson: _json, acceptedMcpSettingsMark: _accepted, ...rest } = tooling;
   return { ...rest, importedMcpSettingsJson: json, importedMcpServerNames: names };
 }

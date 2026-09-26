@@ -113,8 +113,10 @@ Phase 0 (live exposure, independent):
   `repoMcpServersAction: 'accept' | 'discard'`, a compare-and-set on the column; a server counts as
   Haive's only when its definition equals Haive's own under that name; the import strips the three
   consent keys from the committed file; and a boot repair (`holdImportedMcpServerLists`) holds rows
-  imported earlier, skipping a record this install's own 04 wrote and a list accepted here (its
-  hash is recorded on accept). Control: `smoke:mcp-import-consent` fails 3 of 9 with main's
+  imported earlier, skipping a record this install's own 04 wrote and a list accepted here. The
+  acceptance record is an HMAC keyed with the install's encryption key (Codex round 1: a plain hash
+  is forgeable by a mirror an older release imported verbatim), and the PATCH decides only after
+  every other field has validated. Control: `smoke:mcp-import-consent` fails 3 of 9 with main's
   `clone.ts`, passes 9 of 9 with the fix.
 - **B0.2 fix(worker,api,web): refresh-tree fetches and fast-forwards.** New REFRESH job: fetch,
   refuse on tasks in flight, dirty tracked files, unpushed commits or divergence (naming the

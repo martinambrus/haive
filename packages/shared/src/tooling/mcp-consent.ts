@@ -1,9 +1,15 @@
-import { sha256Hex } from '../templates/manifest.js';
+import { createHmac } from 'node:crypto';
 import type { OnboardingToolingMirror } from '../types/index.js';
 
 function toolingOf(mirror: unknown): Record<string, unknown> | null {
   const tooling = (mirror as OnboardingToolingMirror | null | undefined)?.tooling;
   return tooling && typeof tooling === 'object' && !Array.isArray(tooling) ? tooling : null;
+}
+
+/** Proof that someone on THIS install accepted exactly this list: keyed with the install's
+ *  encryption key, so no committed mirror can carry a value that passes. */
+export function mcpAcceptanceMark(json: string, installKey: string): string {
+  return createHmac('sha256', installKey).update(`mcp-consent:v1:${json}`).digest('hex');
 }
 
 /** Names of the imported MCP servers still waiting for a decision on this install, or null when
@@ -20,6 +26,7 @@ export function pendingImportedMcpServers(mirror: unknown): string[] | null {
 export function decideImportedMcpServers(
   mirror: unknown,
   action: 'accept' | 'discard',
+  installKey: string,
 ): OnboardingToolingMirror | null {
   const tooling = toolingOf(mirror);
   const held = tooling?.importedMcpSettingsJson;
@@ -27,14 +34,18 @@ export function decideImportedMcpServers(
   const {
     importedMcpSettingsJson: _held,
     importedMcpServerNames: _names,
-    acceptedMcpSettingsSha256: _accepted,
+    acceptedMcpSettingsMark: _accepted,
     ...rest
   } = tooling;
   return {
     ...(mirror as OnboardingToolingMirror),
     tooling:
       action === 'accept'
-        ? { ...rest, mcpSettingsJson: held, acceptedMcpSettingsSha256: sha256Hex(held) }
+        ? {
+            ...rest,
+            mcpSettingsJson: held,
+            acceptedMcpSettingsMark: mcpAcceptanceMark(held, installKey),
+          }
         : rest,
   };
 }

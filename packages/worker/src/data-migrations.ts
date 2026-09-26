@@ -497,11 +497,14 @@ export async function holdImportedMcpServerLists(db: Database): Promise<void> {
   const repos = await db.query.repositories.findMany({
     columns: { id: true, onboardingTooling: true },
   });
+  const installKey = await configService.getEncryptionKey().catch(() => null);
   for (const repo of repos) {
-    const mirror = repo.onboardingTooling as OnboardingToolingMirror | null;
-    const tooling = mirror?.tooling;
+    const stored = repo.onboardingTooling;
+    if (!stored) continue;
+    const mirror = stored as unknown as OnboardingToolingMirror;
+    const tooling = mirror.tooling;
     if (!tooling || typeof tooling !== 'object' || Array.isArray(tooling)) continue;
-    const held = holdImportedMcpServers(tooling);
+    const held = holdImportedMcpServers(tooling, installKey);
     if (!held) continue;
     const localRuns = await db
       .select({ output: schema.taskSteps.output })
@@ -524,10 +527,7 @@ export async function holdImportedMcpServerLists(db: Database): Promise<void> {
       .update(schema.repositories)
       .set({ onboardingTooling: { ...mirror, tooling: held } })
       .where(
-        and(
-          eq(schema.repositories.id, repo.id),
-          sql`${schema.repositories.onboardingTooling} = ${JSON.stringify(mirror)}::jsonb`,
-        ),
+        and(eq(schema.repositories.id, repo.id), eq(schema.repositories.onboardingTooling, stored)),
       )
       .returning({ id: schema.repositories.id });
     if (updated.length > 0) {
