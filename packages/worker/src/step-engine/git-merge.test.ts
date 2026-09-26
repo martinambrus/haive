@@ -238,6 +238,42 @@ async function setupWideConflict(): Promise<string> {
   return dir;
 }
 
+/** A merge left open on `base.txt` that also cleanly staged feature/x's change to `bad<0xff>.txt`. */
+async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-'));
+  const odd = Buffer.concat([Buffer.from(`${dir}/bad`), Buffer.from([0xff]), Buffer.from('.txt')]);
+  await git(dir, ['init', '-b', 'main']);
+  await git(dir, ['config', 'gc.auto', '0']);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await writeFile(odd, 'odd base\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+  await writeFile(odd, 'odd feature\n');
+  await git(dir, ['commit', '-am', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main']);
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return { dir, odd };
+}
+
+/** HEAD's entries as raw bytes, name to blob. */
+async function headEntries(dir: string): Promise<Map<string, string>> {
+  const { stdout } = await exec('git', ['ls-tree', '-r', '-z', 'HEAD'], {
+    cwd: dir,
+    ...GIT_OPTS,
+    encoding: 'buffer',
+  });
+  const entries = new Map<string, string>();
+  for (const record of stdout.toString('latin1').split('\0').filter(Boolean)) {
+    const tab = record.indexOf('\t');
+    entries.set(record.slice(tab + 1), record.slice(0, tab).split(' ')[2]!);
+  }
+  return entries;
+}
+
 /** One side holds a file `foo` and the other a directory `foo/bar`, so git moves the file aside and
  *  reports only the name it gave it; the merge of `feature/x` into `main` is left open. */
 async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
@@ -877,6 +913,23 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it('keeps the change a merge staged to a file whose name is not UTF-8', async () => {
+    const { dir } = await setupOddNameMerge();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      expect(
+        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets),
+      ).toBeNull();
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      const entries = await headEntries(dir);
+      expect([...entries.keys()].sort()).toEqual(['bad\xff.txt', 'base.txt']);
+      expect(await git(dir, ['cat-file', '-p', entries.get('bad\xff.txt')!])).toBe('odd feature\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
     vi.stubEnv('HOST_REPO_ROOT', root);
@@ -915,6 +968,17 @@ describe('merge helpers (real git)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('aborts a merge after a fixer edited a staged file whose name is not UTF-8', async () => {
+    const { dir, odd } = await setupOddNameMerge();
+    try {
+      await writeFile(odd, 'fixer edit\n');
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(await readFile(odd, 'utf8')).toBe('odd base\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it('checks the markers of a conflicted file whose name git quotes', async () => {
     const dir = await setupNamedConflict('café "notes".txt');

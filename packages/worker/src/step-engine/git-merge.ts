@@ -98,16 +98,45 @@ function isHostCheckout(dir: string): boolean {
   return dir === HOST_REPO_ROOT || dir.startsWith(`${HOST_REPO_ROOT}/`);
 }
 
-/** Paths the merge staged and something edited since, which is what makes `merge --abort` refuse. */
+/** A name as git listed it, read as latin1 to keep its bytes, decoded for a report. */
+function shown(name: string): string {
+  return Buffer.from(name, 'latin1').toString('utf8');
+}
+
+/** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
+ *  that is not UTF-8 as other bytes. */
+async function gitWithPathspecs(
+  dir: string,
+  args: string[],
+  names: string[],
+  env: Record<string, string> = {},
+): Promise<GitRunResult> {
+  const listName = `haive-merge-snapshot-${randomUUID()}`;
+  try {
+    await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(names.join('\0'), 'latin1'));
+    return await gitRun(
+      dir,
+      [...args, `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`, '--pathspec-file-nul'],
+      { ...env, GIT_LITERAL_PATHSPECS: '1' },
+    );
+  } catch (err) {
+    return { stdout: '', stderr: err instanceof Error ? err.message : String(err), code: 1 };
+  } finally {
+    await removeNoFollow(os.tmpdir(), listName).catch(() => false);
+  }
+}
+
+/** Paths the merge staged and something edited since, which is what makes `merge --abort` refuse,
+ *  as git listed them. */
 async function stagedThenEdited(dir: string): Promise<string[] | null> {
   const [staged, edited, unmerged] = await Promise.all([
-    gitRun(dir, ['diff', '--cached', '--name-only', '-z'], undefined, LISTING_BUFFER),
-    gitRun(dir, ['diff', '--name-only', '-z'], undefined, LISTING_BUFFER),
-    unmergedPaths(dir),
+    gitRun(dir, ['diff', '--cached', '--name-only', '-z'], undefined, LISTING),
+    gitRun(dir, ['diff', '--name-only', '-z'], undefined, LISTING),
+    gitRun(dir, ['diff', '--name-only', '--diff-filter=U', '-z'], undefined, LISTING),
   ]);
-  if (staged.code !== 0 || edited.code !== 0 || unmerged === null) return null;
+  if (staged.code !== 0 || edited.code !== 0 || unmerged.code !== 0) return null;
   const changed = new Set(nulPaths(edited.stdout));
-  const open = new Set(unmerged);
+  const open = new Set(nulPaths(unmerged.stdout));
   return nulPaths(staged.stdout).filter((p) => changed.has(p) && !open.has(p));
 }
 
@@ -123,21 +152,17 @@ export async function abortMerge(dir: string): Promise<MergeAbort> {
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
   const blocking = (await stagedThenEdited(dir)) ?? [];
   if (blocking.length === 0 || isHostCheckout(dir)) {
-    return { ok: false, blocking, detail: gitDetail(first) };
+    return { ok: false, blocking: blocking.map(shown), detail: gitDetail(first) };
   }
-  for (let i = 0; i < blocking.length; i += PATHSPEC_CHUNK) {
-    const restore = await gitRun(
-      dir,
-      ['checkout', '--', ...blocking.slice(i, i + PATHSPEC_CHUNK)],
-      { GIT_LITERAL_PATHSPECS: '1' },
-    );
-    if (restore.code !== 0) return { ok: false, blocking, detail: gitDetail(restore) };
+  const restore = await gitWithPathspecs(dir, ['checkout'], blocking);
+  if (restore.code !== 0) {
+    return { ok: false, blocking: blocking.map(shown), detail: gitDetail(restore) };
   }
   const second = await gitRun(dir, ['merge', '--abort']);
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
   return {
     ok: false,
-    blocking: (await stagedThenEdited(dir)) ?? blocking,
+    blocking: ((await stagedThenEdited(dir)) ?? blocking).map(shown),
     detail: gitDetail(second),
   };
 }
@@ -302,7 +327,6 @@ async function snapshotTree(
   const { raw, secrets, since } = opts;
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
-  const listName = `haive-merge-snapshot-${randomUUID()}`;
   try {
     const read = await gitRun(dir, ['read-tree', since?.tree ?? 'HEAD'], env);
     if (read.code !== 0) return { error: gitDetail(read) };
@@ -316,20 +340,10 @@ async function snapshotTree(
         (p) =>
           p !== '' &&
           !(since && covered(since.ignored, p)) &&
-          !(secrets && secretMaskDeniesPath(secrets, Buffer.from(p, 'latin1').toString('utf8'))),
+          !(secrets && secretMaskDeniesPath(secrets, shown(p))),
       );
     if (added.length > 0) {
-      await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(added.join('\0'), 'latin1'));
-      const res = await gitRun(
-        dir,
-        [
-          ...raw.args,
-          'add',
-          `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`,
-          '--pathspec-file-nul',
-        ],
-        { ...env, ...raw.env, GIT_LITERAL_PATHSPECS: '1' },
-      );
+      const res = await gitWithPathspecs(dir, [...raw.args, 'add'], added, { ...env, ...raw.env });
       if (res.code !== 0) return { error: gitDetail(res) };
     }
     const tree = await gitRun(dir, ['write-tree'], env);
@@ -338,7 +352,6 @@ async function snapshotTree(
     return { error: err instanceof Error ? err.message : String(err) };
   } finally {
     await removeNoFollow(os.tmpdir(), name).catch(() => false);
-    await removeNoFollow(os.tmpdir(), listName).catch(() => false);
   }
 }
 
@@ -350,7 +363,7 @@ async function stagedTree(dir: string): Promise<TreeResult> {
     dir,
     ['diff-index', '--cached', '-z', '--no-renames', 'HEAD'],
     undefined,
-    LISTING_BUFFER,
+    LISTING,
   );
   if (changes.code !== 0) return { error: gitDetail(changes) };
   const name = `haive-merge-snapshot-${randomUUID()}`;
@@ -358,23 +371,16 @@ async function stagedTree(dir: string): Promise<TreeResult> {
   try {
     const read = await gitRun(dir, ['read-tree', 'HEAD'], env);
     if (read.code !== 0) return { error: gitDetail(read) };
-    const put: string[] = [];
-    const drop: string[] = [];
-    for (const c of rawChanges(changes.stdout)) {
-      if (c.status === 'U') continue;
-      if (c.status === 'D') drop.push(c.path);
-      else put.push(`${c.dstMode},${c.dstSha},${c.path}`);
-    }
-    // Removals first: a directory/file conflict replaces HEAD's `foo` with `foo/bar`, and the
-    // index refuses the new path while the old one stands.
-    for (let i = 0; i < drop.length; i += PATHSPEC_CHUNK) {
-      const paths = drop.slice(i, i + PATHSPEC_CHUNK);
-      const res = await gitRun(dir, ['update-index', '--force-remove', '--', ...paths], env);
-      if (res.code !== 0) return { error: gitDetail(res) };
-    }
-    for (let i = 0; i < put.length; i += PATHSPEC_CHUNK) {
-      const infos = put.slice(i, i + PATHSPEC_CHUNK).flatMap((p) => ['--cacheinfo', p]);
-      const res = await gitRun(dir, ['update-index', '--add', ...infos], env);
+    // On stdin so each name keeps its bytes; mode 0 removes. Removals first: a directory/file
+    // conflict replaces HEAD's `foo` with `foo/bar`, refused while `foo` stands.
+    const records = rawChanges(changes.stdout)
+      .filter((c) => c.status !== 'U')
+      .sort((a, b) => Number(b.status === 'D') - Number(a.status === 'D'))
+      .map((c) => `${c.dstMode} ${c.dstSha}\t${c.path}\0`);
+    if (records.length > 0) {
+      const res = await gitRun(dir, ['update-index', '--add', '-z', '--index-info'], env, {
+        input: Buffer.from(records.join(''), 'latin1'),
+      });
       if (res.code !== 0) return { error: gitDetail(res) };
     }
     const tree = await gitRun(dir, ['write-tree'], env);
@@ -615,26 +621,8 @@ async function unstageExactly(
   source: string,
   names: string[],
 ): Promise<string | null> {
-  const listName = `haive-merge-snapshot-${randomUUID()}`;
-  try {
-    await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(names.join('\0'), 'latin1'));
-    const res = await gitRun(
-      dir,
-      [
-        'restore',
-        '--staged',
-        `--source=${source}`,
-        `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`,
-        '--pathspec-file-nul',
-      ],
-      { GIT_LITERAL_PATHSPECS: '1' },
-    );
-    return res.code === 0 ? null : gitDetail(res);
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  } finally {
-    await removeNoFollow(os.tmpdir(), listName).catch(() => false);
-  }
+  const res = await gitWithPathspecs(dir, ['restore', '--staged', `--source=${source}`], names);
+  return res.code === 0 ? null : gitDetail(res);
 }
 
 /** Move what a fixer changed outside the paths it was sent to resolve out of `dir`, into
@@ -742,12 +730,12 @@ export async function relocateFixerChanges(
     indexUnchecked = `git could not read the index: ${gitDetail(staged)}`;
   } else {
     for (const c of rawChanges(staged.stdout)) {
-      const shown = Buffer.from(c.path, 'latin1').toString('utf8');
+      const decoded = shown(c.path);
       // Haive's own paths and gitlinks stay in the tree, but `commit` takes the whole index.
-      if (c.status === 'U' || covered(resolving, shown)) continue;
+      if (c.status === 'U' || covered(resolving, decoded)) continue;
       toUnstage.push({
         name: c.path,
-        path: shown,
+        path: decoded,
         blob: NULL_SHA.test(c.dstSha) ? null : c.dstSha,
       });
     }

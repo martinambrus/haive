@@ -486,30 +486,31 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   exits with the codes a conflict does, and used to send fixers into a tree with no merge in it. It
   now halts with git's own reason.
 - **`merge --abort` refuses once a file the merge staged is edited**, a fixer's edit to a cleanly
-  merged file, and used to leave that half merge for the next fixer. `abortMerge` puts those paths back
-  from the index and aborts again. An abort that still fails halts the step with a `merge.abort_failed`
-  event, and nothing is dispatched into the merge. A merge open for another ref is an earlier
-  attempt's and is aborted before a new one opens.
+  merged file, and used to leave that half merge for the next fixer. `abortMerge` puts those paths
+  back from the index, each by its bytes, and aborts again. An abort that still fails halts the step
+  with a `merge.abort_failed` event, and nothing is dispatched into the merge. A merge open for
+  another ref is an earlier attempt's and is aborted before a new one opens.
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
 - **What a fixer changes outside the conflicted files is moved aside, never committed or lost.**
   Before a fixer is sent in, the merge dir is recorded as one git tree built in a scratch index,
   untracked files included, with what the merge staged (a tree built from
-  `diff-index --cached HEAD`, so its cost follows the merge), the paths it is sent to resolve,
-  `HEAD` and `MERGE_HEAD` (`captureFixBaseline`, 1.8 s cold on a 39,378-file repository). Every
-  listing these read is bounded at 64 MiB rather than execFile's 1 MiB default, which 300 changed
-  paths under a deep directory pass, and a listing cut short checked nothing. For a directory/file
-  conflict those paths include the one git moved the file away from: git gives the file a name of
-  its own (`foo~HEAD`), reports only that and stages the directory side, so keeping the file means
-  deleting the directory and putting the file back (MEASURED on git 2.43 and 2.54). The partner is
-  found by content, the same blob beside it on its side where the other side holds a directory,
-  never by the name git chose, and only where that side changed it since the merge base: git takes
-  the directory cleanly where it did not, so an identical sibling is no partner. Files git ignores
-  are left out and stay where a fixer leaves them, never committed: they are where a person's
-  running tools write (build output, logs, caches), and recording them would hash every dependency
-  tree, MEASURED at 43,305 ignored files (835 MB of `node_modules`) beside 1,972 tracked in a
-  worktree of this repository. What counts as ignored is settled then, kept as a blob
+  `diff-index --cached HEAD`, so its cost follows the merge, and written through
+  `update-index --index-info` on stdin, so a name that is not UTF-8 keeps its bytes), the paths it
+  is sent to resolve, `HEAD` and `MERGE_HEAD` (`captureFixBaseline`, 1.8 s cold on a 39,378-file
+  repository). Every listing these read is bounded at 64 MiB rather than execFile's 1 MiB default,
+  which 300 changed paths under a deep directory pass, and a listing cut short checked nothing. For
+  a directory/file conflict those paths include the one git moved the file away from: git gives the
+  file a name of its own (`foo~HEAD`), reports only that and stages the directory side, so keeping
+  the file means deleting the directory and putting the file back (MEASURED on git 2.43 and 2.54).
+  The partner is found by content, the same blob beside it on its side where the other side holds a
+  directory, never by the name git chose, and only where that side changed it since the merge base:
+  git takes the directory cleanly where it did not, so an identical sibling is no partner. Files git
+  ignores are left out and stay where a fixer leaves them, never committed: they are where a
+  person's running tools write (build output, logs, caches), and recording them would hash every
+  dependency tree, MEASURED at 43,305 ignored files (835 MB of `node_modules`) beside 1,972 tracked
+  in a worktree of this repository. What counts as ignored is settled then, kept as a blob
   (`git status --ignored=matching`, which names a directory only when a rule ignores the directory
   itself: 26 entries for those 43,305 files). A fixer resolving `.gitignore` otherwise made a file
   under a rule it dropped read as new and be moved, and hid a recorded file under a rule it added,

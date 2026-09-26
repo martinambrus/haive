@@ -18,11 +18,18 @@ export async function gitRun(
   cwd: string,
   args: string[],
   env?: Record<string, string>,
-  output?: { maxBuffer?: number; encoding?: BufferEncoding },
+  io?: { maxBuffer?: number; encoding?: BufferEncoding; input?: Buffer },
 ): Promise<GitRunResult> {
   try {
+    const { input, ...output } = io ?? {};
     const opts = env ? { cwd, env: { ...process.env, ...env }, ...output } : { cwd, ...output };
-    const { stdout, stderr } = await exec('git', args, opts);
+    const run = exec('git', args, opts);
+    if (input) {
+      // git can exit before reading all of it, which fails that write rather than the run.
+      run.child.stdin?.on('error', () => undefined);
+      run.child.stdin?.end(input);
+    }
+    const { stdout, stderr } = await run;
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
