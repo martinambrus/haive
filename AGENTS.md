@@ -393,7 +393,9 @@ supersede, and every few seconds after (`run-superseded.ts`); a run that reads s
 sandbox or loses the one it has. A Stop takes the Retry's steps in one transaction
 (`stopActiveCliInvocations`): runs, steps, a second sweep of runs, then the task, and the sandboxes
 are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
-Stop that fails leaves every run as it was and kills nothing. A pass a Stop cut off
+Stop that fails leaves every run as it was and kills nothing. The allowance auto-resume
+(`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
+loses takes back every write before it. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
