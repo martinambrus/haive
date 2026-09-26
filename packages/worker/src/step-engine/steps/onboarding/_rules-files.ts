@@ -219,9 +219,6 @@ export async function dropIgnoredRulesFiles(
   return { keep, warnings };
 }
 
-/** Past any rules block; a larger AGENTS.md is one no comparison is attempted on. */
-export const AGENTS_MD_READ_CAP = 1024 * 1024;
-
 /** The cli-rules region of AGENTS.md on disk: null with no file or no region, `unreadable` for a
  *  link, a refused read or a file past the cap. */
 export async function readAgentsRulesRegion(
@@ -231,13 +228,13 @@ export async function readAgentsRulesRegion(
   try {
     read = await readFileNoFollow(repoPath, CLI_RULES_DISK_PATH, {
       strict: true,
-      maxBytes: AGENTS_MD_READ_CAP,
+      maxBytes: RULES_FILE_READ_CAP,
     });
   } catch (err) {
     return { unreadable: err instanceof Error ? err.message : String(err) };
   }
   if (read === null) return { region: null };
-  if (read.truncated) return { unreadable: `larger than ${AGENTS_MD_READ_CAP} bytes` };
+  if (read.truncated) return { unreadable: `larger than ${RULES_FILE_READ_CAP} bytes` };
   return { region: extractRegion(read.data.toString('utf8'), CLI_RULES_START, CLI_RULES_END) };
 }
 

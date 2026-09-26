@@ -14,7 +14,7 @@ import {
   RTK_SETTINGS_PATHS,
 } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
-import { RTK_BLOCK_FILES } from '@haive/shared/rules-files';
+import { RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
@@ -23,7 +23,6 @@ import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
-  AGENTS_MD_READ_CAP,
   RULES_IMPORT_LINE,
   dropIgnoredRulesFiles,
   isLinkToAgentsMd,
@@ -164,15 +163,15 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
     const { stdout: size } = await execFileAsync('git', ['cat-file', '-s', tree[2]!], {
       cwd: repoPath,
     });
-    if (Number(size.trim()) > AGENTS_MD_READ_CAP) {
+    if (Number(size.trim()) > RULES_FILE_READ_CAP) {
       return {
         verdict: 'unknown',
-        reason: `HEAD's copy is larger than ${AGENTS_MD_READ_CAP} bytes`,
+        reason: `HEAD's copy is larger than ${RULES_FILE_READ_CAP} bytes`,
       };
     }
     const { stdout: blob } = await execFileAsync('git', ['cat-file', 'blob', tree[2]!], {
       cwd: repoPath,
-      maxBuffer: AGENTS_MD_READ_CAP + 1024,
+      maxBuffer: RULES_FILE_READ_CAP + 1024,
     });
     const head = extractRegion(blob, CLI_RULES_START, CLI_RULES_END);
     if (head === null) return { verdict: 'stage' };
