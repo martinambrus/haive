@@ -3,7 +3,7 @@
 > **In progress** (2026-09-26). Phase 0 shipped and live-verified: B0.1 (#326), B0.2 (#327), B0.3
 > (#328) and B0.1b (#329, 04's MCP opt-in reaches the runtime). Track A under way: A1 shipped and
 > live-verified (A1.1 #330, A1.2 #331, A1.3 #332, A1.4 #333, A1.5 #334, A1.6 #335); A2.1 shipped
-> and live-verified (#336); A2.1b in review.
+> and live-verified (#336); A2.1b shipped and live-verified (#337); A2.2 in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
