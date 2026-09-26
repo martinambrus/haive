@@ -352,8 +352,8 @@ like any other. A clarification answer is one of those, since it rides `task_eve
 job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
-reset. A task Retry's START runs its first step itself rather than through an advance, so it takes
-that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
+reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
+step itself rather than through an advance, so it takes that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
 merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
 Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
@@ -396,11 +396,17 @@ the task has either not reached that row or already queued the advance that clai
 the step Retry and the fan-out Resume refuse a `cancelled` or `completed` task with a 409 inside
 their transaction, before anything is reset or killed: the task page offers no step action on
 either, and a failed task stays fully recoverable.
-The task retry settles its
-rows again after its bump, since answering a parked form revives the task and can open a row in
-between. That settle locks every active row before it writes (`settleActiveSteps`): a pass that got
-in before the bump can still move its row from a form to `running` between two unlocked writes and
-escape both. The recap goes to the ledger, or to a recap run,
+A task Retry re-runs the step the task stopped on, at its round (`retryTaskAtStep`), rather than
+replaying the task from START, which re-derives every stored loop_back and pays each fix round
+again. One transaction ends the task's live runs, re-offers a parked row as it was (a form keeps its
+schema and answers, a runtime park its detection), resets the failed or live row, its downstream
+and any other live row, and moves the task back through `moveTaskToStep` under a bump fenced on
+`failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
+row is left as it is: its advance re-drives the hand-off it finished with. A task that never
+reached a step still restarts through START, and settles its rows again after its bump, since
+answering a parked form revives the task and can open a row in between. That settle locks every
+active row before it writes (`settleActiveSteps`): a pass that got in before the bump can still
+move its row from a form to `running` between two unlocked writes and escape both. The recap goes to the ledger, or to a recap run,
 only after the outcome has landed and only while the row still reads `done`: the ledger entry is
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
 since a Retry's reset supersedes only the runs that already exist. That check narrows the window

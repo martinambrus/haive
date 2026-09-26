@@ -3,19 +3,25 @@
  * Regression cover for the deadlock that made a task unrecoverable through the UI: a task
  * that failed with a step still in waiting_cli used to restart from step 0 while that step
  * stayed active, and the worker's other-step guard then refused every advance forever.
- * Retry now stops in-flight work first and bumps the orchestration epoch.
+ * Retry now ends the live run, re-runs the step the task stopped on and bumps the epoch.
  *
  * Run manually (the -smoke.ts suffix keeps vitest from auto-running it):
  *   docker exec haive-api sh -c 'cd /app/packages/api && ./node_modules/.bin/tsx test/task-retry-parked-smoke.ts'
  *
- * The BullMQ task queue is PAUSED for the duration so the START job this enqueues for a
+ * The BullMQ task queue is PAUSED for the duration so the advance this enqueues for a
  * throwaway task is never executed by the live worker; it is removed and the queue resumed
  * in the finally block.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { configService, secretsService, userSecretsService, logger } from '@haive/shared';
+import {
+  configService,
+  secretsService,
+  userSecretsService,
+  logger,
+  TASK_JOB_NAMES,
+} from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, closeRedis } from '../src/redis.js';
 import { closeQueues, getTaskQueue } from '../src/queues.js';
@@ -58,7 +64,7 @@ async function main(): Promise<void> {
     const masterKek = await secretsService.getMasterKek();
     await userSecretsService.initialize(db, masterKek);
 
-    // Pause BEFORE the first retry so the START job can never reach the live worker.
+    // Pause BEFORE the first retry so the advance can never reach the live worker.
     await getTaskQueue().pause();
     state.paused = true;
     log.info('task queue paused for the smoke');
@@ -142,11 +148,8 @@ async function main(): Promise<void> {
     const stepAfter = await db.query.taskSteps.findFirst({
       where: eq(schema.taskSteps.id, parkedStep.id),
     });
-    // Terminal is what matters: the other-step guard only blocks on
-    // running / waiting_cli / waiting_form, so anything outside that set unblocks the restart.
-    if (stepAfter?.status === 'waiting_cli' || stepAfter?.status === 'running') {
-      throw new Error(`parked step still active after retry: ${stepAfter?.status}`);
-    }
+    // The step the task stopped on is re-run, so it is reset rather than failed.
+    assertEq('parked step reset', stepAfter?.status, 'pending');
 
     const blocking = await db
       .select({ id: schema.taskSteps.id, status: schema.taskSteps.status })
@@ -160,19 +163,26 @@ async function main(): Promise<void> {
     }
 
     const taskAfter = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) });
-    assertEq('task status', taskAfter?.status, 'queued');
+    assertEq('task status', taskAfter?.status, 'running');
     assertEq('epoch bumped', taskAfter?.orchestrationEpoch, epochBefore + 1);
 
     // bullmq 6 removed 'paused' from JobType — a paused queue's jobs report as 'waiting'.
-    const queued = await getTaskQueue().getJobs(['wait', 'delayed', 'prioritized']);
-    const startJob = queued.find(
-      (j) => j.name === 'start-task' && (j.data as { taskId?: string })?.taskId === task.id,
-    );
-    if (!startJob) throw new Error('retry did not enqueue a START job');
+    const advanceFor = async (epoch: number) =>
+      (await getTaskQueue().getJobs(['wait', 'delayed', 'prioritized'])).find((j) => {
+        const data = j.data as { taskId?: string; stepId?: string; epoch?: number };
+        return (
+          j.name === TASK_JOB_NAMES.ADVANCE_STEP &&
+          data.taskId === task.id &&
+          data.stepId === 'parked-step' &&
+          data.epoch === epoch
+        );
+      });
+    if (!(await advanceFor(epochBefore + 1))) {
+      throw new Error('retry did not enqueue an advance for the step at the new epoch');
+    }
 
     // --- 2. Retry over a waiting_form park ------------------------------------------
-    // stopActiveCliInvocations covers running/waiting_cli only; a form park must be reset
-    // to pending (re-offered by the restart) rather than left blocking.
+    // A form park is re-offered as it was: back to pending, rather than left blocking.
     await db
       .update(schema.taskSteps)
       .set({ status: 'waiting_form', waitingStartedAt: new Date(), endedAt: null })
@@ -197,6 +207,9 @@ async function main(): Promise<void> {
 
     const taskAfter2 = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) });
     assertEq('epoch bumped twice', taskAfter2?.orchestrationEpoch, epochBefore + 2);
+    if (!(await advanceFor(epochBefore + 2))) {
+      throw new Error('retry over the form park did not enqueue an advance');
+    }
 
     console.log(JSON.stringify({ smoke: 'TASK_RETRY_PARKED_OK' }));
   } catch (err) {

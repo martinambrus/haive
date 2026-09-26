@@ -83,7 +83,7 @@ import {
   resolveCostDisplay,
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
-import { stepRoutes } from './steps.js';
+import { retryTaskAtStep, stepRoutes } from './steps.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -1075,6 +1075,25 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
+      // A task that stopped on a step re-runs that step. START replays the task from its first
+      // step, which only a task that never reached one still needs.
+      const [target] = task.currentStepId
+        ? await db
+            .select()
+            .from(schema.taskSteps)
+            .where(
+              and(
+                eq(schema.taskSteps.taskId, id),
+                eq(schema.taskSteps.stepId, task.currentStepId),
+                eq(schema.taskSteps.round, task.currentRound),
+              ),
+            )
+            .limit(1)
+        : [];
+      if (target) {
+        await retryTaskAtStep(db, id, userId, target);
+        return c.json({ ok: true, status: 'running' });
+      }
       // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
       // orchestrator refuses to advance any step while another one is still
       // running/waiting_cli (the other-step guard in task-queue.ts). A task that failed
@@ -1109,7 +1128,7 @@ taskRoutes.post('/:id/action', async (c) => {
         );
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
-      await db
+      const [requeued] = await db
         .update(schema.tasks)
         .set({
           status: 'queued',
@@ -1123,7 +1142,10 @@ taskRoutes.post('/:id/action', async (c) => {
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           updatedAt: new Date(),
         })
-        .where(eq(schema.tasks.id, id));
+        .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')))
+        .returning({ id: schema.tasks.id });
+      // A Cancel that landed since the read stands.
+      if (!requeued) throw new HttpError(409, 'The task is no longer failed; reload it');
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
       await stopActiveCliInvocations(db, id, { failTask: false });

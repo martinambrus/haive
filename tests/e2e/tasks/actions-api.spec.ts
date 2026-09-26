@@ -67,7 +67,7 @@ test.describe('task actions API', () => {
     }
   });
 
-  test('retry on failed task transitions to queued and clears errorMessage', async ({ page }) => {
+  test('retry on a failed task re-runs its step and clears errorMessage', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
@@ -80,7 +80,7 @@ test.describe('task actions API', () => {
         data: { action: 'retry' },
       });
       expect(res.status()).toBe(200);
-      expect((await res.json()).status).toBe('queued');
+      expect((await res.json()).status).toBe('running');
 
       // errorMessage is cleared synchronously in the retry transaction and
       // is not restored to the original value when the worker re-fails the

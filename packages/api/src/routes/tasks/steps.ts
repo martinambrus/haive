@@ -48,6 +48,7 @@ import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
+import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -231,6 +232,7 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
+  opts: { fromFailed?: boolean } = {},
 ) {
   await resetRowsForRerun(tx, taskId, leftActive, now);
   const [bumped] = await tx
@@ -245,11 +247,19 @@ async function moveTaskToStep(
       currentRound: step.round,
       orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
       ...CLEAR_ALLOWANCE_WATCH,
+      // A task Retry means "run it", so a hold left on the failed task goes with it.
+      ...(opts.fromFailed ? { pausedAt: null } : {}),
       updatedAt: now,
     })
-    .where(unendedTask(taskId))
+    .where(
+      opts.fromFailed
+        ? and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed'))
+        : unendedTask(taskId),
+    )
     .returning({ epoch: schema.tasks.orchestrationEpoch });
-  if (!bumped) throw new HttpError(409, ENDED_TASK_MESSAGE);
+  if (!bumped) {
+    throw new HttpError(409, opts.fromFailed ? RETRY_RACED_MESSAGE : ENDED_TASK_MESSAGE);
+  }
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now);
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
@@ -258,6 +268,95 @@ async function moveTaskToStep(
 /** A cancelled or completed task is not moved back to a step, as the task page offers no step
  *  action on one; the refusal throws inside the action's transaction, before any kill. */
 const ENDED_TASK_MESSAGE = 'The task has ended and cannot be moved back to a step';
+const RETRY_RACED_MESSAGE = 'The task is no longer failed; reload it to see what it is doing';
+
+/** Task Retry for a task that failed on a step: re-run that step, at the round the task stopped
+ *  in, instead of replaying the task from START, which re-derives every stored loop_back and pays
+ *  each fix round again. The failed or live row and its downstream are reset, a parked row is
+ *  re-offered as it was, and a task no longer `failed` (a Cancel landing first) is a 409 with
+ *  nothing changed. A `done` or `skipped` row is left as it is: its advance re-drives the hand-off
+ *  it finished with. */
+export async function retryTaskAtStep(
+  db: Database,
+  taskId: string,
+  userId: string,
+  target: typeof schema.taskSteps.$inferSelect,
+): Promise<{ epoch: number }> {
+  const rows = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
+  const downstream = rows.filter(
+    (r) =>
+      r.round === target.round &&
+      r.status !== 'pending' &&
+      (target.runSeq != null
+        ? r.runSeq != null && r.runSeq > target.runSeq
+        : r.stepIndex > target.stepIndex),
+  );
+  const cascade = new Set([target.id, ...downstream.map((r) => r.id)]);
+  const reset = [
+    ...(target.status === 'failed' || isLive(target) ? [target] : []),
+    ...downstream,
+    ...rows.filter((r) => !cascade.has(r.id) && isLive(r)),
+  ];
+  const now = new Date();
+  const moved = await db.transaction(async (tx) => {
+    // Runs first and step rows after, the order a pass takes them in.
+    const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
+    await resetRowsForRerun(tx, taskId, reset, now);
+    await reofferParkedSteps(
+      tx,
+      taskId,
+      now,
+      reset.map((r) => r.id),
+    );
+    // A wait note on a row that is not waiting describes a park that has ended.
+    await tx
+      .update(schema.taskSteps)
+      .set({ statusMessage: null, updatedAt: now })
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, taskId),
+          inArray(schema.taskSteps.status, ['pending', 'skipped']),
+          isNotNull(schema.taskSteps.statusMessage),
+        ),
+      );
+    const result = await moveTaskToStep(tx, taskId, target, [], now, { fromFailed: true });
+    const touched = [...reset, ...result.leftActive];
+    await tx.insert(schema.taskEvents).values({
+      taskId,
+      taskStepId: target.id,
+      eventType: 'task.retried',
+      payload: {
+        by: userId,
+        stepId: target.stepId,
+        round: target.round,
+        priorStatus: target.status,
+        reset: touched.map((r) => ({ stepId: r.stepId, round: r.round })),
+      },
+    });
+    return { epoch: result.epoch, live: cancelled.length > 0 || touched.some(isLive) };
+  });
+  if (moved.live) {
+    const killed = await killTaskSandboxes(taskId);
+    logger.info({ taskId, killed }, 'killed task sandboxes for task retry');
+  }
+  await getTaskQueue().add(
+    TASK_JOB_NAMES.ADVANCE_STEP,
+    {
+      taskId,
+      userId,
+      stepId: target.stepId,
+      round: target.round,
+      epoch: moved.epoch,
+    } as TaskJobPayload,
+    {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    },
+  );
+  return { epoch: moved.epoch };
+}
 function unendedTask(taskId: string) {
   return and(
     eq(schema.tasks.id, taskId),
