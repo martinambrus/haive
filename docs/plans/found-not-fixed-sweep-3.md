@@ -2,7 +2,8 @@
 
 > **In progress** (2026-09-26). Phase 0 shipped and live-verified: B0.1 (#326), B0.2 (#327), B0.3
 > (#328) and B0.1b (#329, 04's MCP opt-in reaches the runtime). Track A under way: A1 shipped and
-> live-verified (A1.1 #330, A1.2 #331, A1.3 #332, A1.4 #333, A1.5 #334, A1.6 #335); A2.1 in review.
+> live-verified (A1.1 #330, A1.2 #331, A1.3 #332, A1.4 #333, A1.5 #334, A1.6 #335); A2.1 shipped
+> and live-verified (#336); A2.1b in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
@@ -151,6 +152,13 @@ DE = `.../dag-executor.ts`.
     refused merge is `error`), `12-worktree-cleanup.test.ts` (a never-answered fixer that edited a
     cleanly merged file: today the next fixer inherits the half merge), `dag-executor.test.ts`.
     Live: a `smoke:dag-auto-resolve` variant (stub fixers, zero tokens).
+- **A2.1b fix(worker): the plan merge reads its conflicted names with `-z`.** Found after A2.1
+  merged: `plan/merge.ts` `conflictedPaths` is a second reader of a merge's unmerged paths and
+  still reads them quoted, so the plan-merge agent is handed a name that opens no file. Reads
+  through `unmergedPaths`; the plan-merge prompt lists only names that fit on one line
+  (`isSingleLine`, `survivesFence`, no U+FFFD) and counts the rest, since `-z` no longer
+  quotes a newline. Controls: `merge.test.ts` (a quoted conflicted name comes back as itself),
+  `plan-merge-passes.test.ts` (a name holding a newline opens no prompt line).
 - **A2.2 fix(worker): a fixer's changes outside the merge are moved aside, never committed or
   lost.**
   - `captureFixBaseline(dir)` after the merge (re)opens and before dispatch (untracked set via

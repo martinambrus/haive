@@ -9,6 +9,7 @@ import {
 import type { Database } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { completeMergeHostSide } from '../../git-merge.js';
+import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
   commitMerge,
@@ -163,7 +164,15 @@ function needsAgentPass(d: PlanMergeDetect): boolean {
   return d.conflicts.length > 0 && d.attempts < MAX_AGENT_PASSES;
 }
 
+/** A name that would open a line of its own, or that git could not decode, stays off the prompt:
+ *  a mangled name is worse than an absent one. */
+function fitsPromptLine(path: string): boolean {
+  return isSingleLine(path) && survivesFence(path) && !path.includes('\uFFFD');
+}
+
 function buildPrompt(d: PlanMergeDetect): string {
+  const listed = d.conflicts.filter(fitsPromptLine);
+  const unlisted = d.conflicts.length - listed.length;
   return [
     'A git merge conflict is live in this repository and you are resolving it.',
     '',
@@ -182,7 +191,12 @@ function buildPrompt(d: PlanMergeDetect): string {
         "two-sided edit. Combine them; don't drop either side's work.",
     '',
     `Conflicting files (${d.conflicts.length}):`,
-    ...d.conflicts.map((p) => `- ${d.worktreeRelPath}/${p}`),
+    ...listed.map((p) => `- ${d.worktreeRelPath}/${p}`),
+    ...(unlisted > 0
+      ? [
+          `- and ${unlisted} more whose names cannot be shown on a line; find them by their conflict markers.`,
+        ]
+      : []),
     '',
     'Resolve EVERY conflict by EDITING those files: remove the <<<<<<< / ======= / >>>>>>>',
     'markers and leave the content you want to keep.',

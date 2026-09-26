@@ -3,6 +3,7 @@ import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js'
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
+import { unmergedPaths } from '../step-engine/git-merge.js';
 import { PLAN_SNAPSHOT_GIT_PATHS } from './snapshot-git.js';
 import type { Database } from '@haive/database';
 
@@ -132,11 +133,7 @@ export async function divergence(
 
 /** Paths git reports as unmerged — the same call the task-side resolver makes. */
 export async function conflictedPaths(worktreePath: string): Promise<string[]> {
-  const res = await gitRun(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
-  return res.stdout
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return (await unmergedPaths(worktreePath)) ?? [];
 }
 
 const PLAN_PATHS = new Set<string>(PLAN_SNAPSHOT_GIT_PATHS);

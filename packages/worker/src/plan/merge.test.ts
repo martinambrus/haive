@@ -206,6 +206,28 @@ describe('mergeOriginInto', () => {
     expect(await readFile(path.join(wt, '.haive-data/plan.json'), 'utf8')).toContain('remote');
   });
 
+  it('reports a conflicted name git would quote as the name itself', async () => {
+    const { local, remote } = await unrelatedPair();
+    const name = 'café "notes".txt';
+    await write(remote, name, 'remote\n');
+    await git(remote, ['add', '-A']);
+    await git(remote, ['commit', '-m', 'remote notes']);
+    await write(local, name, 'local\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'local notes']);
+    await git(local, ['fetch', 'origin', 'main']);
+
+    const wt = await ensurePlanMergeWorktree(local);
+    const attempt = await mergeOriginInto(
+      wt,
+      'main',
+      (await divergence(local, 'main')).unrelated,
+      COMMIT_ENV,
+    );
+    expect(attempt.conflicts.sort()).toEqual(['README.md', name]);
+    expect((await conflictedPaths(wt)).sort()).toEqual(['README.md', name]);
+  });
+
   it('is clean when only the plan files collide', async () => {
     const { local, remote } = await unrelatedPair();
     // Same README on both sides, so it is not a conflict; only the plan differs.
