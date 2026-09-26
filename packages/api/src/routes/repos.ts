@@ -53,6 +53,7 @@ import {
   LEGACY_RTK_MD_PATHS,
   LEGACY_RTK_MD_SHA256,
   normalizeContent,
+  RTK_SETTINGS_PATHS,
   sha256Hex,
   unmanagedAgentsDir,
   type ArchiveFormat,
@@ -1528,7 +1529,7 @@ const ONBOARDING_SWEEP_DIR = '.claude';
 /** rtk's two settings files. Haive writes them, but `writeIfAllowed` SKIPS a file that already
  *  exists (`07-generate-files.ts:789`), so the one on disk may be the user's own — a stored
  *  `written_hash` is the only evidence either way, so provenance decides per file. */
-const ONBOARDING_SETTINGS_FILES = ['.claude/settings.json', '.gemini/settings.json'];
+const ONBOARDING_SETTINGS_FILES = RTK_SETTINGS_PATHS;
 
 /** Kept by a sweep although it sits in a directory Haive otherwise owns: `mcp_settings.json` is
  *  created once and never rewritten (`isUserOwnedAfterWrite`), and a `*-legacy` directory holds

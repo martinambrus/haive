@@ -5,7 +5,6 @@ import {
   buildGeminiSettingsJson,
   buildRtkAwarenessBlock,
   buildRtkTemplateItems,
-  hasClaudeFamily,
   insertRtkHookEntry,
   RTK_HOOK_CLAUDE_COMMAND,
   RTK_HOOK_GEMINI_COMMAND,
@@ -70,11 +69,16 @@ describe('buildRtkTemplateItems gating', () => {
     // silently never gets the hook — which is how ollama went missing.
     const family: CliProviderName[] = ['claude-code', 'zai', 'ollama', 'muse', 'openrouter'];
     const outsiders: CliProviderName[] = ['gemini', 'codex', 'amp', 'grok', 'antigravity'];
+    const items = buildRtkTemplateItems<RtkRenderInputs>();
+    const getsClaudeSettings = (name: CliProviderName) =>
+      items
+        .flatMap((i) => i.render(ctx(true, [name])))
+        .some((r) => r.diskPath === '.claude/settings.json');
     for (const name of family) {
-      expect(hasClaudeFamily(ctx(true, [name])), name).toBe(true);
+      expect(getsClaudeSettings(name), name).toBe(true);
     }
     for (const name of outsiders) {
-      expect(hasClaudeFamily(ctx(true, [name])), name).toBe(false);
+      expect(getsClaudeSettings(name), name).toBe(false);
     }
   });
 
