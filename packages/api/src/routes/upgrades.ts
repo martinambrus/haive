@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
@@ -9,7 +9,9 @@ import {
   CLI_RULES_TEMPLATE_ID,
   computeSetHash,
   getHaiveVersion,
+  newestArtifactsFirst,
   normalizeContent,
+  rtkSettingsNeeded,
   sha256Hex,
   type TaskJobPayload,
   type UpgradeStatusResponse,
@@ -55,6 +57,25 @@ export async function rulesImportGaps(
     else if (state === 'linked-elsewhere') linked.push(file);
   }
   return { missing, linked };
+}
+
+/** The providers the newest live snapshot that recorded an RTK choice names, the one 01's
+ *  `pickRenderSnapshot` renders RTK from. None for a repository whose snapshots predate RTK. */
+export function recordedRtkProviders(
+  rows: ReadonlyArray<{
+    id: string;
+    generatedAt: Date | null;
+    rtkRecorded: boolean | null;
+    snapshotProviders: unknown;
+  }>,
+): string[] | null {
+  const row = newestArtifactsFirst(rows).find((r) => r.rtkRecorded === true);
+  if (!row) return null;
+  if (!Array.isArray(row.snapshotProviders)) return [];
+  return row.snapshotProviders.flatMap((p: unknown) => {
+    const name = (p as { name?: unknown } | null)?.name;
+    return typeof name === 'string' ? [name] : [];
+  });
 }
 
 /**
@@ -135,12 +156,17 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   const liveArtifacts = await db
     .select({
+      id: schema.onboardingArtifacts.id,
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
       generatedAt: schema.onboardingArtifacts.generatedAt,
+      rtkRecorded: sql<
+        boolean | null
+      >`jsonb_typeof(${schema.onboardingArtifacts.formValuesSnapshot} -> 'rtkEnabled') = 'boolean'`,
+      snapshotProviders: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'enabledCliProviders'`,
     })
     .from(schema.onboardingArtifacts)
     .where(
@@ -250,6 +276,16 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
+  // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
+  // apply again wherever the providers of the render context the upgrade uses read them.
+  const rtkProviders = repo.rtkEnabled ? recordedRtkProviders(liveArtifacts) : null;
+  if (rtkProviders) {
+    for (const m of manifestCache) {
+      if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {
+        applicableSet.add(m.templateId);
+      }
+    }
+  }
 
   interface CurrentTemplate {
     templateId: string;

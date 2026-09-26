@@ -483,6 +483,18 @@ async function main(): Promise<void> {
       againApplied.writtenPaths,
     );
 
+    // ---- RTK switched back on: what the banner now offers, the plan offers too --------------
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: true })
+      .where(eq(schema.repositories.id, repositoryId));
+    const back = await upgrade('rtk-off-upgrade-smoke back on');
+    check(
+      'with RTK back on the settings file the off-upgrade removed is offered as a new file',
+      settingsEntry(back.detected)?.bucket === 'new_artifact',
+      { bucket: settingsEntry(back.detected)?.bucket },
+    );
+
     // ---- a repository onboarded before RTK: its plan's "off" was never anyone's choice ------------
     const legacyId = randomUUID();
     const legacyPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-legacy-'));

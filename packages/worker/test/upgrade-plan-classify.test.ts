@@ -14,6 +14,7 @@ import {
 import {
   backfillRecord,
   classifyEntry,
+  pickRenderSnapshot,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
@@ -32,6 +33,7 @@ function live(partial: Partial<LiveArtifactRow> = {}): LiveArtifactRow {
     formValuesSnapshot: null,
     sourceStepId: '12-post-onboarding',
     bundleItemId: null,
+    generatedAt: null,
     ...partial,
   };
 }
@@ -347,5 +349,31 @@ describe('keptRowUpdate', () => {
     expect(update.writtenContent).toBe('EDITED');
     expect(update).not.toHaveProperty('writtenHash');
     expect(classifyEntry({ live: { ...row, ...update }, ...disk })).toBe('unchanged');
+  });
+});
+
+describe('pickRenderSnapshot', () => {
+  const row = (id: string, formValuesSnapshot: Record<string, unknown> | null, at = 0) => ({
+    id,
+    generatedAt: new Date(at),
+    formValuesSnapshot,
+  });
+
+  it('renders from a snapshot that recorded an RTK choice ahead of one from before RTK', () => {
+    const beforeRtk = { framework: 'drupal' };
+    const recorded = { framework: 'drupal', rtkEnabled: false };
+    expect(
+      pickRenderSnapshot([row('a', null), row('b', beforeRtk, 2), row('c', recorded, 1)]),
+    ).toBe(recorded);
+    expect(pickRenderSnapshot([row('a', beforeRtk)])).toBe(beforeRtk);
+    expect(pickRenderSnapshot([row('a', null)])).toBeNull();
+  });
+
+  it('takes the newest recorded snapshot, whatever order the rows come in', () => {
+    const older = { rtkEnabled: true, enabledCliProviders: [{ name: 'gemini' }] };
+    const newer = { rtkEnabled: true, enabledCliProviders: [{ name: 'claude-code' }] };
+    expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 2)])).toBe(newer);
+    expect(pickRenderSnapshot([row('b', newer, 2), row('a', older, 1)])).toBe(newer);
+    expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 1)])).toBe(newer);
   });
 });

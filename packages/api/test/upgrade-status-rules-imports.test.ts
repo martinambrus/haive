@@ -279,3 +279,100 @@ describe('upgrade-status and a repository that switched RTK off', () => {
     expect(body.rtkBlockLeftovers).toBeUndefined();
   });
 });
+
+describe('upgrade-status and a repository that switched RTK back on', () => {
+  let repo: string;
+  const claudeRtk = { templateId: 'rtk.claude-settings', schemaVersion: 1, contentHash: 'h-rtk' };
+  const geminiRtk = { templateId: 'rtk.gemini-settings', schemaVersion: 1, contentHash: 'h-gem' };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-rtk-on-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    inSync([claude]);
+    for (const t of [claudeRtk, geminiRtk]) {
+      state.rows.get(schema.templateManifestCache)!.push({
+        ...t,
+        templateKind: 'rtk-config',
+        setHash: 's',
+      });
+    }
+    // The upgrade that switched RTK off removed the settings file and wrote the snapshot without it.
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: true,
+    };
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  /** What every live row's render-context snapshot says about RTK and the providers. */
+  const snapshots = (rtkRecorded: boolean | null, providers: unknown) => {
+    const rows = state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[];
+    state.rows.set(
+      schema.onboardingArtifacts,
+      rows.map((r) => ({ ...r, rtkRecorded, snapshotProviders: providers })),
+    );
+  };
+
+  it('offers the settings file the recorded providers read once RTK is back on', async () => {
+    snapshots(true, [{ name: 'claude-code' }]);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([claudeRtk.templateId]);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('stays quiet with RTK off, for providers that read no file, and before RTK', async () => {
+    const cases: Array<[string, boolean, boolean | null, unknown]> = [
+      ['RTK off', false, true, [{ name: 'claude-code' }]],
+      ['no provider reads one', true, true, [{ name: 'codex' }]],
+      ['a snapshot from before RTK', true, null, [{ name: 'claude-code' }]],
+    ];
+    for (const [label, rtkEnabled, recorded, providers] of cases) {
+      state.repo = { ...state.repo, rtkEnabled };
+      snapshots(recorded, providers);
+      const body = await status();
+      expect(body.changedTemplateIds, label).toEqual([]);
+      expect(body.hasUpgradeAvailable, label).toBe(false);
+    }
+  });
+
+  it('reads the providers of the newest recorded snapshot, whatever order the rows come in', async () => {
+    const rows = state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[];
+    const recorded = (row: Record<string, unknown>, id: string, at: number, name: string) => ({
+      ...row,
+      id,
+      generatedAt: new Date(at),
+      rtkRecorded: true,
+      snapshotProviders: [{ name }],
+    });
+    state.rows.set(schema.onboardingArtifacts, [
+      ...rows.map((r, i) => recorded(r, `older-${i}`, 1000, 'gemini')),
+      recorded(rows[0]!, 'newer', 2000, 'claude-code'),
+    ]);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([claudeRtk.templateId]);
+  });
+
+  it('reads a settings file the off-upgrade kept as installed, not as missing', async () => {
+    snapshots(true, [{ name: 'claude-code' }]);
+    state.rows.get(schema.onboardingArtifacts)!.push({
+      templateId: claudeRtk.templateId,
+      templateSchemaVersion: claudeRtk.schemaVersion,
+      templateContentHash: claudeRtk.contentHash,
+      bundleItemId: null,
+      haiveVersion: null,
+      generatedAt: null,
+      rtkRecorded: true,
+      snapshotProviders: [{ name: 'claude-code' }],
+    });
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+});
