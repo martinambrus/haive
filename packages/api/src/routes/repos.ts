@@ -9,14 +9,17 @@ import {
   errno,
   isPathContainmentError,
   lstatNoFollow,
+  ParkedFileError,
   openFileNoFollow,
   readFileNoFollow,
   readTextNoFollow,
   readdirNoFollow,
   relUnder,
+  removeFileIfNoFollow,
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
+  type ReadResult,
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
 import {
@@ -1591,7 +1594,13 @@ export interface OnboardingResetOutcome {
 export function classifyResetFailure(err: unknown): { reason: string; io: boolean } | null {
   if (isPathContainmentError(err)) return { reason: err.reason, io: false };
   const code = errno(err);
-  return code === undefined ? null : { reason: code, io: true };
+  if (code === undefined) return null;
+  // A file that could not be moved back had been found and moved, so it is no sign the walk
+  // could not read the tree, and it never trips the empty-walk floor.
+  if (err instanceof ParkedFileError) {
+    return { reason: `${code}; the file is now at ${err.parkedAt}`, io: false };
+  }
+  return { reason: code, io: true };
 }
 
 /** A `Database` or the transaction handle its callback receives. The reset's two closing writes
@@ -1925,20 +1934,59 @@ export async function resetOnboardingArtifacts(
     return verdict;
   };
 
+  /** Remove a file only while it still holds bytes one of `hashes` names, judged on the inode it
+   *  takes: a save landing after the verdict was read is a new file, and is kept. Answers whether
+   *  the file stayed, so the directory around it is not removed with it. */
+  const removeIfStillHashed = async (rel: string, hashes: readonly string[]): Promise<boolean> => {
+    let stayed = true;
+    await guard(rel, async () => {
+      const result = await removeFileIfNoFollow(
+        root,
+        rel,
+        (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+        { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
+      );
+      // A save that took the name back while the old file was judged is the person's file.
+      const retaken = result === 'removed' && (await lstatNoFollow(root, rel)) !== null;
+      if (result === 'removed' && !retaken) {
+        removed.push(rel);
+        vacatedPaths.add(rel);
+      } else if (result === 'kept' || retaken) {
+        skipped.push({ path: rel, reason: claimRefusalReason('edited') });
+      }
+      stayed = result === 'kept' || retaken;
+    });
+    return stayed;
+  };
+
+  /** A file `claimSatisfied` found ours, removed against the hashes that could have made it so. A
+   *  claim with no hash behind it is taken by its path, the window this cannot close. */
+  const removeClaimedFile = async (rel: string): Promise<boolean> => {
+    const recorded = haiveEntries.get(rel);
+    const hashes = [writtenHashes.get(rel), typeof recorded === 'string' ? recorded : undefined];
+    const known = hashes.filter((hash): hash is string => hash !== undefined);
+    if (known.length === 0) return (await remove(rel, false)) !== 'ok';
+    return removeIfStillHashed(rel, known);
+  };
+
+  const readClaimed = (rel: string) =>
+    readFileNoFollow(root, rel, { maxBytes: MAX_FILE_CONTENT_BYTES, strict: true });
+  /** A whole read's normalised hash. None for a read the cap cut: its opening can normalise to a
+   *  render the whole file is not. */
+  const wholeHash = (read: ReadResult | null): string | null =>
+    read === null || read.truncated
+      ? null
+      : sha256Hex(normalizeContent(read.data.toString('utf8')));
+
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.
   for (const rel of ONBOARDING_SETTINGS_FILES) {
     await guard(rel, async () => {
-      const content = await readTextNoFollow(root, rel, { strict: true });
-      if (content === null) return;
+      const read = await readClaimed(rel);
+      if (read === null) return;
       const written = writtenHashes.get(rel);
-      if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
-        if (await removeNoFollow(root, rel)) {
-          removed.push(rel);
-          // Vacated, so its row must not survive on a later parent skip — this deletion does not
-          // go through `remove()` and would otherwise be invisible to `vacatedPaths`.
-          vacatedPaths.add(rel);
-        }
+      if (written !== undefined && written === wholeHash(read)) {
+        await removeIfStillHashed(rel, [written]);
         return;
       }
       skipped.push({
@@ -1999,10 +2047,8 @@ export async function resetOnboardingArtifacts(
 
   /** Whether the bytes on disk are still the ones the writing step recorded. Same normalisation
    *  as the row check, or the two records would disagree about identical files. */
-  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> => {
-    const content = await readTextNoFollow(root, rel, { strict: true }).catch(() => null);
-    return content !== null && sha256Hex(normalizeContent(content)) === hash;
-  };
+  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> =>
+    wholeHash(await readClaimed(rel).catch(() => null)) === hash;
 
   /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
    *  recorded. A row on its own is not evidence: `recordOnboardingArtifacts` inserts one per
@@ -2013,8 +2059,7 @@ export async function resetOnboardingArtifacts(
   const artifactMatchesDisk = async (entry: string): Promise<boolean> => {
     for (const [diskPath, hash] of writtenHashes) {
       if (diskPath !== entry && !diskPath.startsWith(`${entry}/`)) continue;
-      const content = await readTextNoFollow(root, diskPath, { strict: true }).catch(() => null);
-      if (content !== null && sha256Hex(normalizeContent(content)) === hash) return true;
+      if (wholeHash(await readClaimed(diskPath).catch(() => null)) === hash) return true;
     }
     return false;
   };
@@ -2126,7 +2171,7 @@ export async function resetOnboardingArtifacts(
         }
         const verdict = child.isFile() ? await claimSatisfied(rel) : 'unrecorded';
         if (verdict === 'ours') {
-          await remove(rel, false);
+          if (await removeClaimedFile(rel)) left += 1;
           continue;
         }
         left += 1;
@@ -2148,7 +2193,7 @@ export async function resetOnboardingArtifacts(
       const info = await lstatNoFollow(root, rel, { strict: true });
       if (info === null) return;
       const verdict = info.kind === 'file' ? await claimSatisfied(rel) : 'unrecorded';
-      if (verdict === 'ours') await remove(rel, false);
+      if (verdict === 'ours') await removeClaimedFile(rel);
       else skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
     });
   }
@@ -2169,7 +2214,10 @@ export async function resetOnboardingArtifacts(
     // entries that ARE ours are removed instead and it stays, holding what was left behind.
     if (mayRemoveSweptDirWhole(sweep, swept.left)) await remove(rel, true);
     else {
-      for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
+      for (const entry of swept.ours) {
+        if (entry.isDir) await remove(entry.rel, true);
+        else await removeClaimedFile(entry.rel);
+      }
     }
   }
   // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a
@@ -2232,7 +2280,7 @@ export async function resetOnboardingArtifacts(
         skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
         continue;
       }
-      await remove(rel, false);
+      if (await removeClaimedFile(rel)) kept += 1;
     }
     // Nothing of the user's in it: the directory goes too, as it always did.
     if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);

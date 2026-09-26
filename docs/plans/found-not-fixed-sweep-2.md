@@ -1,8 +1,9 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-11, 13, 14, 15, 18, 22 and 23 merged (#301-#313, #315,
-> #317, #320 and #321); PR 24 (a test for each DAG ownership check) is in review. Tracked in the
-> status table of `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-11, 13, 14, 15, 18, 22, 23 and 24 merged (#301-#313, #315,
+> #317, #319, #320 and #321); PR 12 (the onboarding reset removes a claimed file through the checked
+> primitive) is in review. Tracked in the status table of `docs/plans/README.md`, which each PR
+> updates.
 
 ## Context
 
