@@ -9,6 +9,7 @@ import {
   errno,
   isPathContainmentError,
   lstatNoFollow,
+  ParkedFileError,
   openFileNoFollow,
   readFileNoFollow,
   readTextNoFollow,
@@ -1592,7 +1593,11 @@ export interface OnboardingResetOutcome {
 export function classifyResetFailure(err: unknown): { reason: string; io: boolean } | null {
   if (isPathContainmentError(err)) return { reason: err.reason, io: false };
   const code = errno(err);
-  return code === undefined ? null : { reason: code, io: true };
+  if (code === undefined) return null;
+  return {
+    reason: err instanceof ParkedFileError ? `${code}; the file is now at ${err.parkedAt}` : code,
+    io: true,
+  };
 }
 
 /** A `Database` or the transaction handle its callback receives. The reset's two closing writes

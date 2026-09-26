@@ -75,6 +75,20 @@ export function isPathContainmentError(
   return e.code === 'EPATHCONTAINMENT' && (reason === undefined || e.reason === reason);
 }
 
+/** A file judged under a private name that could not be moved back: it is still at `parkedAt`, and
+ *  `code` is the errno of the move, so a caller that absorbs IO failures absorbs this one too. */
+export class ParkedFileError extends Error {
+  constructor(
+    readonly rel: string,
+    readonly parkedAt: string,
+    readonly code: string | undefined,
+    options?: ErrorOptions,
+  ) {
+    super(`${rel} could not be put back (${code ?? 'error'}); it is at ${parkedAt}`, options);
+    this.name = 'ParkedFileError';
+  }
+}
+
 /** `rel` as the primitives take it: relative, no `..`, no NUL; `.` and empty segments dropped, so
  *  `''` (or `.`) addresses the anchor itself. Throws `invalid-path` — the one refusal every mode
  *  throws, because it is a caller bug and never a property of the tree. */
@@ -1122,10 +1136,7 @@ async function settleParked(
       try {
         await restoreNoReplace(dir, parked, leaf);
       } catch (err) {
-        throw new Error(
-          `${safe} could not be put back (${errno(err) ?? 'error'}); it is at ${[...segs, parked].join('/')}`,
-          { cause: err },
-        );
+        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), { cause: err });
       }
     };
 

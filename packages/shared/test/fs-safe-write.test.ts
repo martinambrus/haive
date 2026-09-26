@@ -494,7 +494,13 @@ describe('fs-safe write primitives', () => {
           await writeFile(file, 'PERSON', 'utf8');
           return false;
         }),
-      ).rejects.toThrow(/could not be put back \(EEXIST\); it is at src\/\.a\.txt\.haive-park-/);
+      ).rejects.toMatchObject({
+        code: 'EEXIST',
+        parkedAt: expect.stringMatching(/^src\/\.a\.txt\.haive-park-/),
+        message: expect.stringMatching(
+          /could not be put back \(EEXIST\); it is at src\/\.a\.txt\./,
+        ),
+      });
       expect(await readFile(file, 'utf8')).toBe('PERSON');
       const parked = (await readdir(path.join(root, 'src'))).filter((n) => n !== 'a.txt');
       expect(parked).toHaveLength(1);

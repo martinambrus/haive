@@ -1,11 +1,18 @@
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+interface Swap {
+  when: string;
+  path: string;
+  content: string;
+  then?: Swap;
+}
+
 const h = vi.hoisted(() => ({
-  swap: null as null | { when: string; path: string; content: string },
+  swap: null as null | Swap,
   longest: 0,
 }));
 
@@ -18,7 +25,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
       h.longest = Math.max(h.longest, input.length);
       const swap = h.swap;
       if (swap && input === swap.when) {
-        h.swap = null;
+        h.swap = swap.then ?? null;
         writeFileSync(swap.path, swap.content);
       }
       return real.sha256Hex(input);
@@ -128,6 +135,41 @@ describe('the reset never takes a file saved while it was being judged', () => {
     });
     expect(result.onDisk).toBe(MINE);
     expect(result.skipped).toContainEqual({ path: rel, reason: 'edited since Haive wrote it' });
+  });
+});
+
+describe('a file the reset cannot put back', () => {
+  it('is reported with where it is, and the reset carries on', async () => {
+    const rel = '.claude/settings.json';
+    const other = '.claude/workflow-config.json';
+    const OTHER = '{"haive":"config"}\n';
+    const root = await repoWith({ [rel]: OURS, [other]: OTHER });
+    const provenance = {
+      writtenHashes: new Map([[rel, hashOfOurs()]]),
+      haiveDirs: new Set<string>(),
+      haiveEntries: new Map([[other, sha256Hex(normalizeContent(OTHER))]]),
+    };
+    // Saved over after the reset read it as Haive's, and again while the copy it parked is judged.
+    h.swap = {
+      when: normalizeContent(OURS),
+      path: path.join(root, rel),
+      content: MINE,
+      then: { when: normalizeContent(MINE), path: path.join(root, rel), content: 'AGAIN\n' },
+    };
+    const outcome = await resetOnboardingArtifacts(root, provenance);
+    expect(h.swap).toBeNull();
+
+    expect(await readFile(path.join(root, rel), 'utf8')).toBe('AGAIN\n');
+    const parked = (await readdir(path.join(root, '.claude'))).filter((n) =>
+      n.includes('.haive-park-'),
+    );
+    expect(parked).toHaveLength(1);
+    expect(await readFile(path.join(root, '.claude', parked[0]!), 'utf8')).toBe(MINE);
+    expect(outcome.skipped).toContainEqual({
+      path: rel,
+      reason: `EEXIST; the file is now at .claude/${parked[0]}`,
+    });
+    expect(outcome.removed).toContain(other);
   });
 });
 

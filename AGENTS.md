@@ -2289,7 +2289,9 @@ edited. An edited `.claude/RTK.md` used to be deleted on the path-only claim.
 is read before the removal, so a save landing between the two was deleted as Haive's. Every file
 the reset removes on its own, the settings pass included, goes through `removeFileIfNoFollow`
 against the row's or the step's hash, as an upgrade's delete does; one that no longer matches is
-kept and reported as edited, and its directory stays around it. A claim with no hash behind it is
+kept and reported as edited, and its directory stays around it. One whose name a save took while it
+was judged cannot go back, so it stays under its private name (`ParkedFileError`, carrying the
+errno) and the reset reports where it is and carries on. A claim with no hash behind it is
 still taken by its path, and so is everything in a directory the reset removes whole: a save into
 one of those at that moment can still be lost.
 
