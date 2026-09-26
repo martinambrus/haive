@@ -6,7 +6,8 @@
 > and live-verified (#336); A2.1b shipped and live-verified (#337); A2.2 shipped and live-verified
 > (#338); A3.1 shipped and live-verified (#339); A3.1b (the upgrade banner's actions wrap on a
 > phone) shipped and live-verified (#340); A3.2 shipped and live-verified (#341); A3.3 shipped and
-> live-verified (#342); A3.4 shipped and live-verified (#343); A3.5 in review.
+> live-verified (#342); A3.4 shipped and live-verified (#343); A3.5 shipped and live-verified (#344);
+> A3.6 in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context

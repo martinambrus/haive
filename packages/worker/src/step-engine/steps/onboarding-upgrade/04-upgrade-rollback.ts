@@ -5,7 +5,7 @@ import {
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_END,
@@ -214,7 +214,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // `metadata.mode='rollback'`. Without this filter, repeated rollback
     // clicks chain rollback→rollback and find no live rows to revert).
     const priorUpgrade = await ctx.db
-      .select({ id: schema.tasks.id })
+      .select({ id: schema.tasks.id, completedAt: schema.tasks.completedAt })
       .from(schema.tasks)
       .where(
         and(
@@ -228,6 +228,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       .orderBy(desc(schema.tasks.completedAt))
       .limit(1);
     const priorTaskId = priorUpgrade[0]?.id ?? null;
+    const priorCompletedAt = priorUpgrade[0]?.completedAt ?? null;
     if (!priorTaskId) {
       throw new Error('upgrade-rollback: no prior completed onboarding_upgrade task to revert');
     }
@@ -265,8 +266,8 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         : null;
     const retiredRowIds = createdByPath ? (applied?.retiredRowIds ?? []) : null;
 
-    /** The newest row the upgrade retired at `diskPath`: 02 retires a live row and inserts the
-     *  baseline it captured in one instant, and the baseline, holding what was on disk, wins. */
+    /** The newest row the upgrade retired at `diskPath`: 02 retires a live row and the record of
+     *  what stood there in one instant, and the record, written later, wins. */
     const newestRetiredRow = async (diskPath: string, except?: string) => {
       const [row] = await ctx.db
         .select({
@@ -286,6 +287,13 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
             eq(schema.onboardingArtifacts.diskPath, diskPath),
             except ? ne(schema.onboardingArtifacts.id, except) : undefined,
             retiredRowIds ? inArray(schema.onboardingArtifacts.id, retiredRowIds) : undefined,
+            // Without that record, a row retired after the upgrade completed is a later task's.
+            !retiredRowIds && priorCompletedAt
+              ? or(
+                  isNull(schema.onboardingArtifacts.supersededAt),
+                  lte(schema.onboardingArtifacts.supersededAt, priorCompletedAt),
+                )
+              : undefined,
           ),
         )
         .orderBy(

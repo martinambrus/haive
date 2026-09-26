@@ -4,7 +4,7 @@
  * user, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -36,6 +36,8 @@ if (!process.env.DATABASE_URL) {
 
 let failures = 0;
 let checks = 0;
+const h64 = (c: string) => c.repeat(64);
+
 function check(name: string, ok: boolean, detail?: unknown): void {
   checks += 1;
   if (ok) {
@@ -858,8 +860,243 @@ async function main(): Promise<void> {
       .set({ status: 'completed', completedAt: new Date() })
       .where(eq(schema.tasks.id, thirdTask!.id));
 
+    const openTask = async (
+      title: string,
+      stepIds: string[],
+      metadata?: Record<string, unknown>,
+    ) => {
+      const [t] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId,
+          type: 'onboarding_upgrade',
+          title,
+          status: 'running',
+          ...(metadata ? { metadata } : {}),
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: schema.tasks.id });
+      const steps =
+        stepIds.length === 0
+          ? []
+          : await db
+              .insert(schema.taskSteps)
+              .values(
+                stepIds.map((stepId) => ({
+                  taskId: t!.id,
+                  stepId,
+                  stepIndex: Number(stepId.slice(0, 2)),
+                  title: stepId,
+                  status: 'running' as const,
+                })),
+              )
+              .returning({ id: schema.taskSteps.id });
+      return { taskId: t!.id, ctxs: steps.map((st) => ctxFor(st.id, t!.id)), stepIds: steps };
+    };
+    const endTask = (id: string, status: 'completed' | 'cancelled') =>
+      db
+        .update(schema.tasks)
+        .set({ status, completedAt: new Date() })
+        .where(eq(schema.tasks.id, id));
+
+    // ---- a rollback of an upgrade that recorded nothing it retired -------------------------
+    // The third upgrade's output was never stored, so its rollback reads the newest row retired at
+    // each path, and a later upgrade that failed part-way must not supply one.
+    const thirdWrote = rewritten;
+    if (!thirdApplied.writtenPaths?.includes(thirdWrote)) {
+      throw new Error(`the third upgrade did not write ${thirdWrote}`);
+    }
+    const failed = await openTask('upgrade-claims-smoke failed', []);
+    await endTask(failed.taskId, 'cancelled');
+    const later = new Date(Date.now() + 60_000);
+    const [noise] = await db
+      .insert(schema.onboardingArtifacts)
+      .values({
+        userId,
+        repositoryId,
+        taskId: failed.taskId,
+        diskPath: thirdWrote,
+        templateId: 'agent.noise',
+        templateKind: 'agent',
+        templateSchemaVersion: 1,
+        templateContentHash: h64('n'),
+        writtenHash: h64('n'),
+        writtenContent: 'a later upgrade recorded this\n',
+        lastObservedDiskHash: h64('n'),
+        sourceStepId: '02-upgrade-apply',
+        source: 'backfill',
+        supersededAt: later,
+        updatedAt: later,
+      })
+      .returning({ id: schema.onboardingArtifacts.id });
+    const legacy = await openTask('upgrade-claims-smoke legacy rollback', ['04-upgrade-rollback'], {
+      mode: 'rollback',
+    });
+    const legacyRollback = await upgradeRollbackStep.detect!(legacy.ctxs[0]!);
+    const legacyTarget = legacyRollback.targets.find((t) => t.diskPath === thirdWrote);
+    check(
+      'a rollback that reads the rows takes none a later task retired',
+      legacyTarget !== undefined && legacyTarget.priorArtifactId !== noise!.id,
+      { path: thirdWrote, prior: legacyTarget?.priorArtifactId ?? null, noise: noise!.id },
+    );
+    await endTask(legacy.taskId, 'cancelled');
+
+    // ---- a fourth upgrade that fails after its transaction and is retried -------------------
+    // Its retry finds every path already rewritten, and must still record what stood before.
+    const liveNow = await db
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    let cleanPath: string | null = null;
+    for (const r of liveNow) {
+      if (r.templateKind === CLI_RULES_TEMPLATE_KIND) continue;
+      if ([tracked, untouched, fresh, freshEdited, freshLinked].includes(r.diskPath)) continue;
+      if ((await lstat(join(repoPath, r.diskPath)).catch(() => null))?.isFile() !== true) continue;
+      const bytes = await readFile(join(repoPath, r.diskPath), 'utf8');
+      if (sha256Hex(normalizeContent(bytes)) !== r.writtenHash) continue;
+      cleanPath = r.diskPath;
+      break;
+    }
+    if (!cleanPath) throw new Error('no file still holds what its row records');
+    // An older version Haive wrote, recorded by its row, so the upgrade has something to replace.
+    const clean = {
+      path: cleanPath,
+      bytes: `${await readFile(join(repoPath, cleanPath), 'utf8')}\nAn older version.\n`,
+    };
+    const cleanHash = sha256Hex(normalizeContent(clean.bytes));
+    await writeFile(join(repoPath, clean.path), clean.bytes);
+    await db
+      .update(schema.onboardingArtifacts)
+      .set({
+        templateContentHash: 'template-changed-since',
+        writtenHash: cleanHash,
+        writtenContent: clean.bytes,
+        lastObservedDiskHash: cleanHash,
+      })
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, clean.path),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const [untouchedRow] = await liveRowsAt(untouched);
+    if (!untouchedRow || (await readOrNull(untouched)) !== null) {
+      throw new Error(`${untouched} should be deleted with its row live`);
+    }
+
+    const fourth = await openTask('upgrade-claims-smoke fourth', [
+      '01-upgrade-plan',
+      '02-upgrade-apply',
+    ]);
+    const [fourthPlanCtx, fourthApplyCtx] = fourth.ctxs;
+    const fourthDetected = await upgradePlanStep.detect!(fourthPlanCtx!);
+    const fourthPlanned = await upgradePlanStep.apply(fourthPlanCtx!, {
+      detected: fourthDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: fourthPlanned as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, fourth.stepIds[0]!.id));
+    const fourthPlan = await upgradeApplyStep.detect!(fourthApplyCtx!);
+    const fourthForm = upgradeApplyStep.form!(fourthApplyCtx!, fourthPlan) as FormSchema | null;
+    const fourthValues = defaultValues(fourthForm);
+    const overwriteAgain = fourthForm?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${tracked}`,
+    );
+    if (!overwriteAgain) throw new Error(`no conflict field for ${tracked} in the fourth upgrade`);
+    fourthValues[overwriteAgain.id] = 'apply_theirs';
+    fourthValues.selectedReinstate = fourthDetected.entries
+      .filter((e) => e.diskPath === untouched)
+      .map((e) => e.entryId);
+    check(
+      'the fourth plan offers the moved template as a clean update',
+      fourthDetected.entries.find((e) => e.diskPath === clean.path)?.bucket === 'clean_update',
+    );
+    const applyFourth = () =>
+      upgradeApplyStep.apply(fourthApplyCtx!, {
+        detected: fourthPlan,
+        formValues: fourthValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+    // A link where the install manifest goes fails the apply once its transaction has committed.
+    const haiveDir = join(repoPath, '.haive');
+    const hadHaiveDir = (await lstat(haiveDir).catch(() => null)) !== null;
+    if (hadHaiveDir) await rename(haiveDir, `${haiveDir}-aside`);
+    await symlink('elsewhere', haiveDir);
+    const firstAttempt = await applyFourth().then(
+      () => null,
+      (err: unknown) => err,
+    );
+    await rm(haiveDir);
+    if (hadHaiveDir) await rename(`${haiveDir}-aside`, haiveDir);
+    check(
+      'the first attempt fails after writing',
+      firstAttempt !== null && (await readOrNull(tracked)) !== trackedBytes,
+    );
+    const fourthApplied = await applyFourth();
+    await db
+      .update(schema.taskSteps)
+      .set({ output: fourthApplied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, fourth.stepIds[1]!.id));
+    await endTask(fourth.taskId, 'completed');
+
+    const fourthRollbackTask = await openTask(
+      'upgrade-claims-smoke fourth rollback',
+      ['04-upgrade-rollback'],
+      { mode: 'rollback' },
+    );
+    const fourthRollbackCtx = fourthRollbackTask.ctxs[0]!;
+    const fourthRollback = await upgradeRollbackStep.detect!(fourthRollbackCtx);
+    const fourthRestore = (path: string) =>
+      fourthRollback.targets.find((t) => t.diskPath === path)?.priorWrittenContent ?? null;
+    check(
+      'after a retry, the rollback plans to put back the edit the upgrade overwrote',
+      fourthRestore(tracked) === trackedBytes,
+      { prior: fourthRestore(tracked)?.slice(-40) ?? null },
+    );
+    check(
+      'and the file that held what its row records',
+      fourthRestore(clean.path) === clean.bytes,
+      { path: clean.path },
+    );
+    const undoReinstate = fourthRollback.newArtifactsToUndo.find((u) => u.diskPath === untouched);
+    check(
+      'and to take the reinstated file away, putting back the row it retired',
+      undoReinstate?.retiredRowId === untouchedRow.id,
+      { undo: undoReinstate ?? null, row: untouchedRow.id },
+    );
+    await upgradeRollbackStep.apply(fourthRollbackCtx, {
+      detected: fourthRollback,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'the rollback puts back what stood before the upgrade',
+      (await readOrNull(tracked)) === trackedBytes &&
+        (await readOrNull(clean.path)) === clean.bytes &&
+        (await readOrNull(untouched)) === null,
+    );
+    check(
+      'with the reinstated path read as deleted again',
+      (await liveRowsAt(untouched)).length === 1,
+    );
+    await endTask(fourthRollbackTask.taskId, 'completed');
+
     // ---- the boot repair ----------------------------------------------------------------
-    const h = (c: string) => c.repeat(64);
+    const h = h64;
     const row = (over: Partial<typeof schema.onboardingArtifacts.$inferInsert>) =>
       ({
         userId,
