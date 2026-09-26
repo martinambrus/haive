@@ -209,7 +209,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ),
     )
     .limit(1);
-  const hasPriorUpgrade = liveUpgradeRow.length > 0;
+  const hasPriorUpgrade =
+    liveUpgradeRow.length > 0 || (await lastUpgradeRemovedFiles(db, repositoryId));
 
   // "Upgrade in progress" iff there is a non-terminal onboarding-upgrade task
   // for this repo. The earlier heuristic (`hasPriorUpgrade && hasUpgradeAvailable`)
@@ -463,6 +464,37 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   };
   return c.json(res);
 });
+
+/** Whether the most recent completed upgrade removed a file or region and nothing has rolled it back
+ *  since. A removal leaves no live row, so an upgrade that only removed files has no other trace a
+ *  rollback could be offered from. */
+export async function lastUpgradeRemovedFiles(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const [latest] = await db
+    .select({ id: schema.tasks.id, metadata: schema.tasks.metadata })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding_upgrade'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+    )
+    .orderBy(desc(schema.tasks.completedAt))
+    .limit(1);
+  if (!latest || (latest.metadata as { mode?: unknown } | null)?.mode === 'rollback') return false;
+  const [applied] = await db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .where(
+      and(eq(schema.taskSteps.taskId, latest.id), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
+    )
+    .limit(1);
+  const removed = (applied?.output as { removedPaths?: unknown } | null)?.removedPaths;
+  return Array.isArray(removed) && removed.length > 0;
+}
 
 /**
  * Create a rollback task. The worker's upgrade-rollback step detects
