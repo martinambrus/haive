@@ -670,6 +670,32 @@ async function main(): Promise<void> {
         seededRepo?.applicable?.includes(RTK_ITEM) === true,
         seededRepo?.applicable,
       );
+
+      // A person deletes the file while the form is parked: it was gone before the step ran.
+      const parked = await upgrade('rtk-off-upgrade-smoke seeded parked', seeded);
+      const parkedEntry = settingsEntry(parked.detected);
+      await rm(join(seededPath, SETTINGS));
+      const parkedValues = defaultValues(parked.form);
+      parkedValues.selectedNew = [];
+      parkedValues.selectedObsoleteRemovals = parkedEntry ? [parkedEntry.entryId] : [];
+      const parkedApplied = await upgradeApplyStep.apply(parked.applyCtx, {
+        detected: parked.plan,
+        formValues: parkedValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        "a file deleted while the form was parked is not recorded as the upgrade's removal",
+        offeredForRemoval(parked.form, parkedEntry?.entryId) &&
+          !(parkedApplied.removedPaths ?? []).includes(SETTINGS),
+        { offered: parkedEntry?.entryId, removedPaths: parkedApplied.removedPaths },
+      );
+      await finish(parked.applyCtx, parkedApplied);
+      await rollback('rtk-off-upgrade-smoke seeded parked rollback', seeded);
+      check(
+        'and a rollback of that upgrade leaves it deleted',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null,
+      );
     } finally {
       await rm(seededPath, { recursive: true, force: true });
     }

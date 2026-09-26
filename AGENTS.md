@@ -2566,13 +2566,17 @@ row recorded had nothing to restore from. 02 now keeps what each removal took (t
 rules region with its markers) as a baseline and names the path in `removedPaths`, and 04 puts it
 back only where nothing stands now: a file created at the path since, a region written into
 AGENTS.md since, or an AGENTS.md removed since is what someone did after the upgrade, and stays.
-An apply retried after its removal ran finds the file gone, and records the bytes its plan saw
-there, since they were Haive's and are what the earlier attempt removed. What already holds the
-restore is an earlier attempt of the same rollback, which a retry takes as put back. Such an
-upgrade can leave no live row at all, so upgrade-status offers its rollback from what 02 recorded
-(`lastUpgradeRemovedFiles`) until a rollback completes after it. What a rollback puts back stays in
-the repository's applicable set whatever its snapshot renders, so a file restored after RTK went off
-is offered for removal again rather than dropping out of the banner's view.
+That baseline is written before the removal it records, from the bytes the plan saw there, because
+an absent path says nothing about who removed it: an apply retried after its removal ran finds the
+file gone, and so does one whose file a person deleted while the form was parked. Only the first
+finds an earlier attempt's baseline, and records the removal; the second drops its own, so a
+rollback leaves the file deleted. A removal that keeps the file drops its baseline too. What
+already holds the restore is an earlier attempt of the same rollback, which a retry takes as put
+back. Such an upgrade can leave no live row at all, so upgrade-status offers its rollback from
+what 02 recorded (`lastUpgradeRemovedFiles`) until a rollback completes after it. What a rollback
+puts back stays in the repository's applicable set whatever its snapshot renders, so a file
+restored after RTK went off is offered for removal again rather than dropping out of the banner's
+view.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
