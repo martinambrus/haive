@@ -14,6 +14,7 @@ import {
 import {
   backfillRecord,
   classifyEntry,
+  pickRenderSnapshot,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
@@ -347,5 +348,21 @@ describe('keptRowUpdate', () => {
     expect(update.writtenContent).toBe('EDITED');
     expect(update).not.toHaveProperty('writtenHash');
     expect(classifyEntry({ live: { ...row, ...update }, ...disk })).toBe('unchanged');
+  });
+});
+
+describe('pickRenderSnapshot', () => {
+  it('renders from a snapshot that recorded an RTK choice ahead of one from before RTK', () => {
+    const beforeRtk = { framework: 'drupal' };
+    const recorded = { framework: 'drupal', rtkEnabled: false };
+    expect(
+      pickRenderSnapshot([
+        { formValuesSnapshot: null },
+        { formValuesSnapshot: beforeRtk },
+        { formValuesSnapshot: recorded },
+      ]),
+    ).toBe(recorded);
+    expect(pickRenderSnapshot([{ formValuesSnapshot: beforeRtk }])).toBe(beforeRtk);
+    expect(pickRenderSnapshot([{ formValuesSnapshot: null }])).toBeNull();
   });
 });

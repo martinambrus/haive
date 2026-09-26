@@ -164,15 +164,25 @@ async function loadLiveArtifacts(
   }));
 }
 
-/** Load the render context for this repository. Tries the most recent live
- *  artifact's snapshot first, then falls back to the most recent completed
- *  onboarding task's step 07 detect output (used for lazy backfill). */
+/** The live snapshot to render from. One that recorded an RTK choice comes first, since a snapshot
+ *  from before RTK would keep the repository's RTK switch from reaching the upgrade, and the
+ *  upgrade banner reads the same one. */
+export function pickRenderSnapshot(
+  liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'formValuesSnapshot'>>,
+): Record<string, unknown> | null {
+  const recorded = liveRows.find((r) => typeof r.formValuesSnapshot?.rtkEnabled === 'boolean');
+  return (recorded ?? liveRows.find((r) => r.formValuesSnapshot))?.formValuesSnapshot ?? null;
+}
+
+/** Load the render context for this repository. Tries a live artifact's snapshot
+ *  first, then falls back to the most recent completed onboarding task's step 07
+ *  detect output (used for lazy backfill). */
 async function resolveRenderContext(
   ctx: StepContext,
   repositoryId: string,
   liveRows: LiveArtifactRow[],
 ): Promise<ResolvedRenderContext | null> {
-  const snapshot = liveRows.find((r) => r.formValuesSnapshot)?.formValuesSnapshot ?? null;
+  const snapshot = pickRenderSnapshot(liveRows);
   if (snapshot) {
     return withLiveRtk(
       ctx,
