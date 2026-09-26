@@ -120,19 +120,13 @@ export async function deleteRepoViaApi(
 ): Promise<boolean> {
   const deadline = Date.now() + REPO_DELETE_DEADLINE_MS;
   for (;;) {
-    const rows = await sql<{ status: string; claimed: Date | null }[]>`
-      select status, root_claimed_at as claimed from repositories where id = ${repoId}
-    `;
+    const rows = await sql`select 1 from repositories where id = ${repoId}`;
     if (rows.length === 0) return true;
-    const settled = rows[0]!.status !== 'cloning' && rows[0]!.claimed === null;
-    const expired = Date.now() >= deadline;
-    if (settled || expired) {
-      const res = await request.delete(`${API_BASE}/repos/${repoId}`);
-      if (res.status() === 200) return true;
-      if (res.status() !== 409 || expired) {
-        expect.soft(res.status(), `delete of repository ${repoId}: ${await res.text()}`).toBe(200);
-        return false;
-      }
+    const res = await request.delete(`${API_BASE}/repos/${repoId}`);
+    if (res.status() === 200) return true;
+    if (res.status() !== 409 || Date.now() >= deadline) {
+      expect.soft(res.status(), `delete of repository ${repoId}: ${await res.text()}`).toBe(200);
+      return false;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
