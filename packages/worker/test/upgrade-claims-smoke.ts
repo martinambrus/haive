@@ -360,7 +360,14 @@ async function main(): Promise<void> {
     check("and marked as a person's", regionPrior?.userModified === true);
     check('a rollback leaves the skipped edit alone', !restoreOf(edited) && !deletes(edited));
 
-    await upgradeRollbackStep.apply(rollbackCtx, {
+    // Edited after the upgrade wrote it, so the region is the person's and the rollback keeps it.
+    const agentsEdited = (await readFile(join(repoPath, CLI_RULES_DISK_PATH), 'utf8')).replace(
+      CLI_RULES_END,
+      `Edited after the upgrade.\n${CLI_RULES_END}`,
+    );
+    await writeFile(join(repoPath, CLI_RULES_DISK_PATH), agentsEdited);
+
+    const rolledBack = await upgradeRollbackStep.apply(rollbackCtx, {
       detected: rollback,
       formValues: {},
       iteration: 0,
@@ -373,6 +380,20 @@ async function main(): Promise<void> {
     check(
       'and leaves the skipped edit as it was',
       (await readFile(join(repoPath, edited), 'utf8')) === editedBytes,
+    );
+    check(
+      'and keeps the rules region edited after the upgrade, saying so',
+      (await readOrNull(CLI_RULES_DISK_PATH)) === agentsEdited &&
+        rolledBack.warnings.some((w) => w.includes(`the rules region in ${CLI_RULES_DISK_PATH}`)),
+      { warnings: rolledBack.warnings },
+    );
+    const [keptRegionRow] = await liveRowsAt(CLI_RULES_DISK_PATH);
+    check(
+      'while its ledger goes back to the region before, claiming none of the edit',
+      keptRegionRow?.source === 'rollback' &&
+        keptRegionRow.userModified === true &&
+        keptRegionRow.writtenContent === region?.priorWrittenContent,
+      { row: keptRegionRow ?? null },
     );
     check(
       'and a kept file',
@@ -399,7 +420,7 @@ async function main(): Promise<void> {
         bucket: bucketAfter(overwritten),
       },
     );
-    check('and the restored region', bucketAfter(CLI_RULES_DISK_PATH) === 'conflict', {
+    check('and the region it kept', bucketAfter(CLI_RULES_DISK_PATH) === 'conflict', {
       bucket: bucketAfter(CLI_RULES_DISK_PATH),
     });
     check('and the file taken away as new', bucketAfter(removedBefore) === 'new_artifact', {
@@ -595,6 +616,11 @@ async function main(): Promise<void> {
     );
     if (!overwriteTracked) throw new Error(`no conflict field for ${tracked}`);
     secondValues[overwriteTracked.id] = 'apply_theirs';
+    const overwriteRegion = secondForm?.fields.find(
+      (f) => f.type === 'radio' && f.label === `Conflict: ${CLI_RULES_DISK_PATH}`,
+    );
+    if (!overwriteRegion) throw new Error('no conflict field for the kept rules region');
+    secondValues[overwriteRegion.id] = 'apply_theirs';
     secondValues.selectedObsoleteRemovals = secondDetected.entries
       .filter((e) => e.bucket === 'obsolete')
       .map((e) => e.entryId);
@@ -612,6 +638,10 @@ async function main(): Promise<void> {
       .set({ output: secondApplied as unknown as Record<string, unknown>, status: 'done' })
       .where(eq(schema.taskSteps.id, secondApplyRow!.id));
     check('the deleted file is reinstated', (await readOrNull(untouched)) === untouchedBytes);
+    check(
+      'the kept rules region is overwritten',
+      (await readOrNull(CLI_RULES_DISK_PATH)) !== agentsEdited,
+    );
     check(
       'an obsolete file still holding what Haive wrote is deleted',
       (await readOrNull(retired('retired-gone'))) === null,
@@ -693,6 +723,11 @@ async function main(): Promise<void> {
     check(
       'an overwritten edit to a tracked file is put back',
       (await readOrNull(tracked)) === trackedBytes,
+    );
+    check(
+      'and so is an overwritten rules region nobody touched since',
+      (await readOrNull(CLI_RULES_DISK_PATH)) === agentsEdited,
+      { onDisk: (await readOrNull(CLI_RULES_DISK_PATH))?.slice(-80) ?? null },
     );
     check(
       'a new file edited since is kept, and said so',

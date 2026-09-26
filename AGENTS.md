@@ -2758,6 +2758,16 @@ deleted again. Any other path restores the newest row the upgrade retired there,
 held the bytes the upgrade wrote, so only its row is retired. 01's backfill records no row for a file
 missing from disk. An output from before the record falls back to reading the rows.
 
+A restore replaces only what the upgrade left there (`restoreIfUpgrades`): the file, or the rules
+region, is judged on the bytes it replaces against its upgrade row's `lastObservedDiskHash`, else
+its `writtenHash` (a hook strip claims none of what it left), read by id at apply so a payload
+detected earlier still judges. A file or region edited or removed since is the person's and stays,
+reported, and one that cannot be compared (a link, past 1 MiB) stays too. Its ledger reverts all the
+same, a `rollback` copy of the row before marked `userModified` with what the disk held, so the next
+upgrade judges the file against the version before; it is not counted as reverted. One already
+holding the restore is an earlier attempt's, and counts. A save that takes the name while it is
+judged keeps it, and the warning names where the parked bytes went.
+
 A path the upgrade REMOVED gets its bytes back the same way. The upgrade wrote no row there, so 04
 used to visit only the rows it wrote and never put back an obsolete file it deleted, and a file no
 row recorded had nothing to restore from. 02 now keeps what each removal took (the file, or the

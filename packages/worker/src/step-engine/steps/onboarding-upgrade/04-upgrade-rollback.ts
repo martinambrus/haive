@@ -1,5 +1,7 @@
 import {
   errno,
+  isPathContainmentError,
+  ParkedFileError,
   readTextNoFollow,
   rewriteFileIfNoFollow,
   writeFileNoFollow,
@@ -13,9 +15,11 @@ import {
   extractRegion,
   getHaiveVersion,
   normalizeContent,
+  sha256Hex,
   upsertRegion,
   type InstallManifest,
 } from '@haive/shared';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -26,7 +30,6 @@ import {
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
-  readFileOrEmpty,
   removeIfHaives,
   resolveBundleItemId,
   safeDiskRel,
@@ -436,6 +439,24 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       for (const row of found) liveBundleItemIds.add(row.id);
     }
 
+    // What each upgrade row left at its path: the bytes a rollback may replace, and no others.
+    const judgedIds = detected.targets.flatMap((t) =>
+      t.upgradeArtifactId && !t.removed ? [t.upgradeArtifactId] : [],
+    );
+    const leftByRow = new Map<string, string>();
+    if (judgedIds.length > 0) {
+      for (const r of await ctx.db
+        .select({
+          id: schema.onboardingArtifacts.id,
+          writtenHash: schema.onboardingArtifacts.writtenHash,
+          lastObservedDiskHash: schema.onboardingArtifacts.lastObservedDiskHash,
+        })
+        .from(schema.onboardingArtifacts)
+        .where(inArray(schema.onboardingArtifacts.id, judgedIds))) {
+        leftByRow.set(r.id, r.lastObservedDiskHash ?? r.writtenHash);
+      }
+    }
+
     for (const target of detected.targets) {
       const rendering = byTemplateAndPath.get(`${target.templateId}:${target.diskPath}`);
 
@@ -459,6 +480,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         warnings.push(`refusing to restore ${target.diskPath}: not a path inside the repository`);
         continue;
       }
+      // A kept path's ledger reverts too, so the next upgrade judges it against the version before.
+      let observedHash: string | null = restoreWrittenHash;
+      let putBack = true;
       if (target.removed) {
         if (!(await restoreRemoved(ctx.repoPath, rel, restoreTemplateKind, restoreContent))) {
           warnings.push(
@@ -466,20 +490,22 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           );
           continue;
         }
-      } else if (restoreTemplateKind === CLI_RULES_TEMPLATE_KIND) {
-        // Restore only the cli-rules region from the prior baseline bytes,
-        // leaving the rest of AGENTS.md as it currently stands.
-        const existing = await readFileOrEmpty(ctx.repoPath, rel);
-        await writeFileNoFollow(
+      } else {
+        const left = target.upgradeArtifactId ? leftByRow.get(target.upgradeArtifactId) : undefined;
+        const restore = await restoreIfUpgrades(
           ctx.repoPath,
           rel,
-          upsertRegion(existing, restoreContent, CLI_RULES_START, CLI_RULES_END),
-          { createParents: true },
+          restoreTemplateKind,
+          left,
+          restoreContent,
         );
-      } else {
-        await writeFileNoFollow(ctx.repoPath, rel, restoreContent, { createParents: true });
+        if (restore.outcome !== 'restored') {
+          warnings.push(restoreRefusal(target.diskPath, restoreTemplateKind, restore));
+          putBack = false;
+          observedHash = restore.outcome === 'edited' ? restore.hash : null;
+        }
       }
-      revertedCount += 1;
+      if (putBack) revertedCount += 1;
 
       if (target.upgradeArtifactId) upgradeRowIds.push(target.upgradeArtifactId);
 
@@ -494,8 +520,8 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         templateContentHash: restoreTemplateContentHash,
         writtenHash: restoreWrittenHash,
         writtenContent: restoreContent,
-        lastObservedDiskHash: restoreWrittenHash,
-        userModified: false,
+        lastObservedDiskHash: observedHash,
+        userModified: !putBack,
         formValuesSnapshot: (snapshot ?? {}) as Record<string, unknown>,
         sourceStepId: '04-upgrade-rollback',
         source: 'rollback' as const,
@@ -628,6 +654,89 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     };
   },
 };
+
+type RestoreResult =
+  | { outcome: 'restored' }
+  | { outcome: 'edited'; hash: string }
+  | { outcome: 'absent' }
+  | { outcome: 'unjudged' }
+  | { outcome: 'parked'; parkedAt: string; rewrote: boolean };
+
+/** Put back what an upgrade replaced only while the file, or its rules region, still holds what the
+ *  upgrade left there, judged on the bytes replaced: an edit or a removal since is the person's and
+ *  stays. Holding the prior bytes already is an earlier attempt of this rollback, and counts. */
+async function restoreIfUpgrades(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+  left: string | undefined,
+  content: string,
+): Promise<RestoreResult> {
+  if (left === undefined) return { outcome: 'unjudged' };
+  const hashOf = (text: string) => sha256Hex(normalizeContent(text));
+  const priorHash = hashOf(content);
+  const region = templateKind === CLI_RULES_TEMPLATE_KIND;
+  let judged: RestoreResult = { outcome: 'unjudged' };
+  let rewrote = false;
+  try {
+    const result = await rewriteFileIfNoFollow(
+      repoPath,
+      rel,
+      (data) => {
+        const current = data.toString('utf8');
+        const text = region ? extractRegion(current, CLI_RULES_START, CLI_RULES_END) : current;
+        if (text === null) {
+          judged = { outcome: 'absent' };
+          return null;
+        }
+        const hash = hashOf(text);
+        if (hash === left) {
+          rewrote = true;
+          return Buffer.from(
+            region ? upsertRegion(current, content, CLI_RULES_START, CLI_RULES_END) : content,
+            'utf8',
+          );
+        }
+        judged = hash === priorHash ? { outcome: 'restored' } : { outcome: 'edited', hash };
+        return null;
+      },
+      { maxBytes: RULES_FILE_READ_CAP },
+    );
+    if (result === 'rewritten') return { outcome: 'restored' };
+    return result === 'absent' ? { outcome: 'absent' } : judged;
+  } catch (err) {
+    if (err instanceof ParkedFileError) {
+      return { outcome: 'parked', parkedAt: err.parkedAt, rewrote };
+    }
+    if (isPathContainmentError(err)) {
+      if (['link', 'not-directory', 'not-regular-file'].includes(err.reason)) {
+        return { outcome: 'unjudged' };
+      }
+    } else if (['ENOENT', 'ENOTDIR'].includes(errno(err) ?? '')) {
+      return { outcome: 'absent' };
+    }
+    throw err;
+  }
+}
+
+function restoreRefusal(
+  diskPath: string,
+  templateKind: string,
+  result: Exclude<RestoreResult, { outcome: 'restored' }>,
+): string {
+  const what =
+    templateKind === CLI_RULES_TEMPLATE_KIND ? `the rules region in ${diskPath}` : diskPath;
+  switch (result.outcome) {
+    case 'edited':
+      return `kept ${what} as it is: it was edited after the upgrade wrote it`;
+    case 'absent':
+      return `did not put back ${what}: it was removed after the upgrade wrote it`;
+    case 'parked':
+      return `kept ${what} as it is: it was saved while the rollback judged it, and ${result.rewrote ? 'what the rollback put back' : 'what stood there before'} is at ${result.parkedAt}`;
+    case 'unjudged':
+      return `did not put back ${what}: it could not be compared with what the upgrade wrote there`;
+  }
+}
 
 /** Put back what an upgrade removed, only where nothing stands now: a file there, a region in
  *  AGENTS.md, or AGENTS.md gone altogether is what someone did since, and stays. What stands there
