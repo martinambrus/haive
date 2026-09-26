@@ -2189,6 +2189,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   // advanceStep(steps[0]) call is covered on retry/resume too.
   if (row.status === 'done') return { status: 'done', row, output: row.output };
   if (row.status === 'skipped') return { status: 'skipped', row };
+  // A failed row is reopened only by a write that resets it first, so it fails the task again.
+  if (row.status === 'failed') {
+    return { status: 'failed', row, error: row.errorMessage ?? 'the step failed' };
+  }
 
   const controller = new AbortController();
   let superseded = false;

@@ -2178,6 +2178,24 @@ async function handleAdvanceStep(
     return;
   }
 
+  // Every write that reopens a failed row changes its status first, so an advance finding one is
+  // the job that died between failing the step and failing the task: finish that, as the re-driver would.
+  if (existing?.status === 'failed') {
+    const finished = await finishFailedStep(
+      db,
+      ctx,
+      payload.stepId,
+      existing,
+      existing.errorMessage ?? 'the step failed',
+      ['running'],
+    );
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, finished },
+      'advance-step: the row had failed; failed the task instead of running it',
+    );
+    return;
+  }
+
   // Already finalized at this round — a duplicate delivery must NOT re-run apply().
   // A second job that arrives after the first finished, or was deferred behind it
   // (holdStepAdvance), finds the row done here. MEASURED on 08-phase-5-verify before

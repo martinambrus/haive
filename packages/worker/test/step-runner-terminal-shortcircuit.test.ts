@@ -109,7 +109,7 @@ function runParams(state: MockState) {
   };
 }
 
-function terminalRow(status: 'done' | 'skipped'): Record<string, unknown> {
+function terminalRow(status: 'done' | 'skipped' | 'failed'): Record<string, unknown> {
   return {
     id: 'ts-1',
     taskId: 'task-1',
@@ -118,6 +118,7 @@ function terminalRow(status: 'done' | 'skipped'): Record<string, unknown> {
     round: 0,
     runSeq: 0,
     status,
+    errorMessage: status === 'failed' ? 'kaboom' : null,
     output: status === 'done' ? { generated: ['a', 'b'] } : null,
     formSchema: null,
     formValues: null,
@@ -145,6 +146,14 @@ describe('advanceStep terminal short-circuit', () => {
     const state: MockState = { taskStepRow: terminalRow('skipped'), updates: [] };
     const result = await advanceStep(runParams(state));
     expect(result.status).toBe('skipped');
+    expect(state.updates).toHaveLength(0);
+  });
+
+  // Every reopen resets a failed row first, so one reaching here fails the task again, unrun.
+  it('returns a failed row as its failure without running it', async () => {
+    const state: MockState = { taskStepRow: terminalRow('failed'), updates: [] };
+    const result = await advanceStep(runParams(state));
+    expect(result).toMatchObject({ status: 'failed', error: 'kaboom' });
     expect(state.updates).toHaveLength(0);
   });
 });
