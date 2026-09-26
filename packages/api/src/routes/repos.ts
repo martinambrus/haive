@@ -1594,10 +1594,12 @@ export function classifyResetFailure(err: unknown): { reason: string; io: boolea
   if (isPathContainmentError(err)) return { reason: err.reason, io: false };
   const code = errno(err);
   if (code === undefined) return null;
-  return {
-    reason: err instanceof ParkedFileError ? `${code}; the file is now at ${err.parkedAt}` : code,
-    io: true,
-  };
+  // A file that could not be moved back had been found and moved, so it is no sign the walk
+  // could not read the tree, and it never trips the empty-walk floor.
+  if (err instanceof ParkedFileError) {
+    return { reason: `${code}; the file is now at ${err.parkedAt}`, io: false };
+  }
+  return { reason: code, io: true };
 }
 
 /** A `Database` or the transaction handle its callback receives. The reset's two closing writes

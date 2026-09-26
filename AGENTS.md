@@ -2291,7 +2291,8 @@ the reset removes on its own, the settings pass included, goes through `removeFi
 against the row's or the step's hash, as an upgrade's delete does; one that no longer matches is
 kept and reported as edited, and its directory stays around it. One whose name a save took while it
 was judged cannot go back, so it stays under its private name (`ParkedFileError`, carrying the
-errno) and the reset reports where it is and carries on. A claim with no hash behind it is
+errno) and the reset reports where it is and carries on. That is no failure to read the tree, so it
+never counts toward the floor below that refuses a walk which touched nothing. A claim with no hash behind it is
 still taken by its path, and so is everything in a directory the reset removes whole: a save into
 one of those at that moment can still be lost.
 

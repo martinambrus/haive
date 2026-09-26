@@ -139,15 +139,13 @@ describe('the reset never takes a file saved while it was being judged', () => {
 });
 
 describe('a file the reset cannot put back', () => {
-  it('is reported with where it is, and the reset carries on', async () => {
+  it('is reported with where it is, and the reset still completes', async () => {
     const rel = '.claude/settings.json';
-    const other = '.claude/workflow-config.json';
-    const OTHER = '{"haive":"config"}\n';
-    const root = await repoWith({ [rel]: OURS, [other]: OTHER });
+    const root = await repoWith({ [rel]: OURS });
     const provenance = {
       writtenHashes: new Map([[rel, hashOfOurs()]]),
       haiveDirs: new Set<string>(),
-      haiveEntries: new Map([[other, sha256Hex(normalizeContent(OTHER))]]),
+      haiveEntries: new Map<string, string>(),
     };
     // Saved over after the reset read it as Haive's, and again while the copy it parked is judged.
     h.swap = {
@@ -169,7 +167,6 @@ describe('a file the reset cannot put back', () => {
       path: rel,
       reason: `EEXIST; the file is now at .claude/${parked[0]}`,
     });
-    expect(outcome.removed).toContain(other);
   });
 });
 
