@@ -1,5 +1,16 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -8,12 +19,18 @@ import {
   abortMerge,
   abortOtherMerge,
   buildMergeFixPrompt,
+  captureFixBaseline,
   completeMergeHostSide,
+  fixerLeftoversWarning,
   mergeCommitted,
   openMerge,
+  recordFixerLeftovers,
+  relocateFixerChanges,
   squashMergeCommit,
   unmergedPaths,
 } from './git-merge.js';
+import type { Database } from '@haive/database';
+import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -30,23 +47,34 @@ const COMMIT_ENV: Record<string, string> = {
   GIT_COMMITTER_NAME: 'T',
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
+// A wide merge prints more than execFile's 1 MiB default, which kills git part-way through.
+const GIT_OPTS = { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 };
 async function git(dir: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
+  const { stdout } = await exec('git', args, { cwd: dir, ...GIT_OPTS });
   return stdout.toString();
 }
 async function gitCode(dir: string, args: string[]): Promise<number> {
   try {
-    await exec('git', args, { cwd: dir, env: GIT_ENV });
+    await exec('git', args, { cwd: dir, ...GIT_OPTS });
     return 0;
   } catch (e) {
     return (e as { code?: number }).code ?? 1;
   }
 }
 
+/** git maintenance can outlive the command that started it and keep writing `.git/objects`, which a
+ *  teardown then races; the retries cover a writer nothing here turns off. */
+const REMOVE = { recursive: true, force: true, maxRetries: 5 } as const;
+async function initRepo(dir: string): Promise<void> {
+  await git(dir, ['init', '-b', 'main']);
+  await git(dir, ['config', 'gc.auto', '0']);
+  await git(dir, ['config', 'maintenance.auto', 'false']);
+}
+
 /** A repo on `main` whose `feature/x` diverges `base.txt` so a merge conflicts. */
 async function setupConflict(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -89,7 +117,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await mergeCommitted(dir, 'feature/x')).toBe(true);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toBe('resolved\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -101,7 +129,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
       expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -115,7 +143,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       expect(await mergeCommitted(dir, 'feature/x')).toBe(false);
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });
@@ -123,7 +151,7 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
 /** A conflict on `name` beside `clean.txt`, which only `feature/x` changes, so the merge stages it. */
 async function setupNamedConflict(name: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-named-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, name), 'base\n', 'utf8');
   await writeFile(path.join(dir, 'clean.txt'), 'one\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -139,10 +167,1010 @@ async function setupNamedConflict(name: string): Promise<string> {
 }
 
 const mergeHead = (dir: string) => gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+const noSecrets = async () => null;
+
+/** setupNamedConflict('base.txt') plus two files only `main` has, one of them left edited by the
+ *  person, and an untracked file of theirs; the merge is left open on the conflict. */
+async function setupMergeWithOwnWork(): Promise<string> {
+  const dir = await setupNamedConflict('base.txt');
+  await writeFile(path.join(dir, 'untouched.txt'), 'untouched\n', 'utf8');
+  await writeFile(path.join(dir, 'dirt.txt'), 'dirt\n', 'utf8');
+  await mkdir(path.join(dir, 'lib', 'deep'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'keep\n', 'utf8');
+  await mkdir(path.join(dir, 'lib', 'other'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'other', 'gone.txt'), 'gone\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'main only']);
+  await writeFile(path.join(dir, 'dirt.txt'), 'person dirt\n', 'utf8');
+  await writeFile(path.join(dir, 'mine.txt'), 'mine\n', 'utf8');
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
+}
+
+/** A merge left open on `.gitignore`, which ignores `cache/`, with a file in it and an untracked
+ *  log nothing ignores. */
+async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ignore-'));
+  await initRepo(dir);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\ntheirs/\n', 'utf8');
+  await git(dir, ['commit', '-am', 'feature rule']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\nours/\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main rule']);
+  await mkdir(path.join(dir, 'cache'));
+  const kept = `kept ${randomUUID()}\n`;
+  await writeFile(path.join(dir, 'cache', 'keep'), kept, 'utf8');
+  await writeFile(path.join(dir, 'app.log'), 'line1\n', 'utf8');
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return { dir, kept };
+}
+
+/** Fifteen directories of 240-character names: 300 paths under it list past execFile's 1 MiB. */
+const DEEP = Array.from({ length: 15 }, (_, i) => String(i).padEnd(240, 'd')).join('/');
+
+async function writeMany(
+  dir: string,
+  sub: string,
+  count: number,
+  body: (i: number) => string,
+): Promise<void> {
+  await mkdir(path.join(dir, sub), { recursive: true });
+  for (let i = 0; i < count; i++) {
+    await writeFile(path.join(dir, sub, `f${i}.txt`), body(i), 'utf8');
+  }
+}
+
+/** 300 files conflicting in DEEP beside a directory/file conflict on `DEEP/foo`, left open. */
+async function setupWideConflict(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-wide-'));
+  await initRepo(dir);
+  await writeMany(dir, DEEP, 300, () => 'base\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeMany(dir, DEEP, 300, (i) => `feature ${i}\n`);
+  await mkdir(path.join(dir, DEEP, 'foo'));
+  await writeFile(path.join(dir, DEEP, 'foo', 'bar'), 'bar\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  await writeMany(dir, DEEP, 300, (i) => `main ${i}\n`);
+  await writeFile(path.join(dir, DEEP, 'foo'), 'file\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'main']);
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
+}
+
+/** A merge left open on `base.txt` that also cleanly staged feature/x's change to `bad<0xff>.txt`. */
+async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-'));
+  const odd = Buffer.concat([Buffer.from(`${dir}/bad`), Buffer.from([0xff]), Buffer.from('.txt')]);
+  await initRepo(dir);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await writeFile(odd, 'odd base\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+  await writeFile(odd, 'odd feature\n');
+  await git(dir, ['commit', '-am', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main']);
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return { dir, odd };
+}
+
+/** HEAD's entries as raw bytes, name to blob. */
+async function headEntries(dir: string): Promise<Map<string, string>> {
+  const { stdout } = await exec('git', ['ls-tree', '-r', '-z', 'HEAD'], {
+    cwd: dir,
+    ...GIT_OPTS,
+    encoding: 'buffer',
+  });
+  const entries = new Map<string, string>();
+  for (const record of stdout.toString('latin1').split('\0').filter(Boolean)) {
+    const tab = record.indexOf('\t');
+    entries.set(record.slice(tab + 1), record.slice(0, tab).split(' ')[2]!);
+  }
+  return entries;
+}
+
+/** One side holds a file `foo` and the other a directory `foo/bar`, so git moves the file aside and
+ *  reports only the name it gave it; the merge of `feature/x` into `main` is left open. */
+async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-'));
+  await initRepo(dir);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  for (const branch of ['feature/x', 'main']) {
+    await git(dir, ['checkout', branch]);
+    if (branch === fileOn) {
+      await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
+    } else {
+      await mkdir(path.join(dir, 'foo'));
+      await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
+    }
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', `${branch} foo`]);
+  }
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
+}
+
+describe('fixer leftovers (real git)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('commits only the paths the merge left unmerged', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+      expect(await git(dir, ['show', 'HEAD:clean.txt'])).toBe('two\n');
+      expect(await git(dir, ['show', 'HEAD:dirt.txt'])).toBe('dirt\n');
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
+      expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it("moves a fixer's changes out and puts the tree back as it was sent in", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      expect(baseline).toMatchObject({ resolving: ['base.txt'] });
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'clean.txt'), 'fixer on staged\n', 'utf8');
+      await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+      await rm(path.join(dir, 'dirt.txt'));
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await mkdir(path.join(dir, 'deep'));
+      await writeFile(path.join(dir, 'deep', 'stray2.txt'), 'deeper\n', 'utf8');
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'note.md'), 'haive own\n', 'utf8');
+      await symlink('base.txt', path.join(dir, 'link-stray'));
+
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      const folder = '.haive/merge-leftovers/t1/inv1';
+      expect(out?.folder).toBe(folder);
+      expect(out?.moved.sort()).toEqual([
+        'clean.txt',
+        'deep/stray2.txt',
+        'stray.txt',
+        'untouched.txt',
+      ]);
+      expect(out?.left).toEqual([
+        expect.objectContaining({ path: 'link-stray', target: 'base.txt' }),
+      ]);
+      expect(out?.unstaged).toEqual([]);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('base.txt')).toBe('resolved\n');
+      expect(await read('clean.txt')).toBe('two\n');
+      expect(await read('untouched.txt')).toBe('untouched\n');
+      expect(await read('dirt.txt')).toBe('person dirt\n');
+      expect(await read('mine.txt')).toBe('mine\n');
+      expect(await read('.haive-data/note.md')).toBe('haive own\n');
+      await expect(read('stray.txt')).rejects.toThrow();
+      expect(await read(`${folder}/files/clean.txt`)).toBe('fixer on staged\n');
+      expect(await read(`${folder}/files/deep/stray2.txt`)).toBe('deeper\n');
+      const manifest = JSON.parse(await read(`${folder}/manifest.json`)) as { moved: string[] };
+      expect(manifest.moved.sort()).toEqual(out?.moved.sort());
+      // The index was refreshed after the restore, so git lets the merge go.
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(await read('dirt.txt')).toBe('person dirt\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('puts a file back over the directory a fixer made in its place', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await rm(path.join(dir, 'untouched.txt'));
+      await mkdir(path.join(dir, 'untouched.txt'));
+      await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['untouched.txt/cache']);
+      expect(await readFile(path.join(dir, 'untouched.txt'), 'utf8')).toBe('untouched\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // git replaces a directory standing where it puts a file back, and takes what is in it along.
+  it('keeps a directory standing where a file was while it holds what could not be moved', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await rm(path.join(dir, 'untouched.txt'));
+      await mkdir(path.join(dir, 'untouched.txt'));
+      await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
+      await symlink('../base.txt', path.join(dir, 'untouched.txt', 'link'));
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['untouched.txt/cache']);
+      expect(out?.left.map((l) => l.path).sort()).toEqual(['untouched.txt', 'untouched.txt/link']);
+      expect(out?.left.find((l) => l.path === 'untouched.txt/link')?.target).toBe('../base.txt');
+      expect((await lstat(path.join(dir, 'untouched.txt', 'link'))).isSymbolicLink()).toBe(true);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // A fixer that ran git staged what it changed, and the person's own work with it.
+  it('takes what a fixer staged outside the conflict out of the index before the commit', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved.sort()).toEqual(['stray.txt', 'untouched.txt']);
+      expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
+        'dirt.txt',
+        'mine.txt',
+        'stray.txt',
+        'untouched.txt',
+      ]);
+      expect(fixerLeftoversWarning('t1', out!)).toContain('taken back out of the index');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+      expect(await git(dir, ['show', 'HEAD:clean.txt'])).toBe('two\n');
+      expect(await git(dir, ['show', 'HEAD:untouched.txt'])).toBe('untouched\n');
+      expect(await git(dir, ['show', 'HEAD:dirt.txt'])).toBe('dirt\n');
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
+      expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
+      expect(await readFile(path.join(dir, 'mine.txt'), 'utf8')).toBe('mine\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // A fixer resolving `.gitignore` can drop a rule, and what the rule ignored is still not its own.
+  it('leaves what git ignored when the fixer was sent in, whatever rules it leaves', async () => {
+    const { dir, kept } = await setupIgnoreConflict();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, '.gitignore'), 'ours/\ntheirs/\n', 'utf8');
+      await writeFile(path.join(dir, 'cache', 'new'), 'new under cache\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out).toBeNull();
+      expect(await readFile(path.join(dir, 'cache', 'keep'), 'utf8')).toBe(kept);
+      expect(await readFile(path.join(dir, 'cache', 'new'), 'utf8')).toBe('new under cache\n');
+      // Nor was it hashed: nothing under the directory reached the object store.
+      const blob = (await git(dir, ['hash-object', path.join(dir, 'cache', 'keep')])).trim();
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // Or add one, which hides a file the baseline recorded: it is compared, not restored over.
+  it('compares a recorded file that a rule the fixer added now hides', async () => {
+    const { dir } = await setupIgnoreConflict();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, '.gitignore'), 'cache/\nours/\ntheirs/\n*.log\n', 'utf8');
+      await writeFile(path.join(dir, 'app.log'), 'line1\nline2\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['app.log']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/app.log')).toBe('line1\nline2\n');
+      expect(await read('app.log')).toBe('line1\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('reports a new file whose name is not UTF-8 and leaves it where it is', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/odd-`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(odd, 'odd\n');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toBeUndefined();
+      expect(out?.left).toEqual([expect.objectContaining({ reason: 'its name is not UTF-8' })]);
+      expect(await readFile(odd, 'utf8')).toBe('odd\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // git recreates a file it puts back with its default mode, where the one it replaced was tighter.
+  it('puts a file back no wider than the one it replaced', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, 'private.txt'), 'private\n', 'utf8');
+      await writeFile(path.join(dir, 'run.sh'), 'echo run\n', 'utf8');
+      await chmod(path.join(dir, 'run.sh'), 0o755);
+      await writeFile(path.join(dir, 'open.txt'), 'open\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'modes']);
+      await chmod(path.join(dir, 'private.txt'), 0o600);
+      await chmod(path.join(dir, 'run.sh'), 0o700);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'private.txt'), 'fixer\n', 'utf8');
+      await writeFile(path.join(dir, 'run.sh'), 'echo fixer\n', 'utf8');
+      await writeFile(path.join(dir, 'open.txt'), 'fixer\n', 'utf8');
+      await chmod(path.join(dir, 'open.txt'), 0o777);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved.sort()).toEqual(['open.txt', 'private.txt', 'run.sh']);
+      const mode = async (rel: string) => (await lstat(path.join(dir, rel))).mode & 0o7777;
+      expect(await readFile(path.join(dir, 'private.txt'), 'utf8')).toBe('private\n');
+      expect(await readFile(path.join(dir, 'run.sh'), 'utf8')).toBe('echo run\n');
+      expect(await mode('private.txt')).toBe(0o600);
+      expect(await mode('run.sh')).toBe(0o700);
+      // The merge wrote clean.txt, so it holds the mode git gives a file.
+      expect(await mode('open.txt')).toBe(await mode('clean.txt'));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // U+FFFD is also what an undecodable byte reads as, so only the name's bytes can tell the two.
+  it('moves a file whose UTF-8 name holds U+FFFD like any other', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, 'kept-�.txt'), 'kept\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'odd name']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'kept-�.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(dir, 'new-�.txt'), 'new\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.left).toEqual([]);
+      expect(out?.moved.sort()).toEqual(['kept-�.txt', 'new-�.txt']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      const files = '.haive/merge-leftovers/t1/inv1/files';
+      expect(await read(`${files}/kept-�.txt`)).toBe('fixer edit\n');
+      expect(await read(`${files}/new-�.txt`)).toBe('new\n');
+      expect(await read('kept-�.txt')).toBe('kept\n');
+      await expect(lstat(path.join(dir, 'new-�.txt'))).rejects.toThrow('ENOENT');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // git reports the moved file alone and stages the directory side, so keeping the file touches both.
+  it.each(['main', 'feature/x'] as const)(
+    'commits the file side of a directory/file conflict a fixer chose, the file on %s',
+    async (fileOn) => {
+      const dir = await setupDirectoryFileConflict(fileOn);
+      try {
+        const [moved] = await unmergedPaths(dir).then((u) => u ?? []);
+        expect(moved).toBeDefined();
+        const baseline = await captureFixBaseline(dir, noSecrets);
+        expect(baseline).toMatchObject({ resolving: [moved, 'foo'] });
+        await rm(path.join(dir, 'foo'), { recursive: true });
+        await rename(path.join(dir, moved!), path.join(dir, 'foo'));
+        expect(
+          await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets),
+        ).toBeNull();
+        expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+        expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
+        expect(await git(dir, ['show', 'HEAD:foo'])).toBe('file\n');
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  // Blob equality alone would also take `bar`, which HEAD left alone and git merged cleanly.
+  it('leaves a sibling holding the same blob out of a directory/file conflict it is not in', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-same-'));
+    try {
+      await initRepo(dir);
+      await writeFile(path.join(dir, 'foo'), 'a\n', 'utf8');
+      await writeFile(path.join(dir, 'bar'), 'b\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      for (const name of ['foo', 'bar']) {
+        await rm(path.join(dir, name));
+        await mkdir(path.join(dir, name));
+        await writeFile(path.join(dir, name, 'inner'), `${name} inner\n`, 'utf8');
+      }
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'feature dirs']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(path.join(dir, 'foo'), 'b\n', 'utf8');
+      await git(dir, ['commit', '-am', 'foo like bar']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const unmerged = (await unmergedPaths(dir)) ?? [];
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      expect(baseline).toMatchObject({ resolving: [...unmerged, 'foo'] });
+      await writeFile(path.join(dir, 'bar', 'inner'), 'fixer on bar\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['bar/inner']);
+      expect(await readFile(path.join(dir, 'bar', 'inner'), 'utf8')).toBe('bar inner\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // `commit` takes the whole index, what stays in the tree as not the fixer's to move included.
+  it("takes Haive's own paths and gitlinks a fixer staged back out of the index", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
+      const nested = path.join(dir, 'vendor', 'lib');
+      await mkdir(nested, { recursive: true });
+      await initRepo(nested);
+      await writeFile(path.join(nested, 'lib.txt'), 'lib\n', 'utf8');
+      await git(nested, ['add', '-A']);
+      await git(nested, ['commit', '-m', 'lib']);
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual([]);
+      expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
+        '.haive-data/plan.json',
+        'dirt.txt',
+        'mine.txt',
+        'vendor/lib',
+      ]);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:.haive-data/plan.json'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:vendor/lib'])).not.toBe(0);
+      expect(await readFile(path.join(dir, '.haive-data', 'plan.json'), 'utf8')).toBe('{}\n');
+      expect(await readFile(path.join(nested, 'lib.txt'), 'utf8')).toBe('lib\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // At a same-branch root the deletion can be the person's, so putting a file back is reported.
+  it('reports a deleted file it put back, even when nothing else changed', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await rm(path.join(dir, 'untouched.txt'));
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.restored).toEqual(['untouched.txt']);
+      expect(out?.moved).toEqual([]);
+      expect(fixerLeftoversWarning('t1', out!)).toContain('they were put back');
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('untouched.txt')).toBe('untouched\n');
+      const manifest = JSON.parse(await read('.haive/merge-leftovers/t1/inv1/manifest.json')) as {
+        restored: string[];
+      };
+      expect(manifest.restored).toEqual(['untouched.txt']);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // At a same-branch root the fixer's sandbox holds `.git`, so a masked file must not become a blob.
+  it('keeps a file the sandbox masks out of every object the snapshots write', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const secret = `SECRET=${randomUUID()}\n`;
+      await writeFile(path.join(dir, '.env'), secret, 'utf8');
+      const blob = (await git(dir, ['hash-object', '.env'])).trim();
+      const masked = async () => secretMaskPolicy({});
+      const baseline = await captureFixBaseline(dir, masked);
+      expect(baseline).toHaveProperty('tree');
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        masked,
+      );
+      expect(out?.moved).toEqual(['stray.txt']);
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+      expect(await readFile(path.join(dir, '.env'), 'utf8')).toBe(secret);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // The sandbox masks only what the merge's own index does not track, and the merge tracks what it adds.
+  it('moves a fixer edit to a masked name the merge added', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-env-'));
+    try {
+      await initRepo(dir);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+      await writeFile(path.join(dir, '.env'), 'FROM=feature\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'feature']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
+      await git(dir, ['commit', '-am', 'main']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const masked = async () => secretMaskPolicy({});
+      const baseline = await captureFixBaseline(dir, masked);
+      await writeFile(path.join(dir, '.env'), 'FROM=fixer\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        masked,
+      );
+      expect(out?.moved).toEqual(['.env']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('.env')).toBe('FROM=feature\n');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/.env')).toBe('FROM=fixer\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // A clean filter or a line-ending conversion would record, and put back, other bytes than these.
+  it('puts back the bytes a file held, whatever filter or line ending applies to it', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await writeFile(
+        path.join(dir, '.gitattributes'),
+        '*.txt filter=lossy\n*.crlf text=auto\n',
+        'utf8',
+      );
+      await git(dir, ['config', 'filter.lossy.clean', 'sed s/ORIGINAL/CLEANED/']);
+      await git(dir, ['config', 'filter.lossy.smudge', 'cat']);
+      await writeFile(path.join(dir, 'notes.txt'), 'ORIGINAL\n', 'utf8');
+      await writeFile(path.join(dir, 'win.crlf'), 'one\r\ntwo\r\n', 'utf8');
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'notes.txt'), 'FIXER\n', 'utf8');
+      await writeFile(path.join(dir, 'win.crlf'), 'fixer\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved.sort()).toEqual(['notes.txt', 'win.crlf']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('notes.txt')).toBe('ORIGINAL\n');
+      expect(await read('win.crlf')).toBe('one\r\ntwo\r\n');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/notes.txt')).toBe('FIXER\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // A repository copied from a filesystem without executable bits often sets core.fileMode=false.
+  it('sees a chmod outside the conflict whatever core.fileMode says', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await git(dir, ['config', 'core.fileMode', 'false']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await chmod(path.join(dir, 'untouched.txt'), 0o755);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['untouched.txt']);
+      expect((await lstat(path.join(dir, 'untouched.txt'))).mode & 0o111).toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('reports a baseline git could not record rather than checking nothing', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await git(dir, ['merge', '--abort']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      expect(baseline).toEqual({ unavailable: 'git could not read the merge' });
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toContain('nothing was recorded before it ran');
+      expect(fixerLeftoversWarning('t1', out!)).toContain('Could not check');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  // git writes what it puts back as this process, where the sandbox user owned what stood there.
+  it.runIf(process.getuid?.() === 0)(
+    'hands what it puts back, and the directories git recreated, to the owner of the tree',
+    async () => {
+      const dir = await setupMergeWithOwnWork();
+      try {
+        await exec('chown', ['-R', '1000:1000', dir]);
+        await exec('chown', ['0:0', path.join(dir, 'lib', 'deep')]);
+        const baseline = await captureFixBaseline(dir, noSecrets);
+        await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+        await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'fixer on keep\n', 'utf8');
+        await rm(path.join(dir, 'lib', 'other'), { recursive: true });
+        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
+        expect(await readFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'utf8')).toBe('keep\n');
+        expect(await readFile(path.join(dir, 'lib', 'other', 'gone.txt'), 'utf8')).toBe('gone\n');
+        const owners = [
+          'untouched.txt',
+          'lib/deep/keep.txt',
+          'lib/other',
+          'lib/other/gone.txt',
+          'lib/deep',
+        ];
+        const uids = await Promise.all(
+          owners.map(async (rel) => (await lstat(path.join(dir, rel))).uid),
+        );
+        expect(Object.fromEntries(owners.map((rel, i) => [rel, uids[i]]))).toEqual({
+          'untouched.txt': 1000,
+          'lib/deep/keep.txt': 1000,
+          'lib/other': 1000,
+          'lib/other/gone.txt': 1000,
+          'lib/deep': 0,
+        });
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('moves nothing once the merge it was sent into was finished by hand', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await git(dir, ['add', 'base.txt']);
+      await git(dir, ['commit', '--no-edit']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toBeTruthy();
+      expect(out?.moved).toEqual([]);
+      expect(await readFile(path.join(dir, 'stray.txt'), 'utf8')).toBe('fixer scratch\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it("moves and unstages a fixer's changes whose listing passes 1 MiB", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeMany(dir, DEEP, 300, (i) => `stray ${i}\n`);
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toBeUndefined();
+      expect(out?.moved).toHaveLength(300);
+      expect(out?.unstaged).toHaveLength(302);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await gitCode(dir, ['cat-file', '-e', `HEAD:${DEEP}/f0.txt`])).not.toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  }, 30_000);
+
+  it('takes a staged file whose name is not UTF-8 out of the index before the commit', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/odd-`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(odd, 'odd\n');
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unstaged.map((u) => u.path)).toContain('odd-\uFFFD.txt');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'])).not.toContain('odd-');
+      expect(await readFile(odd, 'utf8')).toBe('odd\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('reports an earlier attempt of the task that was never reported, and only once', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const events: { payload: unknown }[] = [];
+    const db = {
+      insert: () => ({ values: async (v: { payload: unknown }) => void events.push(v) }),
+    } as unknown as Database;
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'first\n', 'utf8');
+      const first = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(first?.interrupted).toEqual([]);
+      // The worker stopped here, before inv1's event was written.
+      const spent = await relocateFixerChanges(
+        dir,
+        null,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(spent?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      await writeFile(path.join(dir, 'stray.txt'), 'second\n', 'utf8');
+      const second = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(second?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      expect(second?.folder).toMatch(/^\.haive\/merge-leftovers\/t1\/inv1-/);
+      expect(await readFile(path.join(dir, `${first!.folder}/files/stray.txt`), 'utf8')).toBe(
+        'first\n',
+      );
+      expect(fixerLeftoversWarning('t1', second!)).toContain('.haive/merge-leftovers/t1/inv1');
+      await recordFixerLeftovers(db, 't1', 's1', 'feature/x', second!);
+      expect(events[0]?.payload).toMatchObject({
+        interrupted: ['.haive/merge-leftovers/t1/inv1'],
+      });
+
+      await writeFile(path.join(dir, 'stray.txt'), 'third\n', 'utf8');
+      const third = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv3' },
+        noSecrets,
+      );
+      expect(third?.interrupted).toEqual([]);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('keeps the change a merge staged to a file whose name is not UTF-8', async () => {
+    const { dir } = await setupOddNameMerge();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      expect(
+        await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets),
+      ).toBeNull();
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      const entries = await headEntries(dir);
+      expect([...entries.keys()].sort()).toEqual(['bad\xff.txt', 'base.txt']);
+      expect(await git(dir, ['cat-file', '-p', entries.get('bad\xff.txt')!])).toBe('odd feature\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('says the merge must not be committed when what a fixer staged cannot be unstaged', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'staged by the fixer\n', 'utf8');
+      await git(dir, ['add', 'stray.txt']);
+      await rm(path.join(dir, 'stray.txt'));
+      // Another git process holds the index for the whole relocation.
+      await writeFile(path.join(dir, '.git', 'index.lock'), '');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      await rm(path.join(dir, '.git', 'index.lock'));
+      expect(out?.indexHeld).toContain('index.lock');
+      expect(out?.unstaged).toEqual([]);
+      expect(await git(dir, ['diff', '--cached', '--name-only'])).toContain('stray.txt');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it("leaves a file a fixer put where Haive's own .haive-data directory stood", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await rm(path.join(dir, '.haive-data'), REMOVE);
+      await writeFile(path.join(dir, '.haive-data'), 'not a directory\n', 'utf8');
+      await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
+      expect(await readFile(path.join(dir, '.haive-data'), 'utf8')).toBe('not a directory\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('puts the index back though the tree cannot be read', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'staged by the fixer\n', 'utf8');
+      await git(dir, ['add', 'stray.txt']);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        async () => {
+          throw new Error('mask unavailable');
+        },
+      );
+      expect(out?.unchecked).toContain('mask unavailable');
+      expect(out?.indexHeld).toBeUndefined();
+      expect(out?.unstaged.map((u) => u.path)).toContain('stray.txt');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('reports what the task whose merge it took over never did', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'first\n', 'utf8');
+      await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
+      await writeFile(path.join(dir, 'stray.txt'), 'second\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't2', runId: 'inv2', ownerTaskId: 't1' },
+        noSecrets,
+      );
+      expect(out?.interrupted).toEqual(['.haive/merge-leftovers/t1/inv1']);
+      expect(out?.folder).toBe('.haive/merge-leftovers/t2/inv2');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it("records nothing in a person's own checkout", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
+    vi.stubEnv('HOST_REPO_ROOT', root);
+    vi.resetModules();
+    const hosted = await import('./git-merge.js');
+    const dir = await setupMergeWithOwnWork();
+    const inHost = path.join(root, 'repo');
+    try {
+      await rename(dir, inHost);
+      expect(await hosted.captureFixBaseline(inHost, noSecrets)).toBeNull();
+    } finally {
+      await rm(root, REMOVE);
+      await rm(dir, REMOVE);
+    }
+  });
+});
 
 describe('merge helpers (real git)', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('reads, records and aborts a merge whose listings pass 1 MiB', async () => {
+    const dir = await setupWideConflict();
+    try {
+      const unmerged = await unmergedPaths(dir);
+      expect(unmerged).toHaveLength(301);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      expect(baseline).not.toHaveProperty('unavailable');
+      expect(baseline).toMatchObject({
+        resolving: expect.arrayContaining([`${DEEP}/f0.txt`, `${DEEP}/foo~HEAD`, `${DEEP}/foo`]),
+      });
+      await writeFile(path.join(dir, DEEP, 'foo', 'bar'), 'fixer edit\n', 'utf8');
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  }, 30_000);
+
+  it('aborts a merge after a fixer edited a staged file whose name is not UTF-8', async () => {
+    const { dir, odd } = await setupOddNameMerge();
+    try {
+      await writeFile(odd, 'fixer edit\n');
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(await readFile(odd, 'utf8')).toBe('odd base\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
   });
 
   it('checks the markers of a conflicted file whose name git quotes', async () => {
@@ -155,7 +1183,48 @@ describe('merge helpers (real git)', () => {
       expect(await mergeHead(dir)).toBe(0);
       expect(await git(dir, ['show', 'HEAD:café "notes".txt'])).toBe('main\n');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('commits a resolved conflict whose UTF-8 name holds U+FFFD', async () => {
+    const dir = await setupNamedConflict('odd-�.txt');
+    try {
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      expect(await unmergedPaths(dir)).toEqual(['odd-�.txt']);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      await writeFile(path.join(dir, 'odd-�.txt'), 'resolved\n', 'utf8');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:odd-�.txt'])).toBe('resolved\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('never commits a conflicted file whose name is not UTF-8', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-conflict-'));
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/bad`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      await initRepo(dir);
+      await writeFile(odd, 'base\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      await writeFile(odd, 'feature\n');
+      await git(dir, ['commit', '-am', 'feature']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(odd, 'main\n');
+      await git(dir, ['commit', '-am', 'main']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      // Its markers are still in the file, and its decoded name names no file to check them in.
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      expect(await mergeHead(dir)).toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
     }
   });
 
@@ -171,7 +1240,7 @@ describe('merge helpers (real git)', () => {
       expect((await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).kind).toBe('conflict');
       expect((await openMerge(dir, 'nosuch', ['--no-edit'], COMMIT_ENV)).kind).toBe('refused');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -189,7 +1258,7 @@ describe('merge helpers (real git)', () => {
       expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
       expect(await abortMerge(dir)).toEqual({ ok: true });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -210,8 +1279,8 @@ describe('merge helpers (real git)', () => {
       expect(await readFile(path.join(inHost, 'clean.txt'), 'utf8')).toBe('their own edit\n');
       expect(await mergeHead(inHost)).toBe(0);
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(dir, { recursive: true, force: true });
+      await rm(root, REMOVE);
+      await rm(dir, REMOVE);
     }
   });
 
@@ -225,7 +1294,7 @@ describe('merge helpers (real git)', () => {
       expect(await abortOtherMerge(dir, 'other')).toEqual({ ok: true });
       expect(await mergeHead(dir)).not.toBe(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });
@@ -233,7 +1302,7 @@ describe('merge helpers (real git)', () => {
 /** A repo on `main` with a `feature/x` that adds two commits and does NOT conflict. */
 async function setupCleanFeature(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gs-'));
-  await git(dir, ['init', '-b', 'main']);
+  await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
@@ -270,7 +1339,7 @@ describe('squashMergeCommit (real git)', () => {
       // Nothing left staged or dirty.
       expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -283,7 +1352,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV)).toBeNull();
       expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(after);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -297,7 +1366,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 
@@ -313,7 +1382,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await count(dir, 'main')).toBe(2);
       expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: resumed');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, REMOVE);
     }
   });
 });

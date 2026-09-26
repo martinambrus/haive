@@ -65,6 +65,18 @@ export async function updateOwnedStep(
   return row;
 }
 
+/** Add `note` to the step's warning once, after whatever it already says. */
+export async function addStepWarning(
+  db: Database | DbHandle,
+  row: TaskStepRow,
+  note: string,
+): Promise<TaskStepRow> {
+  if (row.warningMessage?.includes(note)) return row;
+  return updateOwnedStep(db, row.id, {
+    warningMessage: [row.warningMessage, note].filter(Boolean).join(' '),
+  });
+}
+
 /** Hold a pass's row for the rest of a transaction while it is still the pass's own; false once a
  *  Retry, a Skip or a Stop took it. A Retry writes the steps before the task's epoch, so a hand-off
  *  fenced on the epoch alone can land inside one. */

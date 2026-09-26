@@ -45,7 +45,7 @@ const NOT_A_RESOURCE = [
   /haive-(?:api|worker|web|cli-version-fetcher|ddev-rootCA)\b/,
   /HAIVE_[A-Z_]+/,
   /haive\.[a-z.]+/, // label KEYS and the haive.local hostname
-  /haive-(?:env-build|sandbox-build|compose|net|dump|shots)-/, // host temp dirs
+  /haive-(?:env-build|sandbox-build|compose|net|dump|shots|merge-snapshot)-/, // host temp paths
   /haive_(?:access|refresh)\b/, // cookie names
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|migrated-|import-|pre-migrate|pre-rename)/,
 ];

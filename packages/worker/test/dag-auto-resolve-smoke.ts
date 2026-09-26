@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -41,6 +41,8 @@ const BRANCH = 'feat-auto';
 const CONFLICT_FILE = 'conflict.txt';
 // Only ISSUE-002 writes it, so its conflicting merge stages it cleanly beside the conflict.
 const NOTES_FILE = 'notes-002.txt';
+// Files the two fixers leave outside the conflict, the failed one and the one that resolves it.
+const STRAYS = ['fixer-junk.txt', 'fixer-scratch.md'] as const;
 
 interface State {
   fixtureDir?: string;
@@ -242,6 +244,7 @@ async function main(): Promise<void> {
         failed ? 'half-resolved\n' : 'resolved: 001 + 002\n',
       );
       if (failed) await writeFile(path.join(integrationWorktree, NOTES_FILE), 'fixer edit\n');
+      await writeFile(path.join(integrationWorktree, STRAYS[failed ? 0 : 1]), 'stray\n');
       await db
         .update(schema.cliInvocations)
         // Mirrors handlers.ts: a completed run started, whatever it returned.
@@ -328,6 +331,27 @@ async function main(): Promise<void> {
       throw new Error(
         `the failed fixer's edit to a staged file was committed: ${JSON.stringify(notes)}`,
       );
+    }
+    const leftoversDir = path.join(repoPath, '.haive', 'merge-leftovers', task!.id);
+    const leftovers = existsSync(leftoversDir)
+      ? readdirSync(leftoversDir, { recursive: true }).map(String)
+      : [];
+    for (const stray of STRAYS) {
+      let committed = true;
+      try {
+        git(integrationWorktree, ['cat-file', '-e', `HEAD:${stray}`]);
+      } catch {
+        committed = false;
+      }
+      if (committed) throw new Error(`a fixer's stray ${stray} was committed`);
+      if (existsSync(path.join(integrationWorktree, stray))) {
+        throw new Error(`a fixer's stray ${stray} was left in the integration worktree`);
+      }
+      if (!leftovers.some((p) => p.endsWith(path.join('files', stray)))) {
+        throw new Error(
+          `a fixer's stray ${stray} is not in the leftovers: ${leftovers.join(', ')}`,
+        );
+      }
     }
 
     console.log(
