@@ -6,11 +6,9 @@ import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
   SECRET_KEYS,
-  TASK_JOB_NAMES,
   configService,
   secretsService,
   type GlobalKbSyncJobPayload,
-  type TaskJobPayload,
 } from '@haive/shared';
 import {
   globalKbEntries,
@@ -32,7 +30,8 @@ import {
   releaseEmbedModelIfUnused,
 } from '@haive/shared/rag';
 import { getDb } from '../db.js';
-import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
+import { getGlobalKbSyncQueue } from '../queues.js';
+import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -408,16 +407,7 @@ globalKbRoutes.post('/enrich', async (c) => {
       .where(eq(globalKbEntries.id, entry.id));
   });
 
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.START,
-    { taskId: task.id, userId } satisfies TaskJobPayload,
-    {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    },
-  );
+  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, userId);
 
   return c.json({ entry, taskId: task.id }, 201);
 });

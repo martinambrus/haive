@@ -13,6 +13,16 @@ const { db, taskQueue, order, inserted } = vi.hoisted(() => {
         },
       }),
     }),
+    update: () => ({
+      set: () => ({
+        where: () => ({
+          returning: async () => {
+            order.push('queued');
+            return [{ id: 'task-1', status: 'queued' }];
+          },
+        }),
+      }),
+    }),
   };
   const taskQueue = {
     add: vi.fn(async () => {
@@ -51,14 +61,14 @@ describe('spawnPlanTask seeding', () => {
     cliProviderId: null,
   };
 
-  it('seeds after the row exists and before the job is enqueued', async () => {
+  it('seeds after the row exists and queues the task only once seeded', async () => {
     await spawnPlanTask({
       ...args,
       seed: async (taskId) => {
         order.push(`seed:${taskId}`);
       },
     });
-    expect(order).toEqual(['insert', 'seed:task-1', 'enqueue']);
+    expect(order).toEqual(['insert', 'seed:task-1', 'queued', 'enqueue']);
   });
 
   it('hands the seed the id of the row it just wrote', async () => {
@@ -69,7 +79,7 @@ describe('spawnPlanTask seeding', () => {
 
   it('still enqueues when there is nothing to seed', async () => {
     await spawnPlanTask(args);
-    expect(order).toEqual(['insert', 'enqueue']);
+    expect(order).toEqual(['insert', 'queued', 'enqueue']);
   });
 
   it('creates without enqueueing when the start is deferred', async () => {

@@ -106,11 +106,10 @@ test.describe('tasks list and create', () => {
       `;
       expect(dbRows).toHaveLength(1);
       expect(dbRows[0]!.title).toBe(taskTitle);
-      // Task is created with status='created' but the worker picks it up
-      // near-instantly and starts advancing it, so by the time this query
-      // runs the task may already be in running / waiting_user / failed.
-      // Any of these proves the task row was inserted correctly.
-      expect(['created', 'queued', 'running', 'waiting_user', 'waiting_form', 'failed']).toContain(
+      // The task is queued before its START, and the worker picks it up near-instantly, so by
+      // the time this query runs it may already be running, waiting on a form, or failed. It is
+      // never left `created`, which nothing starts.
+      expect(['queued', 'running', 'waiting_user', 'waiting_form', 'failed']).toContain(
         dbRows[0]!.status,
       );
       expect(dbRows[0]!.repository_id).toBe(repoFixture.repoId);
@@ -226,7 +225,7 @@ test.describe('tasks list and create', () => {
         task: { id: string; type: string; status: string };
       };
       expect(onboardingBody.task.type).toBe('onboarding');
-      expect(onboardingBody.task.status).toBe('created');
+      expect(onboardingBody.task.status).toBe('queued');
       createdIds.push(onboardingBody.task.id);
 
       // A workflow task REQUIRES a description — createTaskRequestSchema refines exactly that,
@@ -248,7 +247,7 @@ test.describe('tasks list and create', () => {
         task: { id: string; type: string; status: string };
       };
       expect(workflowBody.task.type).toBe('workflow');
-      expect(workflowBody.task.status).toBe('created');
+      expect(workflowBody.task.status).toBe('queued');
       createdIds.push(workflowBody.task.id);
 
       const rows = await sql<{ id: string; type: string }[]>`
