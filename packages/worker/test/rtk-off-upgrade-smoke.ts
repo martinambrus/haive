@@ -60,6 +60,7 @@ function defaultValues(form: FormSchema | null): Record<string, unknown> {
 }
 
 const SETTINGS = '.claude/settings.json';
+const GEMINI_SETTINGS = '.gemini/settings.json';
 const RTK_ITEM = 'rtk.claude-settings';
 
 async function main(): Promise<void> {
@@ -508,11 +509,23 @@ async function main(): Promise<void> {
         createdAt: now,
         updatedAt: now,
       });
-      await seedBlankScaffold(
+      // gemini is enabled while the scaffold seeds, and disabled before the first upgrade.
+      const [gemini] = await db
+        .insert(schema.cliProviders)
+        .values({ userId, name: 'gemini', label: 'rtk-off-upgrade-smoke gemini', rulesContent: '' })
+        .returning({ id: schema.cliProviders.id });
+      const seededFiles = await seedBlankScaffold(
         db,
         { userId, repositoryId: seededId, repoName: 'rtk-off-upgrade-smoke seeded' },
         seededPath,
       );
+      if (!seededFiles.includes(GEMINI_SETTINGS)) {
+        throw new Error(`scaffold wrote no ${GEMINI_SETTINGS}`);
+      }
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: false })
+        .where(eq(schema.cliProviders.id, gemini!.id));
       await db
         .update(schema.repositories)
         .set({ rtkEnabled: false })
@@ -533,6 +546,13 @@ async function main(): Promise<void> {
           seededEntry.liveArtifactId === null &&
           offeredForRemoval(firstSeeded.form, seededEntry.entryId),
         { bucket: seededEntry?.bucket },
+      );
+      const geminiEntry = firstSeeded.detected.entries.find((e) => e.diskPath === GEMINI_SETTINGS);
+      check(
+        'and so is the one it seeded for a CLI disabled since',
+        geminiEntry?.bucket === 'obsolete' &&
+          offeredForRemoval(firstSeeded.form, geminiEntry.entryId),
+        { bucket: geminiEntry?.bucket },
       );
       const skipValues = defaultValues(firstSeeded.form);
       skipValues.selectedNew = [];

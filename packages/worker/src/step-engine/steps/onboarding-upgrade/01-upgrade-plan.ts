@@ -9,6 +9,7 @@ import {
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_START,
   CLI_RULES_TEMPLATE_ID,
+  CLI_PROVIDER_LIST,
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
   getCliProviderMetadata,
@@ -505,7 +506,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     }
 
     // Nothing records the RTK settings files a blank scaffold seeds, or the ones of a repository with
-    // no rows at all, so with RTK now off they are found by rendering them as if it were on.
+    // no rows at all, so with RTK now off they are found by rendering them as if it were on, for every
+    // CLI: the scaffold seeded them for the ones enabled then, which may not be the ones enabled now.
     let unrecordedRtk: ExpandedRendering[] = [];
     if (resolved.rtkLive && renderCtx.rtkEnabled === false) {
       const [repo] = await ctx.db
@@ -514,7 +516,15 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
       if (liveRows.length === 0 || repo?.source === 'blank') {
-        unrecordedRtk = expandManifestFor({ ...renderCtx, rtkEnabled: true }, manifest).filter(
+        const everyCli = CLI_PROVIDER_LIST.map((p) => ({
+          name: p.name,
+          rulesFile: p.rulesFile,
+          rulesFileMode: p.rulesFileMode,
+        }));
+        unrecordedRtk = expandManifestFor(
+          { ...renderCtx, rtkEnabled: true, enabledCliProviders: everyCli },
+          manifest,
+        ).filter(
           (r) =>
             r.templateKind === 'rtk-config' &&
             !byPath.has(r.diskPath) &&
