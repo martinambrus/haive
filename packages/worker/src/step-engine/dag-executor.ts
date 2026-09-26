@@ -1203,8 +1203,8 @@ export async function ingestReviewRun(
 /** Per-issue coder<->reviewer inner loop for a level. Returns 'ok' once every
  *  reviewable issue has a resolution, else 'waiting' while agents are in flight.
  *  A blocking verdict sets the issue's resolution to failed_unrecoverable;
- *  resolveDagPhase decides what to do with that. */
-async function resolveReviewPhase(
+ *  resolveDagPhase decides what to do with that. Exported for the unit test. */
+export async function resolveReviewPhase(
   ra: ReviewArgs,
 ): Promise<{ status: 'ok' | 'waiting'; row: TaskStepRow }> {
   const needReview = ra.issues.filter(
