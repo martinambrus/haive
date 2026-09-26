@@ -71,10 +71,10 @@ export async function planMergeFixBaseline(
   db: Database,
   at: { repositoryId: string; taskId: string; taskStepId: string; worktreePath: string },
   opened: boolean,
-): Promise<FixBaseline | FixBaselineUnavailable | null> {
+): Promise<{ baseline: FixBaseline | FixBaselineUnavailable | null; reused: boolean }> {
   if (!opened) {
     const recorded = await recordedFixBaseline(db, at.repositoryId, at.worktreePath);
-    if (recorded) return recorded.baseline;
+    if (recorded) return { baseline: recorded.baseline, reused: true };
   }
   const baseline = await captureFixBaseline(at.worktreePath, () =>
     taskSecretMaskPolicy(db, at.taskId),
@@ -89,7 +89,7 @@ export async function planMergeFixBaseline(
       payload: { baseline, ...open },
     });
   }
-  return baseline;
+  return { baseline, reused: false };
 }
 
 /** Move aside what fixers left in the merge `recorded` was taken of, reported on its task. */

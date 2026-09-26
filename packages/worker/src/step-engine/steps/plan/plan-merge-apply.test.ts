@@ -248,6 +248,30 @@ describe('plan merge: a fixer that did not finish', () => {
     });
   });
 
+  it('reports a tree git could not record before sending in the fixer after one that did not finish', async () => {
+    const local = await unrelatedPair();
+    const { db, events, flags } = fakeDb();
+    const ctx = contextFor(local, db);
+    const leftoversEvents = () => events.filter((e) => e.eventType === 'merge.fixer_leftovers');
+    flags.maskFails = true;
+    const first = await planMergeStep.detect!(ctx);
+    expect(first.fixBaseline).toHaveProperty('unavailable');
+    await planMergeStep.llm!.prepareWorkspace!({ ctx, detected: first, formValues: {} });
+    expect(leftoversEvents()).toEqual([]);
+    await writeFile(path.join(first.worktreePath, 'notes.txt'), 'scratch\n', 'utf8');
+    flags.maskFails = false;
+
+    const retried = await planMergeStep.detect!(ctx);
+    await planMergeStep.llm!.prepareWorkspace!({ ctx, detected: retried, formValues: {} });
+    expect(leftoversEvents()).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          unchecked: expect.stringContaining('nothing was recorded'),
+        }),
+      }),
+    ]);
+  });
+
   it('records the tree afresh when it opens the merge again', async () => {
     const local = await unrelatedPair();
     const { db, events } = fakeDb();

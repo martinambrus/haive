@@ -515,7 +515,9 @@ const NULL_SHA = /^0+$/;
 
 /** Haive's own directories, which other writers keep: a relocation never touches them. */
 function haiveOwned(p: string): boolean {
-  return p === '.haive' || p.startsWith('.haive/') || p.startsWith('.haive-data/');
+  return (
+    p === '.haive' || p === '.haive-data' || p.startsWith('.haive/') || p.startsWith('.haive-data/')
+  );
 }
 
 /** `diff-tree` / `diff-index` `-z` raw records; `--no-renames` keeps each to one path. */

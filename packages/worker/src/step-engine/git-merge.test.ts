@@ -961,6 +961,21 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it("leaves a file a fixer put where Haive's own .haive-data directory stood", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await rm(path.join(dir, '.haive-data'), REMOVE);
+      await writeFile(path.join(dir, '.haive-data'), 'not a directory\n', 'utf8');
+      await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }, noSecrets);
+      expect(await readFile(path.join(dir, '.haive-data'), 'utf8')).toBe('not a directory\n');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
     vi.stubEnv('HOST_REPO_ROOT', root);

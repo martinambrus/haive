@@ -103,6 +103,8 @@ interface PlanMergeDetect {
   mergeOpen: boolean;
   /** The tree the agent is sent into on an answer pass; absent on a collect pass. */
   fixBaseline?: FixBaseline | FixBaselineUnavailable | null;
+  /** Set when that tree came from an earlier pass, whose fixer may have changed it since. */
+  fixBaselineReused?: boolean;
 }
 
 interface PlanMergeApply {
@@ -313,12 +315,13 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       mergeOpen: open,
     };
     if (!open || found.conflicts.length === 0) return found;
-    const fixBaseline = await planMergeFixBaseline(
+    const { baseline: fixBaseline, reused } = await planMergeFixBaseline(
       ctx.db,
       { repositoryId, taskId: ctx.taskId, taskStepId: ctx.taskStepId, worktreePath },
       opened,
     );
-    return needsAgentPass(found) ? { ...found, fixBaseline } : found;
+    if (!needsAgentPass(found)) return found;
+    return { ...found, fixBaseline, ...(reused ? { fixBaselineReused: true } : {}) };
   },
 
   llm: {
@@ -334,7 +337,10 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // stopped or was re-dispatched left behind.
     prepareWorkspace: async ({ ctx, detected }) => {
       const d = detected as PlanMergeDetect;
-      if (!d.fixBaseline || 'unavailable' in d.fixBaseline) return;
+      if (!d.fixBaseline) return;
+      // One git could not record has nothing to report before a first fixer, but one an earlier pass
+      // recorded may already hold what its fixer changed.
+      if ('unavailable' in d.fixBaseline && !d.fixBaselineReused) return;
       await moveAsideFixerLeftovers(
         ctx.db,
         d.worktreePath,

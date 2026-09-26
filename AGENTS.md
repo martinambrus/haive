@@ -563,10 +563,11 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   one that failed, was stopped or was re-dispatched left is moved aside before the next is sent in
   (`llm.prepareWorkspace`) and before Save or Pull removes the worktree, reported by the event
   alone; Save or Pull fails and keeps the worktree when that cannot be done. A tree git could not
-  record is kept the same way, so every later fixer of that merge is reported unchecked rather than
-  a fresh record taking in what one left. A merge a pass opens is recorded afresh, since an earlier
-  merge of the same two commits was another tree. Nothing is recorded under `HOST_REPO_ROOT`: the
-  sandbox mounts a local-path repository read-only, so no fixer can write there.
+  record is kept the same way, so every later fixer of that merge is reported unchecked, a later
+  pass's before its fixer is sent in, rather than a fresh record taking in what one left. A merge a
+  pass opens is recorded afresh, since an earlier merge of the same two commits was another tree.
+  Nothing is recorded under `HOST_REPO_ROOT`: the sandbox mounts a local-path repository read-only,
+  so no fixer can write there.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
