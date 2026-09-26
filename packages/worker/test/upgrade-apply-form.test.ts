@@ -57,6 +57,10 @@ function plan(entries: UpgradePlanEntry[]): UpgradePlanOutput {
   };
 }
 
+function callFormOrNull(detected: UpgradePlanOutput): FormSchema | null {
+  return upgradeApplyStep.form?.({} as unknown as StepContext, detected) ?? null;
+}
+
 function callForm(detected: UpgradePlanOutput): FormSchema {
   // form() signature is (ctx, detected) but the upgrade-apply form does not
   // touch ctx — pass a stub. Using `unknown as` keeps the test free of the
@@ -233,6 +237,34 @@ describe('upgradeApplyStep.form() — empty plan returns null', () => {
       plan([entry('unchanged', '.claude/agents/same.md')]),
     );
     expect(result).toBeNull();
+  });
+});
+
+describe('upgradeApplyStep.form() — a path the plan did not read', () => {
+  it('offers no choice on it and names it, with why, in one note', () => {
+    const schema = callForm(
+      plan([
+        entry('conflict', '.claude/agents/big.md', { unread: 'oversized' }),
+        entry('obsolete', '.claude/settings.json', {
+          unread: 'unreadable',
+          templateKind: 'rtk-config',
+          newContent: null,
+        }),
+        entry('conflict', '.claude/agents/mine.md'),
+      ]),
+    );
+    const labels = schema.fields.map((f) => ('label' in f ? f.label : ''));
+    expect(labels).toContain('Conflict: .claude/agents/mine.md');
+    expect(labels).not.toContain('Conflict: .claude/agents/big.md');
+    expect(schema.fields.some((f) => 'id' in f && f.id === 'selectedObsoleteRemovals')).toBe(false);
+    const note = schema.fields.find((f) => 'id' in f && f.id === 'unreadNote');
+    expect(note && 'body' in note ? note.body : '').toMatch(
+      /`\.claude\/agents\/big\.md`: it is larger than \d+ bytes\n- `\.claude\/settings\.json`: it is not a regular file/,
+    );
+  });
+
+  it('adds no note for an unread path whose template is unchanged', () => {
+    expect(callFormOrNull(plan([entry('unchanged', 'a.md', { unread: 'oversized' })]))).toBeNull();
   });
 });
 

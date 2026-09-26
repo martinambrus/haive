@@ -9,8 +9,28 @@ import { extractRegion, RTK_REF_MARKER_END, RTK_REF_MARKER_START } from './templ
 /** The line an import-mode rules file carries so its CLI loads AGENTS.md. */
 export const RULES_IMPORT_LINE = '@AGENTS.md';
 
-/** A rules file larger than this is one no import check is attempted on. */
+/** No upgrade reads past this: a larger file gets no check, comparison or rewrite. */
 export const RULES_FILE_READ_CAP = 1024 * 1024;
+
+/** Why an upgrade did not read a path: past the cap, or not a regular file it could open. */
+export type UnreadReason = 'oversized' | 'unreadable';
+
+export type UpgradeRead =
+  { kind: 'absent' } | { kind: 'unread'; reason: UnreadReason } | { kind: 'text'; text: string };
+
+/** What stands at `rel`, read no further than the cap. A link, anything but a regular file and a
+ *  read that fails are `unread`, never `absent`: a caller takes absence as leave to write there. */
+export async function readUpgradeFile(repoPath: string, rel: string): Promise<UpgradeRead> {
+  let read;
+  try {
+    read = await readFileNoFollow(repoPath, rel, { strict: true, maxBytes: RULES_FILE_READ_CAP });
+  } catch {
+    return { kind: 'unread', reason: 'unreadable' };
+  }
+  if (read === null) return { kind: 'absent' };
+  if (read.truncated) return { kind: 'unread', reason: 'oversized' };
+  return { kind: 'text', text: read.data.toString('utf8') };
+}
 
 /** The files that must import AGENTS.md for these providers: each import-mode `rulesFile`, once,
  *  in provider order. */

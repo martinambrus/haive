@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { importRulesFilesFor, RULES_FILE_READ_CAP, rulesImportState } from '../src/rules-files.js';
+import {
+  importRulesFilesFor,
+  readUpgradeFile,
+  RULES_FILE_READ_CAP,
+  rulesImportState,
+} from '../src/rules-files.js';
 
 describe('importRulesFilesFor', () => {
   it('names each import-mode rules file once, in provider order', () => {
@@ -57,5 +62,44 @@ describe('rulesImportState', () => {
     await mkdir(path.join(repo, 'GEMINI.md'));
     expect(await rulesImportState(repo, 'CLAUDE.md')).toBe('unreadable');
     expect(await rulesImportState(repo, 'GEMINI.md')).toBe('unreadable');
+  });
+});
+
+describe('readUpgradeFile', () => {
+  let repo: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-read-'));
+    outside = await mkdtemp(path.join(tmpdir(), 'upgrade-read-out-'));
+    await writeFile(path.join(outside, 'elsewhere.md'), 'not ours', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it('reads a file up to the cap, and reports nothing there as absent', async () => {
+    await writeFile(path.join(repo, 'a.md'), 'x'.repeat(RULES_FILE_READ_CAP), 'utf8');
+    const read = await readUpgradeFile(repo, 'a.md');
+    expect(read.kind === 'text' && read.text.length).toBe(RULES_FILE_READ_CAP);
+    expect(await readUpgradeFile(repo, 'missing.md')).toEqual({ kind: 'absent' });
+    expect(await readUpgradeFile(repo, 'no-dir/missing.md')).toEqual({ kind: 'absent' });
+  });
+
+  it('reads no file past the cap', async () => {
+    await writeFile(path.join(repo, 'big.md'), 'x'.repeat(RULES_FILE_READ_CAP + 1), 'utf8');
+    expect(await readUpgradeFile(repo, 'big.md')).toEqual({ kind: 'unread', reason: 'oversized' });
+  });
+
+  it('reads a link, a directory or a path through a link as unread, never as absent', async () => {
+    await symlink(path.join(outside, 'elsewhere.md'), path.join(repo, 'link.md'));
+    await mkdir(path.join(repo, 'dir.md'));
+    await symlink(outside, path.join(repo, 'sub'));
+    const unread = { kind: 'unread', reason: 'unreadable' };
+    expect(await readUpgradeFile(repo, 'link.md')).toEqual(unread);
+    expect(await readUpgradeFile(repo, 'dir.md')).toEqual(unread);
+    expect(await readUpgradeFile(repo, 'sub/elsewhere.md')).toEqual(unread);
   });
 });

@@ -75,6 +75,7 @@ export interface RulesImportStubOutcome {
 export async function ensureRulesImportStub(
   repoPath: string,
   rel: string,
+  opts: { maxBytes?: number } = {},
 ): Promise<RulesImportStubResult> {
   if (await isLinkToAgentsMd(repoPath, rel)) return 'skipped-link';
   const result = await updateFileNoFollow(
@@ -86,14 +87,15 @@ export async function ensureRulesImportStub(
       const sep = current.length === 0 || current.endsWith('\n') ? '' : '\n';
       return `${current}${sep}${RULES_IMPORT_LINE}\n`;
     },
-    { create: true, createParents: true },
+    { create: true, createParents: true, maxBytes: opts.maxBytes },
   );
   if (result === 'created') return 'created';
   return result === 'updated' ? 'appended' : 'unchanged';
 }
 
-/** Ensure each file imports AGENTS.md. A refusal or an I/O error is recorded per file and never
- *  thrown, so one bad rules file cannot stop the rest, or the caller's own work after this. */
+/** Ensure each file imports AGENTS.md, reading none past the cap. A refusal or an I/O error is
+ *  recorded per file and never thrown, so one bad rules file cannot stop the rest, or the caller's
+ *  own work after this. */
 export async function restoreRulesImportStubs(
   repoPath: string,
   files: readonly string[],
@@ -101,7 +103,10 @@ export async function restoreRulesImportStubs(
   const outcomes: RulesImportStubOutcome[] = [];
   for (const file of files) {
     try {
-      outcomes.push({ file, result: await ensureRulesImportStub(repoPath, file) });
+      outcomes.push({
+        file,
+        result: await ensureRulesImportStub(repoPath, file, { maxBytes: RULES_FILE_READ_CAP }),
+      });
     } catch (err) {
       outcomes.push({
         file,
@@ -164,15 +169,15 @@ export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOut
   return outcomes;
 }
 
-/** Which of `files` does not import AGENTS.md right now. A file that cannot be read counts as
- *  missing; the apply step records what then happened to it. */
+/** Which of `files` lacks the import where an upgrade can add it, as upgrade-status counts them: a
+ *  link elsewhere and a file that cannot be read whole are left out, since the apply refuses both. */
 export async function missingRulesImportStubs(
   repoPath: string,
   files: readonly string[],
 ): Promise<string[]> {
   const missing: string[] = [];
   for (const file of files) {
-    if ((await rulesImportState(repoPath, file)) !== 'present') missing.push(file);
+    if ((await rulesImportState(repoPath, file)) === 'missing') missing.push(file);
   }
   return missing;
 }

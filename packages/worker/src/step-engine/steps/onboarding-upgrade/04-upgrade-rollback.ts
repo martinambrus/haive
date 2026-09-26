@@ -2,7 +2,6 @@ import {
   errno,
   isPathContainmentError,
   ParkedFileError,
-  readTextNoFollow,
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
@@ -19,7 +18,7 @@ import {
   upsertRegion,
   type InstallManifest,
 } from '@haive/shared';
-import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
+import { readUpgradeFile, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -484,9 +483,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       let observedHash: string | null = restoreWrittenHash;
       let putBack = true;
       if (target.removed) {
-        if (!(await restoreRemoved(ctx.repoPath, rel, restoreTemplateKind, restoreContent))) {
+        const back = await restoreRemoved(ctx.repoPath, rel, restoreTemplateKind, restoreContent);
+        if (back !== 'restored') {
           warnings.push(
-            `did not put back ${target.diskPath}: it changed after the upgrade removed it`,
+            back === 'unread'
+              ? `did not put back ${target.diskPath}: it could not be compared with what the upgrade removed (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`
+              : `did not put back ${target.diskPath}: it changed after the upgrade removed it`,
           );
           continue;
         }
@@ -740,36 +742,57 @@ function restoreRefusal(
 
 /** Put back what an upgrade removed, only where nothing stands now: a file there, a region in
  *  AGENTS.md, or AGENTS.md gone altogether is what someone did since, and stays. What stands there
- *  already holding the restore is an earlier attempt of this rollback, and counts as put back. */
+ *  already holding the restore is an earlier attempt of this rollback, and counts as put back.
+ *  What cannot be read there, past the cap or not a regular file, is left as it is. */
 async function restoreRemoved(
   repoPath: string,
   rel: string,
   templateKind: string,
   content: string,
-): Promise<boolean> {
+): Promise<'restored' | 'changed' | 'unread'> {
+  const unreadable = (err: unknown) =>
+    isPathContainmentError(err) &&
+    ['link', 'not-directory', 'not-regular-file'].includes(err.reason);
   if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
     try {
       await writeFileNoFollow(repoPath, rel, content, {
         mode: 'create-exclusive',
         createParents: true,
       });
-      return true;
+      return 'restored';
     } catch (err) {
+      if (unreadable(err)) return 'unread';
       if (errno(err) !== 'EEXIST') throw err;
-      return (await readTextNoFollow(repoPath, rel).catch(() => null)) === content;
+      const read = await readUpgradeFile(repoPath, rel);
+      if (read.kind === 'unread') return 'unread';
+      return read.kind === 'text' && read.text === content ? 'restored' : 'changed';
     }
   }
+  let judged = false;
   let alreadyBack = false;
-  const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
-    const current = data.toString('utf8');
-    const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
-    if (region !== null) {
-      alreadyBack = region === content;
-      return null;
-    }
-    return Buffer.from(upsertRegion(current, content, CLI_RULES_START, CLI_RULES_END), 'utf8');
-  });
-  return result === 'rewritten' || alreadyBack;
+  let result;
+  try {
+    result = await rewriteFileIfNoFollow(
+      repoPath,
+      rel,
+      (data) => {
+        judged = true;
+        const current = data.toString('utf8');
+        const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+        if (region !== null) {
+          alreadyBack = region === content;
+          return null;
+        }
+        return Buffer.from(upsertRegion(current, content, CLI_RULES_START, CLI_RULES_END), 'utf8');
+      },
+      { maxBytes: RULES_FILE_READ_CAP },
+    );
+  } catch (err) {
+    if (unreadable(err)) return 'unread';
+    throw err;
+  }
+  if (result === 'rewritten' || alreadyBack) return 'restored';
+  return result === 'kept' && !judged ? 'unread' : 'changed';
 }
 
 async function writeInstallManifest(

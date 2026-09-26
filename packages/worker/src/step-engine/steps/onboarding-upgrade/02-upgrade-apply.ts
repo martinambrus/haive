@@ -1,12 +1,12 @@
 import {
   errno,
   isPathContainmentError,
-  readTextNoFollow,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
   toSafeRel,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { readUpgradeFile, RULES_FILE_READ_CAP, type UnreadReason } from '@haive/shared/rules-files';
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -74,14 +74,18 @@ export function classifyApplyAction(
   allEntries: ReadonlyArray<UpgradePlanEntry>,
   selections: ApplySelections,
 ): ApplyAction {
+  // What the plan did not read is never written, kept or removed; only its row may be untracked.
+  const read = entry.unread === undefined;
   const shouldApply =
-    (entry.bucket === 'clean_update' && selections.selectedUpdates.has(entry.entryId)) ||
-    (entry.bucket === 'new_artifact' && selections.selectedNew.has(entry.entryId)) ||
-    (entry.bucket === 'user_deleted' && selections.selectedReinstate.has(entry.entryId)) ||
-    (entry.bucket === 'conflict' &&
-      selections.conflictChoices.get(entry.entryId) === 'apply_theirs');
+    read &&
+    ((entry.bucket === 'clean_update' && selections.selectedUpdates.has(entry.entryId)) ||
+      (entry.bucket === 'new_artifact' && selections.selectedNew.has(entry.entryId)) ||
+      (entry.bucket === 'user_deleted' && selections.selectedReinstate.has(entry.entryId)) ||
+      (entry.bucket === 'conflict' &&
+        selections.conflictChoices.get(entry.entryId) === 'apply_theirs'));
   if (shouldApply) return 'apply';
   if (
+    read &&
     entry.bucket === 'conflict' &&
     selections.conflictChoices.get(entry.entryId) === 'keep_ours'
   ) {
@@ -89,9 +93,9 @@ export function classifyApplyAction(
   }
 
   const shouldDelete =
-    entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
+    read && entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
   if (shouldDelete) return 'delete';
-  if (entry.bucket === 'obsolete' && selections.selectedRtkHookStrips.has(entry.entryId)) {
+  if (read && entry.bucket === 'obsolete' && selections.selectedRtkHookStrips.has(entry.entryId)) {
     return 'strip';
   }
 
@@ -134,15 +138,17 @@ export function resolveBundleItemId(
 }
 
 /** What sits at a path as its row records it, and hashed the way the plan compares it: the whole
- *  file, or the rules region alone. Null only when nothing is there: a link or anything but a
- *  regular file throws, so no caller mistakes it for absence and removes it. */
+ *  file, or the rules region alone. Null only when nothing is there: a link, anything but a
+ *  regular file and a file past the cap throw, so no caller mistakes one for absence. */
 export async function pathContent(
   repoPath: string,
   rel: string,
   templateKind: string,
 ): Promise<{ content: string; hash: string } | null> {
-  const raw = await readTextNoFollow(repoPath, rel, { strict: true });
-  if (raw === null) return null;
+  const read = await readUpgradeFile(repoPath, rel);
+  if (read.kind === 'absent') return null;
+  if (read.kind === 'unread') throw new Error(unreadWording(read.reason));
+  const raw = read.text;
   if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
     return { content: raw, hash: sha256Hex(normalizeContent(raw)) };
   }
@@ -174,6 +180,17 @@ export function keptRowUpdate(
 const keptRefusal = (diskPath: string) =>
   `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
 
+const unjudgedRefusal = (diskPath: string) =>
+  `kept ${diskPath}: it could not be compared with what Haive wrote there (a link, not a regular ` +
+  `file, or larger than ${RULES_FILE_READ_CAP} bytes), so delete it by hand if it should go`;
+
+/** Why the upgrade leaves a path it did not read as it is. */
+export function unreadWording(reason: UnreadReason): string {
+  return reason === 'oversized'
+    ? `it is larger than ${RULES_FILE_READ_CAP} bytes`
+    : 'it is not a regular file the upgrade could read';
+}
+
 /** `content` is what a removal took: the file, or the rules region with its markers. */
 export type Removal =
   | { outcome: 'removed'; content: string }
@@ -188,47 +205,70 @@ export async function removeIfHaives(
   entry: { diskPath: string; templateKind: string; fileCreated?: boolean },
   writtenHash: string | null | undefined,
 ): Promise<Removal> {
-  const haives = (text: string) => sha256Hex(normalizeContent(text)) === writtenHash;
-  const kept: Removal = { outcome: 'kept', refusal: keptRefusal(entry.diskPath) };
+  let judged = false;
+  const haives = (text: string) => {
+    judged = true;
+    return sha256Hex(normalizeContent(text)) === writtenHash;
+  };
+  const kept = (): Removal => ({
+    outcome: 'kept',
+    refusal: judged ? keptRefusal(entry.diskPath) : unjudgedRefusal(entry.diskPath),
+  });
+  const cap = { maxBytes: RULES_FILE_READ_CAP };
   try {
     let content = '';
     if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) {
-      const result = await removeFileIfNoFollow(repoPath, rel, (data) => {
-        content = data.toString('utf8');
-        return haives(content);
-      });
-      if (result === 'kept') return kept;
+      const result = await removeFileIfNoFollow(
+        repoPath,
+        rel,
+        (data) => {
+          content = data.toString('utf8');
+          return haives(content);
+        },
+        cap,
+      );
+      if (result === 'kept') return kept();
       return result === 'removed' ? { outcome: 'removed', content } : { outcome: 'absent' };
     }
     if (entry.fileCreated) {
       // A file created for the region goes whole while nothing but the region was written to it.
-      const whole = await removeFileIfNoFollow(repoPath, rel, (data) => {
-        const current = data.toString('utf8');
-        const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
-        content = region ?? '';
-        return (
-          region !== null &&
-          haives(region) &&
-          upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END).trim() === ''
-        );
-      });
+      const whole = await removeFileIfNoFollow(
+        repoPath,
+        rel,
+        (data) => {
+          const current = data.toString('utf8');
+          const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+          content = region ?? '';
+          return (
+            region !== null &&
+            haives(region) &&
+            upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END).trim() === ''
+          );
+        },
+        cap,
+      );
       if (whole === 'removed') return { outcome: 'removed', content };
       if (whole === 'absent') return { outcome: 'absent' };
     }
     let noRegion = false;
-    const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
-      const current = data.toString('utf8');
-      const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
-      noRegion = region === null;
-      if (region === null || !haives(region)) return null;
-      content = region;
-      return Buffer.from(upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END), 'utf8');
-    });
+    const result = await rewriteFileIfNoFollow(
+      repoPath,
+      rel,
+      (data) => {
+        const current = data.toString('utf8');
+        const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+        noRegion = region === null;
+        if (region === null || !haives(region)) return null;
+        content = region;
+        return Buffer.from(upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END), 'utf8');
+      },
+      cap,
+    );
     if (result === 'rewritten') return { outcome: 'removed', content };
-    return result === 'absent' || noRegion ? { outcome: 'absent' } : kept;
+    return result === 'absent' || noRegion ? { outcome: 'absent' } : kept();
   } catch (err) {
     if (isPathContainmentError(err)) {
-      if (['link', 'not-directory', 'not-regular-file'].includes(err.reason)) return kept;
+      if (['link', 'not-directory', 'not-regular-file'].includes(err.reason)) return kept();
     } else if (['ENOENT', 'ENOTDIR'].includes(errno(err) ?? '')) {
       return { outcome: 'absent' };
     }
@@ -339,13 +379,16 @@ function groupEntriesForForm(entries: UpgradePlanEntry[]): {
   userDeleted: UpgradePlanEntry[];
   conflicts: UpgradePlanEntry[];
   obsolete: UpgradePlanEntry[];
+  unread: UpgradePlanEntry[];
 } {
+  const read = entries.filter((e) => e.unread === undefined);
   return {
-    cleanUpdates: entries.filter((e) => e.bucket === 'clean_update'),
-    newArtifacts: entries.filter((e) => e.bucket === 'new_artifact'),
-    userDeleted: entries.filter((e) => e.bucket === 'user_deleted'),
-    conflicts: entries.filter((e) => e.bucket === 'conflict'),
-    obsolete: entries.filter((e) => e.bucket === 'obsolete'),
+    cleanUpdates: read.filter((e) => e.bucket === 'clean_update'),
+    newArtifacts: read.filter((e) => e.bucket === 'new_artifact'),
+    userDeleted: read.filter((e) => e.bucket === 'user_deleted'),
+    conflicts: read.filter((e) => e.bucket === 'conflict'),
+    obsolete: read.filter((e) => e.bucket === 'obsolete'),
+    unread: entries.filter((e) => e.unread !== undefined && e.bucket !== 'unchanged'),
   };
 }
 
@@ -369,9 +412,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
   },
 
   form(_ctx, detected): FormSchema | null {
-    const { cleanUpdates, newArtifacts, userDeleted, conflicts, obsolete } = groupEntriesForForm(
-      detected.entries,
-    );
+    const { cleanUpdates, newArtifacts, userDeleted, conflicts, obsolete, unread } =
+      groupEntriesForForm(detected.entries);
     const fields: FormSchema['fields'] = [];
 
     const toOptions = (entries: UpgradePlanEntry[]) =>
@@ -509,6 +551,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           `${missingImports.map((f) => `\`${f}\``).join(', ')} will get an \`@AGENTS.md\` line, ` +
           'so its CLI loads AGENTS.md and the rules in it.',
         variant: 'info',
+      });
+    }
+    if (unread.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'unreadNote',
+        label: 'Left as they are',
+        body:
+          'The upgrade did not read these, so it changes nothing there:\n\n' +
+          unread.map((e) => `- \`${e.diskPath}\`: ${unreadWording(e.unread!)}`).join('\n'),
+        variant: 'warning',
       });
     }
     const rtkBlocks = detected.rtkBlockLeftovers ?? [];
@@ -805,33 +858,47 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         // Taken from the bytes it replaces, so a save since the plan keeps its edits too.
-        const edit: { before?: string; after?: string; notUtf8?: boolean } = {};
+        const edit: { read?: boolean; before?: string; after?: string; notUtf8?: boolean } = {};
+        let stripped;
         try {
-          await rewriteFileIfNoFollow(ctx.repoPath, rel, (data) => {
-            const before = data.toString('utf8');
-            // A byte that is not UTF-8 decodes to U+FFFD, which would be written back in its place.
-            if (!Buffer.from(before, 'utf8').equals(data)) {
-              edit.notUtf8 = true;
-              return null;
-            }
-            const after = withoutRtkHookEntry(entry.templateId, before);
-            if (after === null) {
-              // An earlier attempt that edited the file and then failed left what the plan's bytes
-              // strip to, and the plan still holds what stood there before it.
-              const planned = entry.currentContent;
-              if (planned !== null && withoutRtkHookEntry(entry.templateId, planned) === before) {
-                edit.before = planned;
-                edit.after = before;
+          stripped = await rewriteFileIfNoFollow(
+            ctx.repoPath,
+            rel,
+            (data) => {
+              edit.read = true;
+              const before = data.toString('utf8');
+              // A byte that is not UTF-8 decodes to U+FFFD, which would be written back in its place.
+              if (!Buffer.from(before, 'utf8').equals(data)) {
+                edit.notUtf8 = true;
+                return null;
               }
-              return null;
-            }
-            edit.before = before;
-            edit.after = after;
-            return Buffer.from(after, 'utf8');
-          });
+              const after = withoutRtkHookEntry(entry.templateId, before);
+              if (after === null) {
+                // An earlier attempt that edited the file and then failed left what the plan's bytes
+                // strip to, and the plan still holds what stood there before it.
+                const planned = entry.currentContent;
+                if (planned !== null && withoutRtkHookEntry(entry.templateId, planned) === before) {
+                  edit.before = planned;
+                  edit.after = before;
+                }
+                return null;
+              }
+              edit.before = before;
+              edit.after = after;
+              return Buffer.from(after, 'utf8');
+            },
+            { maxBytes: RULES_FILE_READ_CAP },
+          );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           warnings.push(`failed to remove the RTK hook from ${entry.diskPath}: ${msg}`);
+          skippedCount += 1;
+          continue;
+        }
+        if (stripped === 'kept' && !edit.read) {
+          warnings.push(
+            `did not remove the RTK hook from ${entry.diskPath}: it could not be read (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`,
+          );
           skippedCount += 1;
           continue;
         }
@@ -882,7 +949,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
-        const onDisk = await readTextNoFollow(ctx.repoPath, rel);
+        const read = await readUpgradeFile(ctx.repoPath, rel);
+        if (read.kind === 'unread') {
+          warnings.push(
+            `did not update the rules region in ${entry.diskPath}: ${unreadWording(read.reason)}`,
+          );
+          skippedCount += 1;
+          continue;
+        }
+        const onDisk = read.kind === 'text' ? read.text : null;
         const existing = onDisk ?? '';
         const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
         if (priorRegion === null) {
@@ -913,7 +988,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           { createParents: true },
         );
       } else {
-        const existing = await readTextNoFollow(ctx.repoPath, rel);
+        const read = await readUpgradeFile(ctx.repoPath, rel);
+        if (read.kind === 'unread') {
+          warnings.push(`did not write ${entry.diskPath}: ${unreadWording(read.reason)}`);
+          skippedCount += 1;
+          continue;
+        }
+        const existing = read.kind === 'text' ? read.text : null;
         if (existing === null) {
           created.push({ diskPath: entry.diskPath, fileCreated: true });
         } else {

@@ -17,8 +17,13 @@ import {
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
-import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
-import { importRulesFilesFor, rtkBlockFiles, rulesImportState } from '@haive/shared/rules-files';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import {
+  importRulesFilesFor,
+  readUpgradeFile,
+  rtkBlockFiles,
+  rulesImportState,
+} from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -120,7 +125,7 @@ async function rtkChoiceFollowsLive(
 }
 
 /** The RTK settings files no live row records that still hold RTK's render or hook, which 01 offers
- *  for removal once RTK is off. A link, and a file that cannot be read, claim nothing, as there. */
+ *  for removal once RTK is off. A link, and a file that cannot be read whole, claim nothing, as there. */
 async function rtkSettingsLeftovers(
   root: string,
   recorded: ReadonlySet<string>,
@@ -128,8 +133,10 @@ async function rtkSettingsLeftovers(
   const found: string[] = [];
   for (const file of RTK_SETTINGS_FILES) {
     if (recorded.has(file.diskPath)) continue;
-    const text = await readTextNoFollow(root, file.diskPath).catch(() => null);
-    if (text !== null && holdsRtkSettings(file.templateId, text)) found.push(file.diskPath);
+    const read = await readUpgradeFile(root, file.diskPath);
+    if (read.kind === 'text' && holdsRtkSettings(file.templateId, read.text)) {
+      found.push(file.diskPath);
+    }
   }
   return found;
 }
