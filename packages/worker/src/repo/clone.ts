@@ -21,6 +21,7 @@ import {
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_CONSENT_KEYS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   type ArchiveFormat,
   type OnboardingEnvironmentMirror,
@@ -29,6 +30,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
+import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
@@ -152,9 +154,18 @@ async function importHaiveDataMirror(
       updates.onboardingEnvironment = env as unknown as Record<string, unknown>;
     }
   }
+  let heldMcpServers: unknown = null;
   if (repo.onboardingTooling == null) {
     const tooling = await readJson<OnboardingToolingMirror>(HAIVE_DATA_FILES.tooling);
     if (tooling?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION) {
+      const incoming = tooling.tooling;
+      if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+        const local: Record<string, unknown> = { ...incoming };
+        for (const key of ONBOARDING_TOOLING_CONSENT_KEYS) delete local[key];
+        const held = holdImportedMcpServers(local);
+        heldMcpServers = held?.importedMcpServerNames ?? null;
+        tooling.tooling = held ?? local;
+      }
       updates.onboardingTooling = tooling as unknown as Record<string, unknown>;
     }
   }
@@ -177,6 +188,12 @@ async function importHaiveDataMirror(
     { repositoryId, imported: Object.keys(updates) },
     'restored onboarding state from .haive-data mirror',
   );
+  if (heldMcpServers) {
+    logger.warn(
+      { repositoryId, servers: heldMcpServers },
+      'imported MCP servers held until accepted on this install',
+    );
+  }
 }
 
 async function persistDetection(

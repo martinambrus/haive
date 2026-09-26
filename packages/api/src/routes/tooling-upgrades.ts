@@ -1,10 +1,12 @@
 import { Hono } from 'hono';
-import { and, desc, eq, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   TOOL_INSTALL_METADATA,
+  decideImportedMcpServers,
+  pendingImportedMcpServers,
   userSecretsService,
   type OnboardingEnvironmentMirror,
   type OnboardingToolingMirror,
@@ -331,6 +333,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       ragEmbedDegradedAt: true,
       ragEmbedDegradedReason: true,
       ragEmbedLexicalOnly: true,
+      onboardingTooling: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -388,6 +391,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     ragEmbedDegradedAt: repo.ragEmbedDegradedAt?.toISOString() ?? null,
     ragEmbedDegradedReason: repo.ragEmbedDegradedReason,
     ragEmbedLexicalOnly: repo.ragEmbedLexicalOnly,
+    pendingRepoMcpServers: pendingImportedMcpServers(repo.onboardingTooling),
     // null (never configured) is sent as the full set: that is what the reviewers
     // actually score, so the page shows the effective policy rather than an empty
     // list the user would read as "nothing is reviewed".
@@ -534,12 +538,39 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
      *  a side effect, so it is expressed as a verb rather than as three booleans a
      *  caller could combine into a meaningless state. */
     ragEmbedAction?: 'retry' | 'accept_lexical_only' | 'rebuild_index';
+    /** Decides the MCP servers held when this repository's mirror was imported. */
+    repoMcpServersAction?: 'accept' | 'discard';
     appAuth?: unknown;
     /** Write-only. Stored in user_secrets, never on the repositories row and never
      *  returned by the GET above. */
     appAuthUsername?: string;
     appAuthPassword?: string;
   };
+
+  if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
+    const current = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, repositoryId),
+      columns: { onboardingTooling: true },
+    });
+    const decided = decideImportedMcpServers(current?.onboardingTooling, body.repoMcpServersAction);
+    if (!decided) throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
+    const written = await db
+      .update(schema.repositories)
+      .set({ onboardingTooling: decided as unknown as Record<string, unknown> })
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          sql`${schema.repositories.onboardingTooling} = ${JSON.stringify(current!.onboardingTooling)}::jsonb`,
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    if (written.length === 0) {
+      throw new HttpError(
+        409,
+        'The MCP server settings changed meanwhile; reload and decide again',
+      );
+    }
+  }
 
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
   if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;

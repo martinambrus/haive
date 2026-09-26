@@ -1,4 +1,5 @@
-import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS, type CliProviderName } from '@haive/shared';
+import { isDeepStrictEqual } from 'node:util';
+import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS, sha256Hex, type CliProviderName } from '@haive/shared';
 
 const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
 
@@ -587,4 +588,53 @@ export function buildMcpAddArgv(cliProvider: CliProviderName, server: McpServerS
 
 function tomlString(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Haive's own starting `.claude/mcp_settings.json`: the managed servers and nothing else. */
+export const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
+  const servers = buildDefaultMcpServers({
+    repoPath: '.',
+    includeFilesystem: false,
+    includeGit: false,
+    includeChromeDevtools: true,
+  });
+  const config = buildMcpConfigForCli('claude-code', servers);
+  return config ? config.content : '{\n  "mcpServers": {}\n}';
+})();
+
+/** Servers a person must accept before any CLI runs them: all but one identical to Haive's own
+ *  under that name, since a file can put any command under a managed name. Null when unparseable. */
+export function mcpServersNeedingConsent(json: string): string[] | null {
+  let servers: unknown;
+  let managed: Record<string, unknown>;
+  try {
+    servers = (JSON.parse(json) as { mcpServers?: unknown }).mcpServers;
+    managed =
+      (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers?: Record<string, unknown> })
+        .mcpServers ?? {};
+  } catch {
+    return null;
+  }
+  if (typeof servers !== 'object' || servers === null) return [];
+  const entries = servers as Record<string, unknown>;
+  return Object.keys(entries)
+    .filter(
+      (name) => !(Object.hasOwn(managed, name) && isDeepStrictEqual(entries[name], managed[name])),
+    )
+    .sort();
+}
+
+/** The record with a server list nobody here accepted moved out of `mcpSettingsJson`, the only key
+ *  the runtime reads. Null for Haive's own servers, an unreadable list, or the list accepted here. */
+export function holdImportedMcpServers(
+  tooling: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const json = tooling.mcpSettingsJson;
+  if (typeof json !== 'string' || tooling.acceptedMcpSettingsSha256 === sha256Hex(json)) {
+    return null;
+  }
+  const names = mcpServersNeedingConsent(json);
+  if (!names?.length) return null;
+  const { mcpSettingsJson: _json, acceptedMcpSettingsSha256: _accepted, ...rest } = tooling;
+  return { ...rest, importedMcpSettingsJson: json, importedMcpServerNames: names };
 }

@@ -8,24 +8,9 @@ import {
 } from '@haive/shared';
 import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import {
-  buildDefaultMcpServers,
-  buildMcpConfigForCli,
-  mcpSettingsFileContent,
-} from '../../../sandbox/mcp-config.js';
+import { DEFAULT_MCP_SETTINGS_JSON, mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
 import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import type { EnvDetectApply } from './01-env-detect.js';
-
-const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
-  const servers = buildDefaultMcpServers({
-    repoPath: '.',
-    includeFilesystem: false,
-    includeGit: false,
-    includeChromeDevtools: true,
-  });
-  const config = buildMcpConfigForCli('claude-code', servers);
-  return config ? config.content : '{\n  "mcpServers": {}\n}';
-})();
 
 /** The textarea's starting content: Haive's managed servers, plus any OTHER server
  *  this repo already has on disk.
