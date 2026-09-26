@@ -208,7 +208,9 @@ describe('fixer leftovers (real git)', () => {
         'stray.txt',
         'untouched.txt',
       ]);
-      expect(out?.left.map((l) => l.path)).toEqual(['link-stray']);
+      expect(out?.left).toEqual([
+        expect.objectContaining({ path: 'link-stray', target: 'base.txt' }),
+      ]);
       expect(out?.unstaged).toEqual([]);
       const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
       expect(await read('base.txt')).toBe('resolved\n');
@@ -225,6 +227,40 @@ describe('fixer leftovers (real git)', () => {
       // The index was refreshed after the restore, so git lets the merge go.
       expect(await abortMerge(dir)).toEqual({ ok: true });
       expect(await read('dirt.txt')).toBe('person dirt\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('puts a file back over the directory a fixer made in its place', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await rm(path.join(dir, 'untouched.txt'));
+      await mkdir(path.join(dir, 'untouched.txt'));
+      await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved).toEqual(['untouched.txt/cache']);
+      expect(await readFile(path.join(dir, 'untouched.txt'), 'utf8')).toBe('untouched\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // git replaces a directory standing where it puts a file back, and takes what is in it along.
+  it('keeps a directory standing where a file was while it holds what could not be moved', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await rm(path.join(dir, 'untouched.txt'));
+      await mkdir(path.join(dir, 'untouched.txt'));
+      await writeFile(path.join(dir, 'untouched.txt', 'cache'), 'cached\n', 'utf8');
+      await symlink('../base.txt', path.join(dir, 'untouched.txt', 'link'));
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved).toEqual(['untouched.txt/cache']);
+      expect(out?.left.map((l) => l.path).sort()).toEqual(['untouched.txt', 'untouched.txt/link']);
+      expect(out?.left.find((l) => l.path === 'untouched.txt/link')?.target).toBe('../base.txt');
+      expect((await lstat(path.join(dir, 'untouched.txt', 'link'))).isSymbolicLink()).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

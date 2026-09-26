@@ -6,6 +6,8 @@ import {
   chownNoFollow,
   isPathContainmentError,
   lstatNoFollow,
+  readdirNoFollow,
+  readLinkNoFollow,
   readTextNoFollow,
   removeNoFollow,
   renameNoFollow,
@@ -258,8 +260,8 @@ export interface FixerLeftovers {
   /** The attempt's folder, relative to the repository root. */
   folder: string;
   moved: string[];
-  /** Changes still in the tree, with why. */
-  left: { path: string; reason: string }[];
+  /** Changes left where they are, with why, and a link's target, which is all a link holds. */
+  left: { path: string; reason: string; target?: string }[];
   /** Index entries the fixer staged outside the conflict, put back as the merge had them, with the
    *  blob each held (null for a staged deletion). */
   unstaged: { path: string; blob: string | null }[];
@@ -305,6 +307,35 @@ async function missingParents(anchor: string, prefix: string, paths: string[]): 
     }
   }
   return missing;
+}
+
+/** A path left where it is, with the target of a link, since a scratch worktree removed later takes
+ *  the link with it. */
+async function leftEntry(
+  anchor: string,
+  prefix: string,
+  p: string,
+  reason: string,
+): Promise<FixerLeftovers['left'][number]> {
+  const target = await readLinkNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+  return target === null ? { path: p, reason } : { path: p, reason, target };
+}
+
+/** The paths to put back where a directory now stands that still holds something. git replaces
+ *  such a directory with the file and takes what is in it along. */
+async function occupiedDirectories(
+  anchor: string,
+  prefix: string,
+  paths: string[],
+): Promise<Set<string>> {
+  const occupied = new Set<string>();
+  for (const p of paths) {
+    const entry = await lstatNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+    if (entry?.kind !== 'directory') continue;
+    const inside = await readdirNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+    if (inside === null || inside.length > 0) occupied.add(p);
+  }
+  return occupied;
 }
 
 /** git writes what it puts back as this process, where the sandbox user owned what stood there: the
@@ -394,15 +425,24 @@ export async function relocateFixerChanges(
           });
           moved.push(c.path);
         } catch (err) {
-          left.push({ path: c.path, reason: err instanceof Error ? err.message : String(err) });
+          const reason = err instanceof Error ? err.message : String(err);
+          left.push(await leftEntry(anchor, prefix, c.path, reason));
           continue;
         }
       }
       if (c.status !== 'A') restore.push(c.path);
     }
   }
-  for (let i = 0; i < restore.length; i += PATHSPEC_CHUNK) {
-    const chunk = restore.slice(i, i + PATHSPEC_CHUNK);
+  const occupied = await occupiedDirectories(anchor, prefix, restore);
+  for (const p of occupied) {
+    left.push({
+      path: p,
+      reason: 'not put back: a directory stands in its place, holding what could not be moved',
+    });
+  }
+  const putBack = restore.filter((p) => !occupied.has(p));
+  for (let i = 0; i < putBack.length; i += PATHSPEC_CHUNK) {
+    const chunk = putBack.slice(i, i + PATHSPEC_CHUNK);
     const created = owner ? await missingParents(anchor, prefix, chunk) : [];
     const res = await gitRun(
       dir,
@@ -451,7 +491,7 @@ export async function relocateFixerChanges(
       }
     }
   }
-  if (restore.length > 0 || unstaged.length > 0) {
+  if (putBack.length > 0 || unstaged.length > 0) {
     await gitRun(dir, ['update-index', '-q', '--refresh']);
   }
   if (moved.length === 0 && left.length === 0 && unstaged.length === 0 && !indexUnchecked) {
@@ -516,7 +556,7 @@ export function fixerLeftoversWarning(taskId: string, leftovers: FixerLeftovers)
   const notes: string[] = [];
   if (leftovers.moved.length > 0 || leftovers.left.length > 0) {
     notes.push(
-      `A merge fixer changed files outside the conflicted ones, and none of them was committed. They were moved to ${folder}, a folder per attempt whose manifest.json also lists any that could not be moved and are still in the tree.`,
+      `A merge fixer changed files outside the conflicted ones, and none of them was committed. They were moved to ${folder}, a folder per attempt whose manifest.json also names any it could not move, with each link's target.`,
     );
   }
   if (leftovers.unstaged.length > 0) {

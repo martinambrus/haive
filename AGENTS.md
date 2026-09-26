@@ -517,17 +517,20 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   writes what it puts back as the worker, so those paths, and the directories git created for them,
   are handed back to the merge dir's owner; a directory that already stood keeps its own. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name git could
-  not decode stays and is reported. The recorded tree is spent once used, and one whose merge a
-  person finished or aborted meanwhile moves nothing: putting its paths back would write merged
-  files into a tree with no merge open. A tree git could not record is reported the same way rather
-  than read as a fixer that changed nothing; the fixer is still sent, since halting there would stop
-  every merge whose scratch `add` fails (a clean filter the worker lacks). Each relocation is a
-  `merge.fixer_leftovers` event and a step warning. A base worktree is removed without `--force`, so
-  one still holding something git will not discard is kept and named. The plan merge's agent pass
-  (`01-plan-merge`) is handled the same way, its note going into the conversation rather than a step
-  warning, since the revise loop resets the row every turn. Nothing is recorded under
-  `HOST_REPO_ROOT`: the sandbox mounts a local-path repository read-only, so no fixer can write
-  there.
+  not decode stays and is reported, a link with its target in the manifest, since a scratch worktree
+  removed later takes the link with it. A directory a fixer made where a file stood gives way to the
+  file only once everything in it has moved: git replaces such a directory whole and takes what is
+  left in it along, so one still holding something is kept and named. The recorded tree is spent
+  once used, and one whose merge a person finished or aborted meanwhile moves nothing: putting its
+  paths back would write merged files into a tree with no merge open. A tree git could not record is
+  reported the same way rather than read as a fixer that changed nothing; the fixer is still sent,
+  since halting there would stop every merge whose scratch `add` fails (a clean filter the worker
+  lacks). Each relocation is a `merge.fixer_leftovers` event and a step warning. A base worktree is
+  removed without `--force`, so one still holding something git will not discard is kept and named.
+  The plan merge's agent pass (`01-plan-merge`) is handled the same way, its note going into the
+  conversation rather than a step warning, since the revise loop resets the row every turn. Nothing
+  is recorded under `HOST_REPO_ROOT`: the sandbox mounts a local-path repository read-only, so no
+  fixer can write there.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
