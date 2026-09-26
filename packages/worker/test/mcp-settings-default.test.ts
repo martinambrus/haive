@@ -5,7 +5,6 @@ import path from 'node:path';
 import {
   mcpSettingsDefaultFor,
   mergeRepoOwnedMcpServers,
-  repoOwnedMcpServerNames,
   repoOwnedMcpServers,
 } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
 
@@ -16,6 +15,8 @@ import {
 
 const servers = async (dir: string): Promise<string[]> =>
   Object.keys(JSON.parse(await mcpSettingsDefaultFor(dir)).mcpServers).sort();
+const ownedNames = async (dir: string): Promise<string[]> =>
+  Object.keys(await repoOwnedMcpServers(dir));
 
 const writeSettings = async (dir: string, body: string): Promise<void> => {
   await mkdir(path.join(dir, '.claude'), { recursive: true });
@@ -63,7 +64,7 @@ describe('mcpSettingsDefaultFor', () => {
     );
     expect(await servers(repo)).toEqual(['chrome-devtools']);
     // …but it is still offered, by name, on the opt-in.
-    expect(await repoOwnedMcpServerNames(repo)).toEqual(['postgres']);
+    expect(await ownedNames(repo)).toEqual(['postgres']);
   });
 
   // The managed entry's args track the sandbox image, so a stale copy is BROKEN rather
@@ -89,7 +90,7 @@ describe('mcpSettingsDefaultFor', () => {
     );
     expect(prefill.mcpServers['chrome-devtools'].args).not.toContain('--channel=stable');
     expect(prefill.mcpServers.filesystem).toBeUndefined();
-    expect(await repoOwnedMcpServerNames(repo)).toEqual(['filesystem']);
+    expect(await ownedNames(repo)).toEqual(['filesystem']);
   });
 
   describe('mergeRepoOwnedMcpServers (the opt-in path)', () => {
@@ -142,7 +143,7 @@ describe('mcpSettingsDefaultFor', () => {
     await symlink(outside, path.join(repo, '.claude/mcp_settings.json'));
 
     expect(await servers(repo)).toEqual(['chrome-devtools']);
-    expect(await repoOwnedMcpServerNames(repo)).toEqual([]);
+    expect(await ownedNames(repo)).toEqual([]);
   });
 
   it('falls back to the managed set when the file cannot be parsed', async () => {
@@ -160,7 +161,7 @@ describe('mcpSettingsDefaultFor', () => {
   // The prefilled value is accepted by SUBMITTING the form, and these entries are
   // repository-controlled commands the CLI will execute. Naming them is what makes an
   // unchanged submit an informed choice instead of a blind one.
-  describe('repoOwnedMcpServerNames', () => {
+  describe('the names the opt-in shows', () => {
     it('names the servers carried over from the repo, not the managed ones', async () => {
       const repo = path.join(dir, 'disclose');
       await writeSettings(
@@ -172,20 +173,20 @@ describe('mcpSettingsDefaultFor', () => {
           },
         }),
       );
-      expect(await repoOwnedMcpServerNames(repo)).toEqual(['sneaky']);
+      expect(await ownedNames(repo)).toEqual(['sneaky']);
     });
 
     it('is empty when the repo adds nothing of its own', async () => {
       const repo = path.join(dir, 'clean');
       await writeSettings(repo, JSON.stringify({ mcpServers: { 'chrome-devtools': {} } }));
-      expect(await repoOwnedMcpServerNames(repo)).toEqual([]);
+      expect(await ownedNames(repo)).toEqual([]);
     });
 
     it('is empty when there is no file and when it cannot be parsed', async () => {
-      expect(await repoOwnedMcpServerNames(path.join(dir, 'absent'))).toEqual([]);
+      expect(await ownedNames(path.join(dir, 'absent'))).toEqual([]);
       const broken = path.join(dir, 'broken-names');
       await writeSettings(broken, '{ not json');
-      expect(await repoOwnedMcpServerNames(broken)).toEqual([]);
+      expect(await ownedNames(broken)).toEqual([]);
     });
   });
 });

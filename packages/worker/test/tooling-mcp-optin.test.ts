@@ -6,7 +6,11 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { DEFAULT_MCP_SETTINGS_JSON, mcpSettingsFileContent } from '../src/sandbox/mcp-config.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
-import { toolingInfrastructureStep } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
+import {
+  mcpServersFingerprint,
+  repoOwnedMcpServers,
+  toolingInfrastructureStep,
+} from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -23,14 +27,14 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
-async function runApply(keepRepoMcpServers: boolean) {
+async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'tooling-mcp-optin-'));
   dirs.push(root);
   await mkdir(join(root, '.claude'), { recursive: true });
-  await writeFile(
-    join(root, '.claude/mcp_settings.json'),
-    JSON.stringify({ mcpServers: { ...managed, postgres } }),
-  );
+  const settings = join(root, '.claude/mcp_settings.json');
+  const writeServers = (servers: Record<string, unknown>) =>
+    writeFile(settings, JSON.stringify({ mcpServers: { ...managed, ...servers } }));
+  await writeServers({ postgres });
   const fake = createFakeDb({ tasks: schema.tasks, repositories: schema.repositories });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'r', onboardingTooling: null });
   fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
@@ -43,18 +47,23 @@ async function runApply(keepRepoMcpServers: boolean) {
     cliProviderId: null,
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
-  const out = (await toolingInfrastructureStep.apply(ctx, {
-    detected: { cliSupportsLsp: false },
-    formValues: {
-      mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON,
-      keepRepoMcpServers,
-      rtkEnabled: true,
-    },
-  } as never)) as { tooling: Record<string, unknown> };
-  const file = await readFile(join(root, '.claude/mcp_settings.json'), 'utf8');
-  const [repo] = fake.rows(schema.repositories);
-  const column = (repo!.onboardingTooling as { tooling: Record<string, unknown> }).tooling;
-  return { out, file, column };
+  // What 04's detect records beside the names it shows.
+  const shown = mcpServersFingerprint(await repoOwnedMcpServers(root));
+  const apply = async (
+    keepRepoMcpServers: boolean,
+    detected: Record<string, unknown> = { repoOwnedMcpServersFingerprint: shown },
+  ) =>
+    (await toolingInfrastructureStep.apply(ctx, {
+      detected: { cliSupportsLsp: false, ...detected },
+      formValues: {
+        mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON,
+        keepRepoMcpServers,
+        rtkEnabled: true,
+      },
+    } as never)) as { tooling: Record<string, unknown> };
+  const file = () => readFile(settings, 'utf8');
+  const column = () => fake.rows(schema.repositories)[0]!.onboardingTooling;
+  return { apply, writeServers, file, column };
 }
 
 // The runtime reads the servers from 04's output and then the repository column, never from the
@@ -62,18 +71,45 @@ async function runApply(keepRepoMcpServers: boolean) {
 // into has to be the recorded one, or the file is the only place it ever reaches.
 describe('04 records the MCP servers it writes', () => {
   it('records the repository servers the person opted to keep', async () => {
-    const { out, file, column } = await runApply(true);
+    const f = await fixture();
+    const out = await f.apply(true);
+    const file = await f.file();
     expect(serverNames(file)).toEqual(['chrome-devtools', 'postgres']);
     expect(serverNames(out.tooling.mcpSettingsJson)).toEqual(['chrome-devtools', 'postgres']);
     expect(mcpSettingsFileContent(out.tooling.mcpSettingsJson as string)).toBe(file);
     // The boot repair holds a column no local 04 output equals.
-    expect(column).toEqual(out.tooling);
+    expect((f.column() as { tooling: unknown }).tooling).toEqual(out.tooling);
   });
 
   it('records what was typed when the person did not opt in', async () => {
-    const { out, file, column } = await runApply(false);
-    expect(serverNames(file)).toEqual(['chrome-devtools']);
+    const f = await fixture();
+    const out = await f.apply(false);
+    expect(serverNames(await f.file())).toEqual(['chrome-devtools']);
     expect(out.tooling.mcpSettingsJson).toBe(DEFAULT_MCP_SETTINGS_JSON);
-    expect(column.mcpSettingsJson).toBe(DEFAULT_MCP_SETTINGS_JSON);
+  });
+});
+
+// Consent was given to the definitions the form named. What reaches the runtime must be exactly
+// those, so a file that changed while the form was parked is refused before anything is written.
+describe('04 records only the servers its form named', () => {
+  it('refuses a server added after the form was shown', async () => {
+    const f = await fixture();
+    await f.writeServers({ postgres, added: { command: '/bin/sh', args: ['-c', 'echo reached'] } });
+    const before = await f.file();
+    await expect(f.apply(true)).rejects.toThrow(/changed after this form was shown/);
+    expect(await f.file()).toBe(before);
+    expect(f.column()).toBeNull();
+  });
+
+  it('refuses a command changed under a name the form showed', async () => {
+    const f = await fixture();
+    await f.writeServers({ postgres: { command: '/bin/sh', args: ['-c', 'echo reached'] } });
+    await expect(f.apply(true)).rejects.toThrow(/changed after this form was shown/);
+    expect(f.column()).toBeNull();
+  });
+
+  it('refuses a form detected before the fingerprint was recorded', async () => {
+    const f = await fixture();
+    await expect(f.apply(true, {})).rejects.toThrow(/changed after this form was shown/);
   });
 });

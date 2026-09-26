@@ -5,6 +5,7 @@ import {
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   IN_STACK_OLLAMA_URL,
   DEFAULT_EXTERNAL_OLLAMA_URL,
+  sha256Hex,
 } from '@haive/shared';
 import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -90,24 +91,12 @@ export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
   return DEFAULT_MCP_SETTINGS_JSON;
 }
 
-/** Names of the servers the prefill carried over from the repo's own file.
- *
- *  These are REPOSITORY-CONTROLLED commands: the file is user-owned and usually holds servers
- *  the user added, but a cloned repo can ship one too, and the prefilled value is accepted by
- *  submitting the form. So the field NAMES them rather than merging them in silently — the
- *  same stance the review dimensions take, where a skipped one is disclosed and never implied. */
-export async function repoOwnedMcpServerNames(repoPath: string): Promise<string[]> {
-  const raw = await readTextNoFollow(repoPath, '.claude/mcp_settings.json');
-  if (raw === null) return [];
-  try {
-    const onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
-    const managed =
-      (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers?: Record<string, unknown> })
-        .mcpServers ?? {};
-    return Object.keys(onDisk).filter((name) => !(name in managed));
-  } catch {
-    return [];
-  }
+/** Fingerprint of the repo-owned definitions a form named, so apply can tell whether the file
+ *  still holds what the person was shown. */
+export function mcpServersFingerprint(servers: Record<string, unknown>): string {
+  return sha256Hex(
+    JSON.stringify(Object.entries(servers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+  );
 }
 
 interface ToolingDetect {
@@ -132,6 +121,8 @@ interface ToolingDetect {
   /** Servers the prefill carried over from the repo's own file, named in the field so
    *  submitting unchanged is an informed choice rather than a blind one. */
   repoOwnedMcpServers?: string[];
+  /** Fingerprint of those servers' definitions, read in the same pass as their names. */
+  repoOwnedMcpServersFingerprint?: string;
   /** Per-LSP-option version badge (option value → "version (latest)"). Absent for
    *  the unpinnable servers (rust → rust-analyzer, java → jdtls). */
   lspVersionByOption: Record<string, string>;
@@ -273,6 +264,7 @@ export const toolingInfrastructureStep: StepDefinition<
       const v = newestByTool.get(tool);
       if (v) lspVersionByOption[optValue] = `${v} (latest)`;
     }
+    const repoOwned = await repoOwnedMcpServers(ctx.repoPath);
 
     return {
       primaryLanguage: data.project.primaryLanguage,
@@ -286,7 +278,8 @@ export const toolingInfrastructureStep: StepDefinition<
       rtkVersionLabel: fmtVersion(rtkVersionPin, 'rtk'),
       chromeVersionLabel: fmtVersion(chromeMcpPin, 'chrome-devtools-mcp'),
       mcpSettingsDefault: await mcpSettingsDefaultFor(ctx.repoPath),
-      repoOwnedMcpServers: await repoOwnedMcpServerNames(ctx.repoPath),
+      repoOwnedMcpServers: Object.keys(repoOwned),
+      repoOwnedMcpServersFingerprint: mcpServersFingerprint(repoOwned),
       lspVersionByOption,
     };
   },
@@ -461,11 +454,17 @@ export const toolingInfrastructureStep: StepDefinition<
     // `{"mcpServers": {}}` stub. Step 07 still rewrites the file under its
     // overwrite gate for re-runs.
     let mcpInput = typeof tooling.mcpSettingsJson === 'string' ? tooling.mcpSettingsJson : '';
-    // Repository-controlled servers are added ONLY on the explicit opt-in. Re-read from disk
-    // rather than trusting a submitted copy, so the names the user ticked are the ones the
-    // file actually holds. Recorded as well: the runtime and 07's rewrite read the record.
+    // Repository-controlled servers are added ONLY on the explicit opt-in, and only while the
+    // file still holds the definitions the form named: the runtime and 07's rewrite read the
+    // record, so one added or changed after the form was shown would otherwise run unseen.
     if (tooling.keepRepoMcpServers === true) {
-      mcpInput = mergeRepoOwnedMcpServers(mcpInput, await repoOwnedMcpServers(ctx.repoPath));
+      const repoOwned = await repoOwnedMcpServers(ctx.repoPath);
+      if (mcpServersFingerprint(repoOwned) !== args.detected.repoOwnedMcpServersFingerprint) {
+        throw new Error(
+          "This repository's own MCP server definitions changed after this form was shown, so nothing was written. Retry this step to review them again.",
+        );
+      }
+      mcpInput = mergeRepoOwnedMcpServers(mcpInput, repoOwned);
       tooling.mcpSettingsJson = mcpInput;
     }
     await writeFileNoFollow(
