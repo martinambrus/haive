@@ -1,5 +1,14 @@
 import { writeFileSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -34,6 +43,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
@@ -386,5 +396,102 @@ describe('rolling back a file an upgrade rewrote', () => {
     const out = await apply();
     expect(await readFile(path, 'utf8')).toBe('# Notes\n');
     expect(out.revertedCount).toBe(0);
+  });
+});
+
+describe('rolling back what an upgrade removed', () => {
+  const REGION = `${CLI_RULES_START}\nTHE RULES\n${CLI_RULES_END}`;
+  const hashOf = (text: string) => sha256Hex(normalizeContent(text));
+
+  /** An upgrade that removed `rel` (or the rules region in it), holding `prior` before. */
+  async function removed(rel: string, prior: string) {
+    const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-removed-'));
+    dirs.push(root);
+    const rules = rel === 'AGENTS.md';
+    const fake = createFakeDb({
+      onboardingArtifacts: schema.onboardingArtifacts,
+      repositories: schema.repositories,
+    });
+    const templateId = rules ? 'cli-rules' : 'agent.gone';
+    const kind = rules ? CLI_RULES_TEMPLATE_KIND : 'agent';
+    const baseline = fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: PRIOR_TASK,
+      diskPath: rel,
+      templateId,
+      templateKind: kind,
+      templateSchemaVersion: 1,
+      templateContentHash: hashOf(prior),
+      writtenHash: hashOf(prior),
+      writtenContent: prior,
+      source: 'backfill',
+      supersededAt: new Date(),
+    });
+    const noop = () => undefined;
+    const ctx = {
+      db: fake.db,
+      repoPath: root,
+      taskId: TASK,
+      userId: USER,
+      logger: { info: noop, warn: noop, error: noop, debug: noop },
+    } as unknown as StepContext;
+    const detected = {
+      repositoryId: REPO,
+      rolledBackFromTaskId: PRIOR_TASK,
+      targets: [
+        {
+          diskPath: rel,
+          templateId,
+          templateKind: kind,
+          templateSchemaVersion: 1,
+          priorArtifactId: baseline.id as string,
+          upgradeArtifactId: null,
+          removed: true,
+          priorTemplateContentHash: hashOf(prior),
+          priorWrittenHash: hashOf(prior),
+          priorWrittenContent: prior,
+          priorFormValuesSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
+        },
+      ],
+      newArtifactsToUndo: [],
+      warnings: [],
+    };
+    const apply = () => upgradeRollbackStep.apply(ctx, { detected } as never);
+    return { root, path: join(root, rel), apply };
+  }
+
+  it('puts the rules region back into an AGENTS.md within the read cap', async () => {
+    const { path, apply } = await removed('AGENTS.md', REGION);
+    await writeFile(path, '# Notes\n', 'utf8');
+    const out = await apply();
+    expect(extractRegion(await readFile(path, 'utf8'), CLI_RULES_START, CLI_RULES_END)).toBe(
+      REGION,
+    );
+    expect(out.revertedCount).toBe(1);
+  });
+
+  it('leaves an AGENTS.md past the read cap as it is, and says why', async () => {
+    const { path, apply } = await removed('AGENTS.md', REGION);
+    const big = `# Notes\n${'x'.repeat(RULES_FILE_READ_CAP)}\n`;
+    await writeFile(path, big, 'utf8');
+    const out = await apply();
+    expect(await readFile(path, 'utf8')).toBe(big);
+    expect(out.revertedCount).toBe(0);
+    expect(out.warnings).toContain(
+      `did not put back AGENTS.md: it could not be compared with what the upgrade removed (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`,
+    );
+  });
+
+  it('leaves a path reached through a link as it is, without failing the rollback', async () => {
+    const { root, apply } = await removed(REL, 'HAIVE\n');
+    await mkdir(join(root, '.claude', 'elsewhere'), { recursive: true });
+    await symlink('elsewhere', join(root, '.claude', 'agents'));
+    const out = await apply();
+    expect(await readlink(join(root, '.claude', 'agents'))).toBe('elsewhere');
+    await expect(lstat(join(root, '.claude', 'elsewhere', 'new.md'))).rejects.toThrow();
+    expect(out.warnings).toContain(
+      `did not put back ${REL}: it could not be compared with what the upgrade removed (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`,
+    );
   });
 });

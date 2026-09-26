@@ -1,5 +1,4 @@
-import { readTextNoFollow } from '@haive/shared/fs-safe';
-import { rtkBlockFiles } from '@haive/shared/rules-files';
+import { readUpgradeFile, rtkBlockFiles, type UnreadReason } from '@haive/shared/rules-files';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -76,7 +75,13 @@ export interface UpgradePlanEntry {
   currentTemplateContentHash: string | null;
   templateSchemaVersion: number | null;
   delta: { added: number; removed: number } | null;
+  /** Set when the plan did not read the path, which no action is then offered on: its hash is
+   *  `UNREAD_HASH`, and its content is withheld. */
+  unread?: UnreadReason;
 }
+
+/** The hash of a path the plan did not read, which matches no record and never reads as absent. */
+export const UNREAD_HASH = 'unread';
 
 export interface UpgradePlanDetect {
   repositoryId: string;
@@ -325,23 +330,14 @@ async function withLiveRtk(
     : { renderCtx: recorded, rtkLive: false };
 }
 
-async function readDiskContent(
+export async function readDiskContent(
   repoPath: string,
   diskPath: string,
-): Promise<{ content: string | null; hash: string | null }> {
-  try {
-    // The probe and the read collapse into ONE lenient call: null already covers absent,
-    // unreadable and refused, which is what `pathExists` plus this `catch` folded together — and
-    // that probe was `stat`-based, so it followed a link and read a dangling one as absent.
-    // `diskPath` comes from the manifest, so a malformed one throws `invalid-path` from inside the
-    // primitive and lands in this same catch: one unreadable row, never a failed upgrade plan.
-    const raw = await readTextNoFollow(repoPath, diskPath);
-    if (raw === null) return { content: null, hash: null };
-    const normalized = normalizeContent(raw);
-    return { content: raw, hash: sha256Hex(normalized) };
-  } catch {
-    return { content: null, hash: null };
-  }
+): Promise<{ content: string | null; hash: string | null; unread?: UnreadReason }> {
+  const read = await readUpgradeFile(repoPath, diskPath);
+  if (read.kind === 'absent') return { content: null, hash: null };
+  if (read.kind === 'unread') return { content: null, hash: UNREAD_HASH, unread: read.reason };
+  return { content: read.text, hash: sha256Hex(normalizeContent(read.text)) };
 }
 
 /** What a backfill records for one rendering. The bytes on disk, edited or not, so a rollback
@@ -370,12 +366,11 @@ export function backfillRecord(
 export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
-  diskContent: string | null;
   diskHash: string | null;
   /** Hashes of what Haive rendered at this path before; a file holding one is Haive's to replace. */
   recordedRenderHashes?: ReadonlySet<string>;
 }): UpgradePlanBucket {
-  const { live, current, diskContent, diskHash } = args;
+  const { live, current, diskHash } = args;
 
   if (live && !current) return 'obsolete';
   if (!live && current) {
@@ -389,7 +384,7 @@ export function classifyEntry(args: {
   }
   if (!live || !current) throw new Error('classifyEntry: both live and current null');
 
-  if (diskContent === null) return 'user_deleted';
+  if (diskHash === null) return 'user_deleted';
 
   const templateUnchanged =
     live.templateSchemaVersion === current.templateSchemaVersion &&
@@ -461,7 +456,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       const isCliRules = (current?.templateKind ?? live?.templateKind) === CLI_RULES_TEMPLATE_KIND;
       let diskContent = disk.content;
       let diskHash = disk.hash;
-      if (isCliRules) {
+      if (isCliRules && disk.unread === undefined) {
         const region = disk.content
           ? extractRegion(disk.content, CLI_RULES_START, CLI_RULES_END)
           : null;
@@ -475,14 +470,14 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       const bucket = classifyEntry({
         live,
         current,
-        diskContent,
         diskHash,
         recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
       });
       let newContent = current?.content ?? null;
       if (isCliRules && newContent) newContent = normalizeContent(newContent);
       const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
-      const delta = newContent ? computeLineDelta(diskContent ?? '', newContent) : null;
+      const delta =
+        newContent && !disk.unread ? computeLineDelta(diskContent ?? '', newContent) : null;
 
       entries.push({
         entryId: `e${counterByBucket++}:${diskPath}`,
@@ -502,6 +497,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         templateSchemaVersion:
           current?.templateSchemaVersion ?? live?.templateSchemaVersion ?? null,
         delta,
+        ...(disk.unread ? { unread: disk.unread } : {}),
       });
     }
 

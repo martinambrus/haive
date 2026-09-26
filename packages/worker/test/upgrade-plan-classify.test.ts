@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -11,10 +14,13 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import {
   backfillRecord,
   classifyEntry,
   pickRenderSnapshot,
+  readDiskContent,
+  UNREAD_HASH,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
@@ -53,21 +59,17 @@ function current(partial: Partial<ExpandedRendering> = {}): ExpandedRendering {
 
 describe('classifyEntry', () => {
   it('live without current → obsolete', () => {
-    expect(classifyEntry({ live: live(), current: null, diskContent: 'x', diskHash: 'wh-A' })).toBe(
-      'obsolete',
-    );
+    expect(classifyEntry({ live: live(), current: null, diskHash: 'wh-A' })).toBe('obsolete');
   });
 
   it('current without live → new_artifact', () => {
-    expect(
-      classifyEntry({ live: null, current: current(), diskContent: null, diskHash: null }),
-    ).toBe('new_artifact');
+    expect(classifyEntry({ live: null, current: current(), diskHash: null })).toBe('new_artifact');
   });
 
   it('current without live, and the render already on disk → new_artifact', () => {
-    expect(
-      classifyEntry({ live: null, current: current(), diskContent: 'BODY', diskHash: 'wh-A' }),
-    ).toBe('new_artifact');
+    expect(classifyEntry({ live: null, current: current(), diskHash: 'wh-A' })).toBe(
+      'new_artifact',
+    );
   });
 
   it('current without live, and some other file already on disk → conflict', () => {
@@ -75,7 +77,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: null,
         current: current(),
-        diskContent: 'USER_FILE',
         diskHash: 'wh-USER',
       }),
     ).toBe('conflict');
@@ -86,7 +87,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: null,
         current: current(),
-        diskContent: 'OLD_RENDER',
         diskHash: 'wh-OLD',
         recordedRenderHashes: new Set(['wh-OLD']),
       }),
@@ -98,7 +98,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: live(),
         current: current(),
-        diskContent: null,
         diskHash: null,
       }),
     ).toBe('user_deleted');
@@ -109,7 +108,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: live({ templateContentHash: 'h', templateId: 'agent.x' }),
         current: current({ templateContentHash: 'h', templateId: 'agent.x' }),
-        diskContent: 'BODY',
         diskHash: 'wh-A',
       }),
     ).toBe('unchanged');
@@ -120,7 +118,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: live({ templateSchemaVersion: 1, templateContentHash: 'h' }),
         current: current({ templateSchemaVersion: 2, templateContentHash: 'h' }),
-        diskContent: 'BODY',
         diskHash: 'wh-A',
       }),
     ).toBe('clean_update');
@@ -142,7 +139,6 @@ describe('classifyEntry', () => {
           templateContentHash: 'h',
           templateId: 'custom.bundle-1.NEW-uuid',
         }),
-        diskContent: 'BODY',
         diskHash: 'wh-A',
       }),
     ).toBe('clean_update');
@@ -158,7 +154,6 @@ describe('classifyEntry', () => {
           templateContentHash: 'h',
           templateId: 'agent.code-reviewer-renamed',
         }),
-        diskContent: 'BODY',
         diskHash: 'wh-A',
       }),
     ).toBe('unchanged');
@@ -169,7 +164,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: live({ templateContentHash: 'old', writtenHash: 'wh-A' }),
         current: current({ templateContentHash: 'new' }),
-        diskContent: 'OLD_BODY',
         diskHash: 'wh-A',
       }),
     ).toBe('clean_update');
@@ -180,7 +174,6 @@ describe('classifyEntry', () => {
       classifyEntry({
         live: live({ templateContentHash: 'old', writtenHash: 'wh-A' }),
         current: current({ templateContentHash: 'new' }),
-        diskContent: 'USER_EDITED',
         diskHash: 'wh-USER',
       }),
     ).toBe('conflict');
@@ -227,7 +220,6 @@ describe('classifyEntry on the cli-rules row, recorded from the region on disk',
         content: args.now,
         writtenHash: hashOf(args.now),
       }),
-      diskContent,
       diskHash: sha256Hex(diskContent),
     });
   };
@@ -259,7 +251,6 @@ describe('classifyEntry on the cli-rules row, recorded from the region on disk',
     return classifyEntry({
       live: null,
       current: current({ ...cliRules, content: args.now, writtenHash: hashOf(args.now) }),
-      diskContent,
       diskHash: sha256Hex(diskContent),
       recordedRenderHashes: new Set((args.earlier ?? []).map(hashOf)),
     });
@@ -309,7 +300,6 @@ describe('backfillRecord', () => {
         content: `RENDER-${now}`,
         writtenHash: `wh-RENDER-${now}`,
       }),
-      diskContent: 'EDITED',
       diskHash: 'wh-EDITED',
     });
 
@@ -339,7 +329,7 @@ describe('keptRowUpdate', () => {
       content: 'NEW',
       writtenHash: 'w-new',
     });
-    const disk = { current: next, diskContent: 'EDITED', diskHash: 'wh-EDITED' };
+    const disk = { current: next, diskHash: 'wh-EDITED' };
     expect(classifyEntry({ live: row, ...disk })).toBe('conflict');
 
     const kept = { content: 'EDITED', hash: 'wh-EDITED' };
@@ -375,5 +365,53 @@ describe('pickRenderSnapshot', () => {
     expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 2)])).toBe(newer);
     expect(pickRenderSnapshot([row('b', newer, 2), row('a', older, 1)])).toBe(newer);
     expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 1)])).toBe(newer);
+  });
+});
+
+describe('a path the plan did not read', () => {
+  let repo: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), 'upgrade-plan-unread-'));
+    outside = await mkdtemp(join(tmpdir(), 'upgrade-plan-unread-out-'));
+    await writeFile(join(outside, 'x.md'), 'not ours', 'utf8');
+    await mkdir(join(repo, '.claude/agents'), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it('is read no further than the cap, its content withheld', async () => {
+    const big = `BODY${'\n'.repeat(RULES_FILE_READ_CAP)}`;
+    await writeFile(join(repo, '.claude/agents/x.md'), big, 'utf8');
+    expect(await readDiskContent(repo, '.claude/agents/x.md')).toEqual({
+      content: null,
+      hash: UNREAD_HASH,
+      unread: 'oversized',
+    });
+  });
+
+  it('reads a link or a directory standing there as unread, never as absent', async () => {
+    await symlink(join(outside, 'x.md'), join(repo, '.claude/agents/x.md'));
+    await mkdir(join(repo, '.claude/agents/y.md'));
+    const unread = { content: null, hash: UNREAD_HASH, unread: 'unreadable' };
+    expect(await readDiskContent(repo, '.claude/agents/x.md')).toEqual(unread);
+    expect(await readDiskContent(repo, '.claude/agents/y.md')).toEqual(unread);
+    expect(await readDiskContent(repo, '.claude/agents/z.md')).toEqual({
+      content: null,
+      hash: null,
+    });
+  });
+
+  it('is never deleted, never new and never matched to a record', () => {
+    const changed = current({ templateContentHash: 'hash-B', writtenHash: 'wh-B' });
+    const unread = { diskHash: UNREAD_HASH };
+    expect(classifyEntry({ live: live(), current: changed, ...unread })).toBe('conflict');
+    expect(classifyEntry({ live: live(), current: current(), ...unread })).toBe('unchanged');
+    expect(classifyEntry({ live: null, current: current(), ...unread })).toBe('conflict');
+    expect(classifyEntry({ live: live(), current: null, ...unread })).toBe('obsolete');
   });
 });

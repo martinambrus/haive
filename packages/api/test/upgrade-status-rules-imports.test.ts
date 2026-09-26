@@ -13,6 +13,7 @@ import {
   RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -490,6 +491,13 @@ describe('upgrade-status and the RTK settings files no row records', () => {
     await settings(`${JSON.stringify(edited, null, 2)}\n`);
     const body = await status();
     expect(body.rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+  });
+
+  it('not for one past the read cap, which the plan does not read either', async () => {
+    await settings(`${buildClaudeSettingsJson()}${'\n'.repeat(RULES_FILE_READ_CAP)}`);
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(false);
   });
 
   it('not for a settings file without the hook', async () => {

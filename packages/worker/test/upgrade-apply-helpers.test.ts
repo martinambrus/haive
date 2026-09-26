@@ -9,6 +9,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import {
   classifyApplyAction,
   pathContent,
@@ -200,6 +201,33 @@ describe('classifyApplyAction — primary buckets', () => {
   });
 });
 
+describe('classifyApplyAction — a path the plan did not read', () => {
+  it('neither writes, keeps, removes nor strips it, whatever the form sent', () => {
+    const conflict = entry('conflict', 'a.md', { unread: 'oversized' });
+    for (const choice of ['apply_theirs', 'keep_ours'] as const) {
+      const sel = selections({ conflictChoices: new Map([[conflict.entryId, choice]]) });
+      expect(classifyApplyAction(conflict, [conflict], sel), choice).toBe('skip');
+    }
+    const obsolete = entry('obsolete', 'b.json', {
+      unread: 'unreadable',
+      templateKind: 'rtk-config',
+    });
+    const removal = selections({ selectedObsoleteRemovals: new Set([obsolete.entryId]) });
+    const strip = selections({ selectedRtkHookStrips: new Set([obsolete.entryId]) });
+    expect(classifyApplyAction(obsolete, [obsolete], removal)).toBe('skip');
+    expect(classifyApplyAction(obsolete, [obsolete], strip)).toBe('skip');
+  });
+
+  it('still untracks a dangling custom row, which touches no file', () => {
+    const dangling = entry('obsolete', 'c.md', {
+      unread: 'oversized',
+      templateId: 'custom.bundle.gone',
+      liveArtifactId: 'live-1',
+    });
+    expect(classifyApplyAction(dangling, [dangling], selections())).toBe('untrack');
+  });
+});
+
 describe('classifyApplyAction — untrack-dangling branch', () => {
   it('obsolete custom row that user skipped + no other entry rewrites the path → untrack', () => {
     expect(
@@ -341,6 +369,12 @@ describe('pathContent', () => {
     await expect(pathContent(root, 'dir.md', 'agent')).rejects.toThrow();
   });
 
+  it('refuses a file past the read cap instead of reading it whole', async () => {
+    const root = await repo();
+    await writeFile(join(root, 'big.md'), 'x'.repeat(RULES_FILE_READ_CAP + 1), 'utf8');
+    await expect(pathContent(root, 'big.md', 'agent')).rejects.toThrow(/larger than/);
+  });
+
   it('answers null for a missing file or a file with no region', async () => {
     const root = await repo();
     expect(await pathContent(root, 'gone.md', 'agent')).toBeNull();
@@ -410,6 +444,24 @@ describe('removeIfHaives', () => {
     }
     expect(await readFile(join(root, 'real', 'a.md'), 'utf8')).toBe('HAIVE\n');
     expect(await readFile(join(root, 'target.md'), 'utf8')).toBe('HAIVE\n');
+  });
+
+  it('keeps a file past the read cap, even one that normalises to what Haive wrote', async () => {
+    const root = await repo();
+    const big = `HAIVE${'\n'.repeat(RULES_FILE_READ_CAP)}`;
+    expect(hash(big)).toBe(hash('HAIVE\n'));
+    await writeFile(join(root, 'a.md'), big, 'utf8');
+    expect(await removeIfHaives(root, 'a.md', agent('a.md'), hash('HAIVE\n'))).toEqual({
+      outcome: 'kept',
+      refusal: expect.stringContaining('could not be compared'),
+    });
+    expect(await readFile(join(root, 'a.md'), 'utf8')).toBe(big);
+    const bigRules = `${region}\n${'\n'.repeat(RULES_FILE_READ_CAP)}`;
+    await writeFile(join(root, 'AGENTS.md'), bigRules, 'utf8');
+    expect(await removeIfHaives(root, 'AGENTS.md', rules, hash(region))).toMatchObject({
+      outcome: 'kept',
+    });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe(bigRules);
   });
 
   it('strips the rules region Haive wrote and leaves the rest of AGENTS.md', async () => {

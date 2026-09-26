@@ -2746,6 +2746,20 @@ since, warns, and retires the upgrade's row all the same. 04 also reads only the
 there, and read as new files they were deleted: on a first upgrade's rollback, that took every
 adopted file the person had declined.
 
+**Every upgrade read stops at one cap, and a path it did not read is never taken for nothing
+there.** `readUpgradeFile` (`@haive/shared/rules-files`) reads no further than
+`RULES_FILE_READ_CAP` (1 MiB) and answers `absent` only for a missing path: past the cap, a link,
+anything but a regular file and a read that fails are `unread`. The plan used to read a link as
+absent, offer a new file there pre-selected, and the write then threw and failed the whole apply.
+01 now marks such an entry `unread` under `UNREAD_HASH`, which matches no record and reads neither
+as deleted nor as new, and 02 offers no choice on it: the form names it, with why, in one note, and
+the apply skips it whatever the form sent. The form parks between the two, so 02's writes,
+removals and hook strips check the cap again on the bytes they touch, and a removal it could not
+compare says so rather than that the file was edited. 04 leaves a path it cannot read where a
+removed file or region would go back, and says so; a link in the way there used to throw and fail
+the rollback. upgrade-status reads the RTK settings files, and 01's rules-import note names only
+the stubs the apply can add a line to, the same way, so neither offers what the apply refuses.
+
 **A rollback puts back what stood before, absence included, from what 02 recorded.** Reading it off
 the rows failed three ways: a file missing before the upgrade came back from the row that recorded it,
 or from a backfill row written while it was missing; a row an old reset superseded was restored over

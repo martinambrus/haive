@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/pro
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import {
   ensureRulesImportStub,
   missingRulesImportStubs,
@@ -68,6 +69,14 @@ describe('restoreRulesImportStubs', () => {
     expect(outcomes[1]).toEqual({ file: 'GEMINI.md', result: 'created' });
     expect(await read('GEMINI.md')).toBe('@AGENTS.md\n');
   });
+
+  it('refuses a rules file past the read cap and leaves it byte for byte', async () => {
+    const big = `# Notes\n${'x'.repeat(RULES_FILE_READ_CAP)}\n`;
+    await writeFile(path.join(repo, 'CLAUDE.md'), big, 'utf8');
+    const [outcome] = await restoreRulesImportStubs(repo, ['CLAUDE.md']);
+    expect(outcome).toMatchObject({ file: 'CLAUDE.md', result: 'refused' });
+    expect(await read('CLAUDE.md')).toBe(big);
+  });
 });
 
 describe('missingRulesImportStubs', () => {
@@ -78,5 +87,11 @@ describe('missingRulesImportStubs', () => {
       'CLAUDE.md',
       'OTHER.md',
     ]);
+  });
+
+  it('names no file the apply would refuse: one past the cap, or linked elsewhere', async () => {
+    await writeFile(path.join(repo, 'CLAUDE.md'), 'x'.repeat(RULES_FILE_READ_CAP + 1), 'utf8');
+    await symlink(path.join(outside, 'elsewhere.md'), path.join(repo, 'GEMINI.md'));
+    expect(await missingRulesImportStubs(repo, ['CLAUDE.md', 'GEMINI.md'])).toEqual([]);
   });
 });

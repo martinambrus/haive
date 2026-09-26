@@ -654,9 +654,17 @@ async function main(): Promise<void> {
     );
     check('and its row stays live', (await liveRowsAt(retired('retired-kept'))).length === 1);
     check(
-      'an obsolete path a link now stands at is kept, and said so',
+      'an obsolete path a link now stands at is kept, and the form says so up front',
       (await lstat(join(repoPath, retired('retired-linked')))).isSymbolicLink() &&
-        secondApplied.warnings.some((w) => w.startsWith(`kept ${retired('retired-linked')}:`)),
+        secondDetected.entries.find((e) => e.diskPath === retired('retired-linked'))?.unread ===
+          'unreadable' &&
+        secondForm?.fields.some(
+          (f) =>
+            'id' in f &&
+            f.id === 'unreadNote' &&
+            'body' in f &&
+            f.body.includes(retired('retired-linked')),
+        ) === true,
       secondApplied.warnings,
     );
     check('and its row stays live too', (await liveRowsAt(retired('retired-linked'))).length === 1);
@@ -767,6 +775,88 @@ async function main(): Promise<void> {
     check('and reads as new again', bucketAfterSecond(rewritten) === 'new_artifact', {
       bucket: bucketAfterSecond(rewritten),
     });
+
+    // ---- a third upgrade, with a link where a new file would go ------------------------
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, secondRollbackTask!.id));
+    await symlink('elsewhere.md', join(repoPath, fresh));
+    const [thirdTask] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId,
+        type: 'onboarding_upgrade',
+        title: 'upgrade-claims-smoke third',
+        status: 'running',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.tasks.id });
+    const [thirdPlanRow, thirdApplyRow] = await db
+      .insert(schema.taskSteps)
+      .values([
+        {
+          taskId: thirdTask!.id,
+          stepId: '01-upgrade-plan',
+          stepIndex: 1,
+          title: 'Plan upgrade',
+          status: 'running',
+        },
+        {
+          taskId: thirdTask!.id,
+          stepId: '02-upgrade-apply',
+          stepIndex: 2,
+          title: 'Apply upgrade',
+          status: 'pending',
+        },
+      ])
+      .returning({ id: schema.taskSteps.id });
+    const thirdPlanCtx = ctxFor(thirdPlanRow!.id, thirdTask!.id);
+    const thirdDetected = await upgradePlanStep.detect!(thirdPlanCtx);
+    const thirdPlanned = await upgradePlanStep.apply(thirdPlanCtx, {
+      detected: thirdDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: thirdPlanned as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, thirdPlanRow!.id));
+    const linked = thirdDetected.entries.find((e) => e.diskPath === fresh);
+    check(
+      'a link where a new file would go is not read as nothing there',
+      linked?.unread === 'unreadable' && linked.bucket !== 'new_artifact',
+      { bucket: linked?.bucket ?? null, unread: linked?.unread ?? null },
+    );
+    const thirdApplyCtx = ctxFor(thirdApplyRow!.id, thirdTask!.id);
+    const thirdPlan = await upgradeApplyStep.detect!(thirdApplyCtx);
+    const thirdForm = upgradeApplyStep.form!(thirdApplyCtx, thirdPlan) as FormSchema | null;
+    const unreadNote = thirdForm?.fields.find((f) => 'id' in f && f.id === 'unreadNote');
+    check(
+      'the form offers nothing there and names it in its note',
+      !thirdForm?.fields.some((f) => 'label' in f && f.label === `Conflict: ${fresh}`) &&
+        unreadNote !== undefined &&
+        'body' in unreadNote &&
+        unreadNote.body.includes(fresh),
+    );
+    const thirdApplied = await upgradeApplyStep.apply(thirdApplyCtx, {
+      detected: thirdPlan,
+      formValues: defaultValues(thirdForm),
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'the apply leaves the link and carries on with the rest',
+      (await lstat(join(repoPath, fresh))).isSymbolicLink() && thirdApplied.appliedCount > 0,
+      { applied: thirdApplied.appliedCount, warnings: thirdApplied.warnings },
+    );
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, thirdTask!.id));
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = (c: string) => c.repeat(64);
