@@ -307,6 +307,16 @@ describe('withoutRtkHookEntry', () => {
     }
   });
 
+  it('answers null for a file nested too deep to write back', () => {
+    const depth = 200_000;
+    const text = json({ hooks: { PreToolUse: [rtkEntry()] }, deep: 0 }).replace(
+      '"deep": 0',
+      `"deep": ${'['.repeat(depth)}${']'.repeat(depth)}`,
+    );
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(withoutRtkHookEntry(CLAUDE, text)).toBeNull();
+  });
+
   it('answers null for a file that is not strict JSON, holds no hook, or another template', () => {
     const withComment = `// ours\n${buildClaudeSettingsJson()}`;
     expect(withoutRtkHookEntry(CLAUDE, withComment)).toBeNull();

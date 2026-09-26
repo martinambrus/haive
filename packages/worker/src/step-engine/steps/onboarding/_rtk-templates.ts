@@ -148,8 +148,13 @@ export function withoutRtkHookEntry(templateId: string, text: string): string | 
     return /\n$/.test(text) ? `${body}${eol}` : body;
   };
   // A value a parse cannot keep as written (an integer past 2^53, `1.0`, an escape, a repeated key)
-  // would be rewritten with the hook, so only a file that round-trips exactly is edited.
-  if (serialize(root) !== text) return null;
+  // would be rewritten with the hook, and one nested too deep cannot be written at all, so only a
+  // file that round-trips exactly is edited.
+  try {
+    if (serialize(root) !== text) return null;
+  } catch {
+    return null;
+  }
   if (!isRecord(root) || !isRecord(root.hooks)) return null;
   const hooks = root.hooks;
   const entries = hooks[hook.eventKey];
