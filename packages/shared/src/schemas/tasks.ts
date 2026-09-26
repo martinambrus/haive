@@ -372,6 +372,16 @@ export const OPEN_TASK_STATUSES = [
 
 export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running'] as const;
 
+/** Task states that hold a repository's checkout: moving the tree under one is how a running step
+ *  loses its work. `created` is absent: a task never enqueued holds nothing. */
+export const CHECKOUT_HOLDING_TASK_STATUSES = [
+  'queued',
+  'running',
+  'paused',
+  'waiting_user',
+  'waiting_pr',
+] as const;
+
 /** Filter token for "running but queued behind a capacity cap" — a DERIVED state, not a
  *  task status (see deriveSlotWait), so it cannot be expanded into a status IN (...) list.
  *  expandTaskStatusFilter returns null for it and the api branches on this constant to add

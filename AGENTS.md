@@ -2329,7 +2329,8 @@ survey that established this is worth not repeating:
    between job pickup and `markTaskRunningWithStep` every branch ends in a task-status write and
    none writes a path the reset deletes, so the window carries no data loss.
 2. **The repo queue**, which `rm -rf`s the root in THREE handlers (`clone.ts` copy, init and
-   clone), reachable from `refresh-tree`. Closed by the claim below.
+   clone), reached only when a repository is created or its creation is retried: `refresh-tree`
+   fast-forwards instead (below). Closed by the claim below.
 3. **`stampRepositoryOnboarded`**, which no lock can reach: it runs from `markTaskCompleted` AFTER
    `completed` is committed, so every live-task guard has already stopped seeing that run.
 4. **`PUT /tasks/:id/files/content`**, whose `EDITABLE_PREFIXES` are `KB_DIR` and `LEARNINGS_DIR`
@@ -2457,6 +2458,26 @@ stored the committed tooling verbatim, so a file could carry a matching hash of 
 `holdImportedMcpServerLists` holds such rows at boot. A record this install's own 04 wrote equals
 that run's `output.tooling`, so only one matching no local 04 run is held, and the mark keeps an
 accepted list from being held again.
+
+**Refresh brings a checkout up to its source and never deletes one.** `POST
+/repos/:id/refresh-tree`, which the repos page offers as Retry on a repository in `error`, used to
+enqueue the clone or copy job, and both remove the root before anything else: MEASURED, a clone
+holding one unpushed commit lost it, and every task worktree under `.haive/worktrees` went with the
+tree. `handleRefresh` (`repo/refresh.ts`, claim kind `refresh`) fetches the checkout's branch from
+its source and runs `merge --ff-only`. The source is `origin` with the stored credential or, for a
+writable folder import, the host folder itself (the user's call: that copy carries Haive's own
+onboarding output, and the folder often has no remote). It refuses, saying why beside a `ready`
+repository, while a task holds the checkout (`CHECKOUT_HOLDING_TASK_STATUSES`, shared with plan
+Pull), when the checkout has commits the source lacks or no history in common, and on a detached
+HEAD; git itself refuses a fast-forward that would overwrite a local change. The task check is read
+once, under the claim, and nothing that starts a task reads the claim, so a task that starts during
+a refresh is not fenced out: the window writer 1 above leaves open for the reset. It loses nothing
+here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and
+the rebuild renames; what it can cost is a git lock collision that fails one side, which a Retry
+clears. Only a checkout that is not usable (no `HEAD` at its own top level) is rebuilt, and whatever
+stood there is renamed to a `<repoId>.aside-<time>` sibling first, never removed. A read-only folder
+import is re-scanned as before, and a repository with no remote and no folder answers 409 without
+touching its row.
 
 ## Onboarding template versioning
 

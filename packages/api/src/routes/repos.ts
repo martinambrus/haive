@@ -41,6 +41,7 @@ import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
   createRepoRequestSchema,
   initRepoUploadRequestSchema,
   linkRepoRemoteRequestSchema,
@@ -2900,14 +2901,26 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  // This enqueues a job that `rm -rf`s the whole repository root and copies it again. Refusing
-  // here is the cheap half — the handler checks again, because the claim can land between this
-  // read and the job being picked up, and by then only the worker can stop it.
-  // The cheap half. The handler claims the root itself before it deletes anything, which is what
-  // actually closes the race — this only turns the common case into an immediate 409 instead of a
-  // job that starts, refuses and parks the row at `error`.
+  // The cheap half of each refusal: the job claims the root and checks the tasks again, since
+  // either can change between this read and its pickup.
   const held = await readLiveRootClaim(db, id);
   if (held) throw new HttpError(409, rootClaimRefusal(held.kind));
+  if (repo.source !== 'local_path' && !repo.remoteUrl) {
+    throw new HttpError(409, 'Nothing to refresh from: this repository has no remote.');
+  }
+  const holding = await db.query.tasks.findMany({
+    where: and(
+      eq(schema.tasks.repositoryId, id),
+      inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+    ),
+    columns: { id: true },
+  });
+  if (holding.length > 0) {
+    throw new HttpError(
+      409,
+      `${holding.length} ${holding.length === 1 ? 'task is' : 'tasks are'} using this repository. Refresh once ${holding.length === 1 ? 'it finishes' : 'they finish'}.`,
+    );
+  }
 
   await db
     .update(schema.repositories)
@@ -2925,11 +2938,7 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     ...(repo.credentialsSecretId ? { credentialsId: repo.credentialsSecretId } : {}),
   };
   const jobName =
-    repo.source === 'local_path'
-      ? repo.writable
-        ? REPO_JOB_NAMES.COPY
-        : REPO_JOB_NAMES.SCAN
-      : REPO_JOB_NAMES.CLONE;
+    repo.source === 'local_path' && !repo.writable ? REPO_JOB_NAMES.SCAN : REPO_JOB_NAMES.REFRESH;
   await addRepoJobOrMarkError(db, repo.id, () =>
     queue.add(jobName, payload, {
       attempts: 3,

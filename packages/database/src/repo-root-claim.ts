@@ -9,7 +9,7 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** Who is rewriting the root. Carried only so a refusal can say what it is waiting for — nothing
  *  branches on it, because the exclusion is mutual either way. */
-export type RootClaimKind = 'reset' | 'rebuild' | 'edit' | 'verify';
+export type RootClaimKind = 'reset' | 'rebuild' | 'refresh' | 'edit' | 'verify';
 
 /**
  * How long a root claim is honoured WITHOUT a heartbeat before readers treat it as abandoned.
@@ -743,6 +743,9 @@ export async function readLiveRootClaim(
 export function rootClaimRefusal(kind: RootClaimKind | null): string {
   if (kind === 'rebuild') {
     return 'This repository is being rebuilt from its source. Wait for that to finish and try again.';
+  }
+  if (kind === 'refresh') {
+    return 'This repository is being refreshed from its source. Try again in a moment.';
   }
   if (kind === 'edit') {
     return 'A knowledge file in this repository is being saved. Try again in a moment.';

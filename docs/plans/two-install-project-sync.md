@@ -1,7 +1,8 @@
 # Project state that travels between installations
 
 > **In progress** (2026-09-26). Track B of `found-not-fixed-sweep-3.md` (plan file
-> `compiled-noodling-squid`). Phase 0: B0.1 in review; B0.2 and B0.3 not started.
+> `compiled-noodling-squid`). Phase 0: B0.1 shipped (#326, live-verified); B0.2 in review; B0.3
+> not started.
 
 ## Context
 
@@ -109,7 +110,10 @@ Phase 0 (live exposure, independent):
   install.** Import moves `mcpSettingsJson` to `importedMcpSettingsJson`; `loadUserMcpServers`
   ignores it; tooling page banner with 04's opt-in wording; `PATCH tooling
   {acceptRepoMcpServers}`. Control: B's `loadUserMcpServers` returns the repo's server today, `{}`
-  after until accepted. Adds the repo doc. **As built:** the PATCH field is
+  after until accepted. Adds the repo doc. **Shipped** #326 (`ce255ca5`), live-verified on the dev
+  stack: a folder import holding a foreign server and a forged acceptance was held, the tooling page
+  banner fit at 375/768/1280, accept and discard went through the real route, a mixed request got
+  400, and a worker restart left the accepted list alone. **As built:** the PATCH field is
   `repoMcpServersAction: 'accept' | 'discard'`, a compare-and-set on the column; a server counts as
   Haive's only when its definition equals Haive's own under that name; the import strips the three
   consent keys from the committed file; and a boot repair (`holdImportedMcpServerLists`) holds rows
@@ -123,7 +127,17 @@ Phase 0 (live exposure, independent):
   count), `merge --ff-only` with the `--deepen=50` fallback, then `persistDetection`; with no
   usable checkout, the old tree is moved aside, never `rm -rf`; no-origin sources answer "nothing
   to refresh from". Control: a checkout with one unpushed commit is re-cloned today (commit lost),
-  refused after.
+  refused after. **As built:** a writable folder import fetches from the host folder itself, not
+  from an origin, and fast-forwards (user's call, 2026-09-26: on this install 8 of 14 repos are such
+  imports, with no remote and ~60 tracked files Haive changed). Dirty tracked files are not refused
+  up front: `merge --ff-only` refuses only when an incoming commit touches one, which is the case
+  that can lose work. The claim kind is `refresh`; the tasks that block it are
+  `CHECKOUT_HOLDING_TASK_STATUSES`, now shared with plan Pull; an unusable tree goes to a
+  `<repoId>.aside-<time>` sibling; the api answers 409 for no remote and no folder, and for a task
+  holding the checkout. No web change was needed: the repos page's Retry is the one caller, and its
+  red status line carries the refusal. Controls: on main the unpushed commit is gone after a
+  refresh; `smoke:repo-refresh` passes 14 of 14; `repo-refresh-tree.test.ts` fails 4 of 4 against
+  main's route.
 - **B0.3 fix(worker): the mirror import reads through fs-safe and applies `rtk_enabled`.**
   Control: a symlinked `tooling.json` is imported today, ignored after; `rtkEnabled:false` in the
   mirror leaves the column true today. `fs-ratchet.json` `clone.ts` 10 → 9.

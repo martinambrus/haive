@@ -1,7 +1,7 @@
 # Found-not-fixed sweep 3
 
-> **In progress** (2026-09-26). Phase 0 first: B0.1 (imported MCP servers inert until accepted) is
-> in review; Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
+> **In progress** (2026-09-26). Phase 0 first: B0.1 shipped (#326), B0.2 in review; Track B's plan
+> and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
 
