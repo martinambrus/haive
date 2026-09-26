@@ -1936,7 +1936,7 @@ export async function resetOnboardingArtifacts(
         root,
         rel,
         (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
-        { repairPermissions: true },
+        { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
       if (result === 'removed') {
         removed.push(rel);
@@ -1963,7 +1963,10 @@ export async function resetOnboardingArtifacts(
   // one it may take is already gone from the listing.
   for (const rel of ONBOARDING_SETTINGS_FILES) {
     await guard(rel, async () => {
-      const content = await readTextNoFollow(root, rel, { strict: true });
+      const content = await readTextNoFollow(root, rel, {
+        maxBytes: MAX_FILE_CONTENT_BYTES,
+        strict: true,
+      });
       if (content === null) return;
       const written = writtenHashes.get(rel);
       if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
@@ -2029,7 +2032,10 @@ export async function resetOnboardingArtifacts(
   /** Whether the bytes on disk are still the ones the writing step recorded. Same normalisation
    *  as the row check, or the two records would disagree about identical files. */
   const stepHashMatches = async (rel: string, hash: string): Promise<boolean> => {
-    const content = await readTextNoFollow(root, rel, { strict: true }).catch(() => null);
+    const content = await readTextNoFollow(root, rel, {
+      maxBytes: MAX_FILE_CONTENT_BYTES,
+      strict: true,
+    }).catch(() => null);
     return content !== null && sha256Hex(normalizeContent(content)) === hash;
   };
 
@@ -2042,7 +2048,10 @@ export async function resetOnboardingArtifacts(
   const artifactMatchesDisk = async (entry: string): Promise<boolean> => {
     for (const [diskPath, hash] of writtenHashes) {
       if (diskPath !== entry && !diskPath.startsWith(`${entry}/`)) continue;
-      const content = await readTextNoFollow(root, diskPath, { strict: true }).catch(() => null);
+      const content = await readTextNoFollow(root, diskPath, {
+        maxBytes: MAX_FILE_CONTENT_BYTES,
+        strict: true,
+      }).catch(() => null);
       if (content !== null && sha256Hex(normalizeContent(content)) === hash) return true;
     }
     return false;

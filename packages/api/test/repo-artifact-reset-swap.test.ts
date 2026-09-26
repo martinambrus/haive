@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   swap: null as null | { when: string; path: string; content: string },
+  longest: 0,
 }));
 
 vi.mock('@haive/shared', async (importOriginal) => {
@@ -14,6 +15,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
     ...real,
     // A person saving the file at the moment the reset hashes it to decide whether it is Haive's.
     sha256Hex: (input: string) => {
+      h.longest = Math.max(h.longest, input.length);
       const swap = h.swap;
       if (swap && input === swap.when) {
         h.swap = null;
@@ -26,6 +28,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 
 import { normalizeContent, sha256Hex } from '@haive/shared';
 import { resetOnboardingArtifacts, type OnboardingResetProvenance } from '../src/routes/repos.js';
+import { MAX_FILE_CONTENT_BYTES } from '../src/routes/tasks/_helpers.js';
 
 const OURS = '{"haive":"generated"}\n';
 const MINE = 'MINE\n';
@@ -33,6 +36,7 @@ const MINE = 'MINE\n';
 const dirs: string[] = [];
 afterEach(async () => {
   h.swap = null;
+  h.longest = 0;
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
@@ -124,5 +128,45 @@ describe('the reset never takes a file saved while it was being judged', () => {
     });
     expect(result.onDisk).toBe(MINE);
     expect(result.skipped).toContainEqual({ path: rel, reason: 'edited since Haive wrote it' });
+  });
+});
+
+describe('the reset reads no claimed file past the size cap', () => {
+  // Twice the cap, so a whole read and a capped one (the cap plus the newline normalizing adds)
+  // cannot be mistaken for each other.
+  const big = 'x'.repeat(2 * MAX_FILE_CONTENT_BYTES);
+
+  it('keeps one that grows past it while it is being judged, without reading it', async () => {
+    const rel = '.claude/settings.json';
+    const root = await repoWith({ [rel]: OURS });
+    // Built before the swap is armed, since the hash below would otherwise set it off.
+    const provenance = {
+      writtenHashes: new Map([[rel, hashOfOurs()]]),
+      haiveDirs: new Set<string>(),
+      haiveEntries: new Map<string, string | null>(),
+    };
+    h.swap = { when: normalizeContent(OURS), path: path.join(root, rel), content: big };
+    const outcome = await resetOnboardingArtifacts(root, provenance);
+    expect(h.swap).toBeNull();
+    expect((await readFile(path.join(root, rel), 'utf8')).length).toBe(big.length);
+    expect(outcome.skipped).toContainEqual({ path: rel, reason: 'edited since Haive wrote it' });
+    expect(h.longest).toBeLessThanOrEqual(MAX_FILE_CONTENT_BYTES + 1);
+  });
+
+  it.each([
+    ['a settings file its row names', '.claude/settings.json', 'row'],
+    ['a file its row names', '.claude/workflow-config.json', 'row'],
+    ['a file its step recorded', '.claude/workflow-config.json', 'step'],
+  ] as const)('keeps %s already past it, even holding the recorded bytes', async (_, rel, by) => {
+    const root = await repoWith({ [rel]: big });
+    const recorded = sha256Hex(normalizeContent(big));
+    h.longest = 0;
+    await resetOnboardingArtifacts(root, {
+      writtenHashes: new Map(by === 'row' ? [[rel, recorded]] : []),
+      haiveDirs: new Set(),
+      haiveEntries: new Map(by === 'step' ? [[rel, recorded]] : []),
+    });
+    expect((await readFile(path.join(root, rel), 'utf8')).length).toBe(big.length);
+    expect(h.longest).toBeLessThanOrEqual(MAX_FILE_CONTENT_BYTES + 1);
   });
 });
