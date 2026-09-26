@@ -440,7 +440,10 @@ landing after that check stands: pointing the task at the next step, parking it 
 fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
 The allowance watch a failure arms is fenced the same way, and only while the task still reads
 `failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
-watch as every other exit from `failed` does.
+watch as every other exit from `failed` does. The hint it leaves on the row (`writeStepHint`) lands
+only while the row still reads `failed` and the task is still failed at that epoch, since a reset
+clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
+only on a row still `done` under the pass's fence, and a login hint only while its run stands.
 Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
 own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
 points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows

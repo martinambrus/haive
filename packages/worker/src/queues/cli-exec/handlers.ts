@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
-import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
@@ -173,6 +173,33 @@ export async function writeStepSummary(
       )
       .returning({ stepId: schema.taskSteps.stepId, round: schema.taskSteps.round });
     return step ?? null;
+  });
+}
+
+/** Lands only while its run stands, since a Retry supersedes a step's runs before it resets the row;
+ *  a row left `pending` or `skipped` is not the failure it describes. */
+async function writeLoginHint(
+  db: Database,
+  invocationId: string,
+  stepId: string,
+  hint: CliLoginRequiredError['hint'],
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [run] = await tx
+      .select({ supersededAt: schema.cliInvocations.supersededAt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, invocationId))
+      .for('update');
+    if (!run || run.supersededAt) return;
+    await tx
+      .update(schema.taskSteps)
+      .set({ errorHint: hint, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.taskSteps.id, stepId),
+          notInArray(schema.taskSteps.status, ['pending', 'skipped']),
+        ),
+      );
   });
 }
 
@@ -426,10 +453,7 @@ export async function handleCliExecJob(
       return;
     }
     if (err instanceof CliLoginRequiredError && payload.taskStepId) {
-      await db
-        .update(schema.taskSteps)
-        .set({ errorHint: err.hint, updatedAt: new Date() })
-        .where(eq(schema.taskSteps.id, payload.taskStepId));
+      await writeLoginHint(db, row.id, payload.taskStepId, err.hint);
     }
     // Park-begin candidate (mirror of the success path): a failed invocation — including a
     // rate-limit/allowance fatal — that leaves the step in waiting_cli should have the ensuing
