@@ -78,4 +78,14 @@ describe('deleting a CLI provider', () => {
     expect(res.status).toBe(200);
     expect(fake.rows(schema.cliProviders)).toHaveLength(0);
   });
+
+  it('answers the delete while the queue is still waiting for redis', async () => {
+    setup(TAG);
+    h.add.mockReturnValue(new Promise<undefined>(() => {}));
+    const answered = await Promise.race([
+      Promise.resolve(app.request(`/${PROVIDER}`, { method: 'DELETE' })).then((res) => res.status),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 1000)),
+    ]);
+    expect(answered).toBe(200);
+  });
 });

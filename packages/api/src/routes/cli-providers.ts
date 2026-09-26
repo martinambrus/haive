@@ -550,7 +550,8 @@ cliProviderRoutes.delete('/:id', async (c) => {
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
     // The provider is gone either way, and a removal never queued only leaves its image behind.
-    await getCliExecQueue()
+    // Not awaited: the queue waits for redis rather than failing, which would hold this answer.
+    void getCliExecQueue()
       .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
         removeOnComplete: true,
         removeOnFail: 50,
