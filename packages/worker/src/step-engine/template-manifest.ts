@@ -1,11 +1,13 @@
-import { eq, notInArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { and, eq, notInArray } from 'drizzle-orm';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   AGENT_RENDERER_VERSION,
   buildManifest,
   bundleAgentTemplateHash,
+  CLI_PROVIDER_LIST,
   computeSetHash,
   hashRenderings,
+  logger,
   normalizeContent,
   sha256Hex,
   type CliProviderName,
@@ -99,6 +101,22 @@ export const REFERENCE_CONTEXT: TemplateRenderContext = {
   lspLanguages: [],
   rtkEnabled: false,
   enabledCliProviders: [],
+};
+
+/** Reference contexts for the items REFERENCE_CONTEXT renders empty: each selects what its item
+ *  needs to render. As API-stable as REFERENCE_CONTEXT itself, since a change moves those hashes. */
+const PHP_LSP_REFERENCE_CONTEXT: TemplateRenderContext = {
+  ...REFERENCE_CONTEXT,
+  lspLanguages: ['php'],
+};
+const RTK_REFERENCE_CONTEXT: TemplateRenderContext = {
+  ...REFERENCE_CONTEXT,
+  rtkEnabled: true,
+  enabledCliProviders: CLI_PROVIDER_LIST.map((p) => ({
+    name: p.name,
+    rulesFile: p.rulesFile,
+    rulesFileMode: p.rulesFileMode,
+  })),
 };
 
 function findAgentSpec(id: string, framework: string | null): AgentSpec | null {
@@ -208,12 +226,11 @@ function buildPluginFileItem(
       // Local PHP LSP plugin files are emitted whenever PHP LSP is selected
       // (plain php or php-extended — see wantsLocalPhpLsp). Keeping the gating
       // here means a template removal (PHP LSP disabled) surfaces as `obsolete`
-      // at upgrade time rather than silently. REFERENCE_CONTEXT has no PHP LSP,
-      // so this renders [] for the contentHash either way — widening the
-      // condition does not change any item hash.
+      // at upgrade time rather than silently.
       if (!wantsLocalPhpLsp(ctx.lspLanguages)) return [];
       return [{ diskPath, content: `${content}\n` }];
     },
+    referenceCtx: PHP_LSP_REFERENCE_CONTEXT,
   };
 }
 
@@ -245,7 +262,7 @@ function buildTemplateItems(): TemplateItem<TemplateRenderContext>[] {
     items.push(item);
   }
   for (const item of buildRtkTemplateItems<TemplateRenderContext>()) {
-    items.push(item);
+    items.push({ ...item, referenceCtx: RTK_REFERENCE_CONTEXT });
   }
   return items;
 }
@@ -306,6 +323,35 @@ export function expandManifestFor(
 
 export { computeSetHash, hashRenderings, normalizeContent, sha256Hex };
 
+/** What an item's contentHash was while its reference context rendered it empty. */
+const EMPTY_RENDER_HASH = hashRenderings([]);
+
+/** Rows recorded while an item's reference context rendered it empty carry the hash of nothing.
+ *  Those holding today's body are brought to the item's contentHash, so they read as current; one
+ *  holding an older body keeps it, so the upgrade banner offers the newer one. */
+export async function convergeReferenceHashes(
+  db: Database | DbTx,
+  manifest: TemplateManifest<TemplateRenderContext> = getTemplateManifest(),
+): Promise<void> {
+  for (const item of manifest.items) {
+    if (!item.referenceCtx) continue;
+    for (const r of item.render(item.referenceCtx)) {
+      await db
+        .update(schema.onboardingArtifacts)
+        .set({ templateContentHash: item.contentHash })
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.templateId, item.id),
+            eq(schema.onboardingArtifacts.diskPath, r.diskPath),
+            eq(schema.onboardingArtifacts.templateSchemaVersion, item.schemaVersion),
+            eq(schema.onboardingArtifacts.templateContentHash, EMPTY_RENDER_HASH),
+            eq(schema.onboardingArtifacts.writtenHash, sha256Hex(normalizeContent(r.content))),
+          ),
+        );
+    }
+  }
+}
+
 /** Upsert every manifest item into `template_manifest_cache` and delete rows
  *  for template ids that no longer exist. Called from worker bootstrap so the
  *  API can read the current manifest without spawning worker-side generators. */
@@ -314,6 +360,24 @@ export async function syncTemplateManifestCache(db: Database): Promise<void> {
   const now = new Date();
   const liveIds = manifest.items.map((i) => i.id);
 
+  // One transaction with the rows it converges, so upgrade-status never compares them against
+  // the other side's hashes. A convergence that fails costs only a spurious offer, not the boot.
+  await db.transaction(async (tx) => {
+    await tx
+      .transaction((sp) => convergeReferenceHashes(sp, manifest))
+      .catch((err: unknown) => {
+        logger.error({ err }, 'could not converge reference hashes');
+      });
+    await writeManifestCache(tx, manifest, liveIds, now);
+  });
+}
+
+async function writeManifestCache(
+  db: DbTx,
+  manifest: TemplateManifest<TemplateRenderContext>,
+  liveIds: string[],
+  now: Date,
+): Promise<void> {
   if (liveIds.length === 0) {
     await db.delete(schema.templateManifestCache);
     return;

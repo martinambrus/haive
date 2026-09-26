@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { computeSetHash } from '@haive/shared';
+import { CLI_PROVIDER_LIST, computeSetHash, hashRenderings } from '@haive/shared';
 import {
   expandManifestFor,
   getTemplateManifest,
@@ -148,6 +148,52 @@ describe('template manifest', () => {
     expect(agentIds.has('agent.code-reviewer')).toBe(true);
     expect(agentIds.has('agent.django-model-dev')).toBe(true);
     expect(agentIds.size).toBeGreaterThan(1);
+  });
+
+  // A hash of nothing never changes, so no change to such an item's body could reach the banner.
+  it('hashes a body for every item but the per-repository agents index', () => {
+    const empty = hashRenderings([]);
+    const hollow = getTemplateManifest()
+      .items.filter((i) => i.contentHash === empty)
+      .map((i) => i.id);
+    expect(hollow).toEqual(['agents-index']);
+  });
+
+  it('gives every item its own id', () => {
+    const ids = getTemplateManifest().items.map((i) => i.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('never renders one disk path from two items, whatever the context selects', () => {
+    const manifest = getTemplateManifest();
+    const ctx: TemplateRenderContext = {
+      ...REFERENCE_CONTEXT,
+      acceptedAgentIds: manifest.items
+        .filter((i) => i.kind === 'agent')
+        .map((i) => i.id.slice('agent.'.length)),
+      agentTargets: [
+        { dir: '.claude/agents', format: 'markdown', supportsLsp: true },
+        { dir: '.codex/agents', format: 'toml', supportsLsp: false },
+      ],
+      lspLanguages: ['php-extended'],
+      rtkEnabled: true,
+      enabledCliProviders: CLI_PROVIDER_LIST.map((p) => ({
+        name: p.name,
+        rulesFile: p.rulesFile,
+        rulesFileMode: p.rulesFileMode,
+      })),
+    };
+    const byPath = new Map<string, string>();
+    const clashes: string[] = [];
+    for (const r of expandManifestFor(ctx, manifest)) {
+      const other = byPath.get(r.diskPath);
+      if (other !== undefined && other !== r.templateId) {
+        clashes.push(`${r.diskPath}: ${other}, ${r.templateId}`);
+      }
+      byPath.set(r.diskPath, r.templateId);
+    }
+    expect(clashes).toEqual([]);
+    expect(byPath.size).toBeGreaterThan(10);
   });
 
   it('applies-gate is decoupled from hashing: gated-out agents keep populated, distinct content hashes', () => {

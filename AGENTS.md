@@ -2640,6 +2640,16 @@ Deterministic onboarding artifacts (agent specs, slash commands, `workflow-confi
 
 On worker boot, `syncTemplateManifestCache(db)` upserts the manifest into Postgres (`template_manifest_cache`) so the API can compute the current set hash without importing worker-side generators. Per-repo install state lives in `onboarding_artifacts`, one live row per `(repository_id, disk_path)`, soft-deleted via `superseded_at`.
 
+**An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
+never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
+files and the two RTK settings files, gated on PHP LSP and on RTK, hashed `sha256('')` from the day
+they shipped. Each now renders in a context that selects it. `agents-index` stays empty on purpose,
+since its body is per repository and the upgrade plan compares it per repository. Rows recorded while
+an item hashed empty still carry that hash, so `syncTemplateManifestCache` converges them in the
+transaction that moves the cache (`convergeReferenceHashes`): a row whose written hash is today's
+body takes the new hash and reads as current, and one holding an older body keeps the empty one, so
+the banner offers the newer.
+
 ### When changing a template
 
 1. **Body-only change (rewording an agent prompt, fixing a typo, updating a command example):** edit the generator in `_agent-templates.ts` / `07-generate-files.ts`. The manifest's `contentHash` recomputes on worker boot and the upgrade-status endpoint starts reporting the template as changed. **Do not bump `schemaVersion`.**
