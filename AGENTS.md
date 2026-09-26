@@ -2345,6 +2345,11 @@ leaves the window where a handler has already passed it and the reset claims the
 `rm(dest)` runs, and both then walk the same tree. `root_claim_kind` exists only so a refusal can
 name what it is waiting for; nothing branches on it.
 
+`DELETE /repos/:id` refuses while a claim is live, reading it on the repository row it locks: a
+delete during a clone used to let the resource cleanup it queues run before the clone finished
+writing, which left the checkout on disk with no row to find it by. A writer that claims after the
+lock waits for the delete's commit and then finds no row, so it writes nothing.
+
 **It is a LEASE, not a deadline on the work.** `acquireRootClaim` renews while its caller works
 (`ROOT_CLAIM_RENEW_MS`, a third of the window, on an `unref`ed timer so a held claim never keeps a
 process alive). A fixed expiry cannot tell a dead holder from a slow one, and both exist here —
@@ -2386,10 +2391,10 @@ by nature. A task with no repository takes nothing, since there is no root to pr
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
 holding a connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool; and
-`repo-queue.ts` sets neither `lockDuration` nor `maxStalledCount`, so a handler blocked past
-BullMQ's 30s default is failed as STALLED without running its catch — stranding
-`status = 'cloning'` with no reconciler anywhere to clear it. (That last one is a PRE-EXISTING bug
-in its own right, and the reason this must never become a lock.) A `repo_status` enum value
+`repo-queue.ts` keeps BullMQ's 30s `lockDuration`, so a handler blocked past it can be failed as
+STALLED without running its catch, stranding `status = 'cloning'` until the boot reconciler in
+`data-migrations.ts` releases it (`maxStalledCount` 10 makes that rarer, not impossible). A
+`repo_status` enum value
 expresses the same claim and was refused because Postgres cannot drop an enum value: an
 irreversible migration for a reversible problem. The cost of a row over a lock is that a writer
 killed mid-job leaves it set, which `ROOT_CLAIM_STALE_MS` bounds — generously, since expiring

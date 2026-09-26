@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { cleanupUser, getSql, waitForProviderImage } from '../helpers/db.js';
+import { cleanupUser, deleteProvidersViaApi, getSql, waitForProviderImage } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('cli providers', () => {
@@ -66,7 +66,10 @@ test.describe('cli providers', () => {
       await expect(page.getByRole('heading', { level: 2, name: 'Add another CLI' })).toBeVisible();
       await expect(page.getByRole('heading', { level: 2, name: 'Claude Code' })).toBeVisible();
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -118,7 +121,10 @@ test.describe('cli providers', () => {
       const labels = listAgainBody.providers.map((p) => p.label).sort();
       expect(labels).toEqual(['Claude Code', 'Claude Code (second)']);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -154,7 +160,10 @@ test.describe('cli providers', () => {
       const renameBody = (await renameRes.json()) as { error?: string };
       expect(renameBody.error ?? '').toMatch(/name/i);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -210,7 +219,10 @@ test.describe('cli providers', () => {
       expect(rows[0]!.wrapper_path).toBeNull();
       expect(rows[0]!.wrapper_content).toBeNull();
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -239,7 +251,10 @@ test.describe('cli providers', () => {
       const missingRes = await page.request.delete(`${API_BASE}/cli-providers/${provider.id}`);
       expect(missingRes.status()).toBe(404);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -297,7 +312,10 @@ test.describe('cli providers', () => {
       const afterBody = (await afterRes.json()) as { secrets: unknown[] };
       expect(afterBody.secrets).toEqual([]);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -331,7 +349,10 @@ test.describe('cli providers', () => {
       `;
       expect(['building', 'ready']).toContain(rows[0]!.sandbox_image_build_status);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -387,7 +408,10 @@ test.describe('cli providers', () => {
       expect(dockerBody.provider.sandboxImageBuildStatus).toBe('building');
       expect(dockerBody.provider.sandboxImageBuildError).toBeNull();
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -464,7 +488,10 @@ test.describe('cli providers', () => {
       const labels = listBody.providers.map((p) => p.label).sort();
       expect(labels).toEqual(['Claude Prod', 'Claude Prod Copy']);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -507,15 +534,23 @@ test.describe('cli providers', () => {
       const labels = listBody.providers.map((p) => p.label).sort();
       expect(labels).toEqual(['Gemini', 'Gemini Copy', 'Gemini Copy 2', 'Gemini Copy 3']);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
 
-  test('POST /:id/clone 404s on unknown id and cannot cross users', async ({ page }) => {
+  test('POST /:id/clone 404s on unknown id and cannot cross users', async ({
+    page,
+    playwright,
+  }) => {
     const sql = getSql();
     let userId = '';
     let otherUserId = '';
+    // Its own session, so `page.request` stays the owner's for the provider cleanup below.
+    const other = await playwright.request.newContext();
     try {
       const email = uniqueEmail('cli-clone-iso');
       userId = (await registerUser(sql, page.request, { email })).userId;
@@ -533,12 +568,16 @@ test.describe('cli providers', () => {
       // Other user cannot clone user A's provider. Registering through the helper, like every
       // other spec: a bare POST /auth/register is refused now, and this one was missed because it
       // is inline rather than a call to the shared register function.
-      otherUserId = (await registerUser(sql, page.request, { prefix: 'cli-clone-iso-b' })).userId;
+      otherUserId = (await registerUser(sql, other, { prefix: 'cli-clone-iso-b' })).userId;
 
-      const crossRes = await page.request.post(`${API_BASE}/cli-providers/${provider.id}/clone`);
+      const crossRes = await other.post(`${API_BASE}/cli-providers/${provider.id}/clone`);
       expect(crossRes.status()).toBe(404);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      await other.dispose();
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       if (otherUserId) await cleanupUser(sql, otherUserId);
       await sql.end({ timeout: 5 });
     }

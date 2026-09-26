@@ -4,7 +4,14 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
-import { schema, acquireRootClaim, readLiveRootClaim, rootClaimRefusal } from '@haive/database';
+import {
+  schema,
+  acquireRootClaim,
+  isRootClaimLive,
+  readLiveRootClaim,
+  rootClaimRefusal,
+  type RootClaimKind,
+} from '@haive/database';
 import {
   errno,
   isPathContainmentError,
@@ -2795,16 +2802,27 @@ repoRoutes.delete('/:id', async (c) => {
   let capturedTasks: { id: string; envTemplateId: string | null }[] = [];
 
   await db.transaction(async (tx) => {
+    // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
+    // commits, and finds no row: every writer of the root runs under that claim.
     const repoRows = await tx
       .select({
         id: schema.repositories.id,
         storagePath: schema.repositories.storagePath,
         onboardingTooling: schema.repositories.onboardingTooling,
         onboardingEnvironment: schema.repositories.onboardingEnvironment,
+        rootClaimedAt: schema.repositories.rootClaimedAt,
+        rootClaimKind: schema.repositories.rootClaimKind,
       })
       .from(schema.repositories)
-      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+      .for('update');
     if (repoRows.length === 0) return;
+    if (isRootClaimLive(repoRows[0]!.rootClaimedAt)) {
+      throw new HttpError(
+        409,
+        rootClaimRefusal(repoRows[0]!.rootClaimKind as RootClaimKind | null),
+      );
+    }
     repoFound = true;
     storagePath = repoRows[0]!.storagePath;
 

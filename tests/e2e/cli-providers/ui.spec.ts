@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Response } from '@playwright/test';
-import { cleanupUser, getSql, waitForProviderImage } from '../helpers/db.js';
+import { cleanupUser, deleteProvidersViaApi, getSql, waitForProviderImage } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 import { invokeAction } from '../helpers/actions.js';
 
@@ -65,7 +65,10 @@ test.describe('cli providers UI', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]!.name).toBe('claude-code');
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -108,7 +111,10 @@ test.describe('cli providers UI', () => {
         )
         .toBe('After label');
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -153,7 +159,10 @@ test.describe('cli providers UI', () => {
       expect(rows[0]!.encrypted_value).not.toContain(PLAINTEXT);
       expect(rows[0]!.encrypted_value.length).toBeGreaterThan(0);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -199,7 +208,10 @@ test.describe('cli providers UI', () => {
       `;
       expect(rows).toHaveLength(0);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -301,7 +313,10 @@ test.describe('cli providers UI', () => {
         await expect(notice, `notice cleared for ${tc.name}`).toHaveCount(0);
       }
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -379,7 +394,10 @@ test.describe('cli providers UI', () => {
       await expect(testButton).toBeDisabled();
       await expect(page.getByText(/Unsaved form changes/)).toHaveCount(0);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -419,7 +437,10 @@ test.describe('cli providers UI', () => {
       `;
       expect(rows[0]!.executable_path).toBeNull();
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -465,7 +486,10 @@ test.describe('cli providers UI', () => {
       // back to 'ready' after the cached image is reused. Either is valid.
       expect(['building', 'ready']).toContain(rows[1]!.sandbox_image_build_status);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
@@ -520,7 +544,10 @@ test.describe('cli providers UI', () => {
       expect(after[0]!.secret_name).toBe('ANTHROPIC_API_KEY');
       expect(after[0]!.encrypted_value).toBe(beforeEncrypted);
     } finally {
-      if (userId) await cleanupUser(sql, userId);
+      if (userId) {
+        await deleteProvidersViaApi(sql, page.request, userId);
+        await cleanupUser(sql, userId);
+      }
       await sql.end({ timeout: 5 });
     }
   });
