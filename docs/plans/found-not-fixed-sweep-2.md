@@ -1,8 +1,8 @@
 # Found-not-fixed sweep 2: the recovery hand-over, and what sweep 1 left
 
-> **IN PROGRESS** since 2026-09-25. PRs 1-11, 14 and 15 merged (#301-#313); PR 18 (the two
-> storage-root checks accept any spelling of the root) is in review. Tracked in the status table of
-> `docs/plans/README.md`, which each PR updates.
+> **IN PROGRESS** since 2026-09-25. PRs 1-11, 14, 15 and 18 merged (#301-#313 and #315); PR 22 (the
+> repos and plan pages and a before/after pair fit a phone) is in review. Tracked in the status
+> table of `docs/plans/README.md`, which each PR updates.
 
 ## Context
 
