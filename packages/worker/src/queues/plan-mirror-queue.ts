@@ -149,16 +149,10 @@ export async function integrateOrigin(args: {
   if (gap.behind === 0) return { landed: false, previousCommit };
 
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
+  // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
+  // to move that aside fails the save before anything removes the worktree.
+  await moveAsideRecordedLeftovers(db, args.repositoryId, worktree, `origin/${args.branch}`);
   try {
-    // An abandoned conversation's open merge is discarded below, but not what its fixers left.
-    await moveAsideRecordedLeftovers(
-      db,
-      args.repositoryId,
-      worktree,
-      `origin/${args.branch}`,
-    ).catch((err) =>
-      logger.warn({ err, repositoryId: args.repositoryId }, 'plan merge leftovers kept'),
-    );
     const attempt = await mergeOriginInto(worktree, args.branch, gap.unrelated, args.identity);
     if (!attempt.clean) {
       await abortMerge(worktree);

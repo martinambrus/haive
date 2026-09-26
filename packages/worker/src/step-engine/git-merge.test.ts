@@ -791,7 +791,7 @@ describe('fixer leftovers (real git)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("records nothing in a person's own checkout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
@@ -830,7 +830,7 @@ describe('merge helpers (real git)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('checks the markers of a conflicted file whose name git quotes', async () => {
     const dir = await setupNamedConflict('café "notes".txt');

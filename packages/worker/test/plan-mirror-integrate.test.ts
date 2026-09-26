@@ -54,6 +54,7 @@ type Event = { taskId: string; taskStepId: string; eventType: string; payload: u
 
 function fakeDb() {
   const events: Event[] = [];
+  const flags = { lookupFails: false };
   const db = {
     select: () => ({
       from: (table: unknown) => ({
@@ -64,11 +65,13 @@ function fakeDb() {
         innerJoin: () => ({
           where: () => ({
             orderBy: () => ({
-              limit: async (n: number) =>
-                events
+              limit: async (n: number) => {
+                if (flags.lookupFails) throw new Error('lookup failed');
+                return events
                   .filter((e) => e.eventType === PLAN_MERGE_BASELINE_EVENT)
                   .reverse()
-                  .slice(0, n),
+                  .slice(0, n);
+              },
             }),
           }),
         }),
@@ -85,35 +88,41 @@ function fakeDb() {
       },
     }),
   };
-  return { db, events };
+  return { db, events, flags };
 }
+
+function contextFor(repoPath: string, db: unknown): StepContext {
+  return {
+    repoPath,
+    userId: 'u1',
+    taskId: 't1',
+    taskStepId: 's1',
+    cliProviderId: null,
+    db,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  } as unknown as StepContext;
+}
+
+const integrate = (repoPath: string) =>
+  integrateOrigin({
+    repositoryId: 'r1',
+    repoPath,
+    branch: 'main',
+    userId: 'u1',
+    credentialId: null,
+    identity: IDENTITY,
+  });
 
 describe('plan snapshot save and pull: a merge a conversation left open', () => {
   it('moves aside what its fixer left before the scratch worktree is removed', async () => {
     const local = await unrelatedPair();
     const { db, events } = fakeDb();
     h.db = db;
-    const ctx = {
-      repoPath: local,
-      userId: 'u1',
-      taskId: 't1',
-      taskStepId: 's1',
-      cliProviderId: null,
-      db,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-    } as unknown as StepContext;
-    const detected = await planMergeStep.detect!(ctx);
+    const detected = await planMergeStep.detect!(contextFor(local, db));
     await mkdir(path.join(detected.worktreePath, 'docs'), { recursive: true });
     await writeFile(path.join(detected.worktreePath, 'docs', 'notes.txt'), 'scratch\n', 'utf8');
 
-    const out = await integrateOrigin({
-      repositoryId: 'r1',
-      repoPath: local,
-      branch: 'main',
-      userId: 'u1',
-      credentialId: null,
-      identity: IDENTITY,
-    });
+    const out = await integrate(local);
     expect(out.conflict?.paths).toEqual(['README.md']);
     const moved = events.find((e) => e.eventType === 'merge.fixer_leftovers');
     expect(moved).toMatchObject({ taskId: 't1', payload: { moved: ['docs/notes.txt'] } });
@@ -121,5 +130,18 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
     expect(await readFile(path.join(local, folder, 'files', 'docs', 'notes.txt'), 'utf8')).toBe(
       'scratch\n',
     );
+  });
+
+  it('fails the save and keeps the worktree when they cannot be moved aside', async () => {
+    const local = await unrelatedPair();
+    const { db, flags } = fakeDb();
+    h.db = db;
+    const detected = await planMergeStep.detect!(contextFor(local, db));
+    const stray = path.join(detected.worktreePath, 'notes.txt');
+    await writeFile(stray, 'scratch\n', 'utf8');
+    flags.lookupFails = true;
+
+    await expect(integrate(local)).rejects.toThrow('lookup failed');
+    expect(await readFile(stray, 'utf8')).toBe('scratch\n');
   });
 });

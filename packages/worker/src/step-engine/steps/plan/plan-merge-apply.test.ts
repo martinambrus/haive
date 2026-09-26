@@ -67,6 +67,7 @@ type Event = { taskId: string; taskStepId: string; eventType: string; payload: u
 
 function fakeDb() {
   const events: Event[] = [];
+  const flags = { maskFails: false };
   // The one joined read is the recorded-tree lookup, newest first.
   const recorded = (n: number) =>
     events
@@ -86,7 +87,13 @@ function fakeDb() {
       }),
     }),
     query: {
-      tasks: { findFirst: async () => ({ userId: 'u1', repositoryId: 'r1' }) },
+      // Only the secret mask's policy reads the task this way.
+      tasks: {
+        findFirst: async () => {
+          if (flags.maskFails) throw new Error('mask read failed');
+          return { userId: 'u1', repositoryId: 'r1' };
+        },
+      },
       repositories: { findFirst: async () => ({ credentialsSecretId: null }) },
       users: { findFirst: async () => ({ gitName: 'T', gitEmail: 't@haive.local' }) },
     },
@@ -96,7 +103,7 @@ function fakeDb() {
       },
     }),
   };
-  return { db, events };
+  return { db, events, flags };
 }
 
 function contextFor(repoPath: string, db: unknown): StepContext {
@@ -182,6 +189,34 @@ describe('plan merge: a fixer that did not finish', () => {
     });
     expect(out.resolved).toBe(true);
     expect(await gitCode(wt, ['cat-file', '-e', 'HEAD:notes.txt'])).not.toBe(0);
+  });
+
+  it('keeps a tree git could not record, so what a failed fixer left is reported', async () => {
+    const local = await unrelatedPair();
+    const { db, events, flags } = fakeDb();
+    const ctx = contextFor(local, db);
+    flags.maskFails = true;
+    const first = await planMergeStep.detect!(ctx);
+    expect(first.fixBaseline).toHaveProperty('unavailable');
+    const wt = first.worktreePath;
+    await writeFile(path.join(wt, 'notes.txt'), 'scratch\n', 'utf8');
+    await git(wt, ['add', 'notes.txt']);
+    flags.maskFails = false;
+
+    const retried = await planMergeStep.detect!(ctx);
+    expect(retried.fixBaseline).toEqual(first.fixBaseline);
+    await writeFile(path.join(wt, 'README.md'), '# vareska\n\nboth sides\n', 'utf8');
+    await planMergeStep.apply(ctx, {
+      detected: retried,
+      formValues: {},
+      llmOutput: 'Kept both sides.',
+      llmInvocationId: 'inv2',
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(events.find((e) => e.eventType === 'merge.fixer_leftovers')?.payload).toMatchObject({
+      unchecked: expect.stringContaining('nothing was recorded'),
+    });
   });
 
   it('records the tree afresh when it opens the merge again', async () => {

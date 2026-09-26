@@ -17,7 +17,7 @@ import { gitRun } from '../repo/git-push.js';
 export const PLAN_MERGE_BASELINE_EVENT = 'plan_merge.fix_baseline';
 
 export interface RecordedFixBaseline {
-  baseline: FixBaseline;
+  baseline: FixBaseline | FixBaselineUnavailable;
   taskId: string;
   taskStepId: string | null;
 }
@@ -27,12 +27,19 @@ async function revParse(dir: string, spec: string): Promise<string | null> {
   return res.code === 0 ? res.stdout.trim() : null;
 }
 
+async function openMergeIds(dir: string): Promise<{ head: string; mergeHead: string } | null> {
+  const [head, mergeHead] = await Promise.all([revParse(dir, 'HEAD'), revParse(dir, 'MERGE_HEAD')]);
+  return head !== null && mergeHead !== null ? { head, mergeHead } : null;
+}
+
 /** The newest tree recorded for the repository, while the merge it was taken of is still open. */
 async function recordedFixBaseline(
   db: Database,
   repositoryId: string,
   worktreePath: string,
 ): Promise<RecordedFixBaseline | null> {
+  const open = await openMergeIds(worktreePath);
+  if (!open) return null;
   const [row] = await db
     .select({
       taskId: schema.taskEvents.taskId,
@@ -49,14 +56,12 @@ async function recordedFixBaseline(
     )
     .orderBy(desc(schema.taskEvents.createdAt))
     .limit(1);
-  const baseline = row?.payload?.baseline as FixBaseline | undefined;
-  if (!row || !baseline) return null;
-  const [head, mergeHead] = await Promise.all([
-    revParse(worktreePath, 'HEAD'),
-    revParse(worktreePath, 'MERGE_HEAD'),
-  ]);
-  if (head !== baseline.head || mergeHead !== baseline.mergeHead) return null;
-  return { baseline, taskId: row.taskId, taskStepId: row.taskStepId };
+  const recorded = row?.payload as
+    | { baseline?: FixBaseline | FixBaselineUnavailable; head?: string; mergeHead?: string }
+    | undefined;
+  if (!row || !recorded?.baseline) return null;
+  if (recorded.head !== open.head || recorded.mergeHead !== open.mergeHead) return null;
+  return { baseline: recorded.baseline, taskId: row.taskId, taskStepId: row.taskStepId };
 }
 
 /** One tree per open merge, so a fixer that failed or was stopped is compared with it too. A merge
@@ -73,12 +78,14 @@ export async function planMergeFixBaseline(
   const baseline = await captureFixBaseline(at.worktreePath, () =>
     taskSecretMaskPolicy(db, at.taskId),
   );
-  if (baseline && !('unavailable' in baseline)) {
+  const open = await openMergeIds(at.worktreePath);
+  // One git could not record is kept too: a later capture would absorb what a fixer changed.
+  if (baseline && open) {
     await db.insert(schema.taskEvents).values({
       taskId: at.taskId,
       taskStepId: at.taskStepId,
       eventType: PLAN_MERGE_BASELINE_EVENT,
-      payload: { baseline },
+      payload: { baseline, ...open },
     });
   }
   return baseline;
