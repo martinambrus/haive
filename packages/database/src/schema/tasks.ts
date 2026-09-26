@@ -686,7 +686,7 @@ export interface MergeResolveState {
         tree: string;
         index: string;
         ignored: string;
-        unmerged: string[];
+        resolving: string[];
         head: string;
         mergeHead: string;
       }

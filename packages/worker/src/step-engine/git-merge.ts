@@ -165,7 +165,7 @@ export interface FixBaseline {
   tree: string;
   index: string;
   ignored: string;
-  unmerged: string[];
+  resolving: string[];
   head: string;
   mergeHead: string;
 }
@@ -181,17 +181,12 @@ type TreeResult = { tree: string } | { error: string };
  *  is not UTF-8 compares and is written back as it was read. */
 const LISTING = { maxBuffer: 64 * 1024 * 1024, encoding: 'latin1' } as const;
 
-/** What git ignored when a baseline was recorded: directories ignored whole, and files. */
-interface IgnoredThen {
-  dirs: Set<string>;
-  files: Set<string>;
-}
-
-function wasIgnored(ignored: IgnoredThen, p: string): boolean {
+/** True when `p`, or a directory holding it, is one of `entries`. */
+function covered(entries: ReadonlySet<string>, p: string): boolean {
   const rel = p.replace(/\/$/, '');
-  if (ignored.files.has(rel) || ignored.dirs.has(rel)) return true;
+  if (entries.has(rel)) return true;
   for (let i = rel.indexOf('/'); i !== -1; i = rel.indexOf('/', i + 1)) {
-    if (ignored.dirs.has(rel.slice(0, i))) return true;
+    if (entries.has(rel.slice(0, i))) return true;
   }
   return false;
 }
@@ -203,6 +198,7 @@ async function recordIgnored(dir: string): Promise<{ blob: string } | { error: s
   const listed = await gitRun(
     dir,
     [
+      '--no-optional-locks',
       'status',
       '--porcelain=v1',
       '-z',
@@ -211,7 +207,7 @@ async function recordIgnored(dir: string): Promise<{ blob: string } | { error: s
       '--no-renames',
       '--ignore-submodules=all',
     ],
-    { GIT_OPTIONAL_LOCKS: '0' },
+    undefined,
     LISTING,
   );
   if (listed.code !== 0) return { error: gitDetail(listed) };
@@ -237,15 +233,15 @@ async function recordIgnored(dir: string): Promise<{ blob: string } | { error: s
   }
 }
 
-async function readIgnored(dir: string, blob: string): Promise<IgnoredThen | { error: string }> {
+async function readIgnored(dir: string, blob: string): Promise<Set<string> | { error: string }> {
   const res = await gitRun(dir, ['cat-file', 'blob', blob], undefined, LISTING);
   if (res.code !== 0) return { error: gitDetail(res) };
-  const ignored: IgnoredThen = { dirs: new Set(), files: new Set() };
-  for (const e of res.stdout.split('\0')) {
-    if (e.endsWith('/')) ignored.dirs.add(e.slice(0, -1));
-    else if (e !== '') ignored.files.add(e);
-  }
-  return ignored;
+  return new Set(
+    res.stdout
+      .split('\0')
+      .filter((e) => e !== '')
+      .map((e) => e.replace(/\/$/, '')),
+  );
 }
 
 /** The worktree as one git tree, untracked files included and ignored ones left out. Built in a
@@ -255,7 +251,7 @@ async function readIgnored(dir: string, blob: string): Promise<IgnoredThen | { e
  *  no ignored file into a new one and hides no recorded one. */
 async function snapshotTree(
   dir: string,
-  since?: { tree: string; ignored: IgnoredThen },
+  since?: { tree: string; ignored: ReadonlySet<string> },
 ): Promise<TreeResult> {
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
@@ -281,9 +277,7 @@ async function snapshotTree(
         LISTING,
       );
       if (others.code !== 0) return { error: gitDetail(others) };
-      const added = others.stdout
-        .split('\0')
-        .filter((p) => p !== '' && !wasIgnored(since.ignored, p));
+      const added = others.stdout.split('\0').filter((p) => p !== '' && !covered(since.ignored, p));
       if (added.length > 0) {
         await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(added.join('\0'), 'latin1'));
         const res = await gitRun(
@@ -326,14 +320,16 @@ async function stagedTree(dir: string): Promise<TreeResult> {
       if (c.status === 'D') drop.push(c.path);
       else put.push(`${c.dstMode},${c.dstSha},${c.path}`);
     }
-    for (let i = 0; i < put.length; i += PATHSPEC_CHUNK) {
-      const infos = put.slice(i, i + PATHSPEC_CHUNK).flatMap((p) => ['--cacheinfo', p]);
-      const res = await gitRun(dir, ['update-index', '--add', ...infos], env);
-      if (res.code !== 0) return { error: gitDetail(res) };
-    }
+    // Removals first: a directory/file conflict replaces HEAD's `foo` with `foo/bar`, and the
+    // index refuses the new path while the old one stands.
     for (let i = 0; i < drop.length; i += PATHSPEC_CHUNK) {
       const paths = drop.slice(i, i + PATHSPEC_CHUNK);
       const res = await gitRun(dir, ['update-index', '--force-remove', '--', ...paths], env);
+      if (res.code !== 0) return { error: gitDetail(res) };
+    }
+    for (let i = 0; i < put.length; i += PATHSPEC_CHUNK) {
+      const infos = put.slice(i, i + PATHSPEC_CHUNK).flatMap((p) => ['--cacheinfo', p]);
+      const res = await gitRun(dir, ['update-index', '--add', ...infos], env);
       if (res.code !== 0) return { error: gitDetail(res) };
     }
     const tree = await gitRun(dir, ['write-tree'], env);
@@ -341,6 +337,56 @@ async function stagedTree(dir: string): Promise<TreeResult> {
   } finally {
     await removeNoFollow(os.tmpdir(), name).catch(() => false);
   }
+}
+
+/** The paths a fixer is sent to resolve: those git left unmerged, and for a directory/file conflict
+ *  the path the file was moved away from. git gives the file a name of its own, reports only that
+ *  and stages the directory side, so keeping the file means deleting the directory and putting the
+ *  file back at its path. The partner is found by content, never by the name git chose: the same
+ *  blob stands beside the moved file on its side, where the other side holds a directory. */
+async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[] | null> {
+  if (unmerged.length === 0) return [];
+  const listed = await gitRun(dir, ['ls-files', '-u', '-z'], undefined, {
+    maxBuffer: LISTING.maxBuffer,
+  });
+  if (listed.code !== 0) return null;
+  const stages = new Map<string, Map<string, string>>();
+  for (const record of listed.stdout.split('\0')) {
+    const tab = record.indexOf('\t');
+    if (tab === -1) continue;
+    const [, sha = '', stage = ''] = record.slice(0, tab).split(' ');
+    const p = record.slice(tab + 1);
+    stages.set(p, (stages.get(p) ?? new Map()).set(stage, sha));
+  }
+  const partners = new Set<string>();
+  for (const [p, byStage] of stages) {
+    for (const [stage, side, other] of [
+      ['2', 'HEAD', 'MERGE_HEAD'],
+      ['3', 'MERGE_HEAD', 'HEAD'],
+    ] as const) {
+      const blob = byStage.get(stage);
+      if (!blob || byStage.has(stage === '2' ? '3' : '2')) continue;
+      const parent = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '';
+      const siblings = await gitRun(
+        dir,
+        ['ls-tree', '-z', side, ...(parent ? ['--', parent] : [])],
+        {
+          GIT_LITERAL_PATHSPECS: '1',
+        },
+      );
+      if (siblings.code !== 0) return null;
+      for (const entry of siblings.stdout.split('\0')) {
+        const tab = entry.indexOf('\t');
+        if (tab === -1) continue;
+        const [, type, object] = entry.slice(0, tab).split(' ');
+        const sibling = entry.slice(tab + 1);
+        if (sibling === p || type !== 'blob' || object !== blob) continue;
+        const kind = await gitRun(dir, ['cat-file', '-t', `${other}:${sibling}`]);
+        if (kind.code === 0 && kind.stdout.trim() === 'tree') partners.add(sibling);
+      }
+    }
+  }
+  return [...new Set([...unmerged, ...partners])];
 }
 
 /** Record the tree before a fixer is sent into it, so what the fixer changes outside the conflict
@@ -358,7 +404,8 @@ export async function captureFixBaseline(
     revParse(dir, 'MERGE_HEAD'),
     unmergedPaths(dir),
   ]);
-  if (head === null || mergeHead === null || unmerged === null) {
+  const resolving = unmerged === null ? null : await resolvingPaths(dir, unmerged);
+  if (head === null || mergeHead === null || resolving === null) {
     return { unavailable: 'git could not read the merge' };
   }
   const tree = await snapshotTree(dir);
@@ -369,7 +416,7 @@ export async function captureFixBaseline(
   }
   const index = await stagedTree(dir);
   if ('error' in index) return { unavailable: `git could not record the index: ${index.error}` };
-  return { tree: tree.tree, index: index.tree, ignored: ignored.blob, unmerged, head, mergeHead };
+  return { tree: tree.tree, index: index.tree, ignored: ignored.blob, resolving, head, mergeHead };
 }
 
 export interface FixerLeftovers {
@@ -381,6 +428,8 @@ export interface FixerLeftovers {
   /** Index entries the fixer staged outside the conflict, put back as the merge had them, with the
    *  blob each held (null for a staged deletion). */
   unstaged: { path: string; blob: string | null }[];
+  /** Files deleted outside the conflict and put back, so a deletion is reported like any change. */
+  restored: string[];
   /** Set when git could not say what the fixer changed, so part or all of it went unchecked. */
   unchecked?: string;
 }
@@ -487,6 +536,7 @@ export async function relocateFixerChanges(
     moved: [],
     left: [],
     unstaged: [],
+    restored: [],
     unchecked: reason,
   });
   if ('unavailable' in baseline) {
@@ -511,15 +561,16 @@ export async function relocateFixerChanges(
     () => null,
   );
   const owner = tree ? { uid: tree.stats.uid, gid: tree.stats.gid } : undefined;
-  const conflicted = new Set(baseline.unmerged);
+  const resolving = new Set(baseline.resolving);
   const outside = (c: { srcMode: string; dstMode: string; path: string }): boolean =>
-    !conflicted.has(c.path) &&
+    !covered(resolving, c.path) &&
     !haiveOwned(c.path) &&
     c.srcMode !== GITLINK_MODE &&
     c.dstMode !== GITLINK_MODE;
   const moved: string[] = [];
   const left: FixerLeftovers['left'] = [];
   const restore: string[] = [];
+  const deleted = new Set<string>();
   if (after.tree !== baseline.tree) {
     const diff = await gitRun(dir, [
       'diff-tree',
@@ -550,6 +601,7 @@ export async function relocateFixerChanges(
           continue;
         }
       }
+      if (c.status === 'D') deleted.add(c.path);
       if (c.status !== 'A') restore.push(c.path);
     }
   }
@@ -561,6 +613,7 @@ export async function relocateFixerChanges(
     });
   }
   const putBack = restore.filter((p) => !occupied.has(p));
+  const restored: string[] = [];
   for (let i = 0; i < putBack.length; i += PATHSPEC_CHUNK) {
     const chunk = putBack.slice(i, i + PATHSPEC_CHUNK);
     const created = owner ? await missingParents(anchor, prefix, chunk) : [];
@@ -571,9 +624,10 @@ export async function relocateFixerChanges(
     );
     if (res.code !== 0) {
       for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });
-    } else if (owner) {
-      await giveBack(anchor, prefix, [...created, ...chunk], owner);
+      continue;
     }
+    restored.push(...chunk.filter((p) => deleted.has(p)));
+    if (owner) await giveBack(anchor, prefix, [...created, ...chunk], owner);
   }
   const unstaged: FixerLeftovers['unstaged'] = [];
   let indexUnchecked: string | undefined;
@@ -614,7 +668,13 @@ export async function relocateFixerChanges(
   if (putBack.length > 0 || unstaged.length > 0) {
     await gitRun(dir, ['update-index', '-q', '--refresh']);
   }
-  if (moved.length === 0 && left.length === 0 && unstaged.length === 0 && !indexUnchecked) {
+  if (
+    moved.length === 0 &&
+    restored.length === 0 &&
+    left.length === 0 &&
+    unstaged.length === 0 &&
+    !indexUnchecked
+  ) {
     return null;
   }
   const manifest = {
@@ -622,6 +682,7 @@ export async function relocateFixerChanges(
     baseline: baseline.tree,
     after: after.tree,
     moved,
+    restored,
     left,
     unstaged,
   };
@@ -636,6 +697,7 @@ export async function relocateFixerChanges(
     moved,
     left,
     unstaged,
+    restored,
     ...(indexUnchecked ? { unchecked: indexUnchecked } : {}),
   };
 }
@@ -661,6 +723,8 @@ export async function recordFixerLeftovers(
       leftCount: leftovers.left.length,
       unstaged: leftovers.unstaged.slice(0, 50),
       unstagedCount: leftovers.unstaged.length,
+      restored: leftovers.restored.slice(0, 50),
+      restoredCount: leftovers.restored.length,
       ...(leftovers.unchecked ? { unchecked: leftovers.unchecked } : {}),
     },
   });
@@ -677,6 +741,11 @@ export function fixerLeftoversWarning(taskId: string, leftovers: FixerLeftovers)
   if (leftovers.moved.length > 0 || leftovers.left.length > 0) {
     notes.push(
       `A merge fixer changed files outside the conflicted ones, and none of them was committed. They were moved to ${folder}, a folder per attempt whose manifest.json also names any it could not move, with each link's target.`,
+    );
+  }
+  if (leftovers.restored.length > 0) {
+    notes.push(
+      `A merge fixer deleted files outside the conflicted ones, and they were put back; the manifest.json in ${folder} names each.`,
     );
   }
   if (leftovers.unstaged.length > 0) {
@@ -735,6 +804,8 @@ export async function completeMergeHostSide(
   if (head.code !== 0) return false; // merge no longer open and not committed
   const files = await unmergedPaths(worktreePath);
   if (files === null) return false;
+  const resolving = await resolvingPaths(worktreePath, files);
+  if (resolving === null) return false;
   // The worktree is under `.haive/`, which the sandbox mounts read-write, so it is SPLIT rather
   // than used as the anchor: every path git reported is walked a component at a time.
   const { anchor, prefix } = workspaceAnchor(worktreePath);
@@ -757,10 +828,10 @@ export async function completeMergeHostSide(
   }
   // Only the paths the fixer was sent to resolve: the merge staged everything else itself, and what
   // else the tree holds is someone's own work or a fixer's stray change, neither of it the merge's.
-  for (let i = 0; i < files.length; i += PATHSPEC_CHUNK) {
+  for (let i = 0; i < resolving.length; i += PATHSPEC_CHUNK) {
     const add = await gitRun(
       worktreePath,
-      ['add', '-A', '--', ...files.slice(i, i + PATHSPEC_CHUNK)],
+      ['add', '-A', '--', ...resolving.slice(i, i + PATHSPEC_CHUNK)],
       { GIT_LITERAL_PATHSPECS: '1' },
     );
     if (add.code !== 0) return false;

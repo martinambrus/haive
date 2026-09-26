@@ -184,6 +184,27 @@ async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
   return { dir, kept };
 }
 
+/** `main` holds a file `foo` and `feature/x` a directory `foo/bar`, so git moves the file aside and
+ *  reports only the name it gave it; the merge is left open. */
+async function setupDirectoryFileConflict(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-'));
+  await git(dir, ['init', '-b', 'main']);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await mkdir(path.join(dir, 'foo'));
+  await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature dir']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'main file']);
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
+}
+
 describe('fixer leftovers (real git)', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -210,7 +231,7 @@ describe('fixer leftovers (real git)', () => {
     const dir = await setupMergeWithOwnWork();
     try {
       const baseline = await captureFixBaseline(dir);
-      expect(baseline).toMatchObject({ unmerged: ['base.txt'] });
+      expect(baseline).toMatchObject({ resolving: ['base.txt'] });
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await writeFile(path.join(dir, 'clean.txt'), 'fixer on staged\n', 'utf8');
       await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
@@ -371,6 +392,46 @@ describe('fixer leftovers (real git)', () => {
       expect(out?.unchecked).toBeUndefined();
       expect(out?.left).toEqual([expect.objectContaining({ reason: 'its name is not UTF-8' })]);
       expect(await readFile(odd, 'utf8')).toBe('odd\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // git reports `foo~HEAD` alone and stages the directory side, so keeping the file touches both.
+  it('commits the file side of a directory/file conflict a fixer chose', async () => {
+    const dir = await setupDirectoryFileConflict();
+    try {
+      const [moved] = await unmergedPaths(dir).then((u) => u ?? []);
+      expect(moved).toBeDefined();
+      const baseline = await captureFixBaseline(dir);
+      expect(baseline).toMatchObject({ resolving: [moved, 'foo'] });
+      await rm(path.join(dir, 'foo'), { recursive: true });
+      await rename(path.join(dir, moved!), path.join(dir, 'foo'));
+      expect(await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' })).toBeNull();
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
+      expect(await git(dir, ['show', 'HEAD:foo'])).toBe('file\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // At a same-branch root the deletion can be the person's, so putting a file back is reported.
+  it('reports a deleted file it put back, even when nothing else changed', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await rm(path.join(dir, 'untouched.txt'));
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.restored).toEqual(['untouched.txt']);
+      expect(out?.moved).toEqual([]);
+      expect(fixerLeftoversWarning('t1', out!)).toContain('they were put back');
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('untouched.txt')).toBe('untouched\n');
+      const manifest = JSON.parse(await read('.haive/merge-leftovers/t1/inv1/manifest.json')) as {
+        restored: string[];
+      };
+      expect(manifest.restored).toEqual(['untouched.txt']);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
