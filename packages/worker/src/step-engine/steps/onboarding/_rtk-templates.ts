@@ -2,16 +2,20 @@ import type { CliProviderName, TemplateItem, TemplateRendering } from '@haive/sh
 import {
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
+  RTK_SETTINGS_FILES,
   RTK_SLIM,
   rtkSettingsNeeded,
+  type RtkSettingsFile,
 } from '@haive/shared';
 
 export { RTK_REF_MARKER_END, RTK_REF_MARKER_START, RTK_SLIM };
-
-/** Hook commands invoked by each CLI's runtime when an RTK-managed event
- *  fires. Mirrors rtk's own `CLAUDE_HOOK_COMMAND` / gemini hook command. */
-export const RTK_HOOK_CLAUDE_COMMAND = 'rtk hook claude';
-export const RTK_HOOK_GEMINI_COMMAND = 'rtk hook gemini';
+export {
+  buildClaudeSettingsJson,
+  buildGeminiSettingsJson,
+  RTK_HOOK_CLAUDE_COMMAND,
+  RTK_HOOK_GEMINI_COMMAND,
+  withoutRtkHookEntry,
+} from '@haive/shared';
 
 /** Minimal slice of `TemplateRenderContext` that rtk factories actually read.
  *  Declared locally so this module has no dependency on the manifest module
@@ -38,40 +42,6 @@ export function hasGemini(ctx: RtkRenderInputs): boolean {
   );
 }
 
-/** Hook block written to `.claude/settings.json` (claude-code, zai). Shape
- *  pulled verbatim from rtk's `insert_hook_entry` (PreToolUse → Bash matcher
- *  → command). Once rtk is disabled the next upgrade offers this file for
- *  removal as `obsolete`, and keeps it when it no longer holds these bytes. */
-export function buildClaudeSettingsJson(): string {
-  const obj = {
-    hooks: {
-      PreToolUse: [
-        {
-          matcher: 'Bash',
-          hooks: [{ type: 'command', command: RTK_HOOK_CLAUDE_COMMAND }],
-        },
-      ],
-    },
-  };
-  return `${JSON.stringify(obj, null, 2)}\n`;
-}
-
-/** Gemini hook block. `BeforeTool` + `run_shell_command` matcher come from
- *  rtk's `patch_gemini_settings`. */
-export function buildGeminiSettingsJson(): string {
-  const obj = {
-    hooks: {
-      BeforeTool: [
-        {
-          matcher: 'run_shell_command',
-          hooks: [{ type: 'command', command: RTK_HOOK_GEMINI_COMMAND }],
-        },
-      ],
-    },
-  };
-  return `${JSON.stringify(obj, null, 2)}\n`;
-}
-
 /** Marker-wrapped RTK awareness block inlined into AGENTS.md — the single
  *  rules source every CLI reads (codex/amp/antigravity natively; claude/zai/
  *  gemini via `@AGENTS.md`). Inlined rather than an `@RTK.md` reference because
@@ -91,87 +61,20 @@ export function buildRtkAwarenessBlock(): string {
  *  because a manifest item pointing at AGENTS.md would let an upgrade clobber
  *  or delete the whole project-spec + rules file. */
 export function buildRtkTemplateItems<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx>[] {
-  return [rtkClaudeSettingsItem<TCtx>(), rtkGeminiSettingsItem<TCtx>()];
+  return RTK_SETTINGS_FILES.map((file) => rtkSettingsItem<TCtx>(file));
 }
 
-function rtkClaudeSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
+function rtkSettingsItem<TCtx extends RtkRenderInputs>(file: RtkSettingsFile): TemplateItem<TCtx> {
   return {
-    id: 'rtk.claude-settings',
+    id: file.templateId,
     kind: 'rtk-config',
     schemaVersion: 1,
     render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasClaudeFamily(ctx)) return [];
-      return [{ diskPath: '.claude/settings.json', content: buildClaudeSettingsJson() }];
+      const providers = ctx.enabledCliProviders.map((p) => p.name);
+      if (!ctx.rtkEnabled || !rtkSettingsNeeded(file.templateId, providers)) return [];
+      return [{ diskPath: file.diskPath, content: file.render() }];
     },
   };
-}
-
-function rtkGeminiSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.gemini-settings',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasGemini(ctx)) return [];
-      return [{ diskPath: '.gemini/settings.json', content: buildGeminiSettingsJson() }];
-    },
-  };
-}
-
-const RTK_SETTINGS_HOOKS: Readonly<Record<string, { eventKey: string; command: string }>> = {
-  'rtk.claude-settings': { eventKey: 'PreToolUse', command: RTK_HOOK_CLAUDE_COMMAND },
-  'rtk.gemini-settings': { eventKey: 'BeforeTool', command: RTK_HOOK_GEMINI_COMMAND },
-};
-
-/** A settings file without the hook its RTK template wrote: every hook item whose command is exactly
- *  RTK's, and each entry, event list and `hooks` object that leaves empty, written back with the
- *  file's own indent, line endings and final newline. Null when it holds no such hook, is not
- *  strict JSON, or is a file that parsing and writing back would change anywhere else. */
-export function withoutRtkHookEntry(templateId: string, text: string): string | null {
-  const hook = RTK_SETTINGS_HOOKS[templateId];
-  if (!hook) return null;
-  let root: unknown;
-  try {
-    root = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  const indent = /^[ \t]+(?=\S)/m.exec(text)?.[0] ?? '';
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const serialize = (value: unknown) => {
-    const body = JSON.stringify(value, null, indent).replace(/\n/g, eol);
-    return /\n$/.test(text) ? `${body}${eol}` : body;
-  };
-  // A value a parse cannot keep as written (an integer past 2^53, `1.0`, an escape, a repeated key)
-  // would be rewritten with the hook, and one nested too deep cannot be written at all, so only a
-  // file that round-trips exactly is edited.
-  try {
-    if (serialize(root) !== text) return null;
-  } catch {
-    return null;
-  }
-  if (!isRecord(root) || !isRecord(root.hooks)) return null;
-  const hooks = root.hooks;
-  const entries = hooks[hook.eventKey];
-  if (!Array.isArray(entries)) return null;
-  let removed = false;
-  const kept = entries.filter((entry) => {
-    if (!isRecord(entry) || !Array.isArray(entry.hooks)) return true;
-    const items = entry.hooks.filter((item) => !(isRecord(item) && item.command === hook.command));
-    if (items.length === entry.hooks.length) return true;
-    removed = true;
-    entry.hooks = items;
-    return items.length > 0;
-  });
-  if (!removed) return null;
-  if (kept.length > 0) hooks[hook.eventKey] = kept;
-  else delete hooks[hook.eventKey];
-  if (Object.keys(hooks).length === 0) delete root.hooks;
-  return serialize(root);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Merge-aware insertion of an RTK hook into a parsed JSON settings tree
