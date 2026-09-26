@@ -10,6 +10,7 @@ import {
   buildMergeFixPrompt,
   captureFixBaseline,
   completeMergeHostSide,
+  fixerLeftoversWarning,
   mergeCommitted,
   openMerge,
   relocateFixerChanges,
@@ -150,6 +151,8 @@ async function setupMergeWithOwnWork(): Promise<string> {
   await writeFile(path.join(dir, 'dirt.txt'), 'dirt\n', 'utf8');
   await mkdir(path.join(dir, 'lib', 'deep'), { recursive: true });
   await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'keep\n', 'utf8');
+  await mkdir(path.join(dir, 'lib', 'other'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'other', 'gone.txt'), 'gone\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'main only']);
   await writeFile(path.join(dir, 'dirt.txt'), 'person dirt\n', 'utf8');
@@ -184,7 +187,7 @@ describe('fixer leftovers (real git)', () => {
     const dir = await setupMergeWithOwnWork();
     try {
       const baseline = await captureFixBaseline(dir);
-      expect(baseline?.unmerged).toEqual(['base.txt']);
+      expect(baseline).toMatchObject({ unmerged: ['base.txt'] });
       await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
       await writeFile(path.join(dir, 'clean.txt'), 'fixer on staged\n', 'utf8');
       await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
@@ -206,6 +209,7 @@ describe('fixer leftovers (real git)', () => {
         'untouched.txt',
       ]);
       expect(out?.left.map((l) => l.path)).toEqual(['link-stray']);
+      expect(out?.unstaged).toEqual([]);
       const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
       expect(await read('base.txt')).toBe('resolved\n');
       expect(await read('clean.txt')).toBe('two\n');
@@ -226,21 +230,84 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // A fixer that ran git staged what it changed, and the person's own work with it.
+  it('takes what a fixer staged outside the conflict out of the index before the commit', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved.sort()).toEqual(['stray.txt', 'untouched.txt']);
+      expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
+        'dirt.txt',
+        'mine.txt',
+        'stray.txt',
+        'untouched.txt',
+      ]);
+      expect(fixerLeftoversWarning('t1', out!)).toContain('taken back out of the index');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+      expect(await git(dir, ['show', 'HEAD:clean.txt'])).toBe('two\n');
+      expect(await git(dir, ['show', 'HEAD:untouched.txt'])).toBe('untouched\n');
+      expect(await git(dir, ['show', 'HEAD:dirt.txt'])).toBe('dirt\n');
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
+      expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
+      expect(await readFile(path.join(dir, 'mine.txt'), 'utf8')).toBe('mine\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a baseline git could not record rather than checking nothing', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await git(dir, ['merge', '--abort']);
+      const baseline = await captureFixBaseline(dir);
+      expect(baseline).toEqual({ unavailable: 'git could not read the merge' });
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.unchecked).toContain('nothing was recorded before it ran');
+      expect(fixerLeftoversWarning('t1', out!)).toContain('Could not check');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // git writes what it puts back as this process, where the sandbox user owned what stood there.
   it.runIf(process.getuid?.() === 0)(
-    'hands what it puts back to the owner of the tree, directories git recreated included',
+    'hands what it puts back, and the directories git recreated, to the owner of the tree',
     async () => {
       const dir = await setupMergeWithOwnWork();
       try {
         await exec('chown', ['-R', '1000:1000', dir]);
+        await exec('chown', ['0:0', path.join(dir, 'lib', 'deep')]);
         const baseline = await captureFixBaseline(dir);
         await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
-        await rm(path.join(dir, 'lib'), { recursive: true });
+        await writeFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'fixer on keep\n', 'utf8');
+        await rm(path.join(dir, 'lib', 'other'), { recursive: true });
         await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
         expect(await readFile(path.join(dir, 'lib', 'deep', 'keep.txt'), 'utf8')).toBe('keep\n');
-        for (const rel of ['untouched.txt', 'lib', 'lib/deep', 'lib/deep/keep.txt']) {
-          expect((await lstat(path.join(dir, rel))).uid, rel).toBe(1000);
-        }
+        expect(await readFile(path.join(dir, 'lib', 'other', 'gone.txt'), 'utf8')).toBe('gone\n');
+        const owners = [
+          'untouched.txt',
+          'lib/deep/keep.txt',
+          'lib/other',
+          'lib/other/gone.txt',
+          'lib/deep',
+        ];
+        const uids = await Promise.all(
+          owners.map(async (rel) => (await lstat(path.join(dir, rel))).uid),
+        );
+        expect(Object.fromEntries(owners.map((rel, i) => [rel, uids[i]]))).toEqual({
+          'untouched.txt': 1000,
+          'lib/deep/keep.txt': 1000,
+          'lib/other': 1000,
+          'lib/other/gone.txt': 1000,
+          'lib/deep': 0,
+        });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

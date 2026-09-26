@@ -16,6 +16,7 @@ import {
   recordFixerLeftovers,
   relocateFixerChanges,
   type FixBaseline,
+  type FixBaselineUnavailable,
 } from '../../git-merge.js';
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
@@ -99,7 +100,7 @@ interface PlanMergeDetect {
   /** True while the merge is live in the worktree. */
   mergeOpen: boolean;
   /** The tree the agent is sent into on an answer pass; absent on a collect pass. */
-  fixBaseline?: FixBaseline | null;
+  fixBaseline?: FixBaseline | FixBaselineUnavailable | null;
 }
 
 interface PlanMergeApply {

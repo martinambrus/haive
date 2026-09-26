@@ -37,6 +37,7 @@ import {
   recordFixerLeftovers,
   relocateFixerChanges,
   type FixBaseline,
+  type FixBaselineUnavailable,
   type MergeAbort,
 } from './git-merge.js';
 import {
@@ -497,7 +498,7 @@ interface LevelMergeState {
   /** Per-issueKey count of LLM resolution attempts. */
   conflictRetries: Record<string, number>;
   /** The tree the in-flight fixer was sent into (null = none recorded). */
-  fixBaseline: FixBaseline | null;
+  fixBaseline: FixBaseline | FixBaselineUnavailable | null;
 }
 
 function readMergeState(level: DagLevelRow): LevelMergeState {

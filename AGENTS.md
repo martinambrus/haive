@@ -493,32 +493,41 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
-- **What a fixer changes outside the conflicted files is moved aside, never committed or lost.** Before a
-  fixer is sent in, the merge dir is recorded as one git tree built in a scratch index, untracked files
-  included, with the paths it is sent to resolve, `HEAD` and `MERGE_HEAD` (`captureFixBaseline`,
-  1.8 s cold on a 39,378-file repository). Files git ignores are left out and stay where a fixer leaves
-  them, never committed: they are where a person's running tools write (build output, logs, caches),
-  and recording them would hash every dependency tree, MEASURED at 43,305 ignored files (835 MB of
-  `node_modules`) beside 1,972 tracked in a worktree of this repository. While secret masking is on
-  (the default), the deny-list's files (`.env`, `.env.*`) are read-only empty mounts in the fixer's
-  sandbox, so it cannot change those. Once it ends, on every outcome and before the merge is
-  committed or aborted, whatever it changed outside those paths moves to
-  `.haive/merge-leftovers/<task>/<run>/files/` beside a `manifest.json`, and the paths are put back from
-  the tree (`relocateFixerChanges`). The commit then stages only the paths the fixer was sent to resolve,
-  so neither a stray nor a person's own uncommitted work at a same-branch root is swept into it, where
-  `add -A` took both. A person's own edit made there while the fixer ran cannot be told from the fixer's
-  and is moved with it. The index is refreshed after the restore, since git rewrites the files and
-  `merge --abort` refuses their stale stat data. git writes what it puts back as the worker, so those
-  paths, and any directory recreated for them, are handed back to the merge dir's owner. `.haive/`,
-  `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name git could not
-  decode stays and is reported. The recorded
-  tree is spent once used, and one whose merge a person finished or aborted meanwhile moves nothing:
-  putting its paths back would write merged files into a tree with no merge open. Each relocation is a
+- **What a fixer changes outside the conflicted files is moved aside, never committed or lost.**
+  Before a fixer is sent in, the merge dir is recorded as one git tree built in a scratch index,
+  untracked files included, with what the merge staged (a tree built from
+  `diff-index --cached HEAD`, so its cost follows the merge), the paths it is sent to resolve,
+  `HEAD` and `MERGE_HEAD` (`captureFixBaseline`, 1.8 s cold on a 39,378-file repository). Files git
+  ignores are left out and stay where a fixer leaves them, never committed: they are where a
+  person's running tools write (build output, logs, caches), and recording them would hash every
+  dependency tree, MEASURED at 43,305 ignored files (835 MB of `node_modules`) beside 1,972 tracked
+  in a worktree of this repository. While secret masking is on (the default), the deny-list's files
+  (`.env`, `.env.*`) are read-only empty mounts in the fixer's sandbox, so it cannot change those.
+  Once it ends, on every outcome and before the merge is committed or aborted, whatever it changed
+  outside those paths moves to `.haive/merge-leftovers/<task>/<run>/files/` beside a
+  `manifest.json`, and the paths are put back from the tree (`relocateFixerChanges`). The commit
+  then stages only the paths the fixer was sent to resolve, so neither a stray nor a person's own
+  uncommitted work at a same-branch root is swept into it, where `add -A` took both. What a fixer
+  staged itself outside those paths is put back in the index as the merge had it, since `commit`
+  takes the whole index and a fixer at a same-branch root can run git; MEASURED on git 2.43, git
+  refuses to open a merge while the index holds a staged change, so the recorded index is the
+  merge's own, and the manifest names each blob taken out. A person's own edit made there while the
+  fixer ran cannot be told from the fixer's and is moved with it. The index is refreshed after the
+  restore, since git rewrites the files and `merge --abort` refuses their stale stat data. git
+  writes what it puts back as the worker, so those paths, and the directories git created for them,
+  are handed back to the merge dir's owner; a directory that already stood keeps its own. `.haive/`,
+  `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name git could
+  not decode stays and is reported. The recorded tree is spent once used, and one whose merge a
+  person finished or aborted meanwhile moves nothing: putting its paths back would write merged
+  files into a tree with no merge open. A tree git could not record is reported the same way rather
+  than read as a fixer that changed nothing; the fixer is still sent, since halting there would stop
+  every merge whose scratch `add` fails (a clean filter the worker lacks). Each relocation is a
   `merge.fixer_leftovers` event and a step warning. A base worktree is removed without `--force`, so
   one still holding something git will not discard is kept and named. The plan merge's agent pass
   (`01-plan-merge`) is handled the same way, its note going into the conversation rather than a step
   warning, since the revise loop resets the row every turn. Nothing is recorded under
-  `HOST_REPO_ROOT`: the sandbox mounts a local-path repository read-only, so no fixer can write there.
+  `HOST_REPO_ROOT`: the sandbox mounts a local-path repository read-only, so no fixer can write
+  there.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.

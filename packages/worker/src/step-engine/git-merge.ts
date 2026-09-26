@@ -157,34 +157,85 @@ export function abortFailureNote(abort: { blocking: string[]; detail: string }):
 }
 
 /** What a merge dir held when a fixer was sent in: the worktree as one git tree (tracked files and
- *  the untracked ones git does not ignore), the paths the fixer was sent to resolve, and the merge it
- *  was sent into. */
+ *  the untracked ones git does not ignore), what the merge had staged, the paths the fixer was sent
+ *  to resolve, and the merge it was sent into. */
 export interface FixBaseline {
   tree: string;
+  index: string;
   unmerged: string[];
   head: string;
   mergeHead: string;
 }
 
+/** A baseline git could not record, kept so the relocation says why it checked nothing. */
+export interface FixBaselineUnavailable {
+  unavailable: string;
+}
+
+type TreeResult = { tree: string } | { error: string };
+
 /** The worktree as one git tree, untracked files included and ignored ones left out. Built in a
  *  scratch index, since the merge's own index holds the conflict. */
-async function snapshotTree(dir: string): Promise<string | null> {
+async function snapshotTree(dir: string): Promise<TreeResult> {
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
   try {
-    if ((await gitRun(dir, ['read-tree', 'HEAD'], env)).code !== 0) return null;
-    if ((await gitRun(dir, ['add', '-A'], env)).code !== 0) return null;
+    for (const args of [
+      ['read-tree', 'HEAD'],
+      ['add', '-A'],
+    ]) {
+      const res = await gitRun(dir, args, env);
+      if (res.code !== 0) return { error: gitDetail(res) };
+    }
     const tree = await gitRun(dir, ['write-tree'], env);
-    return tree.code === 0 ? tree.stdout.trim() : null;
+    return tree.code === 0 ? { tree: tree.stdout.trim() } : { error: gitDetail(tree) };
+  } finally {
+    await removeNoFollow(os.tmpdir(), name).catch(() => false);
+  }
+}
+
+/** What the merge staged, as one tree: HEAD with the index's resolved changes applied and the
+ *  conflicted paths left as HEAD has them. Built from the changes alone, so it costs what the merge
+ *  changed rather than what the repository holds. */
+async function stagedTree(dir: string): Promise<TreeResult> {
+  const changes = await gitRun(dir, ['diff-index', '--cached', '-z', '--no-renames', 'HEAD']);
+  if (changes.code !== 0) return { error: gitDetail(changes) };
+  const name = `haive-merge-snapshot-${randomUUID()}`;
+  const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
+  try {
+    const read = await gitRun(dir, ['read-tree', 'HEAD'], env);
+    if (read.code !== 0) return { error: gitDetail(read) };
+    const put: string[] = [];
+    const drop: string[] = [];
+    for (const c of rawChanges(changes.stdout)) {
+      if (c.status === 'U') continue;
+      if (c.status === 'D') drop.push(c.path);
+      else put.push(`${c.dstMode},${c.dstSha},${c.path}`);
+    }
+    for (let i = 0; i < put.length; i += PATHSPEC_CHUNK) {
+      const infos = put.slice(i, i + PATHSPEC_CHUNK).flatMap((p) => ['--cacheinfo', p]);
+      const res = await gitRun(dir, ['update-index', '--add', ...infos], env);
+      if (res.code !== 0) return { error: gitDetail(res) };
+    }
+    for (let i = 0; i < drop.length; i += PATHSPEC_CHUNK) {
+      const paths = drop.slice(i, i + PATHSPEC_CHUNK);
+      const res = await gitRun(dir, ['update-index', '--force-remove', '--', ...paths], env);
+      if (res.code !== 0) return { error: gitDetail(res) };
+    }
+    const tree = await gitRun(dir, ['write-tree'], env);
+    return tree.code === 0 ? { tree: tree.stdout.trim() } : { error: gitDetail(tree) };
   } finally {
     await removeNoFollow(os.tmpdir(), name).catch(() => false);
   }
 }
 
 /** Record the tree before a fixer is sent into it, so what the fixer changes outside the conflict
- *  can be told from the merge and from what stood there already. Null when there is nothing to
- *  record: a person's own checkout, which the sandbox mounts read-only, or a tree git cannot read. */
-export async function captureFixBaseline(dir: string): Promise<FixBaseline | null> {
+ *  can be told from the merge and from what stood there already. Null for a person's own checkout,
+ *  which the sandbox mounts read-only. What git could not record is kept as its reason, so the
+ *  relocation reports it rather than reading the fixer's changes as none. */
+export async function captureFixBaseline(
+  dir: string,
+): Promise<FixBaseline | FixBaselineUnavailable | null> {
   if (isHostCheckout(dir)) return null;
   // `.haive/` holds other tasks' worktrees and earlier leftovers; excluded, no snapshot reads them.
   await ensureGitExcludeEntry(workspaceAnchor(dir).anchor).catch(() => undefined);
@@ -193,9 +244,14 @@ export async function captureFixBaseline(dir: string): Promise<FixBaseline | nul
     revParse(dir, 'MERGE_HEAD'),
     unmergedPaths(dir),
   ]);
-  if (head === null || mergeHead === null || unmerged === null) return null;
+  if (head === null || mergeHead === null || unmerged === null) {
+    return { unavailable: 'git could not read the merge' };
+  }
   const tree = await snapshotTree(dir);
-  return tree === null ? null : { tree, unmerged, head, mergeHead };
+  if ('error' in tree) return { unavailable: `git could not record the tree: ${tree.error}` };
+  const index = await stagedTree(dir);
+  if ('error' in index) return { unavailable: `git could not record the index: ${index.error}` };
+  return { tree: tree.tree, index: index.tree, unmerged, head, mergeHead };
 }
 
 export interface FixerLeftovers {
@@ -204,44 +260,62 @@ export interface FixerLeftovers {
   moved: string[];
   /** Changes still in the tree, with why. */
   left: { path: string; reason: string }[];
-  /** Set when git could not say what the fixer changed, so nothing was moved. */
+  /** Index entries the fixer staged outside the conflict, put back as the merge had them, with the
+   *  blob each held (null for a staged deletion). */
+  unstaged: { path: string; blob: string | null }[];
+  /** Set when git could not say what the fixer changed, so part or all of it went unchecked. */
   unchecked?: string;
 }
 
 export const MERGE_LEFTOVERS_DIR = '.haive/merge-leftovers';
 const GITLINK_MODE = '160000';
+const NULL_SHA = /^0+$/;
 
 /** Haive's own directories, which other writers keep: a relocation never touches them. */
 function haiveOwned(p: string): boolean {
   return p === '.haive' || p.startsWith('.haive/') || p.startsWith('.haive-data/');
 }
 
-/** `diff-tree -r -z` raw records; `--no-renames` keeps each to one path. */
+/** `diff-tree` / `diff-index` `-z` raw records; `--no-renames` keeps each to one path. */
 function rawChanges(
   out: string,
-): { srcMode: string; dstMode: string; status: string; path: string }[] {
+): { srcMode: string; dstMode: string; dstSha: string; status: string; path: string }[] {
   const parts = out.split('\0');
   const changes = [];
   for (let i = 0; i + 1 < parts.length && parts[i]!.startsWith(':'); i += 2) {
-    const [srcMode = '', dstMode = '', , , status = ''] = parts[i]!.slice(1).split(' ');
-    changes.push({ srcMode, dstMode, status: status.charAt(0), path: parts[i + 1]! });
+    const [srcMode = '', dstMode = '', , dstSha = '', status = ''] = parts[i]!.slice(1).split(' ');
+    changes.push({ srcMode, dstMode, dstSha, status: status.charAt(0), path: parts[i + 1]! });
   }
   return changes;
 }
 
-/** git writes the restored files, and any directory it recreated for them, as this process, where
- *  the sandbox user owned what stood there; they are handed back to the tree's owner. */
+/** The directories a restore of `paths` will create: their parents that are missing now. */
+async function missingParents(anchor: string, prefix: string, paths: string[]): Promise<string[]> {
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i += 1) {
+      const parent = parts.slice(0, i).join('/');
+      if (seen.has(parent)) continue;
+      seen.add(parent);
+      if ((await lstatNoFollow(anchor, `${prefix}${parent}`).catch(() => undefined)) === null) {
+        missing.push(parent);
+      }
+    }
+  }
+  return missing;
+}
+
+/** git writes what it puts back as this process, where the sandbox user owned what stood there: the
+ *  restored files, and the directories git created for them, go back to the tree's owner. A
+ *  directory that already stood keeps its own. */
 async function giveBack(
   anchor: string,
   prefix: string,
-  paths: string[],
+  entries: string[],
   owner: { uid: number; gid: number },
 ): Promise<void> {
-  const entries = new Set<string>();
-  for (const p of paths) {
-    const parts = p.split('/');
-    for (let i = 1; i <= parts.length; i += 1) entries.add(parts.slice(0, i).join('/'));
-  }
   for (const e of entries) {
     await chownNoFollow(anchor, `${prefix}${e}`, owner).catch(() => undefined);
   }
@@ -250,68 +324,86 @@ async function giveBack(
 /** Move what a fixer changed outside the paths it was sent to resolve out of `dir`, into
  *  `<folder>/files/`, and put those paths back as the baseline had them, so neither the next fixer
  *  nor the merge commit inherits them. A path that cannot be moved (a link, a name git could not
- *  decode) stays in the tree and is reported. The index is refreshed after the restore, since git
- *  rewrites the files and `merge --abort` refuses an entry whose stat data no longer matches. */
+ *  decode) stays in the tree and is reported. What the fixer staged outside those paths is put back
+ *  in the index too, since the commit takes the whole index. The index is refreshed afterwards,
+ *  since git rewrites the files and `merge --abort` refuses an entry whose stat data no longer
+ *  matches. */
 export async function relocateFixerChanges(
   dir: string,
-  baseline: FixBaseline | null | undefined,
+  baseline: FixBaseline | FixBaselineUnavailable | null | undefined,
   run: { taskId: string; runId: string },
 ): Promise<FixerLeftovers | null> {
   if (!baseline || isHostCheckout(dir)) return null;
   const folder = `${MERGE_LEFTOVERS_DIR}/${run.taskId}/${run.runId}`;
+  const nothingChecked = (reason: string): FixerLeftovers => ({
+    folder,
+    moved: [],
+    left: [],
+    unstaged: [],
+    unchecked: reason,
+  });
+  if ('unavailable' in baseline) {
+    return nothingChecked(`nothing was recorded before it ran (${baseline.unavailable})`);
+  }
   // Once the merge was finished or aborted by hand the baseline no longer describes the tree, and
   // putting its paths back would write merged files into a tree with no merge open.
   if (
     (await revParse(dir, 'HEAD')) !== baseline.head ||
     (await revParse(dir, 'MERGE_HEAD')) !== baseline.mergeHead
   ) {
-    return {
-      folder,
-      moved: [],
-      left: [],
-      unchecked: 'the merge it was sent into is no longer open',
-    };
+    return nothingChecked('the merge it was sent into is no longer open');
   }
   const after = await snapshotTree(dir);
-  if (after === null) {
-    return { folder, moved: [], left: [], unchecked: 'git could not read the tree' };
-  }
-  if (after === baseline.tree) return null;
-  const diff = await gitRun(dir, ['diff-tree', '-r', '-z', '--no-renames', baseline.tree, after]);
-  if (diff.code !== 0) return { folder, moved: [], left: [], unchecked: gitDetail(diff) };
+  if ('error' in after) return nothingChecked(`git could not read the tree: ${after.error}`);
   const { anchor, prefix } = workspaceAnchor(dir);
   const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
     () => null,
   );
   const owner = tree ? { uid: tree.stats.uid, gid: tree.stats.gid } : undefined;
   const conflicted = new Set(baseline.unmerged);
+  const outside = (c: { srcMode: string; dstMode: string; path: string }): boolean =>
+    !conflicted.has(c.path) &&
+    !haiveOwned(c.path) &&
+    c.srcMode !== GITLINK_MODE &&
+    c.dstMode !== GITLINK_MODE;
   const moved: string[] = [];
   const left: FixerLeftovers['left'] = [];
   const restore: string[] = [];
-  for (const c of rawChanges(diff.stdout)) {
-    if (conflicted.has(c.path) || haiveOwned(c.path)) continue;
-    if (c.srcMode === GITLINK_MODE || c.dstMode === GITLINK_MODE) continue;
-    if (c.path.includes('\uFFFD')) {
-      left.push({ path: c.path, reason: 'its name is not UTF-8' });
-      continue;
-    }
-    if (c.status !== 'D') {
-      try {
-        await renameNoFollow(anchor, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
-          noReplace: true,
-          createParents: true,
-          owner,
-        });
-        moved.push(c.path);
-      } catch (err) {
-        left.push({ path: c.path, reason: err instanceof Error ? err.message : String(err) });
+  if (after.tree !== baseline.tree) {
+    const diff = await gitRun(dir, [
+      'diff-tree',
+      '-r',
+      '-z',
+      '--no-renames',
+      baseline.tree,
+      after.tree,
+    ]);
+    if (diff.code !== 0) return nothingChecked(gitDetail(diff));
+    for (const c of rawChanges(diff.stdout)) {
+      if (!outside(c)) continue;
+      if (c.path.includes('�')) {
+        left.push({ path: c.path, reason: 'its name is not UTF-8' });
         continue;
       }
+      if (c.status !== 'D') {
+        try {
+          await renameNoFollow(anchor, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
+            noReplace: true,
+            createParents: true,
+            owner,
+          });
+          moved.push(c.path);
+        } catch (err) {
+          left.push({ path: c.path, reason: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+      }
+      if (c.status !== 'A') restore.push(c.path);
     }
-    if (c.status !== 'A') restore.push(c.path);
   }
   for (let i = 0; i < restore.length; i += PATHSPEC_CHUNK) {
     const chunk = restore.slice(i, i + PATHSPEC_CHUNK);
+    const created = owner ? await missingParents(anchor, prefix, chunk) : [];
     const res = await gitRun(
       dir,
       ['restore', `--source=${baseline.tree}`, '--worktree', '--', ...chunk],
@@ -320,17 +412,58 @@ export async function relocateFixerChanges(
     if (res.code !== 0) {
       for (const p of chunk) left.push({ path: p, reason: `not put back: ${gitDetail(res)}` });
     } else if (owner) {
-      await giveBack(anchor, prefix, chunk, owner);
+      await giveBack(anchor, prefix, [...created, ...chunk], owner);
     }
   }
-  if (restore.length > 0) await gitRun(dir, ['update-index', '-q', '--refresh']);
-  if (moved.length === 0 && left.length === 0) return null;
+  const unstaged: FixerLeftovers['unstaged'] = [];
+  let indexUnchecked: string | undefined;
+  const staged = await gitRun(dir, [
+    'diff-index',
+    '--cached',
+    '-z',
+    '--no-renames',
+    baseline.index,
+  ]);
+  if (staged.code !== 0) {
+    indexUnchecked = `git could not read the index: ${gitDetail(staged)}`;
+  } else {
+    const unstage: { path: string; blob: string | null }[] = [];
+    for (const c of rawChanges(staged.stdout)) {
+      if (c.status === 'U' || !outside(c)) continue;
+      if (c.path.includes('�')) {
+        left.push({ path: c.path, reason: 'staged, and its name is not UTF-8' });
+        continue;
+      }
+      unstage.push({ path: c.path, blob: NULL_SHA.test(c.dstSha) ? null : c.dstSha });
+    }
+    for (let i = 0; i < unstage.length; i += PATHSPEC_CHUNK) {
+      const chunk = unstage.slice(i, i + PATHSPEC_CHUNK);
+      const res = await gitRun(
+        dir,
+        ['restore', '--staged', `--source=${baseline.index}`, '--', ...chunk.map((u) => u.path)],
+        { GIT_LITERAL_PATHSPECS: '1' },
+      );
+      if (res.code !== 0) {
+        for (const u of chunk)
+          left.push({ path: u.path, reason: `still staged: ${gitDetail(res)}` });
+      } else {
+        unstaged.push(...chunk);
+      }
+    }
+  }
+  if (restore.length > 0 || unstaged.length > 0) {
+    await gitRun(dir, ['update-index', '-q', '--refresh']);
+  }
+  if (moved.length === 0 && left.length === 0 && unstaged.length === 0 && !indexUnchecked) {
+    return null;
+  }
   const manifest = {
     dir: prefix.replace(/\/$/, '') || '.',
     baseline: baseline.tree,
-    after,
+    after: after.tree,
     moved,
     left,
+    unstaged,
   };
   await writeFileNoFollow(
     anchor,
@@ -338,7 +471,13 @@ export async function relocateFixerChanges(
     `${JSON.stringify(manifest, null, 2)}\n`,
     { createParents: true, owner },
   ).catch(() => undefined);
-  return { folder, moved, left };
+  return {
+    folder,
+    moved,
+    left,
+    unstaged,
+    ...(indexUnchecked ? { unchecked: indexUnchecked } : {}),
+  };
 }
 
 /** One event per relocation, so every attempt's leftovers stay findable from the Activity tab. */
@@ -360,6 +499,8 @@ export async function recordFixerLeftovers(
       movedCount: leftovers.moved.length,
       left: leftovers.left.slice(0, 20),
       leftCount: leftovers.left.length,
+      unstaged: leftovers.unstaged.slice(0, 50),
+      unstagedCount: leftovers.unstaged.length,
       ...(leftovers.unchecked ? { unchecked: leftovers.unchecked } : {}),
     },
   });
@@ -371,7 +512,19 @@ export function fixerLeftoversWarning(taskId: string, leftovers: FixerLeftovers)
   if (leftovers.unchecked) {
     return `Could not check what a merge fixer changed outside the conflicted files: ${leftovers.unchecked}.`;
   }
-  return `A merge fixer changed files outside the conflicted ones, and none of them was committed. They were moved to ${MERGE_LEFTOVERS_DIR}/${taskId}/, a folder per attempt whose manifest.json also lists any that could not be moved and are still in the tree.`;
+  const folder = `${MERGE_LEFTOVERS_DIR}/${taskId}/`;
+  const notes: string[] = [];
+  if (leftovers.moved.length > 0 || leftovers.left.length > 0) {
+    notes.push(
+      `A merge fixer changed files outside the conflicted ones, and none of them was committed. They were moved to ${folder}, a folder per attempt whose manifest.json also lists any that could not be moved and are still in the tree.`,
+    );
+  }
+  if (leftovers.unstaged.length > 0) {
+    notes.push(
+      `A merge fixer staged changes outside the conflicted files, and they were taken back out of the index before the commit; the manifest.json in ${folder} names each blob it had staged.`,
+    );
+  }
+  return notes.join(' ');
 }
 
 /** Build the conflict-resolution agent's prompt. `title` is an optional
