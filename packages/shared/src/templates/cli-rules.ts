@@ -12,6 +12,7 @@ import {
   DEFAULT_AGENT_RULES,
   KNOWN_DEFAULT_RULES_HASHES,
 } from '../constants/default-agent-rules.js';
+import type { CliProviderName } from '../types/index.js';
 import { sha256Hex } from './manifest.js';
 
 /** Opening marker of the cli-rules region inside AGENTS.md. */
@@ -59,6 +60,20 @@ export const LEGACY_RTK_MD_PATHS: readonly string[] = [
  *  re-vendored, keep this literal, since it names what is already on disk. */
 export const LEGACY_RTK_MD_SHA256 =
   'a1fb23c6477436be8b84a26435cf91f8b0f9a3f433a3081c7778b5b0835a2a54';
+
+/** The providers that read the settings file each RTK template writes, stated once so the worker
+ *  that renders it and the api that offers it cannot drift. `ollama` is the claude binary pointed
+ *  at another endpoint; grok and antigravity stay out, since rtk's target for them is unmeasured. */
+export const RTK_SETTINGS_READERS: Readonly<Record<string, readonly CliProviderName[]>> = {
+  'rtk.claude-settings': ['claude-code', 'zai', 'ollama', 'muse', 'openrouter'],
+  'rtk.gemini-settings': ['gemini'],
+};
+
+/** Whether any of these providers reads the settings file the RTK template writes. */
+export function rtkSettingsNeeded(templateId: string, providers: readonly string[]): boolean {
+  const readers: readonly string[] = RTK_SETTINGS_READERS[templateId] ?? [];
+  return providers.some((name) => readers.includes(name));
+}
 
 /** Every region Haive writes into a rules file, so an onboarding reset strips each of them. */
 export const HAIVE_REGION_MARKERS: ReadonlyArray<readonly [string, string]> = [

@@ -1,5 +1,10 @@
 import type { CliProviderName, TemplateItem, TemplateRendering } from '@haive/shared';
-import { RTK_REF_MARKER_END, RTK_REF_MARKER_START, RTK_SLIM } from '@haive/shared';
+import {
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
+  RTK_SLIM,
+  rtkSettingsNeeded,
+} from '@haive/shared';
 
 export { RTK_REF_MARKER_END, RTK_REF_MARKER_START, RTK_SLIM };
 
@@ -16,31 +21,21 @@ export interface RtkRenderInputs {
   enabledCliProviders: ReadonlyArray<{ name: CliProviderName }>;
 }
 
-/** Which providers get the project-level `.claude/settings.json` rtk hook.
- *
- *  `ollama` belongs here because it IS the claude binary pointed at another endpoint (see
- *  AGENTS.md); it reads the same project settings file as the rest of the family. It was the
- *  one member missing, so an ollama-only repo got the home-level hook that
- *  `rtkInitArgsFor` (sandbox/task-auth-volume.ts) seeds and never the project-level one —
- *  the same omission that file already found and fixed on its own side.
- *
- *  EXPORTED, and 07-generate-files.ts calls it rather than keeping its own copy. That
- *  duplicate is exactly how the two drifted: the list has to be stated once or the next
- *  provider added to the family repeats this. `grok` and `antigravity` stay out for the
- *  reason recorded in task-auth-volume.ts — rtk's write target for them is unmeasured. */
+/** Which providers get the project-level `.claude/settings.json` rtk hook: the family
+ *  `RTK_SETTINGS_READERS` names. 07-generate-files.ts calls this rather than keeping its own copy,
+ *  since a second list is how ollama once went missing from one of them. */
 export function hasClaudeFamily(ctx: RtkRenderInputs): boolean {
-  return ctx.enabledCliProviders.some(
-    (p) =>
-      p.name === 'claude-code' ||
-      p.name === 'zai' ||
-      p.name === 'ollama' ||
-      p.name === 'muse' ||
-      p.name === 'openrouter',
+  return rtkSettingsNeeded(
+    'rtk.claude-settings',
+    ctx.enabledCliProviders.map((p) => p.name),
   );
 }
 
 export function hasGemini(ctx: RtkRenderInputs): boolean {
-  return ctx.enabledCliProviders.some((p) => p.name === 'gemini');
+  return rtkSettingsNeeded(
+    'rtk.gemini-settings',
+    ctx.enabledCliProviders.map((p) => p.name),
+  );
 }
 
 /** Hook block written to `.claude/settings.json` (claude-code, zai). Shape
