@@ -1021,6 +1021,26 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
     });
 
+    // Its job died between failing the step and failing the task; every reopen resets the row first.
+    it('fails the task for a failed row instead of running the row', async () => {
+      h.state.readsAnswer = true;
+      setContainerCleanupRunner(vi.fn(async () => 0));
+      h.state.existingRow = {
+        ...unparked,
+        stepId: 'epoch-chain-first',
+        round: 0,
+        status: 'failed',
+        errorMessage: 'kaboom',
+      };
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      expect(h.state.landedTaskPatches.at(-1)).toMatchObject({
+        status: 'failed',
+        errorMessage: 'kaboom',
+      });
+      expect(h.state.events).toContain('step.failed');
+    });
+
     it('runs an answer to a form still parked on a failed task, which reopens it', async () => {
       h.state.readsAnswer = true;
       h.state.taskStatus = 'failed';
