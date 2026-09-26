@@ -33,6 +33,8 @@ interface UpgradeStatusResponse {
   linkedRulesFiles?: string[];
   /** Rules files still holding the RTK block after RTK was switched off; an upgrade takes it out. */
   rtkBlockLeftovers?: string[];
+  /** RTK settings files no row records that still hold its hook; an upgrade offers to take it out. */
+  rtkSettingsLeftovers?: string[];
 }
 
 export interface UpgradeAvailableBannerProps {
@@ -142,10 +144,11 @@ export function UpgradeAvailableBanner({
     ).length;
     const missingImports = status.missingRulesImports ?? [];
     const rtkBlocks = status.rtkBlockLeftovers ?? [];
+    const rtkHooks = status.rtkSettingsLeftovers ?? [];
     const showTemplateCount =
       haiveChangedCount > 0 ||
       bundleChanges.length > 0 ||
-      (missingImports.length === 0 && rtkBlocks.length === 0);
+      (missingImports.length === 0 && rtkBlocks.length === 0 && rtkHooks.length === 0);
     return (
       <div className="flex flex-col gap-1 rounded border border-indigo-900 bg-indigo-950/40 px-3 py-2 text-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -176,6 +179,13 @@ export function UpgradeAvailableBanner({
                 {(showTemplateCount || missingImports.length > 0) && '; '}
                 RTK is off, but its block is still in{' '}
                 <span className="font-mono text-neutral-200">{rtkBlocks.join(', ')}</span>
+              </>
+            )}
+            {rtkHooks.length > 0 && (
+              <>
+                {(showTemplateCount || missingImports.length > 0 || rtkBlocks.length > 0) && '; '}
+                RTK is off, but its hook is still in{' '}
+                <span className="font-mono text-neutral-200">{rtkHooks.join(', ')}</span>
               </>
             )}
           </span>

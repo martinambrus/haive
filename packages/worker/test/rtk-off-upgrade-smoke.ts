@@ -60,6 +60,7 @@ function defaultValues(form: FormSchema | null): Record<string, unknown> {
 }
 
 const SETTINGS = '.claude/settings.json';
+const GEMINI_SETTINGS = '.gemini/settings.json';
 const RTK_ITEM = 'rtk.claude-settings';
 
 async function main(): Promise<void> {
@@ -179,13 +180,24 @@ async function main(): Promise<void> {
     }
     const settingsEntry = (detected: UpgradePlanDetect) =>
       detected.entries.find((e) => e.diskPath === SETTINGS);
+    /** Mark an upgrade finished, its 02 output stored where a rollback of it reads it. */
+    async function finish(applyCtx: StepContext, applied: unknown) {
+      await db
+        .update(schema.taskSteps)
+        .set({ output: applied as Record<string, unknown>, status: 'done' })
+        .where(eq(schema.taskSteps.id, applyCtx.taskStepId));
+      await db
+        .update(schema.tasks)
+        .set({ status: 'completed', completedAt: new Date() })
+        .where(eq(schema.tasks.id, applyCtx.taskId));
+    }
     /** A rollback task of the most recent completed upgrade, run to the end. */
-    async function rollback(title: string) {
+    async function rollback(title: string, repo = { id: repositoryId, path: repoPath }) {
       const [task] = await db
         .insert(schema.tasks)
         .values({
           userId,
-          repositoryId,
+          repositoryId: repo.id,
           type: 'onboarding_upgrade',
           title,
           status: 'running',
@@ -204,7 +216,7 @@ async function main(): Promise<void> {
           status: 'running',
         })
         .returning({ id: schema.taskSteps.id });
-      const rollbackCtx = ctxFor(task!.id, row!.id);
+      const rollbackCtx = ctxFor(task!.id, row!.id, repo.path);
       const detected = await upgradeRollbackStep.detect!(rollbackCtx);
       return upgradeRollbackStep.apply(rollbackCtx, {
         detected,
@@ -494,6 +506,199 @@ async function main(): Promise<void> {
       settingsEntry(back.detected)?.bucket === 'new_artifact',
       { bucket: settingsEntry(back.detected)?.bucket },
     );
+
+    // ---- a rollback of the upgrade that removed it ------------------------------------------
+    await finish(again.applyCtx, againApplied);
+    await rollback('rtk-off-upgrade-smoke again rollback');
+    check(
+      'a rollback puts the removed settings file back, with a live row',
+      (await readOrNull(SETTINGS)) === buildClaudeSettingsJson() &&
+        (await liveRowsAt(SETTINGS)).length === 1,
+      { now: await readOrNull(SETTINGS) },
+    );
+    // An attempt that put the file back and failed before its rows: the retry finds its own restore.
+    await db
+      .delete(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, SETTINGS),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const retriedRollback = await rollback('rtk-off-upgrade-smoke again rollback retry');
+    check(
+      'a retried rollback takes the file an earlier attempt put back as restored',
+      (await liveRowsAt(SETTINGS)).length === 1 &&
+        !retriedRollback.warnings.some((w) => w.includes(SETTINGS)),
+      retriedRollback.warnings,
+    );
+
+    // ---- a blank repository switched off before its first upgrade ---------------------------
+    const seededId = randomUUID();
+    const seededPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-seeded-'));
+    try {
+      await db.insert(schema.repositories).values({
+        id: seededId,
+        userId,
+        name: 'rtk-off-upgrade-smoke seeded',
+        source: 'blank',
+        rtkEnabled: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      // gemini is enabled while the scaffold seeds, and disabled before the first upgrade.
+      const [gemini] = await db
+        .insert(schema.cliProviders)
+        .values({ userId, name: 'gemini', label: 'rtk-off-upgrade-smoke gemini', rulesContent: '' })
+        .returning({ id: schema.cliProviders.id });
+      const seededFiles = await seedBlankScaffold(
+        db,
+        { userId, repositoryId: seededId, repoName: 'rtk-off-upgrade-smoke seeded' },
+        seededPath,
+      );
+      if (!seededFiles.includes(GEMINI_SETTINGS)) {
+        throw new Error(`scaffold wrote no ${GEMINI_SETTINGS}`);
+      }
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: false })
+        .where(eq(schema.cliProviders.id, gemini!.id));
+      await db
+        .update(schema.repositories)
+        .set({ rtkEnabled: false })
+        .where(eq(schema.repositories.id, seededId));
+      const seeded = { id: seededId, path: seededPath };
+      const offeredForRemoval = (form: FormSchema | null, entryId: string | undefined) => {
+        const field = form?.fields.find((f) => f.id === 'selectedObsoleteRemovals');
+        return (
+          field?.type === 'multi-select' && field.options.some((option) => option.value === entryId)
+        );
+      };
+
+      const firstSeeded = await upgrade('rtk-off-upgrade-smoke seeded first', seeded);
+      const seededEntry = settingsEntry(firstSeeded.detected);
+      check(
+        'the settings file the scaffold seeded is offered for removal though no row records it',
+        seededEntry?.bucket === 'obsolete' &&
+          seededEntry.liveArtifactId === null &&
+          offeredForRemoval(firstSeeded.form, seededEntry.entryId),
+        { bucket: seededEntry?.bucket },
+      );
+      const geminiEntry = firstSeeded.detected.entries.find((e) => e.diskPath === GEMINI_SETTINGS);
+      check(
+        'and so is the one it seeded for a CLI disabled since',
+        geminiEntry?.bucket === 'obsolete' &&
+          offeredForRemoval(firstSeeded.form, geminiEntry.entryId),
+        { bucket: geminiEntry?.bucket },
+      );
+      const skipValues = defaultValues(firstSeeded.form);
+      skipValues.selectedNew = [];
+      await upgradeApplyStep.apply(firstSeeded.applyCtx, {
+        detected: firstSeeded.plan,
+        formValues: skipValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'left unticked, it stays',
+        (await readFile(join(seededPath, SETTINGS), 'utf8')) === buildClaudeSettingsJson(),
+      );
+
+      const seededRows = await db
+        .select({ diskPath: schema.onboardingArtifacts.diskPath })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, seededId),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      check(
+        'the first upgrade recorded rows, none of them for the settings file',
+        seededRows.length > 0 && !seededRows.some((r) => r.diskPath === SETTINGS),
+        seededRows.length,
+      );
+      const secondSeeded = await upgrade('rtk-off-upgrade-smoke seeded second', seeded);
+      const againEntry = settingsEntry(secondSeeded.detected);
+      check(
+        'the next upgrade, with the rows the first recorded, offers it again',
+        againEntry?.bucket === 'obsolete' &&
+          offeredForRemoval(secondSeeded.form, againEntry.entryId),
+        { bucket: againEntry?.bucket },
+      );
+      const removeValues = defaultValues(secondSeeded.form);
+      removeValues.selectedNew = [];
+      removeValues.selectedObsoleteRemovals = [againEntry!.entryId];
+      const removed = await upgradeApplyStep.apply(secondSeeded.applyCtx, {
+        detected: secondSeeded.plan,
+        formValues: removeValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'and removes it when picked, handed to the commit as a removal',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null &&
+          removed.deletedPaths?.includes(SETTINGS) === true,
+        removed.deletedPaths,
+      );
+      // The apply runs again, as a retry after its output was lost: the file is already gone.
+      const reapplied = await upgradeApplyStep.apply(secondSeeded.applyCtx, {
+        detected: secondSeeded.plan,
+        formValues: removeValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'a retry of that apply still records the removal an earlier attempt made',
+        reapplied.removedPaths?.includes(SETTINGS) === true,
+        reapplied.removedPaths,
+      );
+      await finish(secondSeeded.applyCtx, reapplied);
+      await rollback('rtk-off-upgrade-smoke seeded rollback', seeded);
+      check(
+        'a rollback puts back the file no row recorded',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) ===
+          buildClaudeSettingsJson(),
+      );
+      const [seededRepo] = await db
+        .select({ applicable: schema.repositories.applicableTemplateIds })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, seededId));
+      check(
+        'and the template it put back applies again, so the banner can offer it',
+        seededRepo?.applicable?.includes(RTK_ITEM) === true,
+        seededRepo?.applicable,
+      );
+
+      // A person deletes the file while the form is parked: it was gone before the step ran.
+      const parked = await upgrade('rtk-off-upgrade-smoke seeded parked', seeded);
+      const parkedEntry = settingsEntry(parked.detected);
+      await rm(join(seededPath, SETTINGS));
+      const parkedValues = defaultValues(parked.form);
+      parkedValues.selectedNew = [];
+      parkedValues.selectedObsoleteRemovals = parkedEntry ? [parkedEntry.entryId] : [];
+      const parkedApplied = await upgradeApplyStep.apply(parked.applyCtx, {
+        detected: parked.plan,
+        formValues: parkedValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        "a file deleted while the form was parked is not recorded as the upgrade's removal",
+        offeredForRemoval(parked.form, parkedEntry?.entryId) &&
+          !(parkedApplied.removedPaths ?? []).includes(SETTINGS),
+        { offered: parkedEntry?.entryId, removedPaths: parkedApplied.removedPaths },
+      );
+      await finish(parked.applyCtx, parkedApplied);
+      await rollback('rtk-off-upgrade-smoke seeded parked rollback', seeded);
+      check(
+        'and a rollback of that upgrade leaves it deleted',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null,
+      );
+    } finally {
+      await rm(seededPath, { recursive: true, force: true });
+    }
 
     // ---- a repository onboarded before RTK: its plan's "off" was never anyone's choice ------------
     const legacyId = randomUUID();

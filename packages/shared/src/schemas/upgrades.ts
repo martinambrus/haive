@@ -46,6 +46,10 @@ export const upgradeStatusResponseSchema = z.object({
   /** Rules files still holding the RTK block of a repository that switched RTK off. An upgrade
    *  takes it out, so they set `hasUpgradeAvailable`. Omitted when there are none. */
   rtkBlockLeftovers: z.array(z.string()).optional(),
+  /** RTK settings files no row records, such as the ones a blank scaffold seeds, still holding
+   *  RTK's hook in a repository that switched RTK off. An upgrade offers to take them out, so they
+   *  set `hasUpgradeAvailable`. Omitted when there are none. */
+  rtkSettingsLeftovers: z.array(z.string()).optional(),
 });
 
 export type UpgradeStatusResponse = z.infer<typeof upgradeStatusResponseSchema>;

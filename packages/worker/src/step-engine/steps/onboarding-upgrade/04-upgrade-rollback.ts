@@ -1,10 +1,16 @@
-import { writeFileNoFollow } from '@haive/shared/fs-safe';
+import {
+  errno,
+  readTextNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
   CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
   getHaiveVersion,
   normalizeContent,
   upsertRegion,
@@ -57,7 +63,10 @@ interface RollbackTarget {
   templateKind: string;
   templateSchemaVersion: number;
   priorArtifactId: string;
-  upgradeArtifactId: string;
+  /** Null where the upgrade removed what stood here and wrote nothing of its own. */
+  upgradeArtifactId: string | null;
+  /** The upgrade removed what stood here, so it goes back only where nothing stands now. */
+  removed?: boolean;
   priorTemplateContentHash: string;
   priorWrittenHash: string;
   /** Stored content of the prior baseline row. Null on legacy rows written
@@ -247,12 +256,55 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // 02 records where nothing stood and which rows it retired. A payload from before that record
     // falls back to the most recently superseded row at a path, and to deleting where there is none.
     const applied = (await loadPreviousStepOutput(ctx.db, priorTaskId, '02-upgrade-apply'))
-      ?.output as Pick<UpgradeApplyOutput, 'createdPaths' | 'retiredRowIds'> | null | undefined;
+      ?.output as
+      | Pick<UpgradeApplyOutput, 'createdPaths' | 'retiredRowIds' | 'removedPaths'>
+      | null
+      | undefined;
     const createdByPath =
       applied?.createdPaths && applied.retiredRowIds
         ? new Map(applied.createdPaths.map((c) => [c.diskPath, c]))
         : null;
     const retiredRowIds = createdByPath ? (applied?.retiredRowIds ?? []) : null;
+
+    /** The newest row the upgrade retired at `diskPath`: 02 retires a live row and inserts the
+     *  baseline it captured in one instant, and the baseline, holding what was on disk, wins. */
+    const newestRetiredRow = async (diskPath: string, except?: string) => {
+      const [row] = await ctx.db
+        .select({
+          id: schema.onboardingArtifacts.id,
+          templateId: schema.onboardingArtifacts.templateId,
+          templateKind: schema.onboardingArtifacts.templateKind,
+          templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
+          templateContentHash: schema.onboardingArtifacts.templateContentHash,
+          writtenHash: schema.onboardingArtifacts.writtenHash,
+          writtenContent: schema.onboardingArtifacts.writtenContent,
+          formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+        })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, diskPath),
+            except ? ne(schema.onboardingArtifacts.id, except) : undefined,
+            retiredRowIds ? inArray(schema.onboardingArtifacts.id, retiredRowIds) : undefined,
+          ),
+        )
+        .orderBy(
+          desc(schema.onboardingArtifacts.supersededAt),
+          desc(schema.onboardingArtifacts.generatedAt),
+        )
+        .limit(1);
+      return row;
+    };
+    const fromPrior = (prior: NonNullable<Awaited<ReturnType<typeof newestRetiredRow>>>) => ({
+      templateId: prior.templateId,
+      templateSchemaVersion: prior.templateSchemaVersion,
+      priorArtifactId: prior.id,
+      priorTemplateContentHash: prior.templateContentHash,
+      priorWrittenHash: prior.writtenHash,
+      priorWrittenContent: prior.writtenContent ?? null,
+      priorFormValuesSnapshot: (prior.formValuesSnapshot ?? null) as Record<string, unknown> | null,
+    });
 
     const targets: RollbackTarget[] = [];
     const newArtifactsToUndo: NewArtifactToUndo[] = [];
@@ -270,33 +322,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         });
         continue;
       }
-      const priorCandidates = await ctx.db
-        .select({
-          id: schema.onboardingArtifacts.id,
-          templateId: schema.onboardingArtifacts.templateId,
-          templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
-          templateContentHash: schema.onboardingArtifacts.templateContentHash,
-          writtenHash: schema.onboardingArtifacts.writtenHash,
-          writtenContent: schema.onboardingArtifacts.writtenContent,
-          formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
-        })
-        .from(schema.onboardingArtifacts)
-        .where(
-          and(
-            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-            eq(schema.onboardingArtifacts.diskPath, upgradeRow.diskPath),
-            ne(schema.onboardingArtifacts.id, upgradeRow.id),
-            retiredRowIds ? inArray(schema.onboardingArtifacts.id, retiredRowIds) : undefined,
-          ),
-        )
-        // 02 retires a live row and inserts the baseline it captured in one instant, and the
-        // baseline, holding what was on disk, is the one to restore.
-        .orderBy(
-          desc(schema.onboardingArtifacts.supersededAt),
-          desc(schema.onboardingArtifacts.generatedAt),
-        )
-        .limit(1);
-      const prior = priorCandidates[0];
+      const prior = await newestRetiredRow(upgradeRow.diskPath, upgradeRow.id);
       if (!prior && createdByPath) {
         // Something stood there that no row recorded, and 02 records one for any bytes but its own.
         unrecordedRewrites.push({
@@ -315,19 +341,26 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         continue;
       }
       targets.push({
+        ...fromPrior(prior),
         diskPath: upgradeRow.diskPath,
-        templateId: prior.templateId,
         templateKind: upgradeRow.templateKind,
-        templateSchemaVersion: prior.templateSchemaVersion,
-        priorArtifactId: prior.id,
         upgradeArtifactId: upgradeRow.id,
-        priorTemplateContentHash: prior.templateContentHash,
-        priorWrittenHash: prior.writtenHash,
-        priorWrittenContent: prior.writtenContent ?? null,
-        priorFormValuesSnapshot: (prior.formValuesSnapshot ?? null) as Record<
-          string,
-          unknown
-        > | null,
+      });
+    }
+    // A path the upgrade removed has no row of its own: what it held is the baseline 02 kept there.
+    for (const diskPath of retiredRowIds ? (applied?.removedPaths ?? []) : []) {
+      if (upgradeRows.some((r) => r.diskPath === diskPath)) continue;
+      const prior = await newestRetiredRow(diskPath);
+      if (!prior) {
+        warnings.push(`cannot restore ${diskPath}: no row records what the upgrade removed`);
+        continue;
+      }
+      targets.push({
+        ...fromPrior(prior),
+        diskPath,
+        templateKind: prior.templateKind,
+        upgradeArtifactId: null,
+        removed: true,
       });
     }
 
@@ -420,7 +453,14 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         warnings.push(`refusing to restore ${target.diskPath}: not a path inside the repository`);
         continue;
       }
-      if (restoreTemplateKind === CLI_RULES_TEMPLATE_KIND) {
+      if (target.removed) {
+        if (!(await restoreRemoved(ctx.repoPath, rel, restoreTemplateKind, restoreContent))) {
+          warnings.push(
+            `did not put back ${target.diskPath}: it changed after the upgrade removed it`,
+          );
+          continue;
+        }
+      } else if (restoreTemplateKind === CLI_RULES_TEMPLATE_KIND) {
         // Restore only the cli-rules region from the prior baseline bytes,
         // leaving the rest of AGENTS.md as it currently stands.
         const existing = await readFileOrEmpty(ctx.repoPath, rel);
@@ -435,7 +475,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
       revertedCount += 1;
 
-      upgradeRowIds.push(target.upgradeArtifactId);
+      if (target.upgradeArtifactId) upgradeRowIds.push(target.upgradeArtifactId);
 
       rowsToInsert.push({
         userId: ctx.userId,
@@ -554,10 +594,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
     if (snapshot) {
-      const applicableExpanded = expandManifestFor(
-        snapshot as unknown as TemplateRenderContext,
-        manifest,
-      );
+      // What the rollback put back is installed again, so it is compared again whatever the snapshot
+      // renders: a file restored after RTK went off would otherwise drop out of the banner's view.
+      const applicableExpanded = [
+        ...expandManifestFor(snapshot as unknown as TemplateRenderContext, manifest),
+        ...rowsToInsert,
+      ];
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
@@ -580,6 +622,40 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     };
   },
 };
+
+/** Put back what an upgrade removed, only where nothing stands now: a file there, a region in
+ *  AGENTS.md, or AGENTS.md gone altogether is what someone did since, and stays. What stands there
+ *  already holding the restore is an earlier attempt of this rollback, and counts as put back. */
+async function restoreRemoved(
+  repoPath: string,
+  rel: string,
+  templateKind: string,
+  content: string,
+): Promise<boolean> {
+  if (templateKind !== CLI_RULES_TEMPLATE_KIND) {
+    try {
+      await writeFileNoFollow(repoPath, rel, content, {
+        mode: 'create-exclusive',
+        createParents: true,
+      });
+      return true;
+    } catch (err) {
+      if (errno(err) !== 'EEXIST') throw err;
+      return (await readTextNoFollow(repoPath, rel).catch(() => null)) === content;
+    }
+  }
+  let alreadyBack = false;
+  const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
+    const current = data.toString('utf8');
+    const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+    if (region !== null) {
+      alreadyBack = region === content;
+      return null;
+    }
+    return Buffer.from(upsertRegion(current, content, CLI_RULES_START, CLI_RULES_END), 'utf8');
+  });
+  return result === 'rewritten' || alreadyBack;
+}
 
 async function writeInstallManifest(
   ctx: StepContext,

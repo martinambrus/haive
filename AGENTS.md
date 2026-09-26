@@ -2560,12 +2560,39 @@ deleted again. Any other path restores the newest row the upgrade retired there,
 held the bytes the upgrade wrote, so only its row is retired. 01's backfill records no row for a file
 missing from disk. An output from before the record falls back to reading the rows.
 
+A path the upgrade REMOVED gets its bytes back the same way. The upgrade wrote no row there, so 04
+used to visit only the rows it wrote and never put back an obsolete file it deleted, and a file no
+row recorded had nothing to restore from. 02 now keeps what each removal took (the file, or the
+rules region with its markers) as a baseline and names the path in `removedPaths`, and 04 puts it
+back only where nothing stands now: a file created at the path since, a region written into
+AGENTS.md since, or an AGENTS.md removed since is what someone did after the upgrade, and stays.
+That baseline is written before the removal it records, from the bytes the plan saw there, because
+an absent path says nothing about who removed it: an apply retried after its removal ran finds the
+file gone, and so does one whose file a person deleted while the form was parked. Only the first
+finds an earlier attempt's baseline, and records the removal; the second drops its own, so a
+rollback leaves the file deleted. A removal that keeps the file drops its baseline too. What
+already holds the restore is an earlier attempt of the same rollback, which a retry takes as put
+back. Such an upgrade can leave no live row at all, so upgrade-status offers its rollback from
+what 02 recorded (`lastUpgradeRemovedFiles`) until a rollback completes after it. It answers as
+onboarded for any repository an upgrade was started on, whether that upgrade is running, failed or
+finished, since POST /tasks starts one only on an onboarded repository and the banner shows nothing
+for any other. What a rollback puts back stays in the repository's
+applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
+removal again rather than dropping out of the banner's view.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
 --cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
-out from it would restore it. One someone edited is kept by that rule, so the form offers instead to
+out from it would restore it. Nothing records the ones a blank scaffold seeds (a row needs a task,
+and INIT has none), nor any of a repository with no rows at all, so for those 01 renders the RTK
+templates as if RTK were on, for every CLI in the catalog since the scaffold seeded them for the
+CLIs enabled then, and offers a file still holding that render, or its hook, as `obsolete` against
+the render's hash. A blank repository is probed whatever other rows it has, skipping only the
+paths a live row records: onboarding records one for a seeded file only when it renders that
+template itself, with RTK on and the file's CLIs still enabled. Any other repository's rows are
+taken as the whole record. One someone edited is kept by that rule, so the form offers instead to
 take the hook out of it, unticked (`withoutRtkHookEntry`): only hook items whose command is exactly
 RTK's go, with the entries and lists they leave empty, and the file keeps its own indent and line
 endings. A file that parsing and writing back would change anywhere else (an integer past 2^53,
@@ -2585,8 +2612,12 @@ after it (`stripRtkBlocks`). A link is refused and reported, as is a file past t
 plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
 stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
 holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
-repository and reports the files still holding a block (`rtkBlockLeftovers`), so the banner offers
-the upgrade. Switching RTK back on offers the settings files again, and the banner says so: the
+repository and reports the files still holding a block (`rtkBlockLeftovers`), and the settings
+files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): it looks where 01
+looks, reads RTK's choice through the same snapshots, and judges each file by the predicate 01
+uses (`holdsRtkSettings`), so the banner offers the upgrade, and never one whose plan offers
+nothing. A repository never onboarded gets neither, since POST /tasks refuses it an upgrade.
+Switching RTK back on offers the settings files again, and the banner says so: the
 upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of a snapshot that
 recorded the choice read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders

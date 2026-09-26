@@ -7,7 +7,7 @@ import {
   toSafeRel,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_END,
@@ -174,7 +174,11 @@ export function keptRowUpdate(
 const keptRefusal = (diskPath: string) =>
   `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
 
-export type Removal = { outcome: 'removed' | 'absent' } | { outcome: 'kept'; refusal: string };
+/** `content` is what a removal took: the file, or the rules region with its markers. */
+export type Removal =
+  | { outcome: 'removed'; content: string }
+  | { outcome: 'absent' }
+  | { outcome: 'kept'; refusal: string };
 
 /** Remove the file at `rel`, or the rules region alone, only while it holds `writtenHash`, judged on
  *  the bytes removed: a row alone proves nothing, since 12 records one for a file 07 skipped. */
@@ -187,24 +191,29 @@ export async function removeIfHaives(
   const haives = (text: string) => sha256Hex(normalizeContent(text)) === writtenHash;
   const kept: Removal = { outcome: 'kept', refusal: keptRefusal(entry.diskPath) };
   try {
+    let content = '';
     if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) {
-      const result = await removeFileIfNoFollow(repoPath, rel, (data) =>
-        haives(data.toString('utf8')),
-      );
-      return result === 'kept' ? kept : { outcome: result };
+      const result = await removeFileIfNoFollow(repoPath, rel, (data) => {
+        content = data.toString('utf8');
+        return haives(content);
+      });
+      if (result === 'kept') return kept;
+      return result === 'removed' ? { outcome: 'removed', content } : { outcome: 'absent' };
     }
     if (entry.fileCreated) {
       // A file created for the region goes whole while nothing but the region was written to it.
       const whole = await removeFileIfNoFollow(repoPath, rel, (data) => {
         const current = data.toString('utf8');
         const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+        content = region ?? '';
         return (
           region !== null &&
           haives(region) &&
           upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END).trim() === ''
         );
       });
-      if (whole !== 'kept') return { outcome: whole };
+      if (whole === 'removed') return { outcome: 'removed', content };
+      if (whole === 'absent') return { outcome: 'absent' };
     }
     let noRegion = false;
     const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
@@ -212,9 +221,10 @@ export async function removeIfHaives(
       const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
       noRegion = region === null;
       if (region === null || !haives(region)) return null;
+      content = region;
       return Buffer.from(upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END), 'utf8');
     });
-    if (result === 'rewritten') return { outcome: 'removed' };
+    if (result === 'rewritten') return { outcome: 'removed', content };
     return result === 'absent' || noRegion ? { outcome: 'absent' } : kept;
   } catch (err) {
     if (isPathContainmentError(err)) {
@@ -303,6 +313,9 @@ export interface UpgradeApplyOutput {
   createdPaths?: CreatedPath[];
   /** Every row this run retired or kept as a baseline: the only rows a rollback of it restores. */
   retiredRowIds?: string[];
+  /** Every path whose file, or rules region, this run removed. Each has a baseline among
+   *  `retiredRowIds` holding what it removed, so a rollback puts it back. Optional likewise. */
+  removedPaths?: string[];
 }
 
 /** What a row records about the bytes at its path. */
@@ -581,6 +594,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const writtenPaths: string[] = [];
     const deletedPaths: string[] = [];
     const created: Omit<CreatedPath, 'retiredRowId'>[] = [];
+    const removedPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -588,6 +602,26 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
     const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
+    // Baselines of what a removal took, each written before the removal it records.
+    const removalRecords: string[] = [];
+    const earlierRemovals = new Map<string, string>();
+    for (const r of await ctx.db
+      .select({
+        id: schema.onboardingArtifacts.id,
+        diskPath: schema.onboardingArtifacts.diskPath,
+        templateId: schema.onboardingArtifacts.templateId,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+          eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+          eq(schema.onboardingArtifacts.source, 'backfill'),
+          isNotNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      )) {
+      earlierRemovals.set(`${r.templateId}\n${r.diskPath}`, r.id);
+    }
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -697,9 +731,45 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           skippedCount += 1;
           continue;
         }
+        // What a removal takes is recorded before it runs, so a rollback of this upgrade can put it
+        // back, and so a retry that finds the path gone can tell its own removal from a person's.
+        const recordRemoval = async (content: string) => {
+          const now = new Date();
+          const [row] = await ctx.db
+            .insert(schema.onboardingArtifacts)
+            .values({
+              ...artifactRow(
+                backfillRecord(
+                  {
+                    templateContentHash: entry.baselineTemplateContentHash ?? '',
+                    writtenHash: entry.baselineWrittenHash ?? '',
+                  },
+                  { content, hash: sha256Hex(normalizeContent(content)) },
+                ),
+                'backfill',
+              ),
+              supersededAt: now,
+              updatedAt: now,
+            })
+            .returning({ id: schema.onboardingArtifacts.id });
+          return row!.id;
+        };
+        const dropRecord = async (id: string) => {
+          await ctx.db
+            .delete(schema.onboardingArtifacts)
+            .where(eq(schema.onboardingArtifacts.id, id));
+        };
+        const earlier = earlierRemovals.get(`${entry.templateId}\n${entry.diskPath}`) ?? null;
+        const planned =
+          entry.currentContent !== null && entry.currentHash === entry.baselineWrittenHash
+            ? entry.currentContent
+            : null;
+        let recorded: string | null = null;
         try {
+          recorded = earlier ?? (planned === null ? null : await recordRemoval(planned));
           const removal = await removeIfHaives(ctx.repoPath, rel, entry, entry.baselineWrittenHash);
           if (removal.outcome === 'kept') {
+            if (recorded !== null) await dropRecord(recorded);
             warnings.push(removal.refusal);
             skippedCount += 1;
             continue;
@@ -707,8 +777,31 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) deletedPaths.push(rel);
           else if (removal.outcome === 'removed') writtenPaths.push(rel);
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
+          if (removal.outcome === 'removed') {
+            const id = recorded ?? (await recordRemoval(removal.content));
+            if (recorded !== null && removal.content !== planned) {
+              await ctx.db
+                .update(schema.onboardingArtifacts)
+                .set({ writtenContent: removal.content })
+                .where(eq(schema.onboardingArtifacts.id, id));
+            }
+            removalRecords.push(id);
+            removedPaths.push(entry.diskPath);
+          } else if (earlier !== null) {
+            // Gone with an earlier attempt's record standing: that attempt removed it.
+            removalRecords.push(earlier);
+            removedPaths.push(entry.diskPath);
+          } else if (recorded !== null) {
+            // Gone before this step ran, so there is nothing of the upgrade's to put back.
+            await dropRecord(recorded);
+          }
           deletedCount += 1;
         } catch (err) {
+          if (recorded !== null && recorded !== earlier) {
+            await dropRecord(recorded).catch((dropErr: unknown) =>
+              ctx.logger.warn({ err: dropErr, diskPath: entry.diskPath }, 'removal record left'),
+            );
+          }
           const msg = err instanceof Error ? err.message : String(err);
           warnings.push(`failed to delete ${entry.diskPath}: ${msg}`);
         }
@@ -917,10 +1010,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       rowsToSupersede.length > 0 ||
       insertPaths.length > 0 ||
       baselineRows.length > 0 ||
-      keptInPlace.length > 0
+      keptInPlace.length > 0 ||
+      removalRecords.length > 0
     ) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
+        if (removalRecords.length > 0) {
+          // Retired in the instant the row at their path is, so the rollback takes the baseline.
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(inArray(schema.onboardingArtifacts.id, removalRecords));
+        }
         if (rowsToSupersede.length > 0) {
           retired.push(
             ...(await tx
@@ -1016,7 +1117,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         ...c,
         retiredRowId: retired.find((r) => r.diskPath === c.diskPath)?.id ?? null,
       })),
-      retiredRowIds: [...retired.map((r) => r.id), ...baselineIds],
+      retiredRowIds: [...retired.map((r) => r.id), ...baselineIds, ...removalRecords],
+      removedPaths,
     };
   },
 };
