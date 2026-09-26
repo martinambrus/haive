@@ -695,27 +695,17 @@ export async function handleBuildSandboxImageJob(
     started.then(settle, settle);
   }
 
+  let succeeded = false;
   try {
     const result = await build;
     if (result.exitCode === 0) {
+      succeeded = true;
       await markProvidersReady(db, imageTag, provider.id, shared);
       await removeOrphanedPreviousImage(db, {
         providerId: provider.id,
         previousDbTag,
         newTag: imageTag,
       });
-      // A provider deleted while this build ran had its image's removal left to the build.
-      const stillThere = await db.query.cliProviders.findFirst({
-        where: eq(schema.cliProviders.id, provider.id),
-        columns: { id: true },
-      });
-      if (!stillThere) {
-        await removeOrphanedPreviousImage(db, {
-          providerId: provider.id,
-          previousDbTag: imageTag,
-          newTag: null,
-        });
-      }
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
@@ -759,6 +749,28 @@ export async function handleBuildSandboxImageJob(
       .where(eq(schema.cliProviders.id, provider.id));
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
+  } finally {
+    // The tag a build that did not succeed was replacing stays behind, and for a provider deleted
+    // meanwhile nothing but this build knows it.
+    if (!succeeded && previousDbTag && previousDbTag !== imageTag) {
+      await db.query.cliProviders
+        .findFirst({ where: eq(schema.cliProviders.id, provider.id), columns: { id: true } })
+        .then((stillThere) =>
+          stillThere
+            ? undefined
+            : removeOrphanedPreviousImage(db, {
+                providerId: provider.id,
+                previousDbTag,
+                newTag: null,
+              }),
+        )
+        .catch((err: unknown) =>
+          log.warn(
+            { err, providerId: provider.id, previousDbTag },
+            'previous image cleanup failed',
+          ),
+        );
+    }
   }
 }
 
@@ -767,15 +779,19 @@ export async function handleBuildSandboxImageJob(
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
 
-/** Remove the image a deleted provider named, unless another provider names it too. One whose tag
- *  is being built is left to that build, which removes it once it finds its provider gone. */
+/** Remove the image a deleted provider named, unless another provider names it too. A build of the
+ *  tag in flight is waited out first, whatever it ends in, since it may have been this provider's. */
 export async function handleRemoveSandboxImageJob(
   db: Database,
   payload: SandboxImageRemoveJobPayload,
 ): Promise<void> {
-  if (inFlightBuilds.has(payload.imageTag)) {
-    log.info(payload, "left a deleted provider's sandbox image to the build of its tag");
-    return;
+  const building = inFlightBuilds.get(payload.imageTag);
+  if (building) {
+    log.info(payload, "waiting for the build of a deleted provider's tag before removing it");
+    await building.then(
+      () => undefined,
+      () => undefined,
+    );
   }
   await removeOrphanedPreviousImage(db, {
     providerId: payload.providerId,

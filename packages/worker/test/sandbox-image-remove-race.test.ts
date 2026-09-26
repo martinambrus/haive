@@ -89,38 +89,77 @@ describe("removing a deleted provider's image while another provider asks for it
     });
   });
 
-  it('removes the image of a provider deleted while it was built, once the build ends', async () => {
-    const fake = withProvider();
-    docker.inspect.mockResolvedValue({ exists: false });
-    docker.remove.mockResolvedValue({ ok: true, stderr: '' });
+  /** A build of `TAG` for PROVIDER held until `release`, ending in `exitCode`. The provider
+   *  names `previousTag` before it; `standing` lists the tags that exist, and a build that
+   *  succeeds adds `TAG`. */
+  function heldBuild(exitCode: number, previousTag: string | null, standing: Set<string>) {
+    const fake = createFakeDb({ cliProviders: schema.cliProviders });
+    fake.insert(schema.cliProviders, {
+      id: PROVIDER,
+      userId: USER,
+      name: 'zai',
+      label: 'zai',
+      cliVersion: '1.0.0',
+      sandboxImageTag: previousTag,
+    });
+    docker.inspect.mockImplementation(async (tag: string) =>
+      standing.has(tag) ? { exists: true, imageId: `sha256:${tag}` } : { exists: false },
+    );
+    docker.remove.mockImplementation(async (tag: string) => {
+      standing.delete(tag);
+      return { ok: true, stderr: '' };
+    });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     docker.build.mockImplementation(async () => {
       await gate;
+      if (exitCode === 0) standing.add(TAG);
       return {
-        exitCode: 0,
+        exitCode,
         imageTag: TAG,
-        imageId: 'sha256:new',
+        imageId: `sha256:${TAG}`,
         durationMs: 1,
-        stderr: '',
+        stderr: exitCode === 0 ? '' : 'boom',
         timedOut: false,
       };
     });
-
     const db = fake.db as unknown as Database;
     const building = handleBuildSandboxImageJob(db, {
       providerId: PROVIDER,
       userId: USER,
       force: true,
     });
-    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
-    await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, PROVIDER));
-    await handleRemoveSandboxImageJob(db, { providerId: PROVIDER, imageTag: TAG });
-    expect(docker.remove).not.toHaveBeenCalled();
-    docker.inspect.mockResolvedValue({ exists: true, imageId: 'sha256:new' });
-    release();
-    await building;
+    return { db, building, release };
+  }
 
-    expect(docker.remove).toHaveBeenCalledWith(TAG);
+  /** Delete the provider while its build is held, queue the removal of the tag its row names, then
+   *  let the build end. */
+  async function deleteDuringBuild(build: ReturnType<typeof heldBuild>) {
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
+    await build.db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, PROVIDER));
+    const removing = handleRemoveSandboxImageJob(build.db, { providerId: PROVIDER, imageTag: TAG });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(docker.remove).not.toHaveBeenCalled();
+    build.release();
+    await Promise.all([build.building, removing]);
+  }
+
+  it('removes the image of a provider deleted while it was built, once the build ends', async () => {
+    const standing = new Set<string>();
+    await deleteDuringBuild(heldBuild(0, null, standing));
+    expect(standing.has(TAG)).toBe(false);
+  });
+
+  it('removes the image a forced rebuild left when the rebuild fails', async () => {
+    const standing = new Set([TAG]);
+    await deleteDuringBuild(heldBuild(1, TAG, standing));
+    expect(standing.has(TAG)).toBe(false);
+  });
+
+  it('removes the image the provider named before when a build of a new tag fails', async () => {
+    const older = 'haive-cli-claude:0.9.0';
+    const standing = new Set([older]);
+    await deleteDuringBuild(heldBuild(1, older, standing));
+    expect(standing.has(older)).toBe(false);
   });
 });

@@ -111,7 +111,7 @@ describe("removing a deleted provider's image", () => {
     });
   });
 
-  it('keeps it while a build of the tag runs', async () => {
+  it('waits for a build of the tag to end before it removes the image', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     docker.build.mockImplementation(async () => {
@@ -121,9 +121,12 @@ describe("removing a deleted provider's image", () => {
     const db = fakeDb();
     const building = handleBuildSandboxImageJob(db, { providerId: 'p1', userId: 'u', force: true });
     await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
-    await handleRemoveSandboxImageJob(db, removal);
-    expect(images.removeOrphanedPreviousImage).not.toHaveBeenCalled();
+    const removing = handleRemoveSandboxImageJob(db, removal);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const removalCall = [expect.anything(), expect.objectContaining({ providerId: 'gone' })];
+    expect(images.removeOrphanedPreviousImage).not.toHaveBeenCalledWith(...removalCall);
     release();
-    await building;
+    await Promise.all([building, removing]);
+    expect(images.removeOrphanedPreviousImage).toHaveBeenCalledWith(...removalCall);
   });
 });
