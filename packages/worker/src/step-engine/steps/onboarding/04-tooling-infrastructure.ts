@@ -463,9 +463,10 @@ export const toolingInfrastructureStep: StepDefinition<
     let mcpInput = typeof tooling.mcpSettingsJson === 'string' ? tooling.mcpSettingsJson : '';
     // Repository-controlled servers are added ONLY on the explicit opt-in. Re-read from disk
     // rather than trusting a submitted copy, so the names the user ticked are the ones the
-    // file actually holds.
+    // file actually holds. Recorded as well: the runtime and 07's rewrite read the record.
     if (tooling.keepRepoMcpServers === true) {
       mcpInput = mergeRepoOwnedMcpServers(mcpInput, await repoOwnedMcpServers(ctx.repoPath));
+      tooling.mcpSettingsJson = mcpInput;
     }
     await writeFileNoFollow(
       ctx.repoPath,

@@ -2446,7 +2446,9 @@ than overwriting local changes and only touches paths differing between HEAD and
 **A committed MCP server list is not consent on another install.** `12-post-onboarding` commits
 `.haive-data/tooling.json`, and `loadUserMcpServers` hands its `mcpSettingsJson` to every CLI, so a
 clone used to run whatever servers the repository named, past the explicit opt-in 04 asks for
-(`keepRepoMcpServers`). `importHaiveDataMirror` now moves a list holding anything but Haive's own
+(`keepRepoMcpServers`). 04 records the list it writes, the servers that opt-in keeps included,
+since the runtime and 07's rewrite read the record and never the file. `importHaiveDataMirror`
+now moves a list holding anything but Haive's own
 definitions to `importedMcpSettingsJson`, which nothing reads, and the tooling page asks: accept
 puts it back, discard drops it. A server counts as Haive's only when its definition EQUALS Haive's
 under that name (`mcpServersNeedingConsent`), since a file can put any command under
