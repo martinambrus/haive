@@ -123,6 +123,52 @@ function rtkGeminiSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCt
   };
 }
 
+const RTK_SETTINGS_HOOKS: Readonly<Record<string, { eventKey: string; command: string }>> = {
+  'rtk.claude-settings': { eventKey: 'PreToolUse', command: RTK_HOOK_CLAUDE_COMMAND },
+  'rtk.gemini-settings': { eventKey: 'BeforeTool', command: RTK_HOOK_GEMINI_COMMAND },
+};
+
+/** A settings file without the hook its RTK template wrote: every hook item whose command is exactly
+ *  RTK's, and each entry, event list and `hooks` object that leaves empty, written back with the
+ *  file's own indent, line endings and final newline. Null when it holds no such hook or is not
+ *  strict JSON. */
+export function withoutRtkHookEntry(templateId: string, text: string): string | null {
+  const hook = RTK_SETTINGS_HOOKS[templateId];
+  if (!hook) return null;
+  let root: unknown;
+  try {
+    root = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(root) || !isRecord(root.hooks)) return null;
+  const hooks = root.hooks;
+  const entries = hooks[hook.eventKey];
+  if (!Array.isArray(entries)) return null;
+  let removed = false;
+  const kept = entries.filter((entry) => {
+    if (!isRecord(entry) || !Array.isArray(entry.hooks)) return true;
+    const items = entry.hooks.filter((item) => !(isRecord(item) && item.command === hook.command));
+    if (items.length === entry.hooks.length) return true;
+    removed = true;
+    entry.hooks = items;
+    return items.length > 0;
+  });
+  if (!removed) return null;
+  if (kept.length > 0) hooks[hook.eventKey] = kept;
+  else delete hooks[hook.eventKey];
+  if (Object.keys(hooks).length === 0) delete root.hooks;
+
+  const indent = /^[ \t]+(?=\S)/m.exec(text)?.[0] ?? '';
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const body = JSON.stringify(root, null, indent).replace(/\n/g, eol);
+  return /\n$/.test(text) ? `${body}${eol}` : body;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /** Merge-aware insertion of an RTK hook into a parsed JSON settings tree
  *  (Claude `~/.claude/settings.json`, Gemini `~/.gemini/settings.json`).
  *  Mirrors rtk's own `insert_hook_entry` and `hook_already_present` logic

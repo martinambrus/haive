@@ -2546,7 +2546,12 @@ missing from disk. An output from before the record falls back to reading the ro
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
 --cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
-out from it would restore it. A plan whose RTK choice was the repository's live one
+out from it would restore it. One someone edited is kept by that rule, so the form offers instead to
+take the hook out of it, unticked (`withoutRtkHookEntry`): only hook items whose command is exactly
+RTK's go, with the entries and lists they leave empty, and the file keeps its own indent and line
+endings. What it held becomes a superseded baseline and the new live row claims none of it
+(`writtenHash` stays the render's), so a rollback puts the hook back and no later upgrade or reset
+takes the file as Haive's. A plan whose RTK choice was the repository's live one
 (`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
 two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
 RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it

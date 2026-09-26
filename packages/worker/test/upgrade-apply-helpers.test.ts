@@ -55,6 +55,7 @@ function selections(over: Partial<ApplySelections> = {}): ApplySelections {
     selectedNew: new Set(),
     selectedReinstate: new Set(),
     selectedObsoleteRemovals: new Set(),
+    selectedRtkHookStrips: new Set(),
     conflictChoices: new Map(),
     ...over,
   };
@@ -175,6 +176,21 @@ describe('classifyApplyAction — primary buckets', () => {
         'a.md',
         { entryId: 'sel-1' },
         { selectedObsoleteRemovals: new Set(['sel-1']) },
+      ),
+    ).toBe('delete');
+  });
+
+  it('obsolete with the RTK hook strip selected → strip, and a selected removal still wins', () => {
+    const strip = { selectedRtkHookStrips: new Set(['sel-1']) };
+    expect(classify('obsolete', '.claude/settings.json', { entryId: 'sel-1' }, strip)).toBe(
+      'strip',
+    );
+    expect(
+      classify(
+        'obsolete',
+        '.claude/settings.json',
+        { entryId: 'sel-1' },
+        { ...strip, selectedObsoleteRemovals: new Set(['sel-1']) },
       ),
     ).toBe('delete');
   });
