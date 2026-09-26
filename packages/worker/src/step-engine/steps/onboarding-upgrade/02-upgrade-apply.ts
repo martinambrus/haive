@@ -259,17 +259,6 @@ function templateKindLabel(kind: string): string {
   return TEMPLATE_KIND_LABELS[kind] ?? kind;
 }
 
-/** Read a file, returning '' when it does not exist. Used by the cli-rules
- *  region writes so a missing AGENTS.md is treated as empty (upsertRegion then
- *  creates the region) rather than throwing.
- *
- *  Takes `(anchor, rel)` like every other repository read: `null` covers absence AND a refusal —
- *  a link, or a non-regular file — which both mean "nothing to merge into", exactly what the
- *  `catch` this replaces already concluded for an unreadable path. */
-export async function readFileOrEmpty(anchor: string, rel: string): Promise<string> {
-  return (await readTextNoFollow(anchor, rel)) ?? '';
-}
-
 /** `diskPath` reaches this step from a plan row — i.e. from the database — and is joined onto the
  *  repository root, so it is validated before it addresses anything.
  *
