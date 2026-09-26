@@ -19,6 +19,7 @@ import {
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
+  type ReadResult,
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
 import {
@@ -1968,17 +1969,23 @@ export async function resetOnboardingArtifacts(
     return removeIfStillHashed(rel, known);
   };
 
+  const readClaimed = (rel: string) =>
+    readFileNoFollow(root, rel, { maxBytes: MAX_FILE_CONTENT_BYTES, strict: true });
+  /** A whole read's normalised hash. None for a read the cap cut: its opening can normalise to a
+   *  render the whole file is not. */
+  const wholeHash = (read: ReadResult | null): string | null =>
+    read === null || read.truncated
+      ? null
+      : sha256Hex(normalizeContent(read.data.toString('utf8')));
+
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.
   for (const rel of ONBOARDING_SETTINGS_FILES) {
     await guard(rel, async () => {
-      const content = await readTextNoFollow(root, rel, {
-        maxBytes: MAX_FILE_CONTENT_BYTES,
-        strict: true,
-      });
-      if (content === null) return;
+      const read = await readClaimed(rel);
+      if (read === null) return;
       const written = writtenHashes.get(rel);
-      if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
+      if (written !== undefined && written === wholeHash(read)) {
         await removeIfStillHashed(rel, [written]);
         return;
       }
@@ -2040,13 +2047,8 @@ export async function resetOnboardingArtifacts(
 
   /** Whether the bytes on disk are still the ones the writing step recorded. Same normalisation
    *  as the row check, or the two records would disagree about identical files. */
-  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> => {
-    const content = await readTextNoFollow(root, rel, {
-      maxBytes: MAX_FILE_CONTENT_BYTES,
-      strict: true,
-    }).catch(() => null);
-    return content !== null && sha256Hex(normalizeContent(content)) === hash;
-  };
+  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> =>
+    wholeHash(await readClaimed(rel).catch(() => null)) === hash;
 
   /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
    *  recorded. A row on its own is not evidence: `recordOnboardingArtifacts` inserts one per
@@ -2057,11 +2059,7 @@ export async function resetOnboardingArtifacts(
   const artifactMatchesDisk = async (entry: string): Promise<boolean> => {
     for (const [diskPath, hash] of writtenHashes) {
       if (diskPath !== entry && !diskPath.startsWith(`${entry}/`)) continue;
-      const content = await readTextNoFollow(root, diskPath, {
-        maxBytes: MAX_FILE_CONTENT_BYTES,
-        strict: true,
-      }).catch(() => null);
-      if (content !== null && sha256Hex(normalizeContent(content)) === hash) return true;
+      if (wholeHash(await readClaimed(diskPath).catch(() => null)) === hash) return true;
     }
     return false;
   };

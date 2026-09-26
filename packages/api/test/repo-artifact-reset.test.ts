@@ -12,6 +12,7 @@ import {
 import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
+import { MAX_FILE_CONTENT_BYTES } from '../src/routes/tasks/_helpers.js';
 import {
   checkOnboardingMarkers,
   classifyResetFailure,
@@ -1429,6 +1430,31 @@ describe('resetOnboardingArtifacts', () => {
     expect(await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8')).toBe(
       'name = "mine now"\n',
     );
+  });
+
+  it('moves aside a file past the read cap whose opening holds what Haive wrote', async () => {
+    // Blank lines normalise away, so a file that opens with Haive's bytes and carries the
+    // person's text past the cap hashes like the render when only the capped part is read.
+    const rel = '.codex/agents/code-reviewer.toml';
+    const hash = sha256Hex(normalizeContent('x\n'));
+    const content = `x\n${'\n'.repeat(MAX_FILE_CONTENT_BYTES)}mine\n`;
+    for (const claim of [provenance([[rel, hash]]), provenance([], [[rel, hash]])]) {
+      const root = await repo('reset-past-cap-');
+      await installArtifacts(root);
+      await writeFile(path.join(root, rel), content, 'utf8');
+
+      const { removed, quarantined } = await resetOnboardingArtifacts(root, claim);
+
+      expect(removed).not.toContain(rel);
+      expect(quarantined).toContainEqual({
+        from: rel,
+        to: '.codex/agents-legacy/code-reviewer.toml',
+        reason: 'edited',
+      });
+      expect(
+        await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8'),
+      ).toBe(content);
+    }
   });
 
   it('still removes a generated file whose bytes are untouched', async () => {
