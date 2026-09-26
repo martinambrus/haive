@@ -1,4 +1,9 @@
-import { errno, rewriteFileIfNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import {
+  errno,
+  readTextNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -617,7 +622,8 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 };
 
 /** Put back what an upgrade removed, only where nothing stands now: a file there, a region in
- *  AGENTS.md, or AGENTS.md gone altogether is what someone did since, and stays. */
+ *  AGENTS.md, or AGENTS.md gone altogether is what someone did since, and stays. What stands there
+ *  already holding the restore is an earlier attempt of this rollback, and counts as put back. */
 async function restoreRemoved(
   repoPath: string,
   rel: string,
@@ -632,16 +638,21 @@ async function restoreRemoved(
       });
       return true;
     } catch (err) {
-      if (errno(err) === 'EEXIST') return false;
-      throw err;
+      if (errno(err) !== 'EEXIST') throw err;
+      return (await readTextNoFollow(repoPath, rel).catch(() => null)) === content;
     }
   }
+  let alreadyBack = false;
   const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
     const current = data.toString('utf8');
-    if (extractRegion(current, CLI_RULES_START, CLI_RULES_END) !== null) return null;
+    const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+    if (region !== null) {
+      alreadyBack = region === content;
+      return null;
+    }
     return Buffer.from(upsertRegion(current, content, CLI_RULES_START, CLI_RULES_END), 'utf8');
   });
-  return result === 'rewritten';
+  return result === 'rewritten' || alreadyBack;
 }
 
 async function writeInstallManifest(

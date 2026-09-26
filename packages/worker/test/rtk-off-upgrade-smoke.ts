@@ -516,6 +516,23 @@ async function main(): Promise<void> {
         (await liveRowsAt(SETTINGS)).length === 1,
       { now: await readOrNull(SETTINGS) },
     );
+    // An attempt that put the file back and failed before its rows: the retry finds its own restore.
+    await db
+      .delete(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, SETTINGS),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const retriedRollback = await rollback('rtk-off-upgrade-smoke again rollback retry');
+    check(
+      'a retried rollback takes the file an earlier attempt put back as restored',
+      (await liveRowsAt(SETTINGS)).length === 1 &&
+        !retriedRollback.warnings.some((w) => w.includes(SETTINGS)),
+      retriedRollback.warnings,
+    );
 
     // ---- a blank repository switched off before its first upgrade ---------------------------
     const seededId = randomUUID();
