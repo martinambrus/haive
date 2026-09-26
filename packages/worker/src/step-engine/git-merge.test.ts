@@ -184,23 +184,26 @@ async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
   return { dir, kept };
 }
 
-/** `main` holds a file `foo` and `feature/x` a directory `foo/bar`, so git moves the file aside and
- *  reports only the name it gave it; the merge is left open. */
-async function setupDirectoryFileConflict(): Promise<string> {
+/** One side holds a file `foo` and the other a directory `foo/bar`, so git moves the file aside and
+ *  reports only the name it gave it; the merge of `feature/x` into `main` is left open. */
+async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-'));
   await git(dir, ['init', '-b', 'main']);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'init']);
   await git(dir, ['checkout', '-b', 'feature/x']);
-  await mkdir(path.join(dir, 'foo'));
-  await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'feature dir']);
-  await git(dir, ['checkout', 'main']);
-  await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'main file']);
+  for (const branch of ['feature/x', 'main']) {
+    await git(dir, ['checkout', branch]);
+    if (branch === fileOn) {
+      await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
+    } else {
+      await mkdir(path.join(dir, 'foo'));
+      await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
+    }
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', `${branch} foo`]);
+  }
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
   return dir;
 }
@@ -397,20 +400,91 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
-  // git reports `foo~HEAD` alone and stages the directory side, so keeping the file touches both.
-  it('commits the file side of a directory/file conflict a fixer chose', async () => {
-    const dir = await setupDirectoryFileConflict();
+  // git reports the moved file alone and stages the directory side, so keeping the file touches both.
+  it.each(['main', 'feature/x'] as const)(
+    'commits the file side of a directory/file conflict a fixer chose, the file on %s',
+    async (fileOn) => {
+      const dir = await setupDirectoryFileConflict(fileOn);
+      try {
+        const [moved] = await unmergedPaths(dir).then((u) => u ?? []);
+        expect(moved).toBeDefined();
+        const baseline = await captureFixBaseline(dir);
+        expect(baseline).toMatchObject({ resolving: [moved, 'foo'] });
+        await rm(path.join(dir, 'foo'), { recursive: true });
+        await rename(path.join(dir, moved!), path.join(dir, 'foo'));
+        expect(
+          await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' }),
+        ).toBeNull();
+        expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+        expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
+        expect(await git(dir, ['show', 'HEAD:foo'])).toBe('file\n');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Blob equality alone would also take `bar`, which HEAD left alone and git merged cleanly.
+  it('leaves a sibling holding the same blob out of a directory/file conflict it is not in', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-same-'));
     try {
-      const [moved] = await unmergedPaths(dir).then((u) => u ?? []);
-      expect(moved).toBeDefined();
+      await git(dir, ['init', '-b', 'main']);
+      await writeFile(path.join(dir, 'foo'), 'a\n', 'utf8');
+      await writeFile(path.join(dir, 'bar'), 'b\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'init']);
+      await git(dir, ['checkout', '-b', 'feature/x']);
+      for (const name of ['foo', 'bar']) {
+        await rm(path.join(dir, name));
+        await mkdir(path.join(dir, name));
+        await writeFile(path.join(dir, name, 'inner'), `${name} inner\n`, 'utf8');
+      }
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'feature dirs']);
+      await git(dir, ['checkout', 'main']);
+      await writeFile(path.join(dir, 'foo'), 'b\n', 'utf8');
+      await git(dir, ['commit', '-am', 'foo like bar']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const unmerged = (await unmergedPaths(dir)) ?? [];
       const baseline = await captureFixBaseline(dir);
-      expect(baseline).toMatchObject({ resolving: [moved, 'foo'] });
-      await rm(path.join(dir, 'foo'), { recursive: true });
-      await rename(path.join(dir, moved!), path.join(dir, 'foo'));
-      expect(await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' })).toBeNull();
+      expect(baseline).toMatchObject({ resolving: [...unmerged, 'foo'] });
+      await writeFile(path.join(dir, 'bar', 'inner'), 'fixer on bar\n', 'utf8');
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved).toEqual(['bar/inner']);
+      expect(await readFile(path.join(dir, 'bar', 'inner'), 'utf8')).toBe('bar inner\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `commit` takes the whole index, what stays in the tree as not the fixer's to move included.
+  it("takes Haive's own paths and gitlinks a fixer staged back out of the index", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'plan.json'), '{}\n', 'utf8');
+      const nested = path.join(dir, 'vendor', 'lib');
+      await mkdir(nested, { recursive: true });
+      await git(nested, ['init', '-b', 'main']);
+      await writeFile(path.join(nested, 'lib.txt'), 'lib\n', 'utf8');
+      await git(nested, ['add', '-A']);
+      await git(nested, ['commit', '-m', 'lib']);
+      await git(dir, ['add', '-A']);
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved).toEqual([]);
+      expect(out?.unstaged.map((u) => u.path).sort()).toEqual([
+        '.haive-data/plan.json',
+        'dirt.txt',
+        'mine.txt',
+        'vendor/lib',
+      ]);
       expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
-      expect(await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('base.txt\nfoo\n');
-      expect(await git(dir, ['show', 'HEAD:foo'])).toBe('file\n');
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:.haive-data/plan.json'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:vendor/lib'])).not.toBe(0);
+      expect(await readFile(path.join(dir, '.haive-data', 'plan.json'), 'utf8')).toBe('{}\n');
+      expect(await readFile(path.join(nested, 'lib.txt'), 'utf8')).toBe('lib\n');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

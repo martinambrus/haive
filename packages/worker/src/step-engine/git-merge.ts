@@ -343,7 +343,8 @@ async function stagedTree(dir: string): Promise<TreeResult> {
  *  the path the file was moved away from. git gives the file a name of its own, reports only that
  *  and stages the directory side, so keeping the file means deleting the directory and putting the
  *  file back at its path. The partner is found by content, never by the name git chose: the same
- *  blob stands beside the moved file on its side, where the other side holds a directory. */
+ *  blob stands beside the moved file on its side, where the other side holds a directory, and its
+ *  side changed it since the merge base: git takes the directory cleanly where it did not. */
 async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[] | null> {
   if (unmerged.length === 0) return [];
   const listed = await gitRun(dir, ['ls-files', '-u', '-z'], undefined, {
@@ -359,6 +360,7 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
     stages.set(p, (stages.get(p) ?? new Map()).set(stage, sha));
   }
   const partners = new Set<string>();
+  let base: string | null | undefined;
   for (const [p, byStage] of stages) {
     for (const [stage, side, other] of [
       ['2', 'HEAD', 'MERGE_HEAD'],
@@ -381,6 +383,14 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
         const [, type, object] = entry.slice(0, tab).split(' ');
         const sibling = entry.slice(tab + 1);
         if (sibling === p || type !== 'blob' || object !== blob) continue;
+        if (base === undefined) {
+          const found = await gitRun(dir, ['merge-base', 'HEAD', 'MERGE_HEAD']);
+          base = found.code === 0 ? found.stdout.trim() : null;
+        }
+        if (base !== null) {
+          const was = await gitRun(dir, ['rev-parse', '-q', '--verify', `${base}:${sibling}`]);
+          if (was.code === 0 && was.stdout.trim() === object) continue;
+        }
         const kind = await gitRun(dir, ['cat-file', '-t', `${other}:${sibling}`]);
         if (kind.code === 0 && kind.stdout.trim() === 'tree') partners.add(sibling);
       }
@@ -643,7 +653,8 @@ export async function relocateFixerChanges(
   } else {
     const unstage: { path: string; blob: string | null }[] = [];
     for (const c of rawChanges(staged.stdout)) {
-      if (c.status === 'U' || !outside(c)) continue;
+      // Haive's own paths and gitlinks stay in the tree, but `commit` takes the whole index.
+      if (c.status === 'U' || covered(resolving, c.path)) continue;
       if (c.path.includes('�')) {
         left.push({ path: c.path, reason: 'staged, and its name is not UTF-8' });
         continue;
