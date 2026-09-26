@@ -369,11 +369,12 @@ describe('removeIfHaives', () => {
   const rules = { diskPath: 'AGENTS.md', templateKind: CLI_RULES_TEMPLATE_KIND };
   const region = `${CLI_RULES_START}\nKeep every change small.\n${CLI_RULES_END}`;
 
-  it('removes the file Haive wrote, and reports a path holding nothing as absent', async () => {
+  it('removes the file Haive wrote, returning what it held, and reports a path holding nothing as absent', async () => {
     const root = await repo();
     await writeFile(join(root, 'a.md'), 'HAIVE\n', 'utf8');
     expect(await removeIfHaives(root, 'a.md', agent('a.md'), hash('HAIVE\n'))).toEqual({
       outcome: 'removed',
+      content: 'HAIVE\n',
     });
     expect(await exists(join(root, 'a.md'))).toBe(false);
     expect(await removeIfHaives(root, 'gone.md', agent('gone.md'), hash('HAIVE\n'))).toEqual({
@@ -416,6 +417,7 @@ describe('removeIfHaives', () => {
     await writeFile(join(root, 'AGENTS.md'), `# Project\n\n${region}\n\nMine.\n`, 'utf8');
     expect(await removeIfHaives(root, 'AGENTS.md', rules, hash(region))).toEqual({
       outcome: 'removed',
+      content: region,
     });
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe('# Project\n\n\n\nMine.\n');
   });

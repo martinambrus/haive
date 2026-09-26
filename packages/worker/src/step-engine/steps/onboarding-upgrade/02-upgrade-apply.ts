@@ -174,7 +174,11 @@ export function keptRowUpdate(
 const keptRefusal = (diskPath: string) =>
   `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
 
-export type Removal = { outcome: 'removed' | 'absent' } | { outcome: 'kept'; refusal: string };
+/** `content` is what a removal took: the file, or the rules region with its markers. */
+export type Removal =
+  | { outcome: 'removed'; content: string }
+  | { outcome: 'absent' }
+  | { outcome: 'kept'; refusal: string };
 
 /** Remove the file at `rel`, or the rules region alone, only while it holds `writtenHash`, judged on
  *  the bytes removed: a row alone proves nothing, since 12 records one for a file 07 skipped. */
@@ -187,24 +191,29 @@ export async function removeIfHaives(
   const haives = (text: string) => sha256Hex(normalizeContent(text)) === writtenHash;
   const kept: Removal = { outcome: 'kept', refusal: keptRefusal(entry.diskPath) };
   try {
+    let content = '';
     if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) {
-      const result = await removeFileIfNoFollow(repoPath, rel, (data) =>
-        haives(data.toString('utf8')),
-      );
-      return result === 'kept' ? kept : { outcome: result };
+      const result = await removeFileIfNoFollow(repoPath, rel, (data) => {
+        content = data.toString('utf8');
+        return haives(content);
+      });
+      if (result === 'kept') return kept;
+      return result === 'removed' ? { outcome: 'removed', content } : { outcome: 'absent' };
     }
     if (entry.fileCreated) {
       // A file created for the region goes whole while nothing but the region was written to it.
       const whole = await removeFileIfNoFollow(repoPath, rel, (data) => {
         const current = data.toString('utf8');
         const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
+        content = region ?? '';
         return (
           region !== null &&
           haives(region) &&
           upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END).trim() === ''
         );
       });
-      if (whole !== 'kept') return { outcome: whole };
+      if (whole === 'removed') return { outcome: 'removed', content };
+      if (whole === 'absent') return { outcome: 'absent' };
     }
     let noRegion = false;
     const result = await rewriteFileIfNoFollow(repoPath, rel, (data) => {
@@ -212,9 +221,10 @@ export async function removeIfHaives(
       const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
       noRegion = region === null;
       if (region === null || !haives(region)) return null;
+      content = region;
       return Buffer.from(upsertRegion(current, '', CLI_RULES_START, CLI_RULES_END), 'utf8');
     });
-    if (result === 'rewritten') return { outcome: 'removed' };
+    if (result === 'rewritten') return { outcome: 'removed', content };
     return result === 'absent' || noRegion ? { outcome: 'absent' } : kept;
   } catch (err) {
     if (isPathContainmentError(err)) {
@@ -303,6 +313,9 @@ export interface UpgradeApplyOutput {
   createdPaths?: CreatedPath[];
   /** Every row this run retired or kept as a baseline: the only rows a rollback of it restores. */
   retiredRowIds?: string[];
+  /** Every path whose file, or rules region, this run removed. Each has a baseline among
+   *  `retiredRowIds` holding what it removed, so a rollback puts it back. Optional likewise. */
+  removedPaths?: string[];
 }
 
 /** What a row records about the bytes at its path. */
@@ -581,6 +594,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const writtenPaths: string[] = [];
     const deletedPaths: string[] = [];
     const created: Omit<CreatedPath, 'retiredRowId'>[] = [];
+    const removedPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -707,6 +721,20 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) deletedPaths.push(rel);
           else if (removal.outcome === 'removed') writtenPaths.push(rel);
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
+          if (removal.outcome === 'removed') {
+            // What it removed, so a rollback of this upgrade can put it back: a path with no row,
+            // such as a file a blank scaffold seeded, would otherwise leave nothing to restore from.
+            baseline(
+              backfillRecord(
+                {
+                  templateContentHash: entry.baselineTemplateContentHash ?? '',
+                  writtenHash: entry.baselineWrittenHash ?? '',
+                },
+                { content: removal.content, hash: sha256Hex(normalizeContent(removal.content)) },
+              ),
+            );
+            removedPaths.push(entry.diskPath);
+          }
           deletedCount += 1;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1017,6 +1045,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         retiredRowId: retired.find((r) => r.diskPath === c.diskPath)?.id ?? null,
       })),
       retiredRowIds: [...retired.map((r) => r.id), ...baselineIds],
+      removedPaths,
     };
   },
 };

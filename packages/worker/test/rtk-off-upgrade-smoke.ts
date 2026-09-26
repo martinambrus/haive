@@ -180,13 +180,24 @@ async function main(): Promise<void> {
     }
     const settingsEntry = (detected: UpgradePlanDetect) =>
       detected.entries.find((e) => e.diskPath === SETTINGS);
+    /** Mark an upgrade finished, its 02 output stored where a rollback of it reads it. */
+    async function finish(applyCtx: StepContext, applied: unknown) {
+      await db
+        .update(schema.taskSteps)
+        .set({ output: applied as Record<string, unknown>, status: 'done' })
+        .where(eq(schema.taskSteps.id, applyCtx.taskStepId));
+      await db
+        .update(schema.tasks)
+        .set({ status: 'completed', completedAt: new Date() })
+        .where(eq(schema.tasks.id, applyCtx.taskId));
+    }
     /** A rollback task of the most recent completed upgrade, run to the end. */
-    async function rollback(title: string) {
+    async function rollback(title: string, repo = { id: repositoryId, path: repoPath }) {
       const [task] = await db
         .insert(schema.tasks)
         .values({
           userId,
-          repositoryId,
+          repositoryId: repo.id,
           type: 'onboarding_upgrade',
           title,
           status: 'running',
@@ -205,7 +216,7 @@ async function main(): Promise<void> {
           status: 'running',
         })
         .returning({ id: schema.taskSteps.id });
-      const rollbackCtx = ctxFor(task!.id, row!.id);
+      const rollbackCtx = ctxFor(task!.id, row!.id, repo.path);
       const detected = await upgradeRollbackStep.detect!(rollbackCtx);
       return upgradeRollbackStep.apply(rollbackCtx, {
         detected,
@@ -496,6 +507,16 @@ async function main(): Promise<void> {
       { bucket: settingsEntry(back.detected)?.bucket },
     );
 
+    // ---- a rollback of the upgrade that removed it ------------------------------------------
+    await finish(again.applyCtx, againApplied);
+    await rollback('rtk-off-upgrade-smoke again rollback');
+    check(
+      'a rollback puts the removed settings file back, with a live row',
+      (await readOrNull(SETTINGS)) === buildClaudeSettingsJson() &&
+        (await liveRowsAt(SETTINGS)).length === 1,
+      { now: await readOrNull(SETTINGS) },
+    );
+
     // ---- a blank repository switched off before its first upgrade ---------------------------
     const seededId = randomUUID();
     const seededPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-seeded-'));
@@ -603,6 +624,13 @@ async function main(): Promise<void> {
         (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null &&
           removed.deletedPaths?.includes(SETTINGS) === true,
         removed.deletedPaths,
+      );
+      await finish(secondSeeded.applyCtx, removed);
+      await rollback('rtk-off-upgrade-smoke seeded rollback', seeded);
+      check(
+        'a rollback puts back the file no row recorded',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) ===
+          buildClaudeSettingsJson(),
       );
     } finally {
       await rm(seededPath, { recursive: true, force: true });

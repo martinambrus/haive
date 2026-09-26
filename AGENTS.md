@@ -2560,6 +2560,13 @@ deleted again. Any other path restores the newest row the upgrade retired there,
 held the bytes the upgrade wrote, so only its row is retired. 01's backfill records no row for a file
 missing from disk. An output from before the record falls back to reading the rows.
 
+A path the upgrade REMOVED gets its bytes back the same way. The upgrade wrote no row there, so 04
+used to visit only the rows it wrote and never put back an obsolete file it deleted, and a file no
+row recorded had nothing to restore from. 02 now keeps what each removal took (the file, or the
+rules region with its markers) as a baseline and names the path in `removedPaths`, and 04 puts it
+back only where nothing stands now: a file created at the path since, a region written into
+AGENTS.md since, or an AGENTS.md removed since is what someone did after the upgrade, and stays.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
