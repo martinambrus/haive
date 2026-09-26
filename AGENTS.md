@@ -2714,8 +2714,8 @@ upgrade with no prior, which a rollback reads as a file the upgrade introduced a
 records the path only when it replaces the file, keeping what it held as a superseded baseline (the
 rules region through `cliRulesRegionRecord`, any other file through `backfillRecord`). It keeps one
 for a live row too when the bytes on disk are not what that row records, or a rollback of an
-Overwrite would restore Haive's old bytes over the person's edits; 02 retires the row and inserts
-the baseline in one instant, so 04 breaks the `superseded_at` tie by `generated_at`. Both apply
+Overwrite would restore Haive's old bytes over the person's edits; 02 retires the row and the
+baseline in one instant, and the baseline, written after the row, wins 04's `generated_at` tie. Both apply
 one rule to bytes that are not a render: the bytes are `writtenContent`, so a rollback restores
 them; the render's hash is `writtenHash`, so they are never taken as Haive's; and their own hash is
 `templateContentHash`, so the template reads as not installed. A rollback copies both hashes, so a
@@ -2770,7 +2770,23 @@ with the live row it retired there) and every row it retired or kept as a baseli
 nothing else was written to it, and puts the retired row back live, so a reinstated file reads as
 deleted again. Any other path restores the newest row the upgrade retired there, and a path with none
 held the bytes the upgrade wrote, so only its row is retired. 01's backfill records no row for a file
-missing from disk. An output from before the record falls back to reading the rows.
+missing from disk. An output from before the record falls back to reading the rows, and only those
+retired no later than that upgrade completed: a later upgrade that failed part-way leaves its
+records at the same paths.
+
+**02 records what stood at a path before it writes there, so a retried apply records what the first
+attempt did.** The record is its own statement ahead of the write, never part of the transaction
+that retires the rows, since an apply that fails after writing leaves paths that now hold the
+render and show nothing of what stood there. A retry finding the render takes the newest record an
+earlier attempt of the step made for that path. Every write gets one: the bytes that stood, recorded
+as the row that records them when they match it (its hashes, snapshot and schema version, so
+restoring it restores what restoring that row did), or a marker where nothing stood, which carries no
+observed hash and, for the rules region, `''` where the file stood without the region. Only a path
+with no row that already holds the render records nothing. A marker names its path in
+`createdPaths` and is never in `retiredRowIds`. It takes the instant the transaction retires a row
+at its path, which is how a retry tells the live row the failed attempt retired where nothing stood
+from one something else retired since. An earlier attempt's own rows hold what it wrote, so a retry
+drops them from what it reports retired.
 
 A restore replaces only what the upgrade left there (`restoreIfUpgrades`): the file, or the rules
 region, is judged on the bytes it replaces against its upgrade row's `lastObservedDiskHash`, else

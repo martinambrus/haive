@@ -7,7 +7,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { readUpgradeFile, RULES_FILE_READ_CAP, type UnreadReason } from '@haive/shared/rules-files';
-import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_END,
@@ -351,10 +351,14 @@ export interface UpgradeApplyOutput {
 interface ArtifactRecord {
   templateContentHash: string;
   writtenHash: string;
-  writtenContent: string;
+  writtenContent: string | null;
   lastObservedDiskHash: string | null;
   userModified: boolean;
 }
+
+/** What stood at a path before a write: bytes, or nothing (no file, or for the rules region no
+ *  region in the file). */
+type Standing = { absent: 'file' | 'region' } | { content: string; hash: string };
 
 export interface CreatedPath {
   diskPath: string;
@@ -635,23 +639,44 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let deletedCount = 0;
     const writtenPaths: string[] = [];
     const deletedPaths: string[] = [];
-    const created: Omit<CreatedPath, 'retiredRowId'>[] = [];
+    const created: {
+      diskPath: string;
+      fileCreated: boolean;
+      markerId: string;
+      /** The row an earlier attempt retired where nothing stood, when its record proves which. */
+      provenRetired: string | null;
+    }[] = [];
     const removedPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
-    // Superseded baselines for what a written path with no row already held.
+    // Superseded baselines of what a hook strip replaced.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
     const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
     // Baselines of what a removal took, each written before the removal it records.
     const removalRecords: string[] = [];
-    const earlierRemovals = new Map<string, string>();
+    // What stood at each written path, recorded before the write.
+    const preimageIds: string[] = [];
+    // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
+    // what stood there, so a retry takes the newest record of each path from them.
+    const earlierRecords = new Map<
+      string,
+      {
+        id: string;
+        writtenContent: string | null;
+        lastObservedDiskHash: string | null;
+        supersededAt: Date | null;
+      }
+    >();
     for (const r of await ctx.db
       .select({
         id: schema.onboardingArtifacts.id,
         diskPath: schema.onboardingArtifacts.diskPath,
         templateId: schema.onboardingArtifacts.templateId,
+        writtenContent: schema.onboardingArtifacts.writtenContent,
+        lastObservedDiskHash: schema.onboardingArtifacts.lastObservedDiskHash,
+        supersededAt: schema.onboardingArtifacts.supersededAt,
       })
       .from(schema.onboardingArtifacts)
       .where(
@@ -661,9 +686,43 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           eq(schema.onboardingArtifacts.source, 'backfill'),
           isNotNull(schema.onboardingArtifacts.supersededAt),
         ),
-      )) {
-      earlierRemovals.set(`${r.templateId}\n${r.diskPath}`, r.id);
+      )
+      .orderBy(asc(schema.onboardingArtifacts.generatedAt))) {
+      earlierRecords.set(`${r.templateId}\n${r.diskPath}`, r);
     }
+    // The rows the plan saw live: a path still holding what its row records is recorded as that row.
+    const planLiveIds = plan.entries.flatMap((e) =>
+      e.liveArtifactId && e.bucket !== 'unchanged' ? [e.liveArtifactId] : [],
+    );
+    const planLive = new Map<
+      string,
+      {
+        templateSchemaVersion: number;
+        formValuesSnapshot: Record<string, unknown> | null;
+        supersededAt: Date | null;
+      }
+    >();
+    if (planLiveIds.length > 0) {
+      for (const r of await ctx.db
+        .select({
+          id: schema.onboardingArtifacts.id,
+          templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
+          formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+          supersededAt: schema.onboardingArtifacts.supersededAt,
+        })
+        .from(schema.onboardingArtifacts)
+        .where(inArray(schema.onboardingArtifacts.id, planLiveIds))) {
+        planLive.set(r.id, r);
+      }
+    }
+    const insertRecord = async (row: typeof schema.onboardingArtifacts.$inferInsert) => {
+      const now = new Date();
+      const [inserted] = await ctx.db
+        .insert(schema.onboardingArtifacts)
+        .values({ ...row, supersededAt: now, updatedAt: now })
+        .returning({ id: schema.onboardingArtifacts.id });
+      return inserted!.id;
+    };
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -711,6 +770,100 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       // What a path holds that its row does not record (no row, or bytes edited since) is kept as
       // a superseded baseline before it is replaced, so a rollback of this upgrade restores it.
       const baseline = (prior: ArtifactRecord) => baselineRows.push(artifactRow(prior, 'backfill'));
+      const key = `${entry.templateId}\n${entry.diskPath}`;
+      /** Records what stands at the path, in its own statement ahead of the write so a failed attempt
+       *  leaves it; a retry finding the render an earlier attempt wrote takes that attempt's record. */
+      const recordBeforeWrite = async (standing: Standing, render: string) => {
+        const renderHash = sha256Hex(normalizeContent(render));
+        const holdsRender = 'hash' in standing && standing.hash === renderHash;
+        const earlier = earlierRecords.get(key);
+        const live = entry.liveArtifactId ? planLive.get(entry.liveArtifactId) : undefined;
+        if (holdsRender && earlier) {
+          if (earlier.lastObservedDiskHash !== null) {
+            preimageIds.push(earlier.id);
+            return;
+          }
+          // Its record takes the instant the row beside it was retired, so an equal one is that row.
+          const proven =
+            live?.supersededAt && live.supersededAt.getTime() === earlier.supersededAt?.getTime();
+          created.push({
+            diskPath: entry.diskPath,
+            fileCreated: earlier.writtenContent === null,
+            markerId: earlier.id,
+            provenRetired: proven ? entry.liveArtifactId : null,
+          });
+          return;
+        }
+        if ('absent' in standing) {
+          // Nothing stood here: a marker, whose missing observed hash is what tells it apart.
+          const markerId = await insertRecord(
+            artifactRow(
+              {
+                templateContentHash: renderHash,
+                writtenHash: renderHash,
+                writtenContent: standing.absent === 'file' ? null : '',
+                lastObservedDiskHash: null,
+                userModified: false,
+              },
+              'backfill',
+            ),
+          );
+          created.push({
+            diskPath: entry.diskPath,
+            fileCreated: standing.absent === 'file',
+            markerId,
+            provenRetired: null,
+          });
+          return;
+        }
+        if (holdsRender && entry.liveArtifactId === null) return;
+        let record: typeof schema.onboardingArtifacts.$inferInsert;
+        if (live && standing.hash === entry.baselineWrittenHash) {
+          // What its row records, recorded as that row, so a rollback restores what it always did.
+          record = {
+            ...artifactRow(
+              {
+                templateContentHash: entry.baselineTemplateContentHash ?? '',
+                writtenHash: standing.hash,
+                writtenContent: standing.content,
+                lastObservedDiskHash: standing.hash,
+                userModified: false,
+              },
+              'backfill',
+            ),
+            templateSchemaVersion: live.templateSchemaVersion,
+            formValuesSnapshot: live.formValuesSnapshot,
+          };
+        } else if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
+          const prior = cliRulesRegionRecord(
+            standing.content,
+            render,
+            await loadCliRulesRenderHashes(ctx.db, plan.repositoryId),
+          );
+          record = artifactRow(
+            {
+              templateContentHash: prior.templateContentHash,
+              writtenHash: prior.writtenHash,
+              writtenContent: prior.content,
+              lastObservedDiskHash: prior.templateContentHash,
+              userModified: !prior.haiveWritten,
+            },
+            'backfill',
+          );
+        } else {
+          record = artifactRow(
+            backfillRecord(
+              {
+                templateContentHash: entry.currentTemplateContentHash ?? '',
+                writtenHash: renderHash,
+              },
+              standing,
+            ),
+            'backfill',
+          );
+        }
+        preimageIds.push(await insertRecord(record));
+      };
 
       if (action === 'skip') {
         skippedCount += 1;
@@ -775,33 +928,25 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         }
         // What a removal takes is recorded before it runs, so a rollback of this upgrade can put it
         // back, and so a retry that finds the path gone can tell its own removal from a person's.
-        const recordRemoval = async (content: string) => {
-          const now = new Date();
-          const [row] = await ctx.db
-            .insert(schema.onboardingArtifacts)
-            .values({
-              ...artifactRow(
-                backfillRecord(
-                  {
-                    templateContentHash: entry.baselineTemplateContentHash ?? '',
-                    writtenHash: entry.baselineWrittenHash ?? '',
-                  },
-                  { content, hash: sha256Hex(normalizeContent(content)) },
-                ),
-                'backfill',
+        const recordRemoval = (content: string) =>
+          insertRecord(
+            artifactRow(
+              backfillRecord(
+                {
+                  templateContentHash: entry.baselineTemplateContentHash ?? '',
+                  writtenHash: entry.baselineWrittenHash ?? '',
+                },
+                { content, hash: sha256Hex(normalizeContent(content)) },
               ),
-              supersededAt: now,
-              updatedAt: now,
-            })
-            .returning({ id: schema.onboardingArtifacts.id });
-          return row!.id;
-        };
+              'backfill',
+            ),
+          );
         const dropRecord = async (id: string) => {
           await ctx.db
             .delete(schema.onboardingArtifacts)
             .where(eq(schema.onboardingArtifacts.id, id));
         };
-        const earlier = earlierRemovals.get(`${entry.templateId}\n${entry.diskPath}`) ?? null;
+        const earlier = earlierRecords.get(key)?.id ?? null;
         const planned =
           entry.currentContent !== null && entry.currentHash === entry.baselineWrittenHash
             ? entry.currentContent
@@ -960,27 +1105,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         const onDisk = read.kind === 'text' ? read.text : null;
         const existing = onDisk ?? '';
         const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
-        if (priorRegion === null) {
-          created.push({ diskPath: entry.diskPath, fileCreated: onDisk === null });
-        }
-        if (
-          priorRegion &&
-          (entry.liveArtifactId === null ||
-            sha256Hex(normalizeContent(priorRegion)) !== entry.baselineWrittenHash)
-        ) {
-          const prior = cliRulesRegionRecord(
-            priorRegion,
-            entry.newContent,
-            await loadCliRulesRenderHashes(ctx.db, plan.repositoryId),
-          );
-          baseline({
-            templateContentHash: prior.templateContentHash,
-            writtenHash: prior.writtenHash,
-            writtenContent: prior.content,
-            lastObservedDiskHash: prior.templateContentHash,
-            userModified: !prior.haiveWritten,
-          });
-        }
+        await recordBeforeWrite(
+          priorRegion === null
+            ? { absent: onDisk === null ? 'file' : 'region' }
+            : { content: priorRegion, hash: sha256Hex(normalizeContent(priorRegion)) },
+          entry.newContent,
+        );
         await writeFileNoFollow(
           ctx.repoPath,
           rel,
@@ -995,27 +1125,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         const existing = read.kind === 'text' ? read.text : null;
-        if (existing === null) {
-          created.push({ diskPath: entry.diskPath, fileCreated: true });
-        } else {
-          const renderHash = sha256Hex(normalizeContent(entry.newContent));
-          const existingHash = sha256Hex(normalizeContent(existing));
-          const unrecorded =
-            entry.liveArtifactId === null
-              ? existingHash !== renderHash
-              : existingHash !== entry.baselineWrittenHash;
-          if (unrecorded) {
-            baseline(
-              backfillRecord(
-                {
-                  templateContentHash: entry.currentTemplateContentHash ?? '',
-                  writtenHash: renderHash,
-                },
-                { content: existing, hash: existingHash },
-              ),
-            );
-          }
-        }
+        await recordBeforeWrite(
+          existing === null
+            ? { absent: 'file' }
+            : { content: existing, hash: sha256Hex(normalizeContent(existing)) },
+          entry.newContent,
+        );
         await writeFileNoFollow(ctx.repoPath, rel, entry.newContent, { createParents: true });
       }
       writtenPaths.push(rel);
@@ -1073,8 +1188,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const retiredShape = {
       id: schema.onboardingArtifacts.id,
       diskPath: schema.onboardingArtifacts.diskPath,
+      taskId: schema.onboardingArtifacts.taskId,
+      sourceStepId: schema.onboardingArtifacts.sourceStepId,
     };
-    const retired: { id: string; diskPath: string }[] = [];
+    const retired: { id: string; diskPath: string; taskId: string; sourceStepId: string }[] = [];
+    // An earlier attempt's own rows hold what it wrote, never what stood before.
+    const retiredBefore = () =>
+      retired.filter((r) => r.taskId !== ctx.taskId || r.sourceStepId !== '02-upgrade-apply');
     const baselineIds: string[] = [];
     if (
       rowsToSupersede.length > 0 ||
@@ -1085,12 +1205,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     ) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
-        if (removalRecords.length > 0) {
-          // Retired in the instant the row at their path is, so the rollback takes the baseline.
+        const records = [...removalRecords, ...preimageIds];
+        if (records.length > 0) {
+          // Retired in the instant the row at their path is, so the rollback takes the record.
           await tx
             .update(schema.onboardingArtifacts)
             .set({ supersededAt: now, updatedAt: now })
-            .where(inArray(schema.onboardingArtifacts.id, removalRecords));
+            .where(inArray(schema.onboardingArtifacts.id, records));
         }
         if (rowsToSupersede.length > 0) {
           retired.push(
@@ -1120,6 +1241,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               )
               .returning(retiredShape)),
           );
+        }
+        // A marker takes the instant the row beside it is retired, which a retry reads as that row.
+        const markers = created.flatMap((c) =>
+          retiredBefore().some((r) => r.diskPath === c.diskPath) ? [c.markerId] : [],
+        );
+        if (markers.length > 0) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(inArray(schema.onboardingArtifacts.id, markers));
         }
         for (const k of keptInPlace) {
           await tx
@@ -1173,6 +1304,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       { appliedCount, skippedCount, deletedCount, rowsInserted: rowsToInsert.length, warnings },
       'upgrade-apply complete',
     );
+    const before = retiredBefore();
+    const retiredAt = (diskPath: string) => before.find((r) => r.diskPath === diskPath)?.id ?? null;
 
     return {
       appliedCount,
@@ -1184,10 +1317,19 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       writtenPaths,
       deletedPaths,
       createdPaths: created.map((c) => ({
-        ...c,
-        retiredRowId: retired.find((r) => r.diskPath === c.diskPath)?.id ?? null,
+        diskPath: c.diskPath,
+        fileCreated: c.fileCreated,
+        retiredRowId: retiredAt(c.diskPath) ?? c.provenRetired,
       })),
-      retiredRowIds: [...retired.map((r) => r.id), ...baselineIds, ...removalRecords],
+      retiredRowIds: [
+        ...before.map((r) => r.id),
+        ...created.flatMap((c) =>
+          c.provenRetired && retiredAt(c.diskPath) === null ? [c.provenRetired] : [],
+        ),
+        ...baselineIds,
+        ...preimageIds,
+        ...removalRecords,
+      ],
       removedPaths,
     };
   },
