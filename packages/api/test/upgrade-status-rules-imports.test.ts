@@ -385,6 +385,7 @@ describe('upgrade-status and an upgrade that only removed files', () => {
 
   beforeEach(async () => {
     repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-removed-'));
+    state.onboarded = false;
     state.repo = {
       id: 'repo-1',
       applicableTemplateIds: [],
@@ -411,6 +412,13 @@ describe('upgrade-status and an upgrade that only removed files', () => {
     const body = await status();
     expect(body.isOnboarded).toBe(true);
     expect(body.hasPriorUpgrade).toBe(true);
+  });
+
+  it('and while that upgrade has not finished, so the banner offers to continue it', async () => {
+    state.rows.set(schema.taskSteps, []);
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasInProgressUpgradeSession).toBe(true);
   });
 });
 

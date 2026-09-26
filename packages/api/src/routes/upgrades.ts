@@ -436,8 +436,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   const isOnboarded = distinctInstalled.size > 0;
-  // POST /tasks starts an upgrade only on an onboarded repository, so one left to roll back is one.
-  if (!isOnboarded && !hasPriorUpgrade) {
+  if (!isOnboarded) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
@@ -447,7 +446,21 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ),
       columns: { id: true },
     });
-    if (!priorOnboarding) {
+    // POST /tasks starts an upgrade only on an onboarded repository, so one any upgrade ran on is one.
+    const [anyUpgrade] = priorOnboarding
+      ? []
+      : await db
+          .select({ id: schema.tasks.id })
+          .from(schema.tasks)
+          .where(
+            and(
+              eq(schema.tasks.repositoryId, repositoryId),
+              eq(schema.tasks.userId, userId),
+              eq(schema.tasks.type, 'onboarding_upgrade'),
+            ),
+          )
+          .limit(1);
+    if (!priorOnboarding && !anyUpgrade) {
       const res: UpgradeStatusResponse = {
         repositoryId,
         hasUpgradeAvailable: false,
