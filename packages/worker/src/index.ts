@@ -15,9 +15,11 @@ import { scheduleUsagePollTick, startUsagePollWorker } from './queues/usage-poll
 import { closePrPollQueue, schedulePrPollTick, startPrPollWorker } from './queues/pr-poll-queue.js';
 import {
   closeCliExecQueue,
+  getCliExecQueue,
   scheduleCliVersionRefresh,
   startCliExecWorker,
 } from './queues/cli-exec-queue.js';
+import { cliExecJobRequeuedAtBoot, requeueOrphanedActiveJobs } from './queues/boot-requeue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
 import {
   schedulePlanMirrorSweep,
@@ -27,6 +29,7 @@ import {
 import {
   backfillMissingRunSeq,
   closeTaskQueue,
+  getTaskQueue,
   reconcileEmbedModelResidency,
   reconcileOrphanedSteps,
   startTaskWorker,
@@ -89,6 +92,9 @@ async function main(): Promise<void> {
   await clearRuntimeReservations();
   // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
   await clearBrowserSurcharges();
+  // Before this process starts a worker, whose connection would read as the owner of every active job.
+  await requeueOrphanedActiveJobs(getTaskQueue(), () => true);
+  await requeueOrphanedActiveJobs(getCliExecQueue(), cliExecJobRequeuedAtBoot);
   // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
   // above): resume waiting_cli steps and re-drive running steps whose advance-step
   // job died mid-execution, so neither hangs after a restart/crash/power loss.
@@ -238,9 +244,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Worker shutting down');
     // Force-close BullMQ workers without waiting for in-flight jobs (CLI execs
-    // can run for minutes; Docker SIGTERM grace is ~10s). Jobs released back
-    // to the queue will be redelivered once the lock expires; the next
-    // worker pid reaps orphan containers on boot.
+    // can run for minutes; Docker SIGTERM grace is ~10s). Jobs left active are
+    // handed back when the next worker boots, or once their lock expires; the
+    // next worker pid reaps orphan containers on boot.
     terminalReaper.stop();
     ideReaper.stop();
     runtimeRunnerReaper.stop();
