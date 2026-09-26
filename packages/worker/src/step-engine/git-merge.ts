@@ -264,14 +264,17 @@ async function readMaskPolicy(
 
 type RawBytes = { args: string[]; env: Record<string, string> };
 
-/** Attributes read from the empty tree, and no autocrlf, so a snapshot stores a file's bytes as
- *  they are and a restore writes them back as they were: a clean filter or a line-ending
- *  conversion would record, and put back, other bytes than the fixer found. GIT_ATTR_SOURCE needs
- *  git 2.40; an older git applies the attributes as before. */
+/** Attributes read from the empty tree, no autocrlf and file modes honoured, so a snapshot stores
+ *  a file as it is and a restore writes it back as it was: a clean filter or a line-ending
+ *  conversion would record other bytes than the fixer found, and `core.fileMode=false` would hide
+ *  a chmod. GIT_ATTR_SOURCE needs git 2.40; an older git applies the attributes as before. */
 async function rawBytes(dir: string): Promise<RawBytes | { error: string }> {
   const empty = await gitRun(dir, ['hash-object', '-t', 'tree', '/dev/null']);
   if (empty.code !== 0) return { error: gitDetail(empty) };
-  return { args: ['-c', 'core.autocrlf=false'], env: { GIT_ATTR_SOURCE: empty.stdout.trim() } };
+  return {
+    args: ['-c', 'core.autocrlf=false', '-c', 'core.fileMode=true'],
+    env: { GIT_ATTR_SOURCE: empty.stdout.trim() },
+  };
 }
 
 /** The worktree as one git tree, untracked files included and ignored ones left out. Built in a

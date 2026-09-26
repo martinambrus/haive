@@ -1,6 +1,16 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -616,6 +626,26 @@ describe('fixer leftovers (real git)', () => {
       expect(await read('notes.txt')).toBe('ORIGINAL\n');
       expect(await read('win.crlf')).toBe('one\r\ntwo\r\n');
       expect(await read('.haive/merge-leftovers/t1/inv1/files/notes.txt')).toBe('FIXER\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A repository copied from a filesystem without executable bits often sets core.fileMode=false.
+  it('sees a chmod outside the conflict whatever core.fileMode says', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await git(dir, ['config', 'core.fileMode', 'false']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await chmod(path.join(dir, 'untouched.txt'), 0o755);
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.moved).toEqual(['untouched.txt']);
+      expect((await lstat(path.join(dir, 'untouched.txt'))).mode & 0o111).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
