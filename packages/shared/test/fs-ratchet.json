@@ -9,7 +9,7 @@
   "packages/shared/src/utils/host-resources.ts": 2,
   "packages/worker/src/bootstrap.ts": 2,
   "packages/worker/src/queues/cli-exec/handlers.ts": 3,
-  "packages/worker/src/repo/clone.ts": 10,
+  "packages/worker/src/repo/clone.ts": 9,
   "packages/worker/src/sandbox/composed-image-cache.ts": 3,
   "packages/worker/src/sandbox/ddev-runner.ts": 9,
   "packages/worker/src/sandbox/docker-runner.ts": 2,
