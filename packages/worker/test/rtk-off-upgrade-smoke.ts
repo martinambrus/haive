@@ -395,6 +395,27 @@ async function main(): Promise<void> {
       now: await readOrNull(SETTINGS),
     });
 
+    // ---- a byte that is not UTF-8: decoding would write U+FFFD in its place ----------------
+    const notUtf8 = Buffer.from(editedSettings.replace('"ours"', '"oursé"'), 'latin1');
+    await writeFile(join(repoPath, SETTINGS), notUtf8);
+    const lossy = await upgrade('rtk-off-upgrade-smoke not utf-8');
+    const lossyValues = defaultValues(lossy.form);
+    lossyValues.selectedNew = [];
+    lossyValues.selectedRtkHookStrips = [settingsEntry(lossy.detected)!.entryId];
+    const lossyApplied = await upgradeApplyStep.apply(lossy.applyCtx, {
+      detected: lossy.plan,
+      formValues: lossyValues,
+      iteration: 0,
+      previousIterations: [],
+    });
+    check(
+      'a file that is not valid UTF-8 keeps every byte, and says why',
+      (await readFile(join(repoPath, SETTINGS))).equals(notUtf8) &&
+        lossyApplied.writtenPaths?.includes(SETTINGS) !== true &&
+        lossyApplied.warnings.some((w) => w.includes('not valid UTF-8')),
+      lossyApplied.warnings,
+    );
+
     // ---- the same bytes Haive wrote, and a second upgrade ----------------------------------
     await writeFile(join(repoPath, SETTINGS), buildClaudeSettingsJson());
     const again = await upgrade('rtk-off-upgrade-smoke again');

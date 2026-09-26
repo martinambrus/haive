@@ -723,10 +723,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         // Taken from the bytes it replaces, so a save since the plan keeps its edits too.
-        const edit: { before?: string; after?: string } = {};
+        const edit: { before?: string; after?: string; notUtf8?: boolean } = {};
         try {
           await rewriteFileIfNoFollow(ctx.repoPath, rel, (data) => {
             const before = data.toString('utf8');
+            // A byte that is not UTF-8 decodes to U+FFFD, which would be written back in its place.
+            if (!Buffer.from(before, 'utf8').equals(data)) {
+              edit.notUtf8 = true;
+              return null;
+            }
             const after = withoutRtkHookEntry(entry.templateId, before);
             if (after === null) return null;
             edit.before = before;
@@ -736,6 +741,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           warnings.push(`failed to remove the RTK hook from ${entry.diskPath}: ${msg}`);
+          skippedCount += 1;
+          continue;
+        }
+        if (edit.notUtf8) {
+          warnings.push(
+            `did not remove the RTK hook from ${entry.diskPath}: it is not valid UTF-8, so writing it back would change more than the hook`,
+          );
           skippedCount += 1;
           continue;
         }
