@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -8,9 +8,11 @@ import {
   abortMerge,
   abortOtherMerge,
   buildMergeFixPrompt,
+  captureFixBaseline,
   completeMergeHostSide,
   mergeCommitted,
   openMerge,
+  relocateFixerChanges,
   squashMergeCommit,
   unmergedPaths,
 } from './git-merge.js';
@@ -139,6 +141,122 @@ async function setupNamedConflict(name: string): Promise<string> {
 }
 
 const mergeHead = (dir: string) => gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+
+/** setupNamedConflict('base.txt') plus two files only `main` has, one of them left edited by the
+ *  person, and an untracked file of theirs; the merge is left open on the conflict. */
+async function setupMergeWithOwnWork(): Promise<string> {
+  const dir = await setupNamedConflict('base.txt');
+  await writeFile(path.join(dir, 'untouched.txt'), 'untouched\n', 'utf8');
+  await writeFile(path.join(dir, 'dirt.txt'), 'dirt\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'main only']);
+  await writeFile(path.join(dir, 'dirt.txt'), 'person dirt\n', 'utf8');
+  await writeFile(path.join(dir, 'mine.txt'), 'mine\n', 'utf8');
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return dir;
+}
+
+describe('fixer leftovers (real git)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('commits only the paths the merge left unmerged', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+      expect(await git(dir, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+      expect(await git(dir, ['show', 'HEAD:clean.txt'])).toBe('two\n');
+      expect(await git(dir, ['show', 'HEAD:dirt.txt'])).toBe('dirt\n');
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:stray.txt'])).not.toBe(0);
+      expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
+      expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("moves a fixer's changes out and puts the tree back as it was sent in", async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      expect(baseline?.unmerged).toEqual(['base.txt']);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'clean.txt'), 'fixer on staged\n', 'utf8');
+      await writeFile(path.join(dir, 'untouched.txt'), 'fixer on untouched\n', 'utf8');
+      await rm(path.join(dir, 'dirt.txt'));
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await mkdir(path.join(dir, 'deep'));
+      await writeFile(path.join(dir, 'deep', 'stray2.txt'), 'deeper\n', 'utf8');
+      await mkdir(path.join(dir, '.haive-data'));
+      await writeFile(path.join(dir, '.haive-data', 'note.md'), 'haive own\n', 'utf8');
+      await symlink('base.txt', path.join(dir, 'link-stray'));
+
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      const folder = '.haive/merge-leftovers/t1/inv1';
+      expect(out?.folder).toBe(folder);
+      expect(out?.moved.sort()).toEqual([
+        'clean.txt',
+        'deep/stray2.txt',
+        'stray.txt',
+        'untouched.txt',
+      ]);
+      expect(out?.left.map((l) => l.path)).toEqual(['link-stray']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('base.txt')).toBe('resolved\n');
+      expect(await read('clean.txt')).toBe('two\n');
+      expect(await read('untouched.txt')).toBe('untouched\n');
+      expect(await read('dirt.txt')).toBe('person dirt\n');
+      expect(await read('mine.txt')).toBe('mine\n');
+      expect(await read('.haive-data/note.md')).toBe('haive own\n');
+      await expect(read('stray.txt')).rejects.toThrow();
+      expect(await read(`${folder}/files/clean.txt`)).toBe('fixer on staged\n');
+      expect(await read(`${folder}/files/deep/stray2.txt`)).toBe('deeper\n');
+      const manifest = JSON.parse(await read(`${folder}/manifest.json`)) as { moved: string[] };
+      expect(manifest.moved.sort()).toEqual(out?.moved.sort());
+      // The index was refreshed after the restore, so git lets the merge go.
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(await read('dirt.txt')).toBe('person dirt\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('moves nothing once the merge it was sent into was finished by hand', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'stray.txt'), 'fixer scratch\n', 'utf8');
+      await git(dir, ['add', 'base.txt']);
+      await git(dir, ['commit', '--no-edit']);
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.unchecked).toBeTruthy();
+      expect(out?.moved).toEqual([]);
+      expect(await readFile(path.join(dir, 'stray.txt'), 'utf8')).toBe('fixer scratch\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records nothing in a person's own checkout", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'gm-host-'));
+    vi.stubEnv('HOST_REPO_ROOT', root);
+    vi.resetModules();
+    const hosted = await import('./git-merge.js');
+    const dir = await setupMergeWithOwnWork();
+    const inHost = path.join(root, 'repo');
+    try {
+      await rename(dir, inHost);
+      expect(await hosted.captureFixBaseline(inHost)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('merge helpers (real git)', () => {
   afterEach(() => {

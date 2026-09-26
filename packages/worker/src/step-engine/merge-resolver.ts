@@ -14,16 +14,25 @@ import {
   abortFailureNote,
   abortMerge,
   abortOtherMerge,
+  captureFixBaseline,
   completeMergeHostSide,
+  fixerLeftoversWarning,
   mergeCommitted,
   mergeOpenFor,
   openMerge,
+  recordFixerLeftovers,
+  relocateFixerChanges,
   squashMergeCommit,
   unmergedPaths,
   type MergeAbort,
 } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
-import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
+import {
+  addStepWarning,
+  assertOwnsStep,
+  insertOwnedRun,
+  updateOwnedStep,
+} from './step-ownership.js';
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
@@ -236,9 +245,12 @@ async function ensureBaseWorktree(
   await ensureSandboxWritableTree(ctx.repoPath, relUnder(ctx.repoPath, worktreePath));
 }
 
-async function removeBaseWorktree(repoPath: string, worktreePath: string): Promise<void> {
-  await gitRun(repoPath, ['worktree', 'remove', worktreePath, '--force']);
+/** Never forced: a base worktree holding changes git will not discard stays, and why comes back. */
+async function removeBaseWorktree(repoPath: string, worktreePath: string): Promise<string | null> {
+  const res = await gitRun(repoPath, ['worktree', 'remove', worktreePath]);
   await gitRun(repoPath, ['worktree', 'prune']);
+  if (res.code === 0) return null;
+  return (res.stderr || res.stdout).trim().split('\n')[0] || 'git gave no reason';
 }
 
 /** Terminal success: tear down a transient base worktree (cross-branch only — the
@@ -287,7 +299,15 @@ async function reachDone(
     state = { ...pushing, pushed: true };
   }
   if (state.mode === 'cross-branch') {
-    await removeBaseWorktree(ctx.repoPath, state.mergeDir);
+    const kept = await removeBaseWorktree(ctx.repoPath, state.mergeDir);
+    if (kept) {
+      ctx.logger.warn({ worktree: state.mergeDir, reason: kept }, 'base worktree kept after merge');
+      current = await addStepWarning(
+        db,
+        current,
+        `The base worktree ${relUnder(ctx.repoPath, state.mergeDir)} was kept, since git would not remove it: ${kept}.`,
+      );
+    }
   }
   const done: MergeResolveState = {
     ...state,
@@ -762,6 +782,24 @@ export async function resolveMergePhase(
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
       if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
+      const leftovers = await relocateFixerChanges(state.mergeDir, state.fixBaseline, {
+        taskId: params.taskId,
+        runId: inv.id,
+      });
+      if (state.fixBaseline) {
+        // Spent once used: a later pass comparing it with a tree the merge has since left would
+        // put the merge's files back.
+        state = { ...state, fixBaseline: null };
+        await saveMergeState(db, current.id, state);
+      }
+      if (leftovers) {
+        await recordFixerLeftovers(db, params.taskId, current.id, state.featureBranch, leftovers);
+        current = await addStepWarning(
+          db,
+          current,
+          fixerLeftoversWarning(params.taskId, leftovers),
+        );
+      }
       const fix = parseFixResult(inv);
       if (runNeverAnswered(inv) && !fix) {
         // A fixer that never answered may have left the merge half-resolved, so its
@@ -864,6 +902,7 @@ export async function resolveMergePhase(
       if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
     }
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
+    const fixBaseline = await captureFixBaseline(state.mergeDir);
     // A const alias so the closure below keeps TypeScript's narrowing of `state` to
     // non-null (a `let` loses that narrowing across a function boundary).
     const priorState = state;
@@ -882,6 +921,7 @@ export async function resolveMergePhase(
           ...priorState,
           fixInvocationId: invId,
           conflictRetries: priorState.conflictRetries + 1,
+          fixBaseline,
         };
         await saveMergeState(db, current.id, state);
       },

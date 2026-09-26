@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -8,7 +9,14 @@ import {
 } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { completeMergeHostSide } from '../../git-merge.js';
+import {
+  captureFixBaseline,
+  completeMergeHostSide,
+  fixerLeftoversWarning,
+  recordFixerLeftovers,
+  relocateFixerChanges,
+  type FixBaseline,
+} from '../../git-merge.js';
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
@@ -90,6 +98,8 @@ interface PlanMergeDetect {
   pendingGuidance: string | null;
   /** True while the merge is live in the worktree. */
   mergeOpen: boolean;
+  /** The tree the agent is sent into on an answer pass; absent on a collect pass. */
+  fixBaseline?: FixBaseline | null;
 }
 
 interface PlanMergeApply {
@@ -199,7 +209,8 @@ function buildPrompt(d: PlanMergeDetect): string {
       : []),
     '',
     'Resolve EVERY conflict by EDITING those files: remove the <<<<<<< / ======= / >>>>>>>',
-    'markers and leave the content you want to keep.',
+    'markers and leave the content you want to keep. Change no other file: only the conflicted',
+    'files are committed.',
     'Do NOT run git — it is unavailable here; the orchestrator stages and commits the merge',
     'after you finish. Do NOT run tests or any other commands.',
     '',
@@ -284,7 +295,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       unrelated = (await divergence(ctx.repoPath, branch)).unrelated;
     }
 
-    return {
+    const found: PlanMergeDetect = {
       repositoryId,
       branch,
       worktreePath,
@@ -296,6 +307,9 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       pendingGuidance: last?.role === 'user' ? last.body : null,
       mergeOpen: open,
     };
+    return needsAgentPass(found)
+      ? { ...found, fixBaseline: await captureFixBaseline(worktreePath) }
+      : found;
   },
 
   llm: {
@@ -401,12 +415,30 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         repositoryId: d.repositoryId,
       });
       const said = typeof args.llmOutput === 'string' ? args.llmOutput.trim() : '';
+      const leftovers = await relocateFixerChanges(d.worktreePath, d.fixBaseline, {
+        taskId: ctx.taskId,
+        runId: args.llmInvocationId ?? randomUUID(),
+      });
+      if (leftovers) {
+        await recordFixerLeftovers(
+          ctx.db,
+          ctx.taskId,
+          ctx.taskStepId,
+          `origin/${d.branch}`,
+          leftovers,
+        );
+      }
       const committed = await completeMergeHostSide(d.worktreePath, identity, `origin/${d.branch}`);
       const left = await conflictedPaths(d.worktreePath);
       result.resolved = committed && left.length === 0;
-      result.summary = result.resolved
-        ? said || `Resolved ${d.conflicts.length} file(s).`
-        : `Still unresolved: ${left.join(', ') || 'the merge did not commit'}.`;
+      result.summary = [
+        result.resolved
+          ? said || `Resolved ${d.conflicts.length} file(s).`
+          : `Still unresolved: ${left.join(', ') || 'the merge did not commit'}.`,
+        leftovers ? fixerLeftoversWarning(ctx.taskId, leftovers) : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
       await recordMessage(
         ctx.db,
         ctx.taskId,

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -169,11 +169,13 @@ function makeDb(
   let mergeState: MergeResolveState | null = null;
   let status = opts.rowTaken ? 'pending' : 'running';
   let errorMessage: string | null = null;
+  let warningMessage: string | null = null;
   const events: { eventType: string; payload: unknown }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
     if ('status' in patch) status = patch.status as string;
     if ('errorMessage' in patch) errorMessage = (patch.errorMessage as string | null) ?? null;
+    if ('warningMessage' in patch) warningMessage = (patch.warningMessage as string | null) ?? null;
   };
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
@@ -193,7 +195,7 @@ function makeDb(
             const guarded = values.includes('pending') && values.includes('skipped');
             if (guarded && (status === 'pending' || status === 'skipped')) return [];
             applyPatch(patch);
-            return [{ id: 'step1', status, errorMessage }];
+            return [{ id: 'step1', status, errorMessage, warningMessage }];
           },
           then: (resolve: (v: unknown) => void) => {
             applyPatch(patch);
@@ -241,7 +243,13 @@ function makeDb(
       },
     }),
   };
-  return { db, getState: () => mergeState, getStatus: () => status, events };
+  return {
+    db,
+    getState: () => mergeState,
+    getStatus: () => status,
+    getWarning: () => warningMessage,
+    events,
+  };
 }
 
 /** Values a drizzle condition binds, in order. */
@@ -733,6 +741,126 @@ describe('12 merge fix-agent dispatch', () => {
       );
       expect(merge.resolved).toBe(true);
       expect(h.getState()?.merged).toBe(true);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  /** Send a fixer in, let `fix` do what it did in the merge dir, end its run as `run` says, and
+   *  ingest it. */
+  async function fixerRound(
+    parent: string,
+    detected: Det,
+    fix: (mergeDir: string) => Promise<void>,
+    run: { endedAt: Date | null; exitCode?: number; supersededAt?: Date | null },
+  ) {
+    const dbOpts: NonNullable<Parameters<typeof makeDb>[0]> = {};
+    const h = makeDb(dbOpts);
+    const ctx = mkCtx(parent, h.db);
+    const form = { action: 'merge_remove' };
+    const first = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(detected, form),
+      ctx,
+      mkParams(h.db, dispatching),
+    );
+    expect(first.resolved).toBe(false);
+    const sent = h.getState()!;
+    await fix(sent.mergeDir);
+    dbOpts.invocation = { id: 'inv1', ...run };
+    const second = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(detected, form, sent),
+      ctx,
+      mkParams(h.db, dispatching),
+    );
+    return { h, second };
+  }
+
+  it("a fixer's changes outside the conflict are moved aside, and the merge commit holds only the merge", async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      const { h, second } = await fixerRound(
+        parent,
+        det(wt),
+        async (dir) => {
+          await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+          await writeFile(path.join(dir, 'feature.txt'), 'fixer edit\n', 'utf8');
+          await writeFile(path.join(dir, 'notes.txt'), 'scratch\n', 'utf8');
+        },
+        { endedAt: new Date(), exitCode: 0 },
+      );
+      expect(second.resolved).toBe(true);
+      expect(await git(parent, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+      expect(await git(parent, ['show', 'HEAD:feature.txt'])).toBe('feature\n');
+      expect(await gitCode(parent, ['cat-file', '-e', 'HEAD:notes.txt'])).not.toBe(0);
+      const folder = path.join(parent, '.haive', 'merge-leftovers', 't1', 'inv1');
+      expect(await readFile(path.join(folder, 'files', 'notes.txt'), 'utf8')).toBe('scratch\n');
+      expect(await readFile(path.join(folder, 'files', 'feature.txt'), 'utf8')).toBe(
+        'fixer edit\n',
+      );
+      expect(h.events.map((e) => e.eventType)).toContain('merge.fixer_leftovers');
+      expect(h.getWarning()).toContain('.haive/merge-leftovers/t1/');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("a never-answered fixer's changes outside the conflict are gone before the next fixer starts", async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await writeFile(path.join(parent, 'untouched.txt'), 'untouched\n', 'utf8');
+      await git(parent, ['add', 'untouched.txt']);
+      await git(parent, ['commit', '-m', 'main only']);
+      await divergeBase(parent, wt);
+      const { h, second } = await fixerRound(
+        parent,
+        det(wt),
+        async (dir) => {
+          await writeFile(path.join(dir, 'base.txt'), 'half-resolved\n', 'utf8');
+          await writeFile(path.join(dir, 'untouched.txt'), 'fixer edit\n', 'utf8');
+          await writeFile(path.join(dir, 'junk.txt'), 'junk\n', 'utf8');
+        },
+        { endedAt: null, supersededAt: new Date() },
+      );
+      expect(second.resolved).toBe(false);
+      if (!second.resolved) expect(second.result.status).toBe('waiting_cli');
+      expect(await readFile(path.join(parent, 'untouched.txt'), 'utf8')).toBe('untouched\n');
+      await expect(readFile(path.join(parent, 'junk.txt'), 'utf8')).rejects.toThrow();
+      expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toContain('<<<<<<<');
+      const files = path.join(parent, '.haive', 'merge-leftovers', 't1', 'inv1', 'files');
+      expect(await readFile(path.join(files, 'junk.txt'), 'utf8')).toBe('junk\n');
+      expect(await readFile(path.join(files, 'untouched.txt'), 'utf8')).toBe('fixer edit\n');
+      expect(h.getState()?.fixBaseline).toBeTruthy();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('cross-branch: a base worktree holding a change that could not be moved is kept and reported', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await git(parent, ['checkout', '-b', 'develop']);
+      const { h, second } = await fixerRound(
+        parent,
+        det(wt, { parentBranch: 'develop' }),
+        async (dir) => {
+          await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+          await symlink('base.txt', path.join(dir, 'link-stray'));
+        },
+        { endedAt: new Date(), exitCode: 0 },
+      );
+      expect(second.resolved).toBe(true);
+      expect(await git(parent, ['show', 'main:base.txt'])).toBe('resolved\n');
+      expect(await gitCode(parent, ['cat-file', '-e', 'main:link-stray'])).not.toBe(0);
+      const base = path.join(parent, '.haive', 'worktrees', 'main--base');
+      expect((await lstat(path.join(base, 'link-stray'))).isSymbolicLink()).toBe(true);
+      expect(await git(parent, ['worktree', 'list', '--porcelain'])).toContain('main--base');
+      expect(h.getWarning()).toContain('was kept');
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
