@@ -91,7 +91,12 @@ import {
   resumeStepIfLinked,
   STATUS_DEFAULT_MESSAGE,
 } from './resolvers.js';
-import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
+import {
+  markProvidersReady,
+  probeCliPath,
+  removeOrphanedPreviousImage,
+  withImageTagLock,
+} from './images.js';
 import { resolveInvocationCost } from './invocation-cost.js';
 import {
   codexAppServerFallbackWarning,
@@ -661,9 +666,12 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   if (!payload.force) {
-    const existing = await defaultDockerRunner.inspect(imageTag);
-    if (existing.exists) {
+    const cached = await withImageTagLock(imageTag, async () => {
+      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return false;
       await markProvidersReady(db, imageTag, provider.id, shared);
+      return true;
+    });
+    if (cached) {
       await removeOrphanedPreviousImage(db, {
         providerId: provider.id,
         previousDbTag,

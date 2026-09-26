@@ -1818,8 +1818,12 @@ any job exists to join.
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a
 rebuild's old image goes through (`removeOrphanedPreviousImage`): kept while any other provider
-names the tag, and skipped while a build of that tag runs here. A removal that could not be queued
-leaves the image, as every delete did before, and never fails the delete that already happened.
+names the tag, and skipped while a build of that tag runs here. That check and the removal take their
+turn per tag with a build's cache hit (`withImageTagLock`): a removal that read no provider naming
+the tag otherwise deleted the image a cache hit had just marked a provider ready on, and a rebuild
+removing its old tag raced a sibling switching to that tag the same way. A removal that could not
+be queued leaves the image, as every delete did before, and never fails the delete that already
+happened.
 
 `cli_providers.sandbox_image_build_status` is reconciled against the real images on every
 boot (`clearPrunedSandboxImageState`, `data-migrations.ts`). Not cosmetic: a stale `ready`
