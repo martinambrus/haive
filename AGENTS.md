@@ -496,7 +496,12 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **What a fixer changes outside the conflicted files is moved aside, never committed or lost.** Before a
   fixer is sent in, the merge dir is recorded as one git tree built in a scratch index, untracked files
   included, with the paths it is sent to resolve, `HEAD` and `MERGE_HEAD` (`captureFixBaseline`,
-  1.8 s cold on a 39,378-file repository). Once it ends, on every outcome and before the merge is
+  1.8 s cold on a 39,378-file repository). Files git ignores are left out and stay where a fixer leaves
+  them, never committed: they are where a person's running tools write (build output, logs, caches),
+  and recording them would hash every dependency tree, MEASURED at 43,305 ignored files (835 MB of
+  `node_modules`) beside 1,972 tracked in a worktree of this repository. While secret masking is on
+  (the default), the deny-list's files (`.env`, `.env.*`) are read-only empty mounts in the fixer's
+  sandbox, so it cannot change those. Once it ends, on every outcome and before the merge is
   committed or aborted, whatever it changed outside those paths moves to
   `.haive/merge-leftovers/<task>/<run>/files/` beside a `manifest.json`, and the paths are put back from
   the tree (`relocateFixerChanges`). The commit then stages only the paths the fixer was sent to resolve,

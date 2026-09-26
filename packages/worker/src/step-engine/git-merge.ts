@@ -155,8 +155,9 @@ export function abortFailureNote(abort: { blocking: string[]; detail: string }):
   return `The merge could not be aborted${paths}: ${abort.detail || 'git gave no reason'}. It is still open; abort or finish it by hand, then retry.`;
 }
 
-/** What a merge dir held when a fixer was sent in: the whole worktree as one git tree, untracked
- *  files included, the paths the fixer was sent to resolve, and the merge it was sent into. */
+/** What a merge dir held when a fixer was sent in: the worktree as one git tree (tracked files and
+ *  the untracked ones git does not ignore), the paths the fixer was sent to resolve, and the merge it
+ *  was sent into. */
 export interface FixBaseline {
   tree: string;
   unmerged: string[];
@@ -164,8 +165,8 @@ export interface FixBaseline {
   mergeHead: string;
 }
 
-/** The worktree as one git tree, untracked files included. Built in a scratch index, since the
- *  merge's own index holds the conflict. */
+/** The worktree as one git tree, untracked files included and ignored ones left out. Built in a
+ *  scratch index, since the merge's own index holds the conflict. */
 async function snapshotTree(dir: string): Promise<string | null> {
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
