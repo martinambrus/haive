@@ -11,6 +11,7 @@ import {
   extractRegion,
   getCliProviderMetadata,
   normalizeContent,
+  RTK_SETTINGS_PATHS,
 } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { RTK_BLOCK_FILES } from '@haive/shared/rules-files';
@@ -366,7 +367,12 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         ctx.repoPath,
         existingPaths,
         // 02's RTK strip can write a disabled provider's rules file, which no stub names.
-        new Set([CLI_RULES_DISK_PATH, ...RTK_BLOCK_FILES, ...stubs.map((s) => s.file)]),
+        new Set([
+          CLI_RULES_DISK_PATH,
+          ...RTK_BLOCK_FILES,
+          ...RTK_SETTINGS_PATHS,
+          ...stubs.map((s) => s.file),
+        ]),
       );
       warnings.push(...ignored);
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via

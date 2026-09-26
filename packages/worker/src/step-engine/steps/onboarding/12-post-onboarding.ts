@@ -11,7 +11,7 @@ import type {
   OnboardingExclusionsMirror,
   OnboardingToolingMirror,
 } from '@haive/shared';
-import { HAIVE_DATA_DIR } from '@haive/shared';
+import { HAIVE_DATA_DIR, RTK_SETTINGS_PATHS } from '@haive/shared';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -95,10 +95,10 @@ const BASE_STAGE_PATHS = [
 ];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
-// the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md)
-// and the gemini RTK settings. AGENTS.md is listed too as a fallback for the
-// no-provider-rules case, where it holds only the project-info block and is untracked.
-const EXTRA_RULES_STAGE_PATHS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', '.gemini/settings.json'];
+// the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md).
+// AGENTS.md is listed too as a fallback for the no-provider-rules case, where it
+// holds only the project-info block and is untracked.
+const EXTRA_RULES_STAGE_PATHS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
 
 async function resolveStagePaths(
   db: Database,
@@ -721,7 +721,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       const { keep, warnings: ignored } = await dropIgnoredRulesFiles(
         ctx.repoPath,
         existingPaths,
-        new Set(EXTRA_RULES_STAGE_PATHS),
+        new Set([...EXTRA_RULES_STAGE_PATHS, ...RTK_SETTINGS_PATHS]),
       );
       warnings.push(...ignored);
       // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to

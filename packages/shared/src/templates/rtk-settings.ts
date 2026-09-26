@@ -60,6 +60,11 @@ export const RTK_SETTINGS_FILES = [
 
 export type RtkSettingsFile = (typeof RTK_SETTINGS_FILES)[number];
 
+/** Where those files live, for the callers that stage, check or reset them by name. */
+export const RTK_SETTINGS_PATHS: readonly string[] = RTK_SETTINGS_FILES.map(
+  (file) => file.diskPath,
+);
+
 /** A settings file without the hook its RTK template wrote: every hook item whose command is exactly
  *  RTK's, and each entry, event list and `hooks` object that leaves empty, written back with the
  *  file's own indent, line endings and final newline. Null when it holds no such hook, is not

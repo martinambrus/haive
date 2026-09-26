@@ -199,18 +199,18 @@ export async function isGitIgnored(repoPath: string, rel: string): Promise<boole
   }
 }
 
-/** `paths` without the rules files git ignores, each dropped one reported: the `git add -f` the
- *  rest needs would otherwise commit a file the repository keeps out of history on purpose. Call it
- *  after any `git init`, since before one there is no repository to ask. */
+/** `paths` without the rules and settings files git ignores, each dropped one reported: the
+ *  `git add -f` the rest needs would otherwise commit a file the repository keeps out of history on
+ *  purpose. Call it after any `git init`, since before one there is no repository to ask. */
 export async function dropIgnoredRulesFiles(
   repoPath: string,
   paths: readonly string[],
-  rulesFiles: ReadonlySet<string>,
+  checked: ReadonlySet<string>,
 ): Promise<{ keep: string[]; warnings: string[] }> {
   const keep: string[] = [];
   const warnings: string[] = [];
   for (const rel of paths) {
-    if (rulesFiles.has(rel) && (await isGitIgnored(repoPath, rel))) {
+    if (checked.has(rel) && (await isGitIgnored(repoPath, rel))) {
       warnings.push(`${rel} is ignored by git, so it stays out of this commit`);
     } else {
       keep.push(rel);
