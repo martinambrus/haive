@@ -495,6 +495,99 @@ async function main(): Promise<void> {
       { bucket: settingsEntry(back.detected)?.bucket },
     );
 
+    // ---- a blank repository switched off before its first upgrade ---------------------------
+    const seededId = randomUUID();
+    const seededPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-seeded-'));
+    try {
+      await db.insert(schema.repositories).values({
+        id: seededId,
+        userId,
+        name: 'rtk-off-upgrade-smoke seeded',
+        source: 'blank',
+        rtkEnabled: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await seedBlankScaffold(
+        db,
+        { userId, repositoryId: seededId, repoName: 'rtk-off-upgrade-smoke seeded' },
+        seededPath,
+      );
+      await db
+        .update(schema.repositories)
+        .set({ rtkEnabled: false })
+        .where(eq(schema.repositories.id, seededId));
+      const seeded = { id: seededId, path: seededPath };
+      const offeredForRemoval = (form: FormSchema | null, entryId: string | undefined) => {
+        const field = form?.fields.find((f) => f.id === 'selectedObsoleteRemovals');
+        return (
+          field?.type === 'multi-select' && field.options.some((option) => option.value === entryId)
+        );
+      };
+
+      const firstSeeded = await upgrade('rtk-off-upgrade-smoke seeded first', seeded);
+      const seededEntry = settingsEntry(firstSeeded.detected);
+      check(
+        'the settings file the scaffold seeded is offered for removal though no row records it',
+        seededEntry?.bucket === 'obsolete' &&
+          seededEntry.liveArtifactId === null &&
+          offeredForRemoval(firstSeeded.form, seededEntry.entryId),
+        { bucket: seededEntry?.bucket },
+      );
+      const skipValues = defaultValues(firstSeeded.form);
+      skipValues.selectedNew = [];
+      await upgradeApplyStep.apply(firstSeeded.applyCtx, {
+        detected: firstSeeded.plan,
+        formValues: skipValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'left unticked, it stays',
+        (await readFile(join(seededPath, SETTINGS), 'utf8')) === buildClaudeSettingsJson(),
+      );
+
+      const seededRows = await db
+        .select({ diskPath: schema.onboardingArtifacts.diskPath })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, seededId),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      check(
+        'the first upgrade recorded rows, none of them for the settings file',
+        seededRows.length > 0 && !seededRows.some((r) => r.diskPath === SETTINGS),
+        seededRows.length,
+      );
+      const secondSeeded = await upgrade('rtk-off-upgrade-smoke seeded second', seeded);
+      const againEntry = settingsEntry(secondSeeded.detected);
+      check(
+        'the next upgrade, with the rows the first recorded, offers it again',
+        againEntry?.bucket === 'obsolete' &&
+          offeredForRemoval(secondSeeded.form, againEntry.entryId),
+        { bucket: againEntry?.bucket },
+      );
+      const removeValues = defaultValues(secondSeeded.form);
+      removeValues.selectedNew = [];
+      removeValues.selectedObsoleteRemovals = [againEntry!.entryId];
+      const removed = await upgradeApplyStep.apply(secondSeeded.applyCtx, {
+        detected: secondSeeded.plan,
+        formValues: removeValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'and removes it when picked, handed to the commit as a removal',
+        (await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null)) === null &&
+          removed.deletedPaths?.includes(SETTINGS) === true,
+        removed.deletedPaths,
+      );
+    } finally {
+      await rm(seededPath, { recursive: true, force: true });
+    }
+
     // ---- a repository onboarded before RTK: its plan's "off" was never anyone's choice ------------
     const legacyId = randomUUID();
     const legacyPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-legacy-'));

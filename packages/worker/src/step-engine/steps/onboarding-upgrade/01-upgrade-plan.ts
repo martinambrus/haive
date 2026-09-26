@@ -42,6 +42,7 @@ import {
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
+import { withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 
 export type UpgradePlanBucket =
   'unchanged' | 'clean_update' | 'conflict' | 'new_artifact' | 'user_deleted' | 'obsolete';
@@ -500,6 +501,49 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         templateSchemaVersion:
           current?.templateSchemaVersion ?? live?.templateSchemaVersion ?? null,
         delta,
+      });
+    }
+
+    // Nothing records the RTK settings files a blank scaffold seeds, or the ones of a repository with
+    // no rows at all, so with RTK now off they are found by rendering them as if it were on.
+    let unrecordedRtk: ExpandedRendering[] = [];
+    if (resolved.rtkLive && renderCtx.rtkEnabled === false) {
+      const [repo] = await ctx.db
+        .select({ source: schema.repositories.source })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      if (liveRows.length === 0 || repo?.source === 'blank') {
+        unrecordedRtk = expandManifestFor({ ...renderCtx, rtkEnabled: true }, manifest).filter(
+          (r) =>
+            r.templateKind === 'rtk-config' &&
+            !byPath.has(r.diskPath) &&
+            !liveByPath.has(r.diskPath),
+        );
+      }
+    }
+    for (const r of unrecordedRtk) {
+      const disk = await readDiskContent(ctx.repoPath, r.diskPath);
+      if (disk.content === null || disk.hash === null) continue;
+      const holdsRender = disk.hash === r.writtenHash;
+      if (!holdsRender && withoutRtkHookEntry(r.templateId, disk.content) === null) continue;
+      entries.push({
+        entryId: `e${counterByBucket++}:${r.diskPath}`,
+        bucket: 'obsolete',
+        templateId: r.templateId,
+        templateKind: r.templateKind,
+        diskPath: r.diskPath,
+        liveArtifactId: null,
+        currentContent: disk.content,
+        newContent: null,
+        baselineContent: holdsRender ? disk.content : null,
+        currentHash: disk.hash,
+        baselineWrittenHash: r.writtenHash,
+        newContentHash: null,
+        baselineTemplateContentHash: r.templateContentHash,
+        currentTemplateContentHash: null,
+        templateSchemaVersion: r.templateSchemaVersion,
+        delta: null,
       });
     }
 

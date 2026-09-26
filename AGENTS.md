@@ -2565,7 +2565,12 @@ missing from disk. An output from before the record falls back to reading the ro
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
 --cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
-out from it would restore it. One someone edited is kept by that rule, so the form offers instead to
+out from it would restore it. Nothing records the ones a blank scaffold seeds (a row needs a task,
+and INIT has none), nor any of a repository with no rows at all, so for those 01 renders the RTK
+templates as if RTK were on and offers a file still holding that render, or its hook, as `obsolete`
+against the render's hash. A blank repository is covered whatever other rows it has, since 07 skips
+the seeded file and 12 records no row for it; any other repository's rows are taken as the whole
+record. One someone edited is kept by that rule, so the form offers instead to
 take the hook out of it, unticked (`withoutRtkHookEntry`): only hook items whose command is exactly
 RTK's go, with the entries and lists they leave empty, and the file keeps its own indent and line
 endings. A file that parsing and writing back would change anywhere else (an integer past 2^53,
