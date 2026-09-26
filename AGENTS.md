@@ -2784,7 +2784,10 @@ repository, whoever writes the status. The api answers its violation 409 in `err
 whichever route revived the task. The worker revives one whose parked form is answered, and a
 refusal there would drop the answer, so the submit route refuses such an answer before storing it; a
 revival the worker still loses to a race reads as the task not pointed and records
-`upgrade.revive_refused`. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test.
+`upgrade.revive_refused`. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test. Both
+create routes write the task, its event and its move to `queued` in one transaction: a `created` one
+left by a failure part-way would block the next upgrade and rollback, and nothing starts or ends a
+`created` task.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays

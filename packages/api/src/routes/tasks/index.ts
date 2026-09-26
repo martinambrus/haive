@@ -650,35 +650,47 @@ taskRoutes.post('/', async (c) => {
         status: 'created',
       })
       .returning();
-  const inserted =
-    body.type === 'onboarding_upgrade'
-      ? await insertUpgradeTask(db, body.repositoryId!, insertTask)
-      : await insertTask(db);
+  const firstRow = (rows: (typeof schema.tasks.$inferSelect)[]) => {
+    const [row] = rows;
+    if (!row) throw new HttpError(500, 'Failed to create task');
+    return row;
+  };
+  // Every write after the insert that can fail, before the task is `queued`. An upgrade takes them
+  // inside its insert's transaction: a `created` one left behind would block the repository's next
+  // upgrade and rollback, and nothing starts or ends a `created` task.
+  const settle = async (handle: typeof db | DbTx, created: typeof schema.tasks.$inferSelect) => {
+    if (planLinks && planNodes.length > 0) {
+      await handle
+        .insert(schema.planNodeTasks)
+        .values(planNodes.map((n) => ({ nodeId: n.id, taskId: created.id, role: planLinks.role })))
+        .onConflictDoNothing();
+    }
+    await appendTaskEvent(handle, created.id, null, 'task.created', { userId });
+    return markQueuedForStart(handle, created.id);
+  };
+  let task: typeof schema.tasks.$inferSelect;
+  let queued: typeof schema.tasks.$inferSelect | undefined;
+  if (body.type === 'onboarding_upgrade') {
+    ({ task, queued } = await insertUpgradeTask(db, body.repositoryId!, async (tx) => {
+      const row = firstRow(await insertTask(tx));
+      return { task: row, queued: await settle(tx, row) };
+    }));
+  } else {
+    task = firstRow(await insertTask(db));
+    queued = await settle(db, task);
+  }
 
-  const task = inserted[0];
-  if (!task) throw new HttpError(500, 'Failed to create task');
-
-  if (planLinks && planNodes.length > 0) {
-    await db
-      .insert(schema.planNodeTasks)
-      .values(planNodes.map((n) => ({ nodeId: n.id, taskId: task.id, role: planLinks.role })))
-      .onConflictDoNothing();
-
-    // `implements` ONLY. Taskable means "one task could implement this", which is
-    // the opposite of what a slice-link says — marking a 5,000-line container
-    // taskable because something touched part of it would offer it as a unit of
-    // work forever after. One patch rather than one per node: each is its own
-    // transaction and its own mirror bump.
-    if (planLinks.role === 'implements') {
-      if (await markPlanNodesTaskable(db, planNodes, body.repositoryId!)) {
-        await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
-      }
+  // `implements` ONLY. Taskable means "one task could implement this", which is
+  // the opposite of what a slice-link says — marking a 5,000-line container
+  // taskable because something touched part of it would offer it as a unit of
+  // work forever after. One patch rather than one per node: each is its own
+  // transaction and its own mirror bump.
+  if (planLinks?.role === 'implements' && planNodes.length > 0) {
+    if (await markPlanNodesTaskable(db, planNodes, body.repositoryId!)) {
+      await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
     }
   }
 
-  await appendTaskEvent(db, task.id, null, 'task.created', { userId });
-
-  const queued = await markQueuedForStart(db, task.id);
   if (queued) await enqueueStart(task.id, userId);
 
   return c.json({ task: queued ?? task }, 201);

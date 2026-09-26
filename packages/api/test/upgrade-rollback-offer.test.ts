@@ -120,7 +120,7 @@ function repoWith(tasks: TaskSeed[]) {
     fake
       .rows(schema.tasks)
       .filter((r) => r.type === 'onboarding_upgrade' && !ids.includes(r.id as string));
-  return { ids, upgradeTasks };
+  return { ids, upgradeTasks, fake };
 }
 
 const rollBack = () => app.request(`/repositories/${REPO}/rollback-upgrade`, { method: 'POST' });
@@ -130,6 +130,32 @@ const startUpgrade = () =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'onboarding_upgrade', title: 'Upgrade', repositoryId: REPO }),
   });
+
+// A `created` upgrade counts as live, so one a failed request left behind would block the next.
+describe('an upgrade or rollback whose creation fails part-way', () => {
+  it.each([
+    ['the created event', 'beforeInsert', schema.taskEvents],
+    ['the move to queued', 'beforeUpdate', schema.tasks],
+  ] as const)('leaves no upgrade behind when %s fails', async (_label, hook, table) => {
+    const t = repoWith([]);
+    t.fake.hooks[hook] = (written) => {
+      if (written === table) throw new Error('write failed');
+    };
+    expect((await startUpgrade()).status).toBe(500);
+    expect(t.upgradeTasks()).toEqual([]);
+    t.fake.hooks[hook] = null;
+    expect((await startUpgrade()).status).toBe(201);
+  });
+
+  it('leaves no rollback behind when its move to queued fails', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 1 }]);
+    t.fake.hooks.beforeUpdate = (written) => {
+      if (written === schema.tasks) throw new Error('write failed');
+    };
+    expect((await rollBack()).status).toBe(500);
+    expect(t.upgradeTasks()).toEqual([]);
+  });
+});
 
 describe('rolling back an upgrade', () => {
   it('names the upgrade it rolls back', async () => {

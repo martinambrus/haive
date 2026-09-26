@@ -651,7 +651,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
-  const inserted = await insertUpgradeTask(db, repositoryId, async (tx) => {
+  const { task, queued } = await insertUpgradeTask(db, repositoryId, async (tx) => {
     const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
     if (!priorUpgrade) {
       throw new HttpError(
@@ -659,7 +659,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
         'No completed upgrade to roll back: none has completed, or the last one was rolled back',
       );
     }
-    return tx
+    const [row] = await tx
       .insert(schema.tasks)
       .values({
         userId,
@@ -671,11 +671,12 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
         status: 'created',
       })
       .returning();
+    if (!row) throw new HttpError(500, 'Failed to create rollback task');
+    // Queued with the insert: a `created` rollback left behind would block the next one.
+    return { task: row, queued: await markQueuedForStart(tx, row.id) };
   });
-  const task = inserted[0];
-  if (!task) throw new HttpError(500, 'Failed to create rollback task');
 
-  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, userId);
+  if (queued) await enqueueStart(task.id, userId);
 
   const res: RollbackUpgradeResponse = { taskId: task.id };
   return c.json(res, 201);
