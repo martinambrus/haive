@@ -678,11 +678,18 @@ export interface MergeResolveState {
   /** Count of pre-push base-sync rounds run; bounds repeated re-sync when origin keeps
    *  advancing. Absent → 0. */
   baseSyncRounds?: number;
-  /** The tree and index the in-flight fixer was sent into and the paths it was sent to resolve, so
-   *  what it changes outside them is moved aside once it ends; `unavailable` when git could not
-   *  record them. Absent or null: nothing recorded. */
+  /** The tree and index the in-flight fixer was sent into, what git ignored there, and the paths
+   *  it was sent to resolve, so what it changes outside them is moved aside once it ends;
+   *  `unavailable` when git could not record them. Absent or null: nothing recorded. */
   fixBaseline?:
-    | { tree: string; index: string; unmerged: string[]; head: string; mergeHead: string }
+    | {
+        tree: string;
+        index: string;
+        ignored: string;
+        unmerged: string[];
+        head: string;
+        mergeHead: string;
+      }
     | { unavailable: string }
     | null;
 }

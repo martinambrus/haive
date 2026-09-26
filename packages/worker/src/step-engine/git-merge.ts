@@ -159,11 +159,12 @@ export function abortFailureNote(abort: { blocking: string[]; detail: string }):
 }
 
 /** What a merge dir held when a fixer was sent in: the worktree as one git tree (tracked files and
- *  the untracked ones git does not ignore), what the merge had staged, the paths the fixer was sent
- *  to resolve, and the merge it was sent into. */
+ *  the untracked ones git does not ignore), what the merge had staged, a blob listing what git
+ *  ignored, the paths the fixer was sent to resolve, and the merge it was sent into. */
 export interface FixBaseline {
   tree: string;
   index: string;
+  ignored: string;
   unmerged: string[];
   head: string;
   mergeHead: string;
@@ -176,23 +177,134 @@ export interface FixBaselineUnavailable {
 
 type TreeResult = { tree: string } | { error: string };
 
+/** Listings name every file, and latin1 keeps each byte of a name as one character, so a name that
+ *  is not UTF-8 compares and is written back as it was read. */
+const LISTING = { maxBuffer: 64 * 1024 * 1024, encoding: 'latin1' } as const;
+
+/** What git ignored when a baseline was recorded: directories ignored whole, and files. */
+interface IgnoredThen {
+  dirs: Set<string>;
+  files: Set<string>;
+}
+
+function wasIgnored(ignored: IgnoredThen, p: string): boolean {
+  const rel = p.replace(/\/$/, '');
+  if (ignored.files.has(rel) || ignored.dirs.has(rel)) return true;
+  for (let i = rel.indexOf('/'); i !== -1; i = rel.indexOf('/', i + 1)) {
+    if (ignored.dirs.has(rel.slice(0, i))) return true;
+  }
+  return false;
+}
+
+/** What git ignores in the worktree, kept as a blob so the baseline stays a few object ids.
+ *  `--ignored=matching` names a directory only when a rule ignores the directory itself, and git
+ *  cannot re-include anything under one, so a file created there later was ignored too. */
+async function recordIgnored(dir: string): Promise<{ blob: string } | { error: string }> {
+  const listed = await gitRun(
+    dir,
+    [
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--ignored=matching',
+      '--untracked-files=normal',
+      '--no-renames',
+      '--ignore-submodules=all',
+    ],
+    { GIT_OPTIONAL_LOCKS: '0' },
+    LISTING,
+  );
+  if (listed.code !== 0) return { error: gitDetail(listed) };
+  const entries = listed.stdout
+    .split('\0')
+    .filter((e) => e.startsWith('!! '))
+    .map((e) => e.slice(3));
+  const name = `haive-merge-snapshot-${randomUUID()}`;
+  try {
+    await writeFileNoFollow(os.tmpdir(), name, Buffer.from(entries.join('\0'), 'latin1'));
+    const blob = await gitRun(dir, [
+      'hash-object',
+      '-w',
+      '--no-filters',
+      '--',
+      path.join(os.tmpdir(), name),
+    ]);
+    return blob.code === 0 ? { blob: blob.stdout.trim() } : { error: gitDetail(blob) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    await removeNoFollow(os.tmpdir(), name).catch(() => false);
+  }
+}
+
+async function readIgnored(dir: string, blob: string): Promise<IgnoredThen | { error: string }> {
+  const res = await gitRun(dir, ['cat-file', 'blob', blob], undefined, LISTING);
+  if (res.code !== 0) return { error: gitDetail(res) };
+  const ignored: IgnoredThen = { dirs: new Set(), files: new Set() };
+  for (const e of res.stdout.split('\0')) {
+    if (e.endsWith('/')) ignored.dirs.add(e.slice(0, -1));
+    else if (e !== '') ignored.files.add(e);
+  }
+  return ignored;
+}
+
 /** The worktree as one git tree, untracked files included and ignored ones left out. Built in a
- *  scratch index, since the merge's own index holds the conflict. */
-async function snapshotTree(dir: string): Promise<TreeResult> {
+ *  scratch index, since the merge's own index holds the conflict. Read against a baseline, every
+ *  path the baseline holds is read as it stands, whatever the ignore rules say now, and a file new
+ *  since counts only when git ignored it neither then nor now: a fixer's `.gitignore` edit turns
+ *  no ignored file into a new one and hides no recorded one. */
+async function snapshotTree(
+  dir: string,
+  since?: { tree: string; ignored: IgnoredThen },
+): Promise<TreeResult> {
   const name = `haive-merge-snapshot-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
+  const listName = `haive-merge-snapshot-${randomUUID()}`;
   try {
-    for (const args of [
-      ['read-tree', 'HEAD'],
-      ['add', '-A'],
-    ]) {
+    for (const args of since
+      ? [
+          ['read-tree', since.tree],
+          ['add', '-u'],
+        ]
+      : [
+          ['read-tree', 'HEAD'],
+          ['add', '-A'],
+        ]) {
       const res = await gitRun(dir, args, env);
       if (res.code !== 0) return { error: gitDetail(res) };
     }
+    if (since) {
+      const others = await gitRun(
+        dir,
+        ['ls-files', '-z', '-o', '--exclude-standard'],
+        env,
+        LISTING,
+      );
+      if (others.code !== 0) return { error: gitDetail(others) };
+      const added = others.stdout
+        .split('\0')
+        .filter((p) => p !== '' && !wasIgnored(since.ignored, p));
+      if (added.length > 0) {
+        await writeFileNoFollow(os.tmpdir(), listName, Buffer.from(added.join('\0'), 'latin1'));
+        const res = await gitRun(
+          dir,
+          [
+            'add',
+            `--pathspec-from-file=${path.join(os.tmpdir(), listName)}`,
+            '--pathspec-file-nul',
+          ],
+          { ...env, GIT_LITERAL_PATHSPECS: '1' },
+        );
+        if (res.code !== 0) return { error: gitDetail(res) };
+      }
+    }
     const tree = await gitRun(dir, ['write-tree'], env);
     return tree.code === 0 ? { tree: tree.stdout.trim() } : { error: gitDetail(tree) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   } finally {
     await removeNoFollow(os.tmpdir(), name).catch(() => false);
+    await removeNoFollow(os.tmpdir(), listName).catch(() => false);
   }
 }
 
@@ -251,9 +363,13 @@ export async function captureFixBaseline(
   }
   const tree = await snapshotTree(dir);
   if ('error' in tree) return { unavailable: `git could not record the tree: ${tree.error}` };
+  const ignored = await recordIgnored(dir);
+  if ('error' in ignored) {
+    return { unavailable: `git could not record the ignored files: ${ignored.error}` };
+  }
   const index = await stagedTree(dir);
   if ('error' in index) return { unavailable: `git could not record the index: ${index.error}` };
-  return { tree: tree.tree, index: index.tree, unmerged, head, mergeHead };
+  return { tree: tree.tree, index: index.tree, ignored: ignored.blob, unmerged, head, mergeHead };
 }
 
 export interface FixerLeftovers {
@@ -384,7 +500,11 @@ export async function relocateFixerChanges(
   ) {
     return nothingChecked('the merge it was sent into is no longer open');
   }
-  const after = await snapshotTree(dir);
+  const ignored = await readIgnored(dir, baseline.ignored);
+  if ('error' in ignored) {
+    return nothingChecked(`git could not read what it ignored before it ran: ${ignored.error}`);
+  }
+  const after = await snapshotTree(dir, { tree: baseline.tree, ignored });
   if ('error' in after) return nothingChecked(`git could not read the tree: ${after.error}`);
   const { anchor, prefix } = workspaceAnchor(dir);
   const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(

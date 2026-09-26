@@ -18,9 +18,10 @@ export async function gitRun(
   cwd: string,
   args: string[],
   env?: Record<string, string>,
+  output?: { maxBuffer?: number; encoding?: BufferEncoding },
 ): Promise<GitRunResult> {
   try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
+    const opts = env ? { cwd, env: { ...process.env, ...env }, ...output } : { cwd, ...output };
     const { stdout, stderr } = await exec('git', args, opts);
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {

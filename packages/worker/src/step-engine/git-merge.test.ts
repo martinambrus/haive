@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -161,6 +162,28 @@ async function setupMergeWithOwnWork(): Promise<string> {
   return dir;
 }
 
+/** A merge left open on `.gitignore`, which ignores `cache/`, with a file in it and an untracked
+ *  log nothing ignores. */
+async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ignore-'));
+  await git(dir, ['init', '-b', 'main']);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\ntheirs/\n', 'utf8');
+  await git(dir, ['commit', '-am', 'feature rule']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, '.gitignore'), 'cache/\nours/\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main rule']);
+  await mkdir(path.join(dir, 'cache'));
+  const kept = `kept ${randomUUID()}\n`;
+  await writeFile(path.join(dir, 'cache', 'keep'), kept, 'utf8');
+  await writeFile(path.join(dir, 'app.log'), 'line1\n', 'utf8');
+  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return { dir, kept };
+}
+
 describe('fixer leftovers (real git)', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -293,6 +316,61 @@ describe('fixer leftovers (real git)', () => {
       expect(await gitCode(dir, ['cat-file', '-e', 'HEAD:mine.txt'])).not.toBe(0);
       expect(await readFile(path.join(dir, 'dirt.txt'), 'utf8')).toBe('person dirt\n');
       expect(await readFile(path.join(dir, 'mine.txt'), 'utf8')).toBe('mine\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A fixer resolving `.gitignore` can drop a rule, and what the rule ignored is still not its own.
+  it('leaves what git ignored when the fixer was sent in, whatever rules it leaves', async () => {
+    const { dir, kept } = await setupIgnoreConflict();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(path.join(dir, '.gitignore'), 'ours/\ntheirs/\n', 'utf8');
+      await writeFile(path.join(dir, 'cache', 'new'), 'new under cache\n', 'utf8');
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out).toBeNull();
+      expect(await readFile(path.join(dir, 'cache', 'keep'), 'utf8')).toBe(kept);
+      expect(await readFile(path.join(dir, 'cache', 'new'), 'utf8')).toBe('new under cache\n');
+      // Nor was it hashed: nothing under the directory reached the object store.
+      const blob = (await git(dir, ['hash-object', path.join(dir, 'cache', 'keep')])).trim();
+      expect(await gitCode(dir, ['cat-file', '-e', blob])).not.toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Or add one, which hides a file the baseline recorded: it is compared, not restored over.
+  it('compares a recorded file that a rule the fixer added now hides', async () => {
+    const { dir } = await setupIgnoreConflict();
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(path.join(dir, '.gitignore'), 'cache/\nours/\ntheirs/\n*.log\n', 'utf8');
+      await writeFile(path.join(dir, 'app.log'), 'line1\nline2\n', 'utf8');
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.moved).toEqual(['app.log']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/app.log')).toBe('line1\nline2\n');
+      expect(await read('app.log')).toBe('line1\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a new file whose name is not UTF-8 and leaves it where it is', async () => {
+    const dir = await setupMergeWithOwnWork();
+    const odd = Buffer.concat([
+      Buffer.from(`${dir}/odd-`),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    try {
+      const baseline = await captureFixBaseline(dir);
+      await writeFile(odd, 'odd\n');
+      const out = await relocateFixerChanges(dir, baseline, { taskId: 't1', runId: 'inv1' });
+      expect(out?.unchecked).toBeUndefined();
+      expect(out?.left).toEqual([expect.objectContaining({ reason: 'its name is not UTF-8' })]);
+      expect(await readFile(odd, 'utf8')).toBe('odd\n');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
