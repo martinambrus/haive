@@ -59,6 +59,9 @@ export interface TemplateItem<TCtx = unknown> {
    *  reference-context contentHash keeps covering the item's body. Items without
    *  an `applies` are always applicable. */
   applies?(ctx: TCtx): boolean;
+  /** The context this item's contentHash is rendered in, for an item the shared reference context
+   *  renders empty: a hash of nothing never changes, so no change to its body could show. */
+  referenceCtx?: TCtx;
 }
 
 /** TemplateItem augmented with the auto-computed content hash derived at
@@ -145,7 +148,7 @@ export function buildManifest<TCtx>(
 ): TemplateManifest<TCtx> {
   const withHashes: ManifestItem<TCtx>[] = items.map((item) => ({
     ...item,
-    contentHash: hashRenderings(item.render(referenceCtx)),
+    contentHash: hashRenderings(item.render(item.referenceCtx ?? referenceCtx)),
   }));
   return {
     items: withHashes,
