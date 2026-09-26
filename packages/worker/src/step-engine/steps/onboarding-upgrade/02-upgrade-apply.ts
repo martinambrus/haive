@@ -721,7 +721,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           if (entry.templateKind !== CLI_RULES_TEMPLATE_KIND) deletedPaths.push(rel);
           else if (removal.outcome === 'removed') writtenPaths.push(rel);
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
-          if (removal.outcome === 'removed') {
+          // Gone already with Haive's bytes planned there is an earlier attempt of this step that
+          // removed it and failed before recording that, so the plan's bytes are what it removed.
+          const removedContent =
+            removal.outcome === 'removed'
+              ? removal.content
+              : entry.currentContent !== null && entry.currentHash === entry.baselineWrittenHash
+                ? entry.currentContent
+                : null;
+          if (removedContent !== null) {
             // What it removed, so a rollback of this upgrade can put it back: a path with no row,
             // such as a file a blank scaffold seeded, would otherwise leave nothing to restore from.
             baseline(
@@ -730,7 +738,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                   templateContentHash: entry.baselineTemplateContentHash ?? '',
                   writtenHash: entry.baselineWrittenHash ?? '',
                 },
-                { content: removal.content, hash: sha256Hex(normalizeContent(removal.content)) },
+                { content: removedContent, hash: sha256Hex(normalizeContent(removedContent)) },
               ),
             );
             removedPaths.push(entry.diskPath);

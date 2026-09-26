@@ -642,7 +642,19 @@ async function main(): Promise<void> {
           removed.deletedPaths?.includes(SETTINGS) === true,
         removed.deletedPaths,
       );
-      await finish(secondSeeded.applyCtx, removed);
+      // The apply runs again, as a retry after its output was lost: the file is already gone.
+      const reapplied = await upgradeApplyStep.apply(secondSeeded.applyCtx, {
+        detected: secondSeeded.plan,
+        formValues: removeValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'a retry of that apply still records the removal an earlier attempt made',
+        reapplied.removedPaths?.includes(SETTINGS) === true,
+        reapplied.removedPaths,
+      );
+      await finish(secondSeeded.applyCtx, reapplied);
       await rollback('rtk-off-upgrade-smoke seeded rollback', seeded);
       check(
         'a rollback puts back the file no row recorded',
