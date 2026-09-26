@@ -169,6 +169,7 @@ function makeDb(
   let mergeState: MergeResolveState | null = null;
   let status = opts.rowTaken ? 'pending' : 'running';
   let errorMessage: string | null = null;
+  const events: { eventType: string; payload: unknown }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
     if ('status' in patch) status = patch.status as string;
@@ -201,14 +202,17 @@ function makeDb(
         }),
       }),
     }),
-    insert: () => ({
-      values: () => ({
-        returning: async () => {
-          if (opts.insertRejects) throw opts.insertRejects;
-          return [{ id: 'inv1' }];
-        },
-        then: (resolve: (v: unknown) => void) => resolve(undefined),
-      }),
+    insert: (table?: unknown) => ({
+      values: (v: { eventType: string; payload: unknown }) => {
+        if (table === schema.taskEvents) events.push(v);
+        return {
+          returning: async () => {
+            if (opts.insertRejects) throw opts.insertRejects;
+            return [{ id: 'inv1' }];
+          },
+          then: (resolve: (v: unknown) => void) => resolve(undefined),
+        };
+      },
     }),
     // One chain answers both shapes: buildSquashCommitMessage awaits orderBy directly,
     // loadOutstandingMergeGuidance continues to limit(1). lockOwnedStep's ownership probe
@@ -237,7 +241,7 @@ function makeDb(
       },
     }),
   };
-  return { db, getState: () => mergeState, getStatus: () => status };
+  return { db, getState: () => mergeState, getStatus: () => status, events };
 }
 
 /** Values a drizzle condition binds, in order. */
@@ -608,6 +612,131 @@ describe('12 merge fix-agent dispatch', () => {
   // A working provider for the mocked dispatcher above: opts.providers.length > 0 is
   // its whole test for "dispatch a cli invocation" vs. "skip, no provider".
   const withProvider = { providers: [{ id: 'p1', enabled: true }] };
+  const dispatching = { ...withProvider, deps: { enqueueCliInvocation: async () => {} } };
+  const resolving = (parent: string, over: Partial<MergeResolveState> = {}): MergeResolveState => ({
+    mode: 'same-branch',
+    phase: 'resolving',
+    baseBranch: 'main',
+    featureBranch: 'feature/x',
+    mergeDir: parent,
+    sandboxMergeDir: parent,
+    fixInvocationId: 'inv1',
+    conflictRetries: 1,
+    pendingQuestion: null,
+    pushAfterMerge: false,
+    merged: false,
+    skipReason: null,
+    pushed: false,
+    ...over,
+  });
+
+  it('a never-answered fixer that edited a file the merge staged: the next fixer starts from a fresh merge', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      // feature.txt merged cleanly and is staged, and the fixer edited it anyway, which is
+      // exactly what makes `git merge --abort` refuse.
+      await writeFile(path.join(parent, 'feature.txt'), 'fixer edit\n', 'utf8');
+      await writeFile(path.join(parent, 'base.txt'), 'half-resolved\n', 'utf8');
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() } });
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, resolving(parent)),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) expect(merge.result.status).toBe('waiting_cli');
+      expect(await readFile(path.join(parent, 'feature.txt'), 'utf8')).toBe('feature\n');
+      expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toContain('<<<<<<<');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('an abort git refuses halts, is recorded, and sends no fixer into the half merge', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      await writeFile(path.join(parent, 'base.txt'), 'half-resolved\n', 'utf8');
+      // A lock git cannot take: the abort fails whatever is edited.
+      await writeFile(path.join(parent, '.git', 'index.lock'), '', 'utf8');
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: null, supersededAt: new Date() } });
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, resolving(parent)),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) {
+        expect(merge.result.status).toBe('failed');
+        expect((merge.result as { error?: string }).error).toContain('could not be aborted');
+      }
+      expect(h.getState()?.fixInvocationId).toBeNull();
+      expect(h.events.map((e) => e.eventType)).toEqual(['merge.abort_failed']);
+      expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toBe('half-resolved\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a merge git refused halts with its reason and sends no fixer', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      // An untracked file where the feature branch adds one: git refuses the merge outright.
+      await writeFile(path.join(parent, 'feature.txt'), 'mine\n', 'utf8');
+      const h = makeDb();
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) {
+        expect(merge.result.status).toBe('failed');
+        expect((merge.result as { error?: string }).error).toContain(
+          'git refused to merge feature/x into main',
+        );
+      }
+      expect(h.getState()?.fixInvocationId).toBeNull();
+      expect(await readFile(path.join(parent, 'feature.txt'), 'utf8')).toBe('mine\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a merge finished by hand after the fix budget ran out finishes the step', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await divergeBase(parent, wt);
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      await writeFile(path.join(parent, 'base.txt'), 'by hand\n', 'utf8');
+      await git(parent, ['commit', '-am', 'merged by hand']);
+      const h = makeDb();
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(
+          det(wt),
+          { action: 'merge_remove' },
+          resolving(parent, { fixInvocationId: null, conflictRetries: 4 }),
+        ),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+      expect(merge.resolved).toBe(true);
+      expect(h.getState()?.merged).toBe(true);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
 
   it('a fix invocation superseded before it ever started no longer waits forever', async () => {
     const { parent, wt } = await setupWorktree();

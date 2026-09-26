@@ -1,5 +1,6 @@
 import { isPathContainmentError, readTextNoFollow } from '@haive/shared/fs-safe';
-import { gitRun } from '../repo/git-push.js';
+import { gitRun, type GitRunResult } from '../repo/git-push.js';
+import { HOST_REPO_ROOT } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted-repo.js';
 
@@ -20,6 +21,124 @@ export async function mergeCommitted(worktreePath: string, branch: string): Prom
   if (unmerged) return false;
   const ancestor = await gitRun(worktreePath, ['merge-base', '--is-ancestor', branch, 'HEAD']);
   return ancestor.code === 0;
+}
+
+function nulPaths(out: string): string[] {
+  return [...new Set(out.split('\0').filter(Boolean))];
+}
+
+/** The paths still unmerged in `dir`, or null when git could not list them. Read with `-z`: without
+ *  it git quotes a name holding a quote or a non-ASCII byte, and the quoted form names no file. */
+export async function unmergedPaths(dir: string): Promise<string[] | null> {
+  const res = await gitRun(dir, ['diff', '--name-only', '--diff-filter=U', '-z']);
+  return res.code === 0 ? nulPaths(res.stdout) : null;
+}
+
+async function revParse(dir: string, spec: string): Promise<string | null> {
+  const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
+  return res.code === 0 ? res.stdout.trim() : null;
+}
+
+/** True while a merge of `ref` is open in `dir`. */
+export async function mergeOpenFor(dir: string, ref: string): Promise<boolean> {
+  const head = await revParse(dir, 'MERGE_HEAD');
+  return head !== null && head === (await revParse(dir, `${ref}^{commit}`));
+}
+
+function gitDetail(res: GitRunResult): string {
+  return (res.stderr || res.stdout).trim().split('\n').slice(0, 3).join(' ').slice(0, 300);
+}
+
+export type MergeOpen =
+  { kind: 'merged' } | { kind: 'conflict' } | { kind: 'refused'; detail: string };
+
+/** Merge `ref` into the branch checked out in `dir`. A conflict leaves MERGE_HEAD naming `ref`; a
+ *  merge git refused (local changes or an untracked file in the way, a ref it cannot resolve) leaves
+ *  none, and exits with the same codes a conflict does. */
+export async function openMerge(
+  dir: string,
+  ref: string,
+  flags: string[],
+  env: Record<string, string>,
+): Promise<MergeOpen> {
+  const res = await gitRun(dir, ['merge', '--no-ff', ...flags, ref], env);
+  if (res.code === 0) return { kind: 'merged' };
+  if (await mergeOpenFor(dir, ref)) return { kind: 'conflict' };
+  return { kind: 'refused', detail: gitDetail(res) };
+}
+
+export type MergeAbort = { ok: true } | { ok: false; blocking: string[]; detail: string };
+
+/** A person's own checkout, mounted from the host: Haive discards nothing there. */
+function isHostCheckout(dir: string): boolean {
+  return dir === HOST_REPO_ROOT || dir.startsWith(`${HOST_REPO_ROOT}/`);
+}
+
+/** Paths the merge staged and something edited since, which is what makes `merge --abort` refuse. */
+async function stagedThenEdited(dir: string): Promise<string[] | null> {
+  const [staged, edited, unmerged] = await Promise.all([
+    gitRun(dir, ['diff', '--cached', '--name-only', '-z']),
+    gitRun(dir, ['diff', '--name-only', '-z']),
+    unmergedPaths(dir),
+  ]);
+  if (staged.code !== 0 || edited.code !== 0 || unmerged === null) return null;
+  const changed = new Set(nulPaths(edited.stdout));
+  const open = new Set(unmerged);
+  return nulPaths(staged.stdout).filter((p) => changed.has(p) && !open.has(p));
+}
+
+const RESTORE_CHUNK = 100;
+
+/** End the merge open in `dir`, leaving the tree as the merge found it. `merge --abort` refuses once
+ *  a file the merge staged is edited (a fixer's edit to a cleanly merged file), so those edits are
+ *  put back from the index and the abort is tried again. In a host checkout nothing is put back and
+ *  the paths are reported instead. */
+export async function abortMerge(dir: string): Promise<MergeAbort> {
+  if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const first = await gitRun(dir, ['merge', '--abort']);
+  if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const blocking = (await stagedThenEdited(dir)) ?? [];
+  if (blocking.length === 0 || isHostCheckout(dir)) {
+    return { ok: false, blocking, detail: gitDetail(first) };
+  }
+  for (let i = 0; i < blocking.length; i += RESTORE_CHUNK) {
+    const restore = await gitRun(dir, ['checkout', '--', ...blocking.slice(i, i + RESTORE_CHUNK)], {
+      GIT_LITERAL_PATHSPECS: '1',
+    });
+    if (restore.code !== 0) return { ok: false, blocking, detail: gitDetail(restore) };
+  }
+  const second = await gitRun(dir, ['merge', '--abort']);
+  if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  return {
+    ok: false,
+    blocking: (await stagedThenEdited(dir)) ?? blocking,
+    detail: gitDetail(second),
+  };
+}
+
+/** Clear the way to open a merge of `ref` in `dir`. A merge open for anything else is a stale
+ *  attempt and is aborted, or in a host checkout the person's own, left alone and refused. */
+export async function abortOtherMerge(dir: string, ref: string): Promise<MergeAbort> {
+  const head = await revParse(dir, 'MERGE_HEAD');
+  if (head === null || (await mergeOpenFor(dir, ref))) return { ok: true };
+  if (isHostCheckout(dir)) {
+    return {
+      ok: false,
+      blocking: [],
+      detail: `a merge of ${head.slice(0, 12)} is already in progress there`,
+    };
+  }
+  return abortMerge(dir);
+}
+
+/** One line naming what an abort could not undo, for a halt message. */
+export function abortFailureNote(abort: { blocking: string[]; detail: string }): string {
+  const shown = abort.blocking.slice(0, 5).map((p) => JSON.stringify(p));
+  const more =
+    abort.blocking.length > shown.length ? ` and ${abort.blocking.length - shown.length} more` : '';
+  const paths =
+    shown.length > 0 ? ` (changed after the merge staged them: ${shown.join(', ')}${more})` : '';
+  return `The merge could not be aborted${paths}: ${abort.detail || 'git gave no reason'}. It is still open; abort or finish it by hand, then retry.`;
 }
 
 /** Build the conflict-resolution agent's prompt. `title` is an optional
@@ -66,15 +185,14 @@ export async function completeMergeHostSide(
   if (await mergeCommitted(worktreePath, branch)) return true;
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code !== 0) return false; // merge no longer open and not committed
-  const unmerged = await gitRun(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
-  const files = unmerged.stdout
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const files = await unmergedPaths(worktreePath);
+  if (files === null) return false;
   // The worktree is under `.haive/`, which the sandbox mounts read-write, so it is SPLIT rather
   // than used as the anchor: every path git reported is walked a component at a time.
   const { anchor, prefix } = workspaceAnchor(worktreePath);
   for (const f of files) {
+    // A name that is not UTF-8 decodes to one naming no file, which would read as deleted.
+    if (f.includes('\uFFFD')) return false;
     let content: string | null;
     try {
       content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });

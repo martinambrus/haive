@@ -39,6 +39,8 @@ for (const k of ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const)
 
 const BRANCH = 'feat-auto';
 const CONFLICT_FILE = 'conflict.txt';
+// Only ISSUE-002 writes it, so its conflicting merge stages it cleanly beside the conflict.
+const NOTES_FILE = 'notes-002.txt';
 
 interface State {
   fixtureDir?: string;
@@ -209,10 +211,12 @@ async function main(): Promise<void> {
           path.join(issue.worktreePath, CONFLICT_FILE),
           `content from ${issue.issueKey}\n`,
         );
+        const notes = issue.issueKey === 'ISSUE-002';
+        if (notes) await writeFile(path.join(issue.worktreePath, NOTES_FILE), 'notes from 002\n');
         const result = {
           issue_id: issue.issueKey,
           outcome: 'completed',
-          files_modified: [CONFLICT_FILE],
+          files_modified: notes ? [CONFLICT_FILE, NOTES_FILE] : [CONFLICT_FILE],
           debt_items: [],
           concerns: '',
         };
@@ -229,13 +233,15 @@ async function main(): Promise<void> {
       // Merge-fix agent: EDIT the conflicted file only — a real sandboxed agent
       // cannot run git (worktree gitdir path is invalid there); the executor
       // completes the merge host-side. The first one removes the markers and then fails, so
-      // what it left must not be committed and a second one is dispatched.
+      // what it left must not be committed and a second one is dispatched. It also edits the
+      // file the merge staged cleanly, which makes a plain `git merge --abort` refuse.
       fixDispatches += 1;
       const failed = fixDispatches === 1;
       await writeFile(
         path.join(integrationWorktree, CONFLICT_FILE),
         failed ? 'half-resolved\n' : 'resolved: 001 + 002\n',
       );
+      if (failed) await writeFile(path.join(integrationWorktree, NOTES_FILE), 'fixer edit\n');
       await db
         .update(schema.cliInvocations)
         // Mirrors handlers.ts: a completed run started, whatever it returned.
@@ -316,6 +322,12 @@ async function main(): Promise<void> {
     }
     if (content !== 'resolved: 001 + 002\n') {
       throw new Error(`the failed fixer's edit was committed: ${JSON.stringify(content)}`);
+    }
+    const notes = git(integrationWorktree, ['show', `HEAD:${NOTES_FILE}`]);
+    if (notes !== 'notes from 002\n') {
+      throw new Error(
+        `the failed fixer's edit to a staged file was committed: ${JSON.stringify(notes)}`,
+      );
     }
 
     console.log(

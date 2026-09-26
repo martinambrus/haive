@@ -10,7 +10,18 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
-import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
+import {
+  abortFailureNote,
+  abortMerge,
+  abortOtherMerge,
+  completeMergeHostSide,
+  mergeCommitted,
+  mergeOpenFor,
+  openMerge,
+  squashMergeCommit,
+  unmergedPaths,
+  type MergeAbort,
+} from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import { assertOwnsStep, insertOwnedRun, updateOwnedStep } from './step-ownership.js';
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
@@ -467,11 +478,7 @@ async function prePushSync(
 
 /** Unmerged paths in a mid-merge worktree (for the fix prompt). */
 async function conflictFiles(mergeDir: string): Promise<string[]> {
-  const res = await gitRun(mergeDir, ['diff', '--name-only', '--diff-filter=U']);
-  return res.stdout
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return (await unmergedPaths(mergeDir)) ?? [];
 }
 
 /** Outcome of dispatching the conflict-resolution agent. `already_live` means a
@@ -563,6 +570,59 @@ function halt(db: Database, current: TaskStepRow, message: string): Promise<Task
     errorMessage: message,
     endedAt: new Date(),
   });
+}
+
+async function haltFailed(
+  db: Database,
+  current: TaskStepRow,
+  message: string,
+  fallback: string,
+): Promise<MergeResolved> {
+  const row = await halt(db, current, message);
+  return {
+    resolved: false,
+    result: { status: 'failed', row, error: row.errorMessage ?? fallback },
+  };
+}
+
+/** A merge git refused opened nothing, so there is no conflict a fixer could resolve. */
+function haltRefused(
+  db: Database,
+  current: TaskStepRow,
+  state: MergeResolveState,
+  detail: string,
+): Promise<MergeResolved> {
+  return haltFailed(
+    db,
+    current,
+    `git refused to merge ${state.featureBranch} into ${state.baseBranch}: ${detail}. Nothing was merged; clear what git names, then retry.`,
+    'merge refused',
+  );
+}
+
+/** Halt on a merge that could not be aborted, since a fixer dispatched into it would start from
+ *  whatever the last one left. `why` is the halt the abort was part of, when there was one. */
+async function haltUnaborted(
+  db: Database,
+  current: TaskStepRow,
+  taskId: string,
+  state: MergeResolveState,
+  abort: Extract<MergeAbort, { ok: false }>,
+  why?: string,
+): Promise<MergeResolved> {
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: current.id,
+    eventType: 'merge.abort_failed',
+    payload: {
+      featureBranch: state.featureBranch,
+      baseBranch: state.baseBranch,
+      blocking: abort.blocking.slice(0, 20),
+      detail: abort.detail,
+    },
+  });
+  const note = abortFailureNote(abort);
+  return haltFailed(db, current, why ? `${why} ${note}` : note, 'merge abort failed');
 }
 
 /** Merge the feature branch into its base with an LLM conflict-resolution loop.
@@ -660,14 +720,20 @@ export async function resolveMergePhase(
 
   // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
   if (state.phase === 'pending') {
-    const merge = await gitRun(
+    // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
+    const cleared = await abortOtherMerge(state.mergeDir, state.featureBranch);
+    const stale = cleared.ok ? await abortMerge(state.mergeDir) : cleared;
+    if (!stale.ok) return haltUnaborted(db, current, params.taskId, state, stale);
+    const opened = await openMerge(
       state.mergeDir,
-      ['merge', '--no-ff', state.featureBranch, '-m', `Merge ${state.featureBranch}`],
+      state.featureBranch,
+      ['-m', `Merge ${state.featureBranch}`],
       commitEnv,
     );
-    if (merge.code === 0) {
+    if (opened.kind === 'merged') {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
+    if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
     // Conflict: leave the mid-merge LIVE (no --abort) so the fix agent edits it.
     state = { ...state, phase: 'resolving' };
     await saveMergeState(db, current.id, state);
@@ -704,13 +770,14 @@ export async function resolveMergePhase(
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
-        await gitRun(state.mergeDir, ['merge', '--abort']);
+        const aborted = await abortMerge(state.mergeDir);
         state = {
           ...state,
           fixInvocationId: null,
           conflictRetries: Math.max(0, state.conflictRetries - 1),
         };
         await saveMergeState(db, current.id, state);
+        if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
       } else {
         // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
         // not recover this run — abort the live merge and fail instead of spending the
@@ -721,12 +788,10 @@ export async function resolveMergePhase(
             .update(schema.cliInvocations)
             .set({ consumedAt: new Date() })
             .where(eq(schema.cliInvocations.id, inv.id));
-          await gitRun(state.mergeDir, ['merge', '--abort']);
-          const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
-          return {
-            resolved: false,
-            result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
-          };
+          const aborted = await abortMerge(state.mergeDir);
+          const why = inv.errorMessage ?? 'fatal provider error';
+          if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+          return haltFailed(db, current, why, 'fatal provider error');
         }
         await db
           .update(schema.cliInvocations)
@@ -757,49 +822,46 @@ export async function resolveMergePhase(
         }
         // Unusable, or markers remain → abort this attempt; the dispatch decision below retries or
         // halts, and the attempt stays spent.
-        await gitRun(state.mergeDir, ['merge', '--abort']);
+        const aborted = await abortMerge(state.mergeDir);
         await saveMergeState(db, current.id, state);
+        if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
       }
     }
 
-    // (2) Dispatch decision. Abort the live merge before halting so a failed phase
-    // never leaves the parent repo stuck mid-merge (a later "Retry with AI" re-creates
-    // the conflict on demand).
-    if (state.conflictRetries >= MAX_MERGE_CONFLICT_RETRIES) {
-      await gitRun(state.mergeDir, ['merge', '--abort']);
-      const row = await halt(
-        db,
-        current,
-        `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`,
-      );
-      return {
-        resolved: false,
-        result: { status: 'failed', row, error: row.errorMessage ?? 'merge conflict' },
-      };
-    }
-    if (!params.providers || !params.deps) {
-      await gitRun(state.mergeDir, ['merge', '--abort']);
-      const row = await halt(
-        db,
-        current,
-        'Merge conflict requires a CLI provider to resolve, but none were supplied.',
-      );
-      return {
-        resolved: false,
-        result: { status: 'failed', row, error: row.errorMessage ?? 'no provider' },
-      };
-    }
-    // Recreate the live merge if it isn't open (after an abort or a crash).
+    // (2) Dispatch decision. A merge finished by hand after a halt finishes the step here, before
+    // any halt below can fire again. Abort the live merge before halting so a failed phase never
+    // leaves the parent repo stuck mid-merge (a later "Retry with AI" re-creates the conflict on
+    // demand).
     if (await mergeCommitted(state.mergeDir, state.featureBranch)) {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
-    const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-    if (open.code !== 0) {
-      await gitRun(
+    if (state.conflictRetries >= MAX_MERGE_CONFLICT_RETRIES) {
+      const aborted = await abortMerge(state.mergeDir);
+      const why = `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`;
+      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      return haltFailed(db, current, why, 'merge conflict');
+    }
+    if (!params.providers || !params.deps) {
+      const aborted = await abortMerge(state.mergeDir);
+      const why = 'Merge conflict requires a CLI provider to resolve, but none were supplied.';
+      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      return haltFailed(db, current, why, 'no provider');
+    }
+    // Recreate the live merge if it isn't open (after an abort or a crash). One open for another
+    // ref is not this conflict, and a fixer must never be sent into it.
+    const cleared = await abortOtherMerge(state.mergeDir, state.featureBranch);
+    if (!cleared.ok) return haltUnaborted(db, current, params.taskId, state, cleared);
+    if (!(await mergeOpenFor(state.mergeDir, state.featureBranch))) {
+      const opened = await openMerge(
         state.mergeDir,
-        ['merge', '--no-ff', state.featureBranch, '-m', `Merge ${state.featureBranch}`],
+        state.featureBranch,
+        ['-m', `Merge ${state.featureBranch}`],
         commitEnv,
       );
+      if (opened.kind === 'merged') {
+        return finishMerge(db, stepDef, current, ctx, params, state);
+      }
+      if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
     }
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
     // A const alias so the closure below keeps TypeScript's narrowing of `state` to
@@ -834,16 +896,10 @@ export async function resolveMergePhase(
       return { resolved: false, result: { status: 'waiting_cli', row } };
     }
     if (dispatched.kind === 'no_provider') {
-      await gitRun(state.mergeDir, ['merge', '--abort']);
-      const row = await halt(
-        db,
-        current,
-        'No CLI provider available for merge conflict resolution.',
-      );
-      return {
-        resolved: false,
-        result: { status: 'failed', row, error: row.errorMessage ?? 'no provider' },
-      };
+      const aborted = await abortMerge(state.mergeDir);
+      const why = 'No CLI provider available for merge conflict resolution.';
+      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      return haltFailed(db, current, why, 'no provider');
     }
     // 'ok': the onInserted hook above already saved state.fixInvocationId.
     const row = await setStepStatus(db, current.id, {
