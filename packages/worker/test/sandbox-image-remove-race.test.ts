@@ -40,7 +40,12 @@ const PROVIDER = '00000000-0000-4000-8000-0000000000b2';
 
 beforeEach(() => {
   for (const f of Object.values(docker)) f.mockReset();
-  tagOf.mockClear();
+  tagOf.mockReset();
+  tagOf.mockImplementation(() => ({
+    tag: 'haive-cli-claude:1.0.0',
+    shared: true,
+    dockerfileLines: [],
+  }));
 });
 
 function withProvider() {
@@ -282,7 +287,7 @@ describe("a provider's row names its image only once the image is built", () => 
   // Its version changed while a build of the old one ran, and the build of the new one ended first.
   it('keeps the image its config asks for when an older build finishes last', async () => {
     const stale = 'haive-cli-claude:1.1.0';
-    const { db, standing } = onOlder([]);
+    const { fake, db, standing } = onOlder([]);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     docker.build.mockImplementation(async (opts: { tag: string }) => {
@@ -307,6 +312,108 @@ describe("a provider's row names its image only once the image is built", () => 
     await older;
     expect(standing.has(TAG)).toBe(true);
     expect(standing.has(OLDER)).toBe(false);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      sandboxImageTag: TAG,
+      sandboxImageBuildStatus: 'ready',
+    });
+  });
+
+  it('keeps the status a newer build left when an older build fails last', async () => {
+    const stale = 'haive-cli-claude:1.1.0';
+    const { fake, db, standing } = onOlder([]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    docker.build.mockImplementation(async (opts: { tag: string }) => {
+      if (opts.tag === stale) {
+        await gate;
+        return { exitCode: 1, imageTag: stale, durationMs: 1, stderr: 'boom', timedOut: false };
+      }
+      standing.add(opts.tag);
+      return { exitCode: 0, imageTag: opts.tag, durationMs: 1, stderr: '', timedOut: false };
+    });
+    tagOf.mockReturnValueOnce({ tag: stale, shared: true, dockerfileLines: [] });
+    const forced = () =>
+      handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER, force: true });
+    const older = forced();
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
+    await forced();
+    release();
+    expect((await older).ok).toBe(false);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      sandboxImageTag: TAG,
+      sandboxImageBuildStatus: 'ready',
+    });
+  });
+
+  // Another provider leaves the tag this one is building, and its removal lands between this
+  // build and its claim.
+  it('keeps a tag a build is claiming from a provider moving off it', async () => {
+    const X = 'haive-cli-claude:2.0.0';
+    const Y = 'haive-cli-claude:3.0.0';
+    const MOVER = '00000000-0000-4000-8000-0000000000b3';
+    const fake = createFakeDb({ cliProviders: schema.cliProviders });
+    for (const [id, tag] of [
+      [PROVIDER, OLDER],
+      [MOVER, X],
+    ]) {
+      fake.insert(schema.cliProviders, {
+        id,
+        userId: USER,
+        name: 'zai',
+        label: id,
+        cliVersion: '1.0.0',
+        sandboxImageTag: tag,
+        sandboxImageBuildStatus: 'ready',
+      });
+    }
+    const wants: Record<string, string> = { [PROVIDER]: X, [MOVER]: Y };
+    tagOf.mockImplementation((p?: { providerId: string }) => ({
+      tag: wants[p!.providerId]!,
+      shared: true,
+      dockerfileLines: [],
+    }));
+    const standing = new Set([OLDER, X]);
+    let armed = false;
+    let releaseCheck!: () => void;
+    const check = new Promise<void>((resolve) => (releaseCheck = resolve));
+    docker.inspect.mockImplementation(async (tag: string) => {
+      // The mover's removal has read that no row names X, and checks the image while X is built.
+      if (tag === X && armed) await check;
+      return standing.has(tag) ? { exists: true, imageId: `sha256:${tag}` } : { exists: false };
+    });
+    docker.remove.mockImplementation(async (tag: string) => {
+      standing.delete(tag);
+      return { ok: true, stderr: '' };
+    });
+    let releaseBuild!: () => void;
+    const building = new Promise<void>((resolve) => (releaseBuild = resolve));
+    docker.build.mockImplementation(async (opts: { tag: string }) => {
+      if (opts.tag === X) {
+        armed = true;
+        await building;
+      }
+      standing.add(opts.tag);
+      return { exitCode: 0, imageTag: opts.tag, durationMs: 1, stderr: '', timedOut: false };
+    });
+    const db = fake.db as unknown as Database;
+    const forced = (providerId: string) =>
+      handleBuildSandboxImageJob(db, { providerId, userId: USER, force: true });
+
+    const claiming = forced(PROVIDER);
+    await vi.waitFor(() => expect(armed).toBe(true));
+    const moving = forced(MOVER);
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    armed = false;
+    releaseBuild();
+    await claiming;
+    releaseCheck();
+    await moving;
+
+    expect(standing.has(X)).toBe(true);
+    const tagOfRow = new Map(fake.rows(schema.cliProviders).map((r) => [r.id, r.sandboxImageTag]));
+    expect(tagOfRow.get(PROVIDER)).toBe(X);
+    expect(tagOfRow.get(MOVER)).toBe(Y);
   });
 
   it('removes the image it had when it no longer needs one', async () => {

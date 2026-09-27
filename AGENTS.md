@@ -1969,8 +1969,13 @@ stayed for good. A build now writes only its status when it starts. On success o
 (`markProvidersReady`, its rows locked in id order) moves the provider, and on a shared tag every
 sibling it serves, to the tag: a sibling already on it, or one whose own build of it failed, which
 only its config can name now, since that build left its row where it was. It hands back the tags
-those rows named before, and each goes through the removal check below. A provider that stops
-needing an image has the one it named removed the same way.
+those rows named before, and each goes through the removal check below. The claim is made in the
+tag's turn (`withImageTagLock`) and only while the image stands, and every removal first waits out a
+build of its tag running here: with the row no longer naming a tag while it is built, a provider
+moving off that tag otherwise found it unnamed and removed it just before the build claimed it. A
+build of a config the provider has since left moves nothing and records no failure, since the build
+of its new config owns the row. A provider that stops needing an image has the one it named removed
+the same way.
 
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a

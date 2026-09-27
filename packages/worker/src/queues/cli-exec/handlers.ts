@@ -669,11 +669,7 @@ export async function handleBuildSandboxImageJob(
         updatedAt: new Date(),
       })
       .where(eq(schema.cliProviders.id, provider.id));
-    await removeOrphanedPreviousImage(db, {
-      providerId: provider.id,
-      previousDbTag: provider.sandboxImageTag,
-      newTag: null,
-    });
+    await removeOnceBuilt(db, provider.id, provider.sandboxImageTag, null);
     log.info(
       { providerId: provider.id },
       'sandbox image build skipped (no install lines, no extras)',
@@ -683,14 +679,14 @@ export async function handleBuildSandboxImageJob(
 
   const { tag: imageTag, shared } = resolution;
   const previousDbTag = provider.sandboxImageTag;
+  // In the tag's turn, which a removal of the tag also takes, and only while its image stands.
+  const claim = () =>
+    withImageTagLock(imageTag, async () => {
+      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
+      return markProvidersReady(db, imageTag, provider.id, shared);
+    });
   const removeReplaced = async (replaced: string[]) => {
-    for (const tag of replaced) {
-      await removeOrphanedPreviousImage(db, {
-        providerId: provider.id,
-        previousDbTag: tag,
-        newTag: imageTag,
-      });
-    }
+    for (const tag of replaced) await removeOnceBuilt(db, provider.id, tag, imageTag);
   };
 
   // The row keeps naming the image it has until this one exists, so a failed build leaves it there.
@@ -704,10 +700,7 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   if (!payload.force) {
-    const replaced = await withImageTagLock(imageTag, async () => {
-      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
-      return markProvidersReady(db, imageTag, provider.id, shared);
-    });
+    const replaced = await claim();
     if (replaced) {
       await removeReplaced(replaced);
       log.info({ providerId: provider.id, imageTag, shared }, 'sandbox image cache hit');
@@ -730,8 +723,9 @@ export async function handleBuildSandboxImageJob(
 
   try {
     const result = await build;
-    if (result.exitCode === 0) {
-      await removeReplaced(await markProvidersReady(db, imageTag, provider.id, shared));
+    const replaced = result.exitCode === 0 ? await claim() : null;
+    if (replaced) {
+      await removeReplaced(replaced);
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
@@ -744,15 +738,11 @@ export async function handleBuildSandboxImageJob(
       };
     }
 
-    const errMsg = (result.error ?? result.stderr ?? `exit ${result.exitCode}`).slice(-4000);
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageBuildStatus: 'failed',
-        sandboxImageBuildError: errMsg,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    const errMsg =
+      result.exitCode === 0
+        ? 'the image was removed before this build could record it; build it again'
+        : (result.error ?? result.stderr ?? `exit ${result.exitCode}`).slice(-4000);
+    await markBuildFailed(db, provider.id, imageTag, errMsg);
     log.warn(
       { providerId: provider.id, imageTag, exitCode: result.exitCode },
       'sandbox image build failed',
@@ -765,14 +755,7 @@ export async function handleBuildSandboxImageJob(
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageBuildStatus: 'failed',
-        sandboxImageBuildError: errMsg,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    await markBuildFailed(db, provider.id, imageTag, errMsg);
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
   } finally {
@@ -785,13 +768,7 @@ export async function handleBuildSandboxImageJob(
       });
       if (!stillThere) {
         for (const tag of new Set([imageTag, previousDbTag])) {
-          if (tag) {
-            await removeOrphanedPreviousImage(db, {
-              providerId: provider.id,
-              previousDbTag: tag,
-              newTag: null,
-            });
-          }
+          if (tag) await removeOnceBuilt(db, provider.id, tag, null);
         }
       }
     } catch (err) {
@@ -805,24 +782,70 @@ export async function handleBuildSandboxImageJob(
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
 
-/** Remove the image a deleted provider named, unless another provider names it too. A build of the
- *  tag in flight is waited out first, whatever it ends in, since it may have been this provider's. */
+/** Remove the image a deleted provider named, unless another provider names it too. */
 export async function handleRemoveSandboxImageJob(
   db: Database,
   payload: SandboxImageRemoveJobPayload,
 ): Promise<void> {
-  const building = inFlightBuilds.get(payload.imageTag);
-  if (building) {
+  if (inFlightBuilds.has(payload.imageTag)) {
     log.info(payload, "waiting for the build of a deleted provider's tag before removing it");
+  }
+  await removeOnceBuilt(db, payload.providerId, payload.imageTag, null);
+}
+
+/** Remove `tag`'s image unless a provider names it, once a build of it running here has ended,
+ *  whatever it ended in: that build claims the tag in the tag's turn, which the removal takes after. */
+async function removeOnceBuilt(
+  db: Database,
+  providerId: string,
+  tag: string | null,
+  newTag: string | null,
+): Promise<void> {
+  const building = tag ? inFlightBuilds.get(tag) : undefined;
+  if (building) {
     await building.then(
       () => undefined,
       () => undefined,
     );
   }
-  await removeOrphanedPreviousImage(db, {
-    providerId: payload.providerId,
-    previousDbTag: payload.imageTag,
-    newTag: null,
+  await removeOrphanedPreviousImage(db, { providerId, previousDbTag: tag, newTag });
+}
+
+/** Record a failed build only while the provider's config still asks for its tag: by then a build of
+ *  the config it moved to owns the row's status. */
+async function markBuildFailed(
+  db: Database,
+  providerId: string,
+  imageTag: string,
+  error: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({
+        name: schema.cliProviders.name,
+        cliVersion: schema.cliProviders.cliVersion,
+        sandboxDockerfileExtra: schema.cliProviders.sandboxDockerfileExtra,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.id, providerId))
+      .for('update');
+    const wants = row
+      ? resolveImageTag({
+          name: row.name as CliProviderName,
+          cliVersion: row.cliVersion?.trim() || null,
+          providerId,
+          sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+        })?.tag
+      : undefined;
+    if (wants !== imageTag) return;
+    await tx
+      .update(schema.cliProviders)
+      .set({
+        sandboxImageBuildStatus: 'failed',
+        sandboxImageBuildError: error,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.cliProviders.id, providerId));
   });
 }
 

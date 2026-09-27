@@ -5,8 +5,13 @@ import { markProvidersReady } from '../src/queues/cli-exec/images.js';
 import { resolveImageTag } from '../src/sandbox/image-cache.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
-const TAG = 'haive-cli-claude:1.0.0';
 const provider = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+const CLAUDE = { name: 'claude-code' as const, cliVersion: '1.0.0' };
+const TAG = resolveImageTag({
+  ...CLAUDE,
+  providerId: provider(1),
+  sandboxDockerfileExtra: null,
+})!.tag;
 
 describe('marking a shared tag ready', () => {
   it('leaves a sibling whose own build is still queued or running', async () => {
@@ -21,7 +26,7 @@ describe('marking a shared tag ready', () => {
       fake.insert(schema.cliProviders, {
         id: provider(n),
         userId: USER,
-        name: 'claude-code',
+        ...(n === 4 ? { name: 'codex' as const, cliVersion: '1.0.0' } : CLAUDE),
         label: `p${n}`,
         sandboxImageTag: tag,
         sandboxImageBuildStatus: status,
@@ -43,12 +48,6 @@ describe('marking a shared tag ready', () => {
 describe('marking a tag ready', () => {
   it('moves a sibling whose own build of the tag failed, and names what each row replaced', async () => {
     const fake = createFakeDb({ cliProviders: schema.cliProviders });
-    const config = { name: 'claude-code' as const, cliVersion: '1.0.0' };
-    const tag = resolveImageTag({
-      ...config,
-      providerId: provider(1),
-      sandboxDockerfileExtra: null,
-    })!;
     const rows: [number, string, string][] = [
       [1, 'haive-cli-claude:0.8.0', 'building'],
       [2, 'haive-cli-claude:0.9.0', 'failed'],
@@ -57,7 +56,7 @@ describe('marking a tag ready', () => {
       fake.insert(schema.cliProviders, {
         id: provider(n),
         userId: USER,
-        ...config,
+        ...CLAUDE,
         label: `p${n}`,
         sandboxImageTag: older,
         sandboxImageBuildStatus: status,
@@ -66,16 +65,16 @@ describe('marking a tag ready', () => {
 
     const replaced = await markProvidersReady(
       fake.db as unknown as Database,
-      tag.tag,
+      TAG,
       provider(1),
-      tag.shared,
+      true,
     );
 
     expect(
       fake.rows(schema.cliProviders).map((r) => [r.sandboxImageTag, r.sandboxImageBuildStatus]),
     ).toEqual([
-      [tag.tag, 'ready'],
-      [tag.tag, 'ready'],
+      [TAG, 'ready'],
+      [TAG, 'ready'],
     ]);
     expect([...replaced].sort()).toEqual(['haive-cli-claude:0.8.0', 'haive-cli-claude:0.9.0']);
   });

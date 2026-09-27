@@ -470,9 +470,9 @@ function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProvide
   return adapter.defaultExecutable;
 }
 
-/** Point the provider at the image of `imageTag`, and on a shared tag every sibling it serves: one
- *  already on the tag, or one whose own build of it failed. Returns the tags the rows it moved named
- *  before, for the caller to remove once no row names them. */
+/** Point the provider at the image of `imageTag` while its config still asks for it, and on a shared
+ *  tag every sibling it serves: one already on the tag, or one whose own build of it failed. Returns
+ *  the tags the rows it moved named before, for the caller to remove once no row names them. */
 export async function markProvidersReady(
   db: Database,
   imageTag: string,
@@ -509,13 +509,12 @@ export async function markProvidersReady(
         sandboxDockerfileExtra: r.sandboxDockerfileExtra,
       })?.tag;
     // A failed build leaves its row on the image it had, so only its config names the tag it built.
+    // The provider itself moves only while its config asks for this tag: a build of a config it has
+    // since left must not take its row from the build of the new one.
     const moving = rows.filter(
-      (r) => r.id === providerId || r.tag === imageTag || configTag(r) === imageTag,
+      (r) => configTag(r) === imageTag || (r.id !== providerId && r.tag === imageTag),
     );
     if (moving.length === 0) return [];
-    // A build of an older config that ends last must not take the image a newer build made.
-    const self = rows.find((r) => r.id === providerId);
-    const wanted = self ? configTag(self) : undefined;
     await tx
       .update(c)
       .set({
@@ -531,10 +530,7 @@ export async function markProvidersReady(
           moving.map((r) => r.id),
         ),
       );
-    const replaced = moving.flatMap((r) =>
-      r.tag && r.tag !== imageTag && r.tag !== wanted ? [r.tag] : [],
-    );
-    return [...new Set(replaced)];
+    return [...new Set(moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : [])))];
   });
 }
 
