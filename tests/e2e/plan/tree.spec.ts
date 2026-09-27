@@ -153,6 +153,31 @@ test.describe('plan canvas', () => {
     }
   });
 
+  test('a snapshot whose files are gone reads as missing, not as updating', async ({ page }) => {
+    // The plan route is the heaviest in the app to compile.
+    test.setTimeout(240_000);
+    const sql = getSql();
+    let userId = '';
+    let repo = null as Awaited<ReturnType<typeof seedRepoFixture>> | null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'plan-snapshot' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'plan-snapshot');
+      await seedPlan(sql, repo.repoId, 'snapshot');
+
+      // The mirror is settled and the fixture's checkout holds no snapshot files, so no write is on
+      // its way and "updating" would never end.
+      await page.goto(`/repos/${repo.repoId}/plan`);
+      await expect(page.getByText('Snapshot missing', { exact: true })).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(page.getByText('Snapshot updating…')).toHaveCount(0);
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('the plan page fits a phone and a tablet, a name with no break in it included', async ({
     page,
   }) => {

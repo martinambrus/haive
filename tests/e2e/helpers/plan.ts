@@ -107,6 +107,12 @@ export async function seedPlan(
     ordinal: 2,
     taskable: true,
   });
+  // Settled, as a real plan's mirror is once every revision is written.
+  await sql`
+    insert into plan_mirror_state (repository_id, revision, written_revision)
+    values (${repoId}, 1, 1)
+    on conflict (repository_id) do nothing
+  `;
 
   return { repoId, rootId, doneId, blockedId, todoId };
 }
@@ -114,4 +120,5 @@ export async function seedPlan(
 /** Nodes cascade from the repository, so this is only for a plan outliving its repo fixture. */
 export async function cleanupPlan(sql: postgres.Sql, repoId: string): Promise<void> {
   await sql`delete from plan_nodes where repository_id = ${repoId}`;
+  await sql`delete from plan_mirror_state where repository_id = ${repoId}`;
 }

@@ -1685,6 +1685,9 @@ export interface PlanOrderingProgress {
 export interface PlanSnapshotHealth {
   revision: number;
   writtenRevision: number;
+  /** `missing`: the files are not in the checkout and no write is owed, so nothing will
+   *  rewrite them until the plan changes or Save plan runs. */
+  snapshotState: 'updating' | 'missing' | 'written';
   snapshotWritten: boolean;
   lastError: string | null;
   filesExist: boolean;
