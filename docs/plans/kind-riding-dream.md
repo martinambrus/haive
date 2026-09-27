@@ -280,9 +280,13 @@ left alone, 00a's detect defaults `base` to the branch the checkout is on and au
 submits it, so a scan of branch B from a checkout on A would remediate, and merge, into A.
 `scan-triage` therefore pre-answers 00a's `base` with the landing branch through
 `tasks.pre_answers`, the map `06-run-config` pre-answers later steps with (merged into it, never
-written over it, since 06 writes the whole map), and `scan-remediate` dispatches no coder while
-the base 01 recorded is not the landing branch: in manual mode a pre-answer is only a default a
-person can change.
+written over it, since 06 writes the whole map), and `scan-remediate` dispatches no coder until
+the integration worktree's own HEAD is shown to contain the scanned commit
+(`merge-base --is-ancestor`, run in the scratch repository, which sees both commits through its
+alternates). A matching branch name proves nothing: 00a carries on with a stale local base when
+its fast-forward fails, a force-push can move the branch after triage, and in manual mode a
+pre-answer is only a default a person can change. A check that cannot be answered, a history too
+shallow to connect the two, refuses rather than guesses.
 
 **One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
@@ -666,6 +670,12 @@ module:
   `resolveInvocationRepoMount` honours the snapshot ahead of both repository branches — the
   read-only-folder one returns before it reads even the `worktreeRel` override DAG coders use — so
   a read-only folder import is scanned from its snapshot, never from the person's live checkout.
+  The mount is marked as a committed snapshot, and secret masking treats every file in it as
+  tracked, since each one is: `filterUntracked` (`secret-mask.ts`) reads a directory with no
+  `.git` as all untracked and masks more, which would hide from the security dimension exactly
+  the committed `.env` files and keys it exists to find. Such a finding names the file, the line
+  and the kind of credential and never its value, the contract `07_7-secret-sweep` already
+  reports under.
 - **A module declares its fan-out seats.** `STEP_MINING_SEATS` (`@haive/shared`) is a constant the
   api reads by step id to hand the web its per-seat CLI picker, so a module step's seats reach
   neither. The module manifest carries them, derived from the module's dimension set, and the api
@@ -818,8 +828,12 @@ former, and this module does both kinds of write.
 - A change of mode alone (`100644` to `100755`) arrives in the snapshot with the new mode.
 - Two slices raising one finding (one fingerprint, one path, the same lines) record one row, and
   one fingerprint over different lines still fails the step.
-- A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and a base
-  changed on the form stops `scan-remediate` before any coder is dispatched.
+- A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and an
+  integration worktree whose HEAD does not contain the scanned commit — a base changed on the
+  form, a fast-forward 00a could not make, a branch force-pushed since triage — stops
+  `scan-remediate` before any coder is dispatched.
+- A committed `.env` in the snapshot is visible to the security dimension, which reports its
+  file, line and kind and never its value.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
@@ -829,10 +843,10 @@ former, and this module does both kinds of write.
 - `pickFatalProviderError` returns nothing for a content-filter run, so no sibling coder is
   cancelled; the refused issue ends `failed_unrecoverable` with the refusal marker and no advisor
   dispatch, and its siblings merge, with per-issue review on and with it off.
-- A mining dispatch naming a snapshot mounts it alone and read-only, with the base tree bound
-  read-only outside the workdir, for a read-only folder import as for a clone, and so does the
-  same agent replayed from its row: a reserved agent a dead worker never sent, and a wave agent
-  recovered through the retry path.
+- A mining dispatch naming a snapshot mounts it alone and read-only, with no secret mask over its
+  committed files and the base tree bound read-only outside the workdir, for a read-only folder
+  import as for a clone, and so does the same agent replayed from its row: a reserved agent a dead
+  worker never sent, and a wave agent recovered through the retry path.
 - Completing or cancelling a repository task reaps its scratch workspace, snapshot included; a
   failed one keeps it.
 
