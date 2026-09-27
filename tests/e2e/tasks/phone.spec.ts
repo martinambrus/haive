@@ -326,3 +326,61 @@ test.describe('task title strip', () => {
     }
   });
 });
+
+test.describe('task list on a phone', () => {
+  test('a row fits, keeps its title readable and its date clear of the badges', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    try {
+      await seedTaskPage(sql, page, 'task-list-phone', fx);
+
+      const misfits: string[] = [];
+      for (const width of [375, 768, 1280]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto('/tasks');
+        const row = page.locator(`a[href="/tasks/${fx.taskId}"]`, { has: page.locator('h2') });
+        await expect(row).toBeVisible();
+        const title = row.locator('h2');
+        const fit = await title.evaluate((h2) => {
+          const row = h2.parentElement!.parentElement!;
+          const card = row.parentElement!.getBoundingClientRect();
+          const stamp = row.lastElementChild!.getBoundingClientRect();
+          const box = h2.getBoundingClientRect();
+          const badges = Array.from(h2.nextElementSibling!.children).map((b) =>
+            b.getBoundingClientRect(),
+          );
+          return {
+            title: Math.round(box.width),
+            onDate: badges.filter(
+              (b) =>
+                b.left < stamp.right &&
+                stamp.left < b.right &&
+                b.top < stamp.bottom &&
+                stamp.top < b.bottom,
+            ).length,
+            outsideCard: badges.filter((b) => b.right > card.right + 1).length,
+            dateBesideTitle: stamp.top < box.bottom && box.top < stamp.bottom,
+          };
+        });
+        const overflow = await page
+          .locator('main')
+          .evaluate((el) => el.scrollWidth - el.clientWidth);
+        // 80px is about ten characters, the least a title can show and still name the task.
+        if (overflow > 1 || fit.title < 80 || fit.onDate > 0 || fit.outsideCard > 0) {
+          misfits.push(
+            `${width}px: overflow ${overflow}px, title ${fit.title}px, badges on the date ${fit.onDate}, badges outside the card ${fit.outsideCard}`,
+          );
+        }
+        if (width === 1280 && !fit.dateBesideTitle) {
+          misfits.push('1280px: the date left the title line the desktop row keeps');
+        }
+      }
+      expect(misfits, 'every width shows the row whole').toEqual([]);
+    } finally {
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+});
