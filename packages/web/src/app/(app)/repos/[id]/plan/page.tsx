@@ -720,15 +720,17 @@ export default function PlanPage() {
     ? 'Checking snapshot…'
     : snapshot.lastError
       ? 'Snapshot error'
-      : !snapshot.snapshotWritten
-        ? 'Snapshot updating…'
-        : !snapshot.committed
-          ? 'Not committed'
-          : snapshot.pushed === true
-            ? 'Committed and pushed'
-            : snapshot.pushed === false
-              ? 'Committed, not pushed'
-              : 'Committed';
+      : snapshot.snapshotState === 'missing'
+        ? 'Snapshot missing'
+        : !snapshot.snapshotWritten
+          ? 'Snapshot updating…'
+          : !snapshot.committed
+            ? 'Not committed'
+            : snapshot.pushed === true
+              ? 'Committed and pushed'
+              : snapshot.pushed === false
+                ? 'Committed, not pushed'
+                : 'Committed';
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -762,7 +764,12 @@ export default function PlanPage() {
         <div className="flex flex-wrap gap-2">
           {(nodeCount > 0 || snapshot?.lastError) && (
             <span
-              title={snapshot?.lastError ?? 'Repository-backed plan snapshot status'}
+              title={
+                snapshot?.lastError ??
+                (snapshot?.snapshotState === 'missing'
+                  ? 'The snapshot files are not in the checkout, and nothing rewrites them on its own. Save plan rewrites and commits them.'
+                  : 'Repository-backed plan snapshot status')
+              }
               className={`self-center text-xs ${
                 snapshot?.lastError
                   ? 'text-red-400'

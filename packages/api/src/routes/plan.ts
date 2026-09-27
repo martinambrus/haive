@@ -336,10 +336,14 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
 
   const revision = state?.revision ?? 0;
   const writtenRevision = state?.writtenRevision ?? 0;
+  // Only an owed write is on its way: the mirror sweep never rewrites files that went missing.
+  const snapshotState =
+    revision > writtenRevision ? 'updating' : filesExist && revision > 0 ? 'written' : 'missing';
   return c.json({
     revision,
     writtenRevision,
-    snapshotWritten: filesExist && revision > 0 && revision === writtenRevision,
+    snapshotState,
+    snapshotWritten: snapshotState === 'written',
     lastError: state?.lastError ?? null,
     filesExist,
     gitAvailable,
