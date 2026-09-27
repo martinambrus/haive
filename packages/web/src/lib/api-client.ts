@@ -1251,6 +1251,8 @@ export interface GlobalKbEntry {
   status: 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived' | 'failed';
   source: 'user' | 'promoted';
   sourceTaskId: string | null;
+  /** Sent on list rows only; null when the task is gone or belongs to another user. */
+  sourceTaskStatus?: TaskStatus | null;
   sourceRepoId: string | null;
   contentHash: string | null;
   embedStatus: 'pending' | 'embedded' | 'failed' | 'stale';
