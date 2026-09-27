@@ -428,21 +428,6 @@ export async function executeByKind(
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
       const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
       if (uploadsMount) authMounts.push(uploadsMount);
-      // Per-call agent isolation, decided at DISPATCH and carried on the spec — exec never reads the
-      // switch, so a flip between the two cannot split this invocation's prompt from its mounts.
-      // Appended to `authMounts` because that array already carries a non-auth entry (the uploads
-      // mount) and `assertNoAuthVolumeNesting` checks only `kind: 'auth'` targets, so no new
-      // parameter has to be threaded through executeCliSpec.
-      // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
-      // anything starts: a deny rule or the switch can change while the job waits in the queue, and
-      // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
-      // the invocation and fails the step with. Placed before executeCliSpec so a refusal starts no
-      // container and leaves no mount stub to clean up.
-      // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
-      // anything starts: a deny rule or the switch can change while the job waits in the queue, and
-      // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
-      // the invocation and fails the step with. Placed before executeCliSpec so a refusal starts no
-      // container and leaves no mount stub to clean up.
       // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
       // anything starts: a deny rule or the switch can change while the job waits in the queue, and
       // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
@@ -454,6 +439,11 @@ export async function executeByKind(
         repoMount,
         (payload.spec as CliCommandSpec).pastedPersonaPaths ?? [],
       );
+      // Per-call agent isolation, decided at DISPATCH and carried on the spec — exec never reads the
+      // switch, so a flip between the two cannot split this invocation's prompt from its mounts.
+      // Appended to `authMounts` because that array already carries a non-auth entry (the uploads
+      // mount) and `assertNoAuthVolumeNesting` checks only `kind: 'auth'` targets, so no new
+      // parameter has to be threaded through executeCliSpec.
       const agentMasks = await resolveAgentDefinitionMasks(
         db,
         payload.taskId,
