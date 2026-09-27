@@ -14,21 +14,15 @@ import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
 let schemaReady: Promise<void> | null = null;
 
 // Every process and install sharing this store ensures it too, and two ensures at once collide on
-// the catalog ("tuple concurrently updated"), so each runs under one session lock.
+// the catalog ("tuple concurrently updated"). So each runs in one transaction under one lock, and a
+// connection lost part-way rolls it back rather than carrying on without the lock.
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
 
 async function ensureSchemaUnderLock(conn: GlobalKbConnection): Promise<void> {
-  const reserved = await conn.pg.reserve();
-  try {
-    await reserved`SELECT pg_advisory_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
-    try {
-      await ensureGlobalKbSchema({ ...conn, pg: reserved });
-    } finally {
-      await reserved`SELECT pg_advisory_unlock(hashtext(${SCHEMA_LOCK_KEY}))`;
-    }
-  } finally {
-    reserved.release();
-  }
+  await conn.pg.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
+    await ensureGlobalKbSchema({ embeddingDimensions: conn.embeddingDimensions, pg: tx });
+  });
 }
 
 export interface GlobalKbContext {

@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
 import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
-import type { GlobalKbConnection } from '../src/global-kb/connection.js';
+
+type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 
 // Mirrors the repo's RAG tests (e.g. worker insertChunk upsert SQL): no live
 // Postgres — a fake connection captures the generated SQL and we assert on it.
 // The full insert/select round-trip is exercised against the running stack by
 // Slice 2/3.
-function fakeConn(opts: { vectorThrows?: boolean } = {}): {
-  conn: GlobalKbConnection;
+function fakeConn(opts: { vectorThrows?: boolean; hnswThrows?: boolean } = {}): {
+  conn: EnsureConn;
   queries: () => string;
 } {
   const captured: string[] = [];
@@ -20,24 +21,29 @@ function fakeConn(opts: { vectorThrows?: boolean } = {}): {
     }
     return Promise.resolve([]);
   };
-  // A stand-in for the postgres.js tag: complete before the cast, so the cast is the
+  // A stand-in for a postgres.js transaction: complete before the cast, so the cast is the
   // only place the fake is told it is the real thing.
   const pg = Object.assign(tag, {
     unsafe: (q: string) => {
       captured.push(q);
+      if (opts.hnswThrows && q.includes('USING hnsw')) {
+        return Promise.reject(new Error('hnsw unavailable'));
+      }
       return Promise.resolve([]);
     },
-  }) as unknown as GlobalKbConnection['pg'];
-  const conn = {
-    mode: 'internal',
-    pg,
-    namespace: 'default',
-    embeddingDimensions: 2560,
-    ollamaUrl: null,
-    embedModel: null,
-    close: async () => {},
-  } as GlobalKbConnection;
-  return { conn, queries: () => captured.join('\n') };
+    savepoint: async (run: (sql: unknown) => Promise<unknown>) => {
+      captured.push('SAVEPOINT');
+      try {
+        const result = await run(pg);
+        captured.push('RELEASE');
+        return result;
+      } catch (err) {
+        captured.push('ROLLBACK TO');
+        throw err;
+      }
+    },
+  }) as unknown as EnsureConn['pg'];
+  return { conn: { pg, embeddingDimensions: 2560 }, queries: () => captured.join('\n') };
 }
 
 describe('ensureGlobalKbSchema', () => {
@@ -154,5 +160,20 @@ describe('ensureGlobalKbSchema', () => {
     // Upsert key + facet indexes still created on the fallback table.
     expect(sql).toContain('uq_global_rag_ns_entry_section_chunk');
     expect(sql).toContain('USING GIN (facets)');
+  });
+
+  // The ensure runs in one transaction, where a failed statement aborts every statement after it,
+  // so each failure it tolerates is rolled back to a savepoint of its own.
+  it('tolerates a failed HNSW index inside its own savepoint and carries on', async () => {
+    const { conn, queries } = fakeConn({ hnswThrows: true });
+    const res = await ensureGlobalKbSchema(conn);
+    const sql = queries();
+
+    expect(res.usedPgvector).toBe(true);
+    expect(sql).toContain('SAVEPOINT\nCREATE EXTENSION IF NOT EXISTS vector\nRELEASE');
+    expect(sql).toMatch(
+      /SAVEPOINT\nCREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw [^\n]*\nROLLBACK TO/,
+    );
+    expect(sql.split('ROLLBACK TO')[1]).toContain('uq_global_rag_ns_entry_section_chunk');
   });
 });

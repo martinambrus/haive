@@ -1,3 +1,4 @@
+import type postgres from 'postgres';
 import { logger } from '../logger/index.js';
 import type { GlobalKbConnection } from './connection.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
@@ -33,16 +34,17 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
 ];
 
 /** Idempotent schema creation for the global KB store (both the source-of-truth
- *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
- *  the global connection at first use. Mirrors the per-project `ensureRagSchema`
+ *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run in
+ *  the caller's transaction at first use. Mirrors the per-project `ensureRagSchema`
  *  (pgvector with jsonb fallback) but adds namespace/user_id/entry_id/facets and
  *  the JSONB facet indexes. Never touches the main DB or the per-project schema. */
 export async function ensureGlobalKbSchema(
-  conn: GlobalKbConnection,
+  conn: Pick<GlobalKbConnection, 'embeddingDimensions'> & { pg: postgres.TransactionSql },
 ): Promise<{ usedPgvector: boolean }> {
   let usedPgvector = true;
+  // A failed statement aborts the transaction, so each one tolerated here gets its own savepoint.
   try {
-    await conn.pg`CREATE EXTENSION IF NOT EXISTS vector`;
+    await conn.pg.savepoint((pg) => pg`CREATE EXTENSION IF NOT EXISTS vector`);
   } catch (err) {
     log.warn({ err }, 'pgvector unavailable; global KB falls back to jsonb embeddings');
     usedPgvector = false;
@@ -129,8 +131,10 @@ export async function ensureGlobalKbSchema(
       )
     `);
     try {
-      await conn.pg.unsafe(
-        `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
+      await conn.pg.savepoint((pg) =>
+        pg.unsafe(
+          `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
+        ),
       );
     } catch (err) {
       log.warn({ err }, 'global KB HNSW index creation failed; vector search uses sequential scan');

@@ -1,22 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { GlobalKbConnection } from '../src/global-kb/connection.js';
 
 const h = vi.hoisted(() => ({
-  ensure: vi.fn<(conn: GlobalKbConnection) => Promise<unknown>>(),
+  ensure: vi.fn<(conn: { pg: object }) => Promise<unknown>>(),
   log: [] as string[],
 }));
 
 vi.mock('../src/global-kb/connection.js', () => ({
   resolveGlobalKbSettings: async () => ({}),
   resolveGlobalKbConnection: async () => {
-    const reserved = Object.assign(
+    const tx = Object.assign(
       (strings: TemplateStringsArray) => {
         h.log.push(strings.join('$'));
         return Promise.resolve([]);
       },
-      { release: () => h.log.push('release') },
+      { savepoint: async () => undefined },
     );
-    const pg = Object.assign(() => Promise.resolve([]), { reserve: async () => reserved });
+    const begin = async (fn: (sql: typeof tx) => Promise<unknown>) => {
+      h.log.push('begin');
+      try {
+        const result = await fn(tx);
+        h.log.push('commit');
+        return result;
+      } catch (err) {
+        h.log.push('rollback');
+        throw err;
+      }
+    };
+    const pg = Object.assign(() => Promise.resolve([]), { begin });
     return { pg, embeddingDimensions: 8, close: async () => {} };
   },
 }));
@@ -57,31 +67,27 @@ describe('withGlobalKb', () => {
     expect(h.ensure).toHaveBeenCalledTimes(1);
   });
 
-  it('ensures under a session lock, on the one connection that holds it', async () => {
+  it('ensures in one transaction, under the lock that transaction holds', async () => {
     h.ensure.mockImplementation(async (conn) => {
-      h.log.push(`ensure on ${'release' in conn.pg ? 'the reserved connection' : 'the pool'}`);
+      h.log.push(`ensure ${'savepoint' in conn.pg ? 'in the transaction' : 'outside it'}`);
     });
     const withGlobalKb = await load();
 
     await withGlobalKb(haiveDb, async () => undefined);
     expect(h.log).toEqual([
-      'SELECT pg_advisory_lock(hashtext($))',
-      'ensure on the reserved connection',
-      'SELECT pg_advisory_unlock(hashtext($))',
-      'release',
+      'begin',
+      'SELECT pg_advisory_xact_lock(hashtext($))',
+      'ensure in the transaction',
+      'commit',
     ]);
   });
 
-  it('lets go of the lock when the ensure fails, and tries again on the next call', async () => {
+  it('rolls a failed ensure back, and tries again on the next call', async () => {
     h.ensure.mockRejectedValueOnce(new Error('ensure failed')).mockResolvedValueOnce(undefined);
     const withGlobalKb = await load();
 
     await expect(withGlobalKb(haiveDb, async () => undefined)).rejects.toThrow('ensure failed');
-    expect(h.log).toEqual([
-      'SELECT pg_advisory_lock(hashtext($))',
-      'SELECT pg_advisory_unlock(hashtext($))',
-      'release',
-    ]);
+    expect(h.log).toEqual(['begin', 'SELECT pg_advisory_xact_lock(hashtext($))', 'rollback']);
     await withGlobalKb(haiveDb, async () => undefined);
     expect(h.ensure).toHaveBeenCalledTimes(2);
   });
