@@ -112,6 +112,9 @@ services:
     command: sh -c "pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development
+      # tsx watch stopped seeing a file once git replaced it on this bind mount; polling keeps it.
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
       BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
@@ -140,6 +143,9 @@ services:
     command: sh -c "pnpm --filter @haive/worker dev"
     environment:
       NODE_ENV: development
+      # tsx watch stopped seeing a file once git replaced it on this bind mount; polling keeps it.
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
       HOST_USER_HOME: ${HOME}

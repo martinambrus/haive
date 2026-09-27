@@ -2163,7 +2163,12 @@ re-install to repair the store it just read.
 
 For source-only changes to the api, worker, or web app, rely on the bind-mounted source and
 the service's dev watcher first; confirm the loaded source and the logs before deciding a
-restart or rebuild is necessary. A check with no repository wrapper runs inside the matching
+restart or rebuild is necessary. The api and worker watchers POLL (`CHOKIDAR_USEPOLLING` in
+`docker-compose.dev.yml`, read by the chokidar tsx bundles): watching by events, tsx stopped
+seeing a file once git had replaced it on the bind mount, so a pull could leave the old code
+running with no restart line. MEASURED in the worker container: the second `git checkout` of one
+file and every write after it went unseen, all of them seen when polling, at ~1.6% of one core
+for all 744 worker source and lib files polled once a second. A check with no repository wrapper runs inside the matching
 existing service container — `docker exec` is fine for diagnostics and tests, but never to
 install dependencies or rebuild runtime artifacts. Before restarting or rebuilding the
 worker, inspect active tasks: recreating it can interrupt live CLI terminals and
