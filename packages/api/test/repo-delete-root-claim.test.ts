@@ -36,7 +36,11 @@ app.route('/', repoRoutes);
 app.onError(errorHandler);
 
 function setup(rootClaimedAt: Date | null) {
-  const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
+  const fake = createFakeDb({
+    repositories: schema.repositories,
+    tasks: schema.tasks,
+    envTemplates: schema.envTemplates,
+  });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
@@ -68,5 +72,29 @@ describe('deleting a repository', () => {
     expect(res.status).toBe(200);
     expect(fake.rows(schema.repositories)).toHaveLength(0);
     expect(h.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  // A template row goes with its user, so the job cannot count on reading the tag afterwards.
+  it("hands the cleanup job each env template's image tag", async () => {
+    const fake = setup(null);
+    const TEMPLATE = '00000000-0000-4000-8000-0000000000c1';
+    fake.insert(schema.envTemplates, { id: TEMPLATE, userId: USER, imageTag: 'haive-env:abc' });
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-0000000000d1',
+      userId: USER,
+      repositoryId: REPO,
+      envTemplateId: TEMPLATE,
+      type: 'workflow',
+      title: 'task',
+      status: 'completed',
+    });
+    const res = await app.request(`/${REPO}`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(h.cleanup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        envTemplateIds: [TEMPLATE],
+        envImageTags: { [TEMPLATE]: 'haive-env:abc' },
+      }),
+    );
   });
 });

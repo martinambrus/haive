@@ -3316,11 +3316,12 @@ async function handleCleanupRepoResources(
         where: eq(schema.envTemplates.id, envTemplateId),
         columns: { imageTag: true },
       });
-      if (tpl?.imageTag) {
-        const result = await defaultDockerRunner.remove(tpl.imageTag);
+      const imageTag = tpl?.imageTag ?? payload.envImageTags?.[envTemplateId];
+      if (imageTag) {
+        const result = await defaultDockerRunner.remove(imageTag);
         if (!result.ok) {
           logger.warn(
-            { envTemplateId, imageTag: tpl.imageTag, stderr: result.stderr },
+            { envTemplateId, imageTag, stderr: result.stderr },
             'repo-cleanup: env image removal failed',
           );
           continue;
