@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { gitRevParseHead } from './bundle-ingest.js';
+import { hardenGitArgs } from './git-exec.js';
 
 /** Read-only `git fetch` against the bundle's local clone. Does NOT update
  *  the working tree — the explicit upgrade task is the only path that pulls
@@ -17,7 +18,7 @@ function gitFetch(cwd: string, branch: string | null): Promise<void> {
       GIT_TERMINAL_PROMPT: '0',
       GIT_ASKPASS: 'echo',
     };
-    const proc = spawn('git', args, { cwd, env });
+    const proc = spawn('git', hardenGitArgs(args), { cwd, env });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -36,7 +37,7 @@ function gitFetch(cwd: string, branch: string | null): Promise<void> {
 
 function gitRevParse(cwd: string, ref: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', ['rev-parse', ref], { cwd });
+    const proc = spawn('git', hardenGitArgs(['rev-parse', ref]), { cwd });
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => {

@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { FRAMEWORK_PATTERNS, type FormSchema } from '@haive/shared';
 import { coerceReviewSeverity, normalizeCweId } from '@haive/shared/review';
@@ -13,6 +11,7 @@ import { readComposerJson } from './_scope.js';
 import { composerExcludeDirs } from './_scope-seed.js';
 import { collectCodeFiles } from './_rag-collect.js';
 import { scanForOpaquePaths, type OpaquePathHit } from './_opaque-path-scan.js';
+import { gitExec } from '../../../repo/git-exec.js';
 
 // Onboarding — committed-secret sweep. Nothing in Haive looked for a secret that is
 // already IN the repository. `secret-mask` performs the opposite operation (it hides
@@ -30,8 +29,6 @@ import { scanForOpaquePaths, type OpaquePathHit } from './_opaque-path-scan.js';
 // import. Nothing is written to disk: 11-final-review writes `.claude/onboarding-review.md`
 // and 13-onboarding-push pushes `.claude/` artifacts, so routing sweep output through
 // either would commit the very secret being reported.
-
-const execFileAsync = promisify(execFile);
 
 const SWEEP_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -375,7 +372,7 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
       const candidateFiles = [...new Set(opaquePaths.map((h) => h.file))];
       if (candidateFiles.length > 0) {
         try {
-          const { stdout } = await execFileAsync('git', ['ls-files', '--', ...candidateFiles], {
+          const { stdout } = await gitExec(['ls-files', '--', ...candidateFiles], {
             cwd: ctx.repoPath,
             maxBuffer: 4 * 1024 * 1024,
           });

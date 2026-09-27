@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
@@ -97,7 +95,7 @@ import type {
   TaskStepRow,
   WorkerDeps,
 } from './step-runner.js';
-import { GIT_MAX_BUFFER } from '../repo/git-push.js';
+import { gitRun } from '../repo/git-exec.js';
 
 // Drives the persisted DAG (Phase 3) one dependency level per ADVANCE_STEP
 // re-entry. All decisions are a pure function of the task_dag_* rows so a crash
@@ -107,8 +105,6 @@ import { GIT_MAX_BUFFER } from '../repo/git-push.js';
 // merge each branch into the integration branch -> cleanup worktrees ->
 // checkpoint -> advance. The current level is derived as the lowest level whose
 // checkpoint_at is null (never a mutable scalar).
-
-const exec = promisify(execFile);
 
 export type DagResolved =
   { resolved: true; current: TaskStepRow } | { resolved: false; result: AdvanceStepResult };
@@ -123,25 +119,6 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_NAME: 'Haive',
   GIT_COMMITTER_EMAIL: 'worker@haive.local',
 };
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
-}
 
 async function setStepStatus(
   db: Database,

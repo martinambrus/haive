@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
+import { gitExec } from '../../../repo/git-exec.js';
 
 const exec = promisify(execFile);
 
@@ -128,11 +129,10 @@ interface DirtyScan {
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
 async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
-    const { stdout } = await exec(
-      'git',
-      ['--no-optional-locks', 'status', '--porcelain', '-uall'],
-      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER },
-    );
+    const { stdout } = await gitExec(['--no-optional-locks', 'status', '--porcelain', '-uall'], {
+      cwd: worktreePath,
+      maxBuffer: GIT_MAX_BUFFER,
+    });
     const files: string[] = [];
     const untracked: string[] = [];
     for (const line of stdout.toString().split('\n')) {
@@ -269,7 +269,7 @@ async function resolveDiffBase(
 ): Promise<string | null> {
   if (baseBranch) {
     try {
-      const { stdout } = await exec('git', ['merge-base', 'HEAD', baseBranch], {
+      const { stdout } = await gitExec(['merge-base', 'HEAD', baseBranch], {
         cwd: worktreePath,
       });
       const sha = stdout.toString().trim();
@@ -279,7 +279,7 @@ async function resolveDiffBase(
     }
   }
   try {
-    await exec('git', ['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath });
+    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath });
     return 'HEAD';
   } catch {
     return null;
@@ -297,8 +297,7 @@ async function changedLineNotes(
   const base = await resolveDiffBase(worktreePath, baseBranch);
   if (!base) return {};
   try {
-    const { stdout } = await exec(
-      'git',
+    const { stdout } = await gitExec(
       // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
       // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
       // under the name it now has on disk.

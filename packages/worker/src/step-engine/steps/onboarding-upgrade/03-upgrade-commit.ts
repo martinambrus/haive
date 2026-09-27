@@ -30,6 +30,7 @@ import {
 } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
+import { gitExec } from '../../../repo/git-exec.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -121,12 +122,12 @@ export function appliedImportStubs(applyOutput: unknown): { file: string; link: 
  *  which leaves the file and any unrelated edits in it unstaged. */
 export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
   try {
-    await execFileAsync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
+    await gitExec(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
   } catch {
     return true;
   }
   try {
-    await execFileAsync('git', ['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
+    await gitExec(['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
       cwd: repoPath,
     });
     return false;
@@ -146,22 +147,20 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
   if ('unreadable' in disk) return { verdict: 'unknown', reason: disk.unreadable };
   if (disk.region === null) return { verdict: 'current' };
   try {
-    await execFileAsync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
+    await gitExec(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
   } catch {
     return { verdict: 'stage' };
   }
   try {
-    const { stdout: entry } = await execFileAsync(
-      'git',
-      ['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH],
-      { cwd: repoPath },
-    );
+    const { stdout: entry } = await gitExec(['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH], {
+      cwd: repoPath,
+    });
     if (entry === '') return { verdict: 'stage' };
     const tree = /^(\d{6}) \w+ ([0-9a-f]+)\t/.exec(entry);
     if (!tree) return { verdict: 'unknown', reason: 'unexpected git ls-tree output' };
     // A link (120000) or a submodule (160000) in HEAD is replaced by the regular file on disk.
     if (tree[1] !== '100644' && tree[1] !== '100755') return { verdict: 'stage' };
-    const { stdout: size } = await execFileAsync('git', ['cat-file', '-s', tree[2]!], {
+    const { stdout: size } = await gitExec(['cat-file', '-s', tree[2]!], {
       cwd: repoPath,
     });
     if (Number(size.trim()) > RULES_FILE_READ_CAP) {
@@ -170,7 +169,7 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
         reason: `HEAD's copy is larger than ${RULES_FILE_READ_CAP} bytes`,
       };
     }
-    const { stdout: blob } = await execFileAsync('git', ['cat-file', 'blob', tree[2]!], {
+    const { stdout: blob } = await gitExec(['cat-file', 'blob', tree[2]!], {
       cwd: repoPath,
       maxBuffer: RULES_FILE_READ_CAP + 1024,
     });
@@ -359,7 +358,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
           (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
         await initGitWorkspace(ctx.repoPath, initBranch);
         didInit = true;
-        await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
+        await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.
@@ -379,26 +378,21 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
       if (toStage.length > 0) {
-        await execFileAsync('git', ['add', '-f', '--', ...toStage], {
+        await gitExec(['add', '-f', '--', ...toStage], {
           cwd: ctx.repoPath,
           maxBuffer: GIT_MAX_BUFFER,
         });
       }
       if (removedPaths.length > 0) {
-        await execFileAsync(
-          'git',
-          ['rm', '--cached', '--ignore-unmatch', '-q', '--', ...removedPaths],
-          {
-            cwd: ctx.repoPath,
-            maxBuffer: GIT_MAX_BUFFER,
-          },
-        );
+        await gitExec(['rm', '--cached', '--ignore-unmatch', '-q', '--', ...removedPaths], {
+          cwd: ctx.repoPath,
+          maxBuffer: GIT_MAX_BUFFER,
+        });
       }
-      const { stdout: stagedOut } = await execFileAsync(
-        'git',
-        ['diff', '--cached', '--name-only'],
-        { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER },
-      );
+      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only'], {
+        cwd: ctx.repoPath,
+        maxBuffer: GIT_MAX_BUFFER,
+      });
       const staged = stagedOut
         .split('\n')
         .map((s) => s.trim())
@@ -418,12 +412,12 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await execFileAsync('git', ['commit', '-m', message], {
+      await gitExec(['commit', '-m', message], {
         cwd: ctx.repoPath,
         env: { ...process.env, ...identity },
         maxBuffer: GIT_MAX_BUFFER,
       });
-      const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
+      const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;
     } catch (err) {

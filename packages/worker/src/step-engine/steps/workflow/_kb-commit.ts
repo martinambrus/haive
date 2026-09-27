@@ -1,12 +1,8 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
-
-const exec = promisify(execFile);
+import { gitRun } from '../../../repo/git-exec.js';
 
 export const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -26,25 +22,7 @@ export interface KbCommitResult {
   message: string;
 }
 
-export async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
-}
-
+export { gitRun } from '../../../repo/git-exec.js';
 /**
  * Stage and commit the knowledge trees in `workspace`.
  *
