@@ -364,8 +364,9 @@ export class TerminalSessionManager {
     // Task shells start in the git worktree (the branch the workflow is editing),
     // not the repo root — mirrors the CLI agents' cwd (dag-executor) so the shell,
     // git, and the agent all act on the same working copy. The repo root is still
-    // mounted (so the worktree's `.git` file resolves and git works), only the cwd
-    // is the worktree. Falls back to the repo root when there's no worktree (skipped
+    // mounted, only the cwd is the worktree — where git does NOT work: the gitfile names an
+    // absolute host path under the repos volume that exists in no container, so git there fails
+    // whatever is mounted. Falls back to the repo root when there's no worktree (skipped
     // 01-worktree-setup). Repo-scope shells stay at the repo root.
     const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
       Cmd: tmuxCommand,

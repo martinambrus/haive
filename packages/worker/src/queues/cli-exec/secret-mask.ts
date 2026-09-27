@@ -47,9 +47,9 @@ export class SecretMaskError extends Error {
  * alone: masking its worktree copy would surface as a diff and `git show` would
  * still leak it, so committed-secret handling is deliberately out of scope.
  *
- * The repo volume is shared with the app runtime (app-runner / ddev mount the
- * same `haive_repos` subpath WITHOUT these masks), so the running app still sees
- * the real files — only the agent's view is masked.
+ * The repo volume is shared with the app runtime (app-runner / ddev mount this task's own
+ * `haive_repos` subpath WITHOUT these masks), so the running app still sees the real files —
+ * only the agent's view is masked.
  */
 export async function resolveSecretMasks(
   db: Database,

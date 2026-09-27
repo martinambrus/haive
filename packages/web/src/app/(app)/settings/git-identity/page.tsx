@@ -63,7 +63,8 @@ export default function GitIdentityPage() {
       <div>
         <h2 className="text-lg font-semibold text-neutral-50">Git Identity</h2>
         <p className="text-sm text-neutral-400">
-          Name and email used when the CLI agent commits on your behalf inside a task sandbox.
+          Name and email hAIve commits with on your behalf. The agents never commit — the host does,
+          after the gate — and your own shell in the repository Terminal uses this too.
         </p>
       </div>
 
