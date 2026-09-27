@@ -202,8 +202,11 @@ targets).
 **Deduping decides what is NEW, never what the report covers.** A finding an earlier scan already
 recorded is listed as still present, naming the scan that recorded it, not left out: two scans of
 overlapping targets — this week's release window and last week's — re-find the same unfixed
-defects, and a window report that dropped them would present the window as cleaner than it is.
-Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
+defects, and a window report that dropped them would present the window as cleaner than it is. An
+earlier scan is another task's: rows this task already wrote, left by an attempt a crash or a Retry
+cut short after its transaction committed, are taken as this scan's own rather than as prior
+findings, so a re-run never labels its own new findings as still present. Out-of-scope output
+under a diff target is recorded with `raw.inScope = false` and listed apart.
 
 **Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
 best-effort by design and never throws, because a core reviewer's findings live in its step output
@@ -220,8 +223,10 @@ breaks the dedupe every other one survives — see its section below. `recordRev
 collision here is a module bug to surface, not a duplicate to drop. Slices add one case that is not
 a collision: each sees the whole target, so two of them can raise the same finding, both sides of
 one coherence pair falling in different slices being the obvious one. Findings that share a
-fingerprint AND a path and lines are that same finding and are recorded once, before the
-assertion; one fingerprint over different lines is still the collision it exists for.
+fingerprint, a path, lines AND the issue text itself — not its normalized form, which drops
+digits and so can join two defects on one line — are that same finding and are recorded once,
+before the assertion, keeping the first one's fix; one fingerprint over anything else is still
+the collision the assertion exists for.
 
 **5 · `scan-triage`** — form. The human picks which findings to fix. **This step is the entire answer
 to "502 tasks, 0 fixes"**: nothing proceeds to remediation that a person did not choose. A coherence
@@ -236,9 +241,10 @@ through a loop, and a form rendering two thousand checkboxes is no answer. The b
 per-invocation and bounds no findings, so the cap is per-dimension and per-file — each reports at most
 N findings per file, ranked by span, and the coverage record names what it truncated.
 
-**Remediation lands on a branch, and triage names it where the target did not.** A full or branch
-target lands on the branch it scanned; a commit or range target lands on the branch `to` was named
-by, or on one the person picks when `to` was a tag or a bare SHA. The landing branch must contain
+**Remediation lands on a branch, and triage names it where the target did not.** Every target
+lands on the branch its `to` was named by, which for a full or branch target is the branch it
+scanned; whenever `to` was a tag or a bare SHA, which every ref field accepts, triage asks the
+person for the branch, whatever the target kind. The landing branch must contain
 the scanned commit (`merge-base --is-ancestor`), or triage offers no remediation for that target
 and says why: a fix for code a branch never had is not a remediation. Remediation works on the
 landing branch's current tip, which can be ahead of what was scanned, so a finding in a file that
@@ -835,8 +841,13 @@ former, and this module does both kinds of write.
 - A file with more than 20 changed ranges is listed with all of them, or past the prompt budget
   with none, and never scoped to the first 20 alone.
 - A change of mode alone (`100644` to `100755`) arrives in the snapshot with the new mode.
-- Two slices raising one finding (one fingerprint, one path, the same lines) record one row, and
-  one fingerprint over different lines still fails the step.
+- Two slices raising one finding (one fingerprint, one path, the same lines, the same issue text)
+  record one row; one fingerprint over different lines, or over issue texts that differ only in
+  their digits, still fails the step.
+- A `scan-record` re-run after a crash that followed its commit takes the task's own rows as this
+  scan's, and labels none of its findings still present.
+- A full or branch target whose `to` was typed as a tag or a bare SHA asks for a landing branch at
+  triage.
 - A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and
   `scan-remediate` dispatches no coder when the integration HEAD lacks the scanned commit (a base
   changed on the form), lacks the landing tip re-resolved at the source (a fast-forward 00a could
