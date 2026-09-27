@@ -25,6 +25,7 @@ import {
   resolveTaskSandboxWorkdir,
 } from '../queues/cli-exec-queue.js';
 import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
+import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { McpServerSpec } from '../sandbox/mcp-config.js';
 import { buildDefaultMcpServers } from '../sandbox/mcp-config.js';
@@ -206,6 +207,7 @@ export class TerminalSessionManager {
 
     let scopeId: string;
     let repoMount: DockerVolumeMount | null;
+    let nestedMounts: DockerVolumeMount[] = [];
     let mcpServers: McpServerSpec[];
 
     if (scope === 'repo') {
@@ -273,6 +275,17 @@ export class TerminalSessionManager {
       mcpServers = await this.buildMcpServers(req.userId, taskId, {
         hasRepo: task.repositoryId != null,
       });
+      // A task shell is mounted at the repository ROOT, where `.git` is a real directory and a
+      // write to `.git/hooks` or `.git/config` reaches host-side git. The shell's own git still
+      // reads it, and the PTY starts in the worktree, where git could not work anyway (its
+      // gitfile names a host path that exists in no container). The REPO shell keeps its
+      // writable `.git`: committing and pushing from there is what it is for.
+      nestedMounts = (
+        await repoGitDataBoundary(repoMount, {
+          hasWorktree: false,
+          hasRepo: task.repositoryId != null,
+        })
+      ).mounts;
       scopeId = taskId;
     }
 
@@ -302,6 +315,7 @@ export class TerminalSessionManager {
         scopeId,
         providerId,
         repoMount,
+        nestedMounts,
         mcpServers,
         providerEnv,
         trustedWorkdirs: [SANDBOX_WORKDIR, ptyWorkingDir],

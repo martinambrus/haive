@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -31,8 +29,6 @@ import {
 import { safeDiskRel } from './02-upgrade-apply.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
-
-const execFileAsync = promisify(execFile);
 
 const DEFAULT_COMMIT_MESSAGE = [
   'chore: apply Haive onboarding upgrade',

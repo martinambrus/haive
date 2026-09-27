@@ -14,7 +14,7 @@ import {
   resolveInvocationRepoMount,
 } from '../../../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
-import { worktreeGitfileMask } from '../../../queues/cli-exec/gitfile-mask.js';
+import { repoGitDataBoundary } from '../../../queues/cli-exec/gitfile-mask.js';
 
 /** Per-CLI project-scope plugin directory for drupal-php-lsp. Must match the
  *  DRUPAL_LSP_TARGET_BASES in onboarding step 07. */
@@ -199,19 +199,23 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     }
     const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
     // Per-invocation isolation: mount only the feature worktree at the workdir root.
-    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(ctx.db, ctx.taskId);
+    const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
+      ctx.db,
+      ctx.taskId,
+    );
     const sandboxWorkdir = SANDBOX_WORKDIR;
     const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId);
-    const mounts: DockerVolumeMount[] = [...authMounts];
+    const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
+    const mounts: DockerVolumeMount[] = [...authMounts, ...gitData.mounts];
     if (repoMount) mounts.push(repoMount);
 
     // This step runs third-party plugin code against the mounted repo with network
     // access, but reaches runInSandbox directly rather than through exec-core, so it
     // used to receive neither mask. Same set exec-core applies: deny-listed secret
-    // files, plus the worktree gitfile the agent contract says must be unusable.
+    // files, plus the git-data boundary the agent contract says must be unusable.
     const maskFiles = [
       ...(await resolveSecretMasks(ctx.db, ctx.taskId, repoMount)),
-      ...worktreeGitfileMask(hasWorktree),
+      ...gitData.masks,
     ];
 
     const executed: InstallPluginsApply['executed'] = [];

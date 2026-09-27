@@ -24,6 +24,7 @@ import {
 } from '../repo/scratch-workspace.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
+import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
@@ -179,6 +180,11 @@ export async function ensureIdeVolumes(
 export async function startIdeRunner(params: {
   taskId: string;
   workspaceSubpath: string;
+  /** The workspace's own `.git`, mounted back read-only (`repoGitDataBoundary`). code-server runs
+   *  repository-supplied code — tasks, extensions — and host-side git later runs in this tree as
+   *  root. Empty where `.git` is not a directory: a worktree's gitfile names a host path that
+   *  exists in no container, so git there was never usable and nothing changes. */
+  gitDataMounts: DockerVolumeMount[];
   extVolume: string;
   udataVolume: string;
 }): Promise<IdeRunnerHandle> {
@@ -204,6 +210,7 @@ export async function startIdeRunner(params: {
       // can open the workspace but cannot save. One function decides how a subpath mount is
       // spelled, so a fourth site cannot get it wrong.
       ...buildMountArgs([
+        ...params.gitDataMounts,
         { source: REPO_VOLUME, target: '/workspace', subpath: params.workspaceSubpath },
       ]),
       '-v',
@@ -304,7 +311,19 @@ async function ensureIdeRunnerStartedInner(
   }
 
   const { extVolume, udataVolume } = await ensureIdeVolumes(taskId, userId, settingsJson);
-  const handle = await startIdeRunner({ taskId, workspaceSubpath, extVolume, udataVolume });
+  const gitDataMounts = (
+    await repoGitDataBoundary(
+      { source: REPO_VOLUME, target: '/workspace', subpath: workspaceSubpath },
+      { hasWorktree: false, hasRepo: true },
+    )
+  ).mounts;
+  const handle = await startIdeRunner({
+    taskId,
+    workspaceSubpath,
+    gitDataMounts,
+    extVolume,
+    udataVolume,
+  });
   await waitForIdeReady(name, 15_000);
   await setupIdeDebugging(db, taskId, name);
   return handle;
