@@ -281,12 +281,15 @@ submits it, so a scan of branch B from a checkout on A would remediate, and merg
 `scan-triage` therefore pre-answers 00a's `base` with the landing branch through
 `tasks.pre_answers`, the map `06-run-config` pre-answers later steps with (merged into it, never
 written over it, since 06 writes the whole map), and `scan-remediate` dispatches no coder until
-the integration worktree's own HEAD is shown to contain the scanned commit
-(`merge-base --is-ancestor`, run in the scratch repository, which sees both commits through its
-alternates). A matching branch name proves nothing: 00a carries on with a stale local base when
-its fast-forward fails, a force-push can move the branch after triage, and in manual mode a
-pre-answer is only a default a person can change. A check that cannot be answered, a history too
-shallow to connect the two, refuses rather than guesses.
+three things hold, each checked with `merge-base --is-ancestor` in the scratch repository, which
+sees every commit involved: the integration worktree's own HEAD contains the scanned commit; the
+landing branch, re-resolved at its source just before dispatch, still contains it; and HEAD
+contains that re-resolved tip. A matching branch name proves nothing: 00a carries on with the old
+local branch when its fast-forward fails, a force-push makes exactly that happen while the old
+tip still holds the scanned commit, and in manual mode a pre-answer is only a default a person can
+change. Work built on a tip the source has moved away from is work its push cannot land. A check
+that cannot be answered, a history too shallow to connect the commits, refuses rather than
+guesses.
 
 **One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
@@ -834,10 +837,11 @@ former, and this module does both kinds of write.
 - A change of mode alone (`100644` to `100755`) arrives in the snapshot with the new mode.
 - Two slices raising one finding (one fingerprint, one path, the same lines) record one row, and
   one fingerprint over different lines still fails the step.
-- A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and an
-  integration worktree whose HEAD does not contain the scanned commit — a base changed on the
-  form, a fast-forward 00a could not make, a branch force-pushed since triage — stops
-  `scan-remediate` before any coder is dispatched.
+- A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and
+  `scan-remediate` dispatches no coder when the integration HEAD lacks the scanned commit (a base
+  changed on the form), lacks the landing tip re-resolved at the source (a fast-forward 00a could
+  not make), or that tip no longer holds the scanned commit (a branch force-pushed since triage,
+  whose old local tip still holds it).
 - A committed `.env` in the snapshot is visible to the security dimension, which reports its
   file, line and kind and never its value.
 
