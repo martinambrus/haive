@@ -36,6 +36,7 @@ import {
   enabledImportRulesFiles,
   loadCliRulesRenderHashes,
   restoreRulesImportStubs,
+  RTK_BLOCK_RECORD,
   stripRtkBlocks,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
@@ -345,6 +346,9 @@ export interface UpgradeApplyOutput {
   /** Every path whose file, or rules region, this run removed. Each has a baseline among
    *  `retiredRowIds` holding what it removed, so a rollback puts it back. Optional likewise. */
   removedPaths?: string[];
+  /** Every rules file this run took an RTK block out of, with the record of what it held, so a
+   *  rollback puts the block back. Optional likewise. */
+  rtkBlockStrips?: RtkBlockStrip[];
 }
 
 /** What a row records about the bytes at its path. */
@@ -365,6 +369,11 @@ export interface CreatedPath {
   /** Whether the file itself was missing, which for the rules region is more than the region. */
   fileCreated: boolean;
   retiredRowId: string | null;
+}
+
+export interface RtkBlockStrip {
+  file: string;
+  recordId: string;
 }
 
 async function resolvePlanFromStep(ctx: {
@@ -1166,12 +1175,52 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     }
 
     // The RTK block is no manifest item, so no obsolete entry takes it out once RTK is off.
+    const rtkBlockStrips: RtkBlockStrip[] = [];
     if (plan.renderCtxSnapshot.rtkEnabled === false) {
-      for (const strip of await stripRtkBlocks(ctx.repoPath)) {
-        if (strip.result === 'stripped') writtenPaths.push(strip.file);
+      const recorded = new Map<string, string>();
+      const strips = await stripRtkBlocks(ctx.repoPath, async (file, before, after) => {
+        const beforeHash = sha256Hex(normalizeContent(before));
+        const recordId = await insertRecord({
+          userId: ctx.userId,
+          repositoryId: plan.repositoryId,
+          taskId: ctx.taskId,
+          diskPath: file,
+          templateId: RTK_BLOCK_RECORD,
+          templateKind: RTK_BLOCK_RECORD,
+          templateSchemaVersion: 1,
+          templateContentHash: beforeHash,
+          writtenHash: beforeHash,
+          writtenContent: before,
+          lastObservedDiskHash: sha256Hex(normalizeContent(after)),
+          formValuesSnapshot: plan.renderCtxSnapshot,
+          sourceStepId: '02-upgrade-apply',
+          source: 'backfill',
+          haiveVersion,
+        });
+        recorded.set(file, recordId);
+      });
+      // A retry finds the block an earlier attempt took out gone, and takes that attempt's record
+      // while the file still holds what that strip left: anything else there is not its doing.
+      const earlierStrip = async (file: string) => {
+        const earlier = earlierRecords.get(`${RTK_BLOCK_RECORD}\n${file}`);
+        if (!earlier) return undefined;
+        const now = await readUpgradeFile(ctx.repoPath, file);
+        const left = now.kind === 'text' ? sha256Hex(normalizeContent(now.text)) : null;
+        return left === earlier.lastObservedDiskHash ? earlier.id : undefined;
+      };
+      for (const strip of strips) {
         if (strip.result === 'refused') {
           warnings.push(`could not check ${strip.file} for an RTK block: ${strip.error}`);
         }
+        const recordId =
+          strip.result === 'stripped'
+            ? recorded.get(strip.file)
+            : strip.result === 'none'
+              ? await earlierStrip(strip.file)
+              : undefined;
+        if (recordId === undefined) continue;
+        writtenPaths.push(strip.file);
+        rtkBlockStrips.push({ file: strip.file, recordId });
       }
     }
 
@@ -1331,6 +1380,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         ...removalRecords,
       ],
       removedPaths,
+      rtkBlockStrips,
     };
   },
 };

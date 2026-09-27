@@ -786,6 +786,97 @@ async function main(): Promise<void> {
       await rm(legacyPath, { recursive: true, force: true });
     }
 
+    // ---- a rollback puts back the RTK blocks the upgrade took out -----------------------------
+    const blocksId = randomUUID();
+    const blocksPath = await mkdtemp(join(tmpdir(), 'rtk-off-upgrade-smoke-blocks-'));
+    try {
+      await db.insert(schema.repositories).values({
+        id: blocksId,
+        userId,
+        name: 'rtk-off-upgrade-smoke blocks',
+        source: 'blank',
+        rtkEnabled: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const legacyRef = `${RTK_REF_MARKER_START}\n@RTK.md\n${RTK_REF_MARKER_END}\n`;
+      const agentsBefore = `# Project\n\nOur notes.\n${buildRtkAwarenessBlock()}`;
+      const geminiBefore = `@AGENTS.md\n${legacyRef}More notes.\n`;
+      await writeFile(join(blocksPath, 'AGENTS.md'), agentsBefore);
+      await writeFile(join(blocksPath, 'CLAUDE.md'), `@AGENTS.md\n${legacyRef}`);
+      await writeFile(join(blocksPath, 'GEMINI.md'), geminiBefore);
+      const blocks = { id: blocksId, path: blocksPath };
+      const readBlocks = (rel: string) => readFile(join(blocksPath, rel), 'utf8');
+
+      const stripping = await upgrade('rtk-off-upgrade-smoke blocks', blocks);
+      check(
+        'the plan names every rules file holding a block',
+        JSON.stringify(stripping.detected.rtkBlockLeftovers) ===
+          JSON.stringify(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']),
+        stripping.detected.rtkBlockLeftovers,
+      );
+      // Taken out by hand while the form is parked: nothing the upgrade did.
+      await writeFile(join(blocksPath, 'CLAUDE.md'), '@AGENTS.md\n');
+      const stripValues = defaultValues(stripping.form);
+      stripValues.selectedNew = [];
+      stripValues.selectedUpdates = [];
+      stripValues.selectedReinstate = [];
+      stripValues.selectedObsoleteRemovals = [];
+      const stripped = await upgradeApplyStep.apply(stripping.applyCtx, {
+        detected: stripping.plan,
+        formValues: stripValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+      check(
+        'the blocks standing at apply come out, each recorded',
+        JSON.stringify(stripped.rtkBlockStrips?.map((s) => s.file)) ===
+          JSON.stringify(['AGENTS.md', 'GEMINI.md']) &&
+          (await readBlocks('AGENTS.md')) === '# Project\n\nOur notes.\n' &&
+          (await readBlocks('GEMINI.md')) === '@AGENTS.md\nMore notes.\n',
+        stripped.rtkBlockStrips,
+      );
+      await finish(stripping.applyCtx, stripped);
+      // Another block written into AGENTS.md since the upgrade.
+      const agentsOther = `# Project\n\nOur notes.\n${legacyRef}`;
+      await writeFile(join(blocksPath, 'AGENTS.md'), agentsOther);
+
+      const undone = await rollback('rtk-off-upgrade-smoke blocks rollback', blocks);
+      check(
+        'a rollback puts a block back where it stood',
+        (await readBlocks('GEMINI.md')) === geminiBefore,
+        { now: await readBlocks('GEMINI.md') },
+      );
+      check(
+        'keeps a file holding another RTK block, and says so',
+        (await readBlocks('AGENTS.md')) === agentsOther &&
+          undone.warnings.includes(
+            'did not put back the RTK block in AGENTS.md: it holds another RTK block now',
+          ),
+        undone.warnings,
+      );
+      check(
+        'leaves out a block taken out by hand',
+        (await readBlocks('CLAUDE.md')) === '@AGENTS.md\n',
+        { now: await readBlocks('CLAUDE.md') },
+      );
+      check(
+        'counts what it put back, and does not say it had nothing to revert',
+        undone.revertedCount === 1 && !undone.warnings.some((w) => w.includes('nothing to revert')),
+        { revertedCount: undone.revertedCount, warnings: undone.warnings },
+      );
+      const undoneAgain = await rollback('rtk-off-upgrade-smoke blocks rollback retry', blocks);
+      check(
+        'a retried rollback takes a block already back as put back',
+        undoneAgain.revertedCount === 1 &&
+          (await readBlocks('GEMINI.md')) === geminiBefore &&
+          !undoneAgain.warnings.some((w) => w.includes('GEMINI.md')),
+        { revertedCount: undoneAgain.revertedCount, warnings: undoneAgain.warnings },
+      );
+    } finally {
+      await rm(blocksPath, { recursive: true, force: true });
+    }
+
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');
       process.exitCode = 1;

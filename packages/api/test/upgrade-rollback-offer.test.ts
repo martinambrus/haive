@@ -19,14 +19,16 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { lastUpgradeRemovedFiles, upgradeRoutes } from '../src/routes/upgrades.js';
+import { lastUpgradeRemovedContent, upgradeRoutes } from '../src/routes/upgrades.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 
-function upgrades(tasks: { mode?: string; completedAt: number; removedPaths?: string[] }[]) {
+function upgrades(
+  tasks: { mode?: string; completedAt: number; applied?: Record<string, unknown> }[],
+) {
   const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
   for (const t of tasks) {
     const task = fake.insert(schema.tasks, {
@@ -36,36 +38,43 @@ function upgrades(tasks: { mode?: string; completedAt: number; removedPaths?: st
       completedAt: new Date(t.completedAt),
       metadata: t.mode ? { mode: t.mode } : null,
     });
-    if (t.removedPaths) {
+    if (t.applied) {
       fake.insert(schema.taskSteps, {
         taskId: task.id,
         stepId: '02-upgrade-apply',
         status: 'done',
-        output: { removedPaths: t.removedPaths },
+        output: t.applied,
       });
     }
   }
-  return lastUpgradeRemovedFiles(fake.db as never, REPO);
+  return lastUpgradeRemovedContent(fake.db as never, REPO);
 }
 
-describe('offering the rollback of an upgrade that only removed files', () => {
+const removed = { removedPaths: ['.claude/settings.json'] };
+
+describe('offering the rollback of an upgrade that only removed things', () => {
   it('offers it while the latest upgrade removed something and nothing rolled it back', async () => {
-    expect(await upgrades([{ completedAt: 1, removedPaths: ['.claude/settings.json'] }])).toBe(
-      true,
-    );
+    expect(await upgrades([{ completedAt: 1, applied: removed }])).toBe(true);
+  });
+
+  it('offers it for an upgrade that only took RTK blocks out', async () => {
+    const applied = { removedPaths: [], rtkBlockStrips: [{ file: 'AGENTS.md', recordId: 'r1' }] };
+    expect(await upgrades([{ completedAt: 1, applied }])).toBe(true);
   });
 
   it('stops offering it once a rollback completes after that upgrade', async () => {
     expect(
       await upgrades([
-        { completedAt: 1, removedPaths: ['.claude/settings.json'] },
+        { completedAt: 1, applied: removed },
         { mode: 'rollback', completedAt: 2 },
       ]),
     ).toBe(false);
   });
 
   it('does not offer it for an upgrade that removed nothing, or with no upgrade at all', async () => {
-    expect(await upgrades([{ completedAt: 1, removedPaths: [] }])).toBe(false);
+    expect(
+      await upgrades([{ completedAt: 1, applied: { removedPaths: [], rtkBlockStrips: [] } }]),
+    ).toBe(false);
     expect(await upgrades([{ completedAt: 1 }])).toBe(false);
     expect(await upgrades([])).toBe(false);
   });
