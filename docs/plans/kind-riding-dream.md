@@ -196,8 +196,8 @@ Consolidate first, refute second, and keep the inverted 2-of-3 default.
 change; the column is `varchar(128)`), and records coverage — the target (its kind, the names
 given and the commits they resolved to), which dimensions ran, which were REFUSED and by which
 provider, and what the budget truncated, slices of a large target included — reusing the
-disclosure convention from `_impl-changes.ts`. It also removes the scan's snapshot worktree (see
-Scan targets).
+disclosure convention from `_impl-changes.ts`. It also removes the scan's snapshot (see Scan
+targets).
 
 **Deduping decides what is NEW, never what the report covers.** A finding an earlier scan already
 recorded is listed as still present, naming the scan that recorded it, not left out: two scans of
@@ -232,7 +232,9 @@ and says why: a fix for code a branch never had is not a remediation. Remediatio
 landing branch's current tip, which can be ahead of what was scanned, so a finding in a file that
 differs between the scanned commit and that tip is marked — its line numbers describe the scanned
 revision, not the one a coder will edit. Findings recorded out of scope, and ones an earlier scan
-already recorded, are listed apart from the new in-scope ones.
+already recorded, are listed apart from the new in-scope ones. A read-only folder import is
+mounted read-only end to end, so nothing can remediate it: triage records its findings and offers
+no remediation, saying why.
 
 **6 · `scan-plan-remediation`** — deterministic, **no LLM**. Selected findings become DAG rows:
 `task_dag_plans` (mode `'dag'`), `task_dag_levels`, `task_dag_issues` (`title` ← issue,
@@ -261,8 +263,14 @@ dimension-aware.
 module inherits per-level isolated worktrees, parallel coders, the barrier, level-by-level merge,
 checkpointing and crash recovery wholesale. This is the single largest piece of reuse in the plan.
 Those worktrees branch from `01-worktree-setup`'s integration worktree, so `00a-sync-base` and
-`01-worktree-setup` are composed ahead of this step, cutting from triage's landing branch (00a's
-`base`).
+`01-worktree-setup` are composed ahead of this step, and the landing branch has to reach them:
+left alone, 00a's detect defaults `base` to the branch the checkout is on and auto-continue
+submits it, so a scan of branch B from a checkout on A would remediate, and merge, into A.
+`scan-triage` therefore pre-answers 00a's `base` with the landing branch through
+`tasks.pre_answers`, the map `06-run-config` pre-answers later steps with (merged into it, never
+written over it, since 06 writes the whole map), and `scan-remediate` dispatches no coder while
+the base 01 recorded is not the landing branch: in manual mode a pre-answer is only a default a
+person can change.
 
 **One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
@@ -316,16 +324,22 @@ with no source has nothing to fetch from: both list and resolve their local refs
 one is refused by name.
 
 **The code read is the target's own commit, always from a snapshot.** Every target, a full one on
-the commit the root has checked out included, reads a DETACHED worktree of its commit added under
-`.haive/worktrees/` (the `worktree add --detach` precedent in `plan/merge.ts`), with every scan and
-verify agent mounted on it alone, the way a DAG coder is mounted on its issue worktree. Reading the
-root instead would scan its uncommitted bytes under a commit SHA that does not hold them: triage's
-changed-since-scan check compares commits and would call such a finding unchanged, while the coder,
-cut from the committed tip, could not see what it describes. The coverage record names the tracked
-files the root had changed, since the scan did not read them. A step that reads the snapshot
-re-creates it at the recorded commit when it is gone, so a Resume or Retry after `scan-record`
-removed it reads the same revision, and a cancel removes it along with the task's own worktree (see
-Core changes). The price is a second checkout for as long as the scan runs.
+the commit the root has checked out included, reads a SNAPSHOT of its commit: a directory in the
+task's scratch workspace (`repo/scratch-workspace.ts`, the one a repository-less task already
+works in), filled from the repository's objects without writing to the repository — a temporary
+index (`GIT_INDEX_FILE`) read from the commit and written out with `checkout-index --prefix`. Not a
+git worktree: `worktree add` writes admin files into the repository's `.git`, and a read-only
+folder import's `.git` is the person's own. Every scan and verify agent is mounted on the snapshot
+alone and read-only, since the verify wave must read the bytes the analysis read, and the
+invocation mount has to honour that ahead of its read-only-folder branch, which returns first
+today (see Core changes). Reading the root instead would scan its uncommitted bytes under a commit
+SHA that does not hold them: triage's changed-since-scan check compares commits and would call such
+a finding unchanged, while the coder, cut from the committed tip, could not see what it describes.
+The coverage record names the tracked files the root had changed, since the scan did not read
+them. A step that reads the snapshot re-creates it at the recorded commit when it is gone, so a
+Resume or Retry after `scan-record` removed it reads the same revision, and completing or
+cancelling the task reaps it with the scratch workspace (see Core changes). The price is a second
+copy of the tree for as long as the scan runs.
 
 A snapshot holds committed files only, the view every worktree run has. Rules and KB that exist
 only uncommitted at the root — onboarding's commit is off by default — reach its agents the way
@@ -349,6 +363,17 @@ commits of its own, an empty range, a subtree holding no changed file — is ref
 `scan-scope`, for the reason `assertReviewableChange` gives: a scan of nothing renders exactly like
 a clean one. The three module-owned dimensions each add a rule of their own, in their sections
 below.
+
+**A diff target also carries what it removed.** The sandbox has no git and the snapshot holds
+only the target's side, so a rename, a deleted function or a removed call would leave nothing to
+read — and `backward-compatibility` and `dead-code` exist to ask about exactly those. The snapshot
+therefore gets a second tree holding the base-side version of every file the target changed or
+deleted, and nothing else, and each file's line note also names the lines the target removed,
+numbered as in that copy (the hunk headers' `-` side, which `parseChangedLineRanges` skips today).
+That tree is bound read-only at a path OUTSIDE the workdir, through the bind
+`resolveTaskUploadsMount` uses for a task's uploads, so a reference search or a language server
+started in the workdir never counts the base copy as a caller. None of its text enters a prompt:
+it is repository content read off disk under the same `REPO_IS_DATA_LINES` guard as the rest.
 
 **A large diff target is sliced, never truncated.** A task's review caps its list at 100 files and
 discloses the rest as unseen (`changedFilesBlock`'s COVERAGE notice); a scan exists to cover its
@@ -565,29 +590,32 @@ module:
   was measured — fails the whole step today, and afterwards yields the synthetic "did not complete"
   finding both steps already report for a dead agent (`didNotCompleteIssue`), so its silence is
   still never read as approval.
-- **A mining dispatch can name the worktree its agent is mounted on, and its row keeps it.**
-  `worktreeRel` already rides a dispatch request and the cli-exec payload for DAG coders and the
-  merge resolver (`orchestrator/dispatcher.ts`); `AgentMiningDispatch` gains it, so a scan reads
-  its snapshot alone. It also joins the requirements a mining row records (`dispatchRequirements`
-  and `recordedRequirements` in `step-runner.ts`, today `roleKey`, `capabilities` and
-  `preferVision`) as a new `task_step_agent_minings` column: a reserved agent a dead worker never
-  sent, and a wave agent `selectAgents` never authored, are replayed from the row alone, and
-  without it a recovered `scan-verify` refuter would mount the repository root and check the wrong
-  revision.
+- **A mining dispatch can mount a snapshot, and its row keeps it.** `AgentMiningDispatch` names
+  the snapshot its agent is mounted on, and for a diff target the base tree bound beside it, and
+  both join the requirements a mining row records (`dispatchRequirements` and
+  `recordedRequirements` in `step-runner.ts`, today `roleKey`, `capabilities` and `preferVision`)
+  as new `task_step_agent_minings` columns: a reserved agent a dead worker never sent, and a wave
+  agent `selectAgents` never authored, are replayed from the row alone, and without them a
+  recovered `scan-verify` refuter would mount the repository and check the wrong revision.
+  `resolveInvocationRepoMount` honours the snapshot ahead of both repository branches — the
+  read-only-folder one returns before it reads even the `worktreeRel` override DAG coders use — so
+  a read-only folder import is scanned from its snapshot, never from the person's live checkout.
 - **A module declares its fan-out seats.** `STEP_MINING_SEATS` (`@haive/shared`) is a constant the
   api reads by step id to hand the web its per-seat CLI picker, so a module step's seats reach
   neither. The module manifest carries them, derived from the module's dimension set, and the api
   reads them beside core's constant.
-- **Cancel removes every worktree a task owns.** `removeTaskWorktree` (`repo/worktree-remove.ts`)
-  removes the one the task row records (`tasks.worktree_path`, written by `01-worktree-setup`), and
-  a cancel runs no step code, so a snapshot a cancelled scan had added would stay on disk. The
-  snapshot is recorded where that removal reads, as a generic list of the worktrees a task owns
-  rather than a scan-specific column.
+- **The scratch reaper takes a scan's snapshot too.** `cleanupTaskScratchWorkspace`
+  (`repo/scratch-workspace.ts`) already runs when a task completes and when it is cancelled, and
+  the boot sweep catches what those miss, but it reaps only a repository-less task type's
+  workspace, and a cancel runs no step code that could remove the snapshot itself. Widen it to a
+  repository task's scratch workspace, keeping its settled-or-cancelled and no-pending-recap
+  guards, so a failed scan keeps its snapshot for the Retry as a failed task keeps its Editor.
 
 One rule to state in the module system's docs while building this: a module may **write core rows**
-through `ctx.db` (`review_findings`, `task_dag_*` — those are the intended extension points) but must
-**not add core tables**; its own schema goes in its own database via `ensure-schema`. The existing
-cross-cutting rule says the latter but not the former, and this module does both kinds of write.
+through `ctx.db` (`review_findings`, `task_dag_*`, and `tasks.pre_answers` for the landing branch —
+those are the intended extension points) but must **not add core tables**; its own schema goes in
+its own database via `ensure-schema`. The existing cross-cutting rule says the latter but not the
+former, and this module does both kinds of write.
 
 ## Critical files (reference, not modification)
 
@@ -616,11 +644,14 @@ cross-cutting rule says the latter but not the former, and this module does both
 - Fan-out Resume, which re-runs only the failed terminals: `packages/api/src/routes/tasks/steps.ts`
 - Shallow clone, the fetch source and the bounded-deepen rule: `repo/clone.ts`, `repo/refresh.ts`,
   `steps/workflow/00a-sync-base.ts`
-- Detached scratch worktree, per-invocation mount, the requirements a mining row records, and
-  cancel-time removal: `plan/merge.ts`, `worktreeRel` in `orchestrator/dispatcher.ts`,
-  `dispatchRequirements`/`recordedRequirements` in `step-engine/step-runner.ts` with the
-  `task_step_agent_minings` table in `packages/database/src/schema/tasks.ts`,
-  `repo/worktree-remove.ts`
+- The snapshot's home and its reaper: `repo/scratch-workspace.ts`; the invocation mounts it
+  overrides and extends: `resolveInvocationRepoMount` (`queues/cli-exec/resolvers.ts`) and
+  `resolveTaskUploadsMount` (`queues/cli-exec/exec-core.ts`); the requirements a mining row
+  records: `dispatchRequirements`/`recordedRequirements` in `step-engine/step-runner.ts` and the
+  `task_step_agent_minings` table in `packages/database/src/schema/tasks.ts`
+- Pre-answering a later step's form: the `tasks.pre_answers` writer in
+  `steps/workflow/06-run-config.ts`, the runner's `overlayPreAnswerDefaults`, and 00a's `base`
+  field in `steps/workflow/00a-sync-base.ts`
 - Conditional form fields: `visibleWhen` in `packages/shared/src/schemas/form.ts`
 
 ## Verification
@@ -681,6 +712,14 @@ cross-cutting rule says the latter but not the former, and this module does both
 - A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped.
 - Triage marks a finding whose file differs between the scanned commit and the landing tip, and
   offers no remediation when the landing branch does not contain the scanned commit.
+- A diff target that deletes a function and renames a file puts both files' base-side versions in
+  the base tree and names the removed lines as numbered there; `backward-compatibility` then
+  raises a remaining caller of the deleted function, and `dead-code` a symbol whose last call the
+  target deleted.
+- A read-only folder import is scanned from a snapshot filled without writing to its `.git`, and
+  triage offers it no remediation.
+- A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and a base
+  changed on the form stops `scan-remediate` before any coder is dispatched.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
@@ -689,10 +728,12 @@ cross-cutting rule says the latter but not the former, and this module does both
   complete" finding.
 - `pickFatalProviderError` returns nothing for a content-filter run, so no sibling coder is
   cancelled, and the refused issue ends REFUSED with no advisor dispatch while its siblings merge.
-- A mining dispatch naming `worktreeRel` mounts that worktree alone, with its gitfile masked, and so
-  does the same agent replayed from its row: a reserved agent a dead worker never sent, and a wave
-  agent recovered through the retry path.
-- Cancel removes a task's snapshot worktree as well as its integration worktree.
+- A mining dispatch naming a snapshot mounts it alone and read-only, with the base tree bound
+  read-only outside the workdir, for a read-only folder import as for a clone, and so does the
+  same agent replayed from its row: a reserved agent a dead worker never sent, and a wave agent
+  recovered through the retry path.
+- Completing or cancelling a repository task reaps its scratch workspace, snapshot included; a
+  failed one keeps it.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
@@ -716,7 +757,7 @@ cross-cutting rule says the latter but not the former, and this module does both
 3f. Scan one older commit whose files `main` has changed since; confirm the agents read the
    snapshot (a finding's line matches the file at that commit, not at `main`), triage marks the
    finding as changed since the scan, and cancelling a second such scan mid-analysis leaves no
-   snapshot on disk and no `git worktree list` entry.
+   snapshot on disk and the repository's `git worktree list` unchanged.
 3g. Run security on one CLI and two other dimensions on another, with the security run refused. A
    refusal cannot be provoked on demand, so drive it with a stubbed invocation that exits non-zero
    carrying the measured refusal text. Confirm the two land, security is REFUSED in the coverage
