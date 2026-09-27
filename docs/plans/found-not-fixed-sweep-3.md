@@ -8,7 +8,7 @@
 > phone) shipped and live-verified (#340); A3.2 shipped and live-verified (#341); A3.3 shipped and
 > live-verified (#342); A3.4 shipped and live-verified (#343); A3.5 shipped and live-verified (#344);
 > A3.6 shipped and live-verified (#345); A3 closed with A3.7 shipped and live-verified (#346); A4.1
-> in review.
+> shipped and live-verified (#347); A4.2 in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
