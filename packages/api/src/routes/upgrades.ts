@@ -279,7 +279,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     .limit(1);
   const hasPriorUpgrade =
     (await latestUpgradeToRollBack(db, repositoryId)) !== null &&
-    (liveUpgradeRow.length > 0 || (await lastUpgradeRemovedFiles(db, repositoryId)));
+    (liveUpgradeRow.length > 0 || (await lastUpgradeRemovedContent(db, repositoryId)));
 
   // "Upgrade in progress" iff there is a non-terminal onboarding-upgrade task
   // for this repo. The earlier heuristic (`hasPriorUpgrade && hasUpgradeAvailable`)
@@ -623,9 +623,10 @@ export async function insertUpgradeTask<T>(
   });
 }
 
-/** Whether the upgrade a rollback would undo removed a file or region. A removal leaves no live row,
- *  so an upgrade that only removed files has no other trace a rollback could be offered from. */
-export async function lastUpgradeRemovedFiles(
+/** Whether the upgrade a rollback would undo removed a file, a rules region or an RTK block. A
+ *  removal leaves no live row, so an upgrade that only removed things has no other trace a rollback
+ *  could be offered from. */
+export async function lastUpgradeRemovedContent(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
 ): Promise<boolean> {
@@ -638,8 +639,10 @@ export async function lastUpgradeRemovedFiles(
       and(eq(schema.taskSteps.taskId, latest), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
     )
     .limit(1);
-  const removed = (applied?.output as { removedPaths?: unknown } | null)?.removedPaths;
-  return Array.isArray(removed) && removed.length > 0;
+  const output = applied?.output as { removedPaths?: unknown; rtkBlockStrips?: unknown } | null;
+  return [output?.removedPaths, output?.rtkBlockStrips].some(
+    (l) => Array.isArray(l) && l.length > 0,
+  );
 }
 
 /**

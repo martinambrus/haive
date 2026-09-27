@@ -14,7 +14,12 @@ import {
   RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
-import { readFileNoFollow, updateFileNoFollow } from '@haive/shared/fs-safe';
+import {
+  ParkedFileError,
+  readFileNoFollow,
+  rewriteFileIfNoFollow,
+  updateFileNoFollow,
+} from '@haive/shared/fs-safe';
 import {
   importRulesFiles,
   importRulesFilesFor,
@@ -118,20 +123,27 @@ export async function restoreRulesImportStubs(
   return outcomes;
 }
 
-/** `content` without its RTK blocks, each taken with the newline 07 wrote after it, or null when
- *  it holds none. */
-export function withoutRtkBlocks(content: string): string | null {
-  let next = content;
+/** `content` without its RTK blocks, each taken with the newline 07 wrote after it, beside the
+ *  blocks it took, or null when it holds none. */
+export function withoutRtkBlocks(content: string): { text: string; blocks: string[] } | null {
+  let text = content;
+  const blocks: string[] = [];
   for (;;) {
-    const start = next.indexOf(RTK_REF_MARKER_START);
+    const start = text.indexOf(RTK_REF_MARKER_START);
     if (start === -1) break;
-    const endAt = next.indexOf(RTK_REF_MARKER_END, start);
+    const endAt = text.indexOf(RTK_REF_MARKER_END, start);
     if (endAt === -1) break;
     const end = endAt + RTK_REF_MARKER_END.length;
-    next = next.slice(0, start) + next.slice(next[end] === '\n' ? end + 1 : end);
+    const cut = text[end] === '\n' ? end + 1 : end;
+    blocks.push(text.slice(start, cut));
+    text = text.slice(0, start) + text.slice(cut);
   }
-  return next === content ? null : next;
+  return blocks.length === 0 ? null : { text, blocks };
 }
+
+/** The template id and kind 02 records an RTK strip under. No manifest item has it, so nothing that
+ *  reads a template's rows takes the record for one of them. */
+export const RTK_BLOCK_RECORD = 'rtk-block';
 
 export interface RtkBlockStripOutcome {
   file: string;
@@ -139,10 +151,22 @@ export interface RtkBlockStripOutcome {
   error?: string;
 }
 
-/** Take the RTK block out of each rules file that holds one. A `CLAUDE.md -> AGENTS.md` link is
- *  AGENTS.md's own pass, and any other link is refused, as is a file past the read cap, which the
- *  plan could not report. A refusal or an I/O error is recorded per file and never thrown. */
-export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOutcome[]> {
+/** Why an RTK pass left a rules file as it was without judging it. */
+function rtkRefusal(notUtf8: boolean): string {
+  return notUtf8
+    ? 'it is not valid UTF-8, so writing it back would change more than the block'
+    : `it could not be read (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`;
+}
+
+/** Take the RTK block out of each rules file that holds one. `record` runs before the file changes,
+ *  with what it held and what the strip leaves, and a throw there leaves the file as it was. A
+ *  `CLAUDE.md -> AGENTS.md` link is AGENTS.md's own pass, and any other link is refused, as is a
+ *  file past the read cap or one that is not UTF-8. A refusal or an I/O error is recorded per file
+ *  and never thrown. */
+export async function stripRtkBlocks(
+  repoPath: string,
+  record: (file: string, before: string, after: string) => Promise<void>,
+): Promise<RtkBlockStripOutcome[]> {
   const outcomes: RtkBlockStripOutcome[] = [];
   for (const file of RTK_BLOCK_FILES) {
     try {
@@ -150,14 +174,30 @@ export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOut
         outcomes.push({ file, result: 'skipped-link' });
         continue;
       }
-      // `create` only makes an absent file answer 'unchanged': `update` returns null for it.
-      const result = await updateFileNoFollow(
+      let read = false;
+      let notUtf8 = false;
+      const result = await rewriteFileIfNoFollow(
         repoPath,
         file,
-        (current) => (current === null ? null : withoutRtkBlocks(current)),
-        { create: true, maxBytes: RULES_FILE_READ_CAP },
+        async (data) => {
+          read = true;
+          const before = data.toString('utf8');
+          if (!Buffer.from(before, 'utf8').equals(data)) {
+            notUtf8 = true;
+            return null;
+          }
+          const stripped = withoutRtkBlocks(before);
+          if (stripped === null) return null;
+          await record(file, before, stripped.text);
+          return Buffer.from(stripped.text, 'utf8');
+        },
+        { maxBytes: RULES_FILE_READ_CAP },
       );
-      outcomes.push({ file, result: result === 'updated' ? 'stripped' : 'none' });
+      if (result === 'kept' && (!read || notUtf8)) {
+        outcomes.push({ file, result: 'refused', error: rtkRefusal(notUtf8) });
+      } else {
+        outcomes.push({ file, result: result === 'rewritten' ? 'stripped' : 'none' });
+      }
     } catch (err) {
       outcomes.push({
         file,
@@ -167,6 +207,67 @@ export async function stripRtkBlocks(repoPath: string): Promise<RtkBlockStripOut
     }
   }
   return outcomes;
+}
+
+export type RtkBlockRestore =
+  | { outcome: 'restored' }
+  | { outcome: 'standing' }
+  | { outcome: 'absent' }
+  | { outcome: 'kept'; reason: string };
+
+/** Put back the RTK blocks a strip took out of `before`, only while no RTK block stands in the
+ *  file: all of `before` while the file still holds what the strip left (`leftHash`), else the
+ *  blocks appended the way 07 appends one. The same blocks standing there already count as put
+ *  back, and a file removed since stays removed. */
+export async function restoreRtkBlocks(
+  repoPath: string,
+  file: string,
+  before: string,
+  leftHash: string | null,
+): Promise<RtkBlockRestore> {
+  const blocks = (withoutRtkBlocks(before)?.blocks ?? []).join('');
+  let notUtf8 = false;
+  let standing: string | null = null;
+  let rewrote = false;
+  let result;
+  try {
+    result = await rewriteFileIfNoFollow(
+      repoPath,
+      file,
+      (data) => {
+        const text = data.toString('utf8');
+        if (!Buffer.from(text, 'utf8').equals(data)) {
+          notUtf8 = true;
+          return null;
+        }
+        const held = withoutRtkBlocks(text);
+        if (held !== null) {
+          standing = held.blocks.join('');
+          return null;
+        }
+        rewrote = true;
+        if (leftHash !== null && sha256Hex(normalizeContent(text)) === leftHash) {
+          return Buffer.from(before, 'utf8');
+        }
+        const sep = text.length === 0 || text.endsWith('\n') ? '' : '\n';
+        return Buffer.from(`${text}${sep}${blocks}`, 'utf8');
+      },
+      { maxBytes: RULES_FILE_READ_CAP },
+    );
+  } catch (err) {
+    if (!(err instanceof ParkedFileError)) throw err;
+    const parked = rewrote ? 'what the rollback put back' : 'what stood there before';
+    return {
+      outcome: 'kept',
+      reason: `it was saved while the rollback judged it, and ${parked} is at ${err.parkedAt}`,
+    };
+  }
+  if (result === 'absent') return { outcome: 'absent' };
+  if (result === 'rewritten') return { outcome: 'restored' };
+  if (standing === null) return { outcome: 'kept', reason: rtkRefusal(notUtf8) };
+  return standing === blocks
+    ? { outcome: 'standing' }
+    : { outcome: 'kept', reason: 'it holds another RTK block now' };
 }
 
 /** Which of `files` lacks the import where an upgrade can add it, as upgrade-status counts them: a

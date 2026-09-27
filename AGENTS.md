@@ -2810,8 +2810,9 @@ file gone, and so does one whose file a person deleted while the form was parked
 finds an earlier attempt's baseline, and records the removal; the second drops its own, so a
 rollback leaves the file deleted. A removal that keeps the file drops its baseline too. What
 already holds the restore is an earlier attempt of the same rollback, which a retry takes as put
-back. Such an upgrade can leave no live row at all, so upgrade-status offers its rollback from
-what 02 recorded (`lastUpgradeRemovedFiles`) until a rollback completes after it. It answers as
+back. Such an upgrade, like one that only took RTK blocks out, can leave no live row at all, so
+upgrade-status offers its rollback from what 02 recorded (`lastUpgradeRemovedContent`) until a
+rollback completes after it. It answers as
 onboarded for any repository an upgrade was started on, whether that upgrade is running, failed or
 finished, since POST /tasks starts one only on an onboarded repository and the banner shows nothing
 for any other. What a rollback puts back stays in the repository's
@@ -2868,12 +2869,19 @@ plan's bytes as what it held. A plan whose RTK choice was the repository's live 
 (`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
 two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
 RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it
-out
-of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
+out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
-plan reads with, and a `CLAUDE.md -> AGENTS.md` link is left to AGENTS.md's own pass. 03 keeps a
-stripped file git ignores out of the commit, whichever provider it belongs to. 01 names the files
-holding a block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
+plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
+AGENTS.md's own pass. Each strip records what the file held before it changes (`rtkBlockStrips`),
+in a superseded row kept apart from the rows a rollback restores (`RTK_BLOCK_RECORD`), and a retry
+that finds the block gone takes the record an earlier attempt made. A rollback puts the blocks back
+ahead of the rules region, whose restore would move the file off what the strip left, and only
+while no RTK block stands in the file: all of what the file held while it still holds what the
+strip left, else the blocks appended the way 07 appends one. The same blocks standing there count
+as put back; another block, or a file removed since, is kept and named. The `@AGENTS.md` stubs 02
+restores stay, since without them a claude-family CLI never loads AGENTS.md. 03 keeps a stripped
+file git ignores out of the commit, whichever provider it belongs to. 01 names the files holding a
+block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
 repository and reports the files still holding a block (`rtkBlockLeftovers`), and the settings
 files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): it looks where 01
 looks, reads RTK's choice through the same snapshots, and judges each file by the predicate 01
