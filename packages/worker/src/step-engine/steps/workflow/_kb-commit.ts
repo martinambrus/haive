@@ -4,6 +4,7 @@ import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 const exec = promisify(execFile);
 
@@ -32,7 +33,7 @@ export async function gitRun(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, opts);
+    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };

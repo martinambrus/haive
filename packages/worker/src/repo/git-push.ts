@@ -11,6 +11,10 @@ export interface GitRunResult {
   code: number;
 }
 
+/** execFile kills a child whose output outgrows its buffer, 1 MiB by default, and a merge or a
+ *  commit killed that way is left half-written; git's output grows with the repository. */
+export const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
 /** Run a git command, capturing stdout/stderr/exit code instead of throwing. The
  *  identical helper was inlined in several steps (11a-gate-4-push, 12-worktree-cleanup);
  *  centralised here. `env` merges over process.env when provided. */
@@ -22,7 +26,9 @@ export async function gitRun(
 ): Promise<GitRunResult> {
   try {
     const { input, ...output } = io ?? {};
-    const opts = env ? { cwd, env: { ...process.env, ...env }, ...output } : { cwd, ...output };
+    const opts = env
+      ? { cwd, env: { ...process.env, ...env }, maxBuffer: GIT_MAX_BUFFER, ...output }
+      : { cwd, maxBuffer: GIT_MAX_BUFFER, ...output };
     const run = exec('git', args, opts);
     if (input) {
       // git can exit before reading all of it, which fails that write rather than the run.

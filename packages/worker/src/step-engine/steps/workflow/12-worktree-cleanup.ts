@@ -12,7 +12,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
-import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
+import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
@@ -102,7 +102,7 @@ async function gitRun(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, opts);
+    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };

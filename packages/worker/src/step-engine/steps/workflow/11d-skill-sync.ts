@@ -40,6 +40,7 @@ import { listSkillDirs, loadBundleSkillIds } from '../onboarding/09_6-skill-veri
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import type { SkillSyncOp } from './11-phase-8-learning.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 const execFileP = promisify(execFile);
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
@@ -120,7 +121,7 @@ async function gitRun(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await execFileP('git', args, opts);
+    const { stdout, stderr } = await execFileP('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };

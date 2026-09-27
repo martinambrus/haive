@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 const exec = promisify(execFile);
 
@@ -130,7 +131,7 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
     const { stdout } = await exec(
       'git',
       ['--no-optional-locks', 'status', '--porcelain', '-uall'],
-      { cwd: worktreePath },
+      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER },
     );
     const files: string[] = [];
     const untracked: string[] = [];

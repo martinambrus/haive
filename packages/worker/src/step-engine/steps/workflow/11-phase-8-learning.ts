@@ -42,6 +42,7 @@ import {
   recordLearningInstruction,
 } from './_learning-feedback.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -195,7 +196,7 @@ async function gitRun(
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
-    const { stdout, stderr } = await execFileP('git', args, { cwd });
+    const { stdout, stderr } = await execFileP('git', args, { cwd, maxBuffer: GIT_MAX_BUFFER });
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
