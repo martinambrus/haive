@@ -292,7 +292,18 @@ refused content. The first new core change covers both; the refused issue's find
 as not remediated, naming the refusal.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
-a workflow task ends.
+a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
+(`rippling-wibbling-puffin`) refuse a composition whose loop emitters have no declared
+`fixLoop.targetStepId` in its run list. `scan-remediate` cannot be that target: once its levels
+are checkpointed their issue worktrees are gone and `resolveDagPhase` resolves without dispatching
+anything, the reason core does not point its own fix loop at `06c-dag-execute`. Nor can core's
+`07-phase-2-implement`: its round-0 skip keys on `06b-sprint-planning`'s DAG mode, which
+`deep_scan` never records, so it would also run at round 0 and implement the task's own
+description as a brief. So the module ships **`scan-fix`**, composed between `scan-remediate` and
+the tail and declared as the seed's `fixLoop.targetStepId`. It skips round 0, which
+`scan-remediate` owns — the split core makes between `06c-dag-execute` and 07 in DAG mode — and in
+each fix round reads the diagnosis (`loadFixLoopDiagnosis`) and edits `01-worktree-setup`'s
+integration worktree under `REPO_IS_DATA_ACTING_LINES`, the guard for a pass that edits.
 
 ### Scan targets
 
@@ -361,16 +372,22 @@ attributes and run no filter), never checked out: a checkout falls back to the l
 names, so its bytes need not be the commit's — the rule `captureFixBaseline` keeps by reading
 `.gitattributes` from the empty tree — and a git worktree would also write admin files into the
 repository's `.git`, which for a read-only folder import is the person's own. Every git command the
-scan runs, resolution and the diff included, sets `GIT_NO_REPLACE_OBJECTS=1`: a `refs/replace/`
-entry, which a folder import can carry, would otherwise have `ls-tree` and `cat-file` read another
-commit's tree under the SHA the report names. A tree object can hold names no checkout would
-write, so every path is held to git's own checkout rule (`verify_path`: no empty, `.` or `..`
-component, and no `.git`) and a tree that breaks it refuses the target with the path named; each
-file is then written through `@haive/shared/fs-safe` from the snapshot's anchor, never by a
-path-based call, and keeps the executable bit its tree entry records (`100755`), since a change of
-mode alone is a change the line notes list. A symlink is written as a regular file holding its
-target, since recreating the link would hand an agent a path out of the snapshot, and a submodule
-is named in the coverage record as not scanned.
+scan runs, resolution and the diff included, sets `GIT_NO_REPLACE_OBJECTS=1`, since a
+`refs/replace/` entry, which a folder import can carry, would otherwise have `ls-tree` and
+`cat-file` read another commit's tree under the SHA the report names; and each one switches off
+what a repository's config can make git run — `--no-ext-diff` and `--no-textconv` on the diff,
+`core.fsmonitor=false`, `core.hooksPath` at an empty directory — since a folder import's config,
+and a clone's once an agent with the root mounted has written it, is not Haive's to trust. A tree
+object can hold names no checkout would write, so every path is held to git's own checkout rule
+(`verify_path`: no empty, `.` or `..` component, and no `.git`) and a tree that breaks it refuses
+the target with the path named; each file is then written through `@haive/shared/fs-safe` from the
+snapshot's anchor, never by a path-based call, and keeps the executable bit its tree entry records
+(`100755`), since a change of mode alone is a change the line notes list. A symlink whose target
+stays inside the snapshot is recreated as a link, after every file, so nothing is written through
+it; one that points outside — absolute, or climbing past the root — is not recreated, and is named
+with its target in the coverage record and in the prompt of every agent whose scope holds it, so an
+agent sees an escaping link rather than a file that reads as text. A submodule is named in the
+coverage record as not scanned.
 
 A snapshot holds committed files only, the view every worktree run has. Rules and KB that exist
 only uncommitted at the root — onboarding's commit is off by default — reach its agents the way
@@ -620,10 +637,13 @@ module:
   `miningLossNote`. A refused DAG coder needs a third change: with the guard out of the way,
   `classifyDagIssueFailure` (`dag-failure-class.ts`) calls a failure that was neither killed nor
   environmental `genuine` and hands it to the advisor, whose `RETRY_APPROACH`/`RETRY_MODIFIED`
-  would re-send the refused content to the provider that refused it. Its issue ends REFUSED
-  instead, a terminal outcome of its own that skips escalation and leaves its siblings running.
-  Core's own fan-outs change with it: a refused `08c` or `08d` seat — 08d's is where the refusal
-  was measured — fails the whole step today, and afterwards yields the synthetic "did not complete"
+  would re-send the refused content to the provider that refused it. Its issue ends
+  `failed_unrecoverable` with a refusal marker in `concerns`, the way `DAG_INFRA_EXHAUSTED_MARKER`
+  records an exhausted re-dispatch, and escalation and the level's failure rule both read that
+  marker: no advisor is dispatched for the issue, and it does not fail the level its siblings
+  finish. No new `dag_issue_outcome` value, since Postgres cannot drop one once added. Core's own
+  fan-outs change with it: a refused `08c` or `08d` seat — 08d's is where the refusal was
+  measured — fails the whole step today, and afterwards yields the synthetic "did not complete"
   finding both steps already report for a dead agent (`didNotCompleteIssue`), so its silence is
   still never read as approval.
 - **A mining dispatch can mount a snapshot, and its row keeps it.** `AgentMiningDispatch` names
@@ -676,8 +696,13 @@ former, and this module does both kinds of write.
   `step-engine/step-definition.ts`
 - Refusal classification, the three sites the first new core change edits, and the retry veto:
   `queues/cli-exec/failure-class.ts`, the mining barrier in `step-engine/step-runner.ts`,
-  `pickFatalProviderError` in `step-engine/dag-executor.ts`, `classifyDagIssueFailure` in
-  `step-engine/dag-failure-class.ts`, `step-engine/mining-failure.ts`
+  `pickFatalProviderError` in `step-engine/dag-executor.ts`, `classifyDagIssueFailure` and the
+  `DAG_INFRA_EXHAUSTED_MARKER` precedent in `step-engine/dag-failure-class.ts`, the
+  `dag_issue_outcome` enum in `packages/database/src/schema/task-dag.ts`,
+  `step-engine/mining-failure.ts`
+- The fix loop `scan-fix` is the target of: `loadFixLoopDiagnosis` and `FIX_LOOP_TARGET_STEP_ID`
+  in `steps/workflow/_fix-loop.ts`, 07's round split in `steps/workflow/07-phase-2-implement.ts`,
+  and the per-type `fixLoop` block in `rippling-wibbling-puffin.md`
 - Fan-out Resume, which re-runs only the failed terminals: `packages/api/src/routes/tasks/steps.ts`
 - Shallow clone, the fetch source and the bounded-deepen rule: `repo/clone.ts`, `repo/refresh.ts`,
   `steps/workflow/00a-sync-base.ts`
@@ -760,8 +785,14 @@ former, and this module does both kinds of write.
 - A read-only folder import is scanned from a snapshot filled without writing to its `.git`, and
   triage offers it no remediation.
 - A snapshot of a commit whose `.gitattributes` asks for line-ending conversion and a smudge filter
-  holds the blob bytes unchanged and runs no filter; a symlink arrives as a file holding its
-  target, and a submodule is named in the coverage record as not scanned.
+  holds the blob bytes unchanged and runs no filter; a symlink inside the tree arrives as a link,
+  one pointing out of it is named with its target and not recreated, and a submodule is named as
+  not scanned.
+- A repository whose config sets `diff.external`, a textconv driver, `core.fsmonitor` or a hook
+  runs none of them during a scan, and its changed lines come from git's own diff.
+- A tail step's `loop_back` re-enters `scan-fix`, the seed's declared target, which reads the
+  diagnosis and edits the integration worktree; `scan-fix` skips round 0, and the seed passes the
+  composition validator.
 - A malformed tree holding `.`, `..` or `.git` entries (written with `hash-object -t tree
   --literally`) refuses the target with the path named and writes nothing outside the snapshot.
 - A folder import carrying a `refs/replace/` entry for the target: the snapshot, the diff and the
@@ -782,7 +813,8 @@ former, and this module does both kinds of write.
   to be placed. An `08d` fan-out with one refused seat ends degraded, carrying that seat's "did not
   complete" finding.
 - `pickFatalProviderError` returns nothing for a content-filter run, so no sibling coder is
-  cancelled, and the refused issue ends REFUSED with no advisor dispatch while its siblings merge.
+  cancelled; the refused issue ends `failed_unrecoverable` with the refusal marker and no advisor
+  dispatch, and its siblings merge, with per-issue review on and with it off.
 - A mining dispatch naming a snapshot mounts it alone and read-only, with the base tree bound
   read-only outside the workdir, for a read-only folder import as for a clone, and so does the
   same agent replayed from its row: a reserved agent a dead worker never sent, and a wave agent
