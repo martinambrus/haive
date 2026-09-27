@@ -11,6 +11,7 @@ type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 function fakeConn(opts: { vectorThrows?: boolean; hnswThrows?: boolean } = {}): {
   conn: EnsureConn;
   queries: () => string;
+  transactions: () => string[][];
 } {
   const captured: string[] = [];
   const tag = (strings: TemplateStringsArray) => {
@@ -21,9 +22,7 @@ function fakeConn(opts: { vectorThrows?: boolean; hnswThrows?: boolean } = {}): 
     }
     return Promise.resolve([]);
   };
-  // A stand-in for a postgres.js transaction: complete before the cast, so the cast is the
-  // only place the fake is told it is the real thing.
-  const pg = Object.assign(tag, {
+  const tx = Object.assign(tag, {
     unsafe: (q: string) => {
       captured.push(q);
       if (opts.hnswThrows && q.includes('USING hnsw')) {
@@ -31,19 +30,40 @@ function fakeConn(opts: { vectorThrows?: boolean; hnswThrows?: boolean } = {}): 
       }
       return Promise.resolve([]);
     },
-    savepoint: async (run: (sql: unknown) => Promise<unknown>) => {
-      captured.push('SAVEPOINT');
+  });
+  // A stand-in for the postgres.js pool: complete before the cast, so the cast is the only place
+  // the fake is told it is the real thing.
+  const pg = {
+    begin: async (run: (sql: typeof tx) => Promise<unknown>) => {
+      captured.push('BEGIN');
       try {
-        const result = await run(pg);
-        captured.push('RELEASE');
+        const result = await run(tx);
+        captured.push('COMMIT');
         return result;
       } catch (err) {
-        captured.push('ROLLBACK TO');
+        captured.push('ROLLBACK');
         throw err;
       }
     },
-  }) as unknown as EnsureConn['pg'];
-  return { conn: { pg, embeddingDimensions: 2560 }, queries: () => captured.join('\n') };
+  } as unknown as EnsureConn['pg'];
+  const transactions = () => {
+    const txs: string[][] = [];
+    let open: string[] | null = null;
+    for (const q of captured) {
+      if (q === 'BEGIN') open = [];
+      else if (q === 'COMMIT' || q === 'ROLLBACK') {
+        txs.push(open ?? []);
+        open = null;
+      } else if (open) open.push(q);
+      else txs.push(['outside a transaction', q]);
+    }
+    return txs;
+  };
+  return {
+    conn: { pg, embeddingDimensions: 2560 },
+    queries: () => captured.join('\n'),
+    transactions,
+  };
 }
 
 describe('ensureGlobalKbSchema', () => {
@@ -162,18 +182,29 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain('USING GIN (facets)');
   });
 
-  // The ensure runs in one transaction, where a failed statement aborts every statement after it,
-  // so each failure it tolerates is rolled back to a savepoint of its own.
-  it('tolerates a failed HNSW index inside its own savepoint and carries on', async () => {
+  // Every process and install sharing the store runs this ensure, so each statement takes the
+  // schema lock in a transaction of its own: a table lock ends with its step, not the ensure.
+  it('runs each statement in a transaction of its own, under the schema lock', async () => {
+    const { conn, transactions } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const txs = transactions();
+    const head = (q: string) => q.trim().split(/\s+/).slice(0, 4).join(' ');
+
+    expect(txs.length).toBeGreaterThan(20);
+    for (const tx of txs) expect(tx[0]).toBe('SELECT pg_advisory_xact_lock(hashtext())');
+    expect(txs.filter((tx) => tx.length > 2).map((tx) => tx.slice(1).map(head))).toEqual([
+      ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
+      ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_content_tsv BEFORE'],
+    ]);
+  });
+
+  it('rolls back only its own step when the HNSW index is refused, and carries on', async () => {
     const { conn, queries } = fakeConn({ hnswThrows: true });
     const res = await ensureGlobalKbSchema(conn);
     const sql = queries();
 
     expect(res.usedPgvector).toBe(true);
-    expect(sql).toContain('SAVEPOINT\nCREATE EXTENSION IF NOT EXISTS vector\nRELEASE');
-    expect(sql).toMatch(
-      /SAVEPOINT\nCREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw [^\n]*\nROLLBACK TO/,
-    );
-    expect(sql.split('ROLLBACK TO')[1]).toContain('uq_global_rag_ns_entry_section_chunk');
+    expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw [^\n]*\nROLLBACK/);
+    expect(sql.split('ROLLBACK')[1]).toContain('uq_global_rag_ns_entry_section_chunk');
   });
 });

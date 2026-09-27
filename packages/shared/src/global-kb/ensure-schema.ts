@@ -33,18 +33,30 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
   'tags',
 ];
 
+// Every process and install sharing this store runs this ensure, and two at once collide on the
+// catalog ("tuple concurrently updated"). So each statement runs in a transaction of its own under
+// one lock, with a check or a drop in the same transaction as the write that depends on it: tied to
+// the backend that holds the lock, and short, so a table lock is held no longer than its own step.
+const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
+
 /** Idempotent schema creation for the global KB store (both the source-of-truth
- *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run in
- *  the caller's transaction at first use. Mirrors the per-project `ensureRagSchema`
+ *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
+ *  the global connection at first use. Mirrors the per-project `ensureRagSchema`
  *  (pgvector with jsonb fallback) but adds namespace/user_id/entry_id/facets and
  *  the JSONB facet indexes. Never touches the main DB or the per-project schema. */
 export async function ensureGlobalKbSchema(
-  conn: Pick<GlobalKbConnection, 'embeddingDimensions'> & { pg: postgres.TransactionSql },
+  conn: Pick<GlobalKbConnection, 'pg' | 'embeddingDimensions'>,
 ): Promise<{ usedPgvector: boolean }> {
+  const step = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
+    conn.pg.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
+      return run(tx);
+    });
+  const exec = (statement: string) => step((tx) => tx.unsafe(statement));
+
   let usedPgvector = true;
-  // A failed statement aborts the transaction, so each one tolerated here gets its own savepoint.
   try {
-    await conn.pg.savepoint((pg) => pg`CREATE EXTENSION IF NOT EXISTS vector`);
+    await step((tx) => tx`CREATE EXTENSION IF NOT EXISTS vector`);
   } catch (err) {
     log.warn({ err }, 'pgvector unavailable; global KB falls back to jsonb embeddings');
     usedPgvector = false;
@@ -54,7 +66,7 @@ export async function ensureGlobalKbSchema(
 
   // 1. Source-of-truth entries table. Enum-like fields use TEXT CHECK rather than
   //    PG enum types so there are no main-DB enum migrations to coordinate.
-  await conn.pg.unsafe(`
+  await exec(`
     CREATE TABLE IF NOT EXISTS ${ENTRIES_TABLE} (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       namespace TEXT NOT NULL,
@@ -76,43 +88,43 @@ export async function ensureGlobalKbSchema(
       superseded_at TIMESTAMP
     )
   `);
-  await conn.pg.unsafe(
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_status ON ${ENTRIES_TABLE} (namespace, status)`,
   );
-  await conn.pg.unsafe(
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_embed_status ON ${ENTRIES_TABLE} (embed_status)`,
   );
   // Cross-repo dedup key (category:tech). Additive column for pre-existing DBs.
-  await conn.pg.unsafe(`ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS topic_key TEXT`);
-  await conn.pg.unsafe(
+  await exec(`ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS topic_key TEXT`);
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_topic_key ON ${ENTRIES_TABLE} (namespace, topic_key)`,
   );
   // Merge/update route: a draft links to the entry it enriches + supersedes on
   // activation. Additive column for pre-existing DBs.
-  await conn.pg.unsafe(
-    `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`,
-  );
+  await exec(`ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`);
   // Indexed because the successor lookup WALKS this column: `GET /entries/:id` follows the
   // supersession chain forward to find the live entry that replaced an archived one, which is a
   // lookup per generation. Unindexed that is a sequential scan per level, up to the recursion's
   // depth cap — cheap on a small store and not something to leave for a large one.
-  await conn.pg.unsafe(
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_supersedes ON ${ENTRIES_TABLE} (supersedes_entry_id)`,
   );
   // Widen the status CHECK to allow 'failed' on pre-existing DBs — a kb_author
   // enrich task that fails leaves its entry in a terminal 'failed' state. Idempotent:
   // drop the inline-named constraint and re-add it with the full value set.
-  await conn.pg.unsafe(
-    `ALTER TABLE ${ENTRIES_TABLE} DROP CONSTRAINT IF EXISTS ${ENTRIES_TABLE}_status_check`,
-  );
-  await conn.pg.unsafe(
-    `ALTER TABLE ${ENTRIES_TABLE} ADD CONSTRAINT ${ENTRIES_TABLE}_status_check CHECK (status IN ('skeleton','enriching','draft','active','archived','failed'))`,
-  );
+  await step(async (tx) => {
+    await tx.unsafe(
+      `ALTER TABLE ${ENTRIES_TABLE} DROP CONSTRAINT IF EXISTS ${ENTRIES_TABLE}_status_check`,
+    );
+    await tx.unsafe(
+      `ALTER TABLE ${ENTRIES_TABLE} ADD CONSTRAINT ${ENTRIES_TABLE}_status_check CHECK (status IN ('skeleton','enriching','draft','active','archived','failed'))`,
+    );
+  });
 
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS
   //    namespace/user_id/entry_id/facets. pgvector primary, jsonb fallback.
   if (usedPgvector) {
-    await conn.pg.unsafe(`
+    await exec(`
       CREATE TABLE IF NOT EXISTS ${VECTORS_TABLE} (
         id SERIAL PRIMARY KEY,
         namespace TEXT NOT NULL,
@@ -131,16 +143,14 @@ export async function ensureGlobalKbSchema(
       )
     `);
     try {
-      await conn.pg.savepoint((pg) =>
-        pg.unsafe(
-          `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
-        ),
+      await exec(
+        `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
       );
     } catch (err) {
       log.warn({ err }, 'global KB HNSW index creation failed; vector search uses sequential scan');
     }
   } else {
-    await conn.pg.unsafe(`
+    await exec(`
       CREATE TABLE IF NOT EXISTS ${VECTORS_TABLE} (
         id SERIAL PRIMARY KEY,
         namespace TEXT NOT NULL,
@@ -161,31 +171,27 @@ export async function ensureGlobalKbSchema(
   }
 
   // Upsert key + lookup/scope indexes (both variants).
-  await conn.pg.unsafe(
+  await exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_global_rag_ns_entry_section_chunk ON ${VECTORS_TABLE} (namespace, entry_id, section_id, chunk_index)`,
   );
-  await conn.pg.unsafe(
-    `CREATE INDEX IF NOT EXISTS idx_global_rag_namespace ON ${VECTORS_TABLE} (namespace)`,
-  );
-  await conn.pg.unsafe(
-    `CREATE INDEX IF NOT EXISTS idx_global_rag_entry_id ON ${VECTORS_TABLE} (entry_id)`,
-  );
-  await conn.pg.unsafe(
+  await exec(`CREATE INDEX IF NOT EXISTS idx_global_rag_namespace ON ${VECTORS_TABLE} (namespace)`);
+  await exec(`CREATE INDEX IF NOT EXISTS idx_global_rag_entry_id ON ${VECTORS_TABLE} (entry_id)`);
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_rag_content_tsv ON ${VECTORS_TABLE} USING GIN (content_tsv)`,
   );
 
   // Broad default-jsonb_ops GIN (NOT jsonb_path_ops), kept: it is the general-purpose
   // index for `?` / `?|` / `@>` against the whole column.
-  await conn.pg.unsafe(
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_rag_facets ON ${VECTORS_TABLE} USING GIN (facets)`,
   );
   for (const dim of RETIRED_FACET_INDEX_DIMENSIONS) {
-    await conn.pg.unsafe(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
+    await exec(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
   }
 
   // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name
   // since this is a different database).
-  await conn.pg.unsafe(`
+  await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
       NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''));
@@ -193,16 +199,18 @@ export async function ensureGlobalKbSchema(
     END;
     $$ LANGUAGE plpgsql
   `);
-  const triggerExists = await conn.pg.unsafe(
-    `SELECT 1 FROM pg_trigger WHERE tgname = 'trg_global_content_tsv'`,
-  );
-  if (triggerExists.length === 0) {
-    await conn.pg.unsafe(`
-      CREATE TRIGGER trg_global_content_tsv
-        BEFORE INSERT OR UPDATE ON ${VECTORS_TABLE}
-        FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
-    `);
-  }
+  await step(async (tx) => {
+    const triggerExists = await tx.unsafe(
+      `SELECT 1 FROM pg_trigger WHERE tgname = 'trg_global_content_tsv'`,
+    );
+    if (triggerExists.length === 0) {
+      await tx.unsafe(`
+        CREATE TRIGGER trg_global_content_tsv
+          BEFORE INSERT OR UPDATE ON ${VECTORS_TABLE}
+          FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
+      `);
+    }
+  });
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
   // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
@@ -272,7 +280,7 @@ export async function ensureGlobalKbSchema(
   const orphan = orphanFacetMajorSql('kv.key', 't.facets');
   const trim = trimFacetValueSql('v');
   for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
-    await conn.pg.unsafe(`
+    await exec(`
       UPDATE ${table} AS t
       SET facets = COALESCE((
         SELECT jsonb_object_agg(kv.key, a.arr)
