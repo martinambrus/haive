@@ -87,21 +87,26 @@ describe('reapOrphanedAuthVolumes', () => {
       doneTask,
     ];
     const removed: string[] = [];
-    const cleaned: string[] = [];
+    const stopped: string[] = [];
+    const forced: string[] = [];
     const count = await reapOrphanedAuthVolumes(db(), {
       listAuthVolumes: async () => present,
       removeStoppedContainersUsingVolume: async (name) => {
-        cleaned.push(name);
+        stopped.push(name);
+      },
+      removeContainersUsingVolume: async (name) => {
+        forced.push(name);
       },
       removeVolume: async (name) => {
         removed.push(name);
       },
     });
 
-    const reaped = [...goneOwners, doneTask];
     expect(count).toBe(3);
-    expect(cleaned.sort()).toEqual([...reaped].sort());
-    expect(removed.sort()).toEqual([...reaped].sort());
+    // A running container of a task copy is spared; a gone owner's login session is not.
+    expect(stopped).toEqual([doneTask]);
+    expect(forced.sort()).toEqual([...goneOwners].sort());
+    expect(removed.sort()).toEqual([...goneOwners, doneTask].sort());
   });
 
   it('is a no-op when nothing is listed', async () => {

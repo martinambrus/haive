@@ -40,6 +40,8 @@ export function selectOrphanAuthVolumes(names: string[], live: LiveAuthOwners): 
 
 export interface AuthVolumeReaperDeps {
   listAuthVolumes: () => Promise<string[]>;
+  /** Every container mounting the volume, running or not: only called once its owner row is gone. */
+  removeContainersUsingVolume?: (name: string) => Promise<void>;
   removeStoppedContainersUsingVolume?: (name: string) => Promise<void>;
   removeVolume: (name: string) => Promise<void>;
 }
@@ -67,6 +69,11 @@ async function listVolumes(filter: string): Promise<string[]> {
 
 const defaultDeps: AuthVolumeReaperDeps = {
   listAuthVolumes: () => listVolumes(AUTH_VOL_FILTER),
+  async removeContainersUsingVolume(name) {
+    const out = await runDocker(['ps', '-aq', '--filter', `volume=${name}`], 15_000);
+    const ids = out.split(/\s+/).filter((id) => id.length > 0);
+    if (ids.length > 0) await runDocker(['rm', '-f', ...ids], 30_000);
+  },
   async removeVolume(name) {
     const result = await defaultDockerRunner.volumeRemove(name);
     if (!result.ok) throw new Error(result.stderr || `failed to remove volume ${name}`);
@@ -125,7 +132,13 @@ export async function reapOrphanedAuthVolumes(
   let removed = 0;
   for (const name of orphans) {
     try {
-      await deps.removeStoppedContainersUsingVolume?.(name);
+      // A task copy spares a running container, which may be a recap of that task still starting.
+      // A provider's or user's has no owner left to serve, so a login session still holding it goes.
+      if (cliAuthVolumeOwner(name)?.kind === 'task') {
+        await deps.removeStoppedContainersUsingVolume?.(name);
+      } else {
+        await deps.removeContainersUsingVolume?.(name);
+      }
       await deps.removeVolume(name);
       removed += 1;
     } catch (err) {
