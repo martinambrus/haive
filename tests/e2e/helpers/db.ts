@@ -212,13 +212,15 @@ export async function removeUser(
         if (!(await deleteRepoViaApi(sql, request, id))) reposGone = false;
       }
       // What no repository delete cancelled; one it did is answered as already cancelled.
+      let cancelsAccepted = true;
       for (const { id } of toCancel) {
         const res = await request.post(`${API_BASE}/tasks/${id}/action`, {
           data: { action: 'cancel' },
         });
         expect.soft(res.status(), `cancel of task ${id}: ${await res.text()}`).toBe(200);
+        if (res.status() !== 200) cancelsAccepted = false;
       }
-      cancelsFinished = await waitForWorkerCancels(sql, user.userId);
+      cancelsFinished = cancelsAccepted && (await waitForWorkerCancels(sql, user.userId));
       if (cancelsFinished) await deleteProvidersViaApi(sql, request, user.userId);
     } finally {
       await request.dispose();
