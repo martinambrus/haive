@@ -344,14 +344,16 @@ the default branch, the scan this plan described before it had targets.
 **Names are checked before git sees them, and resolved once.** Every ref the person gave is
 validated in code before any git command runs — refused when it starts with `-` or breaks git's
 own ref-name rules, and a SHA must be hex — and every git command, the fetch below included, takes
-it only after `--end-of-options`, inside a refspec Haive builds from the checked name. The fetch
-runs before resolution, so a check made only there would come too late: `git fetch` reads an
-option-shaped refspec as an option, and some of its options name a command to run. `scan-scope`'s
-apply then resolves each name to a full commit SHA with `rev-parse --verify`, peeled with
-`^{commit}` so a tag of a tree or blob is refused, and records the names beside the SHAs. Every
-later step reads the SHAs: a branch that moves mid-run must not change what the verify wave reads
-or what the report says was scanned. Prompts name the target by SHA and ref name only, never by
-commit message, which is repository-authored prose.
+it only after `--end-of-options`, inside a refspec Haive builds from the checked name with its
+source fully qualified (`refs/heads/<name>`, `refs/tags/<name>`): a leading `+` is legal in a
+branch name and makes a bare refspec a forced fetch of another ref, and no terminator changes
+refspec grammar. The fetch runs before resolution, so a check made only there would come too
+late: `git fetch` reads an option-shaped refspec as an option, and some of its options name a
+command to run. `scan-scope`'s apply then resolves each name to a full commit SHA with
+`rev-parse --verify`, peeled with `^{commit}` so a tag of a tree or blob is refused, and records
+the names beside the SHAs. Every later step reads the SHAs: a branch that moves mid-run must not
+change what the verify wave reads or what the report says was scanned. Prompts name the target by
+SHA and ref name only, never by commit message, which is repository-authored prose.
 
 **The scan's git runs in a repository Haive owns, and history is fetched there within a bound.**
 Every git command the scan runs works in a scratch bare repository beside the snapshot, whose
@@ -707,8 +709,10 @@ ahead of the module:
   `--end-of-options`, and `base` comes from a free-text field, so a value shaped like an option is
   read as one, and some `git fetch` options name a command to run. The landing branch this module
   pre-answers is checked before it gets there, but the step's own field has the same gap: its
-  fetches take the refspec after `--end-of-options`, and the field is held to git's ref-name rules
-  (no leading `-`, no `:`).
+  fetches take the refspec after `--end-of-options` with the source fully qualified
+  (`refs/heads/<base>`, the deepen fetch included), since `+topic` is a legal branch name and a
+  leading `+` turns `+topic:refs/heads/+topic` into a forced fetch of `topic`, and the field is held
+  to git's ref-name rules (no leading `-`, no `:`).
 
 One rule to state in the module system's docs while building this: a module may **write core rows**
 through `ctx.db` (`review_findings`, `task_dag_*`, and `tasks.pre_answers` for the landing branch —
@@ -806,7 +810,8 @@ former, and this module does both kinds of write.
 - Target resolution over a fixture repository holding a root commit, a merge and two branches:
   branch → merge-base, commit → first parent (root commit → empty tree), range → merge-base of
   `from` and `to`. A ref starting with `-` is refused before any git command runs, the fetch
-  included, and every git argv carries a person's ref only after `--end-of-options`; a tag naming
+  included, and every git argv carries a person's ref only after `--end-of-options`, inside a
+  fully qualified refspec, so a branch named `+topic` is fetched as itself; a tag naming
   a tree is refused before any diff runs; a branch with no commits of its own, an empty range and
   a subtree holding no changed file each refuse at `scan-scope`.
 - Moving a branch after `scan-scope` changes nothing `scan-analyze`, `scan-verify` or the report
@@ -883,7 +888,8 @@ former, and this module does both kinds of write.
 - Completing or cancelling a repository task reaps its scratch workspace, snapshot included; a
   failed one keeps it.
 - `00a-sync-base` refuses a `base` that starts with `-` or breaks git's ref-name rules, and every
-  fetch it runs carries its refspec after `--end-of-options`.
+  fetch it runs carries its refspec after `--end-of-options` with the source fully qualified, so a
+  base named `+topic` updates `refs/heads/+topic` from `refs/heads/+topic` and nothing else.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
