@@ -12,7 +12,7 @@
 > live-verified (#349); A4.4 shipped and live-verified (#350); A4.5 shipped and live-verified
 > (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3
 > shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and
-> live-verified (#357); A5.5 in review.
+> live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 in review (#359).
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
@@ -348,15 +348,42 @@ restore); every payload persisted before a PR still replays.
   `tests/e2e/helpers/fixtures.ts` on `base.extend`: `users.register()` records each user, and its
   teardown (own timeout) removes each one through `removeUser`: repositories through the api
   first, which cancels their live tasks and records them for the resource cleanup, then every task
-  still live through the api's cancel action, then a wait for the worker to finish each cancel
-  (`task.cancel_finished`, a worker event written after the CANCEL teardown, since that teardown
-  reads the task's rows), then providers through the api and the user. Backstop: `registerUser`
-  appends to a run file and a config-level `globalTeardown` removes recorded users still present.
-  The specs that seed running tasks (phone, actions-api, create) moved to the fixture; the others
-  rely on the backstop. `cleanupTaskFixture` and the fixture tasks' `updated_at` were left as they
-  are: the teardown cancels a live task instead of racing the re-driver. Controls: an opt-in
-  harness project whose spec seeds a user and a running task and then times out, and checks both
-  are gone; `container-cleanup-smoke` waits for `task.cancel_finished`.
+  not yet completed or cancelled through the api's cancel action (a failed task keeps its runners
+  and worktree for recovery, and only a cancel takes them down), then a wait for the worker to
+  finish each cancel (`task.cancel_finished`, a worker event written after the CANCEL teardown,
+  since that teardown reads the task's rows), then providers through the api and the user. A user
+  whose repository delete or cancel has not finished, or whose cancel the api refused, is kept.
+  The repository cleanup job now carries each env template's image tag, since a template row goes
+  with its user and can be gone when the job runs. Backstop: `registerUser` appends to a run file
+  and a config-level `globalTeardown` removes recorded users still present. The specs that seed
+  running tasks (phone, actions-api, create) moved to the fixture; the others rely on the
+  backstop. `cleanupTaskFixture` and the fixture tasks' `updated_at` were left as they are: the
+  teardown cancels a live task instead of racing the re-driver. Controls: an opt-in harness
+  project whose spec seeds a user and a running task and then times out, and checks both are gone;
+  `container-cleanup-smoke` waits for `task.cancel_finished`; `repo-resource-cleanup.test.ts`
+  removes the image of a template whose row went with its user.
+- **A5.6 fix(web): a CLI picked while the remembered choice loads stands.** Found on A5.5:
+  changing the repository on the New Task form fires `/tasks/last-cli`, and its answer overwrote
+  both CLI dropdowns whenever it landed, a pick made meanwhile included; delaying that answer
+  150-600 ms failed create.spec's happy path 4 of 8 runs. Each dropdown remembers the repository it
+  was picked for, and a late answer fills only one nobody picked for that repository. Control:
+  `tasks/new-task-cli-memory.spec` holds `/tasks/last-cli` until after the pick.
+- **A5.7 fix(shared): the global KB schema is ensured once at a time.** Found in A5.3b's live check
+  (#357): the first two `/global-kb/entries` after an api restart, 12 ms apart, answered 500
+  (`tuple concurrently updated`) and 200, because `withGlobalKb` set its per-process flag only after
+  the ensure returned. Concurrent first calls for a store now share one ensure, and the memo is kept
+  per store, so a store `/global-kb/config` switches to at runtime is ensured too (main's flag
+  skipped it until a restart; Codex on #359). Each ensure statement runs in a transaction of its
+  own under `pg_advisory_xact_lock`, a check or a drop in the same one as the write that depends on
+  it: ensures from other processes and installs never run DDL at once, and a table lock ends with
+  its own step. A failed lock, or any `CREATE EXTENSION` failure that says nothing about the
+  server, is retried rather than read as "no pgvector": only 0A000, 58P01 and 42501 select the
+  jsonb table, which no later ensure can convert, here and in the per-repo `ensureRagSchema`
+  (Codex on #359). Controls: `global-kb-client.test.ts` (one ensure for concurrent first calls; a
+  store switched to is ensured), `global-kb-schema.test.ts` (every statement in its own locked
+  transaction; a refused HNSW index rolls back only its step; a failed lock or an unrelated
+  extension failure creates nothing) and `rag-schema.test.ts`. Measured on a scratch Postgres: 8
+  concurrent first ensures on 5 fresh databases failed 35 of 40 on main and 0 after.
 
 ## Track B
 
