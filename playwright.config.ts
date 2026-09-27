@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
+  globalSetup: './tests/e2e/global-setup.ts',
+  globalTeardown: './tests/e2e/global-teardown.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -48,13 +50,19 @@ export default defineConfig({
       name: 'chromium',
       // The visual project is opt-in: it needs the pinned container, and a normal run must not
       // try to compare screenshots taken wherever the developer happens to be.
-      testIgnore: '**/visual/**',
+      testIgnore: ['**/visual/**', '**/harness/**'],
       dependencies: ['sandbox-warmup'],
       use: { ...devices['Desktop Chrome'] },
     },
     {
       name: 'visual',
       testDir: './tests/e2e/visual',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      // Opt-in: checks the harness itself, with a test that times out on purpose.
+      name: 'harness',
+      testDir: './tests/e2e/harness',
       use: { ...devices['Desktop Chrome'] },
     },
   ],

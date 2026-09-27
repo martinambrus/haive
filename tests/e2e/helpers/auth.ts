@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { expect, type APIRequestContext } from '@playwright/test';
 import type postgres from 'postgres';
 
@@ -36,6 +37,15 @@ function hashInviteToken(token: string): string {
 export interface RegisteredUser {
   userId: string;
   email: string;
+}
+
+/** Names the file every account this run registers is appended to, so the global teardown can
+ *  remove the ones a test left behind. Set by the global setup; unset outside a run. */
+export const REGISTERED_USERS_FILE_ENV = 'HAIVE_E2E_REGISTERED_USERS';
+
+function recordRegisteredUser(user: RegisteredUser): void {
+  const file = process.env[REGISTERED_USERS_FILE_ENV];
+  if (file) appendFileSync(file, `${JSON.stringify(user)}\n`);
 }
 
 /**
@@ -135,7 +145,9 @@ export async function registerUser(
   }
 
   const body = (await res.json()) as { user: { id: string } };
-  return { userId: body.user.id, email };
+  const user = { userId: body.user.id, email };
+  recordRegisteredUser(user);
+  return user;
 }
 
 /** Log an existing account in on `request`, for specs that test the login path itself. */

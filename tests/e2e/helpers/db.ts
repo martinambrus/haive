@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { expect, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequest, type APIRequestContext } from '@playwright/test';
 import postgres from 'postgres';
-import { API_BASE } from './auth.js';
+import { API_BASE, loginUser, type RegisteredUser } from './auth.js';
 
 const DEFAULT_URL = 'postgres://haive:haive_dev_password@localhost:5432/haive';
 
@@ -152,6 +152,38 @@ export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<vo
   // first would strand the redeemed invite with nothing left to identify it by.
   await sql`delete from user_invites where consumed_by_user_id = ${userId}`;
   await sql`delete from users where id = ${userId}`;
+}
+
+/**
+ * Remove a user and everything it owns. Its tasks go first, so the dev worker stops acting on a
+ * live one; its repositories and providers go through the api, which also has the worker remove
+ * what it made for them; then the user, unless one of its repositories could not be deleted.
+ */
+export async function removeUser(
+  sql: postgres.Sql,
+  requests: APIRequest,
+  user: RegisteredUser,
+): Promise<void> {
+  if ((await sql`select 1 from users where id = ${user.userId}`).length === 0) return;
+  await sql`delete from tasks where user_id = ${user.userId}`;
+  const repos = await sql<{ id: string }[]>`
+    select id from repositories where user_id = ${user.userId}
+  `;
+  const providers = await sql`select 1 from cli_providers where user_id = ${user.userId}`;
+  let reposGone = true;
+  if (repos.length > 0 || providers.length > 0) {
+    const request = await requests.newContext();
+    try {
+      await loginUser(request, user.email);
+      for (const { id } of repos) {
+        if (!(await deleteRepoViaApi(sql, request, id))) reposGone = false;
+      }
+      await deleteProvidersViaApi(sql, request, user.userId);
+    } finally {
+      await request.dispose();
+    }
+  }
+  if (reposGone) await cleanupUser(sql, user.userId);
 }
 
 export interface ProviderImageState {
