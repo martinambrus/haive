@@ -6,7 +6,10 @@ import type { RagConnection } from '@haive/shared/rag';
 // fake connection captures the generated SQL and we assert on it. This file
 // exists because its absence is why the jsonb branch went without a
 // content_tsv GIN index; the global-KB twin had a schema test and did not drift.
-function fakeConn(opts: { vectorThrows?: boolean } = {}): {
+/** A failure carrying its SQLSTATE, as postgres.js reports one. */
+const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), { code });
+
+function fakeConn(opts: { vectorThrows?: string } = {}): {
   conn: RagConnection;
   queries: () => string;
 } {
@@ -18,7 +21,7 @@ function fakeConn(opts: { vectorThrows?: boolean } = {}): {
     const q = strings.join('');
     captured.push(q);
     if (opts.vectorThrows && q.includes('CREATE EXTENSION')) {
-      return Promise.reject(new Error('pgvector unavailable'));
+      return Promise.reject(pgError(opts.vectorThrows));
     }
     return Promise.resolve([]);
   }) as unknown as { unsafe: (q: string, params?: unknown[]) => Promise<unknown[]> };
@@ -51,7 +54,7 @@ describe('ensureRagSchema', () => {
     // The regression this file was added for. A store with no vector column is
     // exactly the one ragHybridSearch forces onto lexical-only ranking, so
     // without this index every query it serves is a sequential scan.
-    const { conn, queries } = fakeConn({ vectorThrows: true });
+    const { conn, queries } = fakeConn({ vectorThrows: '0A000' });
     const res = await ensureRagSchema(conn);
     const sql = queries();
 
@@ -72,7 +75,7 @@ describe('ensureRagSchema', () => {
     ];
     const withVector = fakeConn();
     await ensureRagSchema(withVector.conn);
-    const jsonb = fakeConn({ vectorThrows: true });
+    const jsonb = fakeConn({ vectorThrows: '0A000' });
     await ensureRagSchema(jsonb.conn);
 
     for (const index of shared) {
@@ -82,7 +85,7 @@ describe('ensureRagSchema', () => {
   });
 
   it('installs the identifier-aware tsvector trigger in both variants', async () => {
-    for (const opts of [{}, { vectorThrows: true }]) {
+    for (const opts of [{}, { vectorThrows: '0A000' }]) {
       const { conn, queries } = fakeConn(opts);
       await ensureRagSchema(conn);
       const sql = queries();
@@ -91,4 +94,24 @@ describe('ensureRagSchema', () => {
       expect(sql).toContain('trg_content_tsv');
     }
   });
+
+  it.each(['58P01', '42501'])(
+    'falls back to jsonb when creating pgvector answers %s',
+    async (code) => {
+      const { conn, queries } = fakeConn({ vectorThrows: code });
+
+      expect((await ensureRagSchema(conn)).usedPgvector).toBe(false);
+      expect(queries()).toContain('embedding_json jsonb NOT NULL');
+    },
+  );
+
+  it.each(['XX000', 'CONNECTION_CLOSED'])(
+    'rethrows an extension failure that says nothing about pgvector (%s), and creates nothing',
+    async (code) => {
+      const { conn, queries } = fakeConn({ vectorThrows: code });
+
+      await expect(ensureRagSchema(conn)).rejects.toMatchObject({ code });
+      expect(queries()).not.toContain('CREATE TABLE');
+    },
+  );
 });
