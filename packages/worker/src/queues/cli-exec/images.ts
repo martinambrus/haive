@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne, or } from 'drizzle-orm';
+import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
@@ -471,8 +471,8 @@ function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProvide
 }
 
 /** Point the provider at the image of `imageTag` while its config still asks for it, and on a shared
- *  tag every sibling it serves: one already on the tag, or one whose own build of it failed. Returns
- *  the tags the rows it moved named before, for the caller to remove once no row names them. */
+ *  tag every sibling whose config asks for it too. Returns the tags the rows it moved named before,
+ *  for the caller to remove once no row names them. */
 export async function markProvidersReady(
   db: Database,
   imageTag: string,
@@ -484,10 +484,7 @@ export async function markProvidersReady(
   return db.transaction(async (tx) => {
     // A sibling still `building` has a build of its own queued or running, forced or not, and
     // reports its own result: marking it here re-enabled its Rebuild button mid-rebuild.
-    const siblings = and(
-      ne(c.sandboxImageBuildStatus, 'building'),
-      or(eq(c.sandboxImageTag, imageTag), eq(c.sandboxImageBuildStatus, 'failed')),
-    );
+    const siblings = ne(c.sandboxImageBuildStatus, 'building');
     const rows = await tx
       .select({
         id: c.id,
@@ -508,12 +505,9 @@ export async function markProvidersReady(
         providerId: r.id,
         sandboxDockerfileExtra: r.sandboxDockerfileExtra,
       })?.tag;
-    // A failed build leaves its row on the image it had, so only its config names the tag it built.
-    // The provider itself moves only while its config asks for this tag: a build of a config it has
-    // since left must not take its row from the build of the new one.
-    const moving = rows.filter(
-      (r) => configTag(r) === imageTag || (r.id !== providerId && r.tag === imageTag),
-    );
+    // Keyed on config, never on the tag a row names: a failed build leaves its row on the image it
+    // had, and a row a build of a config it has since left would move is the newer build's to move.
+    const moving = rows.filter((r) => configTag(r) === imageTag);
     if (moving.length === 0) return [];
     await tx
       .update(c)

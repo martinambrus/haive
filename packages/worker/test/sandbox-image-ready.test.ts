@@ -78,4 +78,30 @@ describe('marking a tag ready', () => {
     ]);
     expect([...replaced].sort()).toEqual(['haive-cli-claude:0.8.0', 'haive-cli-claude:0.9.0']);
   });
+
+  it('leaves a sibling on the tag whose own build of another one failed', async () => {
+    const fake = createFakeDb({ cliProviders: schema.cliProviders });
+    for (const [n, cliVersion, status] of [
+      [1, '1.0.0', 'building'],
+      [2, '2.0.0', 'failed'],
+    ] as const) {
+      fake.insert(schema.cliProviders, {
+        id: provider(n),
+        userId: USER,
+        ...CLAUDE,
+        cliVersion,
+        label: `p${n}`,
+        sandboxImageTag: TAG,
+        sandboxImageBuildStatus: status,
+        sandboxImageBuildError: status === 'failed' ? 'boom' : null,
+      });
+    }
+
+    await markProvidersReady(fake.db as unknown as Database, TAG, provider(1), true);
+
+    expect(fake.rows(schema.cliProviders)[1]).toMatchObject({
+      sandboxImageBuildStatus: 'failed',
+      sandboxImageBuildError: 'boom',
+    });
+  });
 });

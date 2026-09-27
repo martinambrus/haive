@@ -1967,9 +1967,11 @@ before building, so one that failed left the row naming an image that was never 
 the old one any more, and a later success removed the failed tag as "previous" while the old image
 stayed for good. A build now writes only its status when it starts. On success one locked write
 (`markProvidersReady`, its rows locked in id order) moves the provider, and on a shared tag every
-sibling it serves, to the tag: a sibling already on it, or one whose own build of it failed, which
-only its config can name now, since that build left its row where it was. It hands back the tags
-those rows named before, and each goes through the removal check below. The claim is made in the
+sibling not still building, to the tag, each only while its config asks for that tag. It keys on
+config, never on the tag a row names: a failed build leaves its row on the image it had, so a
+sibling on this tag whose config has moved on keeps showing its own failure rather than being
+marked ready on an image it no longer wants. It hands back the tags those rows named before, and
+each goes through the removal check below. The claim is made in the
 tag's turn (`withImageTagLock`) and only while the image stands, and every removal first waits out a
 build of its tag running here: with the row no longer naming a tag while it is built, a provider
 moving off that tag otherwise found it unnamed and removed it just before the build claimed it. A
