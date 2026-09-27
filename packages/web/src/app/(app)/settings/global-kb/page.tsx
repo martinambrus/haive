@@ -1252,6 +1252,8 @@ export default function GlobalKbPage() {
           {rows.map((e) => {
             const inProgress = e.status === 'enriching' || e.status === 'skeleton';
             const failed = e.status === 'failed';
+            // The step Retry refuses a task that is not failed, and finds no deleted one.
+            const retryable = failed && !!e.sourceTaskId && e.sourceTaskStatus === 'failed';
             const clickable = !inProgress && !failed;
             return (
               <Card
@@ -1308,8 +1310,7 @@ export default function GlobalKbPage() {
                           Cancel
                         </Button>
                       )}
-                      {/* The step Retry refuses a task that is not failed, and finds no deleted one. */}
-                      {failed && e.sourceTaskId && e.sourceTaskStatus === 'failed' && (
+                      {retryable && (
                         <Button
                           size="sm"
                           disabled={busy}
@@ -1395,7 +1396,9 @@ export default function GlobalKbPage() {
                     )}
                     {failed && (
                       <span className="text-xs text-red-400">
-                        Enrichment failed — retry, or open the task for details.
+                        {retryable
+                          ? 'Enrichment failed — retry, or open the task for details.'
+                          : 'Enrichment failed — open the task for details.'}
                       </span>
                     )}
                   </div>
