@@ -326,3 +326,93 @@ test.describe('task title strip', () => {
     }
   });
 });
+
+test.describe('task list on a phone', () => {
+  test('a row fits, keeps its title readable and its date clear of the badges', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
+    const waitingTaskId = randomUUID();
+    try {
+      await seedTaskPage(sql, page, 'task-list-phone', fx);
+      // Stalled behind a runtime slot for most of a day: the widest status badge a row carries.
+      const since = new Date(Date.now() - (23 * 60 + 47) * 60_000);
+      const touched = new Date(Date.now() - 30 * 60_000);
+      await sql`
+        insert into tasks (
+          id, user_id, type, title, status, repository_id, current_step_id, current_step_index,
+          started_at, created_at, updated_at
+        ) values (
+          ${waitingTaskId}, ${fx.userId}, 'workflow', 'A task stalled behind a runtime slot',
+          'running', ${fx.repoId}, '01c-ddev-env', 0, ${since}, ${since}, ${since}
+        )
+      `;
+      await sql`
+        insert into task_steps (
+          id, task_id, step_id, step_index, title, status, waiting_started_at, created_at,
+          updated_at
+        ) values (
+          ${randomUUID()}, ${waitingTaskId}, '01c-ddev-env', 0, 'DDEV environment', 'pending',
+          ${since}, ${since}, ${touched}
+        )
+      `;
+
+      const misfits: string[] = [];
+      for (const width of [375, 768, 1280]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto('/tasks');
+        const waiting = page.locator(`a[href="/tasks/${waitingTaskId}"]`, {
+          has: page.locator('h2'),
+        });
+        await expect(waiting.getByText(/stalled\?/)).toBeVisible();
+        for (const [name, taskId] of [
+          ['running', fx.taskId],
+          ['waiting', waitingTaskId],
+        ] as const) {
+          const row = page.locator(`a[href="/tasks/${taskId}"]`, { has: page.locator('h2') });
+          await expect(row).toBeVisible();
+          const title = row.locator('h2');
+          const fit = await title.evaluate((h2) => {
+            const row = h2.parentElement!.parentElement!;
+            const card = row.parentElement!.getBoundingClientRect();
+            const stamp = row.lastElementChild!.getBoundingClientRect();
+            const box = h2.getBoundingClientRect();
+            const badges = Array.from(h2.nextElementSibling!.children).map((b) =>
+              b.getBoundingClientRect(),
+            );
+            return {
+              title: Math.round(box.width),
+              onDate: badges.filter(
+                (b) =>
+                  b.left < stamp.right &&
+                  stamp.left < b.right &&
+                  b.top < stamp.bottom &&
+                  stamp.top < b.bottom,
+              ).length,
+              outsideCard: badges.filter((b) => b.right > card.right + 1).length,
+              dateBesideTitle: stamp.top < box.bottom && box.top < stamp.bottom,
+            };
+          });
+          const overflow = await page
+            .locator('main')
+            .evaluate((el) => el.scrollWidth - el.clientWidth);
+          // 80px is about ten characters, the least a title can show and still name the task.
+          if (overflow > 1 || fit.title < 80 || fit.onDate > 0 || fit.outsideCard > 0) {
+            misfits.push(
+              `${width}px ${name}: overflow ${overflow}px, title ${fit.title}px, badges on the date ${fit.onDate}, badges outside the card ${fit.outsideCard}`,
+            );
+          }
+          if (width === 1280 && !fit.dateBesideTitle) {
+            misfits.push(`1280px ${name}: the date left the title line the desktop row keeps`);
+          }
+        }
+      }
+      expect(misfits, 'every width shows each row whole').toEqual([]);
+    } finally {
+      await cleanupTaskFixture(sql, waitingTaskId);
+      await cleanupTaskPage(sql, fx);
+      await sql.end({ timeout: 5 });
+    }
+  });
+});

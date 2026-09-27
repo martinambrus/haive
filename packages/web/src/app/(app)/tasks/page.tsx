@@ -69,9 +69,11 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
       // could wrap, so the floor was one word wide and nothing showed.
       className="block min-w-0"
     >
-      <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
+      {/* @container: the row wraps by the card's width, not the viewport's, since the sidebar
+          beside the list takes anything from 56 to 484px of the screen. */}
+      <Card className="@container flex flex-col gap-2 transition-colors hover:border-indigo-700">
+        <div className="flex items-center justify-between gap-3 @max-xl:flex-wrap">
+          <div className="flex min-w-0 items-center gap-2 @max-xl:flex-wrap">
             {/* Ahead of the title because this is where tasks are COMPARED — the list is
                 sorted by it, so the column of scores reads down the page. */}
             <TaskVote taskId={task.id} score={task.voteScore ?? 0} />
@@ -84,7 +86,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
                 1280px the default weighting left the title 432px and squeezed the badges onto
                 THREE lines, while losing 118px of title puts them back on two. */}
             <h2
-              className="min-w-0 max-w-[36rem] shrink-[2] truncate text-lg font-semibold text-neutral-50"
+              className="min-w-0 max-w-[36rem] shrink-[2] truncate text-lg font-semibold text-neutral-50 @max-xl:min-w-[min(8rem,100%)] @max-xl:flex-1"
               title={task.title}
             >
               {task.title}
@@ -92,8 +94,9 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
             {/* The badges are their own flex line so they can WRAP under pressure instead of
                 overflowing the card: with the title truncating, nothing else on the row gives.
                 No min-w-0 here on purpose — min-width:auto bottoms the group out at its widest
-                badge, which is exactly as far as it should compress. */}
-            <div className="flex flex-wrap items-center gap-2">
+                badge, which is exactly as far as it should compress. Below a 36rem card the row
+                wraps instead, so there the group may shrink and a long badge truncates. */}
+            <div className="flex flex-wrap items-center gap-2 @max-xl:min-w-0">
               {/* Both a paused task and one queued behind a capacity cap stay `running` in the
                   DB, which made "working", "held" and "waiting in line" look identical here.
                   Paused wins: it is the deliberate state, and the server already suppresses
@@ -106,15 +109,19 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
                   paused
                 </Badge>
               ) : task.slotWait ? (
-                <SlotWaitBadge slotWait={task.slotWait} />
+                <SlotWaitBadge slotWait={task.slotWait} className="@max-xl:max-w-full" />
               ) : (
                 <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
               )}
               <Badge>{TYPE_LABELS[task.type]}</Badge>
               {task.repository && (
-                <Badge variant="info" className="gap-1">
+                <Badge
+                  variant="info"
+                  className="gap-1 @max-xl:max-w-full"
+                  title={task.repository.name}
+                >
                   <FolderGit2 className="h-3 w-3" />
-                  {task.repository.name}
+                  <span className="@max-xl:truncate">{task.repository.name}</span>
                 </Badge>
               )}
               {/* Current step as a badge, matching the fixed-header strip on the task page.
@@ -124,9 +131,15 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
                   older api omits the label. Hidden on done/cancelled tasks — there is no
                   "current" step then, and an amber badge would read as an alert. */}
               {task.currentStepId && task.status !== 'completed' && task.status !== 'cancelled' && (
-                <Badge variant="warning" className="gap-1" title={task.currentStepId}>
+                <Badge
+                  variant="warning"
+                  className="gap-1 @max-xl:max-w-full"
+                  title={task.currentStepId}
+                >
                   <CircleDot className="h-3 w-3" />
-                  {task.currentStepLabel ?? task.currentStepId}
+                  <span className="@max-xl:truncate">
+                    {task.currentStepLabel ?? task.currentStepId}
+                  </span>
                 </Badge>
               )}
             </div>
@@ -449,7 +462,7 @@ export default function TasksPage() {
             Deterministic step engine runs. Status refreshes every few seconds.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <input
             type="search"
             aria-label="Search tasks by title"
@@ -462,7 +475,7 @@ export default function TasksPage() {
             aria-label="Filter by repository"
             value={repoFilter}
             onChange={(e) => setFilter('repositoryId', e.target.value)}
-            className={FILTER_SELECT_CLASS}
+            className={`${FILTER_SELECT_CLASS} max-w-full`}
           >
             <option value="">All repositories</option>
             {repoOptions.map((r) => (
