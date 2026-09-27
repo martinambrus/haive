@@ -339,25 +339,33 @@ one is refused by name.
 **The code read is the target's own commit, always from a snapshot.** Every target, a full one on
 the commit the root has checked out included, reads a SNAPSHOT of its commit: a directory in the
 task's scratch workspace (`repo/scratch-workspace.ts`, the one a repository-less task already
-works in), holding exactly the bytes the commit stores. It is written from the object store
-(`ls-tree -r -z` and `cat-file --batch`, which read no attributes and run no filter), never checked
-out: a checkout falls back to the live checkout's `.gitattributes` where the target has none and
-runs whatever smudge filter the repository's config names, so its bytes need not be the commit's
-— the rule `captureFixBaseline` keeps by reading `.gitattributes` from the empty tree — and a git
-worktree would also write admin files into the repository's `.git`, which for a read-only folder
-import is the person's own. A symlink is written as a regular file holding its target, since
-recreating the link would hand an agent a path out of the snapshot, and a submodule is named in
-the coverage record as not scanned. Every scan and verify agent is mounted on the snapshot
-alone and read-only, since the verify wave must read the bytes the analysis read, and the
-invocation mount has to honour that ahead of its read-only-folder branch, which returns first
-today (see Core changes). Reading the root instead would scan its uncommitted bytes under a commit
-SHA that does not hold them: triage's changed-since-scan check compares commits and would call such
-a finding unchanged, while the coder, cut from the committed tip, could not see what it describes.
-The coverage record names the tracked files the root had changed, since the scan did not read
-them. A step that reads the snapshot re-creates it at the recorded commit when it is gone, so a
-Resume or Retry after `scan-record` removed it reads the same revision, and completing or
-cancelling the task reaps it with the scratch workspace (see Core changes). The price is a second
-copy of the tree for as long as the scan runs.
+works in). Every scan and verify agent is mounted on it alone and read-only, since the verify wave
+must read the bytes the analysis read, and the invocation mount has to honour that ahead of its
+read-only-folder branch, which returns first today (see Core changes). Reading the root instead
+would scan its uncommitted bytes under a commit SHA that does not hold them: triage's
+changed-since-scan check compares commits and would call such a finding unchanged, while the coder,
+cut from the committed tip, could not see what it describes. The coverage record names the tracked
+files the root had changed, since the scan did not read them. A step that reads the snapshot
+re-creates it at the recorded commit when it is gone, so a Resume or Retry after `scan-record`
+removed it reads the same revision, and completing or cancelling the task reaps it with the scratch
+workspace (see Core changes). The price is a second copy of the tree for as long as the scan runs.
+
+**The snapshot holds exactly the bytes the commit stores, and nothing it writes lands outside it.**
+It is written from the object store (`ls-tree -r -z` and `cat-file --batch`, which read no
+attributes and run no filter), never checked out: a checkout falls back to the live checkout's
+`.gitattributes` where the target has none and runs whatever smudge filter the repository's config
+names, so its bytes need not be the commit's — the rule `captureFixBaseline` keeps by reading
+`.gitattributes` from the empty tree — and a git worktree would also write admin files into the
+repository's `.git`, which for a read-only folder import is the person's own. Every git command the
+scan runs, resolution and the diff included, sets `GIT_NO_REPLACE_OBJECTS=1`: a `refs/replace/`
+entry, which a folder import can carry, would otherwise have `ls-tree` and `cat-file` read another
+commit's tree under the SHA the report names. A tree object can hold names no checkout would
+write, so every path is held to git's own checkout rule (`verify_path`: no empty, `.` or `..`
+component, and no `.git`) and a tree that breaks it refuses the target with the path named; each
+file is then written through `@haive/shared/fs-safe` from the snapshot's anchor, never by a
+path-based call. A symlink is written as a regular file holding its target, since recreating the
+link would hand an agent a path out of the snapshot, and a submodule is named in the coverage
+record as not scanned.
 
 A snapshot holds committed files only, the view every worktree run has. Rules and KB that exist
 only uncommitted at the root — onboarding's commit is off by default — reach its agents the way
@@ -664,10 +672,11 @@ former, and this module does both kinds of write.
 - Fan-out Resume, which re-runs only the failed terminals: `packages/api/src/routes/tasks/steps.ts`
 - Shallow clone, the fetch source and the bounded-deepen rule: `repo/clone.ts`, `repo/refresh.ts`,
   `steps/workflow/00a-sync-base.ts`
-- The snapshot's home and its reaper: `repo/scratch-workspace.ts`; the invocation mounts it
-  overrides and extends: `resolveInvocationRepoMount` (`queues/cli-exec/resolvers.ts`) and
-  `resolveTaskUploadsMount` (`queues/cli-exec/exec-core.ts`); the requirements a mining row
-  records: `dispatchRequirements`/`recordedRequirements` in `step-engine/step-runner.ts` and the
+- The snapshot's home, its writer's primitives and its reaper: `repo/scratch-workspace.ts` and
+  `@haive/shared/fs-safe`; the invocation mounts it overrides and extends:
+  `resolveInvocationRepoMount` (`queues/cli-exec/resolvers.ts`) and `resolveTaskUploadsMount`
+  (`queues/cli-exec/exec-core.ts`); the requirements a mining row records:
+  `dispatchRequirements`/`recordedRequirements` in `step-engine/step-runner.ts` and the
   `task_step_agent_minings` table in `packages/database/src/schema/tasks.ts`
 - Pre-answering a later step's form: the `tasks.pre_answers` writer in
   `steps/workflow/06-run-config.ts`, the runner's `overlayPreAnswerDefaults`, and 00a's `base`
@@ -744,6 +753,10 @@ former, and this module does both kinds of write.
 - A snapshot of a commit whose `.gitattributes` asks for line-ending conversion and a smudge filter
   holds the blob bytes unchanged and runs no filter; a symlink arrives as a file holding its
   target, and a submodule is named in the coverage record as not scanned.
+- A malformed tree holding `.`, `..` or `.git` entries (written with `hash-object -t tree
+  --literally`) refuses the target with the path named and writes nothing outside the snapshot.
+- A folder import carrying a `refs/replace/` entry for the target: the snapshot, the diff and the
+  recorded SHA all describe the target's own commit, not the replacement.
 - A `scan-record` whose write fails fails the step and leaves no finding in its output without a
   row, and the Retry writes each row once.
 - A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and a base
