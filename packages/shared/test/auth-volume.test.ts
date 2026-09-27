@@ -4,12 +4,14 @@ import {
   cliAuthProviderVolumeName,
   cliAuthTaskVolumeName,
   cliAuthVolumeName,
+  cliAuthVolumeOwner,
   isCliAuthProviderVolume,
   isCliAuthTaskVolume,
   isCliAuthVolume,
   resolveCliAuthUserVolumeName,
   type CliAuthVolumeCtx,
 } from '../src/cli-providers/auth-volume.js';
+import { ideExtensionsVolumeName } from '../src/constants/index.js';
 
 describe('cliAuthVolumeName (per-user shared)', () => {
   it('strips dashes and truncates user id to 12 chars', () => {
@@ -126,5 +128,37 @@ describe('isCliAuth* discriminators', () => {
     expect(isCliAuthProviderVolume(cliAuthProviderVolumeName('p1', 'codex', 0))).toBe(true);
     expect(isCliAuthProviderVolume(cliAuthVolumeName('u1', 'codex', 0))).toBe(false);
     expect(isCliAuthProviderVolume(cliAuthTaskVolumeName('t1', 'codex', 0))).toBe(false);
+  });
+});
+
+describe('cliAuthVolumeOwner', () => {
+  const USER = 'eeeeeeee-5555-4555-8555-555555555555';
+  const PROVIDER = 'ffffffff-6666-4666-8666-666666666666';
+  const TASK = 'aaaabbbb-cccc-4ddd-8eee-ffff00001111';
+
+  it('reads back the owner every builder here names', () => {
+    expect(cliAuthVolumeOwner(cliAuthVolumeName(USER, 'codex', 0))).toEqual({
+      kind: 'user',
+      slug: 'eeeeeeee5555',
+    });
+    expect(cliAuthVolumeOwner(cliAuthApiKeyVolumeName(USER, 'zai', 1))).toEqual({
+      kind: 'user',
+      slug: 'eeeeeeee5555',
+    });
+    expect(cliAuthVolumeOwner(cliAuthProviderVolumeName(PROVIDER, 'gemini', 0))).toEqual({
+      kind: 'provider',
+      slug: 'ffffffff6666',
+    });
+    expect(cliAuthVolumeOwner(cliAuthTaskVolumeName(TASK, 'claude-code', 0))).toEqual({
+      kind: 'task',
+      slug: 'aaaabbbbcccc',
+    });
+  });
+
+  it('claims no name it did not build', () => {
+    expect(cliAuthVolumeOwner('some_unrelated_volume')).toBeNull();
+    expect(cliAuthVolumeOwner(ideExtensionsVolumeName(USER))).toBeNull();
+    expect(cliAuthVolumeOwner('haive_cli_auth_')).toBeNull();
+    expect(cliAuthVolumeOwner('haive_cli_auth_p_')).toBeNull();
   });
 });

@@ -16,6 +16,9 @@ function idSlug(id: string): string {
   return id.replace(/-/g, '').slice(0, 12);
 }
 
+/** The slug a volume name carries for a task, provider or user id. */
+export const cliAuthIdSlug = idSlug;
+
 export function cliAuthVolumeName(
   userId: string,
   providerName: CliProviderName,
@@ -95,6 +98,24 @@ export function cliAuthTaskVolumeName(
 
 export function isCliAuthVolume(name: string): boolean {
   return name.startsWith(volumePrefix(VOLUME_FAMILY));
+}
+
+/** The prefix every CLI auth volume of this install starts with. */
+export function cliAuthVolumePrefix(): string {
+  return volumePrefix(VOLUME_FAMILY);
+}
+
+/** Whose credential an auth volume holds, read back out of its name: a task's copy, an isolated
+ *  provider row's, or a user's (subscription or API key). Null for a name this module did not build. */
+export function cliAuthVolumeOwner(
+  name: string,
+): { kind: 'task' | 'provider' | 'user'; slug: string } | null {
+  if (!isCliAuthVolume(name)) return null;
+  const [first, second] = name.slice(cliAuthVolumePrefix().length).split('_');
+  if (first === TASK_SEGMENT || first === PROVIDER_SEGMENT) {
+    return second ? { kind: first === TASK_SEGMENT ? 'task' : 'provider', slug: second } : null;
+  }
+  return first ? { kind: 'user', slug: first } : null;
 }
 
 /** The prefix a per-TASK auth volume starts with. Exported so the reaper's docker `name=` filter

@@ -37,7 +37,7 @@ import {
 import { defaultDeps, redriveStalledTasks, StalledTaskSweeper } from './queues/stalled-redrive.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
-import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
+import { reapOrphanedAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
@@ -66,10 +66,9 @@ async function main(): Promise<void> {
   await reapAllCliSandboxes('worker boot').catch((err) => {
     logger.warn({ err }, 'cli sandbox reap on boot failed');
   });
-  // Reap per-task CLI auth volumes orphaned by a prior worker that died mid-teardown
-  // (the leak cleanupTaskContainers can't recover after the fact). Keeps live tasks'
-  // volumes + all per-user/per-provider auth volumes.
-  await reapOrphanedTaskAuthVolumes(getDb()).catch((err) => {
+  // Reap CLI auth volumes whose task ended or whose provider or user is gone, among them the
+  // per-task copies a prior worker that died mid-teardown left behind.
+  await reapOrphanedAuthVolumes(getDb()).catch((err) => {
     logger.warn({ err }, 'orphan auth-volume reap on boot failed');
   });
   // Reap env templates that never reached 'ready' and have no live task — leftovers
