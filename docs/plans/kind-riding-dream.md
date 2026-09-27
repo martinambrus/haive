@@ -336,20 +336,29 @@ later step reads the SHAs: a branch that moves mid-run must not change what the 
 or what the report says was scanned. Prompts name the target by SHA and ref name only, never by
 commit message, which is repository-authored prose.
 
-**History is fetched first, within a bound.** A clone is `git clone --depth 1` (`repo/clone.ts`),
-which is also single-branch, so another branch, a tag, an older commit or a fork point is usually
-not on disk. Both the pickers and the fetch go to the repository's source, the one `repo/refresh.ts`
-already picks: `origin` with its credential, or the host folder of a writable folder import. The
-pickers list `git ls-remote --heads --tags` against that source, since a clone's local refs would
-show one branch, and a listing that fails leaves the fields free-text rather than blocking the
-form. Before resolving, apply fetches the refs the target names, then deepens in bounded steps
-until the base is present — `00a-sync-base`'s rule, never `--unshallow`, since a full history can
-be huge. A target whose base is not reached within the bound is refused, naming the depth reached;
-it is never scanned as the shorter window that did arrive. Fetching a bare SHA depends on the host
-allowing it and is UNMEASURED; a SHA reachable from a ref the target names needs no such allowance.
-A read-only folder import is the person's own clone and is never fetched into, and a repository
-with no source has nothing to fetch from: both list and resolve their local refs, and a missing
-one is refused by name.
+**The scan's git runs in a repository Haive owns, and history is fetched there within a bound.**
+Every git command the scan runs works in a scratch bare repository beside the snapshot, whose
+config Haive writes, with system and global config off (`GIT_CONFIG_NOSYSTEM`,
+`GIT_CONFIG_GLOBAL=/dev/null`); the clone's object store is borrowed through
+`objects/info/alternates`, so nothing already on disk is downloaded again, and the repository's
+own `.git/config` is never read. That config is not Haive's to trust — a folder import's is the
+person's, and a clone's can be written by an agent that had the root mounted — and a denylist of
+the keys that make git run something (`remote.*.uploadpack`, `core.sshCommand`,
+`credential.helper`, `diff.external`, `core.fsmonitor`, hooks) is never complete. The scratch
+repository fetches from the source Haive records rather than from a remote that config names: the
+stored remote URL with Haive's credential helper, the host folder of a writable folder import
+(the source `repo/refresh.ts` already picks), or the person's own clone for a read-only folder
+import, which is read and never written; a repository with no remote is read from its own storage
+the same way. A clone is `git clone --depth 1` (`repo/clone.ts`), which is also single-branch, so
+another branch, a tag, an older commit or a fork point is usually not on disk. The pickers list
+`git ls-remote --heads --tags` against the source, since a clone's local refs would show one
+branch, and a listing that fails leaves the fields free-text rather than blocking the form. Before
+resolving, apply fetches the refs the target names, then deepens in bounded steps until the base
+is present — `00a-sync-base`'s rule, never `--unshallow`, since a full history can be huge. A
+target whose base is not reached within the bound is refused, naming the depth reached; it is
+never scanned as the shorter window that did arrive. Fetching a bare SHA depends on the host
+allowing it and is UNMEASURED; a SHA reachable from a ref the target names needs no such
+allowance. A missing ref is refused by name.
 
 **The code read is the target's own commit, always from a snapshot.** Every target, a full one on
 the commit the root has checked out included, reads a SNAPSHOT of its commit: a directory in the
@@ -374,11 +383,8 @@ names, so its bytes need not be the commit's — the rule `captureFixBaseline` k
 repository's `.git`, which for a read-only folder import is the person's own. Every git command the
 scan runs, resolution and the diff included, sets `GIT_NO_REPLACE_OBJECTS=1`, since a
 `refs/replace/` entry, which a folder import can carry, would otherwise have `ls-tree` and
-`cat-file` read another commit's tree under the SHA the report names; and each one switches off
-what a repository's config can make git run — `--no-ext-diff` and `--no-textconv` on the diff,
-`core.fsmonitor=false`, `core.hooksPath` at an empty directory — since a folder import's config,
-and a clone's once an agent with the root mounted has written it, is not Haive's to trust. A tree
-object can hold names no checkout would write, so every path is held to git's own checkout rule
+`cat-file` read another commit's tree under the SHA the report names. A tree object can hold names
+no checkout would write, so every path is held to git's own checkout rule
 (`verify_path`: no empty, `.` or `..` component, and no `.git`) and a tree that breaks it refuses
 the target with the path named; each file is then written through `@haive/shared/fs-safe` from the
 snapshot's anchor, never by a path-based call, and keeps the executable bit its tree entry records
@@ -397,7 +403,11 @@ so a hit is a pointer to open in the snapshot and never evidence; grounding on d
 mandatory (`_retrieval-guidance.ts`). The coverage record says which rules and KB the scan read.
 
 **A diff target scopes every dimension by LINES, with the fence core already uses.** The changed
-lines come from `git diff --unified=0 <base> <to>` through `parseChangedLineRanges`, the parser and
+lines come from `git diff --unified=0 --no-ext-diff --no-textconv <base> <to>`, run in the scratch
+repository with `GIT_ATTR_SOURCE` pinned to the empty tree as `captureFixBaseline` pins it, so no
+attribute from any source — a committed `.gitattributes`, `info/attributes`, a
+`core.attributesFile` — can mark a changed text file binary and drop its hunks; the notes then
+number the bytes the snapshot holds. They are read through `parseChangedLineRanges`, the parser and
 the `+`-side numbering a task's own review scope uses, and reach agents through
 `changedFilesBlock`. `SCOPE_BOUNDARY` (`_scope-fence.ts`) then applies as written: the lines the
 target wrote, the function or block each sits in, and blast radius. It gets exported for this.
@@ -788,8 +798,12 @@ former, and this module does both kinds of write.
   holds the blob bytes unchanged and runs no filter; a symlink inside the tree arrives as a link,
   one pointing out of it is named with its target and not recreated, and a submodule is named as
   not scanned.
-- A repository whose config sets `diff.external`, a textconv driver, `core.fsmonitor` or a hook
-  runs none of them during a scan, and its changed lines come from git's own diff.
+- A clone whose `.git/config` sets `remote.origin.uploadpack`, `core.sshCommand`, a credential
+  helper, `diff.external`, a textconv driver, `core.fsmonitor` or a hook runs none of them during a
+  scan, since every git command runs in the scratch repository, and its changed lines come from
+  git's own diff.
+- A `.gitattributes`, `info/attributes` entry or `core.attributesFile` marking a changed text file
+  `binary` changes none of the scan's line notes.
 - A tail step's `loop_back` re-enters `scan-fix`, the seed's declared target, which reads the
   diagnosis and edits the integration worktree; `scan-fix` skips round 0, and the seed passes the
   composition validator.
