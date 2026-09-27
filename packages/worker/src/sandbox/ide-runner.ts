@@ -324,10 +324,18 @@ async function ensureIdeRunnerStartedInner(
   }
 
   const { extVolume, udataVolume } = await ensureIdeVolumes(taskId, userId, settingsJson);
+  // `hasRepo` is the task's own, so a repo-less `kb_author` workspace is never lstat'ed as though
+  // it were a repository root. A DDEV SUB-DIRECTORY workspace needs no boundary either: `.git` sits
+  // above what the editor mounts, so it is not in the container at all and nothing there can write
+  // it — the boundary applies exactly where the workspace IS the repository root.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { repositoryId: true },
+  });
   const gitDataMounts = (
     await repoGitDataBoundary(
       { source: REPO_VOLUME, target: '/workspace', subpath: workspaceSubpath },
-      { hasWorktree: false, hasRepo: true },
+      { hasWorktree: false, hasRepo: task?.repositoryId != null },
     )
   ).mounts;
   const handle = await startIdeRunner({

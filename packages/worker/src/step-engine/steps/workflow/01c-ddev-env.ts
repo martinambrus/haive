@@ -353,9 +353,10 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       // not by the filename, which carries no reliable extension (`.backup`,
       // `.dump`, `.pgsql`, …).
       // The dump sits in `_uploads/<userId>/`, which is NOT an anchor: that directory is in the
-      // `haive_repos` volume, which this very runner mounts whole at `/repos`. The storage root
-      // anchors it and both segments below are walked; a row whose path is not that shape answers
-      // null and the sniff is skipped, exactly as an unreadable dump already was.
+      // `haive_repos` volume the runner mounts from (its own dump file, read-only, since
+      // `resolveDumpMounts`). The storage root anchors it and both segments below are walked; a row
+      // whose path is not that shape answers null and the sniff is skipped, exactly as an
+      // unreadable dump already was.
       const dump = d.dumpWorkerPath ? splitUploadPath(REPO_STORAGE_ROOT, d.dumpWorkerPath) : null;
       const format: DumpImportFormat = dump
         ? await sniffDumpFormat(dump.anchor, dump.rel)
