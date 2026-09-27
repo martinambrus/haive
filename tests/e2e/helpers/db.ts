@@ -154,11 +154,11 @@ export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<vo
   await sql`delete from users where id = ${userId}`;
 }
 
-export const TASK_CANCEL_DEADLINE_MS = 30_000;
+export const TASK_CANCEL_DEADLINE_MS = 60_000;
 
 /** Wait until the worker has finished the CANCEL of each task of this user the api cancelled,
- *  since its teardown reads the task's rows until then. */
-async function waitForWorkerCancels(sql: postgres.Sql, userId: string): Promise<void> {
+ *  since its teardown reads the task's rows until then; false when it has not in time. */
+async function waitForWorkerCancels(sql: postgres.Sql, userId: string): Promise<boolean> {
   const deadline = Date.now() + TASK_CANCEL_DEADLINE_MS;
   for (;;) {
     const waiting = await sql`
@@ -173,18 +173,19 @@ async function waitForWorkerCancels(sql: postgres.Sql, userId: string): Promise<
           where e.task_id = t.id and e.event_type = 'task.cancel_finished'
         )
     `;
-    if (waiting.length === 0) return;
+    if (waiting.length === 0) return true;
     if (Date.now() >= deadline) {
-      console.warn(`the worker finished no CANCEL for ${waiting.length} task(s) in time`);
-      return;
+      expect.soft(waiting.length, `cancels the worker did not finish for user ${userId}`).toBe(0);
+      return false;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 }
 
 /**
- * Remove a user and everything it owns through the api first, which cancels its live tasks and
- * cleans up after them from their rows, and only then the user, whose delete takes those rows.
+ * Remove a user and everything it owns through the api first, which cancels its tasks and cleans
+ * up after them from their rows, and only then the user, whose delete takes those rows. A user is
+ * kept while a repository delete or a task's cancel has not finished.
  */
 export async function removeUser(
   sql: postgres.Sql,
@@ -192,16 +193,18 @@ export async function removeUser(
   user: RegisteredUser,
 ): Promise<void> {
   if ((await sql`select 1 from users where id = ${user.userId}`).length === 0) return;
-  const liveTasks = await sql<{ id: string }[]>`
+  // A failed task keeps its runners and worktree for recovery, and only a cancel takes them down.
+  const toCancel = await sql<{ id: string }[]>`
     select id from tasks
-    where user_id = ${user.userId} and status not in ('completed', 'failed', 'cancelled')
+    where user_id = ${user.userId} and status not in ('completed', 'cancelled')
   `;
   const repos = await sql<{ id: string }[]>`
     select id from repositories where user_id = ${user.userId}
   `;
   const providers = await sql`select 1 from cli_providers where user_id = ${user.userId}`;
   let reposGone = true;
-  if (liveTasks.length > 0 || repos.length > 0 || providers.length > 0) {
+  let cancelsFinished: boolean;
+  if (toCancel.length > 0 || repos.length > 0 || providers.length > 0) {
     const request = await requests.newContext();
     try {
       await loginUser(request, user.email);
@@ -209,19 +212,22 @@ export async function removeUser(
         if (!(await deleteRepoViaApi(sql, request, id))) reposGone = false;
       }
       // What no repository delete cancelled; one it did is answered as already cancelled.
-      for (const { id } of liveTasks) {
+      for (const { id } of toCancel) {
         const res = await request.post(`${API_BASE}/tasks/${id}/action`, {
           data: { action: 'cancel' },
         });
         expect.soft(res.status(), `cancel of task ${id}: ${await res.text()}`).toBe(200);
       }
-      await waitForWorkerCancels(sql, user.userId);
-      await deleteProvidersViaApi(sql, request, user.userId);
+      cancelsFinished = await waitForWorkerCancels(sql, user.userId);
+      if (cancelsFinished) await deleteProvidersViaApi(sql, request, user.userId);
     } finally {
       await request.dispose();
     }
+  } else {
+    // A cancel an earlier pass asked for can still be reading the rows.
+    cancelsFinished = await waitForWorkerCancels(sql, user.userId);
   }
-  if (reposGone) await cleanupUser(sql, user.userId);
+  if (reposGone && cancelsFinished) await cleanupUser(sql, user.userId);
 }
 
 export interface ProviderImageState {
