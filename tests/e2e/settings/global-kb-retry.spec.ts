@@ -61,11 +61,19 @@ test.describe('global KB entries', () => {
       await page.goto('/settings/global-kb');
 
       const row = (title: string) => page.getByText(title, { exact: true }).locator('xpath=..');
+      const card = (title: string) => row(title).locator('xpath=..');
       await expect(row('Can run again').getByRole('button', { name: 'Retry' })).toBeVisible();
+      await expect(card('Can run again')).toContainText(
+        'Enrichment failed — retry, or open the task for details.',
+      );
       const cancelled = row('Task was cancelled');
       await expect(cancelled.getByRole('button', { name: 'Go to task' })).toBeVisible();
       await expect(cancelled.getByRole('button', { name: 'Delete' })).toBeVisible();
       await expect(cancelled.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+      await expect(card('Task was cancelled')).toContainText(
+        'Enrichment failed — open the task for details.',
+      );
+      await expect(card('Task was cancelled')).not.toContainText('retry');
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

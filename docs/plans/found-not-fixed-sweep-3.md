@@ -11,7 +11,8 @@
 > shipped and live-verified (#347); A4.2 shipped and live-verified (#348); A4.3 shipped and
 > live-verified (#349); A4.4 shipped and live-verified (#350); A4.5 shipped and live-verified
 > (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3
-> shipped and live-verified (#355); A5.4 in review.
+> shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b (a failed
+> entry's note offers retry only beside a Retry button) in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
@@ -332,6 +333,11 @@ restore); every payload persisted before a PR still replays.
   decision.) The entries API adds `sourceTaskStatus` from an owner-scoped query on `tasks` (the
   KB rows live behind `withGlobalKb`, no join); the page shows Retry only for `failed`, keeps
   Go to task and Delete. Controls: an api vitest on the entries route; a web unit or e2e check.
+- **A5.3b fix(web): a failed KB entry's note offers retry only beside a Retry button.** Found in
+  A5.3's live check (#355): the note under every failed entry still read "retry, or open the task
+  for details." where Retry was no longer offered. One `retryable` condition drives both; without
+  Retry the note reads "open the task for details." Control: `global-kb-retry.spec` asserts each
+  card's note.
 - **A5.4 fix: the plan page says when the snapshot files are missing.** `routes/plan.ts` ~342
   answers `snapshotState: 'updating' | 'missing' | 'written'` (keeping the boolean); the page
   shows "Snapshot missing" (title: Save plan rewrites and commits them) instead of a permanent
