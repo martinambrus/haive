@@ -1962,6 +1962,16 @@ provider ready and re-enable its Rebuild button while the build still ran. Joini
 flight could not close that, since the api sets `building` the moment Rebuild is clicked, before
 any job exists to join.
 
+**A provider's row names its image only once that image exists.** A build used to write its new tag
+before building, so one that failed left the row naming an image that was never made, nothing named
+the old one any more, and a later success removed the failed tag as "previous" while the old image
+stayed for good. A build now writes only its status when it starts. On success one locked write
+(`markProvidersReady`, its rows locked in id order) moves the provider, and on a shared tag every
+sibling it serves, to the tag: a sibling already on it, or one whose own build of it failed, which
+only its config can name now, since that build left its row where it was. It hands back the tags
+those rows named before, and each goes through the removal check below. A provider that stops
+needing an image has the one it named removed the same way.
+
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a
 rebuild's old image goes through (`removeOrphanedPreviousImage`): kept while any other provider

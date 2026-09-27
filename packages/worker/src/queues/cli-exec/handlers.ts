@@ -669,6 +669,11 @@ export async function handleBuildSandboxImageJob(
         updatedAt: new Date(),
       })
       .where(eq(schema.cliProviders.id, provider.id));
+    await removeOrphanedPreviousImage(db, {
+      providerId: provider.id,
+      previousDbTag: provider.sandboxImageTag,
+      newTag: null,
+    });
     log.info(
       { providerId: provider.id },
       'sandbox image build skipped (no install lines, no extras)',
@@ -678,11 +683,20 @@ export async function handleBuildSandboxImageJob(
 
   const { tag: imageTag, shared } = resolution;
   const previousDbTag = provider.sandboxImageTag;
+  const removeReplaced = async (replaced: string[]) => {
+    for (const tag of replaced) {
+      await removeOrphanedPreviousImage(db, {
+        providerId: provider.id,
+        previousDbTag: tag,
+        newTag: imageTag,
+      });
+    }
+  };
 
+  // The row keeps naming the image it has until this one exists, so a failed build leaves it there.
   await db
     .update(schema.cliProviders)
     .set({
-      sandboxImageTag: imageTag,
       sandboxImageBuildStatus: 'building',
       sandboxImageBuildError: null,
       updatedAt: new Date(),
@@ -690,17 +704,12 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   if (!payload.force) {
-    const cached = await withImageTagLock(imageTag, async () => {
-      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return false;
-      await markProvidersReady(db, imageTag, provider.id, shared);
-      return true;
+    const replaced = await withImageTagLock(imageTag, async () => {
+      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
+      return markProvidersReady(db, imageTag, provider.id, shared);
     });
-    if (cached) {
-      await removeOrphanedPreviousImage(db, {
-        providerId: provider.id,
-        previousDbTag,
-        newTag: imageTag,
-      });
+    if (replaced) {
+      await removeReplaced(replaced);
       log.info({ providerId: provider.id, imageTag, shared }, 'sandbox image cache hit');
       return { ok: true, providerId: provider.id, imageTag };
     }
@@ -722,12 +731,7 @@ export async function handleBuildSandboxImageJob(
   try {
     const result = await build;
     if (result.exitCode === 0) {
-      await markProvidersReady(db, imageTag, provider.id, shared);
-      await removeOrphanedPreviousImage(db, {
-        providerId: provider.id,
-        previousDbTag,
-        newTag: imageTag,
-      });
+      await removeReplaced(await markProvidersReady(db, imageTag, provider.id, shared));
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
