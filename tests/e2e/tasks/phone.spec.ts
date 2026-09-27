@@ -1,14 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type Page, type Route } from '@playwright/test';
+import type { Page, Route } from '@playwright/test';
 import type postgres from 'postgres';
-import {
-  cleanupRepoFixture,
-  cleanupTaskFixture,
-  cleanupUser,
-  getSql,
-  seedRepoFixture,
-} from '../helpers/db.js';
-import { registerUser } from '../helpers/auth.js';
+import { seedRepoFixture } from '../helpers/db.js';
+import { expect, test, type TestUsers } from '../helpers/fixtures.js';
 
 /** A summary holding a before/after pair, which renders as a side-by-side diff. */
 const BEFORE_AFTER_SUMMARY = [
@@ -34,17 +28,19 @@ interface TaskPageFixture {
  * usage meters (the current step's default CLI and one of its seats on a second provider), and both
  * estimates, which is the widest those rows get. A finished step carries a duration and a round
  * badge beside its title.
- *
- * Fills `fx` as it goes, so the cleanup removes whatever was created before a failure.
  */
 async function seedTaskPage(
   sql: postgres.Sql,
   page: Page,
+  users: TestUsers,
   prefix: string,
-  fx: TaskPageFixture,
-): Promise<void> {
-  fx.userId = (await registerUser(sql, page.request, { prefix })).userId;
-  fx.repoId = (await seedRepoFixture(sql, fx.userId, 'phone')).repoId;
+): Promise<TaskPageFixture> {
+  const { userId } = await users.register(page.request, { prefix });
+  const fx: TaskPageFixture = {
+    taskId: randomUUID(),
+    userId,
+    repoId: (await seedRepoFixture(sql, userId, 'phone')).repoId,
+  };
   await sql`update repositories set name = ${`phone_${'x'.repeat(48)}`} where id = ${fx.repoId}`;
   const [claude, codex] = [randomUUID(), randomUUID()];
   await sql`
@@ -88,331 +84,290 @@ async function seedTaskPage(
       (${randomUUID()}, ${fx.taskId}, '08c-code-review', 1, 'Phase 6: Code review',
        'running', 0, ${ended}, null, null, ${ended}, ${ended})
   `;
-}
-
-async function cleanupTaskPage(sql: postgres.Sql, fx: TaskPageFixture): Promise<void> {
-  await cleanupTaskFixture(sql, fx.taskId);
-  if (fx.userId) {
-    await sql`delete from user_step_cli_role_preferences where user_id = ${fx.userId}`;
-    await sql`delete from usage_window_snapshots where user_id = ${fx.userId}`;
-    await sql`delete from cli_providers where user_id = ${fx.userId}`;
-  }
-  if (fx.repoId) await cleanupRepoFixture(sql, fx.repoId);
-  if (fx.userId) await cleanupUser(sql, fx.userId);
+  return fx;
 }
 
 test.describe('task page on a phone', () => {
   test.use({ viewport: { width: 375, height: 812 } });
 
-  test('fits the screen, and the title strip keeps to one line', async ({ page }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
-    try {
-      await seedTaskPage(sql, page, 'task-phone', fx);
+  test('fits the screen, and the title strip keeps to one line', async ({ page, sql, users }) => {
+    const fx = await seedTaskPage(sql, page, users, 'task-phone');
 
-      await page.goto(`/tasks/${fx.taskId}`);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-      await expect(page.locator('[title*="subscription usage"]')).toHaveCount(2);
+    await page.goto(`/tasks/${fx.taskId}`);
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await expect(page.locator('[title*="subscription usage"]')).toHaveCount(2);
 
-      const main = page.locator('main');
-      expect(
-        await main.evaluate((el) => el.scrollWidth - el.clientWidth),
-        'nothing pushes the page sideways',
-      ).toBeLessThanOrEqual(1);
+    const main = page.locator('main');
+    expect(
+      await main.evaluate((el) => el.scrollWidth - el.clientWidth),
+      'nothing pushes the page sideways',
+    ).toBeLessThanOrEqual(1);
 
-      const duration = page.locator('[data-step-id] [title="Active work time"]').first();
-      expect(
-        (await duration.boundingBox())!.height,
-        'a step duration keeps to one line',
-      ).toBeLessThan(20);
+    const duration = page.locator('[data-step-id] [title="Active work time"]').first();
+    expect(
+      (await duration.boundingBox())!.height,
+      'a step duration keeps to one line',
+    ).toBeLessThan(20);
 
-      // The document scrolls, not <main> (see sidebar-nav.tsx), and the strip shows only once the
-      // header is scrolled out of view.
-      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-      const strip = page.locator('[data-fixed-title-strip]');
-      await expect(strip).toBeVisible();
-      const fit = await strip.evaluate((el) => {
-        const box = el.getBoundingClientRect();
-        return {
-          height: box.height,
-          outside: Array.from(el.children).filter((child) => {
-            const b = child.getBoundingClientRect();
-            return b.width > 0 && (b.right > box.right + 1 || b.left < box.left - 1);
-          }).length,
-        };
-      });
-      expect(fit.outside, 'every item of the strip is inside it').toBe(0);
-      expect(fit.height, 'the strip keeps to one line').toBeLessThan(48);
-    } finally {
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
-    }
+    // The document scrolls, not <main> (see sidebar-nav.tsx), and the strip shows only once the
+    // header is scrolled out of view.
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const strip = page.locator('[data-fixed-title-strip]');
+    await expect(strip).toBeVisible();
+    const fit = await strip.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return {
+        height: box.height,
+        outside: Array.from(el.children).filter((child) => {
+          const b = child.getBoundingClientRect();
+          return b.width > 0 && (b.right > box.right + 1 || b.left < box.left - 1);
+        }).length,
+      };
+    });
+    expect(fit.outside, 'every item of the strip is inside it').toBe(0);
+    expect(fit.height, 'the strip keeps to one line').toBeLessThan(48);
   });
 
-  test('a before/after pair leaves each half room to read', async ({ page }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
-    try {
-      await seedTaskPage(sql, page, 'task-phone-diff', fx);
+  test('a before/after pair leaves each half room to read', async ({ page, sql, users }) => {
+    const fx = await seedTaskPage(sql, page, users, 'task-phone-diff');
 
-      await page.goto(`/tasks/${fx.taskId}`);
-      const step = page.locator('[data-step-id]', {
-        has: page.getByRole('heading', { name: 'Phase 5b: Test management' }),
-      });
-      await step.getByText('What the agent did').click();
-      const half = step.locator('pre', { hasText: 'DEFAULT_RETRY_COUNT' }).first();
-      await expect(half).toBeVisible();
-      expect(
-        (await half.boundingBox())!.width,
-        'a half shows a line of code, not a few characters of it',
-      ).toBeGreaterThan(200);
-      expect(
-        await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
-        'the pair scrolls inside itself, not the page',
-      ).toBeLessThanOrEqual(1);
+    await page.goto(`/tasks/${fx.taskId}`);
+    const step = page.locator('[data-step-id]', {
+      has: page.getByRole('heading', { name: 'Phase 5b: Test management' }),
+    });
+    await step.getByText('What the agent did').click();
+    const half = step.locator('pre', { hasText: 'DEFAULT_RETRY_COUNT' }).first();
+    await expect(half).toBeVisible();
+    expect(
+      (await half.boundingBox())!.width,
+      'a half shows a line of code, not a few characters of it',
+    ).toBeGreaterThan(200);
+    expect(
+      await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+      'the pair scrolls inside itself, not the page',
+    ).toBeLessThanOrEqual(1);
 
-      // A tablet with the sidebar open leaves the pair less room than a phone does.
-      await page.setViewportSize({ width: 768, height: 1024 });
-      await expect
-        .poll(async () => (await half.boundingBox())!.width, { message: 'the same holds at 768px' })
-        .toBeGreaterThan(200);
-      expect(
-        await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
-        'the pair scrolls inside itself at 768px too',
-      ).toBeLessThanOrEqual(1);
-    } finally {
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
-    }
+    // A tablet with the sidebar open leaves the pair less room than a phone does.
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await expect
+      .poll(async () => (await half.boundingBox())!.width, { message: 'the same holds at 768px' })
+      .toBeGreaterThan(200);
+    expect(
+      await page.locator('main').evaluate((el) => el.scrollWidth - el.clientWidth),
+      'the pair scrolls inside itself at 768px too',
+    ).toBeLessThanOrEqual(1);
   });
 });
 
 test.describe('task title strip', () => {
   test('keeps its title readable at every width, with the sidebar open or folded', async ({
     page,
+    sql,
+    users,
   }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
-    try {
-      await seedTaskPage(sql, page, 'task-strip', fx);
+    const fx = await seedTaskPage(sql, page, users, 'task-strip');
 
-      // Short, so the header scrolls out of view even at the widest width.
-      await page.setViewportSize({ width: 1920, height: 500 });
-      await page.goto(`/tasks/${fx.taskId}`);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-      await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
+    // Short, so the header scrolls out of view even at the widest width.
+    await page.setViewportSize({ width: 1920, height: 500 });
+    await page.goto(`/tasks/${fx.taskId}`);
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
 
-      const strip = page.locator('[data-fixed-title-strip]');
-      const misfits: string[] = [];
-      for (const sidebar of ['open', 'folded'] as const) {
-        if (sidebar === 'folded') {
-          await page.setViewportSize({ width: 1920, height: 500 });
-          await page.evaluate(() => window.scrollTo(0, 0));
-          await page.getByRole('button', { name: 'Collapse sidebar' }).click();
-          await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
-        }
-        for (let width = 375; width <= 1920; width += 25) {
-          await page.setViewportSize({ width, height: 500 });
-          await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-          await expect(strip).toBeVisible();
-          // The strip's own usage chip reads the page's usage poll; hidden or not, its two
-          // meters are in the DOM once that has loaded.
-          await expect(strip.locator('[title*="subscription usage"]')).toHaveCount(2);
-          const fit = await strip.evaluate((el) => ({
-            overflow: el.scrollWidth - el.clientWidth,
-            title: Math.round(el.querySelector('p')!.getBoundingClientRect().width),
-          }));
-          // 80px is about ten characters of the title, the one thing the strip is there to show.
-          if (fit.overflow > 1 || fit.title < 80) {
-            misfits.push(
-              `${width}px, sidebar ${sidebar}: overflow ${fit.overflow}px, title ${fit.title}px`,
-            );
-          }
+    const strip = page.locator('[data-fixed-title-strip]');
+    const misfits: string[] = [];
+    for (const sidebar of ['open', 'folded'] as const) {
+      if (sidebar === 'folded') {
+        await page.setViewportSize({ width: 1920, height: 500 });
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+        await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+      }
+      for (let width = 375; width <= 1920; width += 25) {
+        await page.setViewportSize({ width, height: 500 });
+        await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+        await expect(strip).toBeVisible();
+        // The strip's own usage chip reads the page's usage poll; hidden or not, its two
+        // meters are in the DOM once that has loaded.
+        await expect(strip.locator('[title*="subscription usage"]')).toHaveCount(2);
+        const fit = await strip.evaluate((el) => ({
+          overflow: el.scrollWidth - el.clientWidth,
+          title: Math.round(el.querySelector('p')!.getBoundingClientRect().width),
+        }));
+        // 80px is about ten characters of the title, the one thing the strip is there to show.
+        if (fit.overflow > 1 || fit.title < 80) {
+          misfits.push(
+            `${width}px, sidebar ${sidebar}: overflow ${fit.overflow}px, title ${fit.title}px`,
+          );
         }
       }
-      expect(misfits, 'the strip holds all its items and a readable title').toEqual([]);
-    } finally {
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
     }
+    expect(misfits, 'the strip holds all its items and a readable title').toEqual([]);
   });
 
-  test('the header, the strip and the usage alerts share one poll', async ({ page }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
-    try {
-      await seedTaskPage(sql, page, 'task-usage-poll', fx);
+  test('the header, the strip and the usage alerts share one poll', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const fx = await seedTaskPage(sql, page, users, 'task-usage-poll');
 
-      await page.clock.install();
-      await page.setViewportSize({ width: 1920, height: 500 });
-      await page.goto(`/tasks/${fx.taskId}`);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-      await expect(
-        page.locator('[data-fixed-title-strip] [title*="subscription usage"]'),
-      ).toHaveCount(2);
+    await page.clock.install();
+    await page.setViewportSize({ width: 1920, height: 500 });
+    await page.goto(`/tasks/${fx.taskId}`);
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await expect(
+      page.locator('[data-fixed-title-strip] [title*="subscription usage"]'),
+    ).toHaveCount(2);
 
-      let polls = 0;
-      page.on('request', (request) => {
-        if (new URL(request.url()).pathname === '/usage-window') polls += 1;
-      });
-      await page.clock.fastForward('01:00');
-      // Every consumer's minute tick has fired by now; this gives its request time to leave.
-      await page.waitForTimeout(1_000);
-      expect(polls, 'one /usage-window request a minute for the whole page').toBe(1);
+    let polls = 0;
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/usage-window') polls += 1;
+    });
+    await page.clock.fastForward('01:00');
+    // Every consumer's minute tick has fired by now; this gives its request time to leave.
+    await page.waitForTimeout(1_000);
+    expect(polls, 'one /usage-window request a minute for the whole page').toBe(1);
 
-      // A return to the tab raises both events at once.
-      polls = 0;
-      await page.evaluate(() => {
-        document.dispatchEvent(new Event('visibilitychange'));
-        window.dispatchEvent(new Event('focus'));
-      });
-      await page.waitForTimeout(1_000);
-      expect(polls, 'a return to the tab asks once').toBe(1);
-    } finally {
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
-    }
+    // A return to the tab raises both events at once.
+    polls = 0;
+    await page.evaluate(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    await page.waitForTimeout(1_000);
+    expect(polls, 'a return to the tab asks once').toBe(1);
   });
 
-  test('a refresh that fails does not hide an answer still on its way', async ({ page }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
-    try {
-      await seedTaskPage(sql, page, 'task-usage-race', fx);
+  test('a refresh that fails does not hide an answer still on its way', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const fx = await seedTaskPage(sql, page, users, 'task-usage-race');
 
-      // The page counts its own calls, so the test knows when every request it made has reached
-      // the handler below, and which one the refresh made.
-      await page.addInitScript(() => {
-        const calls = { count: 0 };
-        (window as unknown as { usageCalls: typeof calls }).usageCalls = calls;
-        const fetch = window.fetch.bind(window);
-        window.fetch = (input, init) => {
-          const url = input instanceof Request ? input.url : String(input);
-          if (url.endsWith('/usage-window')) calls.count += 1;
-          return fetch(input, init);
-        };
-      });
-      const issued = () =>
-        page.evaluate(
-          () => (window as unknown as { usageCalls: { count: number } }).usageCalls.count,
-        );
-      const held: Route[] = [];
-      await page.route('**/usage-window', (route) => {
-        held.push(route);
-      });
-      await page.goto(`/tasks/${fx.taskId}`);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-      await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
-      await expect.poll(async () => held.length > 0 && held.length === (await issued())).toBe(true);
-
-      // A notification-settings change refreshes while the first load is still out; the
-      // refresh fails first, then the first load answers.
-      const before = held.length;
-      await page.evaluate(() =>
-        window.dispatchEvent(new Event('haive:notification-settings-changed')),
+    // The page counts its own calls, so the test knows when every request it made has reached
+    // the handler below, and which one the refresh made.
+    await page.addInitScript(() => {
+      const calls = { count: 0 };
+      (window as unknown as { usageCalls: typeof calls }).usageCalls = calls;
+      const fetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith('/usage-window')) calls.count += 1;
+        return fetch(input, init);
+      };
+    });
+    const issued = () =>
+      page.evaluate(
+        () => (window as unknown as { usageCalls: { count: number } }).usageCalls.count,
       );
-      await expect.poll(() => held.length).toBe(before + 1);
-      await held.at(-1)!.abort();
-      for (const route of held.slice(0, -1)) await route.continue();
+    const held: Route[] = [];
+    await page.route('**/usage-window', (route) => {
+      held.push(route);
+    });
+    await page.goto(`/tasks/${fx.taskId}`);
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await expect(page.locator('html[data-shell-hydrated="true"]')).toHaveCount(1);
+    await expect.poll(async () => held.length > 0 && held.length === (await issued())).toBe(true);
 
-      // Two meters in the header; the fixed strip adds two more if the page has scrolled.
-      await expect
-        .poll(() => page.locator('[title*="subscription usage"]').count())
-        .toBeGreaterThanOrEqual(2);
-    } finally {
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
-    }
+    // A notification-settings change refreshes while the first load is still out; the
+    // refresh fails first, then the first load answers.
+    const before = held.length;
+    await page.evaluate(() =>
+      window.dispatchEvent(new Event('haive:notification-settings-changed')),
+    );
+    await expect.poll(() => held.length).toBe(before + 1);
+    await held.at(-1)!.abort();
+    for (const route of held.slice(0, -1)) await route.continue();
+
+    // Two meters in the header; the fixed strip adds two more if the page has scrolled.
+    await expect
+      .poll(() => page.locator('[title*="subscription usage"]').count())
+      .toBeGreaterThanOrEqual(2);
   });
 });
 
 test.describe('task list on a phone', () => {
   test('a row fits, keeps its title readable and its date clear of the badges', async ({
     page,
+    sql,
+    users,
   }) => {
-    const sql = getSql();
-    const fx: TaskPageFixture = { taskId: randomUUID(), userId: '', repoId: '' };
     const waitingTaskId = randomUUID();
-    try {
-      await seedTaskPage(sql, page, 'task-list-phone', fx);
-      // Stalled behind a runtime slot for most of a day: the widest status badge a row carries.
-      const since = new Date(Date.now() - (23 * 60 + 47) * 60_000);
-      const touched = new Date(Date.now() - 30 * 60_000);
-      await sql`
-        insert into tasks (
-          id, user_id, type, title, status, repository_id, current_step_id, current_step_index,
-          started_at, created_at, updated_at
-        ) values (
-          ${waitingTaskId}, ${fx.userId}, 'workflow', 'A task stalled behind a runtime slot',
-          'running', ${fx.repoId}, '01c-ddev-env', 0, ${since}, ${since}, ${since}
-        )
-      `;
-      await sql`
-        insert into task_steps (
-          id, task_id, step_id, step_index, title, status, waiting_started_at, created_at,
-          updated_at
-        ) values (
-          ${randomUUID()}, ${waitingTaskId}, '01c-ddev-env', 0, 'DDEV environment', 'pending',
-          ${since}, ${since}, ${touched}
-        )
-      `;
+    const fx = await seedTaskPage(sql, page, users, 'task-list-phone');
+    // Stalled behind a runtime slot for most of a day: the widest status badge a row carries.
+    const since = new Date(Date.now() - (23 * 60 + 47) * 60_000);
+    const touched = new Date(Date.now() - 30 * 60_000);
+    await sql`
+      insert into tasks (
+        id, user_id, type, title, status, repository_id, current_step_id, current_step_index,
+        started_at, created_at, updated_at
+      ) values (
+        ${waitingTaskId}, ${fx.userId}, 'workflow', 'A task stalled behind a runtime slot',
+        'running', ${fx.repoId}, '01c-ddev-env', 0, ${since}, ${since}, ${since}
+      )
+    `;
+    await sql`
+      insert into task_steps (
+        id, task_id, step_id, step_index, title, status, waiting_started_at, created_at,
+        updated_at
+      ) values (
+        ${randomUUID()}, ${waitingTaskId}, '01c-ddev-env', 0, 'DDEV environment', 'pending',
+        ${since}, ${since}, ${touched}
+      )
+    `;
 
-      const misfits: string[] = [];
-      for (const width of [375, 768, 1280]) {
-        await page.setViewportSize({ width, height: 900 });
-        await page.goto('/tasks');
-        const waiting = page.locator(`a[href="/tasks/${waitingTaskId}"]`, {
-          has: page.locator('h2'),
+    const misfits: string[] = [];
+    for (const width of [375, 768, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/tasks');
+      const waiting = page.locator(`a[href="/tasks/${waitingTaskId}"]`, {
+        has: page.locator('h2'),
+      });
+      await expect(waiting.getByText(/stalled\?/)).toBeVisible();
+      for (const [name, taskId] of [
+        ['running', fx.taskId],
+        ['waiting', waitingTaskId],
+      ] as const) {
+        const row = page.locator(`a[href="/tasks/${taskId}"]`, { has: page.locator('h2') });
+        await expect(row).toBeVisible();
+        const title = row.locator('h2');
+        const fit = await title.evaluate((h2) => {
+          const row = h2.parentElement!.parentElement!;
+          const card = row.parentElement!.getBoundingClientRect();
+          const stamp = row.lastElementChild!.getBoundingClientRect();
+          const box = h2.getBoundingClientRect();
+          const badges = Array.from(h2.nextElementSibling!.children).map((b) =>
+            b.getBoundingClientRect(),
+          );
+          return {
+            title: Math.round(box.width),
+            onDate: badges.filter(
+              (b) =>
+                b.left < stamp.right &&
+                stamp.left < b.right &&
+                b.top < stamp.bottom &&
+                stamp.top < b.bottom,
+            ).length,
+            outsideCard: badges.filter((b) => b.right > card.right + 1).length,
+            dateBesideTitle: stamp.top < box.bottom && box.top < stamp.bottom,
+          };
         });
-        await expect(waiting.getByText(/stalled\?/)).toBeVisible();
-        for (const [name, taskId] of [
-          ['running', fx.taskId],
-          ['waiting', waitingTaskId],
-        ] as const) {
-          const row = page.locator(`a[href="/tasks/${taskId}"]`, { has: page.locator('h2') });
-          await expect(row).toBeVisible();
-          const title = row.locator('h2');
-          const fit = await title.evaluate((h2) => {
-            const row = h2.parentElement!.parentElement!;
-            const card = row.parentElement!.getBoundingClientRect();
-            const stamp = row.lastElementChild!.getBoundingClientRect();
-            const box = h2.getBoundingClientRect();
-            const badges = Array.from(h2.nextElementSibling!.children).map((b) =>
-              b.getBoundingClientRect(),
-            );
-            return {
-              title: Math.round(box.width),
-              onDate: badges.filter(
-                (b) =>
-                  b.left < stamp.right &&
-                  stamp.left < b.right &&
-                  b.top < stamp.bottom &&
-                  stamp.top < b.bottom,
-              ).length,
-              outsideCard: badges.filter((b) => b.right > card.right + 1).length,
-              dateBesideTitle: stamp.top < box.bottom && box.top < stamp.bottom,
-            };
-          });
-          const overflow = await page
-            .locator('main')
-            .evaluate((el) => el.scrollWidth - el.clientWidth);
-          // 80px is about ten characters, the least a title can show and still name the task.
-          if (overflow > 1 || fit.title < 80 || fit.onDate > 0 || fit.outsideCard > 0) {
-            misfits.push(
-              `${width}px ${name}: overflow ${overflow}px, title ${fit.title}px, badges on the date ${fit.onDate}, badges outside the card ${fit.outsideCard}`,
-            );
-          }
-          if (width === 1280 && !fit.dateBesideTitle) {
-            misfits.push(`1280px ${name}: the date left the title line the desktop row keeps`);
-          }
+        const overflow = await page
+          .locator('main')
+          .evaluate((el) => el.scrollWidth - el.clientWidth);
+        // 80px is about ten characters, the least a title can show and still name the task.
+        if (overflow > 1 || fit.title < 80 || fit.onDate > 0 || fit.outsideCard > 0) {
+          misfits.push(
+            `${width}px ${name}: overflow ${overflow}px, title ${fit.title}px, badges on the date ${fit.onDate}, badges outside the card ${fit.outsideCard}`,
+          );
+        }
+        if (width === 1280 && !fit.dateBesideTitle) {
+          misfits.push(`1280px ${name}: the date left the title line the desktop row keeps`);
         }
       }
-      expect(misfits, 'every width shows each row whole').toEqual([]);
-    } finally {
-      await cleanupTaskFixture(sql, waitingTaskId);
-      await cleanupTaskPage(sql, fx);
-      await sql.end({ timeout: 5 });
     }
+    expect(misfits, 'every width shows each row whole').toEqual([]);
   });
 });

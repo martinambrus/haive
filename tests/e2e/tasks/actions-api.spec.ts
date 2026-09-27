@@ -1,14 +1,6 @@
-import { expect, test } from '@playwright/test';
-import {
-  cleanupTaskFixture,
-  cleanupUser,
-  getSql,
-  readTaskStatus,
-  seedTaskFixture,
-  type TaskFixture,
-  FIXTURE_FAILED_STEP_ID,
-} from '../helpers/db.js';
-import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
+import { readTaskStatus, seedTaskFixture, FIXTURE_FAILED_STEP_ID } from '../helpers/db.js';
+import { API_BASE } from '../helpers/auth.js';
+import { expect, test } from '../helpers/fixtures.js';
 import type postgres from 'postgres';
 
 async function setTaskStatus(sql: postgres.Sql, taskId: string, status: string): Promise<void> {
@@ -16,111 +8,78 @@ async function setTaskStatus(sql: postgres.Sql, taskId: string, status: string):
 }
 
 test.describe('task actions API', () => {
-  test('retry rejects non-failed task with 409', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-retry-rej');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'retry-rej');
-      await setTaskStatus(sql, fixture.taskId, 'running');
+  test('retry rejects non-failed task with 409', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-retry-rej' });
+    const fixture = await seedTaskFixture(sql, userId, 'retry-rej');
+    await setTaskStatus(sql, fixture.taskId, 'running');
 
-      const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
-        data: { action: 'retry' },
-      });
-      expect(res.status()).toBe(409);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
+      data: { action: 'retry' },
+    });
+    expect(res.status()).toBe(409);
   });
 
-  test('cancel is idempotent on already-cancelled or completed task', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-cancel-idem');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'cancel-idem');
-      await setTaskStatus(sql, fixture.taskId, 'cancelled');
+  test('cancel is idempotent on already-cancelled or completed task', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-cancel-idem' });
+    const fixture = await seedTaskFixture(sql, userId, 'cancel-idem');
+    await setTaskStatus(sql, fixture.taskId, 'cancelled');
 
-      const cancelAgain = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
-        data: { action: 'cancel' },
-      });
-      expect(cancelAgain.status()).toBe(200);
-      expect((await cancelAgain.json()).status).toBe('cancelled');
+    const cancelAgain = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
+      data: { action: 'cancel' },
+    });
+    expect(cancelAgain.status()).toBe(200);
+    expect((await cancelAgain.json()).status).toBe('cancelled');
 
-      await setTaskStatus(sql, fixture.taskId, 'completed');
-      const cancelCompleted = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/action`,
-        { data: { action: 'cancel' } },
-      );
-      expect(cancelCompleted.status()).toBe(200);
-      expect((await cancelCompleted.json()).status).toBe('completed');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    await setTaskStatus(sql, fixture.taskId, 'completed');
+    const cancelCompleted = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
+      data: { action: 'cancel' },
+    });
+    expect(cancelCompleted.status()).toBe(200);
+    expect((await cancelCompleted.json()).status).toBe('completed');
   });
 
-  test('retry on a failed task re-runs its step and clears errorMessage', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-retry-ok');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'retry-ok');
+  test('retry on a failed task re-runs its step and clears errorMessage', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-retry-ok' });
+    const fixture = await seedTaskFixture(sql, userId, 'retry-ok');
 
-      const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
-        data: { action: 'retry' },
-      });
-      expect(res.status()).toBe(200);
-      expect((await res.json()).status).toBe('running');
+    const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
+      data: { action: 'retry' },
+    });
+    expect(res.status()).toBe(200);
+    expect((await res.json()).status).toBe('running');
 
-      // errorMessage is cleared synchronously in the retry transaction and
-      // is not restored to the original value when the worker re-fails the
-      // fixture task (markTaskFailed writes a new message). The presence of
-      // task.retried in the event log proves the synchronous handler ran.
-      const events = await sql<{ event_type: string }[]>`
-        select event_type from task_events
-        where task_id = ${fixture.taskId} and event_type = 'task.retried'
-      `;
-      expect(events).toHaveLength(1);
+    // errorMessage is cleared synchronously in the retry transaction and
+    // is not restored to the original value when the worker re-fails the
+    // fixture task (markTaskFailed writes a new message). The presence of
+    // task.retried in the event log proves the synchronous handler ran.
+    const events = await sql<{ event_type: string }[]>`
+      select event_type from task_events
+      where task_id = ${fixture.taskId} and event_type = 'task.retried'
+    `;
+    expect(events).toHaveLength(1);
 
-      const rows = await sql<{ error_message: string | null }[]>`
-        select error_message from tasks where id = ${fixture.taskId}
-      `;
-      expect(rows[0]!.error_message).not.toBe('simulated failure');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const rows = await sql<{ error_message: string | null }[]>`
+      select error_message from tasks where id = ${fixture.taskId}
+    `;
+    expect(rows[0]!.error_message).not.toBe('simulated failure');
   });
 
-  test('unknown action returns 400', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-unknown');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'unknown');
+  test('unknown action returns 400', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-unknown' });
+    const fixture = await seedTaskFixture(sql, userId, 'unknown');
 
-      const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
-        data: { action: 'launch_nukes' },
-      });
-      expect([400, 422]).toContain(res.status());
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.post(`${API_BASE}/tasks/${fixture.taskId}/action`, {
+      data: { action: 'launch_nukes' },
+    });
+    expect([400, 422]).toContain(res.status());
   });
 });
 
@@ -143,151 +102,125 @@ async function readStepRow(sql: postgres.Sql, stepPkId: string): Promise<StepRow
 test.describe('step retry API', () => {
   test('retry on done step cascades downstream + clears formSchema/formValues/output', async ({
     page,
+    sql,
+    users,
   }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry-done');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry-done');
+    const { userId } = await users.register(page.request, { prefix: 'step-retry-done' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry-done');
 
-      // Mutate fixture: step 0 done w/ form data + output, step 1 done w/ form
-      // data + output, step 2 pending. The task stays failed: a step action refuses a completed one.
-      await sql`
-        update task_steps set status = 'done',
-          form_schema = ${JSON.stringify({ title: 'old' })}::jsonb,
-          form_values = ${JSON.stringify({ x: 1 })}::jsonb,
-          output = ${JSON.stringify({ result: 'a' })}::jsonb,
-          detect_output = ${JSON.stringify({ d: 1 })}::jsonb,
-          ended_at = now()
-        where id = ${fixture.failedStepId}
-      `;
-      await sql`
-        update task_steps set status = 'done',
-          form_schema = ${JSON.stringify({ title: 'mid' })}::jsonb,
-          form_values = ${JSON.stringify({ y: 2 })}::jsonb,
-          output = ${JSON.stringify({ result: 'b' })}::jsonb,
-          ended_at = now()
-        where id = ${fixture.middleStepId}
-      `;
+    // Mutate fixture: step 0 done w/ form data + output, step 1 done w/ form
+    // data + output, step 2 pending. The task stays failed: a step action refuses a completed one.
+    await sql`
+      update task_steps set status = 'done',
+        form_schema = ${JSON.stringify({ title: 'old' })}::jsonb,
+        form_values = ${JSON.stringify({ x: 1 })}::jsonb,
+        output = ${JSON.stringify({ result: 'a' })}::jsonb,
+        detect_output = ${JSON.stringify({ d: 1 })}::jsonb,
+        ended_at = now()
+      where id = ${fixture.failedStepId}
+    `;
+    await sql`
+      update task_steps set status = 'done',
+        form_schema = ${JSON.stringify({ title: 'mid' })}::jsonb,
+        form_values = ${JSON.stringify({ y: 2 })}::jsonb,
+        output = ${JSON.stringify({ result: 'b' })}::jsonb,
+        ended_at = now()
+      where id = ${fixture.middleStepId}
+    `;
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      const resBody = await res.text();
-      expect(res.status(), `retry failed body=${resBody}`).toBe(200);
-      expect(JSON.parse(resBody).status).toBe('pending');
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    const resBody = await res.text();
+    expect(res.status(), `retry failed body=${resBody}`).toBe(200);
+    expect(JSON.parse(resBody).status).toBe('pending');
 
-      const target = await readStepRow(sql, fixture.failedStepId);
-      expect(target?.status).toBe('pending');
-      expect(target?.form_schema).toBeNull();
-      expect(target?.form_values).toBeNull();
-      expect(target?.output).toBeNull();
-      expect(target?.detect_output).toBeNull();
+    const target = await readStepRow(sql, fixture.failedStepId);
+    expect(target?.status).toBe('pending');
+    expect(target?.form_schema).toBeNull();
+    expect(target?.form_values).toBeNull();
+    expect(target?.output).toBeNull();
+    expect(target?.detect_output).toBeNull();
 
-      const middle = await readStepRow(sql, fixture.middleStepId);
-      expect(middle?.status).toBe('pending');
-      expect(middle?.form_schema).toBeNull();
-      expect(middle?.output).toBeNull();
+    const middle = await readStepRow(sql, fixture.middleStepId);
+    expect(middle?.status).toBe('pending');
+    expect(middle?.form_schema).toBeNull();
+    expect(middle?.output).toBeNull();
 
-      const last = await readStepRow(sql, fixture.lastStepId);
-      expect(last?.status).toBe('pending');
+    const last = await readStepRow(sql, fixture.lastStepId);
+    expect(last?.status).toBe('pending');
 
-      // task.status raced with the worker re-failing the fictitious step
-      // (handleAdvanceStep falls through to markTaskFailed for unknown step
-      // ids). currentStepId is durable because markTaskFailed doesn't touch
-      // it; step rows are durable because failure path doesn't update them.
-      const taskRow = await readTaskStatus(sql, fixture.taskId);
-      expect(taskRow?.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
+    // task.status raced with the worker re-failing the fictitious step
+    // (handleAdvanceStep falls through to markTaskFailed for unknown step
+    // ids). currentStepId is durable because markTaskFailed doesn't touch
+    // it; step rows are durable because failure path doesn't update them.
+    const taskRow = await readTaskStatus(sql, fixture.taskId);
+    expect(taskRow?.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
 
-      const events = await sql<{ payload: Record<string, unknown> }[]>`
-        select payload from task_events
-        where task_id = ${fixture.taskId} and event_type = 'step.retry'
-      `;
-      expect(events).toHaveLength(1);
-      expect(events[0]!.payload.priorStatus).toBe('done');
-      // Step 1 (middle) was 'done' → cascaded. Step 2 (last) was 'pending' → not counted.
-      expect(events[0]!.payload.cascadedSteps).toBe(1);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const events = await sql<{ payload: Record<string, unknown> }[]>`
+      select payload from task_events
+      where task_id = ${fixture.taskId} and event_type = 'step.retry'
+    `;
+    expect(events).toHaveLength(1);
+    expect(events[0]!.payload.priorStatus).toBe('done');
+    // Step 1 (middle) was 'done' → cascaded. Step 2 (last) was 'pending' → not counted.
+    expect(events[0]!.payload.cascadedSteps).toBe(1);
   });
 
   test('retry on waiting_form step clears stale form schema (regression: KB acquisition bug)', async ({
     page,
+    sql,
+    users,
   }) => {
     // Verifies the bug where step-runner kept a stale form_schema after retry
     // because the retry endpoint did not clear the form_schema column. Without
     // this clearing, the runner skips stepDef.form() regen and the UI stays
     // pinned to the prior diagnostic.
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry-wf');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry-wf');
+    const { userId } = await users.register(page.request, { prefix: 'step-retry-wf' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry-wf');
 
-      const stalePayload = { title: 'stale unparseable form', fields: [] };
-      await sql`
-        update task_steps set status = 'waiting_form',
-          form_schema = ${JSON.stringify(stalePayload)}::jsonb,
-          form_values = ${JSON.stringify({ manualTopics: 'old' })}::jsonb
-        where id = ${fixture.failedStepId}
-      `;
-      await setTaskStatus(sql, fixture.taskId, 'waiting_user');
+    const stalePayload = { title: 'stale unparseable form', fields: [] };
+    await sql`
+      update task_steps set status = 'waiting_form',
+        form_schema = ${JSON.stringify(stalePayload)}::jsonb,
+        form_values = ${JSON.stringify({ manualTopics: 'old' })}::jsonb
+      where id = ${fixture.failedStepId}
+    `;
+    await setTaskStatus(sql, fixture.taskId, 'waiting_user');
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(200);
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(200);
 
-      const after = await readStepRow(sql, fixture.failedStepId);
-      expect(after?.status).toBe('pending');
-      expect(after?.form_schema).toBeNull();
-      expect(after?.form_values).toBeNull();
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const after = await readStepRow(sql, fixture.failedStepId);
+    expect(after?.status).toBe('pending');
+    expect(after?.form_schema).toBeNull();
+    expect(after?.form_values).toBeNull();
   });
 
-  test('retry on skipped step succeeds', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry-skip');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry-skip');
+  test('retry on skipped step succeeds', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-retry-skip' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry-skip');
 
-      await sql`update task_steps set status = 'skipped' where id = ${fixture.failedStepId}`;
+    await sql`update task_steps set status = 'skipped' where id = ${fixture.failedStepId}`;
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(200);
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(200);
 
-      const after = await readStepRow(sql, fixture.failedStepId);
-      expect(after?.status).toBe('pending');
+    const after = await readStepRow(sql, fixture.failedStepId);
+    expect(after?.status).toBe('pending');
 
-      const events = await sql<{ payload: Record<string, unknown> }[]>`
-        select payload from task_events
-        where task_id = ${fixture.taskId} and event_type = 'step.retry'
-      `;
-      expect(events[0]!.payload.priorStatus).toBe('skipped');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const events = await sql<{ payload: Record<string, unknown> }[]>`
+      select payload from task_events
+      where task_id = ${fixture.taskId} and event_type = 'step.retry'
+    `;
+    expect(events[0]!.payload.priorStatus).toBe('skipped');
   });
 
   // These asserted 409. The handler says the opposite in as many words — "Any status is
@@ -295,112 +228,79 @@ test.describe('step retry API', () => {
   // the cascade is live it force-kills the task's sandboxes rather than refusing. So the contract
   // to pin is that the step comes back RESET, whatever state it was in.
   for (const status of ['running', 'waiting_cli', 'pending'] as const) {
-    test(`retry on a ${status} step resets it`, async ({ page }) => {
-      const sql = getSql();
-      let userId = '';
-      let fixture: TaskFixture | null = null;
-      try {
-        const email = uniqueEmail(`step-retry-${status}`);
-        userId = (await registerUser(sql, page.request, { email })).userId;
-        fixture = await seedTaskFixture(sql, userId, `step-retry-${status}`);
+    test(`retry on a ${status} step resets it`, async ({ page, sql, users }) => {
+      const { userId } = await users.register(page.request, { prefix: `step-retry-${status}` });
+      const fixture = await seedTaskFixture(sql, userId, `step-retry-${status}`);
 
-        await sql`update task_steps set status = ${status}::step_status where id = ${fixture.failedStepId}`;
+      await sql`update task_steps set status = ${status}::step_status where id = ${fixture.failedStepId}`;
 
-        const res = await page.request.post(
-          `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-          { data: { action: 'retry' } },
-        );
-        expect(res.status()).toBe(200);
+      const res = await page.request.post(
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+        { data: { action: 'retry' } },
+      );
+      expect(res.status()).toBe(200);
 
-        const after = await readStepRow(sql, fixture.failedStepId);
-        expect(after?.status, `a ${status} step should be reset by retry`).toBe('pending');
-      } finally {
-        if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-        if (userId) await cleanupUser(sql, userId);
-        await sql.end({ timeout: 5 });
-      }
+      const after = await readStepRow(sql, fixture.failedStepId);
+      expect(after?.status, `a ${status} step should be reset by retry`).toBe('pending');
     });
   }
 
   // Also asserted 409, and also inverted: a running DOWNSTREAM step does not block a retry, it
   // gets swept into the reset. That is the whole point of the cascade.
-  test('retry resets a running downstream step too', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry-blocked');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry-blocked');
+  test('retry resets a running downstream step too', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-retry-blocked' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry-blocked');
 
-      await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.failedStepId}`;
-      await sql`update task_steps set status = 'running', started_at = now() where id = ${fixture.middleStepId}`;
+    await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.failedStepId}`;
+    await sql`update task_steps set status = 'running', started_at = now() where id = ${fixture.middleStepId}`;
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(200);
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(200);
 
-      // Both the clicked step and the running one after it come back pending.
-      const target = await readStepRow(sql, fixture.failedStepId);
-      expect(target?.status, 'the clicked step is reset').toBe('pending');
-      const downstream = await readStepRow(sql, fixture.middleStepId);
-      expect(downstream?.status, 'the running downstream step is swept into the reset').toBe(
-        'pending',
-      );
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    // Both the clicked step and the running one after it come back pending.
+    const target = await readStepRow(sql, fixture.failedStepId);
+    expect(target?.status, 'the clicked step is reset').toBe('pending');
+    const downstream = await readStepRow(sql, fixture.middleStepId);
+    expect(downstream?.status, 'the running downstream step is swept into the reset').toBe(
+      'pending',
+    );
   });
 
-  test('retry supersedes cli_invocations for cascaded steps', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry-supersede');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry-supersede');
+  test('retry supersedes cli_invocations for cascaded steps', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-retry-supersede' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry-supersede');
 
-      await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.failedStepId}`;
-      await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.middleStepId}`;
+    await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.failedStepId}`;
+    await sql`update task_steps set status = 'done', ended_at = now() where id = ${fixture.middleStepId}`;
 
-      // Insert one live cli_invocation per step. cli_provider_id is nullable
-      // (onDelete: set null), so leaving it null avoids needing a provider row.
-      const invTarget = await sql<{ id: string }[]>`
-        insert into cli_invocations (task_id, task_step_id, mode, prompt)
-        values (${fixture.taskId}, ${fixture.failedStepId}, 'cli', 'p1')
-        returning id
-      `;
-      const invDownstream = await sql<{ id: string }[]>`
-        insert into cli_invocations (task_id, task_step_id, mode, prompt)
-        values (${fixture.taskId}, ${fixture.middleStepId}, 'cli', 'p2')
-        returning id
-      `;
+    // Insert one live cli_invocation per step. cli_provider_id is nullable
+    // (onDelete: set null), so leaving it null avoids needing a provider row.
+    const invTarget = await sql<{ id: string }[]>`
+      insert into cli_invocations (task_id, task_step_id, mode, prompt)
+      values (${fixture.taskId}, ${fixture.failedStepId}, 'cli', 'p1')
+      returning id
+    `;
+    const invDownstream = await sql<{ id: string }[]>`
+      insert into cli_invocations (task_id, task_step_id, mode, prompt)
+      values (${fixture.taskId}, ${fixture.middleStepId}, 'cli', 'p2')
+      returning id
+    `;
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(200);
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(200);
 
-      const rows = await sql<{ id: string; superseded_at: Date | null }[]>`
-        select id, superseded_at from cli_invocations
-        where id in (${invTarget[0]!.id}, ${invDownstream[0]!.id})
-      `;
-      for (const r of rows) {
-        expect(r.superseded_at, `invocation ${r.id} should be superseded`).not.toBeNull();
-      }
-
-      // Cleanup the rows we inserted (cleanupTaskFixture only deletes from
-      // task_events/task_steps/tasks; cli_invocations cascade on tasks delete).
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
+    const rows = await sql<{ id: string; superseded_at: Date | null }[]>`
+      select id, superseded_at from cli_invocations
+      where id in (${invTarget[0]!.id}, ${invDownstream[0]!.id})
+    `;
+    for (const r of rows) {
+      expect(r.superseded_at, `invocation ${r.id} should be superseded`).not.toBeNull();
     }
   });
 });

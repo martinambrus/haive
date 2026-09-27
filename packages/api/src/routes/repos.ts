@@ -2802,6 +2802,8 @@ repoRoutes.delete('/:id', async (c) => {
   let internalRagProjectNames: string[] = [];
   let storagePath: string | null = null;
   let capturedTasks: { id: string; envTemplateId: string | null }[] = [];
+  let envTemplateIds: string[] = [];
+  let envImageTags: Record<string, string> = {};
 
   await db.transaction(async (tx) => {
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
@@ -2846,6 +2848,18 @@ repoRoutes.delete('/:id', async (c) => {
       .select({ id: schema.tasks.id, envTemplateId: schema.tasks.envTemplateId })
       .from(schema.tasks)
       .where(and(eq(schema.tasks.repositoryId, id), eq(schema.tasks.userId, userId)));
+    envTemplateIds = Array.from(
+      new Set(capturedTasks.map((t) => t.envTemplateId).filter((x): x is string => x !== null)),
+    );
+    if (envTemplateIds.length > 0) {
+      const templates = await tx
+        .select({ id: schema.envTemplates.id, imageTag: schema.envTemplates.imageTag })
+        .from(schema.envTemplates)
+        .where(inArray(schema.envTemplates.id, envTemplateIds));
+      envImageTags = Object.fromEntries(
+        templates.flatMap((t) => (t.imageTag ? [[t.id, t.imageTag] as const] : [])),
+      );
+    }
 
     const open = await cancelOpenTasksForRepo(tx, id, userId);
     cancelled.push(...open);
@@ -2881,9 +2895,8 @@ repoRoutes.delete('/:id', async (c) => {
     userId,
     repositoryId: id,
     taskIds: capturedTasks.map((t) => t.id),
-    envTemplateIds: Array.from(
-      new Set(capturedTasks.map((t) => t.envTemplateId).filter((x): x is string => x !== null)),
-    ),
+    envTemplateIds,
+    envImageTags,
     storagePath,
   });
 

@@ -3264,6 +3264,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
   // delete the still-enriching row so it disappears from the KB view too.
   await reconcileKbAuthorEntryOnTaskEnd(db, payload.taskId, 'cancelled', logger);
+  // The teardown above reads this task's rows, so whoever deletes them waits for this record.
+  await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });
 }
 
 async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {
@@ -3314,11 +3316,12 @@ async function handleCleanupRepoResources(
         where: eq(schema.envTemplates.id, envTemplateId),
         columns: { imageTag: true },
       });
-      if (tpl?.imageTag) {
-        const result = await defaultDockerRunner.remove(tpl.imageTag);
+      const imageTag = tpl?.imageTag ?? payload.envImageTags?.[envTemplateId];
+      if (imageTag) {
+        const result = await defaultDockerRunner.remove(imageTag);
         if (!result.ok) {
           logger.warn(
-            { envTemplateId, imageTag: tpl.imageTag, stderr: result.stderr },
+            { envTemplateId, imageTag, stderr: result.stderr },
             'repo-cleanup: env image removal failed',
           );
           continue;

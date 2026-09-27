@@ -354,12 +354,14 @@ export interface RepoRagCleanupPayload {
  *  repo's haive_repos files. Captured before the delete because `repository_id`
  *  cascades to NULL, so the worker could not trace these afterward. `storagePath`
  *  is only removed when it lives under the worker's repo-storage root (never a
- *  `/host-fs` local-path repo). */
+ *  `/host-fs` local-path repo). `envImageTags` carries each template's image tag,
+ *  since a template row goes with its user and can be gone when the job runs. */
 export interface RepoResourceCleanupPayload {
   userId: string;
   repositoryId: string;
   taskIds: string[];
   envTemplateIds: string[];
+  envImageTags?: Record<string, string>;
   storagePath: string | null;
 }
 

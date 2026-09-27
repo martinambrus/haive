@@ -11,8 +11,8 @@
 > shipped and live-verified (#347); A4.2 shipped and live-verified (#348); A4.3 shipped and
 > live-verified (#349); A4.4 shipped and live-verified (#350); A4.5 shipped and live-verified
 > (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3
-> shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b (a failed
-> entry's note offers retry only beside a Retry button) in review.
+> shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and
+> live-verified (#357); A5.5 in review.
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
@@ -345,13 +345,18 @@ restore); every payload persisted before a PR still replays.
   Controls: an api vitest per state; `plan/tree.spec.ts`.
 - **A5.5 test(e2e): fixtures are removed even when a spec times out.** A spec's own `finally`
   never runs after a timeout (Playwright stops awaiting the body). New
-  `tests/e2e/helpers/fixtures.ts` on `base.extend`: `users.register()` records each user; its
-  teardown (own timeout) deletes the user's tasks, deletes repos and providers through the api,
-  then `cleanupUser`. Backstop: `registerUser` appends to a run file and a config-level
-  `globalTeardown` purges recorded ids still present. `cleanupTaskFixture` becomes one
-  `delete from tasks` (steps and events cascade); fixture tasks seed `updated_at = now()`.
-  Migrate the specs that seed running tasks first. Control: an opt-in harness project whose spec
-  seeds a user and a running task and then times out; the teardown check asserts both are gone.
+  `tests/e2e/helpers/fixtures.ts` on `base.extend`: `users.register()` records each user, and its
+  teardown (own timeout) removes each one through `removeUser`: repositories through the api
+  first, which cancels their live tasks and records them for the resource cleanup, then every task
+  still live through the api's cancel action, then a wait for the worker to finish each cancel
+  (`task.cancel_finished`, a worker event written after the CANCEL teardown, since that teardown
+  reads the task's rows), then providers through the api and the user. Backstop: `registerUser`
+  appends to a run file and a config-level `globalTeardown` removes recorded users still present.
+  The specs that seed running tasks (phone, actions-api, create) moved to the fixture; the others
+  rely on the backstop. `cleanupTaskFixture` and the fixture tasks' `updated_at` were left as they
+  are: the teardown cancels a live task instead of racing the re-driver. Controls: an opt-in
+  harness project whose spec seeds a user and a running task and then times out, and checks both
+  are gone; `container-cleanup-smoke` waits for `task.cancel_finished`.
 
 ## Track B
 

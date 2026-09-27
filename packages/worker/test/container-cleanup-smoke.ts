@@ -167,6 +167,24 @@ async function main(): Promise<void> {
       throw new Error(`expected count=3, got ${payload.count}`);
     }
 
+    // The job's last record: the finally below deletes the rows its teardown reads.
+    await pollUntil(
+      async () => {
+        const rows = await db
+          .select({ id: schema.taskEvents.id })
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, task.id),
+              eq(schema.taskEvents.eventType, 'task.cancel_finished'),
+            ),
+          );
+        return rows.length > 0 ? rows : null;
+      },
+      (rows) => rows.length >= 1,
+      'task.cancel_finished task_event',
+    );
+
     log.info(
       { status: cancelled.status, stubCalls, eventCount: cleanupEvents.length },
       'cleanup wiring verified',
