@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import {
   CONFIG_KEYS,
+  RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   configService,
   dashPrefix,
@@ -53,7 +54,12 @@ import {
   readdirNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { splitRepoSubpath } from '../repo/worktree-paths.js';
+import { splitRepoSubpath, splitUploadPath } from '../repo/worktree-paths.js';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { getDb } from '../db.js';
+import { buildMountArgs, type DockerVolumeMount } from './docker-runner.js';
+import { runnerSubpathVerdict } from './app-runner.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
@@ -241,6 +247,34 @@ export function ddevRunnerRunning(handle: DdevRunnerHandle): Promise<boolean> {
  *  nested dockerd. Labeled haive.task.id (so the existing cancel sweep + boot
  *  reaper find it) and haive.ddev (so killTaskDdevRunners can target it with
  *  -v to drop the anon /var/lib/docker volume). */
+/** The read-only mount for this task's DB dump directory, or none.
+ *
+ *  Read from the task's own `db_upload` row rather than threaded from 01c, because the runner is
+ *  also created by the VNC/runtime-ensure path, which knows nothing about a dump, and the import
+ *  runs later against a container that must already have the mount. */
+async function resolveDumpMounts(taskId: string): Promise<DockerVolumeMount[]> {
+  const dir = await resolveDumpSubpath(taskId);
+  if (!dir) return [];
+  return [{ source: REPO_VOLUME, target: `/repos/${dir}`, subpath: dir, readOnly: true }];
+}
+
+/** `_uploads/<owner>` for the task's completed dump, or null. */
+export async function resolveDumpSubpath(taskId: string): Promise<string | null> {
+  const task = await getDb()
+    .query.tasks.findFirst({ where: eq(schema.tasks.id, taskId), columns: { dbUploadId: true } })
+    .catch(() => null);
+  if (!task?.dbUploadId) return null;
+  const dump = await getDb()
+    .query.dbUploads.findFirst({
+      where: eq(schema.dbUploads.id, task.dbUploadId),
+      columns: { dumpPath: true, status: true },
+    })
+    .catch(() => null);
+  if (!dump?.dumpPath || dump.status !== 'complete') return null;
+  const upload = splitUploadPath(XDEBUG_REPO_STORAGE_ROOT, dump.dumpPath);
+  return upload ? path.posix.dirname(upload.rel) : null;
+}
+
 export async function startDdevRunner(params: {
   taskId: string;
   /** Repo subpath within the haive_repos volume, e.g. `<userId>/<repoId>`. */
@@ -248,6 +282,7 @@ export async function startDdevRunner(params: {
 }): Promise<DdevRunnerHandle> {
   const tag = await ensureDdevRunnerImage();
   const name = runnerName(params.taskId);
+  const dumpMounts = await resolveDumpMounts(params.taskId);
   // Drop any stale runner from a prior attempt (with its anon volume). A DinD
   // runner's teardown (nested dockerd + the anon /var/lib/docker volume) can be
   // slow; if the rm overruns its timeout the `docker run` below hits a name
@@ -365,13 +400,29 @@ export async function startDdevRunner(params: {
         `haive.task.id=${params.taskId}`,
         '--label',
         'haive.ddev=1',
+        '--label',
+        `${RUNNER_SUBPATH_LABEL}=${params.repoSubpath}`,
         ...limitArgs,
         ...weightArgs,
         ...publish,
         ...caMount,
         ...registryEnv,
-        '-v',
-        `${REPO_VOLUME}:/repos`,
+        // ONE subpath, at the path it already had. The whole volume gave this runner every
+        // user's repository, and DDEV's nested containers bind the approot from what it sees.
+        // `/repos/<subpath>` is unchanged, so the approot label, the per-runner project list and
+        // every `cd <projectDir>` still name the same path.
+        ...buildMountArgs([
+          {
+            source: REPO_VOLUME,
+            target: `/repos/${params.repoSubpath}`,
+            subpath: params.repoSubpath,
+          },
+          // The database dump is the one path a runner needs OUTSIDE its repository:
+          // `_uploads/<owner>/<file>`, which `ddev import-db` reads by the same
+          // `/repos/...` path 01c translates it to. Read-only, and only the directory
+          // holding this task's own dump.
+          ...dumpMounts,
+        ]),
         tag,
       ],
     };
@@ -1824,6 +1875,17 @@ async function ensureDdevStartedInner(
   }
 
   const existing = runnerHandleForTask(taskId, repoSubpath);
+  // A runner mounts ONE subpath, so a container created for another one cannot serve this call.
+  // Removed rather than reused: the cold path below recreates it with the right mounts.
+  if ((await runnerSubpathVerdict(existing.container, repoSubpath)) === 'other') {
+    log.info(
+      { taskId, container: existing.container, repoSubpath },
+      'ddev runner mounts another subpath; recreating',
+    );
+    await exec('docker', ['rm', '-f', '-v', existing.container], { timeout: 90_000 }).catch(
+      () => {},
+    );
+  }
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
   const describeOk = describe.exitCode === 0;
   // A STOPPED project still describes cleanly and still reports its primary_url, so the

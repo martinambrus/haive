@@ -8,6 +8,7 @@ import {
   CODE_SERVER_IMAGE,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
+  RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   appRunnerName,
   ddevRunnerName,
@@ -25,6 +26,7 @@ import {
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
+import { runnerSubpathVerdict } from './app-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
@@ -202,6 +204,8 @@ export async function startIdeRunner(params: {
       `haive.task.id=${params.taskId}`,
       '--label',
       `${IDE_RUNNER_LABEL}=1`,
+      '--label',
+      `${RUNNER_SUBPATH_LABEL}=${params.workspaceSubpath}`,
       // Built by `buildMountArgs`, not spelled out here. This is the THIRD site to need
       // `volume-nocopy` on a subpath mount and the third to have been written without it — the
       // sandbox had it, the terminal did not, and neither did this. Docker seeds an empty subpath
@@ -304,7 +308,16 @@ async function ensureIdeRunnerStartedInner(
 
   const name = ideRunnerName(taskId);
   if (await isRunning(name)) {
-    return { container: name };
+    // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
+    // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
+    // running container is the one for this workspace; its `.git` mount is that workspace's too.
+    if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
+      return { container: name };
+    }
+    log.info(
+      { taskId, container: name, workspaceSubpath },
+      'ide runner holds another workspace; recreating',
+    );
   }
   if (await containerExists(name)) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
