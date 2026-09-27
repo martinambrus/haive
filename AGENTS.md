@@ -1975,9 +1975,11 @@ each goes through the removal check below. The claim is made in the
 tag's turn (`withImageTagLock`) and only while the image stands, and every removal first waits out a
 build of its tag running here: with the row no longer naming a tag while it is built, a provider
 moving off that tag otherwise found it unnamed and removed it just before the build claimed it. A
-build of a config the provider has since left moves nothing and records no failure, since the build
-of its new config owns the row. A provider that stops needing an image has the one it named removed
-the same way.
+build of a config the provider has since left moves nothing and records no failure on the row,
+since the build of its new config owns it; its image goes unless a row names it, and its caller, an
+inline dispatch included, hears the build as failed for that reason rather than running an image the
+provider no longer asks for. A provider that stops needing an image has the one it named removed the
+same way.
 
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a

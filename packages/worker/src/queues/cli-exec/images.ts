@@ -471,14 +471,14 @@ function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProvide
 }
 
 /** Point the provider at the image of `imageTag` while its config still asks for it, and on a shared
- *  tag every sibling whose config asks for it too. Returns the tags the rows it moved named before,
- *  for the caller to remove once no row names them. */
+ *  tag every sibling whose config asks for it too. Returns whether the provider itself moved, and the
+ *  tags the rows it moved named before, for the caller to remove once no row names them. */
 export async function markProvidersReady(
   db: Database,
   imageTag: string,
   providerId: string,
   shared: boolean,
-): Promise<string[]> {
+): Promise<{ self: boolean; replaced: string[] }> {
   const now = new Date();
   const c = schema.cliProviders;
   return db.transaction(async (tx) => {
@@ -508,7 +508,8 @@ export async function markProvidersReady(
     // Keyed on config, never on the tag a row names: a failed build leaves its row on the image it
     // had, and a row a build of a config it has since left would move is the newer build's to move.
     const moving = rows.filter((r) => configTag(r) === imageTag);
-    if (moving.length === 0) return [];
+    const self = moving.some((r) => r.id === providerId);
+    if (moving.length === 0) return { self, replaced: [] };
     await tx
       .update(c)
       .set({
@@ -524,7 +525,8 @@ export async function markProvidersReady(
           moving.map((r) => r.id),
         ),
       );
-    return [...new Set(moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : [])))];
+    const replaced = moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : []));
+    return { self, replaced: [...new Set(replaced)] };
   });
 }
 

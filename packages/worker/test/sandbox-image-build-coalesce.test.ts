@@ -7,7 +7,7 @@ const docker = vi.hoisted(() => ({
   remove: vi.fn(),
 }));
 const images = vi.hoisted(() => ({
-  markProvidersReady: vi.fn(async (): Promise<string[]> => []),
+  markProvidersReady: vi.fn(async () => ({ self: true, replaced: [] as string[] })),
   withImageTagLock: vi.fn(<T>(_tag: string, fn: () => Promise<T>) => fn()),
   removeOrphanedPreviousImage: vi.fn(async () => ({ removed: false, reason: 'no-previous' })),
   probeCliPath: vi.fn(),

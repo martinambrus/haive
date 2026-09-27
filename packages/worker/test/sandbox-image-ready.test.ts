@@ -63,7 +63,7 @@ describe('marking a tag ready', () => {
       });
     }
 
-    const replaced = await markProvidersReady(
+    const { replaced } = await markProvidersReady(
       fake.db as unknown as Database,
       TAG,
       provider(1),

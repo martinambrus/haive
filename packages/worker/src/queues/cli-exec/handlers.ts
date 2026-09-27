@@ -688,6 +688,17 @@ export async function handleBuildSandboxImageJob(
   const removeReplaced = async (replaced: string[]) => {
     for (const tag of replaced) await removeOnceBuilt(db, provider.id, tag, imageTag);
   };
+  // Built for a config the provider has since left: its image goes unless a row names it, and a
+  // caller waiting to run it hears why.
+  const superseded = async (): Promise<SandboxImageBuildResult> => {
+    await removeOnceBuilt(db, provider.id, imageTag, null);
+    log.info({ providerId: provider.id, imageTag }, 'sandbox image built for a config since left');
+    return {
+      ok: false,
+      providerId: provider.id,
+      error: 'the provider changed while this image was built, and now asks for another image',
+    };
+  };
 
   // The row keeps naming the image it has until this one exists, so a failed build leaves it there.
   await db
@@ -700,9 +711,10 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   if (!payload.force) {
-    const replaced = await claim();
-    if (replaced) {
-      await removeReplaced(replaced);
+    const claimed = await claim();
+    if (claimed) {
+      await removeReplaced(claimed.replaced);
+      if (!claimed.self) return superseded();
       log.info({ providerId: provider.id, imageTag, shared }, 'sandbox image cache hit');
       return { ok: true, providerId: provider.id, imageTag };
     }
@@ -723,9 +735,10 @@ export async function handleBuildSandboxImageJob(
 
   try {
     const result = await build;
-    const replaced = result.exitCode === 0 ? await claim() : null;
-    if (replaced) {
-      await removeReplaced(replaced);
+    const claimed = result.exitCode === 0 ? await claim() : null;
+    if (claimed) {
+      await removeReplaced(claimed.replaced);
+      if (!claimed.self) return await superseded();
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',

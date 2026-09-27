@@ -309,9 +309,8 @@ describe("a provider's row names its image only once the image is built", () => 
     await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
     await forced();
     release();
-    await older;
-    expect(standing.has(TAG)).toBe(true);
-    expect(standing.has(OLDER)).toBe(false);
+    expect(await older).toMatchObject({ ok: false, error: expect.stringContaining('changed') });
+    expect([...standing].sort()).toEqual([TAG]);
     expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
       sandboxImageTag: TAG,
       sandboxImageBuildStatus: 'ready',
