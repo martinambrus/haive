@@ -141,6 +141,16 @@ describe('an upgrade that takes RTK blocks out', () => {
     expect(records()).toHaveLength(2);
   });
 
+  // What a save landing while the strip was parked leaves there, as does an edit between attempts.
+  it('takes no earlier record for a file that no longer holds what that strip left', async () => {
+    const { root, apply } = await setup();
+    await apply();
+    await writeFile(join(root, 'AGENTS.md'), '# Mine\n');
+    const retried = await apply();
+    expect(retried.rtkBlockStrips?.map((s) => s.file)).toEqual(['CLAUDE.md']);
+    expect(retried.writtenPaths).not.toContain('AGENTS.md');
+  });
+
   it('leaves a file that is not UTF-8 as it is, and records nothing for it', async () => {
     const bytes = Buffer.concat([
       Buffer.from('# Caf'),

@@ -1199,16 +1199,24 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         });
         recorded.set(file, recordId);
       });
+      // A retry finds the block an earlier attempt took out gone, and takes that attempt's record
+      // while the file still holds what that strip left: anything else there is not its doing.
+      const earlierStrip = async (file: string) => {
+        const earlier = earlierRecords.get(`${RTK_BLOCK_RECORD}\n${file}`);
+        if (!earlier) return undefined;
+        const now = await readUpgradeFile(ctx.repoPath, file);
+        const left = now.kind === 'text' ? sha256Hex(normalizeContent(now.text)) : null;
+        return left === earlier.lastObservedDiskHash ? earlier.id : undefined;
+      };
       for (const strip of strips) {
         if (strip.result === 'refused') {
           warnings.push(`could not check ${strip.file} for an RTK block: ${strip.error}`);
         }
-        // A retry finds the block an earlier attempt took out gone, and takes that attempt's record.
         const recordId =
           strip.result === 'stripped'
             ? recorded.get(strip.file)
             : strip.result === 'none'
-              ? earlierRecords.get(`${RTK_BLOCK_RECORD}\n${strip.file}`)?.id
+              ? await earlierStrip(strip.file)
               : undefined;
         if (recordId === undefined) continue;
         writtenPaths.push(strip.file);

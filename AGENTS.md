@@ -2874,7 +2874,8 @@ after it (`stripRtkBlocks`). A link is refused and reported, as is a file past t
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
 AGENTS.md's own pass. Each strip records what the file held before it changes (`rtkBlockStrips`),
 in a superseded row kept apart from the rows a rollback restores (`RTK_BLOCK_RECORD`), and a retry
-that finds the block gone takes the record an earlier attempt made. A rollback puts the blocks back
+that finds the block gone takes the record an earlier attempt made while the file still holds what
+that strip left: a save that took the name while the strip was parked is not its doing. A rollback puts the blocks back
 ahead of the rules region, whose restore would move the file off what the strip left, and only
 while no RTK block stands in the file: all of what the file held while it still holds what the
 strip left, else the blocks appended the way 07 appends one. The same blocks standing there count
