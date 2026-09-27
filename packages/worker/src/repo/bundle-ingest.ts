@@ -71,7 +71,8 @@ function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
       GIT_TERMINAL_PROMPT: '0',
       GIT_ASKPASS: 'echo',
     };
-    const proc = spawn('git', args, { cwd, env });
+    // A pull lists every file it changes, and output left unread in a pipe stops git once it fills.
+    const proc = spawn('git', args, { cwd, env, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
