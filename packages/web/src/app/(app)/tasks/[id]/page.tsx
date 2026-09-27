@@ -103,7 +103,7 @@ import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { ScreenshotGallery } from '@/components/browser/screenshot-gallery';
 import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
 import { DatabaseAccessPanel } from '@/components/terminal/DatabaseAccessPanel';
-import { InteractiveShell } from '@/components/terminal/InteractiveShell';
+import { InteractiveShell, ShellUnavailable } from '@/components/terminal/InteractiveShell';
 import {
   autoScrollTerminalsEnabled,
   scrollToNewestActiveTerminal,
@@ -1121,13 +1121,11 @@ export default function TaskDetailPage() {
   // worktree is reaped) and until 01-worktree-setup has prepared the worktree —
   // otherwise the shell's persistent tmux session would be rooted at the repo
   // checkout (wrong branch). Mirrors terminal-session-manager's openSession gate.
+  // The tab itself stays open, so the shell can say why it is unavailable.
   const terminalDisabled =
     task?.status === 'completed' || task?.status === 'cancelled' || !worktreeReady;
   const terminalDisabledReason: 'ended' | 'preparing' =
     task?.status === 'completed' || task?.status === 'cancelled' ? 'ended' : 'preparing';
-  useEffect(() => {
-    if (terminalDisabled && tab === 'terminal') setTab('steps');
-  }, [terminalDisabled, tab]);
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setSubmitting(step.stepId);
@@ -1922,11 +1920,7 @@ export default function TaskDetailPage() {
         >
           Editor
         </TabButton>
-        <TabButton
-          active={tab === 'terminal'}
-          onClick={() => setTab('terminal')}
-          disabled={terminalDisabled}
-        >
+        <TabButton active={tab === 'terminal'} onClick={() => setTab('terminal')}>
           Terminal
         </TabButton>
         <TabButton active={tab === 'activity'} onClick={() => setTab('activity')}>
@@ -2382,6 +2376,16 @@ function TerminalTab({
   const enabledProviders = providers.filter((p) => p.enabled);
   const usableProviders = enabledProviders.length > 0 ? enabledProviders : providers;
 
+  if (disabled) {
+    return (
+      <ShellUnavailable
+        reason={disabledReason}
+        repositoryId={repositoryId ?? undefined}
+        repositoryName={repositoryName}
+      />
+    );
+  }
+
   if (usableProviders.length === 0) {
     return (
       <Card className="p-4 text-sm text-neutral-400">
@@ -2402,8 +2406,7 @@ function TerminalTab({
           <select
             value={selectedCliProviderId ?? ''}
             onChange={(e) => onSelectCliProvider(e.target.value)}
-            disabled={disabled}
-            className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
           >
             {usableProviders.map((p) => (
               <option key={p.id} value={p.id}>
@@ -2417,14 +2420,7 @@ function TerminalTab({
         </span>
       </div>
       {selectedCliProviderId && (
-        <InteractiveShell
-          taskId={taskId}
-          repositoryId={repositoryId ?? undefined}
-          repositoryName={repositoryName}
-          cliProviderId={selectedCliProviderId}
-          disabled={disabled}
-          disabledReason={disabledReason}
-        />
+        <InteractiveShell taskId={taskId} cliProviderId={selectedCliProviderId} />
       )}
     </div>
   );
