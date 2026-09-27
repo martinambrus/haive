@@ -156,23 +156,26 @@ export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<vo
 
 export const TASK_CANCEL_DEADLINE_MS = 30_000;
 
-/** Wait until the worker has taken the CANCEL of each of these tasks that the api cancelled: the
- *  job records its event before any teardown, and fails at that record once the row is gone. */
-async function waitForWorkerCancels(sql: postgres.Sql, taskIds: string[]): Promise<void> {
+/** Wait until the worker has finished the CANCEL of each task of this user the api cancelled,
+ *  since its teardown reads the task's rows until then. */
+async function waitForWorkerCancels(sql: postgres.Sql, userId: string): Promise<void> {
   const deadline = Date.now() + TASK_CANCEL_DEADLINE_MS;
-  while (taskIds.length > 0) {
+  for (;;) {
     const waiting = await sql`
       select t.id from tasks t
-      where t.id in ${sql(taskIds)} and t.status = 'cancelled'
-        and not exists (
+      where t.user_id = ${userId} and t.status = 'cancelled'
+        and exists (
           select 1 from task_events e
           where e.task_id = t.id and e.event_type = 'task.cancelled'
-            and e.payload ->> 'source' = 'worker'
+        )
+        and not exists (
+          select 1 from task_events e
+          where e.task_id = t.id and e.event_type = 'task.cancel_finished'
         )
     `;
     if (waiting.length === 0) return;
     if (Date.now() >= deadline) {
-      console.warn(`the worker took no CANCEL for ${waiting.length} task(s) in time`);
+      console.warn(`the worker finished no CANCEL for ${waiting.length} task(s) in time`);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -212,10 +215,7 @@ export async function removeUser(
         });
         expect.soft(res.status(), `cancel of task ${id}: ${await res.text()}`).toBe(200);
       }
-      await waitForWorkerCancels(
-        sql,
-        liveTasks.map((t) => t.id),
-      );
+      await waitForWorkerCancels(sql, user.userId);
       await deleteProvidersViaApi(sql, request, user.userId);
     } finally {
       await request.dispose();
