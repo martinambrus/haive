@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -167,5 +167,29 @@ describe('sweepOrphanScratchWorkspaces', () => {
       ),
     );
     expect(await scratchNames(root, userId)).toEqual([TASK]);
+  });
+});
+
+describe('ensureTaskScratchWorkspace', () => {
+  const TASK = '22222222-2222-4222-8222-222222222222';
+
+  it('creates the user directory that a first repo-less task finds missing', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'scratch-ensure-'));
+    try {
+      vi.resetModules();
+      // Handing the directory to this process's own uid keeps the chown a no-op on any runner.
+      vi.doMock('../src/sandbox/sandbox-identity.js', () => ({
+        SANDBOX_UID: process.getuid!(),
+        SANDBOX_GID: process.getgid!(),
+      }));
+      process.env.REPO_STORAGE_ROOT = root;
+      const mod = await import('../src/repo/scratch-workspace.js');
+      const dir = await mod.ensureTaskScratchWorkspace('u-new', TASK);
+      expect(dir).toBe(path.join(root, 'u-new', '_scratch', TASK));
+      expect((await stat(dir)).isDirectory()).toBe(true);
+    } finally {
+      vi.doUnmock('../src/sandbox/sandbox-identity.js');
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

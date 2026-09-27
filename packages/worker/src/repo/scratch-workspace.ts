@@ -56,6 +56,8 @@ export async function ensureTaskScratchWorkspace(userId: string, taskId: string)
   const anchor = path.join(REPO_STORAGE_ROOT, userId);
   const rel = `${TASK_SCRATCH_DIR}/${taskId}`;
   const owner = { uid: SANDBOX_UID, gid: SANDBOX_GID };
+  // A user whose first task has no repository has no directory here yet.
+  await ensureDirNoFollow(REPO_STORAGE_ROOT, userId);
   await ensureDirNoFollow(anchor, rel, { owner });
   try {
     // Separate from the create above, which only hands over directories it made: a scratch dir an
