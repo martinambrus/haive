@@ -1308,7 +1308,8 @@ export default function GlobalKbPage() {
                           Cancel
                         </Button>
                       )}
-                      {failed && e.sourceTaskId && (
+                      {/* The step Retry refuses a task that is not failed, and finds no deleted one. */}
+                      {failed && e.sourceTaskId && e.sourceTaskStatus === 'failed' && (
                         <Button
                           size="sm"
                           disabled={busy}

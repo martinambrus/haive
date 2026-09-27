@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, ne, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -412,6 +412,28 @@ globalKbRoutes.post('/enrich', async (c) => {
   return c.json({ entry, taskId: task.id }, 201);
 });
 
+/** Each entry's source task status, read from the main database since the global KB is a separate
+ *  one. Another user's task reads as null: none of its actions are the caller's to take. */
+export async function withSourceTaskStatus<T extends { sourceTaskId: string | null }>(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  entries: T[],
+) {
+  const ids = [...new Set(entries.flatMap((e) => (e.sourceTaskId ? [e.sourceTaskId] : [])))];
+  const rows =
+    ids.length === 0
+      ? []
+      : await db
+          .select({ id: schema.tasks.id, status: schema.tasks.status })
+          .from(schema.tasks)
+          .where(and(inArray(schema.tasks.id, ids), eq(schema.tasks.userId, userId)));
+  const statusById = new Map(rows.map((r) => [r.id, r.status]));
+  return entries.map((e) => ({
+    ...e,
+    sourceTaskStatus: e.sourceTaskId ? (statusById.get(e.sourceTaskId) ?? null) : null,
+  }));
+}
+
 // Server-side paginated browse. Only one page of rows ever reaches the client,
 // so the full-body corpus is never shipped/held in the browser. Search + filters
 // run in SQL; the distinct framework list (for the filter dropdown) is computed
@@ -468,7 +490,7 @@ globalKbRoutes.get('/entries', async (c) => {
   });
 
   return c.json({
-    entries: result.entries,
+    entries: await withSourceTaskStatus(getDb(), c.get('userId'), result.entries),
     total: result.total,
     page,
     pageSize,

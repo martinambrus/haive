@@ -1,0 +1,74 @@
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { registerUser } from '../helpers/auth.js';
+
+/** A failed entry as the list route sends it, seeded by a task now in `sourceTaskStatus`. */
+function failedEntry(id: string, title: string, sourceTaskStatus: string) {
+  const at = new Date().toISOString();
+  return {
+    id,
+    namespace: 'default',
+    userId: null,
+    title,
+    seedText: 'Seed notes the person wrote',
+    body: '',
+    category: 'general',
+    facets: {},
+    status: 'failed',
+    source: 'user',
+    sourceTaskId: `${id.slice(0, -1)}f`,
+    sourceTaskStatus,
+    sourceRepoId: null,
+    contentHash: null,
+    embedStatus: 'pending',
+    createdAt: at,
+    updatedAt: at,
+    supersedesEntryId: null,
+    supersededAt: null,
+  };
+}
+
+test.describe('global KB entries', () => {
+  test('a failed entry offers Retry only while its task can be retried', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'kb-retry' })).userId;
+      // The rows are faked on top of the real response, so its headers stay the api's own.
+      await page.route(
+        (url) => url.pathname === '/global-kb/entries',
+        async (route) => {
+          const response = await route.fetch();
+          await route.fulfill({
+            response,
+            json: {
+              entries: [
+                failedEntry('00000000-0000-4000-8000-0000000000e1', 'Can run again', 'failed'),
+                failedEntry(
+                  '00000000-0000-4000-8000-0000000000e2',
+                  'Task was cancelled',
+                  'cancelled',
+                ),
+              ],
+              total: 2,
+              page: 1,
+              pageSize: 12,
+              frameworks: [],
+            },
+          });
+        },
+      );
+      await page.goto('/settings/global-kb');
+
+      const row = (title: string) => page.getByText(title, { exact: true }).locator('xpath=..');
+      await expect(row('Can run again').getByRole('button', { name: 'Retry' })).toBeVisible();
+      const cancelled = row('Task was cancelled');
+      await expect(cancelled.getByRole('button', { name: 'Go to task' })).toBeVisible();
+      await expect(cancelled.getByRole('button', { name: 'Delete' })).toBeVisible();
+      await expect(cancelled.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+});
