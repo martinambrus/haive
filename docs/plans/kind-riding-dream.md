@@ -217,7 +217,11 @@ output without its row.
 breaks the dedupe every other one survives — see its section below. `recordReviewFindings` writes with
 `onConflictDoNothing` against the UNIQUE `review_findings_dedupe_idx`
 `(task_id, task_step_id, round, fingerprint)`, so a collision is swallowed with no error and no log. A
-collision here is a module bug to surface, not a duplicate to drop.
+collision here is a module bug to surface, not a duplicate to drop. Slices add one case that is not
+a collision: each sees the whole target, so two of them can raise the same finding, both sides of
+one coherence pair falling in different slices being the obvious one. Findings that share a
+fingerprint AND a path and lines are that same finding and are recorded once, before the
+assertion; one fingerprint over different lines is still the collision it exists for.
 
 **5 · `scan-triage`** — form. The human picks which findings to fix. **This step is the entire answer
 to "502 tasks, 0 fixes"**: nothing proceeds to remediation that a person did not choose. A coherence
@@ -363,9 +367,10 @@ commit's tree under the SHA the report names. A tree object can hold names no ch
 write, so every path is held to git's own checkout rule (`verify_path`: no empty, `.` or `..`
 component, and no `.git`) and a tree that breaks it refuses the target with the path named; each
 file is then written through `@haive/shared/fs-safe` from the snapshot's anchor, never by a
-path-based call. A symlink is written as a regular file holding its target, since recreating the
-link would hand an agent a path out of the snapshot, and a submodule is named in the coverage
-record as not scanned.
+path-based call, and keeps the executable bit its tree entry records (`100755`), since a change of
+mode alone is a change the line notes list. A symlink is written as a regular file holding its
+target, since recreating the link would hand an agent a path out of the snapshot, and a submodule
+is named in the coverage record as not scanned.
 
 A snapshot holds committed files only, the view every worktree run has. Rules and KB that exist
 only uncommitted at the root — onboarding's commit is off by default — reach its agents the way
@@ -406,9 +411,13 @@ as the rest.
 discloses the rest as unseen (`changedFilesBlock`'s COVERAGE notice); a scan exists to cover its
 target, so a diff over that cap is cut into slices of at most 100 files, contiguous in path order so
 a directory stays together, and each dimension runs one agent per slice — still one dimension per
-terminal, each agent told it holds one slice, so it leaves another slice's files to that slice. No
-slice is truncated, so the notice never renders; what the budget cuts is recorded instead. A
-release window of several hundred files is the case this exists for.
+terminal, each agent told it holds one slice, so it leaves another slice's files to that slice.
+The same holds inside a file: `parseChangedLineRanges` keeps 20 ranges per file and reduces the
+rest to `(+N more ranges)`, which the fence would read as out of scope, so the scan parses without
+that cap, and a file whose ranges would still overrun the prompt is listed with no note, which the
+fence reads as all of it in scope. No slice is truncated, so the notice never renders; what the
+budget cuts is recorded instead. A release window of several hundred files is the case this
+exists for.
 
 ### The coherence dimension
 
@@ -759,6 +768,11 @@ former, and this module does both kinds of write.
   recorded SHA all describe the target's own commit, not the replacement.
 - A `scan-record` whose write fails fails the step and leaves no finding in its output without a
   row, and the Retry writes each row once.
+- A file with more than 20 changed ranges is listed with all of them, or past the prompt budget
+  with none, and never scoped to the first 20 alone.
+- A change of mode alone (`100644` to `100755`) arrives in the snapshot with the new mode.
+- Two slices raising one finding (one fingerprint, one path, the same lines) record one row, and
+  one fingerprint over different lines still fails the step.
 - A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and a base
   changed on the form stops `scan-remediate` before any coder is dispatched.
 
