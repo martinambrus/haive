@@ -118,6 +118,40 @@ test.describe('task detail page', () => {
     }
   });
 
+  test('the Terminal tab says why the shell is unavailable', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    let fixture: TaskFixture | null = null;
+    try {
+      const email = uniqueEmail('task-terminal');
+      userId = (await registerUser(sql, page.request, { email })).userId;
+      fixture = await seedTaskFixture(sql, userId, 'terminal');
+
+      await page.goto(`/tasks/${fixture.taskId}`);
+      const terminalTab = page.getByRole('button', { name: 'Terminal', exact: true });
+      await expect(terminalTab).toBeEnabled();
+      await terminalTab.click();
+      await expect(page.getByText(/Terminal is preparing\./)).toBeVisible();
+      await expect(page.getByText(/connects\s+automatically when the worktree/)).toBeVisible();
+
+      await sql`
+        update tasks set status = 'completed', completed_at = now() where id = ${fixture.taskId}
+      `;
+      await page.reload();
+      await expect(terminalTab).toBeEnabled();
+      await terminalTab.click();
+      await expect(page.getByText(/because the task has ended/)).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Browse repositories' })).toHaveAttribute(
+        'href',
+        '/repos',
+      );
+    } finally {
+      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('the header Retry recovers the failed step', async ({ page }) => {
     const sql = getSql();
     let userId = '';
