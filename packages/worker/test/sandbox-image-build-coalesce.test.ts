@@ -7,7 +7,8 @@ const docker = vi.hoisted(() => ({
   remove: vi.fn(),
 }));
 const images = vi.hoisted(() => ({
-  markProvidersReady: vi.fn(async () => {}),
+  markProvidersReady: vi.fn(async () => ({ self: true, replaced: [] as string[] })),
+  withImageTagLock: vi.fn(<T>(_tag: string, fn: () => Promise<T>) => fn()),
   removeOrphanedPreviousImage: vi.fn(async () => ({ removed: false, reason: 'no-previous' })),
   probeCliPath: vi.fn(),
 }));
@@ -45,6 +46,11 @@ function fakeDb(): Database {
       },
     },
     update: () => ({ set: () => ({ where: async () => {} }) }),
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [providers.p1] }) }) }),
+        update: () => ({ set: () => ({ where: async () => {} }) }),
+      }),
   } as unknown as Database;
 }
 

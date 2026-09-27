@@ -1962,6 +1962,28 @@ provider ready and re-enable its Rebuild button while the build still ran. Joini
 flight could not close that, since the api sets `building` the moment Rebuild is clicked, before
 any job exists to join.
 
+**A provider's row names its image only once that image exists.** A build used to write its new tag
+before building, so one that failed left the row naming an image that was never made, nothing named
+the old one any more, and a later success removed the failed tag as "previous" while the old image
+stayed for good. A build now writes only its status when it starts. On success one locked write
+(`markProvidersReady`, its rows locked in id order) moves the provider, and on a shared tag every
+sibling not still building, to the tag, each only while its config asks for that tag. It keys on
+config, never on the tag a row names: a failed build leaves its row on the image it had, so a
+sibling on this tag whose config has moved on keeps showing its own failure rather than being
+marked ready on an image it no longer wants. It hands back the tags those rows named before, and
+each goes through the removal check below. The claim is made in the
+tag's turn (`withImageTagLock`) and only while the image stands, and every removal first waits out a
+build of its tag running here: with the row no longer naming a tag while it is built, a provider
+moving off that tag otherwise found it unnamed and removed it just before the build claimed it. A
+build of a config the provider has since left moves nothing and records no failure on the row,
+since the build of its new config owns it; its image goes unless a row names it, and its caller, an
+inline dispatch included, hears the build as failed for that reason rather than running an image the
+provider no longer asks for. Every write a build makes to its own row lands only while the
+provider's config still asks for its tag (`writeWhileWanted`), its first included, so a build
+already left when it starts builds nothing: an older build's `building` landing after a newer build
+marked the row ready used to leave it `building` for good. A provider that stops needing an image has the one it named removed the
+same way.
+
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
 `REMOVE_SANDBOX_IMAGE` with the row's tag, and the worker removes the image through the same check a
 rebuild's old image goes through (`removeOrphanedPreviousImage`): kept while any other provider

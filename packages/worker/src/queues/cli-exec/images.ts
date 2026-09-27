@@ -1,4 +1,4 @@
-import { and, eq, ne } from 'drizzle-orm';
+import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
@@ -470,18 +470,48 @@ function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProvide
   return adapter.defaultExecutable;
 }
 
+/** Point the provider at the image of `imageTag` while its config still asks for it, and on a shared
+ *  tag every sibling whose config asks for it too. Returns whether the provider itself moved, and the
+ *  tags the rows it moved named before, for the caller to remove once no row names them. */
 export async function markProvidersReady(
   db: Database,
   imageTag: string,
   providerId: string,
   shared: boolean,
-): Promise<void> {
+): Promise<{ self: boolean; replaced: string[] }> {
   const now = new Date();
-  if (shared) {
+  const c = schema.cliProviders;
+  return db.transaction(async (tx) => {
     // A sibling still `building` has a build of its own queued or running, forced or not, and
     // reports its own result: marking it here re-enabled its Rebuild button mid-rebuild.
-    await db
-      .update(schema.cliProviders)
+    const siblings = ne(c.sandboxImageBuildStatus, 'building');
+    const rows = await tx
+      .select({
+        id: c.id,
+        name: c.name,
+        cliVersion: c.cliVersion,
+        sandboxDockerfileExtra: c.sandboxDockerfileExtra,
+        tag: c.sandboxImageTag,
+      })
+      .from(c)
+      .where(shared ? or(eq(c.id, providerId), siblings) : eq(c.id, providerId))
+      // One lock order for every build, so two marking overlapping siblings cannot deadlock.
+      .orderBy(asc(c.id))
+      .for('update');
+    const configTag = (r: (typeof rows)[number]) =>
+      resolveImageTag({
+        name: r.name as CliProviderName,
+        cliVersion: r.cliVersion?.trim() || null,
+        providerId: r.id,
+        sandboxDockerfileExtra: r.sandboxDockerfileExtra,
+      })?.tag;
+    // Keyed on config, never on the tag a row names: a failed build leaves its row on the image it
+    // had, and a row a build of a config it has since left would move is the newer build's to move.
+    const moving = rows.filter((r) => configTag(r) === imageTag);
+    const self = moving.some((r) => r.id === providerId);
+    if (moving.length === 0) return { self, replaced: [] };
+    await tx
+      .update(c)
       .set({
         sandboxImageTag: imageTag,
         sandboxImageBuildStatus: 'ready',
@@ -490,22 +520,14 @@ export async function markProvidersReady(
         updatedAt: now,
       })
       .where(
-        and(
-          eq(schema.cliProviders.sandboxImageTag, imageTag),
-          ne(schema.cliProviders.sandboxImageBuildStatus, 'building'),
+        inArray(
+          c.id,
+          moving.map((r) => r.id),
         ),
       );
-  }
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageTag: imageTag,
-      sandboxImageBuildStatus: 'ready',
-      sandboxImageBuildError: null,
-      sandboxImageBuiltAt: now,
-      updatedAt: now,
-    })
-    .where(eq(schema.cliProviders.id, providerId));
+    const replaced = moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : []));
+    return { self, replaced: [...new Set(replaced)] };
+  });
 }
 
 const tagTurns = new Map<string, Promise<void>>();

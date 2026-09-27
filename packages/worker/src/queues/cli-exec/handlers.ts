@@ -659,16 +659,14 @@ export async function handleBuildSandboxImageJob(
   });
 
   if (!resolution) {
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageTag: null,
-        sandboxImageBuildStatus: 'idle',
-        sandboxImageBuildError: null,
-        sandboxImageBuiltAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    const wrote = await writeWhileWanted(db, provider.id, null, {
+      sandboxImageTag: null,
+      sandboxImageBuildStatus: 'idle',
+      sandboxImageBuildError: null,
+      sandboxImageBuiltAt: null,
+    });
+    if (!wrote) return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
+    await removeOnceBuilt(db, provider.id, provider.sandboxImageTag, null);
     log.info(
       { providerId: provider.id },
       'sandbox image build skipped (no install lines, no extras)',
@@ -678,29 +676,35 @@ export async function handleBuildSandboxImageJob(
 
   const { tag: imageTag, shared } = resolution;
   const previousDbTag = provider.sandboxImageTag;
+  // In the tag's turn, which a removal of the tag also takes, and only while its image stands.
+  const claim = () =>
+    withImageTagLock(imageTag, async () => {
+      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
+      return markProvidersReady(db, imageTag, provider.id, shared);
+    });
+  const removeReplaced = async (replaced: string[]) => {
+    for (const tag of replaced) await removeOnceBuilt(db, provider.id, tag, imageTag);
+  };
+  // Built for a config the provider has since left: its image goes unless a row names it, and a
+  // caller waiting to run it hears why.
+  const superseded = async (): Promise<SandboxImageBuildResult> => {
+    await removeOnceBuilt(db, provider.id, imageTag, null);
+    log.info({ providerId: provider.id, imageTag }, 'sandbox image built for a config since left');
+    return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
+  };
 
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageTag: imageTag,
-      sandboxImageBuildStatus: 'building',
-      sandboxImageBuildError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.cliProviders.id, provider.id));
+  // The row keeps naming the image it has until this one exists, so a failed build leaves it there.
+  const started = await writeWhileWanted(db, provider.id, imageTag, {
+    sandboxImageBuildStatus: 'building',
+    sandboxImageBuildError: null,
+  });
+  if (!started) return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
 
   if (!payload.force) {
-    const cached = await withImageTagLock(imageTag, async () => {
-      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return false;
-      await markProvidersReady(db, imageTag, provider.id, shared);
-      return true;
-    });
-    if (cached) {
-      await removeOrphanedPreviousImage(db, {
-        providerId: provider.id,
-        previousDbTag,
-        newTag: imageTag,
-      });
+    const claimed = await claim();
+    if (claimed) {
+      await removeReplaced(claimed.replaced);
+      if (!claimed.self) return superseded();
       log.info({ providerId: provider.id, imageTag, shared }, 'sandbox image cache hit');
       return { ok: true, providerId: provider.id, imageTag };
     }
@@ -721,13 +725,10 @@ export async function handleBuildSandboxImageJob(
 
   try {
     const result = await build;
-    if (result.exitCode === 0) {
-      await markProvidersReady(db, imageTag, provider.id, shared);
-      await removeOrphanedPreviousImage(db, {
-        providerId: provider.id,
-        previousDbTag,
-        newTag: imageTag,
-      });
+    const claimed = result.exitCode === 0 ? await claim() : null;
+    if (claimed) {
+      await removeReplaced(claimed.replaced);
+      if (!claimed.self) return await superseded();
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
@@ -740,15 +741,14 @@ export async function handleBuildSandboxImageJob(
       };
     }
 
-    const errMsg = (result.error ?? result.stderr ?? `exit ${result.exitCode}`).slice(-4000);
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageBuildStatus: 'failed',
-        sandboxImageBuildError: errMsg,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    const errMsg =
+      result.exitCode === 0
+        ? 'the image was removed before this build could record it; build it again'
+        : (result.error ?? result.stderr ?? `exit ${result.exitCode}`).slice(-4000);
+    await writeWhileWanted(db, provider.id, imageTag, {
+      sandboxImageBuildStatus: 'failed',
+      sandboxImageBuildError: errMsg,
+    });
     log.warn(
       { providerId: provider.id, imageTag, exitCode: result.exitCode },
       'sandbox image build failed',
@@ -761,14 +761,10 @@ export async function handleBuildSandboxImageJob(
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageBuildStatus: 'failed',
-        sandboxImageBuildError: errMsg,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    await writeWhileWanted(db, provider.id, imageTag, {
+      sandboxImageBuildStatus: 'failed',
+      sandboxImageBuildError: errMsg,
+    });
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
   } finally {
@@ -781,13 +777,7 @@ export async function handleBuildSandboxImageJob(
       });
       if (!stillThere) {
         for (const tag of new Set([imageTag, previousDbTag])) {
-          if (tag) {
-            await removeOrphanedPreviousImage(db, {
-              providerId: provider.id,
-              previousDbTag: tag,
-              newTag: null,
-            });
-          }
+          if (tag) await removeOnceBuilt(db, provider.id, tag, null);
         }
       }
     } catch (err) {
@@ -801,24 +791,70 @@ export async function handleBuildSandboxImageJob(
  *  that build instead of starting a second. */
 const inFlightBuilds = new Map<string, Promise<DockerBuildResult>>();
 
-/** Remove the image a deleted provider named, unless another provider names it too. A build of the
- *  tag in flight is waited out first, whatever it ends in, since it may have been this provider's. */
+/** Remove the image a deleted provider named, unless another provider names it too. */
 export async function handleRemoveSandboxImageJob(
   db: Database,
   payload: SandboxImageRemoveJobPayload,
 ): Promise<void> {
-  const building = inFlightBuilds.get(payload.imageTag);
-  if (building) {
+  if (inFlightBuilds.has(payload.imageTag)) {
     log.info(payload, "waiting for the build of a deleted provider's tag before removing it");
+  }
+  await removeOnceBuilt(db, payload.providerId, payload.imageTag, null);
+}
+
+/** Remove `tag`'s image unless a provider names it, once a build of it running here has ended,
+ *  whatever it ended in: that build claims the tag in the tag's turn, which the removal takes after. */
+async function removeOnceBuilt(
+  db: Database,
+  providerId: string,
+  tag: string | null,
+  newTag: string | null,
+): Promise<void> {
+  const building = tag ? inFlightBuilds.get(tag) : undefined;
+  if (building) {
     await building.then(
       () => undefined,
       () => undefined,
     );
   }
-  await removeOrphanedPreviousImage(db, {
-    providerId: payload.providerId,
-    previousDbTag: payload.imageTag,
-    newTag: null,
+  await removeOrphanedPreviousImage(db, { providerId, previousDbTag: tag, newTag });
+}
+
+const SUPERSEDED_BUILD =
+  'the provider changed, and now asks for another image than this build makes';
+
+/** Write `set` to the provider's row only while its config still asks for `imageTag` (null: for no
+ *  image): once it asks for another, the build of that one owns the row. */
+async function writeWhileWanted(
+  db: Database,
+  providerId: string,
+  imageTag: string | null,
+  set: Partial<typeof schema.cliProviders.$inferInsert>,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({
+        name: schema.cliProviders.name,
+        cliVersion: schema.cliProviders.cliVersion,
+        sandboxDockerfileExtra: schema.cliProviders.sandboxDockerfileExtra,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.id, providerId))
+      .for('update');
+    if (!row) return false;
+    const wants =
+      resolveImageTag({
+        name: row.name as CliProviderName,
+        cliVersion: row.cliVersion?.trim() || null,
+        providerId,
+        sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+      })?.tag ?? null;
+    if (wants !== imageTag) return false;
+    await tx
+      .update(schema.cliProviders)
+      .set({ ...set, updatedAt: new Date() })
+      .where(eq(schema.cliProviders.id, providerId));
+    return true;
   });
 }
 
