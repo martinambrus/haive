@@ -659,16 +659,13 @@ export async function handleBuildSandboxImageJob(
   });
 
   if (!resolution) {
-    await db
-      .update(schema.cliProviders)
-      .set({
-        sandboxImageTag: null,
-        sandboxImageBuildStatus: 'idle',
-        sandboxImageBuildError: null,
-        sandboxImageBuiltAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
+    const wrote = await writeWhileWanted(db, provider.id, null, {
+      sandboxImageTag: null,
+      sandboxImageBuildStatus: 'idle',
+      sandboxImageBuildError: null,
+      sandboxImageBuiltAt: null,
+    });
+    if (!wrote) return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
     await removeOnceBuilt(db, provider.id, provider.sandboxImageTag, null);
     log.info(
       { providerId: provider.id },
@@ -693,22 +690,15 @@ export async function handleBuildSandboxImageJob(
   const superseded = async (): Promise<SandboxImageBuildResult> => {
     await removeOnceBuilt(db, provider.id, imageTag, null);
     log.info({ providerId: provider.id, imageTag }, 'sandbox image built for a config since left');
-    return {
-      ok: false,
-      providerId: provider.id,
-      error: 'the provider changed while this image was built, and now asks for another image',
-    };
+    return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
   };
 
   // The row keeps naming the image it has until this one exists, so a failed build leaves it there.
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageBuildStatus: 'building',
-      sandboxImageBuildError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.cliProviders.id, provider.id));
+  const started = await writeWhileWanted(db, provider.id, imageTag, {
+    sandboxImageBuildStatus: 'building',
+    sandboxImageBuildError: null,
+  });
+  if (!started) return { ok: false, providerId: provider.id, error: SUPERSEDED_BUILD };
 
   if (!payload.force) {
     const claimed = await claim();
@@ -755,7 +745,10 @@ export async function handleBuildSandboxImageJob(
       result.exitCode === 0
         ? 'the image was removed before this build could record it; build it again'
         : (result.error ?? result.stderr ?? `exit ${result.exitCode}`).slice(-4000);
-    await markBuildFailed(db, provider.id, imageTag, errMsg);
+    await writeWhileWanted(db, provider.id, imageTag, {
+      sandboxImageBuildStatus: 'failed',
+      sandboxImageBuildError: errMsg,
+    });
     log.warn(
       { providerId: provider.id, imageTag, exitCode: result.exitCode },
       'sandbox image build failed',
@@ -768,7 +761,10 @@ export async function handleBuildSandboxImageJob(
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    await markBuildFailed(db, provider.id, imageTag, errMsg);
+    await writeWhileWanted(db, provider.id, imageTag, {
+      sandboxImageBuildStatus: 'failed',
+      sandboxImageBuildError: errMsg,
+    });
     log.error({ err, providerId: provider.id }, 'sandbox image build threw');
     return { ok: false, providerId: provider.id, error: errMsg };
   } finally {
@@ -824,15 +820,18 @@ async function removeOnceBuilt(
   await removeOrphanedPreviousImage(db, { providerId, previousDbTag: tag, newTag });
 }
 
-/** Record a failed build only while the provider's config still asks for its tag: by then a build of
- *  the config it moved to owns the row's status. */
-async function markBuildFailed(
+const SUPERSEDED_BUILD =
+  'the provider changed, and now asks for another image than this build makes';
+
+/** Write `set` to the provider's row only while its config still asks for `imageTag` (null: for no
+ *  image): once it asks for another, the build of that one owns the row. */
+async function writeWhileWanted(
   db: Database,
   providerId: string,
-  imageTag: string,
-  error: string,
-): Promise<void> {
-  await db.transaction(async (tx) => {
+  imageTag: string | null,
+  set: Partial<typeof schema.cliProviders.$inferInsert>,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
     const [row] = await tx
       .select({
         name: schema.cliProviders.name,
@@ -842,23 +841,20 @@ async function markBuildFailed(
       .from(schema.cliProviders)
       .where(eq(schema.cliProviders.id, providerId))
       .for('update');
-    const wants = row
-      ? resolveImageTag({
-          name: row.name as CliProviderName,
-          cliVersion: row.cliVersion?.trim() || null,
-          providerId,
-          sandboxDockerfileExtra: row.sandboxDockerfileExtra,
-        })?.tag
-      : undefined;
-    if (wants !== imageTag) return;
+    if (!row) return false;
+    const wants =
+      resolveImageTag({
+        name: row.name as CliProviderName,
+        cliVersion: row.cliVersion?.trim() || null,
+        providerId,
+        sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+      })?.tag ?? null;
+    if (wants !== imageTag) return false;
     await tx
       .update(schema.cliProviders)
-      .set({
-        sandboxImageBuildStatus: 'failed',
-        sandboxImageBuildError: error,
-        updatedAt: new Date(),
-      })
+      .set({ ...set, updatedAt: new Date() })
       .where(eq(schema.cliProviders.id, providerId));
+    return true;
   });
 }
 

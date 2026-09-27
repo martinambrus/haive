@@ -46,6 +46,11 @@ function fakeDb(): Database {
       },
     },
     update: () => ({ set: () => ({ where: async () => {} }) }),
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [providers.p1] }) }) }),
+        update: () => ({ set: () => ({ where: async () => {} }) }),
+      }),
   } as unknown as Database;
 }
 

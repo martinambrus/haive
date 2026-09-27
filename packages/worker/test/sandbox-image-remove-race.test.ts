@@ -302,7 +302,9 @@ describe("a provider's row names its image only once the image is built", () => 
         timedOut: false,
       };
     });
-    tagOf.mockReturnValueOnce({ tag: stale, shared: true, dockerfileLines: [] });
+    // Its config asks for `stale` when it reads the provider and starts, and for TAG from then on.
+    const staleTag = { tag: stale, shared: true, dockerfileLines: [] };
+    tagOf.mockReturnValueOnce(staleTag).mockReturnValueOnce(staleTag);
     const forced = () =>
       handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER, force: true });
     const older = forced();
@@ -311,6 +313,29 @@ describe("a provider's row names its image only once the image is built", () => 
     release();
     expect(await older).toMatchObject({ ok: false, error: expect.stringContaining('changed') });
     expect([...standing].sort()).toEqual([TAG]);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      sandboxImageTag: TAG,
+      sandboxImageBuildStatus: 'ready',
+    });
+  });
+
+  // The newer build finished between the older one reading the provider and its first write.
+  it('builds nothing for a config the provider left before the build started', async () => {
+    const stale = 'haive-cli-claude:1.1.0';
+    const { fake, db, standing } = onOlder([]);
+    await fake.db
+      .update(schema.cliProviders)
+      .set({ sandboxImageTag: TAG, sandboxImageBuildStatus: 'ready' })
+      .where(eq(schema.cliProviders.id, PROVIDER));
+    standing.add(TAG);
+    tagOf.mockReturnValueOnce({ tag: stale, shared: true, dockerfileLines: [] });
+    const result = await handleBuildSandboxImageJob(db, {
+      providerId: PROVIDER,
+      userId: USER,
+      force: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(docker.build).not.toHaveBeenCalled();
     expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
       sandboxImageTag: TAG,
       sandboxImageBuildStatus: 'ready',
@@ -330,7 +355,9 @@ describe("a provider's row names its image only once the image is built", () => 
       standing.add(opts.tag);
       return { exitCode: 0, imageTag: opts.tag, durationMs: 1, stderr: '', timedOut: false };
     });
-    tagOf.mockReturnValueOnce({ tag: stale, shared: true, dockerfileLines: [] });
+    // Its config asks for `stale` when it reads the provider and starts, and for TAG from then on.
+    const staleTag = { tag: stale, shared: true, dockerfileLines: [] };
+    tagOf.mockReturnValueOnce(staleTag).mockReturnValueOnce(staleTag);
     const forced = () =>
       handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER, force: true });
     const older = forced();
@@ -417,7 +444,7 @@ describe("a provider's row names its image only once the image is built", () => 
 
   it('removes the image it had when it no longer needs one', async () => {
     const { fake, standing, build } = onOlder([]);
-    tagOf.mockReturnValueOnce(null);
+    tagOf.mockReturnValueOnce(null).mockReturnValueOnce(null);
     expect((await build()).ok).toBe(true);
     expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
       sandboxImageTag: null,

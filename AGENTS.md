@@ -1978,7 +1978,10 @@ moving off that tag otherwise found it unnamed and removed it just before the bu
 build of a config the provider has since left moves nothing and records no failure on the row,
 since the build of its new config owns it; its image goes unless a row names it, and its caller, an
 inline dispatch included, hears the build as failed for that reason rather than running an image the
-provider no longer asks for. A provider that stops needing an image has the one it named removed the
+provider no longer asks for. Every write a build makes to its own row lands only while the
+provider's config still asks for its tag (`writeWhileWanted`), its first included, so a build
+already left when it starts builds nothing: an older build's `building` landing after a newer build
+marked the row ready used to leave it `building` for good. A provider that stops needing an image has the one it named removed the
 same way.
 
 Deleting a provider removes the image it named. The api never touches Docker, so its DELETE queues
