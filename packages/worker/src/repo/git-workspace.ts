@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { isPathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from './worktree-paths.js';
-
-const exec = promisify(execFile);
+import { gitExec } from './git-exec.js';
 
 /** `absent` — no `.git` entry: a legitimate in-place / no-git workspace.
  *  `broken` — a `.git` entry exists but is not usable, either because git refuses it (a linked
@@ -40,7 +37,7 @@ async function probe(dir: string): Promise<{ status: GitWorkspaceStatus; detail:
     return { status: 'broken', detail: '.git is a symbolic link' };
   }
   try {
-    const { stdout } = await exec('git', ['rev-parse', '--is-inside-work-tree'], { cwd: dir });
+    const { stdout } = await gitExec(['rev-parse', '--is-inside-work-tree'], { cwd: dir });
     if (stdout.trim() === 'true') return { status: 'ok', detail: '' };
     return { status: 'broken', detail: stdout.trim() };
   } catch (err) {

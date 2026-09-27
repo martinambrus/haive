@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -51,8 +49,7 @@ import {
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { writeInstallManifestFromLiveRows } from '../../_install-manifest.js';
 import type { GenerateFilesDetect } from './07-generate-files.js';
-
-const exec = promisify(execFile);
+import { gitExec } from '../../../repo/git-exec.js';
 
 const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
@@ -714,7 +711,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await initGitWorkspace(ctx.repoPath, initBranch);
         branch = initBranch;
         didInit = true;
-        await exec('git', ['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
+        await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.
@@ -729,12 +726,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
       if (keep.length > 0) {
-        await exec('git', ['add', '-f', '--', ...keep], {
+        await gitExec(['add', '-f', '--', ...keep], {
           cwd: ctx.repoPath,
           maxBuffer: GIT_MAX_BUFFER,
         });
       }
-      const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
+      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only'], {
         cwd: ctx.repoPath,
         maxBuffer: GIT_MAX_BUFFER,
       });
@@ -758,12 +755,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await exec('git', ['commit', '-m', message], {
+      await gitExec(['commit', '-m', message], {
         cwd: ctx.repoPath,
         env: { ...process.env, ...identity },
         maxBuffer: GIT_MAX_BUFFER,
       });
-      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
+      const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;
       // Hand the push choices to 13-onboarding-push, only now that the commit landed.

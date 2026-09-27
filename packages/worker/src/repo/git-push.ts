@@ -1,51 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { Database } from '@haive/database';
 import { getDecryptedCredentials } from './credentials.js';
+import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
 
-const exec = promisify(execFile);
-
-export interface GitRunResult {
-  stdout: string;
-  stderr: string;
-  code: number;
-}
-
-/** execFile kills a child whose output outgrows its buffer, 1 MiB by default, and a merge or a
- *  commit killed that way is left half-written; git's output grows with the repository. */
-export const GIT_MAX_BUFFER = 64 * 1024 * 1024;
-
-/** Run a git command, capturing stdout/stderr/exit code instead of throwing. The
- *  identical helper was inlined in several steps (11a-gate-4-push, 12-worktree-cleanup);
- *  centralised here. `env` merges over process.env when provided. */
-export async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-  io?: { maxBuffer?: number; encoding?: BufferEncoding; input?: Buffer },
-): Promise<GitRunResult> {
-  try {
-    const { input, ...output } = io ?? {};
-    const opts = env
-      ? { cwd, env: { ...process.env, ...env }, maxBuffer: GIT_MAX_BUFFER, ...output }
-      : { cwd, maxBuffer: GIT_MAX_BUFFER, ...output };
-    const run = exec('git', args, opts);
-    if (input) {
-      // git can exit before reading all of it, which fails that write rather than the run.
-      run.child.stdin?.on('error', () => undefined);
-      run.child.stdin?.end(input);
-    }
-    const { stdout, stderr } = await run;
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
-}
+// Re-exported because the step modules and the merge core import them from here.
+export { GIT_MAX_BUFFER, gitRun };
+export type { GitRunResult };
 
 /** Replace every occurrence of the secret in command output before it is logged
  *  or surfaced to the user. Defensive: git masks credential-helper passwords in

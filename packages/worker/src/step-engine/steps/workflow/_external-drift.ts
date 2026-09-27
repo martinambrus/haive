@@ -1,11 +1,8 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-
-const exec = promisify(execFile);
+import { gitExec } from '../../../repo/git-exec.js';
 
 /**
  * Commits that reached this repository without Haive making them.
@@ -88,7 +85,7 @@ const NOTHING: Omit<ExternalDrift, 'worktreePath'> & { worktreePath: string } = 
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+    const { stdout } = await gitExec(args, { cwd, maxBuffer: 32 * 1024 * 1024 });
     return stdout.toString();
   } catch {
     return null;

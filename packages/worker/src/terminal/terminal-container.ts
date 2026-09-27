@@ -121,6 +121,10 @@ export interface EnsureShellContainerOpts {
    *  uses. May be null when a task has no associated repository (rare; we
    *  still spawn the container with no repo mount in that case). */
   repoMount: DockerVolumeMount | null;
+  /** Extra mounts nested under the workdir. A TASK shell is mounted at the repository ROOT, so
+   *  this carries the read-only `.git` the cli-exec sandboxes get (`repoGitDataBoundary`); a REPO
+   *  shell passes none, because committing and pushing from there is what it is for. */
+  nestedMounts?: DockerVolumeMount[];
   /** MCP servers configured for this user/task. Written into the container
    *  at /haive/mcp.json before the first attach so claude/zai pick it up. */
   mcpServers: McpServerSpec[];
@@ -235,6 +239,18 @@ export async function ensureShellContainer(
     ReadOnly?: boolean;
     VolumeOptions?: { Subpath?: string; NoCopy?: boolean };
   }> = [];
+  // Nested first: docker refuses two mounts on one target, and a nested read-only entry has to
+  // survive beside the repo mount it sits inside rather than replacing it.
+  for (const nested of opts.nestedMounts ?? []) {
+    if (!nested.subpath) continue;
+    mounts.push({
+      Type: 'volume',
+      Source: nested.source,
+      Target: nested.target,
+      ReadOnly: nested.readOnly ?? false,
+      VolumeOptions: { Subpath: nested.subpath, NoCopy: true },
+    });
+  }
   if (repoMount) {
     if (repoMount.subpath) {
       mounts.push({
@@ -347,7 +363,8 @@ export async function ensureShellContainer(
   // "Permission denied" the first time a user tries to edit a file from the
   // shell. One-shot fix per fresh spawn; reused containers skip it.
   if (repoMount) {
-    await chownWorkdir(docker, containerName, repoMount.target).catch((err) => {
+    const readOnlyNested = (opts.nestedMounts ?? []).filter((m) => m.readOnly).map((m) => m.target);
+    await chownWorkdir(docker, containerName, repoMount.target, readOnlyNested).catch((err) => {
       log.warn({ err, containerName }, 'workdir chown failed — writes may be denied');
     });
   }
@@ -446,14 +463,50 @@ async function detectShell(docker: Docker, containerName: string): Promise<'bash
   }
 }
 
+/** The argv that chowns `target` to the sandbox user while walking AROUND `skip`.
+ *
+ *  Pure, because the parenthesising is the whole point: `find T -path A -o -path B -prune` binds
+ *  `-prune` to B alone, so a second skipped path would be chowned anyway. MEASURED in the sandbox
+ *  image, both forms exit 0 and the pruned trees keep their ownership. */
+export function chownCmd(target: string, skip: readonly string[]): string[] {
+  const owner = `${SANDBOX_USER}:${SANDBOX_USER}`;
+  if (skip.length === 0) return ['chown', '-R', owner, target];
+  return [
+    'find',
+    target,
+    '(',
+    ...skip.flatMap((p, i) => (i === 0 ? ['-path', p] : ['-o', '-path', p])),
+    ')',
+    '-prune',
+    '-o',
+    '-exec',
+    'chown',
+    owner,
+    '{}',
+    '+',
+  ];
+}
+
 /** chown the entire workdir mount to the sandbox user as a one-shot root
  *  exec. Required because the haive_repos named volume often has root-owned
  *  files left behind by clone/ingest steps; the shell runs as `node` and
- *  would otherwise hit "Permission denied" on the first write. Idempotent. */
-async function chownWorkdir(docker: Docker, containerName: string, target: string): Promise<void> {
+ *  would otherwise hit "Permission denied" on the first write. Idempotent.
+ *
+ *  `skip` names read-only mounts nested under the target — the repository's own `.git` on a task
+ *  shell. A plain `chown -R` over one of those exits non-zero on every fresh spawn, and that
+ *  failure is only logged, so it would read as "writes may be denied" for the whole workspace.
+ *  `find -prune` walks around them instead (MEASURED in the sandbox image: exit 0, and the pruned
+ *  tree keeps its ownership). */
+async function chownWorkdir(
+  docker: Docker,
+  containerName: string,
+  target: string,
+  skip: string[] = [],
+): Promise<void> {
   const container = docker.getContainer(containerName);
+  const cmd = chownCmd(target, skip);
   const exec = await container.exec({
-    Cmd: ['chown', '-R', `${SANDBOX_USER}:${SANDBOX_USER}`, target],
+    Cmd: cmd,
     AttachStdout: true,
     AttachStderr: true,
     User: '0:0',

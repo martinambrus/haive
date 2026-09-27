@@ -55,9 +55,11 @@ export function splitRepoSubpath(
  * Split an absolute path to an uploaded archive or DB dump into the storage root and the rel below
  * it, refusing anything that is not `<storageRoot>/_uploads/<owner>/<name>`.
  *
- * `_uploads/<userId>` cannot itself be an anchor: it lives in the `haive_repos` volume, which
- * `ddev-runner` and `app-runner` both mount WHOLE at `/repos`, so a project's own runtime can write
- * into it. The storage root is the trusted end, and both segments below it are walked.
+ * `_uploads/<userId>` cannot itself be an anchor: it lives in the `haive_repos` volume, which the
+ * runtime runners mount from — the app runner cannot see it at all now, and the DDEV runner mounts
+ * this task's own dump FILE read-only, but a project's own runtime still runs over that volume and
+ * the guard is what keeps this reader from trusting a path it hands back. The storage root is the
+ * trusted end, and both segments below it are walked.
  *
  * Null rather than a guess when the shape does not match — a legacy row, or a path written by
  * something else — as `splitWorktreePath` and `splitAttachmentStoredPath` both do. The api applies

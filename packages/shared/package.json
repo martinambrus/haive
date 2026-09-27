@@ -91,6 +91,10 @@
       "types": "./dist/knowledge-paths.d.ts",
       "import": "./dist/knowledge-paths.js"
     },
+    "./git-args": {
+      "types": "./dist/git-args.d.ts",
+      "import": "./dist/git-args.js"
+    },
     "./markdown-fences": {
       "types": "./dist/markdown-fences.d.ts",
       "import": "./dist/markdown-fences.js"

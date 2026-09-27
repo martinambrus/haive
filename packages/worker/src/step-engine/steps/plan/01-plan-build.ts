@@ -15,11 +15,8 @@ import {
   planNodeDepth,
   type PlanNodeSkeleton,
 } from '@haive/shared/plan';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 
-const exec = promisify(execFile);
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
@@ -44,6 +41,7 @@ import {
   type PlanInputsApply,
 } from './00-plan-inputs.js';
 import { classifyPlanInput } from './_plan-inputs.js';
+import { gitExec } from '../../../repo/git-exec.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -753,7 +751,7 @@ export function createPlanBuildStep(
       // HEAD as the agents saw it, stamped on the code links they emit so a stale
       // one can be dated. Best-effort: a repo with no commits yet (a brand-new
       // blank one) records undated links rather than failing.
-      const derivedAtCommit = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath })
+      const derivedAtCommit = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath })
         .then((r) => r.stdout.trim())
         .catch(() => null);
 

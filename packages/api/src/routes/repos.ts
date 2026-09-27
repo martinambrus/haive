@@ -40,6 +40,7 @@ import {
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
   createRepoRequestSchema,
@@ -2383,7 +2384,10 @@ repoRoutes.post('/:id/remote', async (c) => {
 
   const git = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
     try {
-      const { stdout, stderr } = await execGit('git', args, { cwd: root, timeout: 10_000 });
+      const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
+        cwd: root,
+        timeout: 10_000,
+      });
       return { ok: true, stdout: stdout.toString().trim(), stderr: stderr.toString().trim() };
     } catch (err) {
       const e = err as { stdout?: string; stderr?: string };

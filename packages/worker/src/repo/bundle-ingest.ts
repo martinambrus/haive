@@ -8,6 +8,7 @@ import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
 import { buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
 import { getDecryptedCredentials } from './credentials.js';
+import { hardenGitArgs } from './git-exec.js';
 
 /** Resolves the per-bundle storage root inside the haive_bundles volume. The
  *  layout is `<root>/<userId>/<bundleId>/extracted/`. The archive (if any)
@@ -42,7 +43,7 @@ export function bundleArchiveRel(
 
 export function gitRevParseHead(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', ['rev-parse', 'HEAD'], { cwd });
+    const proc = spawn('git', hardenGitArgs(['rev-parse', 'HEAD']), { cwd });
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => {
@@ -72,7 +73,11 @@ function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
       GIT_ASKPASS: 'echo',
     };
     // A pull lists every file it changes, and output left unread in a pipe stops git once it fills.
-    const proc = spawn('git', args, { cwd, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    const proc = spawn('git', hardenGitArgs(args), {
+      cwd,
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();

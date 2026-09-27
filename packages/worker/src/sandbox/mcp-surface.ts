@@ -316,9 +316,12 @@ const BROWSER_TAB_DISCIPLINE = [
 /** Prompt contract paired with the MCP config the sandbox actually receives.
  *
  *  Names ONLY the servers an agent is meant to reach. `filesystem` and `git` are
- *  omitted on purpose: the git server points at a workdir whose `.git` is a masked
- *  zero-byte file in every worktree invocation, and the same prompt tells the agent
- *  not to run git — advertising it would send it at a tool built to fail.
+ *  omitted on purpose: the git server points at a workdir whose `.git` an agent cannot write — a
+ *  masked zero-byte file in a worktree invocation, the repository's real `.git` mounted read-only
+ *  at a repo-root one — so its write tools (`git_add`, `git_commit`, `git_reset`, `git_checkout`)
+ *  fail there, and `mcp-server-git` has no per-tool switch to drop them with. Its read tools are
+ *  why the server is still wired; the same prompt tells the agent not to run git, and advertising
+ *  it would send it at a tool built to fail.
  *
  *  The `ddev-control` line states the exec limit explicitly. Without it an agent
  *  plans around a `ddev exec` that does not exist and reports the shortfall as an

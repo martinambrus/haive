@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
@@ -18,9 +16,7 @@ import {
   sandboxWorktreePath,
   worktreeDirName,
 } from '../../../repo/worktree-paths.js';
-import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
-
-const exec = promisify(execFile);
+import { gitRun } from '../../../repo/git-exec.js';
 
 const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -113,25 +109,6 @@ export function nextFreeBranchName(
     if (!taken(candidate)) return candidate;
   }
   return `${base}-${limit + 1}`;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
 }
 
 /** Local branch names in the parent clone. An empty set on failure: a missing list must

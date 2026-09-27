@@ -8,6 +8,7 @@ import {
   CODE_SERVER_IMAGE,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
+  RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   appRunnerName,
   ddevRunnerName,
@@ -24,6 +25,8 @@ import {
 } from '../repo/scratch-workspace.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
+import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
+import { runnerSubpathVerdict } from './app-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
@@ -179,6 +182,11 @@ export async function ensureIdeVolumes(
 export async function startIdeRunner(params: {
   taskId: string;
   workspaceSubpath: string;
+  /** The workspace's own `.git`, mounted back read-only (`repoGitDataBoundary`). code-server runs
+   *  repository-supplied code — tasks, extensions — and host-side git later runs in this tree as
+   *  root. Empty where `.git` is not a directory: a worktree's gitfile names a host path that
+   *  exists in no container, so git there was never usable and nothing changes. */
+  gitDataMounts: DockerVolumeMount[];
   extVolume: string;
   udataVolume: string;
 }): Promise<IdeRunnerHandle> {
@@ -196,6 +204,8 @@ export async function startIdeRunner(params: {
       `haive.task.id=${params.taskId}`,
       '--label',
       `${IDE_RUNNER_LABEL}=1`,
+      '--label',
+      `${RUNNER_SUBPATH_LABEL}=${params.workspaceSubpath}`,
       // Built by `buildMountArgs`, not spelled out here. This is the THIRD site to need
       // `volume-nocopy` on a subpath mount and the third to have been written without it — the
       // sandbox had it, the terminal did not, and neither did this. Docker seeds an empty subpath
@@ -204,6 +214,7 @@ export async function startIdeRunner(params: {
       // can open the workspace but cannot save. One function decides how a subpath mount is
       // spelled, so a fourth site cannot get it wrong.
       ...buildMountArgs([
+        ...params.gitDataMounts,
         { source: REPO_VOLUME, target: '/workspace', subpath: params.workspaceSubpath },
       ]),
       '-v',
@@ -297,14 +308,43 @@ async function ensureIdeRunnerStartedInner(
 
   const name = ideRunnerName(taskId);
   if (await isRunning(name)) {
-    return { container: name };
+    // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
+    // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
+    // running container is the one for this workspace; its `.git` mount is that workspace's too.
+    if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
+      return { container: name };
+    }
+    log.info(
+      { taskId, container: name, workspaceSubpath },
+      'ide runner holds another workspace; recreating',
+    );
   }
   if (await containerExists(name)) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
 
   const { extVolume, udataVolume } = await ensureIdeVolumes(taskId, userId, settingsJson);
-  const handle = await startIdeRunner({ taskId, workspaceSubpath, extVolume, udataVolume });
+  // `hasRepo` is the task's own, so a repo-less `kb_author` workspace is never lstat'ed as though
+  // it were a repository root. A DDEV SUB-DIRECTORY workspace needs no boundary either: `.git` sits
+  // above what the editor mounts, so it is not in the container at all and nothing there can write
+  // it — the boundary applies exactly where the workspace IS the repository root.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { repositoryId: true },
+  });
+  const gitDataMounts = (
+    await repoGitDataBoundary(
+      { source: REPO_VOLUME, target: '/workspace', subpath: workspaceSubpath },
+      { hasWorktree: false, hasRepo: task?.repositoryId != null },
+    )
+  ).mounts;
+  const handle = await startIdeRunner({
+    taskId,
+    workspaceSubpath,
+    gitDataMounts,
+    extVolume,
+    udataVolume,
+  });
   await waitForIdeReady(name, 15_000);
   await setupIdeDebugging(db, taskId, name);
   return handle;

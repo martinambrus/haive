@@ -4,6 +4,7 @@ import { access } from 'node:fs/promises';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import { and, asc, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -104,7 +105,7 @@ async function requireNode(repositoryId: string, nodeId: string) {
 
 async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
   try {
-    const { stdout } = await exec('git', args, { cwd, timeout: 5_000 });
+    const { stdout } = await exec('git', hardenGitArgs(args), { cwd, timeout: 5_000 });
     return { ok: true, stdout: stdout.toString().trim() };
   } catch (err) {
     const e = err as { stdout?: string };

@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -12,7 +10,8 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
-import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, pushBranch } from '../../../repo/git-push.js';
+import { gitRun } from '../../../repo/git-exec.js';
+import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
@@ -25,8 +24,6 @@ import {
   resolveForgeProvider,
   type OpenPrResult,
 } from '../../../forge/index.js';
-
-const exec = promisify(execFile);
 
 /** Whether a stored credential can open a PR for this repo. The repo's forge is fixed by
  *  its origin URL; a credential is usable when its forge (explicit provider, else inferred
@@ -93,25 +90,6 @@ interface CreatePrFormValues {
   prBaseBranch?: string;
   prCredentialId?: string;
   finalizeMode?: string;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
 }
 
 export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, WorktreeCleanupApply> = {

@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -29,10 +27,9 @@ import {
   RULES_IMPORT_LINE,
   rulesImportState,
 } from '@haive/shared/rules-files';
+import { gitExec } from '../../../repo/git-exec.js';
 
 export { isLinkToAgentsMd, RULES_IMPORT_LINE };
-
-const execFileAsync = promisify(execFile);
 
 export interface RulesPlan {
   /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
@@ -298,7 +295,7 @@ export async function enabledImportRulesFiles(db: Database, userId: string): Pro
  *  forced stage too. A tracked file is never reported ignored, and a failed check answers false. */
 export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
   try {
-    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repoPath });
+    await gitExec(['check-ignore', '-q', '--', rel], { cwd: repoPath });
     return true;
   } catch {
     return false;

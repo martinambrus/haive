@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import type { BundleJobPayload, FormSchema, FormValues } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { gitRevParseHead, handleResyncGit } from '../../../repo/bundle-ingest.js';
+import { hardenGitArgs } from '../../../repo/git-exec.js';
 
 interface BundleResyncCandidate {
   bundleId: string;
@@ -42,7 +43,7 @@ function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
       GIT_TERMINAL_PROMPT: '0',
       GIT_ASKPASS: 'echo',
     };
-    const fetchProc = spawn('git', fetchArgs, { cwd, env });
+    const fetchProc = spawn('git', hardenGitArgs(fetchArgs), { cwd, env });
     let stderr = '';
     fetchProc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -55,7 +56,7 @@ function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
         return;
       }
       const ref = branch ? `origin/${branch}` : 'origin/HEAD';
-      const revProc = spawn('git', ['rev-parse', ref], { cwd });
+      const revProc = spawn('git', hardenGitArgs(['rev-parse', ref]), { cwd });
       let stdout = '';
       let revStderr = '';
       revProc.stdout.on('data', (d: Buffer) => {

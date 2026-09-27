@@ -43,6 +43,7 @@ import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
+import { hardenGitArgs } from './git-exec.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
   // Only http(s) carries userinfo. An `ssh://` or scp-style address
@@ -77,7 +78,7 @@ export function gitClone(
       GIT_ASKPASS: 'echo',
       ...(auth?.env ?? {}),
     };
-    const proc = spawn('git', args, { env });
+    const proc = spawn('git', hardenGitArgs(args), { env });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -99,7 +100,7 @@ export function gitClone(
  *  embedded token does not persist in .git/config. */
 export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', ['-C', dest, 'remote', 'set-url', 'origin', url]);
+    const proc = spawn('git', hardenGitArgs(['-C', dest, 'remote', 'set-url', 'origin', url]));
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -605,7 +606,9 @@ export async function handleExtract(
  *  network, no credentials), so unlike gitClone there is nothing to redact. */
 function gitRun(cwd: string, args: string[], env?: Record<string, string>): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', ['-C', cwd, ...args], { env: { ...process.env, ...(env ?? {}) } });
+    const proc = spawn('git', hardenGitArgs(['-C', cwd, ...args]), {
+      env: { ...process.env, ...(env ?? {}) },
+    });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();

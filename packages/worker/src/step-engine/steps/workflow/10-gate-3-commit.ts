@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -11,9 +9,7 @@ import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
-
-const exec = promisify(execFile);
+import { gitRun } from '../../../repo/git-exec.js';
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
  *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a
@@ -50,25 +46,6 @@ interface CommitGateApply {
   committed: boolean;
   commitSha: string | null;
   message: string;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
 }
 
 /** Persist the durable commit outcome (sha + touched paths) onto the TASK ROW so a

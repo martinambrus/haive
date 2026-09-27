@@ -1,13 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { findWorktreePathClaimant } from './worktree-claims.js';
 import { splitWorktreePath, WORKTREE_SUBDIR } from './worktree-paths.js';
-
-const exec = promisify(execFile);
+import { gitExec } from './git-exec.js';
 
 export interface WorktreeRemovalResult {
   removed: boolean;
@@ -114,7 +111,7 @@ export async function removeTaskWorktree(
   let branchDeleted = false;
   if (removal.removed && repoRoot && branch) {
     try {
-      await exec('git', ['-C', repoRoot, 'branch', '-d', branch]);
+      await gitExec(['-C', repoRoot, 'branch', '-d', branch]);
       branchDeleted = true;
     } catch (err) {
       logger.info({ err, branch }, 'branch not deleted (unmerged or missing); left in place');
@@ -153,9 +150,7 @@ export async function removeWorktreeDir(
     // there, and `git worktree repair` would then act on whatever that names.
     const gitfile = await lstatNoFollow(split.anchor, `${split.rel}/.git`);
     if (gitfile?.kind === 'file') {
-      await exec('git', ['-C', repoRoot, 'worktree', 'repair', worktreePath]).catch(
-        () => undefined,
-      );
+      await gitExec(['-C', repoRoot, 'worktree', 'repair', worktreePath]).catch(() => undefined);
     }
   }
 
@@ -164,7 +159,7 @@ export async function removeWorktreeDir(
     // was already gone is a success. Steps 12 and 13 both treat `removed: false` as loud failure.
     await removeNoFollow(split.anchor, split.rel, { recursive: true, repairPermissions: true });
     if (repoRoot) {
-      await exec('git', ['-C', repoRoot, 'worktree', 'prune']).catch(() => undefined);
+      await gitExec(['-C', repoRoot, 'worktree', 'prune']).catch(() => undefined);
     }
     // Only ever 'rmdir' now; the 'git' variant stays in the type because step outputs written before
     // this change carry it and are replayed.

@@ -27,6 +27,9 @@ export async function executeSubAgentNative(
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
   maskFiles: SandboxExtraFile[],
+  /** The read-only `.git` mount for a repository-root invocation, resolved beside the masks in
+   *  executeByKind so both sub-agent kinds carry the same boundary as a plain cli run. */
+  gitDataMounts: DockerVolumeMount[],
   /** Whether this invocation targets a linked worktree. Threaded through from executeByKind,
    *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
    *  disagree about whether git is usable here. */
@@ -60,6 +63,7 @@ export async function executeSubAgentNative(
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
   // and the agent silently runs with no MCP servers at all.
   const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
+  authMounts.push(...gitDataMounts);
   const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,
@@ -108,6 +112,9 @@ export async function executeSubAgentSequential(
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
   maskFiles: SandboxExtraFile[],
+  /** The read-only `.git` mount for a repository-root invocation, resolved beside the masks in
+   *  executeByKind so both sub-agent kinds carry the same boundary as a plain cli run. */
+  gitDataMounts: DockerVolumeMount[],
   /** Whether this invocation targets a linked worktree. Threaded through from executeByKind,
    *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
    *  disagree about whether git is usable here. */
@@ -135,6 +142,7 @@ export async function executeSubAgentSequential(
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
   // and the agent silently runs with no MCP servers at all.
   const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
+  authMounts.push(...gitDataMounts);
   const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,

@@ -709,6 +709,16 @@ export function appRunnerName(taskId: string): string {
  *  cleanup can find and remove it (mirrors the DDEV runner's haive.ddev label). */
 export const APP_RUNNER_LABEL = 'haive.apprunner';
 
+/** Docker label recording the repos-volume subpath a runtime runner MOUNTED at boot.
+ *
+ *  Both runners mount one subpath rather than the whole volume, so a reused container can no
+ *  longer serve a different one — and the resolved subpath does change: a `run_app` task that
+ *  skipped `01-worktree-setup`, a Retry that cleared that step's output, and the VNC
+ *  runtime-ensure path firing before a worktree exists all reach a runner with a different
+ *  answer than the one it booted with. Nothing compared them before, so the container quietly
+ *  served the tree it happened to be created for. */
+export const RUNNER_SUBPATH_LABEL = 'haive.repo.subpath';
+
 /** Name of a task's per-task browser-IDE (code-server) container. Shared because
  *  the api reverse-proxies the editor by this DNS name on the internal sandbox
  *  network (the /ide HTTP+WS proxy) while the worker creates and destroys it. */

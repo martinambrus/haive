@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { posix } from 'node:path';
-import { promisify } from 'node:util';
 import { glob } from 'tinyglobby';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -21,8 +19,7 @@ import {
   type SecretMaskPolicy,
 } from './secret-mask-policy.js';
 import { log } from './_shared.js';
-
-const execFileAsync = promisify(execFile);
+import { gitExec } from '../../repo/git-exec.js';
 
 /**
  * Secret masking could not be applied faithfully, and we cannot prove it was off.
@@ -50,9 +47,9 @@ export class SecretMaskError extends Error {
  * alone: masking its worktree copy would surface as a diff and `git show` would
  * still leak it, so committed-secret handling is deliberately out of scope.
  *
- * The repo volume is shared with the app runtime (app-runner / ddev mount the
- * same `haive_repos` subpath WITHOUT these masks), so the running app still sees
- * the real files — only the agent's view is masked.
+ * The repo volume is shared with the app runtime (app-runner / ddev mount this task's own
+ * `haive_repos` subpath WITHOUT these masks), so the running app still sees the real files —
+ * only the agent's view is masked.
  */
 export async function resolveSecretMasks(
   db: Database,
@@ -393,7 +390,7 @@ async function filterUntracked(workerRoot: string, matches: string[]): Promise<s
  *  directory is not a git work tree / git is unavailable. */
 export async function listTrackedFiles(repoRoot: string): Promise<Set<string> | null> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'ls-files', '-z'], {
+    const { stdout } = await gitExec(['-C', repoRoot, 'ls-files', '-z'], {
       maxBuffer: 64 * 1024 * 1024,
     });
     const set = new Set<string>();

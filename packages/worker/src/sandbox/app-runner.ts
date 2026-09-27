@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import {
   APP_RUNNER_LABEL,
+  RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   appRunnerName,
   logger,
@@ -19,6 +20,7 @@ import {
   restoreBrowserWindow,
 } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
+import { buildMountArgs } from './docker-runner.js';
 import {
   RUNTIME_WEIGHT_LABEL,
   buildResourceLimitArgs,
@@ -192,10 +194,21 @@ export async function startAppRunner(params: {
       `haive.task.id=${params.taskId}`,
       '--label',
       `${APP_RUNNER_LABEL}=1`,
+      '--label',
+      `${RUNNER_SUBPATH_LABEL}=${params.repoSubpath}`,
       ...limitArgs,
       ...weightArgs,
-      '-v',
-      `${REPO_VOLUME}:/repos`,
+      // ONE subpath, at the path it already had. Mounting the whole volume gave every task's
+      // runner every user's repository, and the project's own commands run in here (installs,
+      // dev servers). The destination is unchanged — `/repos/<subpath>` — so `projectDir`, the
+      // IDE debug `remoteRoot` and every command built from them still name the same path.
+      ...buildMountArgs([
+        {
+          source: REPO_VOLUME,
+          target: `/repos/${params.repoSubpath}`,
+          subpath: params.repoSubpath,
+        },
+      ]),
       ...publishArgs,
       ...debugEnvArgs,
       params.imageTag,
@@ -260,7 +273,14 @@ async function ensureAppRunnerStartedInner(
 ): Promise<AppRunnerHandle> {
   const name = appRunnerName(taskId);
   if (await isRunning(name)) {
-    return { container: name, projectDir: `/repos/${repoSubpath}` };
+    // A runner mounts one subpath, so reuse is only safe while that is the subpath asked for.
+    if ((await runnerSubpathVerdict(name, repoSubpath)) === 'match') {
+      return { container: name, projectDir: `/repos/${repoSubpath}` };
+    }
+    log.info(
+      { taskId, container: name, repoSubpath },
+      'app runner mounts another subpath; recreating',
+    );
   }
   if (await containerExists(name)) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
@@ -278,6 +298,24 @@ async function ensureAppRunnerStartedInner(
   } finally {
     releaseSlot();
   }
+}
+
+/** Which subpath a runner was created for, read from the label it stamped at boot.
+ *
+ *  `absent` is a container docker cannot inspect; `other` covers both a different subpath and an
+ *  EMPTY label, which is a container from before this existed — it mounts the whole volume, so
+ *  reusing it would keep that reach alive for the life of the task. */
+export async function runnerSubpathVerdict(
+  container: string,
+  repoSubpath: string,
+): Promise<'match' | 'other' | 'absent'> {
+  const res = await exec(
+    'docker',
+    ['inspect', '-f', `{{index .Config.Labels "${RUNNER_SUBPATH_LABEL}"}}`, container],
+    { timeout: 15_000 },
+  ).catch(() => null);
+  if (res === null) return 'absent';
+  return res.stdout.trim() === repoSubpath ? 'match' : 'other';
 }
 
 /** Whether the task opted into step-debugging (tasks.debug_mode). Swallows lookup
