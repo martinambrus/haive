@@ -5,6 +5,7 @@ import {
   IDENTIFIER_TSV_SENTINEL,
   RAG_TABLE,
   identifierTsvSql,
+  isPgvectorUnavailable,
   openExistingRagDatabase,
   ragDatabaseName,
   type RagConnection,
@@ -36,6 +37,7 @@ export async function ensureRagSchema(
   try {
     await conn.pg`CREATE EXTENSION IF NOT EXISTS vector`;
   } catch (err) {
+    if (!isPgvectorUnavailable(err)) throw err;
     log.warn({ err }, 'pgvector extension unavailable; falling back to jsonb embeddings');
     usedPgvector = false;
   }

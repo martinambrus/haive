@@ -1,5 +1,6 @@
 import type postgres from 'postgres';
 import { logger } from '../logger/index.js';
+import { isPgvectorUnavailable } from '../rag/connection.js';
 import type { GlobalKbConnection } from './connection.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
@@ -58,6 +59,7 @@ export async function ensureGlobalKbSchema(
   try {
     await step((tx) => tx`CREATE EXTENSION IF NOT EXISTS vector`);
   } catch (err) {
+    if (!isPgvectorUnavailable(err)) throw err;
     log.warn({ err }, 'pgvector unavailable; global KB falls back to jsonb embeddings');
     usedPgvector = false;
   }

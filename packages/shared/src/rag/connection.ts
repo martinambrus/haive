@@ -15,6 +15,15 @@ const onnotice = (notice: postgres.Notice): void =>
 
 export const RAG_TABLE = 'ai_rag_embeddings';
 
+/** SQLSTATEs `CREATE EXTENSION vector` raises when the server cannot run pgvector: not installed
+ *  (0A000, or 58P01 for a missing file) or not permitted (42501). Any other failure is retried. */
+const PGVECTOR_UNAVAILABLE_CODES: ReadonlySet<string> = new Set(['0A000', '58P01', '42501']);
+
+export function isPgvectorUnavailable(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && PGVECTOR_UNAVAILABLE_CODES.has(code);
+}
+
 /** The `source_type` values that carry PROJECT KNOWLEDGE, as opposed to code.
  *  Named positively rather than as "not code" because a fifth value exists that
  *  is neither: `task` rows (`workflow/_task-embedding.ts`) hold one embedding per

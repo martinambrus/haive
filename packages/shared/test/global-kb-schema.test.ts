@@ -8,17 +8,28 @@ type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 // Postgres — a fake connection captures the generated SQL and we assert on it.
 // The full insert/select round-trip is exercised against the running stack by
 // Slice 2/3.
-function fakeConn(opts: { vectorThrows?: boolean; hnswThrows?: boolean } = {}): {
+/** A failure carrying its SQLSTATE, as postgres.js reports one. */
+const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), { code });
+
+function fakeConn(
+  opts: { vectorThrows?: string; lockThrowsOnce?: string; hnswThrows?: boolean } = {},
+): {
   conn: EnsureConn;
   queries: () => string;
   transactions: () => string[][];
 } {
   const captured: string[] = [];
+  let lockFailure = opts.lockThrowsOnce;
   const tag = (strings: TemplateStringsArray) => {
     const q = strings.join('');
     captured.push(q);
+    if (lockFailure && q.includes('pg_advisory_xact_lock')) {
+      const code = lockFailure;
+      lockFailure = undefined;
+      return Promise.reject(pgError(code));
+    }
     if (opts.vectorThrows && q.includes('CREATE EXTENSION')) {
-      return Promise.reject(new Error('pgvector unavailable'));
+      return Promise.reject(pgError(opts.vectorThrows));
     }
     return Promise.resolve([]);
   };
@@ -169,8 +180,12 @@ describe('ensureGlobalKbSchema', () => {
     expect(firstTokens.filter((t) => t !== 'CASE')).toEqual([]);
   });
 
-  it('falls back to jsonb embeddings when pgvector is unavailable', async () => {
-    const { conn, queries } = fakeConn({ vectorThrows: true });
+  it.each([
+    ['0A000', 'not installed'],
+    ['58P01', 'missing its files'],
+    ['42501', 'not permitted'],
+  ])('falls back to jsonb embeddings when pgvector is %s (%s)', async (code) => {
+    const { conn, queries } = fakeConn({ vectorThrows: code });
     const res = await ensureGlobalKbSchema(conn);
     const sql = queries();
 
@@ -180,6 +195,20 @@ describe('ensureGlobalKbSchema', () => {
     // Upsert key + facet indexes still created on the fallback table.
     expect(sql).toContain('uq_global_rag_ns_entry_section_chunk');
     expect(sql).toContain('USING GIN (facets)');
+  });
+
+  it('rethrows a failure to take the schema lock, and creates nothing', async () => {
+    const { conn, queries } = fakeConn({ lockThrowsOnce: '57014' });
+
+    await expect(ensureGlobalKbSchema(conn)).rejects.toMatchObject({ code: '57014' });
+    expect(queries()).not.toContain('CREATE TABLE');
+  });
+
+  it('rethrows an extension failure that says nothing about pgvector, and creates nothing', async () => {
+    const { conn, queries } = fakeConn({ vectorThrows: 'XX000' });
+
+    await expect(ensureGlobalKbSchema(conn)).rejects.toMatchObject({ code: 'XX000' });
+    expect(queries()).not.toContain('CREATE TABLE');
   });
 
   // Every process and install sharing the store runs this ensure, so each statement takes the
