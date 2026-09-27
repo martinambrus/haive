@@ -205,6 +205,14 @@ overlapping targets — this week's release window and last week's — re-find t
 defects, and a window report that dropped them would present the window as cleaner than it is.
 Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
 
+**Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
+best-effort by design and never throws, because a core reviewer's findings live in its step output
+and the table only informs. Here the rows ARE the state: the dashboard reads them, the report's
+NEW and still-present verdicts are computed against them, and the next scan dedups on them. So
+`scan-record` writes its findings, with the same row shape and fingerprint, in one transaction
+whose failure fails the step, and a Retry writes them again. A finding is never in the step's
+output without its row.
+
 **It asserts distinct fingerprints within a batch**, because `comment-debt` is the one dimension that
 breaks the dedupe every other one survives — see its section below. `recordReviewFindings` writes with
 `onConflictDoNothing` against the UNIQUE `review_findings_dedupe_idx`
@@ -301,12 +309,17 @@ the default branch, the scan this plan described before it had targets.
   window is this case — `from` the last release tag, `to` the release branch — and the merge-base
   keeps a `from` on another line of history from showing up as its own changes, reversed.
 
-**Names are resolved once, in `scan-scope`'s apply.** Every ref the person gave becomes a full
-commit SHA through `rev-parse --verify` behind `--end-of-options`, peeled with `^{commit}`, so a
-value starting with `-` never reaches git as an option and a tag of a tree or blob is refused; the
-names are recorded beside the SHAs. Every later step reads the SHAs: a branch that moves mid-run
-must not change what the verify wave reads or what the report says was scanned. Prompts name the
-target by SHA and ref name only, never by commit message, which is repository-authored prose.
+**Names are checked before git sees them, and resolved once.** Every ref the person gave is
+validated in code before any git command runs — refused when it starts with `-` or breaks git's
+own ref-name rules, and a SHA must be hex — and every git command, the fetch below included, takes
+it only after `--end-of-options`, inside a refspec Haive builds from the checked name. The fetch
+runs before resolution, so a check made only there would come too late: `git fetch` reads an
+option-shaped refspec as an option, and some of its options name a command to run. `scan-scope`'s
+apply then resolves each name to a full commit SHA with `rev-parse --verify`, peeled with
+`^{commit}` so a tag of a tree or blob is refused, and records the names beside the SHAs. Every
+later step reads the SHAs: a branch that moves mid-run must not change what the verify wave reads
+or what the report says was scanned. Prompts name the target by SHA and ref name only, never by
+commit message, which is repository-authored prose.
 
 **History is fetched first, within a bound.** A clone is `git clone --depth 1` (`repo/clone.ts`),
 which is also single-branch, so another branch, a tag, an older commit or a fork point is usually
@@ -326,10 +339,15 @@ one is refused by name.
 **The code read is the target's own commit, always from a snapshot.** Every target, a full one on
 the commit the root has checked out included, reads a SNAPSHOT of its commit: a directory in the
 task's scratch workspace (`repo/scratch-workspace.ts`, the one a repository-less task already
-works in), filled from the repository's objects without writing to the repository — a temporary
-index (`GIT_INDEX_FILE`) read from the commit and written out with `checkout-index --prefix`. Not a
-git worktree: `worktree add` writes admin files into the repository's `.git`, and a read-only
-folder import's `.git` is the person's own. Every scan and verify agent is mounted on the snapshot
+works in), holding exactly the bytes the commit stores. It is written from the object store
+(`ls-tree -r -z` and `cat-file --batch`, which read no attributes and run no filter), never checked
+out: a checkout falls back to the live checkout's `.gitattributes` where the target has none and
+runs whatever smudge filter the repository's config names, so its bytes need not be the commit's
+— the rule `captureFixBaseline` keeps by reading `.gitattributes` from the empty tree — and a git
+worktree would also write admin files into the repository's `.git`, which for a read-only folder
+import is the person's own. A symlink is written as a regular file holding its target, since
+recreating the link would hand an agent a path out of the snapshot, and a submodule is named in
+the coverage record as not scanned. Every scan and verify agent is mounted on the snapshot
 alone and read-only, since the verify wave must read the bytes the analysis read, and the
 invocation mount has to honour that ahead of its read-only-folder branch, which returns first
 today (see Core changes). Reading the root instead would scan its uncommitted bytes under a commit
@@ -367,13 +385,14 @@ below.
 **A diff target also carries what it removed.** The sandbox has no git and the snapshot holds
 only the target's side, so a rename, a deleted function or a removed call would leave nothing to
 read — and `backward-compatibility` and `dead-code` exist to ask about exactly those. The snapshot
-therefore gets a second tree holding the base-side version of every file the target changed or
-deleted, and nothing else, and each file's line note also names the lines the target removed,
-numbered as in that copy (the hunk headers' `-` side, which `parseChangedLineRanges` skips today).
-That tree is bound read-only at a path OUTSIDE the workdir, through the bind
-`resolveTaskUploadsMount` uses for a task's uploads, so a reference search or a language server
-started in the workdir never counts the base copy as a caller. None of its text enters a prompt:
-it is repository content read off disk under the same `REPO_IS_DATA_LINES` guard as the rest.
+therefore gets a second tree, written the same way, holding the base-side version of every file
+the target changed or deleted and nothing else, and each file's line note also names the lines
+the target removed, numbered as in that copy (the hunk headers' `-` side, which
+`parseChangedLineRanges` skips today). That tree is bound read-only at a path OUTSIDE the workdir,
+through the bind `resolveTaskUploadsMount` uses for a task's uploads, so a reference search or a
+language server started in the workdir never counts the base copy as a caller. None of its text
+enters a prompt: it is repository content read off disk under the same `REPO_IS_DATA_LINES` guard
+as the rest.
 
 **A large diff target is sliced, never truncated.** A task's review caps its list at 100 files and
 discloses the rest as unseen (`changedFilesBlock`'s COVERAGE notice); a scan exists to cover its
@@ -626,7 +645,8 @@ former, and this module does both kinds of write.
 - Whole-tree step precedent: `steps/onboarding/07_7-secret-sweep.ts`
 - Change-scoped dead-code detection that `dead-code` extends whole-tree:
   `steps/workflow/07b-phase-4-validate.ts`, Step 5 and the Step 4 refactoring-impact check
-- Findings persistence + fingerprint: `steps/workflow/_review-findings.ts`
+- Findings persistence + fingerprint: `steps/workflow/_review-findings.ts` (its writer is
+  best-effort by design, which is why `scan-record` writes strictly)
 - DAG rows + executor: `packages/database/src/schema/task-dag.ts`, `step-engine/dag-executor.ts`
 - Untrusted-tree clause: `steps/_untrusted-repo.ts`
 - Comment policy `comment-debt` judges against: `packages/shared/src/constants/default-agent-rules.ts`
@@ -653,6 +673,8 @@ former, and this module does both kinds of write.
   `steps/workflow/06-run-config.ts`, the runner's `overlayPreAnswerDefaults`, and 00a's `base`
   field in `steps/workflow/00a-sync-base.ts`
 - Conditional form fields: `visibleWhen` in `packages/shared/src/schemas/form.ts`
+- A commit's stored bytes with no attribute or filter applied, the rule the merge snapshots keep:
+  `captureFixBaseline` in `step-engine/git-merge.ts`
 
 ## Verification
 
@@ -697,9 +719,10 @@ former, and this module does both kinds of write.
   did-not-complete, never as REFUSED and never as a clean dimension.
 - Target resolution over a fixture repository holding a root commit, a merge and two branches:
   branch → merge-base, commit → first parent (root commit → empty tree), range → merge-base of
-  `from` and `to`. A ref starting with `-` and a tag naming a tree are refused before any diff
-  runs; a branch with no commits of its own, an empty range and a subtree holding no changed file
-  each refuse at `scan-scope`.
+  `from` and `to`. A ref starting with `-` is refused before any git command runs, the fetch
+  included, and every git argv carries a person's ref only after `--end-of-options`; a tag naming
+  a tree is refused before any diff runs; a branch with no commits of its own, an empty range and
+  a subtree holding no changed file each refuse at `scan-scope`.
 - Moving a branch after `scan-scope` changes nothing `scan-analyze`, `scan-verify` or the report
   reads.
 - A full target on the root's own commit reads the snapshot, not the root: a tracked file edited
@@ -718,6 +741,11 @@ former, and this module does both kinds of write.
   target deleted.
 - A read-only folder import is scanned from a snapshot filled without writing to its `.git`, and
   triage offers it no remediation.
+- A snapshot of a commit whose `.gitattributes` asks for line-ending conversion and a smudge filter
+  holds the blob bytes unchanged and runs no filter; a symlink arrives as a file holding its
+  target, and a submodule is named in the coverage record as not scanned.
+- A `scan-record` whose write fails fails the step and leaves no finding in its output without a
+  row, and the Retry writes each row once.
 - A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and a base
   changed on the form stops `scan-remediate` before any coder is dispatched.
 
