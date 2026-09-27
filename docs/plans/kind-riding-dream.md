@@ -357,12 +357,15 @@ the same way. A clone is `git clone --depth 1` (`repo/clone.ts`), which is also 
 another branch, a tag, an older commit or a fork point is usually not on disk. The pickers list
 `git ls-remote --heads --tags` against the source, since a clone's local refs would show one
 branch, and a listing that fails leaves the fields free-text rather than blocking the form. Before
-resolving, apply fetches the refs the target names, then deepens in bounded steps until the base
-is present — `00a-sync-base`'s rule, never `--unshallow`, since a full history can be huge. A
-target whose base is not reached within the bound is refused, naming the depth reached; it is
-never scanned as the shorter window that did arrive. Fetching a bare SHA depends on the host
-allowing it and is UNMEASURED; a SHA reachable from a ref the target names needs no such
-allowance. A missing ref is refused by name.
+resolving, apply fetches each ref the target names at `--depth=1`, which marks the scratch
+repository shallow with a boundary of its own: the alternates carry the clone's objects but not
+its `.git/shallow`, a repository not marked shallow cannot be deepened, and a first fetch with no
+depth can pull a whole history. It then deepens in bounded steps until the base is present —
+`00a-sync-base`'s rule, never `--unshallow`, since a full history can be huge. A target whose base
+is not reached within the bound is refused, naming the depth reached, and so is one whose walk
+still meets a missing object, naming the object; neither is ever scanned as the shorter window
+that did arrive. Fetching a bare SHA depends on the host allowing it and is UNMEASURED; a SHA
+reachable from a ref the target names needs no such allowance. A missing ref is refused by name.
 
 **The code read is the target's own commit, always from a snapshot.** Every target, a full one on
 the commit the root has checked out included, reads a SNAPSHOT of its commit: a directory in the
@@ -792,6 +795,9 @@ former, and this module does both kinds of write.
   at the root is named in the coverage record, and its edit is never scanned.
 - A shallow fixture whose range base lies past the deepen bound is refused naming the depth reached,
   never scanned as the part that was fetched.
+- The scratch repository's first fetch of a ref is `--depth=1`, so it holds a shallow boundary of
+  its own and deepens from there beside a `--depth 1` clone lent through alternates; a walk that
+  still meets a missing object refuses the target, naming the object.
 - Under a diff target: coherence raises a pair only when a side lies in the changed lines;
   `dead-code` raises a pre-existing symbol whose last caller the target removed; `comment-debt`
   raises nothing outside the changed lines and the blocks around them.
