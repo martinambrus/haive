@@ -244,7 +244,9 @@ N findings per file, ranked by span, and the coverage record names what it trunc
 **Remediation lands on a branch, and triage names it where the target did not.** Every target
 lands on the branch its `to` was named by, which for a full or branch target is the branch it
 scanned; whenever `to` was a tag or a bare SHA, which every ref field accepts, triage asks the
-person for the branch, whatever the target kind. The landing branch must contain
+person for the branch, whatever the target kind. A name given there is checked the way
+`scan-scope` checks every ref (see Scan targets) before it is stored or pre-answered, since
+`00a-sync-base` fetches it. The landing branch must contain
 the scanned commit (`merge-base --is-ancestor`), or triage offers no remediation for that target
 and says why: a fix for code a branch never had is not a remediation. Remediation works on the
 landing branch's current tip, which can be ahead of what was scanned, so a finding in a file that
@@ -287,15 +289,17 @@ submits it, so a scan of branch B from a checkout on A would remediate, and merg
 `scan-triage` therefore pre-answers 00a's `base` with the landing branch through
 `tasks.pre_answers`, the map `06-run-config` pre-answers later steps with (merged into it, never
 written over it, since 06 writes the whole map), and `scan-remediate` dispatches no coder until
-three things hold, each checked with `merge-base --is-ancestor` in the scratch repository, which
-sees every commit involved: the integration worktree's own HEAD contains the scanned commit; the
-landing branch, re-resolved at its source just before dispatch, still contains it; and HEAD
-contains that re-resolved tip. A matching branch name proves nothing: 00a carries on with the old
-local branch when its fast-forward fails, a force-push makes exactly that happen while the old
-tip still holds the scanned commit, and in manual mode a pre-answer is only a default a person can
-change. Work built on a tip the source has moved away from is work its push cannot land. A check
-that cannot be answered, a history too shallow to connect the commits, refuses rather than
-guesses.
+01 has recorded the landing branch itself as its base and three things hold, each checked with
+`merge-base --is-ancestor` in the scratch repository, which sees every commit involved: the
+integration worktree's own HEAD contains the scanned commit; the landing branch, re-resolved at
+its source just before dispatch, still contains it; and HEAD contains that re-resolved tip. The
+name is necessary and proves nothing alone: 00a carries on with the old local branch when its
+fast-forward fails, a force-push makes exactly that happen while the old tip still holds the
+scanned commit, and in manual mode a pre-answer is only a default a person can change. A root
+checked out on a detached HEAD fails the name test outright, since 00a then skips its form,
+pre-answer included, and 01 falls back to `HEAD`, so remediation refuses there and says why. Work
+built on a tip the source has moved away from is work its push cannot land. A check that cannot
+be answered, a history too shallow to connect the commits, refuses rather than guesses.
 
 **One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
@@ -650,8 +654,8 @@ Two are already written into the two modularity plans (`5aa4704`):
 - Module `composableSteps` union into `composable_step_catalog`, namespaced `module.<id>.<stepId>`.
 - Module-seeded task-type definitions, and the dangling-reference rule when a module is removed.
 
-Four more follow from how the scan runs. The first stands on its own and can ship ahead of the
-module:
+Five more follow from how the scan runs. The first and the last stand on their own and can ship
+ahead of the module:
 
 - **A provider's content-filter refusal is a per-agent outcome, not a dead provider.** The fan-out
   barrier's fail-fast (`step-runner.ts`) and the DAG's `pickFatalProviderError` both key on
@@ -698,6 +702,13 @@ module:
   workspace, and a cancel runs no step code that could remove the snapshot itself. Widen it to a
   repository task's scratch workspace, keeping its settled-or-cancelled and no-pending-recap
   guards, so a failed scan keeps its snapshot for the Retry as a failed task keeps its Editor.
+- **`00a-sync-base` fences its refspecs.** Its fetches put `base` straight after `origin`
+  (`fetch origin <base>:refs/heads/<base>`, `fetch --deepen=50 origin <base>`) with no
+  `--end-of-options`, and `base` comes from a free-text field, so a value shaped like an option is
+  read as one, and some `git fetch` options name a command to run. The landing branch this module
+  pre-answers is checked before it gets there, but the step's own field has the same gap: its
+  fetches take the refspec after `--end-of-options`, and the field is held to git's ref-name rules
+  (no leading `-`, no `:`).
 
 One rule to state in the module system's docs while building this: a module may **write core rows**
 through `ctx.db` (`review_findings`, `task_dag_*`, and `tasks.pre_answers` for the landing branch —
@@ -852,7 +863,8 @@ former, and this module does both kinds of write.
   `scan-remediate` dispatches no coder when the integration HEAD lacks the scanned commit (a base
   changed on the form), lacks the landing tip re-resolved at the source (a fast-forward 00a could
   not make), or that tip no longer holds the scanned commit (a branch force-pushed since triage,
-  whose old local tip still holds it).
+  whose old local tip still holds it). A root on a detached HEAD refuses remediation, and a
+  landing name that starts with `-` is refused at triage before it is stored.
 - A committed `.env` in the snapshot is visible to the security dimension, which reports its
   file, line and kind and never its value.
 
@@ -870,6 +882,8 @@ former, and this module does both kinds of write.
   worker never sent, and a wave agent recovered through the retry path.
 - Completing or cancelling a repository task reaps its scratch workspace, snapshot included; a
   failed one keeps it.
+- `00a-sync-base` refuses a `base` that starts with `-` or breaks git's ref-name rules, and every
+  fetch it runs carries its refspec after `--end-of-options`.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
