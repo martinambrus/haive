@@ -205,8 +205,12 @@ overlapping targets — this week's release window and last week's — re-find t
 defects, and a window report that dropped them would present the window as cleaner than it is. An
 earlier scan is another task's: rows this task already wrote, left by an attempt a crash or a Retry
 cut short after its transaction committed, are taken as this scan's own rather than as prior
-findings, so a re-run never labels its own new findings as still present. Out-of-scope output
-under a diff target is recorded with `raw.inScope = false` and listed apart.
+findings, so a re-run never labels its own new findings as still present. A match against an
+earlier task's row counts only when that row's issue text is the same text, not merely the same
+after the fingerprint's normalization, which drops digits and ids and so can hand a different
+defect the earlier row's fingerprint; anything else is new, the safer of the two mistakes, and a
+defect that moved lines between scans still matches, since its text did not change.
+Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
 
 **Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
 best-effort by design and never throws, because a core reviewer's findings live in its step output
@@ -862,6 +866,8 @@ former, and this module does both kinds of write.
   their digits, still fails the step.
 - A `scan-record` re-run after a crash that followed its commit takes the task's own rows as this
   scan's, and labels none of its findings still present.
+- A later scan's finding whose issue differs from an earlier row's only in its digits is new, not
+  still present; one whose text is unchanged but whose line moved is still present.
 - A full or branch target whose `to` was typed as a tag or a bare SHA asks for a landing branch at
   triage.
 - A scan of branch B while the checkout is on A pre-answers 00a's `base` with B, and
