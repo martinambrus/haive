@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ ensure: vi.fn<() => Promise<unknown>>() }));
+type Store = { mode: 'internal' | 'external'; connectionString: string | null };
+
+const h = vi.hoisted(() => ({
+  ensure: vi.fn<(conn: { store: string }) => Promise<unknown>>(),
+  settings: { mode: 'internal', connectionString: null } as Store,
+}));
 
 vi.mock('../src/global-kb/connection.js', () => ({
-  resolveGlobalKbSettings: async () => ({}),
-  resolveGlobalKbConnection: async () => ({
+  resolveGlobalKbSettings: async () => ({ ...h.settings }),
+  resolveGlobalKbConnection: async (settings: Store) => ({
+    store: settings.connectionString ?? settings.mode,
     pg: () => Promise.resolve([]),
     embeddingDimensions: 8,
     close: async () => {},
@@ -23,6 +29,7 @@ const haiveDb = {} as Parameters<Awaited<ReturnType<typeof load>>>[0];
 
 beforeEach(() => {
   h.ensure.mockReset();
+  h.settings = { mode: 'internal', connectionString: null };
 });
 
 describe('withGlobalKb', () => {
@@ -53,5 +60,48 @@ describe('withGlobalKb', () => {
     await expect(withGlobalKb(haiveDb, async () => undefined)).rejects.toThrow('ensure failed');
     await withGlobalKb(haiveDb, async () => undefined);
     expect(h.ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("ensures a store switched to while another store's ensure is in flight", async () => {
+    const finish: Record<string, () => void> = {};
+    h.ensure.mockImplementation(
+      (conn) => new Promise<void>((resolve) => (finish[conn.store] = resolve)),
+    );
+    const withGlobalKb = await load();
+    const ran: string[] = [];
+
+    const internal = withGlobalKb(haiveDb, async () => void ran.push('internal'));
+    await vi.waitFor(() => expect(finish.internal).toBeDefined());
+    h.settings = { mode: 'external', connectionString: 'postgres://kb.example/one' };
+    const external = withGlobalKb(haiveDb, async () => void ran.push('external'));
+    finish.internal!();
+    await internal;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(ran).toEqual(['internal']);
+    expect(h.ensure.mock.calls.map(([conn]) => conn.store)).toEqual([
+      'internal',
+      'postgres://kb.example/one',
+    ]);
+    finish['postgres://kb.example/one']!();
+    await external;
+    expect(ran).toEqual(['internal', 'external']);
+  });
+
+  it('ensures a store switched to after the first one was ensured, once', async () => {
+    h.ensure.mockResolvedValue(undefined);
+    const withGlobalKb = await load();
+
+    await withGlobalKb(haiveDb, async () => undefined);
+    h.settings = { mode: 'external', connectionString: 'postgres://kb.example/one' };
+    await withGlobalKb(haiveDb, async () => undefined);
+    await withGlobalKb(haiveDb, async () => undefined);
+    h.settings = { mode: 'internal', connectionString: null };
+    await withGlobalKb(haiveDb, async () => undefined);
+
+    expect(h.ensure.mock.calls.map(([conn]) => conn.store)).toEqual([
+      'internal',
+      'postgres://kb.example/one',
+    ]);
   });
 });
