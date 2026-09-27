@@ -29,7 +29,7 @@ import {
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { detectOrigin, getOriginUrl, gitRun } from '../../../repo/git-push.js';
+import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
@@ -714,7 +714,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await initGitWorkspace(ctx.repoPath, initBranch);
         branch = initBranch;
         didInit = true;
-        await exec('git', ['add', '-A'], { cwd: ctx.repoPath });
+        await exec('git', ['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.
@@ -728,9 +728,15 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
-      if (keep.length > 0) await exec('git', ['add', '-f', '--', ...keep], { cwd: ctx.repoPath });
+      if (keep.length > 0) {
+        await exec('git', ['add', '-f', '--', ...keep], {
+          cwd: ctx.repoPath,
+          maxBuffer: GIT_MAX_BUFFER,
+        });
+      }
       const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
         cwd: ctx.repoPath,
+        maxBuffer: GIT_MAX_BUFFER,
       });
       const staged = stagedOut
         .split('\n')
@@ -755,6 +761,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       await exec('git', ['commit', '-m', message], {
         cwd: ctx.repoPath,
         env: { ...process.env, ...identity },
+        maxBuffer: GIT_MAX_BUFFER,
       });
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();

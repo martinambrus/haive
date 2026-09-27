@@ -26,7 +26,12 @@ import { createFakeDb } from '@haive/database/testing';
 import type { Database } from '@haive/database';
 import type { ClassifiedBundle } from '../src/bundle-parser/classifier.js';
 import { extractArchive, gitClone } from '../src/repo/clone.js';
-import { bundleArchiveRel, gitRevParseHead, handleIngestZip } from '../src/repo/bundle-ingest.js';
+import {
+  bundleArchiveRel,
+  gitRevParseHead,
+  handleIngestZip,
+  handleResyncGit,
+} from '../src/repo/bundle-ingest.js';
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -201,4 +206,56 @@ describe('bundle-ingest: git clone + rev-parse', () => {
     expect(head).toMatch(/^[0-9a-f]{40}$/);
     expect((await readdir(dest)).sort()).toContain('agents');
   });
+});
+
+describe('handleResyncGit', () => {
+  const BUNDLE = '00000000-0000-4000-8000-0000000000b2';
+  /** A pull names every file it creates in full, so 60 under this print over 200 KiB. */
+  const DEEP = Array.from({ length: 15 }, (_, i) => String(i).padEnd(240, 'd')).join('/');
+
+  it('finishes a pull that prints more than a pipe holds', async () => {
+    const origin = path.join(tmpRoot, 'origin');
+    const work = path.join(tmpRoot, 'work');
+    await mkdir(origin, { recursive: true });
+    await run('git', ['init', '--bare', '-b', 'main'], origin);
+    await mkdir(path.join(work, 'agents'), { recursive: true });
+    await run('git', ['init', '-b', 'main'], work);
+    await run('git', ['remote', 'add', 'origin', origin], work);
+    await writeFile(path.join(work, 'agents', 'README.md'), '# bundle agents\n');
+    await run('git', ['add', '.'], work);
+    await run('git', ['commit', '-m', 'init'], work);
+    await run('git', ['push', 'origin', 'main'], work);
+    await gitClone(`file://${origin}`, path.join(tmpRoot, h.user, BUNDLE, 'extracted'), 'main');
+
+    await mkdir(path.join(work, 'docs', DEEP), { recursive: true });
+    for (let i = 0; i < 60; i++) {
+      await writeFile(path.join(work, 'docs', DEEP, `n${i}.md`), `note ${i}\n`);
+    }
+    await run('git', ['add', '.'], work);
+    await run('git', ['commit', '-q', '-m', 'wide'], work);
+    await run('git', ['push', 'origin', 'main'], work);
+
+    const fake = createFakeDb({ customBundles: schema.customBundles });
+    fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: h.user,
+      repositoryId: '00000000-0000-4000-8000-0000000000c1',
+      name: 'bundle',
+      sourceType: 'git',
+      gitUrl: `file://${origin}`,
+      gitBranch: 'main',
+      storageRoot: '',
+    });
+    const resync = handleResyncGit(
+      { bundleId: BUNDLE, userId: h.user } as never,
+      fake.db as unknown as Database,
+      tmpRoot,
+    ).then(() => 'finished');
+    const hung = new Promise((resolve) =>
+      setTimeout(() => resolve('still pulling'), 15_000).unref(),
+    );
+
+    expect(await Promise.race([resync, hung])).toBe('finished');
+    expect(fake.rows(schema.customBundles)[0]?.lastSyncCommit).toBe(await gitRevParseHead(work));
+  }, 30_000);
 });

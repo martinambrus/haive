@@ -18,6 +18,7 @@ import {
   sandboxWorktreePath,
   worktreeDirName,
 } from '../../../repo/worktree-paths.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 const exec = promisify(execFile);
 
@@ -121,7 +122,7 @@ async function gitRun(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, opts);
+    const { stdout, stderr } = await exec('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };

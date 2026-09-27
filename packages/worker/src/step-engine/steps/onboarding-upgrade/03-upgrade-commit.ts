@@ -29,6 +29,7 @@ import {
   readAgentsRulesRegion,
 } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
+import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -358,7 +359,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
           (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
         await initGitWorkspace(ctx.repoPath, initBranch);
         didInit = true;
-        await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath });
+        await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.
@@ -378,7 +379,10 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
       if (toStage.length > 0) {
-        await execFileAsync('git', ['add', '-f', '--', ...toStage], { cwd: ctx.repoPath });
+        await execFileAsync('git', ['add', '-f', '--', ...toStage], {
+          cwd: ctx.repoPath,
+          maxBuffer: GIT_MAX_BUFFER,
+        });
       }
       if (removedPaths.length > 0) {
         await execFileAsync(
@@ -386,13 +390,14 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
           ['rm', '--cached', '--ignore-unmatch', '-q', '--', ...removedPaths],
           {
             cwd: ctx.repoPath,
+            maxBuffer: GIT_MAX_BUFFER,
           },
         );
       }
       const { stdout: stagedOut } = await execFileAsync(
         'git',
         ['diff', '--cached', '--name-only'],
-        { cwd: ctx.repoPath },
+        { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER },
       );
       const staged = stagedOut
         .split('\n')
@@ -416,6 +421,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       await execFileAsync('git', ['commit', '-m', message], {
         cwd: ctx.repoPath,
         env: { ...process.env, ...identity },
+        maxBuffer: GIT_MAX_BUFFER,
       });
       const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();

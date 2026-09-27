@@ -12,7 +12,8 @@
 > live-verified (#349); A4.4 shipped and live-verified (#350); A4.5 shipped and live-verified
 > (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3
 > shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and
-> live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 in review (#359).
+> live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 shipped and live-verified
+> (#359); A2.3 in review (#360).
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
@@ -188,6 +189,15 @@ DE = `.../dag-executor.ts`.
     holds only merge paths — today `add -A` commits them), `dag-executor.test.ts` (baseline
     survives a state round trip), a dirty base worktree kept (today force-removed).
   - Rollback: revert A2.2 before A2.1; leftover folders stay excluded from git and are listed.
+- **A2.3 fix(worker): git output past a buffer no longer kills or stalls git.** Found on #338 R10:
+  execFile kills a child whose output outgrows `maxBuffer` (1 MiB by default). A merge of 300
+  conflicting deep paths printed 2.19 MB, so `openMerge` read the half-written merge, which had no
+  MERGE_HEAD, as `refused`; a wide commit read as failed although HEAD moved. Every git helper runs
+  under `GIT_MAX_BUFFER` (64 MiB): the shared `gitRun`, the seven local copies, 12's and 03's stage
+  and commit calls, and `_impl-changes.ts`' status. The bundle resync's `git pull` piped stdout
+  nobody read and hung past 128 KiB (MEASURED on Node 26.7.0); its stdout now goes nowhere.
+  Controls: `git-output-buffer.test.ts` (a 300-path conflicted merge and a 400-file commit, both
+  past 1 MiB) and `bundle-ingest.test.ts` (a resync whose pull adds 60 deep files).
 
 ## Track A3: upgrade and rollback (order L → G → M(b) → I → J → H → M(a))
 
