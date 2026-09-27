@@ -196,8 +196,8 @@ Consolidate first, refute second, and keep the inverted 2-of-3 default.
 change; the column is `varchar(128)`), and records coverage — the target (its kind, the names
 given and the commits they resolved to), which dimensions ran, which were REFUSED and by which
 provider, and what the budget truncated, slices of a large target included — reusing the
-disclosure convention from `_impl-changes.ts`. It also removes the scan's snapshot worktree when
-there is one (see Scan targets).
+disclosure convention from `_impl-changes.ts`. It also removes the scan's snapshot worktree (see
+Scan targets).
 
 **Deduping decides what is NEW, never what the report covers.** A finding an earlier scan already
 recorded is listed as still present, naming the scan that recorded it, not left out: two scans of
@@ -266,8 +266,10 @@ Those worktrees branch from `01-worktree-setup`'s integration worktree, so `00a-
 
 **One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
-fix the provider's filter refuses carries one, so one refused issue would stop its whole level. The
-first new core change covers it.
+fix the provider's filter refuses carries one, so one refused issue would stop its whole level.
+Taking the guard away alone would send that issue to the advisor instead, which can re-send the
+refused content. The first new core change covers both; the refused issue's findings stay recorded
+as not remediated, naming the refusal.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends.
@@ -313,17 +315,17 @@ A read-only folder import is the person's own clone and is never fetched into, a
 with no source has nothing to fetch from: both list and resolve their local refs, and a missing
 one is refused by name.
 
-**The code read is the target's own revision.** A full target whose commit is the one the
-repository root has checked out reads the root, as a task with no worktree does, and its coverage
-record counts any uncommitted change there, since that is what was read. Every other target reads
-a DETACHED worktree of its commit, added under `.haive/worktrees/` (the `worktree add --detach`
-precedent in `plan/merge.ts`), with every scan and verify agent mounted on it alone, the way a DAG
-coder is mounted on its issue worktree. A diff target takes the snapshot even at the root's own
-commit, since an uncommitted edit there would shift the lines its notes point at. A step that reads
-the snapshot re-creates it at the recorded commit when it is gone, so a Resume or Retry after
-`scan-record` removed it reads the same revision, and a cancel removes it along with the task's own
-worktree (see Core changes). A full target on a revision the root does not have costs a second
-checkout for as long as the scan runs.
+**The code read is the target's own commit, always from a snapshot.** Every target, a full one on
+the commit the root has checked out included, reads a DETACHED worktree of its commit added under
+`.haive/worktrees/` (the `worktree add --detach` precedent in `plan/merge.ts`), with every scan and
+verify agent mounted on it alone, the way a DAG coder is mounted on its issue worktree. Reading the
+root instead would scan its uncommitted bytes under a commit SHA that does not hold them: triage's
+changed-since-scan check compares commits and would call such a finding unchanged, while the coder,
+cut from the committed tip, could not see what it describes. The coverage record names the tracked
+files the root had changed, since the scan did not read them. A step that reads the snapshot
+re-creates it at the recorded commit when it is gone, so a Resume or Retry after `scan-record`
+removed it reads the same revision, and a cancel removes it along with the task's own worktree (see
+Core changes). The price is a second checkout for as long as the scan runs.
 
 A snapshot holds committed files only, the view every worktree run has. Rules and KB that exist
 only uncommitted at the root — onboarding's commit is off by default — reach its agents the way
@@ -554,16 +556,24 @@ module:
   step, and in the DAG cancelling in-flight siblings, is right. A refusal concerns ONE prompt: its
   siblings' prompts are not refused by it, and waiting changes nothing. Exclude `content_filter` at
   those two sites. A refused mining agent then degrades like any failed agent, its refusal named in
-  `miningLossNote`; a refused DAG coder fails its own issue, without cancelling its siblings and
-  without escalation re-sending the same content to the provider that refused it. Core's own
-  fan-outs change with it: a refused `08c` or `08d` seat — 08d's is where the refusal was measured
-  — fails the whole step today, and afterwards yields the synthetic "did not complete" finding both
-  steps already report for a dead agent (`didNotCompleteIssue`), so its silence is still never read
-  as approval.
-- **A mining dispatch can name the worktree its agent is mounted on.** `worktreeRel` already rides a
-  dispatch request and the cli-exec payload for DAG coders and the merge resolver
-  (`orchestrator/dispatcher.ts`); `AgentMiningDispatch` gains it, so a scan of a revision the root
-  does not have reads that revision alone.
+  `miningLossNote`. A refused DAG coder needs a third change: with the guard out of the way,
+  `classifyDagIssueFailure` (`dag-failure-class.ts`) calls a failure that was neither killed nor
+  environmental `genuine` and hands it to the advisor, whose `RETRY_APPROACH`/`RETRY_MODIFIED`
+  would re-send the refused content to the provider that refused it. Its issue ends REFUSED
+  instead, a terminal outcome of its own that skips escalation and leaves its siblings running.
+  Core's own fan-outs change with it: a refused `08c` or `08d` seat — 08d's is where the refusal
+  was measured — fails the whole step today, and afterwards yields the synthetic "did not complete"
+  finding both steps already report for a dead agent (`didNotCompleteIssue`), so its silence is
+  still never read as approval.
+- **A mining dispatch can name the worktree its agent is mounted on, and its row keeps it.**
+  `worktreeRel` already rides a dispatch request and the cli-exec payload for DAG coders and the
+  merge resolver (`orchestrator/dispatcher.ts`); `AgentMiningDispatch` gains it, so a scan reads
+  its snapshot alone. It also joins the requirements a mining row records (`dispatchRequirements`
+  and `recordedRequirements` in `step-runner.ts`, today `roleKey`, `capabilities` and
+  `preferVision`) as a new `task_step_agent_minings` column: a reserved agent a dead worker never
+  sent, and a wave agent `selectAgents` never authored, are replayed from the row alone, and
+  without it a recovered `scan-verify` refuter would mount the repository root and check the wrong
+  revision.
 - **A module declares its fan-out seats.** `STEP_MINING_SEATS` (`@haive/shared`) is a constant the
   api reads by step id to hand the web its per-seat CLI picker, so a module step's seats reach
   neither. The module manifest carries them, derived from the module's dimension set, and the api
@@ -599,14 +609,18 @@ cross-cutting rule says the latter but not the former, and this module does both
 - Per-seat CLI selection, which each dimension becomes: `STEP_MINING_SEATS` in
   `packages/shared/src/step-engine/types.ts`, `AgentMiningDispatch.roleKey` in
   `step-engine/step-definition.ts`
-- Refusal classification, the two fail-fast sites the first new core change edits, and the retry
-  veto: `queues/cli-exec/failure-class.ts`, the mining barrier in `step-engine/step-runner.ts`,
-  `pickFatalProviderError` in `step-engine/dag-executor.ts`, `step-engine/mining-failure.ts`
+- Refusal classification, the three sites the first new core change edits, and the retry veto:
+  `queues/cli-exec/failure-class.ts`, the mining barrier in `step-engine/step-runner.ts`,
+  `pickFatalProviderError` in `step-engine/dag-executor.ts`, `classifyDagIssueFailure` in
+  `step-engine/dag-failure-class.ts`, `step-engine/mining-failure.ts`
 - Fan-out Resume, which re-runs only the failed terminals: `packages/api/src/routes/tasks/steps.ts`
 - Shallow clone, the fetch source and the bounded-deepen rule: `repo/clone.ts`, `repo/refresh.ts`,
   `steps/workflow/00a-sync-base.ts`
-- Detached scratch worktree, per-invocation mount and cancel-time removal: `plan/merge.ts`,
-  `worktreeRel` in `orchestrator/dispatcher.ts`, `repo/worktree-remove.ts`
+- Detached scratch worktree, per-invocation mount, the requirements a mining row records, and
+  cancel-time removal: `plan/merge.ts`, `worktreeRel` in `orchestrator/dispatcher.ts`,
+  `dispatchRequirements`/`recordedRequirements` in `step-engine/step-runner.ts` with the
+  `task_step_agent_minings` table in `packages/database/src/schema/tasks.ts`,
+  `repo/worktree-remove.ts`
 - Conditional form fields: `visibleWhen` in `packages/shared/src/schemas/form.ts`
 
 ## Verification
@@ -657,6 +671,8 @@ cross-cutting rule says the latter but not the former, and this module does both
   each refuse at `scan-scope`.
 - Moving a branch after `scan-scope` changes nothing `scan-analyze`, `scan-verify` or the report
   reads.
+- A full target on the root's own commit reads the snapshot, not the root: a tracked file edited
+  at the root is named in the coverage record, and its edit is never scanned.
 - A shallow fixture whose range base lies past the deepen bound is refused naming the depth reached,
   never scanned as the part that was fetched.
 - Under a diff target: coherence raises a pair only when a side lies in the changed lines;
@@ -671,9 +687,11 @@ cross-cutting rule says the latter but not the former, and this module does both
   content-filter row — a table over every `ProviderFatalClass` member, so a class added later has
   to be placed. An `08d` fan-out with one refused seat ends degraded, carrying that seat's "did not
   complete" finding.
-- `pickFatalProviderError` returns nothing for a content-filter run: no sibling coder is cancelled,
-  and the refused issue fails without escalation.
-- A mining dispatch naming `worktreeRel` mounts that worktree alone, with its gitfile masked.
+- `pickFatalProviderError` returns nothing for a content-filter run, so no sibling coder is
+  cancelled, and the refused issue ends REFUSED with no advisor dispatch while its siblings merge.
+- A mining dispatch naming `worktreeRel` mounts that worktree alone, with its gitfile masked, and so
+  does the same agent replayed from its row: a reserved agent a dead worker never sent, and a wave
+  agent recovered through the retry path.
 - Cancel removes a task's snapshot worktree as well as its integration worktree.
 
 **End to end on the dev stack:**
