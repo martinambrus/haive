@@ -255,7 +255,7 @@ describe("a provider's row names its image only once the image is built", () => 
     });
     const db = fake.db as unknown as Database;
     const build = () => handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER });
-    return { fake, standing, build };
+    return { fake, db, standing, build };
   }
 
   it('keeps naming the image it had when a build of a new tag fails', async () => {
@@ -277,6 +277,36 @@ describe("a provider's row names its image only once the image is built", () => 
       sandboxImageBuildStatus: 'ready',
     });
     expect([...standing]).toEqual([TAG]);
+  });
+
+  // Its version changed while a build of the old one ran, and the build of the new one ended first.
+  it('keeps the image its config asks for when an older build finishes last', async () => {
+    const stale = 'haive-cli-claude:1.1.0';
+    const { db, standing } = onOlder([]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    docker.build.mockImplementation(async (opts: { tag: string }) => {
+      if (opts.tag === stale) await gate;
+      standing.add(opts.tag);
+      return {
+        exitCode: 0,
+        imageTag: opts.tag,
+        imageId: `sha256:${opts.tag}`,
+        durationMs: 1,
+        stderr: '',
+        timedOut: false,
+      };
+    });
+    tagOf.mockReturnValueOnce({ tag: stale, shared: true, dockerfileLines: [] });
+    const forced = () =>
+      handleBuildSandboxImageJob(db, { providerId: PROVIDER, userId: USER, force: true });
+    const older = forced();
+    await vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
+    await forced();
+    release();
+    await older;
+    expect(standing.has(TAG)).toBe(true);
+    expect(standing.has(OLDER)).toBe(false);
   });
 
   it('removes the image it had when it no longer needs one', async () => {

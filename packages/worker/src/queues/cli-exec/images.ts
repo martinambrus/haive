@@ -501,19 +501,21 @@ export async function markProvidersReady(
       // One lock order for every build, so two marking overlapping siblings cannot deadlock.
       .orderBy(asc(c.id))
       .for('update');
+    const configTag = (r: (typeof rows)[number]) =>
+      resolveImageTag({
+        name: r.name as CliProviderName,
+        cliVersion: r.cliVersion?.trim() || null,
+        providerId: r.id,
+        sandboxDockerfileExtra: r.sandboxDockerfileExtra,
+      })?.tag;
     // A failed build leaves its row on the image it had, so only its config names the tag it built.
     const moving = rows.filter(
-      (r) =>
-        r.id === providerId ||
-        r.tag === imageTag ||
-        resolveImageTag({
-          name: r.name as CliProviderName,
-          cliVersion: r.cliVersion?.trim() || null,
-          providerId: r.id,
-          sandboxDockerfileExtra: r.sandboxDockerfileExtra,
-        })?.tag === imageTag,
+      (r) => r.id === providerId || r.tag === imageTag || configTag(r) === imageTag,
     );
     if (moving.length === 0) return [];
+    // A build of an older config that ends last must not take the image a newer build made.
+    const self = rows.find((r) => r.id === providerId);
+    const wanted = self ? configTag(self) : undefined;
     await tx
       .update(c)
       .set({
@@ -529,7 +531,10 @@ export async function markProvidersReady(
           moving.map((r) => r.id),
         ),
       );
-    return [...new Set(moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : [])))];
+    const replaced = moving.flatMap((r) =>
+      r.tag && r.tag !== imageTag && r.tag !== wanted ? [r.tag] : [],
+    );
+    return [...new Set(replaced)];
   });
 }
 
