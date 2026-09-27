@@ -33,9 +33,11 @@ export function SlotWaitBadge({ slotWait, className }: { slotWait: SlotWait; cla
           : (slotWait.message ?? `Queued for a free ${KIND_LABEL[slotWait.kind]}`)
       }
     >
-      waiting: {KIND_LABEL[slotWait.kind]}
-      {waited}
-      {slotWait.stale ? ' · stalled?' : ''}
+      <span className="truncate">
+        waiting: {KIND_LABEL[slotWait.kind]}
+        {waited}
+        {slotWait.stale ? ' · stalled?' : ''}
+      </span>
     </Badge>
   );
 }

@@ -109,7 +109,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
                   paused
                 </Badge>
               ) : task.slotWait ? (
-                <SlotWaitBadge slotWait={task.slotWait} />
+                <SlotWaitBadge slotWait={task.slotWait} className="@max-xl:max-w-full" />
               ) : (
                 <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
               )}
