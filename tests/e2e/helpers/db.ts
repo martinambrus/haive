@@ -154,10 +154,34 @@ export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<vo
   await sql`delete from users where id = ${userId}`;
 }
 
+export const TASK_CANCEL_DEADLINE_MS = 30_000;
+
+/** Wait until the worker has taken the CANCEL of each of these tasks that the api cancelled: the
+ *  job records its event before any teardown, and fails at that record once the row is gone. */
+async function waitForWorkerCancels(sql: postgres.Sql, taskIds: string[]): Promise<void> {
+  const deadline = Date.now() + TASK_CANCEL_DEADLINE_MS;
+  while (taskIds.length > 0) {
+    const waiting = await sql`
+      select t.id from tasks t
+      where t.id in ${sql(taskIds)} and t.status = 'cancelled'
+        and not exists (
+          select 1 from task_events e
+          where e.task_id = t.id and e.event_type = 'task.cancelled'
+            and e.payload ->> 'source' = 'worker'
+        )
+    `;
+    if (waiting.length === 0) return;
+    if (Date.now() >= deadline) {
+      console.warn(`the worker took no CANCEL for ${waiting.length} task(s) in time`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 /**
- * Remove a user and everything it owns. Its tasks go first, so the dev worker stops acting on a
- * live one; its repositories and providers go through the api, which also has the worker remove
- * what it made for them; then the user, unless one of its repositories could not be deleted.
+ * Remove a user and everything it owns through the api first, which cancels its live tasks and
+ * cleans up after them from their rows, and only then the user, whose delete takes those rows.
  */
 export async function removeUser(
   sql: postgres.Sql,
@@ -165,19 +189,33 @@ export async function removeUser(
   user: RegisteredUser,
 ): Promise<void> {
   if ((await sql`select 1 from users where id = ${user.userId}`).length === 0) return;
-  await sql`delete from tasks where user_id = ${user.userId}`;
+  const liveTasks = await sql<{ id: string }[]>`
+    select id from tasks
+    where user_id = ${user.userId} and status not in ('completed', 'failed', 'cancelled')
+  `;
   const repos = await sql<{ id: string }[]>`
     select id from repositories where user_id = ${user.userId}
   `;
   const providers = await sql`select 1 from cli_providers where user_id = ${user.userId}`;
   let reposGone = true;
-  if (repos.length > 0 || providers.length > 0) {
+  if (liveTasks.length > 0 || repos.length > 0 || providers.length > 0) {
     const request = await requests.newContext();
     try {
       await loginUser(request, user.email);
       for (const { id } of repos) {
         if (!(await deleteRepoViaApi(sql, request, id))) reposGone = false;
       }
+      // What no repository delete cancelled; one it did is answered as already cancelled.
+      for (const { id } of liveTasks) {
+        const res = await request.post(`${API_BASE}/tasks/${id}/action`, {
+          data: { action: 'cancel' },
+        });
+        expect.soft(res.status(), `cancel of task ${id}: ${await res.text()}`).toBe(200);
+      }
+      await waitForWorkerCancels(
+        sql,
+        liveTasks.map((t) => t.id),
+      );
       await deleteProvidersViaApi(sql, request, user.userId);
     } finally {
       await request.dispose();

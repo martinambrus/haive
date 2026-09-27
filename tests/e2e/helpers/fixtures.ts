@@ -1,7 +1,7 @@
 import { test as base, type APIRequestContext } from '@playwright/test';
 import type postgres from 'postgres';
 import { registerUser, type RegisteredUser } from './auth.js';
-import { getSql, removeUser, REPO_DELETE_DEADLINE_MS } from './db.js';
+import { getSql, removeUser, REPO_DELETE_DEADLINE_MS, TASK_CANCEL_DEADLINE_MS } from './db.js';
 
 export interface TestUsers {
   /** `registerUser`, with the account and everything it owns removed once the test ends. */
@@ -34,7 +34,7 @@ export const test = base.extend<{ sql: postgres.Sql; users: TestUsers }>({
       });
       for (const user of registered.reverse()) await removeUser(sql, playwright.request, user);
     },
-    { timeout: REPO_DELETE_DEADLINE_MS + 60_000 },
+    { timeout: REPO_DELETE_DEADLINE_MS + TASK_CANCEL_DEADLINE_MS + 60_000 },
   ],
 });
 
