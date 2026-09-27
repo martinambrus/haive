@@ -170,6 +170,10 @@ export default function NewTaskPage() {
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
   // '' = inherit the step's CLI, a uuid = use it for recaps, SUMMARY_CLI_OFF = no recap.
   const [summaryCliProviderId, setSummaryCliProviderId] = useState<string>('');
+  // The repository each CLI dropdown was last picked for, so a remembered choice that answers
+  // after a pick for the same repository never replaces it.
+  const cliPickedFor = useRef<string | null>(null);
+  const summaryCliPickedFor = useRef<string | null>(null);
   const [isBugFix, setIsBugFix] = useState(false);
   const [feature, setFeature] = useState('');
   const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
@@ -358,8 +362,14 @@ export default function NewTaskPage() {
       .then((res) => {
         if (cancelled) return;
         const ids = providers.map((p) => p.id);
-        setCliProviderId(resolveCliChoiceValue(res.cliChoice, ids));
-        setSummaryCliProviderId(resolveSummaryChoiceValue(res.summaryChoice, ids));
+        if (cliPickedFor.current !== repositoryId) {
+          cliPickedFor.current = null;
+          setCliProviderId(resolveCliChoiceValue(res.cliChoice, ids));
+        }
+        if (summaryCliPickedFor.current !== repositoryId) {
+          summaryCliPickedFor.current = null;
+          setSummaryCliProviderId(resolveSummaryChoiceValue(res.summaryChoice, ids));
+        }
       })
       .catch(() => {
         /* non-fatal: leave the current selection */
@@ -975,7 +985,10 @@ export default function NewTaskPage() {
             <select
               id="cliProviderId"
               value={cliProviderId}
-              onChange={(e) => setCliProviderId(e.target.value)}
+              onChange={(e) => {
+                cliPickedFor.current = repositoryId;
+                setCliProviderId(e.target.value);
+              }}
               className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
             >
               <option value="">(none — deterministic steps only)</option>
@@ -1030,7 +1043,10 @@ export default function NewTaskPage() {
           <select
             id="summaryCliProviderId"
             value={summaryCliProviderId}
-            onChange={(e) => setSummaryCliProviderId(e.target.value)}
+            onChange={(e) => {
+              summaryCliPickedFor.current = repositoryId;
+              setSummaryCliProviderId(e.target.value);
+            }}
             className="h-10 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
           >
             <option value="">(inherit — same CLI as the step)</option>
