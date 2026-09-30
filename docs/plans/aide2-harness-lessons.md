@@ -127,12 +127,16 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
 - **F5. Two more plan renders reach prompts unbounded.** `11f-plan-reconcile` and
   `01f-external-plan-sync` render titles to depth 4 with no character bound. One 11f prompt was 358,017
   characters; 01f is unmeasured. → P5.
-- **F6. Haive's background blocks already do what AIDE85 does. No work.** The task ledger
-  (`augmentPromptWithLedger`, a 4,000-character block), the prior fix diagnoses (`loadPriorFixContext`,
-  400 per entry and 4,000 per block), the honored constraints (`loadHonoredConstraints`, 3,000 with a
-  400 floor per source) and learned guidance (5 items, 1,500 characters) are all bounded, drop whole
-  oldest entries rather than slicing one, deduplicate by `contentFingerprint` and state what they
-  dropped. Do not re-propose them.
+- **F6. Haive's background blocks are already bounded, and none grows with the task's history. No
+  work from this paper.** Two of them do everything AIDE85's summary does: the task ledger
+  (`augmentPromptWithLedger`, a 4,000-character block) and the prior fix diagnoses
+  (`loadPriorFixContext`, 400 per entry and 4,000 per block) deduplicate by `contentFingerprint`, drop
+  whole oldest entries rather than slicing one, and state what they dropped. The other two are bounded
+  differently. The honored constraints (`loadHonoredConstraints`) keep the latest diagnosis per source
+  and head-slice each to its share of 3,000 characters with a 400 floor, on purpose: its own comment
+  prefers a cut constraint to a dropped one. Learned guidance (`augmentPromptWithLearnedGuidance`)
+  takes at most 5 items and 1,500 characters and stops at the cap without saying so (D8). Do not
+  re-propose the bounding.
 - **F7. A check that keeps failing spends every fix round on the same approach.**
   `detectFixLoopOscillation` trips only when a DIFFERENT source loops back in between, so one source
   re-raising its defect runs to the round cap (5 by default in `06-run-config`, and all 75 tasks on the
@@ -212,14 +216,17 @@ parents where the arms differ. The step has no ground truth by design (a disagre
 independent judgements … only a person can say which is right"), so that check is the grade. D1 picks
 the arm. Rollback: revert the builder call; no schema change.
 
-### P2. Tell the fixer when its approach already failed (prompt only)
+### P2. Tell the fixer what the same check said last round (prompt only)
 
 Every fix round asks for the root cause before the edit (paper rewrite 6). When the source that loops
-back also looped back in the previous round, meaning the same check still fails after a fix whatever
-its wording, 07's fix prompt also says so: which rounds, that the approach taken then did not hold, and
-that it should take a different one (rewrite 28's intent, inside one lineage). The trigger is keyed on
-the source step and round of the `fix_loop.requested` events, never on diagnosis text, since
-fingerprints split on rewording (F7). 08c keeps its own `buildRecurringNote`. Verification:
+back also looped back in the previous round, 07's fix prompt says so as a fact: the check, the rounds,
+and what it reported then. It does not claim the earlier approach failed, because a check can fail
+again on a different defect (a fix that makes one test pass can reveal another). The fixer judges: the
+same defect means stating why the earlier fix did not hold and taking a different approach (rewrite
+28's intent, inside one lineage); a different defect means saying so. The fact is keyed on the source
+step and round of the `fix_loop.requested` events, never on diagnosis text, since fingerprints split
+on rewording (F7). Like `recurrence_count`, it informs the prompt and a person, and nothing branches on
+it (AGENTS.md, "Review findings and waivers"). 08c keeps its own `buildRecurringNote`. Verification:
 prompt-builder unit tests (a repeat adds the block; a first occurrence, or a different source, does
 not); in the field, rounds-to-green and gate-2 rejections on tasks with a repeat, before and after by
 P0's stamp. Rollback: prompt only; revert.
@@ -227,25 +234,35 @@ P0's stamp. Rollback: prompt only; revert.
 ### P3. Run the next fix round on another CLI, for this task only
 
 A task-scoped choice that never writes a user preference; with nothing chosen, dispatch resolves
-exactly as today. Offered in two places: both escalation gates, as "run the next round on: the same
-CLI, or one of the enabled providers", and `06-run-config` as an opt-in, "when a check fails again
-after a fix round, run the next round on …", off by default. The worktree stays, so the best state so
-far is kept: AIDE's fork of the champion, and the argument Haive already made for per-seat providers
-in 08c (F9). The automatic half reuses P2's repeat signal. Verification: resolution unit tests; live,
-a task forced into a repeat runs its next 07 on the chosen provider, and a SELECT of both preference
-tables is identical before and after. Rollback: the setting is additive and defaults off; removing it
-restores today's resolution.
+exactly as today. Offered where a person decides: both escalation gates, as "run the next round on:
+the same CLI, or one of the enabled providers". The worktree stays, so the best state so far is kept:
+AIDE's fork of the champion, and the argument Haive already made for per-seat providers in 08c (F9).
+There is no automatic switch. P2's repeat is a source-and-round fact that cannot tell one defect from
+the next, so switching on it would change model whenever a fix uncovers a second defect; an automatic
+half waits for a stable defect identity (D3). Verification: resolution unit tests; live, a task parked
+at a gate and answered with another provider runs its next 07 on it, and a SELECT of both preference
+tables is identical before and after. Rollback: additive; removing the option restores today's
+resolution.
 
-### P4. Bound plan chat's plan and transcript
+### P4. Bound plan chat's whole prompt
 
-The focus node's neighbourhood keeps its bodies, and every other node arrives through the bounded
-index (`renderBoundedPlanIndexParts`: titles and ids, depth stepped down to fit, the reduction stated),
-so a patch to another node still has its id. The prompt names `.haive-data/plan.md` in the workspace
-for any other body, and says the mirror can trail the canvas by one sweep. The transcript keeps its
-newest turns whole and older ones as one line each, stating the omission. Verification: the prompt for
-the 800-node plan stays under the provider-neutral bound; a turn that patches a node outside the
-neighbourhood by id still lands; the ollama run in F4 no longer fails on size. D2 settles the
-transcript's scope. Rollback: revert the call.
+Invariant: the variable part of the prompt, the three parts below together, stays under one budget,
+the provider-neutral bound for plan context (`PLAN_EXPANSION_CONTEXT_MAX_CHARS`). Each part gets a
+share and is cut by whole units, with the cut stated:
+
+- the focus node's neighbourhood with bodies, cut by whole nodes;
+- every other node through the bounded index (`renderBoundedPlanIndexParts`: titles and ids, depth
+  stepped down to fit), handed its share explicitly, since its default budget
+  (`PLAN_INDEX_MAX_CHARS`, 120k) is itself over the bound;
+- the transcript, newest turn first, as many whole turns as fit, with the number of earlier turns
+  dropped.
+
+A patch to another node still has its id wherever the index reaches it. The prompt names
+`.haive-data/plan.md` in the workspace for any other body, and says the mirror can trail the canvas by
+one sweep. Verification: fixtures at each extreme (the 800-node plan, a focus node whose children
+carry long bodies, a transcript of many long turns) each assemble under the bound; a turn that patches
+a node outside the neighbourhood by id still lands; the ollama run in F4 no longer fails on size. D2
+settles the transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
 
@@ -267,9 +284,12 @@ Cheap half first:
   08c are told which test files a fix pass changed, as Haive-derived paths.
 
 The heavier half is conditional on the cheap half showing test edits beside gate-2 rejections: re-run
-the failing tests as they stood before the fix pass against the fixed code, a check the fixer never
-sees. Verification: prompt tests, the gate row rendered from a fixture, and field counts. Rollback:
-display and prompt only.
+each changed test as it stood before the fix pass against the fixed code, and add the result to the
+gate row beside the spec line the fixer cited. It is evidence for a person, never a grade. Where the
+spec made the old expectation wrong, the old test is supposed to fail against a correct fix, so a
+failure there proves nothing on its own, and nothing loops back or fails a step on it. Verification:
+prompt tests, the gate row rendered from a fixture, and field counts. Rollback: display and prompt
+only.
 
 ### P7. A cheaper model on a narrow, high-volume seat (configuration, no code)
 
@@ -281,11 +301,16 @@ Rollback: restore the snapshot.
 
 ### P8. Grade LLM-step changes on fixed inputs (larger; conditional)
 
-A replay set of stored step inputs (`detect_output` and the dispatched prompt) for steps whose outcome
-can be graded by something the prompt under test cannot see: the sequence step's orders against a
-person-checked order on a held-out plan, and reviewer prompts against known defects (the untracked
-review-corpus harvester already holds Codex and Greptile findings on this repository's own PRs). A
-fixed budget per run, at least three runs per arm, and the spread reported beside the mean. It is the
+A replay set for steps whose outcome can be graded by something the prompt under test cannot see: the
+sequence step's orders against a person-checked order on a held-out plan, and reviewer prompts against
+known defects (the untracked review-corpus harvester already holds Codex and Greptile findings on this
+repository's own PRs). A case is not only its stored inputs (`detect_output` and the dispatched
+prompt): an agent with tools reads the workspace, and a reviewer's prompt names the files it is to
+open rather than carrying them. So a case is its prompt plus the exact tree its agent reads, which
+must be the tree its labels were written against. A PR case pins that PR's head commit; a task case
+needs its worktree captured at dispatch, uncommitted changes included; a case whose tree cannot be
+reproduced is not a replay case. Both arms read the same tree and the same retrieval state. A fixed
+budget per run, at least three runs per arm, and the spread reported beside the mean. It is the
 vehicle for F13's reviewer ablation, for the spec writer's ~40k plan-index experiment that
 `_plan-index.ts` names, and for P1's second arm at scale. Build it only once P1 and P2 show whether
 field comparison by P0's stamp is enough. Rollback: tooling only.
@@ -294,7 +319,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 
 - **D1.** P1: keep parity (96k) or adopt the role-sized arm, decided by P1's measurement.
 - **D2.** Plan chat's transcript: one conversation per node across tasks, as today, or one per task.
-- **D3.** P3: the gates only, or the automatic opt-in as well.
+- **D3.** P3's automatic half, once a stable defect identity exists (08b's failing test ids are one
+  candidate, unmeasured): whether to add an opt-in that switches the CLI on a repeat of the SAME
+  defect.
 - **D4.** A cheaper provider for narrow seats as a product default, or user configuration only.
 - **D5.** F11: collapse repeated lines in test output before the tail cut (structural, with no banner
   matching), parked until more 08b runs exist.
@@ -302,6 +329,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
   dev-side restructure, the user's call, outside these phases.
 - **D7.** The step CLI switch sits under `/tasks/:id/…` but writes a user-wide preference. Outside this
   plan's scope, found while checking F7; P3 does not depend on it changing.
+- **D8.** F6: learned guidance drops items past its cap without saying so. State the omission as the
+  ledger does, or leave it, since it is a five-item nudge list by design. Not from the paper; found
+  while checking F6.
 
 ## Decided
 
