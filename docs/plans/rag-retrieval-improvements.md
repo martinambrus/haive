@@ -433,8 +433,10 @@ None yet.
   repository tree inside `haive-worker` (`pnpm --filter @haive/worker exec tsx <file>.mts` from
   `/app`; the `.mts` extension allows top-level await), with the collector options the sync uses:
   `scope_exclude_globs`, `01-env-detect`'s `customCodePaths.exclude` and `09_7`'s selection.
-- **F6.** Count `rag_query_log` rows with `code_hits > 0 AND runbook_hits = 0` and
-  `max_rrf > 0.0164`. Valid while `rrfK` is 60 and the pools are 50.
+- **F6.** The denominator is the `rag_query_log` rows with `code_hits > 0 AND runbook_hits = 0`;
+  F6's share is those among them with `max_rrf <= 0.0164`, the pages where no hit came from two
+  rankers. `max_rrf > 0.0164` counts the two-ranker complement instead. Valid while `rrfK` is 60 and
+  no candidate pool exceeds 50.
 - **Replay.** Load the chunks into a scratch database's temp table, build the trigger's exact
   tsvector (the `english` half plus the identifier lexemes), and apply `plainto_tsquery`.
 - **F14.** In one transaction, `SET LOCAL enable_seqscan = off` and `enable_bitmapscan = off`, then
