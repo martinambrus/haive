@@ -13,7 +13,7 @@
 > (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3
 > shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and
 > live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 shipped and live-verified
-> (#359); A2.3 shipped and live-verified (#360); A5.6 in review (#361).
+> (#359); A2.3 shipped and live-verified (#360); A5.6 shipped and live-verified (#361).
 > Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
 
 ## Context
