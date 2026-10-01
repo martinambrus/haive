@@ -112,6 +112,9 @@ interface NotJson {
   reason: string;
 }
 
+// Far deeper than any record value; the bound keeps every walk of a value inside the stack.
+const MAX_DEPTH = 64;
+
 /** The first thing in `value` JSON cannot carry exactly, or null. */
 function notJson(
   value: unknown,
@@ -123,6 +126,7 @@ function notJson(
     return Number.isFinite(value) ? null : { path, reason: `is ${String(value)}` };
   }
   if (typeof value !== 'object') return { path, reason: `is ${typeof value}` };
+  if (path.length >= MAX_DEPTH) return { path, reason: `nests deeper than ${MAX_DEPTH} levels` };
   if (ancestors.has(value)) return { path, reason: 'refers back to itself' };
   ancestors.add(value);
   try {

@@ -316,6 +316,40 @@ describe('renderProjectState refuses what JSON cannot carry', () => {
   });
 });
 
+describe('a value nested past the bound', () => {
+  const nested = (levels: number): unknown => {
+    let value: unknown = [];
+    for (let i = 1; i < levels; i++) value = [value];
+    return value;
+  };
+
+  it('reads a file nested 10,000 deep as refused, not as a thrown error', () => {
+    const files = withFile(
+      renderProjectState(record()),
+      'settings/deep.json',
+      `${'['.repeat(10_000)}${']'.repeat(10_000)}\n`,
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.problems.join('\n')).toContain('nests deeper than 64 levels');
+  });
+
+  it('refuses to write one with ProjectStateError', () => {
+    const r = record();
+    r.settings.deep = nested(10_000);
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('takes a value exactly at the bound and refuses one level more', () => {
+    const at = record();
+    at.settings.deep = nested(64);
+    expect(parseProjectState(renderProjectState(at)).ok).toBe(true);
+    const over = record();
+    over.settings.deep = nested(65);
+    expect(() => renderProjectState(over)).toThrow(/nests deeper than 64 levels/);
+  });
+});
+
 describe('parseProjectState reads a setting only under a record name', () => {
   it('refuses a settings/__proto__.json file holding an object', () => {
     const files = withFile(
