@@ -338,6 +338,28 @@ Phase 1 (the record):
   repositories LIST query does not fetch the column: MEASURED on 13 step-07 outputs, a context is
   11-42 KB against ~3.3 KB for the rest of a list row, and the list is polled every 5 s.
 
+  **As built, B1.4b (the sync; still nothing reads the column).** `syncProjectStateFromCheckout`
+  (worker `project-state/sync.ts`) runs from `persistDetection` after the legacy mirror import and
+  before the plan import, non-fatal, so every clone, copy, extract, scan and refresh reads the
+  checkout's record. It merges the render unit alone: environment, tooling and exclusions still
+  come from the legacy importer, and a unit this release does not map is neither applied nor kept
+  in the base. The walk reads the whole state tree, since the codec reads a record whole or not at
+  all, and refuses past 4,096 entries or 16 MiB, stopping there; each file is capped at 1 MiB, and
+  a link, a non-regular file or bytes that are not UTF-8 refuse the record. The local record, the
+  column's portable fields, goes through `renderProjectState` before the merge, since `projectInfo`
+  and `customAgentSpecs` hold values only the codec bounds. The base is read first and the files
+  next; then one transaction takes the writer's lock (`lockProjectState`, shared with `write.ts`),
+  defers to a live onboarding or upgrade (`CHECKOUT_HOLDING_TASK_STATUSES`, which leaves `created`
+  out so a task stranded at creation cannot hold the sync off for good), re-reads the base and
+  stands down as `superseded` when a writer recorded one since, and locks the repository row. The
+  new base is the CHECKOUT's record, not the merged one: a merged base reverted a local-only change
+  on the next sync, since the checkout still held the record the change departed from, and dropped
+  a set member added beside a teammate's. A conflicted key keeps its old base, so the next sync
+  meets the same conflict until B1.5 asks, and `last_error` names the keys. A refusal writes
+  `last_error` only on an existing row: a new row needs a base, and any base record turns the next
+  first import into a conflict. A column the sync creates records `rtkChoiceRecorded: true`, since
+  B follows its live RTK switch, which B0.3 imported from A's tooling.
+
   Controls, each failing on main: B's render context equals A's on all 8 keys with an LLM custom
   agent in A's fixture (the smoke's current 3-field check passes a lossy derivation); a record
   holding only `render.json` still imports environment, tooling and exclusions; A onboards,
