@@ -201,21 +201,21 @@ Phase 1 (the record):
   its own for a newer format, on conflict markers anywhere, a missing or newer `format.json`, a file
   that is not JSON or fails its schema, a claim outside the repository, a file under another unit's
   name, and a setting holding null or a set setting that is not a list of strings. The renderer
-  normalizes the record and then validates it: each section against its schema, and every value for
-  what JSON cannot carry (a non-finite number, a bigint, a function, an undefined array element, a
-  non-plain object, a cycle, a `__proto__` key, a key JSON does not write: a symbol, a
-  non-enumerable key, an array's named property; an accessor, which JSON calls when it writes, so
-  what it writes need not be what was checked; a proxy, which can answer any of these checks
-  falsely) and every value nested deeper than 64 levels, which keeps each later walk of it inside
-  the stack, so a record either renders to files that read back as itself or throws
-  `ProjectStateError`. Nothing reads inside a value before that walk (it runs ahead of zod and of
-  sorting a set), and normalizing reads the record's own containers once into the fresh ones that
-  are checked and written, so what is checked is what is written; a container that cannot be read is
-  a `ProjectStateError` too. "As itself" is under `sameValue`, the equality the merge decides with,
-  so what JSON writes differently but no reader can tell apart passes: an undefined object property
-  is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the same check on
-  every file before its schema, since zod would drop a `__proto__` key and read the record back
-  without it. Every settings map has no prototype, so an absent setting named like an
+  normalizes the record and then validates it: each section against its schema, every CLI member as
+  a record name, and every value for what JSON cannot carry (a non-finite number, a bigint, a
+  function, an undefined array element, a non-plain object, a cycle, a `__proto__` key, a key JSON
+  does not write: a symbol, a non-enumerable key, an array's named property; an accessor, which JSON
+  calls when it writes, so what it writes need not be what was checked; a proxy, which can answer
+  any of these checks falsely) and every value nested deeper than 64 levels, which keeps each later
+  walk of it inside the stack, so a record either renders to files that read back as itself or
+  throws `ProjectStateError`. Nothing reads inside a value before that walk (it runs ahead of zod
+  and of sorting a set), and normalizing reads the record's own containers once into the fresh ones
+  that are checked and written, so what is checked is what is written; a container that cannot be
+  read is a `ProjectStateError` too. "As itself" is under `sameValue`, the equality the merge
+  decides with, so what JSON writes differently but no reader can tell apart passes: an undefined
+  object property is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the
+  same check on every file before its schema, since zod would drop a `__proto__` key and read the
+  record back without it. Every settings map has no prototype, so an absent setting named like an
   `Object.prototype` member reads as absent, and the parser checks a setting's name before storing
   it. The renderer writes each file with its schema's keys alone, and sorts every set
   (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which the renderers can
@@ -228,22 +228,21 @@ Phase 1 (the record):
   standing for a removal; a conflict keeps the local value and names `<file>#<key>` or the file.
   Portable custom ids encode both parts (`custom:<source>:<path>`, each URI-encoded), since a git
   URL holds colons, and a git source encodes its URL and branch apart, since `#` is valid in both.
-  The URL is first reduced to where the remote is (scheme, host, port and path), with its scheme in
-  lower case, its host as the URL standard names it (lower case, IDNA, canonical IPv4 and IPv6; an
-  scp address's host too) and no default port, since none of these names another remote, keeping
-  only an ssh user, which is a login: userinfo, a query and a fragment can each carry a token, so
-  none reaches a committed file. The path is the server's to compare, so it stays as typed, and the
-  source is compared exactly after that: other spellings of one remote (a trailing slash, a `.git`
-  suffix, an scp address against an ssh URL) stay two sources, and their claims read foreign until
-  the bundle is added under one spelling: the safe direction, since a foreign claim keeps its file
-  and offers nothing. A token pasted into a path segment reads like a name and stays, which is why a
-  bundle's credential is stored apart from its URL. One maps back only when exactly one local bundle
-  holds its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it
+  An http(s) remote is named as the URL standard serializes it (host, port and path resolved, dot
+  segments included) without userinfo, a query or a fragment, since each can carry a token. An ssh
+  URL and an scp address keep only the user, which is a login, name the host as the standard does
+  and drop a default port, while the path stays as typed, since the remote's own filesystem resolves
+  it. The source is compared exactly after that: other spellings of one remote (a trailing slash, a
+  `.git` suffix, an scp address against an ssh URL) stay two sources, and their claims read foreign
+  until the bundle is added under one spelling: the safe direction, since a foreign claim keeps its
+  file and offers nothing. A token pasted into a path segment reads like a name and stays, which is
+  why a bundle's credential is stored apart from its URL. One maps back only when exactly one local
+  bundle holds its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it
   foreign rather than guessing. Two keys of one project file can still conflict under a merge a
   person drives, which the parser then refuses; the merges Haive drives resolve them per key (B2.3).
   `gitBlobId` takes the repository's object format (sha1 or sha256), since the two never agree on
-  one file and the sync compares against ids read from the repository. MEASURED: 116 tests, every
-  mutation tried caught (Codex's eleven rounds added 46 controls, 38 of them failing before), and
+  one file and the sync compares against ids read from the repository. MEASURED: 119 tests, every
+  mutation tried caught (Codex's twelve rounds added 49 controls, 41 of them failing before), and
   `git merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
   record merge, while two adjacent settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
