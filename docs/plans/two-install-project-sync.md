@@ -208,9 +208,12 @@ Phase 1 (the record):
   what it writes need not be what was checked; a proxy, which can answer any of these checks
   falsely) and every value nested deeper than 64 levels, which keeps each later walk of it inside
   the stack, so a record either renders to files that read back as itself or throws
-  `ProjectStateError`. "As itself" is under `sameValue`, the equality the merge decides with, so
-  what JSON writes differently but no reader can tell apart passes: an undefined object property is
-  left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the same check on
+  `ProjectStateError`. Nothing reads inside a value before that walk (it runs ahead of zod and of
+  sorting a set), and normalizing reads the record's own containers once into the fresh ones that
+  are checked and written, so what is checked is what is written; a container that cannot be read is
+  a `ProjectStateError` too. "As itself" is under `sameValue`, the equality the merge decides with,
+  so what JSON writes differently but no reader can tell apart passes: an undefined object property
+  is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the same check on
   every file before its schema, since zod would drop a `__proto__` key and read the record back
   without it. Every settings map has no prototype, so an absent setting named like an
   `Object.prototype` member reads as absent, and the parser checks a setting's name before storing
@@ -239,9 +242,9 @@ Phase 1 (the record):
   foreign rather than guessing. Two keys of one project file can still conflict under a merge a
   person drives, which the parser then refuses; the merges Haive drives resolve them per key (B2.3).
   `gitBlobId` takes the repository's object format (sha1 or sha256), since the two never agree on
-  one file and the sync compares against ids read from the repository. MEASURED: 113 tests, every
-  mutation tried caught (Codex's ten rounds added 43 controls, 35 of them failing before), and `git
-  merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
+  one file and the sync compares against ids read from the repository. MEASURED: 116 tests, every
+  mutation tried caught (Codex's eleven rounds added 46 controls, 38 of them failing before), and
+  `git merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
   record merge, while two adjacent settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
   [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
