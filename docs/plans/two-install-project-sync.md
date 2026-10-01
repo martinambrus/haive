@@ -219,15 +219,16 @@ Phase 1 (the record):
   `diskHash`, an absent file standing for a removal; a conflict keeps the local value and names
   `<file>#<key>` or the file. Portable custom ids encode both parts (`custom:<source>:<path>`, each
   URI-encoded), since a git URL holds colons, and a git source encodes its URL and branch apart,
-  since `#` is valid in both. The URL loses its credentials first: an ssh URL keeps its user, a
-  login, and loses its password, any other loses its userinfo, since an http(s) username can itself
-  be a token, so nothing typed into a bundle's URL reaches a committed file. One maps back only when
-  exactly one local bundle holds its source: two (two ZIP bundles of one name, or one git bundle
-  added twice) leave it foreign rather than guessing. Two keys of one project file can still
+  since `#` is valid in both. The URL is first reduced to where the remote is (scheme, host, port
+  and path), keeping only an ssh user, which is a login: userinfo, a query and a fragment can each
+  carry a token, so none reaches a committed file. A token pasted into a path segment reads like a
+  name and stays, which is why a bundle's credential is stored apart from its URL. One maps back
+  only when exactly one local bundle holds its source: two (two ZIP bundles of one name, or one git
+  bundle added twice) leave it foreign rather than guessing. Two keys of one project file can still
   conflict under a merge a person drives, which the parser then refuses; the merges Haive drives
   resolve them per key (B2.3). `gitBlobId` takes the repository's object format (sha1 or sha256),
   since the two never agree on one file and the sync compares against ids read from the
-  repository. MEASURED: 99 tests, every mutation tried caught (Codex's five rounds added 29
+  repository. MEASURED: 99 tests, every mutation tried caught (Codex's six rounds added 29
   controls, 22 of them failing before), and `git merge-file` over all 28 pairs of eight
   single-file edits merges cleanly to the render of the record merge, while two adjacent settings
   edited in one pretty JSON file conflict.
