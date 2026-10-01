@@ -12,6 +12,14 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return { ...actual, resolveTaskFacets };
 });
+
+// The module's own log line, which is the only trace a drop leaves when nothing is shown.
+const logInfo = vi.hoisted(() => vi.fn());
+vi.mock('@haive/shared', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared')>();
+  const child = { info: logInfo, warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  return { ...real, logger: { ...real.logger, child: () => child } };
+});
 import {
   augmentPromptWithLearnedGuidance,
   guidanceOmissionNotice,
@@ -94,6 +102,7 @@ const DRUPAL_PROJECT = {
 beforeEach(() => {
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   resolveTaskFacets.mockResolvedValue(DRUPAL_PROJECT);
+  logInfo.mockClear();
 });
 
 afterEach(() => {
@@ -211,6 +220,27 @@ describe('augmentPromptWithLearnedGuidance', () => {
     expect(out).toContain('(possibly more approved lessons not shown');
     const lines = out.trimEnd().split('\n');
     expect(lines[lines.length - 1]!.startsWith('(possibly more')).toBe(true);
+  });
+
+  it('logs a saturated scan that left nothing to show, and leaves the prompt as built', async () => {
+    // No lesson survived the facet match, so there is no list to misread; the log is the trace.
+    const db = fakeDb({
+      rows: Array.from({ length: 100 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
+    });
+    expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
+    expect(logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ omitted: 0, shown: 0, scanSaturated: true }),
+      expect.any(String),
+    );
+  });
+
+  it('logs a lesson too long to show, and leaves the prompt as built', async () => {
+    const db = fakeDb({ rows: [repoRow('z'.repeat(1600))] });
+    expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
+    expect(logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ omitted: 1, shown: 0, scanSaturated: false }),
+      expect.any(String),
+    );
   });
 });
 

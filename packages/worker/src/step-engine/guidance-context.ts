@@ -172,18 +172,14 @@ export async function augmentPromptWithLearnedGuidance(
     // Repo-scoped first: it was approved about THIS codebase, so when the char cap
     // truncates, the item that survives is the more specific one.
     const eligible = [...repoRows, ...globalRows];
-    const selected = eligible.slice(0, MAX_ITEMS);
-    if (selected.length === 0) return prompt;
-
     const lines: string[] = [];
     let used = 0;
-    for (const r of selected) {
+    for (const r of eligible.slice(0, MAX_ITEMS)) {
       const line = `- ${r.guidance}`;
       if (used + line.length + 1 > MAX_CHARS) break;
       lines.push(line);
       used += line.length + 1;
     }
-    if (lines.length === 0) return prompt;
 
     // Both caps used to drop in silence, so a sixth approved lesson — or one that pushed the
     // block past MAX_CHARS — was simply absent and the list read as complete. That is the one
@@ -199,6 +195,8 @@ export async function augmentPromptWithLearnedGuidance(
         'learned guidance incomplete; items not shown',
       );
     }
+    // Nothing shown leaves no list an agent could take for the whole one, so the prompt stays as built.
+    if (lines.length === 0) return prompt;
 
     return (
       prompt +
