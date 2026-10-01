@@ -40,6 +40,7 @@ import {
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
+import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
@@ -250,6 +251,19 @@ export async function persistDetection(
     await importHaiveDataMirror(db, repositoryId, storagePath);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'haive-data mirror import failed (non-fatal)');
+  }
+
+  try {
+    const synced = await syncProjectStateFromCheckout(db, {
+      repositoryId,
+      repoPath: storagePath,
+    });
+    logger.info(
+      { repositoryId, outcome: synced.outcome, reason: synced.reason },
+      'project state record synced from the checkout',
+    );
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'project state sync failed (non-fatal)');
   }
 
   // The plan canvas restores from the same dir but is its own call, not another
