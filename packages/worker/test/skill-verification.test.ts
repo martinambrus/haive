@@ -2,7 +2,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import { resolvePreferredCli } from '../src/step-engine/step-runner.js';
 import {
   checkSkill,
   resolveGateCliChoice,
@@ -348,6 +351,12 @@ describe('skillVerificationStep CLI-for-the-fix field', () => {
 });
 
 describe('skillVerificationStep.apply CLI write', () => {
+  const USER = '00000000-0000-4000-8000-0000000000a1';
+  const TASK = '00000000-0000-4000-8000-0000000000c1';
+  const LATER_TASK = '00000000-0000-4000-8000-0000000000c2';
+  const CURRENT = '00000000-0000-4000-8000-0000000000d1';
+  const GATE_PICK = '00000000-0000-4000-8000-0000000000d2';
+  const CLIS_TAB_PICK = '00000000-0000-4000-8000-0000000000d3';
   const makeFakeDb = (sink: Record<string, unknown>[]) =>
     ({
       insert: () => ({
@@ -368,31 +377,44 @@ describe('skillVerificationStep.apply CLI write', () => {
       cur,
     );
 
-  it('records the chosen CLI as the target step pref (+touched) for repair', async () => {
-    const inserts: Record<string, unknown>[] = [];
+  it("runs the fix on the gate's pick in this task, over the task's earlier pick, and no later", async () => {
+    const fake = createFakeDb({
+      taskStepCliChoices: schema.taskStepCliChoices,
+      taskStepCliTouched: schema.taskStepCliTouched,
+      userStepCliPreferences: schema.userStepCliPreferences,
+      userStepCliRolePreferences: schema.userStepCliRolePreferences,
+    });
+    fake.insert(schema.taskStepCliChoices, {
+      taskId: TASK,
+      stepId: '09_5b-skill-repair',
+      role: 'default',
+      cliProviderId: CLIS_TAB_PICK,
+      effortLevel: 'high',
+    });
+    const db = fake.db as unknown as StepContext['db'];
     const ctx = {
-      userId: 'u1',
-      taskId: 't1',
-      db: makeFakeDb(inserts),
+      userId: USER,
+      taskId: TASK,
+      db,
       logger: { info: () => {} },
     } as unknown as StepContext;
+    const options = [CURRENT, GATE_PICK, CLIS_TAB_PICK].map((id) => ({ id, label: id }));
     const out = await skillVerificationStep.apply(ctx, {
-      detected: brokenDetect('p1'),
-      formValues: { decision: 'repair', repairCli: 'p2' },
+      detected: detectStub(
+        [makeCheck({ skillId: 'bad', passed: false, issues: ['SKILL.md empty'] })],
+        options,
+        CURRENT,
+      ),
+      formValues: { decision: 'repair', repairCli: GATE_PICK },
       iteration: 0,
       previousIterations: [],
     });
     expect(out.decision).toBe('repair');
-    expect(inserts).toContainEqual(
-      expect.objectContaining({
-        stepId: '09_5b-skill-repair',
-        cliProviderId: 'p2',
-        explicit: true,
-      }),
-    );
-    expect(inserts).toContainEqual(
-      expect.objectContaining({ stepId: '09_5b-skill-repair', role: 'default' }),
-    );
+    const providers = options.map((o) => ({ id: o.id, enabled: true }));
+    const resolve = (taskId: string) =>
+      resolvePreferredCli(db, USER, '09_5b-skill-repair', CURRENT, providers, 'default', taskId);
+    expect(await resolve(TASK)).toEqual({ cliProviderId: GATE_PICK, effortLevel: null });
+    expect(await resolve(LATER_TASK)).toEqual({ cliProviderId: CURRENT, effortLevel: null });
   });
 
   it('writes nothing when the pick equals the current model', async () => {

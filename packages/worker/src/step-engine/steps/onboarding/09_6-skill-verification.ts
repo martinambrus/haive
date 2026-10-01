@@ -266,8 +266,8 @@ export async function checkSkill(
 
 /** Provider the fix should run on, or null for "no change / not applicable". Pure so the
  *  gate → target-step routing is unit-tested without a DB. Only a repair/regenerate whose
- *  chosen provider is enabled AND differs from the current model records a preference;
- *  anything else leaves the current model (no spurious sticky write). */
+ *  chosen provider is enabled AND differs from the current model records a choice;
+ *  anything else leaves the target step as it already resolves. */
 export interface GateCliChoice {
   targetStepId: string;
   cliProviderId: string;
@@ -352,7 +352,7 @@ export const skillVerificationStep: StepDefinition<
       'skill verification detect complete',
     );
     // Enabled CLI providers for the gate's optional "CLI for the fix" dropdown. The
-    // chosen provider is recorded (in apply) as the target step's preference so the
+    // chosen provider is recorded (in apply) as the target step's choice in this task so the
     // forked repair/regenerate round runs on it. Mirrors 12-post-onboarding's enumeration.
     const providerRows = await ctx.db.query.cliProviders.findMany({
       where: and(eq(schema.cliProviders.userId, ctx.userId), eq(schema.cliProviders.enabled, true)),
@@ -468,11 +468,8 @@ export const skillVerificationStep: StepDefinition<
           ? 'repair'
           : 'accept';
 
-    // When the user picked a CLI for the fix, record it as the target step's per-step
-    // preference so the forked repair (09_5b) / regenerate (09_5) round dispatches on it.
-    // Mirrors the per-step CLI picker's write (userStepCliPreferences + a touched marker);
-    // resolvePreferredCli reads it at dispatch. Only a real change from the current model is
-    // written, so an unchanged dropdown never mints a sticky preference.
+    // This task's own choice for the target step, which resolvePreferredCli reads first, so the
+    // fix runs on it even over an earlier pick from the CLIs tab, and no later task inherits it.
     const cliChoice = resolveGateCliChoice({
       decision,
       repairCli: typeof values.repairCli === 'string' ? values.repairCli : undefined,
@@ -481,21 +478,22 @@ export const skillVerificationStep: StepDefinition<
     });
     if (cliChoice) {
       await ctx.db
-        .insert(schema.userStepCliPreferences)
+        .insert(schema.taskStepCliChoices)
         .values({
-          userId: ctx.userId,
+          taskId: ctx.taskId,
           stepId: cliChoice.targetStepId,
+          role: 'default',
           cliProviderId: cliChoice.cliProviderId,
-          explicit: true,
+          effortLevel: null,
         })
         .onConflictDoUpdate({
-          target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
-          set: { cliProviderId: cliChoice.cliProviderId, explicit: true, updatedAt: new Date() },
+          target: [
+            schema.taskStepCliChoices.taskId,
+            schema.taskStepCliChoices.stepId,
+            schema.taskStepCliChoices.role,
+          ],
+          set: { cliProviderId: cliChoice.cliProviderId, effortLevel: null, updatedAt: new Date() },
         });
-      await ctx.db
-        .insert(schema.taskStepCliTouched)
-        .values({ taskId: ctx.taskId, stepId: cliChoice.targetStepId, role: 'default' })
-        .onConflictDoNothing();
     }
 
     ctx.logger.info(
