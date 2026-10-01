@@ -274,26 +274,34 @@ resolution.
 
 ### P4. Bound plan chat's whole prompt
 
-Invariant: the variable part of the prompt, the three parts below together, stays under one budget,
-the provider-neutral bound for plan context (`PLAN_EXPANSION_CONTEXT_MAX_CHARS`). Each part gets a
-share and is cut by whole units, with the cut stated:
+Two invariants.
+
+**The prompt is bounded as a whole.** Its variable part, the three parts below together, stays under
+one budget, the provider-neutral bound for plan context (`PLAN_EXPANSION_CONTEXT_MAX_CHARS`). Each
+part gets a share and is cut by whole units, with the cut stated:
 
 - the focus node's neighbourhood with bodies, cut by whole nodes;
 - every other node through the bounded index (`renderBoundedPlanIndexParts`: titles and ids, depth
   stepped down to fit), handed its share explicitly, since its default budget
   (`PLAN_INDEX_MAX_CHARS`, 120k) is itself over the bound;
-- the transcript, newest turn first, as many whole turns as fit, with the number of earlier turns
-  dropped.
+- the transcript: whole turns selected from the newest backward until its share is spent, rendered in
+  chronological order after a line counting the earlier turns dropped.
 
-Every node shown, in the neighbourhood and in the index alike, carries its current version (F14). A
-plan chat turn exists to patch nodes beyond the one in focus, and without a version such a patch skips
-the concurrency check. So a patch to another node has its id and version wherever the index reaches
-it. The prompt names `.haive-data/plan.md` in the workspace for any other body, and says the mirror
-can trail the canvas by one sweep. Verification: fixtures at each extreme (the 800-node plan, a focus
-node whose children carry long bodies, a transcript of many long turns) each assemble under the bound;
-a turn that patches a node outside the neighbourhood sends that node's version and lands, and one
-whose node changed meanwhile is refused and reported; the ollama run in F4 no longer fails on size. D2
-settles the transcript's scope. Rollback: revert.
+**Every update the turn applies is checked against the state its content was read from (F14).** A
+plan chat turn exists to patch nodes beyond the one in focus, so this is the half that makes bounding
+safe. The prompt is built from one read of the plan, and every node it shows carries that read's
+version. Any file the prompt sends the agent to for other bodies (`.haive-data/plan.md`) is rewritten
+from that same read before dispatch, so a body read there and a version read in the index describe
+one state, and an edit landing after the read moves the node's version and the patch is refused. An
+update to an existing node that carries no version is refused in this step, so a node the index does
+not reach cannot be changed unchecked.
+
+Verification: fixtures at each extreme (the 800-node plan, a focus node whose children carry long
+bodies, a transcript of many long turns) each assemble under the bound, the transcript in order; a
+turn that patches a node outside the neighbourhood sends that node's version and lands; one whose node
+changed after the read, including one built on a body taken from the file, is refused and reported; an
+update with no version is refused; the ollama run in F4 no longer fails on size. D2 settles the
+transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
 
@@ -317,8 +325,11 @@ Cheap half first:
   pass's edit to a test an earlier pass wrote cannot be told apart, and later edits overwrite what a
   diff would need. The evidence is captured at the pass and never rebuilt afterwards.
 - Gate 2, and gate 3 when no gate-2 decision exists, shows that record (the pass, its round and its
-  patch) as display copy under the rules the similar-sites row follows. 07b and 08c are told which
-  test files a fix pass changed, as Haive-derived paths.
+  patch) as display copy behind the similar-sites row's trust boundary: never in a prompt, its paths
+  sanitised as that row's are. The patch keeps its lines. That row's one-line, 200-character collapse
+  would leave nothing of a diff, so the patch is shown as a fenced block sized to its content, under
+  its own line and byte cap with the cut stated. 07b and 08c are told which test files a fix pass
+  changed, as Haive-derived paths.
 
 The heavier half is conditional on the cheap half showing test edits beside gate-2 rejections: re-run
 each changed test as it stood before the fix pass (its recorded content) against the fixed code, and
