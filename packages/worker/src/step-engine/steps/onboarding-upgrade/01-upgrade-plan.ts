@@ -405,6 +405,8 @@ export function classifyEntry(args: {
   return 'conflict';
 }
 
+export class RenderContextUnresolvedError extends Error {}
+
 export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutput> = {
   metadata: {
     id: '01-upgrade-plan',
@@ -426,7 +428,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const liveRows = await loadLiveArtifacts(ctx, repositoryId);
     const resolved = await resolveRenderContext(ctx, repositoryId, liveRows);
     if (!resolved) {
-      throw new Error(
+      throw new RenderContextUnresolvedError(
         'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
       );
     }
