@@ -179,7 +179,7 @@ export function mergeProjectState(input: ProjectStateMergeInput): ProjectStateMe
   );
   const cli = mergeMembers(base?.cli, local.cli, incoming.cli, out.hasBase);
 
-  const settings: Record<string, unknown> = {};
+  const settings = Object.create(null) as Record<string, unknown>;
   const names = sortedSet([
     ...Object.keys(base?.settings ?? {}),
     ...Object.keys(local.settings),

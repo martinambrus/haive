@@ -62,7 +62,7 @@ export const emptyProjectState = (): ProjectStateRecord => ({
   environment: null,
   render: null,
   cli: [],
-  settings: {},
+  settings: Object.create(null) as Record<string, unknown>,
   claims: [],
   bundles: [],
 });

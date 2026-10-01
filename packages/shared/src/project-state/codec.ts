@@ -34,6 +34,15 @@ const quote = (value: string): string => JSON.stringify(value);
 /** What no record may hold, written or read. */
 export function projectStateProblems(record: ProjectStateRecord): string[] {
   const problems: string[] = [];
+  const check = (rel: string, schema: z.ZodType, value: unknown): void => {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      problems.push(...issues(rel, parsed.error));
+      return;
+    }
+    const found = notJson(value);
+    if (found) problems.push(notJsonProblem(rel, found));
+  };
   for (const provider of record.cli) {
     if (!isRecordName(provider)) problems.push(`cli: ${quote(provider)} is not a record name`);
   }
@@ -44,14 +53,22 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
       problems.push(`settings/${name}.json: holds no value`);
     } else if (SET_SETTINGS.has(name) && !isStringList(value)) {
       problems.push(`settings/${name}.json: is not a list of strings`);
+    } else {
+      const found = notJson(value);
+      if (found) problems.push(notJsonProblem(`settings/${name}.json`, found));
     }
   }
+  if (record.environment !== null) {
+    check('project/environment.json', environmentSchema, record.environment);
+  }
+  if (record.render !== null) check('project/render.json', renderSchema, record.render);
   const paths = new Set<string>();
   for (const claim of record.claims) {
     if (!isClaimablePath(claim.path)) {
       problems.push(`claim: ${quote(claim.path)} is not a repository path`);
-    } else if (paths.has(claim.path)) {
-      problems.push(`claim: ${quote(claim.path)} is claimed twice`);
+    } else {
+      if (paths.has(claim.path)) problems.push(`claim: ${quote(claim.path)} is claimed twice`);
+      check(claimFileName(claim.path), claimSchema, claim);
     }
     paths.add(claim.path);
   }
@@ -60,6 +77,7 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
     if (sources.has(bundle.source))
       problems.push(`bundle: ${quote(bundle.source)} is listed twice`);
     sources.add(bundle.source);
+    check(bundleFileName(bundle.source), bundleSchema, bundle);
   }
   return problems;
 }
@@ -89,10 +107,55 @@ const bundleOf = (b: ProjectStateBundle): ProjectStateBundle => ({
 const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((v) => typeof v === 'string');
 
+interface NotJson {
+  path: string[];
+  reason: string;
+}
+
+/** The first thing in `value` JSON cannot carry exactly, or null. */
+function notJson(
+  value: unknown,
+  path: string[] = [],
+  ancestors = new Set<object>(),
+): NotJson | null {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return null;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? null : { path, reason: `is ${String(value)}` };
+  }
+  if (typeof value !== 'object') return { path, reason: `is ${typeof value}` };
+  if (ancestors.has(value)) return { path, reason: 'refers back to itself' };
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const found = notJson(value[i], [...path, String(i)], ancestors);
+        if (found) return found;
+      }
+      return null;
+    }
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null)
+      return { path, reason: 'is not a plain object' };
+    if (Object.hasOwn(value, '__proto__')) return { path, reason: 'holds a key named __proto__' };
+    for (const [key, child] of Object.entries(value)) {
+      // JSON leaves an undefined property out, and so does the record's reader.
+      if (child === undefined) continue;
+      const found = notJson(child, [...path, key], ancestors);
+      if (found) return found;
+    }
+    return null;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+const notJsonProblem = (rel: string, found: NotJson): string =>
+  `${rel}: ${found.path.join('.') || 'the file'} ${found.reason}`;
+
 /** The record as it is written: each object carrying its schema's keys alone, every set sorted
  *  and every list ordered by its key, so two equal states compare equal. */
 export function normalizeProjectState(record: ProjectStateRecord): ProjectStateRecord {
-  const settings: Record<string, unknown> = {};
+  const settings = Object.create(null) as Record<string, unknown>;
   for (const name of Object.keys(record.settings).sort()) {
     const value = record.settings[name];
     settings[name] = SET_SETTINGS.has(name) && isStringList(value) ? sortedSet(value) : value;
@@ -117,9 +180,9 @@ export function normalizeProjectState(record: ProjectStateRecord): ProjectStateR
 /** The record's files, relative to `PROJECT_STATE_DIR`, sorted by path. Throws
  *  `ProjectStateError` for a record no reader would accept. */
 export function renderProjectState(record: ProjectStateRecord): Map<string, string> {
-  const problems = projectStateProblems(record);
-  if (problems.length > 0) throw new ProjectStateError(problems);
   const r = normalizeProjectState(record);
+  const problems = projectStateProblems(r);
+  if (problems.length > 0) throw new ProjectStateError(problems);
   const files = new Map<string, string>();
   files.set('format.json', canonicalJson({ schemaVersion: PROJECT_STATE_FORMAT }));
   if (r.environment) files.set('project/environment.json', canonicalJson(r.environment));
@@ -202,7 +265,16 @@ export function parseProjectState(files: ReadonlyMap<string, string>): ProjectSt
       problems.push(`${rel}: is not JSON`);
       continue;
     }
+    const found = notJson(value);
+    if (found) {
+      problems.push(notJsonProblem(rel, found));
+      continue;
+    }
     if (kind.type === 'settings') {
+      if (!isRecordName(kind.name)) {
+        problems.push(`settings: ${quote(kind.name)} is not a record name`);
+        continue;
+      }
       record.settings[kind.name] = value;
       continue;
     }

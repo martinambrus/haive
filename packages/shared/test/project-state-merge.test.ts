@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import {
   canonicalJson,
   claimFileName,
+  emptyProjectState,
   mergeProjectState,
   normalizeProjectState,
   renderProjectState,
@@ -216,6 +217,46 @@ describe('mergeProjectState with no base (a first import)', () => {
     expect(result.merged.settings).toMatchObject({ 'rtk-enabled': true, 'local-only': 'kept' });
     expect(result.merged.cli).toEqual(['claude-code', 'codex']);
     expect(result.overwritten).toEqual([RTK]);
+    expect(result.conflicts).toEqual([]);
+  });
+});
+
+describe('mergeProjectState reads only a setting a side holds', () => {
+  const withSettings = (settings: Record<string, unknown>): ProjectStateRecord => ({
+    ...emptyProjectState(),
+    settings,
+  });
+
+  it('keeps a constructor setting only the local side holds', () => {
+    const result = mergeProjectState({
+      base: null,
+      local: withSettings({ constructor: 'a' }),
+      incoming: withSettings({}),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'constructor')).toBe(true);
+    expect(result.merged.settings['constructor']).toBe('a');
+    expect(result.overwritten).toEqual([]);
+  });
+
+  it('keeps a constructor setting only the incoming side holds', () => {
+    const result = mergeProjectState({
+      base: null,
+      local: withSettings({}),
+      incoming: withSettings({ constructor: 'x' }),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'constructor')).toBe(true);
+    expect(result.merged.settings['constructor']).toBe('x');
+    expect(result.overwritten).toEqual([]);
+  });
+
+  it('keeps a constructor setting only the local side holds, against an empty base', () => {
+    const result = mergeProjectState({
+      base: emptyProjectState(),
+      local: withSettings({ constructor: 'a' }),
+      incoming: withSettings({}),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'constructor')).toBe(true);
+    expect(result.merged.settings['constructor']).toBe('a');
     expect(result.conflicts).toEqual([]);
   });
 });

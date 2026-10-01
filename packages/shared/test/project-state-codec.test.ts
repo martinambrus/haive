@@ -6,6 +6,7 @@ import {
   ProjectStateError,
   canonicalJson,
   claimFileName,
+  emptyProjectState,
   gitBlobId,
   localTemplateId,
   normalizeProjectState,
@@ -210,6 +211,130 @@ describe('renderProjectState and parseProjectState', () => {
       withFile(renderProjectState(record()), name, canonicalJson(partial)),
     );
     expect(!parsed.ok && parsed.problems.join('\n')).toContain(`${name}: writtenHash`);
+  });
+});
+
+describe('renderProjectState refuses what JSON cannot carry', () => {
+  it('refuses a setting holding NaN', () => {
+    const r = record();
+    r.settings.x = NaN;
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+    expect(() => renderProjectState(r)).toThrow(/settings\/x\.json/);
+  });
+
+  it('refuses a setting holding a bigint', () => {
+    const r = record();
+    r.settings.x = 10n;
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a setting holding an array with an undefined element', () => {
+    const r = record();
+    r.settings.x = { a: [1, undefined] };
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a setting holding a Date', () => {
+    const r = record();
+    r.settings.x = { when: new Date(0) };
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a setting holding Infinity', () => {
+    const r = record();
+    r.settings.x = { a: Infinity };
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a setting whose value points back at itself', () => {
+    const r = record();
+    const x: Record<string, unknown> = {};
+    x.self = x;
+    r.settings.x = x;
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
+  it('refuses render.projectInfo holding NaN', () => {
+    const r = record();
+    r.render!.projectInfo = { n: NaN };
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+    expect(() => renderProjectState(r)).toThrow(/project\/render\.json/);
+  });
+
+  it('refuses environment.envDetectData holding a bigint', () => {
+    const r = record();
+    r.environment!.envDetectData = { big: 1n };
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+    expect(() => renderProjectState(r)).toThrow(/project\/environment\.json/);
+  });
+
+  it('refuses a claim with an invalid schemaVersion', () => {
+    const withNaN = record();
+    withNaN.claims[0]!.schemaVersion = NaN;
+    expect(() => renderProjectState(withNaN)).toThrow(ProjectStateError);
+    const withNegative = record();
+    withNegative.claims[0]!.schemaVersion = -1;
+    expect(() => renderProjectState(withNegative)).toThrow(ProjectStateError);
+  });
+
+  it('renders a setting holding an undefined property without it, and reads that back', () => {
+    const r = record();
+    r.settings.x = { a: 1, b: undefined };
+    const parsed = parseProjectState(renderProjectState(r));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.record.settings.x).toEqual({ a: 1 });
+  });
+
+  it('refuses a record whose settings carries an own __proto__ key', () => {
+    const r = record();
+    r.settings = JSON.parse('{"__proto__": 1}');
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+    expect(() => renderProjectState(r)).toThrow(/__proto__/);
+  });
+});
+
+describe('parseProjectState reads a setting only under a record name', () => {
+  it('refuses a settings/__proto__.json file holding an object', () => {
+    const files = withFile(
+      renderProjectState(emptyProjectState()),
+      'settings/__proto__.json',
+      '{"x":1}\n',
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.problems.join('\n')).toContain('__proto__');
+  });
+
+  it('refuses a settings/__proto__.json file holding a bare value', () => {
+    const files = withFile(
+      renderProjectState(emptyProjectState()),
+      'settings/__proto__.json',
+      '1\n',
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(false);
+  });
+});
+
+describe('parseProjectState refuses a key JSON parsing would drop', () => {
+  it('refuses a project file holding a __proto__ key', () => {
+    const base = renderProjectState(emptyProjectState());
+    const render = withFile(
+      base,
+      'project/render.json',
+      '{"acceptedAgentIds":[],"customAgentSpecs":[],"framework":null,"lspLanguages":[],"projectInfo":{"__proto__":{"x":1}}}\n',
+    );
+    const environment = withFile(
+      base,
+      'project/environment.json',
+      '{"confirmedValues":{},"envDetectData":{"__proto__":{"x":1}}}\n',
+    );
+    for (const files of [render, environment]) {
+      const parsed = parseProjectState(files);
+      expect(parsed.ok).toBe(false);
+      expect(!parsed.ok && parsed.problems.join('\n')).toContain('__proto__');
+    }
   });
 });
 
