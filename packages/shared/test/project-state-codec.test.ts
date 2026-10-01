@@ -347,6 +347,22 @@ describe('portable template ids', () => {
   });
   const bundles = [{ bundleId: 'bundle-a', source, items: new Map([['item-1', 'agents/x.md']]) }];
 
+  it('tell two git bundles apart whose url and branch join to one string', () => {
+    const inUrl = portableBundleSource({
+      sourceType: 'git',
+      gitUrl: 'git@example.com:repo#feature',
+      gitBranch: 'x',
+      name: 'b',
+    });
+    const inBranch = portableBundleSource({
+      sourceType: 'git',
+      gitUrl: 'git@example.com:repo',
+      gitBranch: 'feature#x',
+      name: 'b',
+    });
+    expect(inUrl).not.toBe(inBranch);
+  });
+
   it("keep Haive's own ids as they are", () => {
     expect(portableTemplateId('agent.code-reviewer', bundles)).toBe('agent.code-reviewer');
     expect(localTemplateId('agent.code-reviewer', bundles)).toBe('agent.code-reviewer');

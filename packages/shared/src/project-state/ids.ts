@@ -20,9 +20,11 @@ export function portableBundleSource(bundle: {
   gitBranch: string | null;
   name: string;
 }): string {
+  // Each part is encoded on its own, since `#` is valid both in an scp-style remote path and in a
+  // ref name: joined raw, one url#branch pair reads as another's.
   return bundle.sourceType === 'git'
-    ? `git:${bundle.gitUrl ?? ''}#${bundle.gitBranch ?? ''}`
-    : `zip:${bundle.name}`;
+    ? `git:${encodeURIComponent(bundle.gitUrl ?? '')}#${encodeURIComponent(bundle.gitBranch ?? '')}`
+    : `zip:${encodeURIComponent(bundle.name)}`;
 }
 
 /** A template id another install can map back: Haive's own ids as they are, and a custom one
