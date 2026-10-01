@@ -1,6 +1,5 @@
-import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { ensureDirNoFollow, openFileNoFollow } from '@haive/shared/fs-safe';
+import { ensureDirNoFollow } from '@haive/shared/fs-safe';
 import { HttpError } from '../context.js';
 
 /**
@@ -86,22 +85,4 @@ export function uploadFileRelOrThrow(
   const rel = uploadFileRel(userId, stored, root);
   if (rel === null) throw new HttpError(409, `${what} is not in this user uploads directory`);
   return rel;
-}
-
-/**
- * Roll a partial upload back to the byte count its session row still claims.
- *
- * A second verified open rather than the write stream's own handle: MEASURED on node v26.7.0, a
- * FileHandle write stream CLOSES the handle at `finish`, so after a failed chunk the name has to be
- * resolved again anyway — and resolving it again re-checks it. Absent is a no-op, since there is
- * then nothing to roll back.
- */
-export async function truncateUploadFile(anchor: string, rel: string, size: number): Promise<void> {
-  const fh: FileHandle | null = await openFileNoFollow(anchor, rel, 'read-write');
-  if (!fh) return;
-  try {
-    await fh.truncate(size);
-  } finally {
-    await fh.close();
-  }
 }

@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -17,7 +16,12 @@ import {
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import { signAccessToken, signRefreshToken, hashRefreshToken } from '../auth/jwt.js';
 import { setAuthCookies } from '../auth/cookies.js';
-import { lstatNoFollow, openFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  lstatNoFollow,
+  openFileNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -371,27 +375,15 @@ userSettingsRoutes.post('/notifications/sound', async (c) => {
   const soundRel = `${uploadsRel(userId)}/notification-sound.${resolved.ext}`;
   const soundPath = path.join(anchor, soundRel);
 
-  // The name is FIXED per extension, so unlike every other upload here a re-upload legitimately
-  // replaces an existing file — hence replace-atomic rather than create-exclusive. Streamed through
-  // the descriptor that mode opens, so the bytes cannot land anywhere but that inode, and a link at
-  // the name is refused instead of written through.
+  // The name is FIXED per extension, so a re-upload replaces the previous sound: written to a temp
+  // beside it and renamed over it only on success; a link at the name is replaced, not followed.
   try {
-    const body = soundField.stream() as unknown as ReadableStream<Uint8Array>;
-    const fh = await openFileNoFollow(anchor, soundRel, 'create-exclusive', {
+    await writeFileNoFollow(anchor, soundRel, Buffer.from(await soundField.arrayBuffer()), {
+      mode: 'replace-atomic',
       fileMode: 0o644,
-    }).catch(async (err: unknown) => {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      await removeNoFollow(anchor, soundRel);
-      return openFileNoFollow(anchor, soundRel, 'create-exclusive', { fileMode: 0o644 });
+      replaceLeafLink: true,
     });
-    try {
-      await pipeline(Readable.fromWeb(body as never), fh.createWriteStream());
-    } finally {
-      await fh.close().catch(() => {});
-    }
   } catch (err) {
-    await removeNoFollow(anchor, soundRel).catch(() => {});
-    if (err instanceof HttpError) throw err;
     throw new HttpError(500, `failed to write sound: ${(err as Error).message}`);
   }
 

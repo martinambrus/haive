@@ -5,12 +5,13 @@ import { Readable } from 'node:stream';
  *  positions, and leave it open. A write stream built on a FileHandle closes it when it ends, and
  *  with `autoClose: false` keeps a reference that makes `close()` hang, so a caller removing the
  *  file by its inode could not keep that inode pinned. Throws `tooLarge()` before writing past
- *  `maxBytes`. Returns the bytes written. */
+ *  `maxBytes`. Returns the bytes written, the first at file offset `start`. */
 export async function writeBodyToHeld(
   body: ReadableStream<Uint8Array>,
   fh: FileHandle,
   maxBytes: number,
   tooLarge: () => Error,
+  start = 0,
 ): Promise<number> {
   let total = 0;
   for await (const chunk of Readable.fromWeb(body as never) as AsyncIterable<Uint8Array>) {
@@ -21,7 +22,7 @@ export async function writeBodyToHeld(
         chunk,
         written,
         chunk.byteLength - written,
-        total + written,
+        start + total + written,
       );
       written += bytesWritten;
     }
