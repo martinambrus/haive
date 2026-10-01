@@ -11,6 +11,15 @@ import {
 } from '@haive/shared/project-state';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** First in every transaction that writes a repository's render context or its sync row. */
+export async function lockProjectState(tx: Tx, repositoryId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+  );
+}
+
 export interface ProjectStateRecordInput {
   repositoryId: string;
   repoPath: string;
@@ -55,9 +64,7 @@ export async function writeProjectStateRecord(
       updatedAt: new Date(),
     };
     await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
-      );
+      await lockProjectState(tx, repositoryId);
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
