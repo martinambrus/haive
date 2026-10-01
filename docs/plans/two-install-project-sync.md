@@ -201,16 +201,26 @@ Phase 1 (the record):
   its own for a newer format, on conflict markers anywhere, a missing or newer `format.json`, a file
   that is not JSON or fails its schema, a claim outside the repository, a file under another unit's
   name, and a setting holding null or a set setting that is not a list of strings. The renderer
-  throws on a record the parser would refuse, writes each file with its schema's keys alone, and
-  sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
+  normalizes the record and then validates it: each section against its schema, and every value for
+  what JSON cannot carry exactly (a non-finite number, a bigint, a function, an undefined array
+  element, a non-plain object, a cycle, a `__proto__` key), so a record either renders to files that
+  read back as itself or throws `ProjectStateError`; an undefined object property is left out, as
+  JSON leaves it. The parser runs the same check on every file before its schema, since zod would
+  drop a `__proto__` key and read the record back without it. Every settings map has no prototype,
+  so an absent setting named like an `Object.prototype` member reads as absent, and the parser
+  checks a setting's name before storing it. The renderer writes each file with its schema's keys
+  alone, and sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
   the renderers can take since all of them read those as sets. The merge goes key by key in a
   project file both sides hold and file by file otherwise; a set moves member by member and never
   conflicts (joined when there is no base); a claim both sides changed follows the bytes through
   `diskHash`, an absent file standing for a removal; a conflict keeps the local value and names
   `<file>#<key>` or the file. Portable custom ids encode both parts (`custom:<source>:<path>`, each
-  URI-encoded), since a git URL holds colons. Two keys of one project file can still conflict under
+  URI-encoded), since a git URL holds colons. One maps back only when exactly one local bundle holds
+  its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it foreign rather
+  than guessing. Two keys of one project file can still conflict under
   a merge a person drives, which the parser then refuses; the merges Haive drives resolve them per
-  key (B2.3). MEASURED: 70 tests, six mutations each caught, and `git merge-file` over all 28 pairs
+  key (B2.3). MEASURED: 70 tests, six mutations each caught (Codex round 1 added 20 controls, 16 of them
+  failing before), and `git merge-file` over all 28 pairs
   of eight single-file edits merges cleanly to the render of the record merge, while two adjacent
   settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
@@ -234,7 +244,9 @@ Phase 1 (the record):
   409 and a throw today; after, B's rows equal A's claims and 01 is all `unchanged`; after A's
   upgrade B reads `conflict` everywhere today, `unchanged` after.
 - **B1.7 feat(worker): write the record at onboarding, upgrade and rollback; retire install.json**
-  [B1.6]. Control: two identical 12 runs leave `git diff` empty (today install.json differs).
+  [B1.6]. The writer collapses local bundles to one descriptor per portable source, since the codec
+  refuses a source listed twice. Control: two identical 12 runs leave `git diff` empty (today
+  install.json differs).
 - **B1.8 feat(api,worker): keep the record current on every settings edit** [B1.7]
   (`markProjectStateDirty` in PATCH exclusions/tooling, the reset, bundle changes, 02-detection,
   04-tooling, 06_7, bundle resync). Control: PATCH exclusions then a sweep tick updates
