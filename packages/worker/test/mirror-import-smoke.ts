@@ -33,7 +33,15 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 
 const tooling = (extra: Record<string, unknown> = {}) =>
   JSON.stringify({ schemaVersion: 1, tooling: { ragMode: 'none', rtkEnabled: false, ...extra } });
-const environment = JSON.stringify({ schemaVersion: 1, envDetectData: {}, confirmedValues: {} });
+const environment = JSON.stringify({
+  schemaVersion: 1,
+  envDetectData: {
+    project: { name: 'mirror-import-smoke' },
+    __configContents: '--- docker-compose.yml ---\nservices: {}',
+    __repoIntel: 'file tree',
+  },
+  confirmedValues: {},
+});
 const exclusions = JSON.stringify({ schemaVersion: 1, scopeExcludeGlobs: ['vendor/**'] });
 
 async function main(): Promise<void> {
@@ -104,6 +112,13 @@ async function main(): Promise<void> {
       'a plain mirror is imported',
       b.onboardingTooling !== null && b.onboardingEnvironment !== null,
       b,
+    );
+    check(
+      "without the prompt-only fields an older release's 02 mirrored",
+      JSON.stringify(
+        (b.onboardingEnvironment as { envDetectData?: unknown } | null)?.envDetectData,
+      ) === '{"project":{"name":"mirror-import-smoke"}}',
+      b.onboardingEnvironment,
     );
     check('with its scope list', JSON.stringify(b.scopeExcludeGlobs) === '["vendor/**"]', b);
     check('and RTK switched off as the mirror says', b.rtkEnabled === false, b);

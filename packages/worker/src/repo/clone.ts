@@ -30,6 +30,7 @@ import {
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
   ONBOARDING_TOOLING_CONSENT_KEYS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
+  mirroredEnvDetectData,
   type ArchiveFormat,
   type OnboardingEnvironmentMirror,
   type OnboardingExclusionsMirror,
@@ -166,6 +167,11 @@ async function importHaiveDataMirror(
   if (repo.onboardingEnvironment == null) {
     const env = await readJson<OnboardingEnvironmentMirror>(HAIVE_DATA_FILES.environment);
     if (env?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
+      const data = env.envDetectData as unknown;
+      // An older release committed 01's prompt-only fields here.
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        env.envDetectData = mirroredEnvDetectData(data as Record<string, unknown>);
+      }
       updates.onboardingEnvironment = env as unknown as Record<string, unknown>;
     }
   }
