@@ -21,6 +21,7 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches ./patches
 # Every package's tsconfig extends this. Without it tsc silently falls back to its defaults and the
 # build fails on top-level await, import.meta and Map iteration — all of which the base config
 # permits. Same line, same reason, as the api and worker Dockerfiles.

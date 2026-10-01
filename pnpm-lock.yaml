@@ -17,6 +17,11 @@ overrides:
   brace-expansion: ^5.0.9
   nanoid: ^3.3.18
 
+patchedDependencies:
+  postgres@3.4.9:
+    hash: 8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6
+    path: patches/postgres@3.4.9.patch
+
 importers:
 
   .:
@@ -35,7 +40,7 @@ importers:
         version: 17.3.0
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)
       prettier:
         specifier: ^3.9.4
         version: 3.9.6
@@ -80,7 +85,7 @@ importers:
         version: 5.0.1
       drizzle-orm:
         specifier: 0.45.2
-        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
+        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6))
       hono:
         specifier: ^4.13.5
         version: 4.13.7
@@ -126,10 +131,10 @@ importers:
     dependencies:
       drizzle-orm:
         specifier: 0.45.2
-        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
+        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6))
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)
     devDependencies:
       '@types/node':
         specifier: ^26.4.1
@@ -151,7 +156,7 @@ importers:
         version: link:../database
       drizzle-orm:
         specifier: 0.45.2
-        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
+        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6))
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0
@@ -160,7 +165,7 @@ importers:
         version: 10.3.1
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -182,7 +187,7 @@ importers:
         version: link:../shared
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)
     devDependencies:
       '@types/node':
         specifier: ^26.4.1
@@ -316,7 +321,7 @@ importers:
         version: 5.0.1
       drizzle-orm:
         specifier: 0.45.2
-        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
+        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6))
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0
@@ -4766,10 +4771,10 @@ snapshots:
       esbuild: 0.28.1
       tsx: 4.23.12
 
-  drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9):
+  drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)):
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
-      postgres: 3.4.9
+      postgres: 3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6)
 
   ecdsa-sig-formatter@1.0.11:
     dependencies:
@@ -5702,7 +5707,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postgres@3.4.9: {}
+  postgres@3.4.9(patch_hash=8234353c1c0be21eef5b8480d7edfc9b20639bd8e23e62686314a72e4b35c0a6): {}
 
   prettier@3.9.6: {}
 
