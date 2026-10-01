@@ -88,8 +88,22 @@ function mergeSetValue(
   out: Outcome,
 ): unknown {
   const isList = (v: unknown): v is string[] => Array.isArray(v);
-  if (isList(local) && isList(incoming) && (base === undefined || isList(base))) {
-    return mergeMembers(base as string[] | undefined, local, incoming, out.hasBase);
+  const absent = local === undefined || incoming === undefined;
+  // A side that holds no set holds no member, so one that unset it still merges member by member
+  // rather than conflicting. Nothing left then means unset, never an empty set written back.
+  if (
+    (isList(local) || local === undefined) &&
+    (isList(incoming) || incoming === undefined) &&
+    (base === undefined || isList(base)) &&
+    !(local === undefined && incoming === undefined)
+  ) {
+    const merged = mergeMembers(
+      base as string[] | undefined,
+      local ?? [],
+      incoming ?? [],
+      out.hasBase,
+    );
+    return absent && merged.length === 0 ? undefined : merged;
   }
   return mergeUnit(unit, base, local, incoming, out);
 }

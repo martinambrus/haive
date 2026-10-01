@@ -147,6 +147,36 @@ describe('mergeProjectState, unit by unit', () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  it('merges a set one side unset member by member, rather than conflicting', () => {
+    const result = mergeProjectState({
+      base: edit((r) => (r.settings['scope-exclude-globs'] = ['vendor/**'])),
+      local: edit((r) => delete r.settings['scope-exclude-globs']),
+      incoming: edit((r) => (r.settings['scope-exclude-globs'] = ['vendor/**', 'build/**'])),
+    });
+    expect(result.merged.settings['scope-exclude-globs']).toEqual(['build/**']);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('leaves a set unset when one side unset it and the other left it alone', () => {
+    const result = mergeProjectState({
+      base: edit((r) => (r.settings['scope-exclude-globs'] = ['vendor/**'])),
+      local: edit((r) => delete r.settings['scope-exclude-globs']),
+      incoming: edit((r) => (r.settings['scope-exclude-globs'] = ['vendor/**'])),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'scope-exclude-globs')).toBe(false);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('leaves a set unset when both sides unset it', () => {
+    const result = mergeProjectState({
+      base: edit((r) => (r.settings['scope-exclude-globs'] = ['vendor/**'])),
+      local: edit((r) => delete r.settings['scope-exclude-globs']),
+      incoming: edit((r) => delete r.settings['scope-exclude-globs']),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'scope-exclude-globs')).toBe(false);
+    expect(result.conflicts).toEqual([]);
+  });
+
   it('reads a set in another order as the same set', () => {
     const result = mergeProjectState({
       base: base(),
