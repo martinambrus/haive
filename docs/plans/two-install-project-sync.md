@@ -162,8 +162,9 @@ Phase 1 (the record):
   (`haive`, `haive_h5` on 55432; CI creates `haive_b`), one bare `file://` remote, A's onboarding
   driven through the real 07/12 steps from seeded rows, B via `handleClone`. Each later PR removes
   its gaps (a gap that passes fails the run), which is its control. **As built:** one file, and B's
-  database is the smoke's own (`<db>_two_install_b`, created from `DATABASE_URL`, migrated by the
-  real runner and dropped at the end), so CI needs no extra step; neither install calls
+  database is the smoke's own (`<db>_two_install_<random>`, created from `DATABASE_URL`, migrated
+  by the real runner, and dropped at the end only by the run that created it, a failed migration
+  included), so CI needs no extra step; neither install calls
   `initDatabase`, so a singleton `getDb()` on the path would throw rather than cross installs. The
   smoke pushes A's commit itself, since 13 runs inside the step runner's merge phase. A onboards a
   small Drupal fixture through every deterministic step 07 reads from (01, 02, 04, 06_5, then 07 and

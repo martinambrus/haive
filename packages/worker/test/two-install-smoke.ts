@@ -235,24 +235,29 @@ const planOf = (install: Install) =>
 
 async function main(): Promise<void> {
   const nameA = new URL(urlA).pathname.slice(1);
-  const nameB = `${nameA}_two_install_b`;
+  // Its own name per run, so it can only ever drop what it created.
+  const nameB = `${nameA}_two_install_${randomBytes(4).toString('hex')}`;
   const urlB = new URL(urlA);
   urlB.pathname = `/${nameB}`;
   const admin = postgres(urlA, { max: 1, onnotice: () => {} });
-  await admin.unsafe(`DROP DATABASE IF EXISTS "${nameB}" WITH (FORCE)`);
-  await admin.unsafe(`CREATE DATABASE "${nameB}"`);
-  execFileSync(
-    'node',
-    [fileURLToPath(new URL('migrate/index.js', import.meta.resolve('@haive/database')))],
-    { env: { ...process.env, DATABASE_URL: urlB.toString() }, stdio: 'pipe' },
-  );
-
-  const dbA = createDatabase(urlA);
-  const dbB = createDatabase(urlB.toString());
-  const tmp = await mkdtemp(path.join(tmpdir(), 'two-install-smoke-'));
+  let createdB = false;
+  let dbA: Database | null = null;
+  let dbB: Database | null = null;
+  let tmp: string | null = null;
   let userA: string | null = null;
 
   try {
+    await admin.unsafe(`CREATE DATABASE "${nameB}"`);
+    createdB = true;
+    execFileSync(
+      'node',
+      [fileURLToPath(new URL('migrate/index.js', import.meta.resolve('@haive/database')))],
+      { env: { ...process.env, DATABASE_URL: urlB.toString() }, stdio: 'pipe' },
+    );
+    dbA = createDatabase(urlA);
+    dbB = createDatabase(urlB.toString());
+    tmp = await mkdtemp(path.join(tmpdir(), 'two-install-smoke-'));
+
     const origin = path.join(tmp, 'origin.git');
     git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
     const seed = path.join(tmp, 'seed');
@@ -509,12 +514,12 @@ async function main(): Promise<void> {
       log.error({ check: name }, 'FAILED: a known gap was never checked');
     }
   } finally {
-    if (userA) await dbA.delete(schema.users).where(eq(schema.users.id, userA));
-    await dbA.$client.end({ timeout: 5 });
-    await dbB.$client.end({ timeout: 5 });
-    await admin.unsafe(`DROP DATABASE IF EXISTS "${nameB}" WITH (FORCE)`);
+    if (userA && dbA) await dbA.delete(schema.users).where(eq(schema.users.id, userA));
+    await dbA?.$client.end({ timeout: 5 });
+    await dbB?.$client.end({ timeout: 5 });
+    if (createdB) await admin.unsafe(`DROP DATABASE IF EXISTS "${nameB}" WITH (FORCE)`);
     await admin.end({ timeout: 5 });
-    await rm(tmp, { recursive: true, force: true });
+    if (tmp) await rm(tmp, { recursive: true, force: true });
   }
 }
 
