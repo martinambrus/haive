@@ -1,0 +1,125 @@
+import { parseScpLikeGitUrl } from '../schemas/git-url.js';
+
+/** A custom bundle as this install holds it: its local id, the source another install can find
+ *  it by, and its items' local ids against their paths in that source. */
+export interface LocalBundle {
+  bundleId: string;
+  source: string;
+  items: ReadonlyMap<string, string>;
+}
+
+/** A claim whose bundle item this install does not hold: it claims its file, and no upgrade here
+ *  offers anything for it. */
+export const FOREIGN_TEMPLATE = 'foreign';
+
+const LOCAL_CUSTOM = /^custom\.([^.]+)\.([^.]+)$/;
+const PORTABLE_CUSTOM = 'custom:';
+
+const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#]*)@)?([^/?#]*)([^?#]*)/i;
+
+const HOST_PORT = /^(.*?)(?::(\d*))?$/;
+
+const DEFAULT_PORT: Readonly<Record<string, string>> = {
+  'http://': '80',
+  'https://': '443',
+  'ssh://': '22',
+};
+
+/** A host as the URL standard names it (lower case, IDNA, canonical IPv4 and IPv6), so every
+ *  spelling of one host is one; a host the standard reads otherwise is only folded to lower case. */
+function canonicalHost(host: string): string {
+  try {
+    const parsed = new URL(`http://${host}`);
+    if (parsed.pathname === '/') return parsed.hostname;
+  } catch {
+    // Folded below.
+  }
+  return host.toLowerCase();
+}
+
+/** An http(s) URL as the URL standard serializes it (host, port and path resolved, dot segments
+ *  included), without userinfo, query or fragment; null when the standard refuses it. */
+function standardHttpUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+/** A remote as every install names it, with no userinfo but an ssh login, nor a query or a fragment,
+ *  since each can carry a token. An http(s) URL is the standard's serialization; elsewhere the host
+ *  is the standard's and the path stays as typed, since the remote's own filesystem resolves it. */
+function portableRemote(url: string): string {
+  if (/^https?:\/\//i.test(url)) {
+    const standard = standardHttpUrl(url);
+    if (standard) return standard;
+  }
+  const match = URL_PARTS.exec(url);
+  if (!match) {
+    const scp = parseScpLikeGitUrl(url);
+    return scp ? `${scp.user ? `${scp.user}@` : ''}${canonicalHost(scp.host)}:${scp.path}` : url;
+  }
+  const [, rawScheme = '', userinfo, authority = '', path = ''] = match;
+  const scheme = rawScheme.toLowerCase();
+  const [, host = '', rawPort = ''] = HOST_PORT.exec(authority)!;
+  const port = rawPort === '' ? '' : String(Number(rawPort));
+  const kept = port === '' || port === DEFAULT_PORT[scheme] ? '' : `:${port}`;
+  const user = scheme === 'ssh://' ? (userinfo ?? '').split(':')[0]! : '';
+  return `${scheme}${user && `${user}@`}${canonicalHost(host)}${kept}${path}`;
+}
+
+/** Where a bundle came from, the same on every install that ingested it. */
+export function portableBundleSource(bundle: {
+  sourceType: 'git' | 'zip';
+  gitUrl: string | null;
+  gitBranch: string | null;
+  name: string;
+}): string {
+  // Each part is encoded on its own, since `#` is valid both in an scp-style remote path and in a
+  // ref name: joined raw, one url#branch pair reads as another's.
+  return bundle.sourceType === 'git'
+    ? `git:${encodeURIComponent(portableRemote(bundle.gitUrl ?? ''))}#${encodeURIComponent(bundle.gitBranch ?? '')}`
+    : `zip:${encodeURIComponent(bundle.name)}`;
+}
+
+/** A template id another install can map back: Haive's own ids as they are, and a custom one
+ *  (`custom.<bundleId>.<itemId>`, both local) as its bundle's source and the item's path in it.
+ *  Null for a custom id whose bundle or item this install no longer holds. */
+export function portableTemplateId(
+  localId: string,
+  bundles: readonly LocalBundle[],
+): string | null {
+  if (!localId.startsWith('custom.')) return localId;
+  const match = LOCAL_CUSTOM.exec(localId);
+  if (!match) return null;
+  const bundle = bundles.find((b) => b.bundleId === match[1]);
+  const sourcePath = bundle?.items.get(match[2]!);
+  if (!bundle || sourcePath === undefined) return null;
+  return `${PORTABLE_CUSTOM}${encodeURIComponent(bundle.source)}:${encodeURIComponent(sourcePath)}`;
+}
+
+/** The local template id for a portable one, or `FOREIGN_TEMPLATE` when this install holds no
+ *  bundle item at that source and path, or holds that source in more than one bundle, since
+ *  either could be meant. */
+export function localTemplateId(portableId: string, bundles: readonly LocalBundle[]): string {
+  if (!portableId.startsWith(PORTABLE_CUSTOM)) return portableId;
+  const parts = portableId.slice(PORTABLE_CUSTOM.length).split(':');
+  if (parts.length !== 2) return FOREIGN_TEMPLATE;
+  let source: string;
+  let sourcePath: string;
+  try {
+    source = decodeURIComponent(parts[0]!);
+    sourcePath = decodeURIComponent(parts[1]!);
+  } catch {
+    return FOREIGN_TEMPLATE;
+  }
+  const holders = bundles.filter((b) => b.source === source);
+  if (holders.length !== 1) return FOREIGN_TEMPLATE;
+  const bundle = holders[0]!;
+  for (const [itemId, path] of bundle.items) {
+    if (path === sourcePath) return `custom.${bundle.bundleId}.${itemId}`;
+  }
+  return FOREIGN_TEMPLATE;
+}

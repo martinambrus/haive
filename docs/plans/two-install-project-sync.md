@@ -40,9 +40,9 @@ moving a project between installs "must work and be synced correctly and fully".
   files never conflict): `format.json` (schemaVersion), `project/environment.json`,
   `project/render.json` (projectInfo, framework, acceptedAgentIds, customAgentSpecs,
   lspLanguages), `cli/<provider>.json` (the repo-level CLI union), `settings/<name>.json` (one per
-  portable setting), `artifacts/<slug>~<h8>.json` (one claim per disk path: path, template, kind,
+  portable setting), `artifacts/<slug>~<h32>.json` (one claim per disk path: path, template, kind,
   schemaVersion, templateHash, writtenHash, haiveVersion — never the bytes, which are in git),
-  `bundles/<slug>~<h8>.json` (portable bundle descriptors). Canonical form: UTF-8, LF, 2-space,
+  `bundles/<slug>~<h32>.json` (portable bundle descriptors). Canonical form: UTF-8, LF, 2-space,
   sorted keys and sets, trailing newline, no timestamps, no install ids. Portable bundle template
   ids `custom:<gitUrl#branch|zip:name>:<sourcePath>`; an unmapped claim is `foreign` (claims its
   file, never offered). `applicable_template_ids` is recomputed on import, never carried.
@@ -195,7 +195,56 @@ Phase 1 (the record):
   types, canonical render, zod parse, three-way merge returning conflicts, claim naming, id
   mapping, state hash). Control: determinism, round-trip, the merge table, and a `git merge-file`
   property test (edits to different units merge cleanly; the same edits on one pretty JSON file
-  conflict).
+  conflict). **As built:** `@haive/shared/project-state`. The schemas are strict, so a new field is
+  a format bump, while a file no kind claims is left out and listed rather than refused, so a newer
+  release's additions survive an older parser. The parser refuses the whole record, with a reason of
+  its own for a newer format, on conflict markers anywhere, a missing or newer `format.json`, a file
+  that is not JSON or fails its schema, a claim outside the repository, a file under another unit's
+  name, and a setting holding null or a set setting that is not a list of strings. The renderer
+  normalizes the record and then validates it: each section against its schema, every CLI member as
+  a record name, and every value for what JSON cannot carry (a non-finite number, a bigint, a
+  function, an undefined array element, a non-plain object, a cycle, a `__proto__` key, a key JSON
+  does not write: a symbol, a non-enumerable key, an array's named property; an accessor, which JSON
+  calls when it writes, so what it writes need not be what was checked; a proxy, which can answer
+  any of these checks falsely) and every value nested deeper than 64 levels, which keeps each later
+  walk of it inside the stack, so a record either renders to files that read back as itself or
+  throws `ProjectStateError`. Nothing reads inside a value before that walk (it runs ahead of zod
+  and of sorting a set), and normalizing reads the record's own containers once into the fresh ones
+  that are checked and written, so what is checked is what is written; a container that cannot be
+  read is a `ProjectStateError` too. "As itself" is under `sameValue`, the equality the merge
+  decides with, so what JSON writes differently but no reader can tell apart passes: an undefined
+  object property is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the
+  same check on every file before its schema, since zod would drop a `__proto__` key and read the
+  record back without it. Every settings map has no prototype, so an absent setting named like an
+  `Object.prototype` member reads as absent, and the parser checks a setting's name before storing
+  it. The renderer writes each file with its schema's keys alone, and sorts every set
+  (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which the renderers can
+  take since all of them read those as sets. The merge goes key by key in a project file both sides
+  hold and file by file otherwise; a set (a set setting, the CLI set, `lspLanguages`) moves member
+  by member and never conflicts (joined when there is no base); a side that unset a set holds no
+  member of it, and a set that empties that way stays unset; `acceptedAgentIds` stays one value,
+  since an empty list there means every applicable agent and two narrowings would merge wider than
+  either chose; a claim both sides changed follows the bytes through `diskHash`, an absent file
+  standing for a removal; a conflict keeps the local value and names `<file>#<key>` or the file.
+  Portable custom ids encode both parts (`custom:<source>:<path>`, each URI-encoded), since a git
+  URL holds colons, and a git source encodes its URL and branch apart, since `#` is valid in both.
+  An http(s) remote is named as the URL standard serializes it (host, port and path resolved, dot
+  segments included) without userinfo, a query or a fragment, since each can carry a token. An ssh
+  URL and an scp address keep only the user, which is a login, name the host as the standard does
+  and drop a default port, while the path stays as typed, since the remote's own filesystem resolves
+  it. The source is compared exactly after that: other spellings of one remote (a trailing slash, a
+  `.git` suffix, an scp address against an ssh URL) stay two sources, and their claims read foreign
+  until the bundle is added under one spelling: the safe direction, since a foreign claim keeps its
+  file and offers nothing. A token pasted into a path segment reads like a name and stays, which is
+  why a bundle's credential is stored apart from its URL. One maps back only when exactly one local
+  bundle holds its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it
+  foreign rather than guessing. Two keys of one project file can still conflict under a merge a
+  person drives, which the parser then refuses; the merges Haive drives resolve them per key (B2.3).
+  `gitBlobId` takes the repository's object format (sha1 or sha256), since the two never agree on
+  one file and the sync compares against ids read from the repository. MEASURED: 119 tests, every
+  mutation tried caught (Codex's twelve rounds added 49 controls, 41 of them failing before), and
+  `git merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
+  record merge, while two adjacent settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
   [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
   replaces `importHaiveDataMirror` (legacy files as fallback); 12/02 write `render_context`; 01's
@@ -217,7 +266,9 @@ Phase 1 (the record):
   409 and a throw today; after, B's rows equal A's claims and 01 is all `unchanged`; after A's
   upgrade B reads `conflict` everywhere today, `unchanged` after.
 - **B1.7 feat(worker): write the record at onboarding, upgrade and rollback; retire install.json**
-  [B1.6]. Control: two identical 12 runs leave `git diff` empty (today install.json differs).
+  [B1.6]. The writer collapses local bundles to one descriptor per portable source, since the codec
+  refuses a source listed twice. Control: two identical 12 runs leave `git diff` empty (today
+  install.json differs).
 - **B1.8 feat(api,worker): keep the record current on every settings edit** [B1.7]
   (`markProjectStateDirty` in PATCH exclusions/tooling, the reset, bundle changes, 02-detection,
   04-tooling, 06_7, bundle resync). Control: PATCH exclusions then a sweep tick updates
@@ -300,9 +351,10 @@ Verified facts the survey added (2a610d56):
   (`packages/shared/test/fs-ratchet.json`); `HAIVE_INSTALL_ID` already supports a second install
   on one machine (docker-compose.yml header).
 
-Claim file names: slug = the path with `/` → `__` and leading dots dropped, `h8` = first 8 hex of
-sha256(path); the parser refuses a name that does not match its path; flat on purpose (mirroring
-`.claude/...` under `.haive-data` would plant directories tools scan).
+Claim file names: slug = the path with `/` → `__` and leading dots dropped, `h32` = the first 32
+hex of sha256(path), wide enough that paths chosen to collide still get two files; the parser
+refuses a name that does not match its path; flat on purpose (mirroring `.claude/...` under
+`.haive-data` would plant directories tools scan).
 
 `syncProjectStateFromCheckout(db, repoId, {reason})` — worker `src/project-state/sync.ts`, `db`
 explicit (the smoke drives two databases), under
