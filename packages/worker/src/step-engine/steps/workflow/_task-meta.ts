@@ -34,7 +34,10 @@ export interface DdevWorkspace {
  * migration code an imported old DB must be migrated against both live there, not
  * at the repo root. Returns the worktree path plus its volume-relative subpath (so
  * the runner mounts/`cd`s into the worktree), falling back to the repo root when
- * no worktree output exists. Returns null when the task has no repository.
+ * no worktree exists. Returns null when the task has no repository.
+ *
+ * Read from `tasks.worktree_path` first: a Retry nulls 01's output while the worktree and
+ * everything mounting it stay, and answering the root then re-targets the runner.
  */
 export async function resolveDdevWorkspace(
   db: Database,
@@ -43,7 +46,7 @@ export async function resolveDdevWorkspace(
 ): Promise<DdevWorkspace | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true },
+    columns: { userId: true, repositoryId: true, worktreePath: true },
   });
   if (!task?.repositoryId) return null;
 
@@ -54,17 +57,21 @@ export async function resolveDdevWorkspace(
       and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-worktree-setup')),
     )
     .limit(1);
-  const wt = rows[0]?.output as { worktreePath?: string } | null;
-  const workspace = wt?.worktreePath ?? repoPath;
+  const step = rows[0];
+  const wt = step?.output as { worktreePath?: string } | null;
+  // A run_app Skip ends 01 without a worktree, while the column may still name an old one.
+  const recorded =
+    step?.status === 'skipped' ? repoPath : (task.worktreePath ?? wt?.worktreePath ?? repoPath);
 
   // Worktree path relative to the repo root (e.g. ".haive/worktrees/<branch>", or
   // "" when there's no worktree). Appended to the known `<userId>/<repoId>` volume
   // subpath so the runner's /repos mount resolves the worktree.
-  const rel = path.relative(repoPath, workspace);
-  const repoSubpath =
-    rel && !rel.startsWith('..')
-      ? `${task.userId}/${task.repositoryId}/${rel}`
-      : `${task.userId}/${task.repositoryId}`;
+  const rel = path.relative(repoPath, recorded);
+  const inside = rel !== '' && !rel.startsWith('..');
+  const workspace = inside ? recorded : repoPath;
+  const repoSubpath = inside
+    ? `${task.userId}/${task.repositoryId}/${rel}`
+    : `${task.userId}/${task.repositoryId}`;
 
   return { workspace, repoSubpath };
 }
