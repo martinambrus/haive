@@ -161,7 +161,18 @@ Phase 1 (the record):
   `packages/worker/test/two-install-smoke.ts` (+ `test/support/two-install.ts`): two databases
   (`haive`, `haive_h5` on 55432; CI creates `haive_b`), one bare `file://` remote, A's onboarding
   driven through the real 07/12 steps from seeded rows, B via `handleClone`. Each later PR removes
-  its gaps (a gap that passes fails the run), which is its control.
+  its gaps (a gap that passes fails the run), which is its control. **As built:** one file, and B's
+  database is the smoke's own (`<db>_two_install_b`, created from `DATABASE_URL`, migrated by the
+  real runner and dropped at the end), so CI needs no extra step; neither install calls
+  `initDatabase`, so a singleton `getDb()` on the path would throw rather than cross installs. The
+  smoke pushes A's commit itself, since 13 runs inside the step runner's merge phase. Passing today:
+  the round trip, the mirror (environment, tooling without its machine-local keys, exclusions, the
+  RTK switch) and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan resolves its
+  render context (B1.4) and reads every claimed path `unchanged` (B1.6), and a second 12 run leaves
+  A's checkout clean (B1.7; today `.haive/install.json` differs). A listed gap no check names fails
+  the run too. The scenarios that need machinery not built yet (a sweep, the record, conflicts)
+  arrive with the PRs that build it, each with its own check. MEASURED: 16 checks, 4 gaps; a passing
+  check listed as a gap and a listed gap no check runs each fail the run.
 - **B1.2 fix(worker): an upgrade adopts a file that already holds the current render.** New
   `adopt` bucket in `classifyEntry` (live row, disk equals the current render); 02 supersedes the
   row with a render-claiming backfill row, outside `writtenPaths`/`createdPaths`/`retiredRowIds`.
