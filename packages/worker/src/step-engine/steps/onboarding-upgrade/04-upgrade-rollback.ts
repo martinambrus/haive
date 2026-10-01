@@ -30,6 +30,7 @@ import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
+import { loadLiveArtifacts, pickRenderSnapshot } from './01-upgrade-plan.js';
 import {
   removeIfHaives,
   resolveBundleItemId,
@@ -707,19 +708,23 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
-    if (snapshot) {
-      try {
+    try {
+      // A rollback that restored no snapshot (the upgrade only created files) records the context
+      // the rows still live carry, which is the one the repository had before the upgrade.
+      const recorded =
+        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx, detected.repositoryId));
+      if (recorded) {
         await writeProjectStateRecord(ctx.db, {
           repositoryId: detected.repositoryId,
           repoPath: ctx.repoPath,
-          context: renderCtx,
-          rtkChoiceRecorded: typeof snapshot.rtkEnabled === 'boolean',
+          context: recorded as unknown as TemplateRenderContext,
+          rtkChoiceRecorded: typeof recorded.rtkEnabled === 'boolean',
         });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        warnings.push(`project state record write failed: ${message}`);
-        ctx.logger.warn({ err }, 'project state record write failed');
       }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warnings.push(`project state record write failed: ${message}`);
+      ctx.logger.warn({ err }, 'project state record write failed');
     }
 
     const installManifestWritten = await writeInstallManifest(

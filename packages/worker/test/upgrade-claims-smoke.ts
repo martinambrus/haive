@@ -100,6 +100,7 @@ async function main(): Promise<void> {
   const repositoryId = randomUUID();
   const now = new Date();
   const repoPath = await mkdtemp(join(tmpdir(), 'upgrade-claims-smoke-'));
+  const createdRepoPath = await mkdtemp(join(tmpdir(), 'upgrade-claims-smoke-created-'));
 
   try {
     await db.insert(schema.users).values({
@@ -188,8 +189,8 @@ async function main(): Promise<void> {
       ])
       .returning({ id: schema.taskSteps.id });
 
-    const readOrNull = (rel: string) =>
-      readFile(join(repoPath, rel), 'utf8').then(
+    const readOrNull = (rel: string, root = repoPath) =>
+      readFile(join(root, rel), 'utf8').then(
         (text) => text,
         () => null,
       );
@@ -207,13 +208,13 @@ async function main(): Promise<void> {
 
     /** What the writers leave: the repository's render context and the sync row, or why they could
      *  not be read, so that a missing column fails the checks that read it and not the run. */
-    const stateOf = async () => {
+    const stateOf = async (repoId = repositoryId) => {
       try {
         const column = (await db.execute(
-          sql`select render_context from repositories where id = ${repositoryId}`,
+          sql`select render_context from repositories where id = ${repoId}`,
         )) as unknown as { render_context: unknown }[];
         const sync = (await db.execute(
-          sql`select base_snapshot, last_error from project_state_sync where repository_id = ${repositoryId}`,
+          sql`select base_snapshot, last_error from project_state_sync where repository_id = ${repoId}`,
         )) as unknown as { base_snapshot: unknown; last_error: string | null }[];
         return { column: column[0]?.render_context ?? null, sync };
       } catch (err) {
@@ -222,25 +223,28 @@ async function main(): Promise<void> {
     };
     /** Nothing recorded and no record file, so what is read next is what the next step wrote; with
      *  `staleSync` the sync row stays, stale and in error, so the next write has to replace it. */
-    const forgetState = async (staleSync = false) => {
-      await db.execute(
-        sql`update repositories set render_context = null where id = ${repositoryId}`,
-      );
+    const forgetState = async (staleSync = false, repoId = repositoryId, root = repoPath) => {
+      await db.execute(sql`update repositories set render_context = null where id = ${repoId}`);
       await db.execute(
         staleSync
-          ? sql`update project_state_sync set base_snapshot = '{"stale": true}'::jsonb, last_error = 'an earlier failure' where repository_id = ${repositoryId}`
-          : sql`delete from project_state_sync where repository_id = ${repositoryId}`,
+          ? sql`update project_state_sync set base_snapshot = '{"stale": true}'::jsonb, last_error = 'an earlier failure' where repository_id = ${repoId}`
+          : sql`delete from project_state_sync where repository_id = ${repoId}`,
       );
-      await rm(join(repoPath, '.haive-data/state'), { recursive: true, force: true });
+      await rm(join(root, '.haive-data/state'), { recursive: true, force: true });
     };
     /** Whether the state holds `context` with the RTK choice flag `recorded`, as its three parts. */
-    const stateHolds = async (context: Record<string, unknown>, recorded: boolean) => {
-      const state = await stateOf();
+    const stateHolds = async (
+      context: Record<string, unknown>,
+      recorded: boolean,
+      repoId = repositoryId,
+      root = repoPath,
+    ) => {
+      const state = await stateOf(repoId);
       const want = recordOf(context);
       const files = renderProjectState(want);
       const onDisk = {
-        format: await readOrNull(RECORD_FORMAT),
-        render: await readOrNull(RECORD_RENDER),
+        format: await readOrNull(RECORD_FORMAT, root),
+        render: await readOrNull(RECORD_RENDER, root),
       };
       const readable = !('error' in state);
       return {
@@ -266,13 +270,13 @@ async function main(): Promise<void> {
     };
 
     const controller = new AbortController();
-    const ctxFor = (taskStepId: string, forTask = taskId): StepContext => ({
+    const ctxFor = (taskStepId: string, forTask = taskId, root = repoPath): StepContext => ({
       round: 0,
       taskId: forTask,
       taskStepId,
       userId,
-      repoPath,
-      workspacePath: repoPath,
+      repoPath: root,
+      workspacePath: root,
       sandboxWorkdir: '/haive/workdir',
       cliProviderId: null,
       db,
@@ -1011,12 +1015,13 @@ async function main(): Promise<void> {
       title: string,
       stepIds: string[],
       metadata?: Record<string, unknown>,
+      at = { id: repositoryId, root: repoPath },
     ) => {
       const [t] = await db
         .insert(schema.tasks)
         .values({
           userId,
-          repositoryId,
+          repositoryId: at.id,
           type: 'onboarding_upgrade',
           title,
           status: 'running',
@@ -1040,7 +1045,11 @@ async function main(): Promise<void> {
                 })),
               )
               .returning({ id: schema.taskSteps.id });
-      return { taskId: t!.id, ctxs: steps.map((st) => ctxFor(st.id, t!.id)), stepIds: steps };
+      return {
+        taskId: t!.id,
+        ctxs: steps.map((st) => ctxFor(st.id, t!.id, at.root)),
+        stepIds: steps,
+      };
     };
     const endTask = (id: string, status: 'completed' | 'cancelled') =>
       db
@@ -1268,6 +1277,138 @@ async function main(): Promise<void> {
     );
     await endTask(fourthRollbackTask.taskId, 'completed');
 
+    // ---- an upgrade that only creates files, and its rollback ------------------------------
+    // The rollback restores no snapshot, so the context it records has to come from the rows still
+    // live. RTK is off where those rows were written and on by the time of the upgrade, so the two
+    // contexts differ in the one field that tells them apart.
+    const created = { id: randomUUID(), root: createdRepoPath };
+    await db.insert(schema.repositories).values({
+      id: created.id,
+      userId,
+      name: 'upgrade-claims-smoke-created',
+      source: 'blank',
+      rtkEnabled: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await seedBlankScaffold(
+      db,
+      { userId, repositoryId: created.id, repoName: 'upgrade-claims-smoke-created' },
+      created.root,
+    );
+    const seededWith = await openTask(
+      'upgrade-claims-smoke created seeded',
+      ['01-upgrade-plan'],
+      undefined,
+      created,
+    );
+    const seededDetected = await upgradePlanStep.detect!(seededWith.ctxs[0]!);
+    await upgradePlanStep.apply(seededWith.ctxs[0]!, {
+      detected: seededDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await endTask(seededWith.taskId, 'completed');
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: true })
+      .where(eq(schema.repositories.id, created.id));
+
+    const creating = await openTask(
+      'upgrade-claims-smoke created upgrade',
+      ['01-upgrade-plan', '02-upgrade-apply'],
+      undefined,
+      created,
+    );
+    const [creatingPlanCtx, creatingApplyCtx] = creating.ctxs;
+    const creatingDetected = await upgradePlanStep.detect!(creatingPlanCtx!);
+    const creatingPlanned = await upgradePlanStep.apply(creatingPlanCtx!, {
+      detected: creatingDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: creatingPlanned as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, creating.stepIds[0]!.id));
+    const creatingPlan = await upgradeApplyStep.detect!(creatingApplyCtx!);
+    const creatingForm = upgradeApplyStep.form!(
+      creatingApplyCtx!,
+      creatingPlan,
+    ) as FormSchema | null;
+    const creatingApplied = await upgradeApplyStep.apply(creatingApplyCtx!, {
+      detected: creatingPlan,
+      formValues: defaultValues(creatingForm),
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: creatingApplied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, creating.stepIds[1]!.id));
+    await endTask(creating.taskId, 'completed');
+
+    const undoCreated = await openTask(
+      'upgrade-claims-smoke created rollback',
+      ['04-upgrade-rollback'],
+      { mode: 'rollback' },
+      created,
+    );
+    const undoCreatedCtx = undoCreated.ctxs[0]!;
+    const undoDetected = await upgradeRollbackStep.detect!(undoCreatedCtx);
+    check(
+      'the upgrade only created files, and renders RTK as on where the rows it leaves live record it off',
+      undoDetected.targets.length === 0 &&
+        undoDetected.newArtifactsToUndo.length > 0 &&
+        seededDetected.renderCtxSnapshot.rtkEnabled === false &&
+        creatingPlan.renderCtxSnapshot.rtkEnabled === true,
+      {
+        targets: undoDetected.targets.length,
+        created: undoDetected.newArtifactsToUndo.map((u) => u.diskPath),
+        rowsRecord: seededDetected.renderCtxSnapshot.rtkEnabled ?? null,
+        upgradeRenders: creatingPlan.renderCtxSnapshot.rtkEnabled ?? null,
+      },
+    );
+    // Cleared, so that what is read after is what the rollback wrote.
+    await forgetState(true, created.id, created.root);
+    const undoneCreated = await upgradeRollbackStep.apply(undoCreatedCtx, {
+      detected: undoDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    const createdState = await stateHolds(
+      seededDetected.renderCtxSnapshot,
+      true,
+      created.id,
+      created.root,
+    );
+    check(
+      'a rollback of it records the render context the rows still live carry, with its RTK choice',
+      createdState.column,
+      createdState.detail,
+    );
+    check(
+      'and writes the record files and moves the sync from that context',
+      createdState.files && createdState.sync,
+      createdState.detail,
+    );
+    const stillThere = (
+      await Promise.all(
+        undoDetected.newArtifactsToUndo.map(async (u) =>
+          (await readOrNull(u.diskPath, created.root)) === null ? null : u.diskPath,
+        ),
+      )
+    ).filter((path) => path !== null);
+    check(
+      'the files the upgrade created are gone',
+      undoneCreated.revertedCount > 0 && stillThere.length === 0,
+      { reverted: undoneCreated.revertedCount, stillThere, warnings: undoneCreated.warnings },
+    );
+    await endTask(undoCreated.taskId, 'completed');
+
     // ---- the boot repair ----------------------------------------------------------------
     const h = h64;
     const row = (over: Partial<typeof schema.onboardingArtifacts.$inferInsert>) =>
@@ -1374,6 +1515,7 @@ async function main(): Promise<void> {
       log.warn({ err: cleanupErr }, 'cleanup failed');
     }
     await rm(repoPath, { recursive: true, force: true });
+    await rm(createdRepoPath, { recursive: true, force: true });
     process.exit(process.exitCode ?? 0);
   }
 }
