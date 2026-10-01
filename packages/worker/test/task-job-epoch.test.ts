@@ -288,6 +288,25 @@ vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/queues/_step-reset.js')>()),
   resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 7 })),
 }));
+// A task's teardown would otherwise run docker against the host: every CLI's auth volume on a
+// failure, and the runners and the IDE's volume on a definitive end.
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+}));
+vi.mock('../src/sandbox/ddev-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/ddev-runner.js')>()),
+  killTaskDdevRunners: vi.fn(async () => 0),
+}));
+vi.mock('../src/sandbox/app-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/app-runner.js')>()),
+  killTaskAppRunners: vi.fn(async () => 0),
+}));
+vi.mock('../src/sandbox/ide-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/ide-runner.js')>()),
+  killTaskIdeContainers: vi.fn(async () => 0),
+}));
 
 // 07 is the fix loop's fixed re-entry target.
 for (const id of ['epoch-job-step', 'epoch-job-target', '07-phase-2-implement']) {
