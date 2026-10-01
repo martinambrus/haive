@@ -268,7 +268,7 @@ export function litellmRowsForProviders(
       if (entry.vendor === null || !vendors.includes(entry.vendor)) continue;
       const modelKey = normalizeModelKey(litellmModelSegment(entry.key));
       if (modelKey === null) continue;
-      const mapKey = `${provider} ${modelKey}`;
+      const mapKey = JSON.stringify([provider, modelKey]);
       const existing = out.get(mapKey);
       if (existing && existing.sourceKey.length <= entry.key.length) continue;
       out.set(mapKey, { provider, modelKey, rates: entry.rates, sourceKey: entry.key });
