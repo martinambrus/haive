@@ -339,10 +339,18 @@ export const ONBOARDING_TOOLING_CONSENT_KEYS = [
  *  lookup that returns nothing after a fresh clone. */
 export interface OnboardingEnvironmentMirror {
   schemaVersion: number;
-  /** The `01-env-detect` detect `.data` object (project/container/stack/paths/...). */
+  /** The `01-env-detect` detect `.data` object (project/container/stack/paths/...), without the
+   *  prompt-only fields `mirroredEnvDetectData` leaves out. */
   envDetectData: Record<string, unknown>;
   /** The `02-detection-confirmation` confirmed form values. */
   confirmedValues: Record<string, unknown>;
+}
+
+/** 01's detect data as the environment mirror keeps it. Its `__`-named fields exist for one prompt
+ *  (config file contents, untracked ones included, and a repository digest), and the mirror is
+ *  committed. */
+export function mirroredEnvDetectData(data: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(data).filter(([key]) => !key.startsWith('__')));
 }
 
 /** Repo-level snapshot of an onboarded repo's TOOLING prefs. Persisted on
