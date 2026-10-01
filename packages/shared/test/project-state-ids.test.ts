@@ -65,6 +65,12 @@ describe('portableBundleSource', () => {
     expect(at('https://user:secrettoken@example.com/b.git')).toBe(bare);
     expect(at('https://secrettoken@example.com/b.git')).toBe(bare);
     expect(at('https://user:secret@token@example.com/b.git')).toBe(bare);
+    expect(at('https://example.com/b.git?access_token=secrettoken')).toBe(bare);
+    expect(at('https://example.com/b.git#secrettoken')).toBe(bare);
+    expect(at('ssh://git@example.com/b.git?secrettoken')).toBe(
+      source('ssh://git@example.com/b.git'),
+    );
+    expect(at('https://example.com/p@th/b.git')).toBe(source('https://example.com/p@th/b.git'));
     expect(at('ssh://git:secrettoken@example.com/b.git')).toBe(
       source('ssh://git@example.com/b.git'),
     );
