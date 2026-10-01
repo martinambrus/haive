@@ -6,7 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import postgres from 'postgres';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, type FormSchema } from '@haive/shared';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { handleClone } from '../src/repo/clone.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
@@ -29,7 +30,10 @@ import { toolingInfrastructureStep } from '../src/step-engine/steps/onboarding/0
 import { agentDiscoveryStep } from '../src/step-engine/steps/onboarding/06_5-agent-discovery.js';
 import { generateFilesStep } from '../src/step-engine/steps/onboarding/07-generate-files.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
-import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import {
+  RenderContextUnresolvedError,
+  upgradePlanStep,
+} from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
 
@@ -82,12 +86,6 @@ const gitEnv = {
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', ['-c', 'gc.auto=0', ...args], { cwd, env: gitEnv, encoding: 'utf8' }).trim();
 
-const exists = (p: string) =>
-  stat(p).then(
-    () => true,
-    () => false,
-  );
-
 /** What a person submitting the form untouched sends: every field's own default. */
 function defaultValues(form: FormSchema | null): Record<string, unknown> {
   const values: Record<string, unknown> = {};
@@ -113,8 +111,8 @@ async function cloneInstall(
   db: Database,
   storage: string,
   remoteUrl: string,
+  userId: string = randomUUID(),
 ): Promise<Install> {
-  const userId = randomUUID();
   const repositoryId = randomUUID();
   const now = new Date();
   await db.insert(schema.users).values({
@@ -207,6 +205,8 @@ async function runStep<D, O>(
   return { detected, output };
 }
 
+const sorted = (v: unknown) => (Array.isArray(v) ? [...(v as string[])].sort() : v);
+
 const livePaths = async (install: Install): Promise<string[]> =>
   (
     await install.db
@@ -273,8 +273,9 @@ async function main(): Promise<void> {
     const remoteUrl = `file://${origin}`;
 
     // ---- A onboards ----------------------------------------------------------------------
-    const a = await cloneInstall('A', dbA, path.join(tmp, 'storage-a'), remoteUrl);
-    userA = a.userId;
+    // Known before the clone runs, so a clone that fails still has its rows removed.
+    userA = randomUUID();
+    const a = await cloneInstall('A', dbA, path.join(tmp, 'storage-a'), remoteUrl, userA);
     const globs = ['vendor/**', 'build/**'];
     await a.db
       .update(schema.repositories)
@@ -409,7 +410,7 @@ async function main(): Promise<void> {
     const filesOnB = await Promise.all(
       ['.claude/workflow-config.json', 'AGENTS.md', '.haive-data/plan.json'].map(async (rel) => ({
         rel,
-        present: await exists(path.join(b.repoPath, rel)),
+        present: (await lstatNoFollow(b.repoPath, rel))?.kind === 'file',
       })),
     );
     check(
@@ -485,14 +486,16 @@ async function main(): Promise<void> {
       entries = planB.entries;
       contextB = planB.renderCtxSnapshot;
     } catch (err) {
-      planError = err instanceof Error ? err.message : String(err);
+      if (!(err instanceof RenderContextUnresolvedError)) throw err;
+      planError = err.message;
     }
     check(
       "B's upgrade plan resolves its render context",
       contextB !== null &&
         contextB.framework === rendered.framework &&
-        isDeepStrictEqual(contextB.acceptedAgentIds, rendered.acceptedAgentIds) &&
-        isDeepStrictEqual(contextB.lspLanguages, rendered.lspLanguages),
+        // Both are sets to every renderer, so the record may store them sorted.
+        isDeepStrictEqual(sorted(contextB.acceptedAgentIds), sorted(rendered.acceptedAgentIds)) &&
+        isDeepStrictEqual(sorted(contextB.lspLanguages), sorted(rendered.lspLanguages)),
       planError ?? contextB,
     );
     const notUnchanged = entries
