@@ -84,4 +84,13 @@ describe('portableBundleSource', () => {
     expect(at('Git@Example.COM:b.git')).toBe(source('Git@example.com:b.git'));
     expect(at('https://example.com/B.git')).toBe(source('https://example.com/B.git'));
   });
+
+  it('names one remote alike with or without its default port', () => {
+    expect(at('https://example.com:443/b.git')).toBe(source('https://example.com/b.git'));
+    expect(at('HTTP://example.com:80/b.git')).toBe(source('http://example.com/b.git'));
+    expect(at('ssh://git@example.com:22/b.git')).toBe(source('ssh://git@example.com/b.git'));
+    expect(at('https://example.com:8443/b.git')).toBe(source('https://example.com:8443/b.git'));
+    expect(at('https://example.com:4443/b.git')).toBe(source('https://example.com:4443/b.git'));
+    expect(at('http://example.com:443/b.git')).toBe(source('http://example.com:443/b.git'));
+  });
 });

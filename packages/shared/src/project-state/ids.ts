@@ -17,18 +17,28 @@ const PORTABLE_CUSTOM = 'custom:';
 
 const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#]*)@)?([^/?#]*)([^?#]*)/i;
 
-/** A remote as every install names it: where it is (scheme, host, port, path), the scheme and host
- *  in lower case as both are case-insensitive, and no userinfo but an ssh login, nor a query or a
- *  fragment, since each can carry a token. */
+const DEFAULT_PORT: Readonly<Record<string, string>> = {
+  'http://': ':80',
+  'https://': ':443',
+  'ssh://': ':22',
+};
+
+/** A remote as every install names it: where it is (scheme, host, port, path), with the scheme and
+ *  host in lower case and no default port, since neither names another remote, and no userinfo but
+ *  an ssh login, nor a query or a fragment, since each can carry a token. */
 function portableRemote(url: string): string {
   const match = URL_PARTS.exec(url);
   if (!match) {
     const scp = parseScpLikeGitUrl(url);
     return scp ? `${scp.user ? `${scp.user}@` : ''}${scp.host.toLowerCase()}:${scp.path}` : url;
   }
-  const [, scheme = '', userinfo, host = '', path = ''] = match;
-  const user = /^ssh:/i.test(scheme) ? (userinfo ?? '').split(':')[0]! : '';
-  return `${scheme.toLowerCase()}${user && `${user}@`}${host.toLowerCase()}${path}`;
+  const [, rawScheme = '', userinfo, rawHost = '', path = ''] = match;
+  const scheme = rawScheme.toLowerCase();
+  const port = DEFAULT_PORT[scheme];
+  const host = rawHost.toLowerCase();
+  const user = scheme === 'ssh://' ? (userinfo ?? '').split(':')[0]! : '';
+  const bare = port && host.endsWith(port) ? host.slice(0, -port.length) : host;
+  return `${scheme}${user && `${user}@`}${bare}${path}`;
 }
 
 /** Where a bundle came from, the same on every install that ingested it. */
