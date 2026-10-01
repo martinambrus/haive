@@ -397,6 +397,20 @@ describe('a value with a key JSON does not write', () => {
     expect(() => renderProjectState(r)).toThrow(ProjectStateError);
   });
 
+  it('refuses a CLI set holding something other than a name, before reading its members', () => {
+    const number = record();
+    number.cli = [123 as unknown as string];
+    expect(() => renderProjectState(number)).toThrow(ProjectStateError);
+    const getter = record();
+    getter.cli = Object.defineProperty(['claude-code'], 0, {
+      enumerable: true,
+      get: () => {
+        throw new Error('getter');
+      },
+    });
+    expect(() => renderProjectState(getter)).toThrow(/holds an accessor/);
+  });
+
   it('refuses a proxy, which can answer any of these checks falsely', () => {
     expect(refused(new Proxy({ a: 1 }, {}))).toThrow(/is a proxy/);
   });

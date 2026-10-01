@@ -48,8 +48,15 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
     const parsed = schema.safeParse(value);
     if (!parsed.success) problems.push(...issues(rel, parsed.error));
   };
-  for (const provider of record.cli) {
-    if (!isRecordName(provider)) problems.push(`cli: ${quote(provider)} is not a record name`);
+  const cliFound = notJson(record.cli);
+  if (cliFound) problems.push(notJsonProblem('cli', cliFound));
+  else if (!Array.isArray(record.cli)) problems.push('cli: is not a list');
+  else {
+    for (const provider of record.cli) {
+      if (typeof provider !== 'string' || !isRecordName(provider)) {
+        problems.push(`cli: ${quote(provider)} is not a record name`);
+      }
+    }
   }
   for (const [name, value] of Object.entries(record.settings)) {
     const rel = `settings/${name}.json`;
