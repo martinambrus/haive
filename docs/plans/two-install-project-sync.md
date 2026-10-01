@@ -325,10 +325,15 @@ Phase 1 (the record):
   transaction, takes an advisory lock on a per-repository key distinct from the plan mirror's,
   sets the column and upserts the sync row. Files before the lock is the design above: two
   overlapping writers (an onboarding beside an upgrade) can leave one's files with the other's
-  column, which the next sync converges. 12 writes whenever 07's context exists, 02 adds both
-  files to `writtenPaths`, and 04 writes the snapshot it restored or, for a rollback of an upgrade
-  that only created files (no snapshot among its targets), the one the rows still live after it
-  carry. The onboarding reset takes it all back: the two files by name, their directories only once
+  column, which the next sync converges. 12 derives its context from 07's output before anything
+  else and writes whenever it exists, whatever recording the artifacts did. 02 adds both files to
+  `writtenPaths` even when the database half fails (the writer's rejection names the files it
+  wrote), since they are what a later sync takes as the intended context and 03 commits only what
+  02 lists. 04 writes the snapshot it restored or, for a rollback of an upgrade that only created
+  files (no snapshot among its targets), the one the rows still live after it carry. The RTK flag
+  is never read off the value, since 01's pre-RTK fallback stores a synthesized `false`: 02 takes
+  its plan's `rtkFollowsLive`, 04 the rolled-back upgrade's plan's (and a boolean in what it
+  restores), and 12 whether 07's output recorded RTK at all. The onboarding reset takes it all back: the two files by name, their directories only once
   empty, and the column and the sync row in the transaction that clears `onboarded_at`. The
   repositories LIST query does not fetch the column: MEASURED on 13 step-07 outputs, a context is
   11-42 KB against ~3.3 KB for the rest of a list row, and the list is polled every 5 s.
