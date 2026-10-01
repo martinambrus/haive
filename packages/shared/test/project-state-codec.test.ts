@@ -333,6 +333,35 @@ describe('a value with a key JSON does not write', () => {
     );
   });
 
+  it('refuses a getter that throws with ProjectStateError, not its own error', () => {
+    const value = Object.defineProperty({}, 'a', {
+      enumerable: true,
+      get: () => {
+        throw new Error('getter');
+      },
+    });
+    expect(refused(value)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a getter that answers once with a number and then with NaN', () => {
+    let reads = 0;
+    const value = Object.defineProperty({}, 'a', {
+      enumerable: true,
+      get: () => (reads++ === 0 ? 1 : Number.NaN),
+    });
+    expect(refused(value)).toThrow(/holds an accessor/);
+  });
+
+  it('refuses an array element read through a getter', () => {
+    expect(refused(Object.defineProperty([0], 0, { enumerable: true, get: () => 1 }))).toThrow(
+      /holds an accessor/,
+    );
+  });
+
+  it('refuses a proxy, which can answer any of these checks falsely', () => {
+    expect(refused(new Proxy({ a: 1 }, {}))).toThrow(/is a proxy/);
+  });
+
   it('refuses an array with a named property', () => {
     expect(refused(Object.assign([1, 2], { extra: 3 }))).toThrow(/holds a key JSON does not write/);
   });

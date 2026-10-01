@@ -1,3 +1,4 @@
+import { types } from 'node:util';
 import type { z } from 'zod';
 import { canonicalJson, sortedSet } from './canonical.js';
 import { bundleFileName, claimFileName, isClaimablePath, isRecordName } from './names.js';
@@ -117,6 +118,8 @@ const MAX_DEPTH = 64;
 
 // A symbol, a non-enumerable key or an array's named property: JSON leaves each out unseen.
 const NOT_WRITTEN = 'holds a key JSON does not write';
+// JSON calls a getter when it writes, so what it writes need not be what was checked.
+const ACCESSOR = 'holds an accessor';
 
 /** The first thing in `value` JSON cannot carry exactly, or null. */
 function notJson(
@@ -130,13 +133,18 @@ function notJson(
   }
   if (typeof value !== 'object') return { path, reason: `is ${typeof value}` };
   if (path.length >= MAX_DEPTH) return { path, reason: `nests deeper than ${MAX_DEPTH} levels` };
+  if (types.isProxy(value)) return { path, reason: 'is a proxy' };
   if (ancestors.has(value)) return { path, reason: 'refers back to itself' };
   ancestors.add(value);
   try {
+    // Read through descriptors, so no getter runs and each value is read once.
+    const own = Object.getOwnPropertyDescriptors(value);
     if (Array.isArray(value)) {
-      if (Reflect.ownKeys(value).length > value.length + 1) return { path, reason: NOT_WRITTEN };
+      if (Reflect.ownKeys(own).length > value.length + 1) return { path, reason: NOT_WRITTEN };
       for (let i = 0; i < value.length; i++) {
-        const found = notJson(value[i], [...path, String(i)], ancestors);
+        const slot = own[String(i)];
+        if (slot && !('value' in slot)) return { path: [...path, String(i)], reason: ACCESSOR };
+        const found = notJson(slot?.value, [...path, String(i)], ancestors);
         if (found) return found;
       }
       return null;
@@ -145,13 +153,13 @@ function notJson(
     if (proto !== Object.prototype && proto !== null)
       return { path, reason: 'is not a plain object' };
     if (Object.hasOwn(value, '__proto__')) return { path, reason: 'holds a key named __proto__' };
-    if (Reflect.ownKeys(value).length !== Object.keys(value).length) {
-      return { path, reason: NOT_WRITTEN };
-    }
-    for (const [key, child] of Object.entries(value)) {
+    if (Object.getOwnPropertySymbols(own).length > 0) return { path, reason: NOT_WRITTEN };
+    for (const [key, slot] of Object.entries(own)) {
+      if (!slot.enumerable) return { path, reason: NOT_WRITTEN };
+      if (!('value' in slot)) return { path: [...path, key], reason: ACCESSOR };
       // JSON leaves an undefined property out, and so does the record's reader.
-      if (child === undefined) continue;
-      const found = notJson(child, [...path, key], ancestors);
+      if (slot.value === undefined) continue;
+      const found = notJson(slot.value, [...path, key], ancestors);
       if (found) return found;
     }
     return null;
