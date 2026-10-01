@@ -581,7 +581,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       const listed = await gitRun(ctx.repoPath, [
         'branch',
         '--list',
-        '--format=%(refname:short)',
+        '--format=%(refname:lstrip=2)',
         '--merged',
         d.branchName,
         `${issuePrefix}*`,

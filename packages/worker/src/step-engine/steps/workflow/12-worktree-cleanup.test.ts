@@ -1618,4 +1618,32 @@ describe('12 squash merge (real git)', () => {
       await rm(parent, { recursive: true, force: true });
     }
   });
+
+  it('deletes a merged DAG issue branch that a same-named tag shadows, and keeps the tag', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await git(wt, ['checkout', '-b', 'feature/x--iss-1']);
+      await writeFile(path.join(wt, 'iss1.txt'), '1\n', 'utf8');
+      await git(wt, ['add', '-A']);
+      await git(wt, ['commit', '-m', 'ISS-1: work']);
+      await git(wt, ['checkout', 'feature/x']);
+      await git(wt, ['merge', '--no-ff', '--no-edit', 'feature/x--iss-1']);
+      // `%(refname:short)` prints the branch as `heads/feature/x--iss-1` beside this tag.
+      await git(parent, ['tag', 'feature/x--iss-1', 'feature/x--iss-1']);
+
+      const { applyOut } = await mergeThenApply(parent, det(wt), {
+        action: 'merge_remove',
+        deleteBranch: true,
+      });
+      expect(applyOut?.message).toContain('1 merged DAG issue branch');
+      expect(
+        await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x--iss-1']),
+      ).not.toBe(0);
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/tags/feature/x--iss-1'])).toBe(
+        0,
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
 });

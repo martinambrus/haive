@@ -40,6 +40,9 @@ interface WorktreeDetect {
    *  (no git, no origin) or for an older task created before the step existed; the
    *  apply falls back to the parent's current branch in that case. */
   syncedBase: string | null;
+  /** The proposal is this task's own branch from an earlier apply, so a Retry re-enters its
+   *  worktree. Absent on a detect stored before the field existed. */
+  proposalIsOwnBranch?: boolean;
 }
 
 interface WorktreeApply {
@@ -116,7 +119,11 @@ export function nextFreeBranchName(
  *  only weaken the uniqueness proposal, never block setup — the claim guard in apply is
  *  the check that has to be right. */
 async function listLocalBranches(repoPath: string): Promise<Set<string>> {
-  const res = await gitRun(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  const res = await gitRun(repoPath, [
+    'for-each-ref',
+    '--format=%(refname:lstrip=2)',
+    'refs/heads',
+  ]);
   if (res.code !== 0) return new Set();
   return new Set(
     res.stdout
@@ -167,7 +174,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
   async detect(ctx: StepContext): Promise<WorktreeDetect> {
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { title: true, description: true, metadata: true },
+      columns: { title: true, description: true, metadata: true, worktreeBranch: true },
     });
     const title = task?.title ?? '';
     const category = (task?.metadata as { category?: string } | null)?.category ?? null;
@@ -192,6 +199,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         proposedBranch: baseProposal,
         proposalBumpedFrom: null,
         syncedBase,
+        proposalIsOwnBranch: false,
       };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -202,17 +210,24 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     // shares the other task's directory.
     const taken = await listLocalBranches(ctx.repoPath);
     const takenDirs = new Set([...taken].map(worktreeDirName));
-    const proposedBranch = nextFreeBranchName(
-      baseProposal,
-      (name) => taken.has(name) || takenDirs.has(worktreeDirName(name)),
-    );
+    // A Retry nulls this step's output but not the task's recorded branch, and bumping past it
+    // would fork a fresh worktree from the base and leave the task's work in the old one.
+    const own = task?.worktreeBranch ?? null;
+    const isOwn = own !== null && taken.has(own);
+    const proposedBranch = isOwn
+      ? own
+      : nextFreeBranchName(
+          baseProposal,
+          (name) => taken.has(name) || takenDirs.has(worktreeDirName(name)),
+        );
     return {
       hasGit: true,
       currentBranch: branch.code === 0 ? branch.stdout.trim() : null,
       isClean: status.code === 0 && status.stdout.trim().length === 0,
       proposedBranch,
-      proposalBumpedFrom: proposedBranch === baseProposal ? null : baseProposal,
+      proposalBumpedFrom: isOwn || proposedBranch === baseProposal ? null : baseProposal,
       syncedBase,
+      proposalIsOwnBranch: isOwn,
     };
   },
 
@@ -271,7 +286,9 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     }
     return {
       title: 'Worktree setup',
-      description: `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
+      description: detected.proposalIsOwnBranch
+        ? `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. This task already has a worktree on ${detected.proposedBranch}: submitting re-enters it and keeps its work. A different name starts a new worktree from ${base}.`
+        : `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
       fields,
       submitLabel: 'Prepare workspace',
     };
@@ -370,6 +387,13 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       );
     }
 
+    // Durable record for the cancel reaper and a Retry's proposal, written once the worktree exists:
+    // a Retry nulls this step's `output`, and either step below can still fail the apply.
+    await ctx.db
+      .update(schema.tasks)
+      .set({ worktreePath, worktreeBranch: branchName })
+      .where(eq(schema.tasks.id, ctx.taskId));
+
     // `git worktree add` runs as the worker (root in compose), while cli-exec
     // runs as uid 1000. Repair both new and reused worktrees and fail before a
     // model call if the ownership cannot be made writable.
@@ -381,12 +405,6 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     await carryUntrackedForTask(ctx.db, ctx.taskId, ctx.repoPath, worktreePath);
 
     const sandboxWorktree = sandboxWorktreePath(ctx.sandboxWorkdir, branchName);
-    // Durable record for the cancel reaper (removeTaskWorktree). This step's `output`
-    // is not enough: a Retry cascade nulls it while the worktree stays on disk.
-    await ctx.db
-      .update(schema.tasks)
-      .set({ worktreePath, worktreeBranch: branchName })
-      .where(eq(schema.tasks.id, ctx.taskId));
     ctx.logger.info(
       { worktreePath, sandboxWorktreePath: sandboxWorktree, branchName, base },
       'worktree created',
