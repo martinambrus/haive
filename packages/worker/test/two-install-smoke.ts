@@ -22,7 +22,7 @@ import {
   renderProjectState,
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
-import { handleClone } from '../src/repo/clone.js';
+import { handleClone, handleScan } from '../src/repo/clone.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 import {
   TaskCancelledError,
@@ -582,6 +582,67 @@ async function main(): Promise<void> {
       .where(eq(schema.repositories.id, b.repositoryId));
     check('B is ready', repoB?.status === 'ready', repoB?.status);
     check("B checks out A's commit", git(b.repoPath, 'rev-parse', 'HEAD') === headA);
+
+    // ---- B reads the record in its checkout into its render context and sync base (B1.4b) ----
+    const wantRender = wantRecord === null ? null : normalizeProjectState(wantRecord).render;
+    const columnB = await rowsOf<{ render_context: unknown }>(
+      b.db,
+      sql`select render_context from repositories where id = ${b.repositoryId}`,
+    );
+    const renderContextB =
+      'rows' in columnB && columnB.rows.length === 1 ? columnB.rows[0]!.render_context : null;
+    check(
+      "B's render_context holds the portable render fields of A's record, records its RTK choice and holds no per-install field",
+      wantRender !== null &&
+        isDeepStrictEqual(
+          asJson(renderContextB),
+          asJson({ ...wantRender, rtkChoiceRecorded: true }),
+        ),
+      { want: wantRender, got: renderContextB, columnB },
+    );
+    const syncB = await rowsOf<{ base_snapshot: unknown; last_error: string | null }>(
+      b.db,
+      sql`select base_snapshot, last_error from project_state_sync where repository_id = ${b.repositoryId}`,
+    );
+    check(
+      "B's sync starts from the record A committed, with no error",
+      wantRecord !== null &&
+        'rows' in syncB &&
+        syncB.rows.length === 1 &&
+        isDeepStrictEqual(
+          asJson(syncB.rows[0]!.base_snapshot),
+          asJson(normalizeProjectState(wantRecord)),
+        ) &&
+        syncB.rows[0]!.last_error === null,
+      syncB,
+    );
+    // A rescan reads the same record again: nothing differs, so nothing is written, whatever order
+    // the database hands a jsonb value back in.
+    const syncStateB = () =>
+      rowsOf<Record<string, unknown>>(
+        b.db,
+        sql`select r.render_context, s.base_snapshot, s.last_error, s.updated_at from repositories r left join project_state_sync s on s.repository_id = r.id where r.id = ${b.repositoryId}`,
+      );
+    const beforeRescan = await syncStateB();
+    await handleScan(
+      {
+        repositoryId: b.repositoryId,
+        userId: b.userId,
+        source: 'git_https',
+        localPath: b.repoPath,
+      },
+      b.db,
+    );
+    const afterRescan = await syncStateB();
+    check(
+      "a rescan of B's checkout leaves its render_context and its sync row as they were",
+      'rows' in beforeRescan &&
+        'rows' in afterRescan &&
+        beforeRescan.rows.length === 1 &&
+        beforeRescan.rows[0]!.base_snapshot !== null &&
+        isDeepStrictEqual(afterRescan.rows, beforeRescan.rows),
+      { beforeRescan, afterRescan },
+    );
     const filesOnB = await Promise.all(
       ['.claude/workflow-config.json', 'AGENTS.md', '.haive-data/plan.json'].map(async (rel) => ({
         rel,
