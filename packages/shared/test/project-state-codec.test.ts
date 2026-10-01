@@ -389,6 +389,14 @@ describe('portable template ids', () => {
 });
 
 describe('hashes', () => {
+  it("give a file the id git gives it in the repository's object format", () => {
+    // MEASURED against git 2.54: `git hash-object` on a sha256 repository and on a sha1 one.
+    expect(gitBlobId('hello\n', 'sha256')).toBe(
+      '2cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb4',
+    );
+    expect(gitBlobId('hello\n')).toBe('ce013625030ba8dba906f756967f9e9ca394464a');
+  });
+
   it('give a file the id git gives it', () => {
     for (const content of ['hello\n', '', '{\n  "a": "é"\n}\n']) {
       const git = execFileSync('git', ['hash-object', '--stdin'], {
