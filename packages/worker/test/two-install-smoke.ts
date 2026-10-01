@@ -1,7 +1,8 @@
 /**
  * Two installations, each with its own database, sharing one git remote: A onboards a repository
- * through the real 07 and 12 steps and pushes, and B clones it. Throwaway user, database and temp
- * directory, removed after. Track B's plan is docs/plans/two-install-project-sync.md.
+ * through the real deterministic onboarding steps (01, 02, 04, 06_5, 07, 12, their LLM passes
+ * absent) and pushes, and B clones it. Throwaway user, database and temp directory, removed after.
+ * Track B's plan is docs/plans/two-install-project-sync.md.
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -22,6 +23,10 @@ import {
   type StepContext,
   type StepDefinition,
 } from '../src/step-engine/step-definition.js';
+import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import { detectionConfirmationStep } from '../src/step-engine/steps/onboarding/02-detection-confirmation.js';
+import { toolingInfrastructureStep } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
+import { agentDiscoveryStep } from '../src/step-engine/steps/onboarding/06_5-agent-discovery.js';
 import { generateFilesStep } from '../src/step-engine/steps/onboarding/07-generate-files.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
@@ -97,6 +102,7 @@ interface Install {
   name: 'A' | 'B';
   db: Database;
   userId: string;
+  providerId: string;
   repositoryId: string;
   repoPath: string;
 }
@@ -122,9 +128,10 @@ async function cloneInstall(
     createdAt: now,
     updatedAt: now,
   });
-  await db
+  const [provider] = await db
     .insert(schema.cliProviders)
-    .values({ userId, name: 'claude-code', label: `two-install-smoke ${name}` });
+    .values({ userId, name: 'claude-code', label: `two-install-smoke ${name}` })
+    .returning({ id: schema.cliProviders.id });
   await db.insert(schema.repositories).values({
     id: repositoryId,
     userId,
@@ -140,7 +147,14 @@ async function cloneInstall(
     db,
     storage,
   );
-  return { name, db, userId, repositoryId, repoPath: path.join(storage, userId, repositoryId) };
+  return {
+    name,
+    db,
+    userId,
+    providerId: provider!.id,
+    repositoryId,
+    repoPath: path.join(storage, userId, repositoryId),
+  };
 }
 
 const controller = new AbortController();
@@ -153,7 +167,7 @@ function ctxFor(install: Install, taskId: string, taskStepId: string): StepConte
     repoPath: install.repoPath,
     workspacePath: install.repoPath,
     sandboxWorkdir: '/haive/workdir',
-    cliProviderId: null,
+    cliProviderId: install.providerId,
     db: install.db,
     logger: log.child({ install: install.name, taskStepId }),
     signal: controller.signal,
@@ -171,7 +185,7 @@ async function runStep<D, O>(
   taskId: string,
   taskStepId: string,
   overrides: Record<string, unknown> = {},
-): Promise<O> {
+): Promise<{ detected: D; output: O }> {
   const ctx = ctxFor(install, taskId, taskStepId);
   const detected = await step.detect!(ctx);
   await install.db
@@ -190,7 +204,7 @@ async function runStep<D, O>(
     .update(schema.taskSteps)
     .set({ formValues, output, status: 'done' })
     .where(eq(schema.taskSteps.id, taskStepId));
-  return output;
+  return { detected, output };
 }
 
 const livePaths = async (install: Install): Promise<string[]> =>
@@ -244,7 +258,11 @@ async function main(): Promise<void> {
     const seed = path.join(tmp, 'seed');
     git(tmp, 'clone', '-q', `file://${origin}`, seed);
     await writeFile(path.join(seed, 'README.md'), '# two-install smoke\n');
-    git(seed, 'add', 'README.md');
+    await writeFile(
+      path.join(seed, 'composer.json'),
+      `${JSON.stringify({ name: 'acme/two-install', require: { 'drupal/core-recommended': '^10.3' } }, null, 2)}\n`,
+    );
+    git(seed, 'add', 'README.md', 'composer.json');
     git(seed, 'commit', '-q', '-m', 'seed');
     git(seed, 'push', '-q', 'origin', 'HEAD:main');
     const remoteUrl = `file://${origin}`;
@@ -252,24 +270,10 @@ async function main(): Promise<void> {
     // ---- A onboards ----------------------------------------------------------------------
     const a = await cloneInstall('A', dbA, path.join(tmp, 'storage-a'), remoteUrl);
     userA = a.userId;
-    const environment = {
-      schemaVersion: 1,
-      envDetectData: { project: { name: 'two-install-smoke' } },
-      confirmedValues: { framework: 'none' },
-    };
-    const portableTooling = { ragMode: 'none', lspLanguages: [], rtkEnabled: false };
     const globs = ['vendor/**', 'build/**'];
     await a.db
       .update(schema.repositories)
-      .set({
-        onboardingEnvironment: environment,
-        onboardingTooling: {
-          schemaVersion: 1,
-          tooling: { ...portableTooling, ollamaUrl: 'http://only-on-a:11434' },
-        },
-        scopeExcludeGlobs: globs,
-        rtkEnabled: false,
-      })
+      .set({ scopeExcludeGlobs: globs })
       .where(eq(schema.repositories.id, a.repositoryId));
     await applyPlanPatch(
       a.db,
@@ -294,30 +298,64 @@ async function main(): Promise<void> {
       })
       .returning({ id: schema.tasks.id });
     const taskA = onboarding!.id;
-    const [row07, row12] = await a.db
+    const chain = [
+      envDetectStep,
+      detectionConfirmationStep,
+      toolingInfrastructureStep,
+      agentDiscoveryStep,
+      generateFilesStep,
+      postOnboardingStep,
+    ] as const;
+    const rows = await a.db
       .insert(schema.taskSteps)
-      .values([
-        {
+      .values(
+        chain.map((step) => ({
           taskId: taskA,
-          stepId: '07-generate-files',
-          stepIndex: 7,
-          title: 'Generate workflow files',
-          status: 'pending',
-        },
-        {
-          taskId: taskA,
-          stepId: '12-post-onboarding',
-          stepIndex: 16,
-          title: 'Post-onboarding commit',
-          status: 'pending',
-        },
-      ])
-      .returning({ id: schema.taskSteps.id });
+          stepId: step.metadata.id,
+          stepIndex: step.metadata.index,
+          title: step.metadata.title,
+          status: 'pending' as const,
+        })),
+      )
+      .returning({ id: schema.taskSteps.id, stepId: schema.taskSteps.stepId });
+    const rowOf = (step: (typeof chain)[number]) =>
+      rows.find((r) => r.stepId === step.metadata.id)!.id;
 
-    const generated = await runStep(a, generateFilesStep, taskA, row07!.id);
-    check('A generates its files', generated.wroteFiles.length > 0, generated.wroteFiles);
-    const posted = await runStep(a, postOnboardingStep, taskA, row12!.id, { commit: true });
-    check('A commits its onboarding', posted.commitPerformed && posted.commitSha !== null, posted);
+    await runStep(a, envDetectStep, taskA, rowOf(envDetectStep));
+    await runStep(a, detectionConfirmationStep, taskA, rowOf(detectionConfirmationStep), {
+      projectDescription: 'Two-install smoke fixture.',
+    });
+    await runStep(a, toolingInfrastructureStep, taskA, rowOf(toolingInfrastructureStep), {
+      ragMode: 'none',
+      ollamaMode: 'external',
+      ollamaUrl: 'http://only-on-a:11434',
+      rtkEnabled: false,
+    });
+    await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep));
+    const generated = await runStep(a, generateFilesStep, taskA, rowOf(generateFilesStep));
+    const rendered = generated.detected;
+    check(
+      'A renders from the context its earlier steps recorded',
+      rendered.framework === 'drupal' &&
+        rendered.lspLanguages.includes('php-extended') &&
+        rendered.acceptedAgentIds.includes('code-reviewer') &&
+        generated.output.wroteFiles.includes('.claude/agents/code-reviewer.md') &&
+        generated.output.wroteFiles.some((f) => f.startsWith('.claude/plugins/drupal-php-lsp/')),
+      {
+        framework: rendered.framework,
+        lspLanguages: rendered.lspLanguages,
+        acceptedAgentIds: rendered.acceptedAgentIds,
+        wroteFiles: generated.output.wroteFiles,
+      },
+    );
+    const posted = await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep), {
+      commit: true,
+    });
+    check(
+      'A commits its onboarding',
+      posted.output.commitPerformed && posted.output.commitSha !== null,
+      posted.output,
+    );
     await a.db
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date() })
@@ -327,6 +365,27 @@ async function main(): Promise<void> {
     git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
     const headA = git(a.repoPath, 'rev-parse', 'HEAD');
     check("the remote holds A's onboarding commit", git(origin, 'rev-parse', 'main') === headA);
+    const [repoA] = await a.db
+      .select({
+        onboardingEnvironment: schema.repositories.onboardingEnvironment,
+        onboardingTooling: schema.repositories.onboardingTooling,
+        rtkEnabled: schema.repositories.rtkEnabled,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, a.repositoryId));
+    const toolingA = (repoA?.onboardingTooling ?? {}) as {
+      schemaVersion?: number;
+      tooling?: Record<string, unknown>;
+    };
+    const { ollamaUrl: localOllamaUrl, ...portableTooling } = toolingA.tooling ?? {};
+    check(
+      'A records its environment, tooling and RTK switch',
+      repoA?.onboardingEnvironment != null &&
+        localOllamaUrl === 'http://only-on-a:11434' &&
+        isDeepStrictEqual(portableTooling.lspLanguages, ['php-extended']) &&
+        repoA.rtkEnabled === false,
+      repoA,
+    );
 
     // ---- B clones --------------------------------------------------------------------------
     const b = await cloneInstall('B', dbB, path.join(tmp, 'storage-b'), remoteUrl);
@@ -355,12 +414,15 @@ async function main(): Promise<void> {
     );
     check(
       'B restores the environment A recorded',
-      isDeepStrictEqual(repoB?.onboardingEnvironment, environment),
+      isDeepStrictEqual(repoB?.onboardingEnvironment, repoA?.onboardingEnvironment),
       repoB?.onboardingEnvironment,
     );
     check(
       "B restores A's tooling without its machine-local keys",
-      isDeepStrictEqual(repoB?.onboardingTooling, { schemaVersion: 1, tooling: portableTooling }),
+      isDeepStrictEqual(repoB?.onboardingTooling, {
+        schemaVersion: toolingA.schemaVersion,
+        tooling: portableTooling,
+      }),
       repoB?.onboardingTooling,
     );
     check(
@@ -411,13 +473,23 @@ async function main(): Promise<void> {
       })
       .returning({ id: schema.taskSteps.id });
     let entries: { diskPath: string; bucket: string }[] | null = null;
+    let contextB: Record<string, unknown> | null = null;
     let planError: string | null = null;
     try {
-      entries = (await upgradePlanStep.detect!(ctxFor(b, upgrade!.id, planRow!.id))).entries;
+      const planB = await upgradePlanStep.detect!(ctxFor(b, upgrade!.id, planRow!.id));
+      entries = planB.entries;
+      contextB = planB.renderCtxSnapshot;
     } catch (err) {
       planError = err instanceof Error ? err.message : String(err);
     }
-    check("B's upgrade plan resolves its render context", entries !== null, planError);
+    check(
+      "B's upgrade plan resolves its render context",
+      contextB !== null &&
+        contextB.framework === rendered.framework &&
+        isDeepStrictEqual(contextB.acceptedAgentIds, rendered.acceptedAgentIds) &&
+        isDeepStrictEqual(contextB.lspLanguages, rendered.lspLanguages),
+      planError ?? contextB,
+    );
     const notUnchanged = entries
       ?.filter((e) => e.bucket !== 'unchanged')
       .map((e) => `${e.diskPath}: ${e.bucket}`);
@@ -427,7 +499,7 @@ async function main(): Promise<void> {
       notUnchanged ?? planError,
     );
 
-    await runStep(a, postOnboardingStep, taskA, row12!.id);
+    await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
     const dirty = git(a.repoPath, 'status', '--porcelain');
     check("a second 12 run leaves A's checkout clean", dirty === '', dirty.split('\n'));
 

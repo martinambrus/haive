@@ -165,14 +165,21 @@ Phase 1 (the record):
   database is the smoke's own (`<db>_two_install_b`, created from `DATABASE_URL`, migrated by the
   real runner and dropped at the end), so CI needs no extra step; neither install calls
   `initDatabase`, so a singleton `getDb()` on the path would throw rather than cross installs. The
-  smoke pushes A's commit itself, since 13 runs inside the step runner's merge phase. Passing today:
-  the round trip, the mirror (environment, tooling without its machine-local keys, exclusions, the
-  RTK switch) and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan resolves its
-  render context (B1.4) and reads every claimed path `unchanged` (B1.6), and a second 12 run leaves
-  A's checkout clean (B1.7; today `.haive/install.json` differs). A listed gap no check names fails
-  the run too. The scenarios that need machinery not built yet (a sweep, the record, conflicts)
-  arrive with the PRs that build it, each with its own check. MEASURED: 16 checks, 4 gaps; a passing
-  check listed as a gap and a listed gap no check runs each fail the run.
+  smoke pushes A's commit itself, since 13 runs inside the step runner's merge phase. A onboards a
+  small Drupal fixture through every deterministic step 07 reads from (01, 02, 04, 06_5, then 07 and
+  12, with no LLM pass), so the environment, tooling and RTK switch are written by the steps that
+  own them, and the first check is A's render context: framework, LSP languages, accepted agents,
+  and the agent and LSP plugin files they produce. Seeding the repository columns alone left 07
+  rendering an empty context (Codex round 1; MEASURED without those steps: framework null, no LSP,
+  no agents, 7 files), against which every later check would pass empty. Passing today: the round
+  trip, the mirror (environment, tooling without its machine-local keys, exclusions, the RTK switch)
+  and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan resolves a render context
+  naming A's framework, agents and LSP languages (B1.4) and reads every claimed path `unchanged`
+  (B1.6), and a second 12 run leaves A's checkout clean (B1.7; today `.haive/install.json` differs).
+  A listed gap no check names fails the run too. The scenarios that need machinery not built yet (a
+  sweep, the record, conflicts) arrive with the PRs that build it, each with its own check.
+  MEASURED: 17 checks, 4 gaps, 35 paths claimed on A; a passing check listed as a gap and a listed
+  gap no check runs each fail the run.
 - **B1.2 fix(worker): an upgrade adopts a file that already holds the current render.** New
   `adopt` bucket in `classifyEntry` (live row, disk equals the current render); 02 supersedes the
   row with a render-claiming backfill row, outside `writtenPaths`/`createdPaths`/`retiredRowIds`.
