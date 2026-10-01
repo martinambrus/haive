@@ -63,6 +63,10 @@
       "types": "./dist/plan/index.d.ts",
       "import": "./dist/plan/index.js"
     },
+    "./project-state": {
+      "types": "./dist/project-state/index.d.ts",
+      "import": "./dist/project-state/index.js"
+    },
     "./plan-describe": {
       "types": "./dist/plan/describe.d.ts",
       "import": "./dist/plan/describe.js"
