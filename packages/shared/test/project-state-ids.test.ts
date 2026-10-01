@@ -57,10 +57,11 @@ describe('localTemplateId with a source two local bundles hold', () => {
 });
 
 describe('portableBundleSource', () => {
+  const at = (gitUrl: string) =>
+    portableBundleSource({ sourceType: 'git', gitUrl, gitBranch: 'main', name: 'b' });
+  const source = (gitUrl: string) => `git:${encodeURIComponent(gitUrl)}#main`;
+
   it('carries no credential a git URL was typed with', () => {
-    const at = (gitUrl: string) =>
-      portableBundleSource({ sourceType: 'git', gitUrl, gitBranch: 'main', name: 'b' });
-    const source = (gitUrl: string) => `git:${encodeURIComponent(gitUrl)}#main`;
     const bare = source('https://example.com/b.git');
     expect(at('https://user:secrettoken@example.com/b.git')).toBe(bare);
     expect(at('https://secrettoken@example.com/b.git')).toBe(bare);
@@ -75,5 +76,12 @@ describe('portableBundleSource', () => {
       source('ssh://git@example.com/b.git'),
     );
     expect(at('git@example.com:b.git')).toBe(source('git@example.com:b.git'));
+  });
+
+  it('names one remote alike whatever the case of its scheme and host', () => {
+    expect(at('HTTPS://EXAMPLE.COM/b.git')).toBe(source('https://example.com/b.git'));
+    expect(at('ssh://Git@Example.COM:2222/b.git')).toBe(source('ssh://Git@example.com:2222/b.git'));
+    expect(at('Git@Example.COM:b.git')).toBe(source('Git@example.com:b.git'));
+    expect(at('https://example.com/B.git')).toBe(source('https://example.com/B.git'));
   });
 });

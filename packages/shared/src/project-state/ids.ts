@@ -1,3 +1,5 @@
+import { parseScpLikeGitUrl } from '../schemas/git-url.js';
+
 /** A custom bundle as this install holds it: its local id, the source another install can find
  *  it by, and its items' local ids against their paths in that source. */
 export interface LocalBundle {
@@ -13,16 +15,20 @@ export const FOREIGN_TEMPLATE = 'foreign';
 const LOCAL_CUSTOM = /^custom\.([^.]+)\.([^.]+)$/;
 const PORTABLE_CUSTOM = 'custom:';
 
-const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#]*)@)?([^?#]*)/i;
+const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#]*)@)?([^/?#]*)([^?#]*)/i;
 
-/** A URL reduced to where the remote is (scheme, host, port, path), keeping only an ssh user, which
- *  is a login: userinfo, a query and a fragment can each carry a token. scp-style stays as typed. */
-function withoutCredentials(url: string): string {
+/** A remote as every install names it: where it is (scheme, host, port, path), the scheme and host
+ *  in lower case as both are case-insensitive, and no userinfo but an ssh login, nor a query or a
+ *  fragment, since each can carry a token. */
+function portableRemote(url: string): string {
   const match = URL_PARTS.exec(url);
-  if (!match) return url;
-  const [, scheme = '', userinfo, location = ''] = match;
+  if (!match) {
+    const scp = parseScpLikeGitUrl(url);
+    return scp ? `${scp.user ? `${scp.user}@` : ''}${scp.host.toLowerCase()}:${scp.path}` : url;
+  }
+  const [, scheme = '', userinfo, host = '', path = ''] = match;
   const user = /^ssh:/i.test(scheme) ? (userinfo ?? '').split(':')[0]! : '';
-  return `${scheme}${user && `${user}@`}${location}`;
+  return `${scheme.toLowerCase()}${user && `${user}@`}${host.toLowerCase()}${path}`;
 }
 
 /** Where a bundle came from, the same on every install that ingested it. */
@@ -35,7 +41,7 @@ export function portableBundleSource(bundle: {
   // Each part is encoded on its own, since `#` is valid both in an scp-style remote path and in a
   // ref name: joined raw, one url#branch pair reads as another's.
   return bundle.sourceType === 'git'
-    ? `git:${encodeURIComponent(withoutCredentials(bundle.gitUrl ?? ''))}#${encodeURIComponent(bundle.gitBranch ?? '')}`
+    ? `git:${encodeURIComponent(portableRemote(bundle.gitUrl ?? ''))}#${encodeURIComponent(bundle.gitBranch ?? '')}`
     : `zip:${encodeURIComponent(bundle.name)}`;
 }
 
