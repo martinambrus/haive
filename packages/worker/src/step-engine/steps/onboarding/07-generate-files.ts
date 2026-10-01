@@ -14,7 +14,6 @@ import {
   CLI_RULES_END,
   PROJECT_INFO_START,
   PROJECT_INFO_END,
-  getCliProviderMetadata,
   normalizeContent,
   resolveEffectiveRules,
   sha256Hex,
@@ -23,6 +22,7 @@ import {
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
+import { renderTargetsFor } from '../../_render-targets.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
@@ -604,46 +604,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
     }
 
-    // Carry per-CLI rules-file metadata into detect so the rtk-config items
-    // can fan out per CLI without re-querying the adapter registry inside
-    // the manifest expansion. Only enabled providers are included; rules
-    // content presence is ignored here (rtk works whether the user has
-    // populated cli_providers.rules_content or not).
-    const enabledCliProviders = providerRows
-      .filter((p) => p.enabled)
-      .map((p) => {
-        const adapter = cliAdapterRegistry.get(p.name);
-        return {
-          name: p.name,
-          rulesFile: adapter.rulesFile,
-          rulesFileMode: adapter.rulesFileMode,
-        };
-      });
-
-    // Per-CLI agent file targets. Claude-code and Zai share `.claude/agents`
-    // (markdown + YAML frontmatter); Gemini uses its own `.gemini/agents`
-    // (markdown); Codex uses `.codex/agents` (TOML — Codex's own schema);
-    // Amp has no file-based custom agents so is omitted entirely.
-    const enabledProviders = providerRows.filter((p) => p.enabled);
-    const hasConfiguredLsp = lspLanguages.length > 0;
-    const agentTargetsByDir = new Map<string, AgentRenderTarget>();
-    for (const p of enabledProviders) {
-      const meta = getCliProviderMetadata(p.name);
-      if (!meta.projectAgentsDir || !meta.agentFileFormat) continue;
-      const existingTarget = agentTargetsByDir.get(meta.projectAgentsDir);
-      if (!existingTarget) {
-        agentTargetsByDir.set(meta.projectAgentsDir, {
-          dir: meta.projectAgentsDir,
-          format: meta.agentFileFormat,
-          supportsLsp: meta.supportsLsp && hasConfiguredLsp,
-        });
-      } else if (meta.supportsLsp && hasConfiguredLsp) {
-        // Shared targets (currently Claude Code + Z.AI) can use LSP whenever
-        // at least one provider wired to that directory can expose it.
-        existingTarget.supportsLsp = true;
-      }
-    }
-    const agentTargets = Array.from(agentTargetsByDir.values());
+    const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, lspLanguages);
     const agentExt = (format: 'markdown' | 'toml'): string => (format === 'toml' ? 'toml' : 'md');
 
     const candidates = [
