@@ -12,7 +12,8 @@ export function hasSemanticExpansionResolution(ops: unknown[], selfNodeId: strin
     if (candidate.op !== 'upsert') return false;
     const marksSelfTaskable =
       (candidate.nodeRef === selfNodeId || candidate.nodeRef === 'self') &&
-      candidate.taskable === true;
+      candidate.taskable === true &&
+      candidate.expectedVersion !== undefined;
     const createsDirectChild =
       typeof candidate.nodeRef === 'string' &&
       candidate.nodeRef !== 'self' &&
@@ -26,7 +27,8 @@ export function hasSemanticExpansionResolution(ops: unknown[], selfNodeId: strin
  * Make legacy/underspecified atomic replies explicit. Historically [] meant
  * "cannot decompose" and a link/body-only reply had the same practical shape,
  * but both left a non-taskable leaf that looked unfinished forever. Preserve
- * the agent's semantic stop by recording taskable=true on its focus node.
+ * the agent's semantic stop by recording taskable=true on its focus node. An
+ * unversioned self update is dropped at apply, so it cannot carry the stop.
  */
 export async function ensureSemanticExpansionResolution(
   db: Database,
@@ -41,7 +43,8 @@ export async function ensureSemanticExpansionResolution(
     const candidate = op as Record<string, unknown>;
     return (
       candidate.op === 'upsert' &&
-      (candidate.nodeRef === selfNodeId || candidate.nodeRef === 'self')
+      (candidate.nodeRef === selfNodeId || candidate.nodeRef === 'self') &&
+      candidate.expectedVersion !== undefined
     );
   });
   if (existingUpdate >= 0) {

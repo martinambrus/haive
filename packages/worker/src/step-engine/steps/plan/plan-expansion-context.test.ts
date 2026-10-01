@@ -5,7 +5,11 @@ import {
   PLAN_EXPANSION_CONTEXT_MAX_CHARS,
 } from './_plan-expansion-context.js';
 import { buildExpandPrompt, buildRootPrompt, type PlanBuildDetect } from './01-plan-build.js';
-import { hasSemanticExpansionResolution } from './_plan-semantic-stop.js';
+import type { Database } from '@haive/database';
+import {
+  ensureSemanticExpansionResolution,
+  hasSemanticExpansionResolution,
+} from './_plan-semantic-stop.js';
 
 function node(id: string, title: string, parentId: string | null, path: string): PlanNodeSkeleton {
   return {
@@ -215,5 +219,26 @@ describe('semantic expansion stopping', () => {
         self,
       ),
     ).toBe(true);
+  });
+
+  it("records the stop itself when the agent's own self update carries no version", async () => {
+    // Applied as an agent patch, an unversioned change to an existing node is dropped, so
+    // it cannot carry the stop: the leaf would read as unfinished for good.
+    const self = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect(
+      hasSemanticExpansionResolution([{ op: 'upsert', nodeRef: self, taskable: true }], self),
+    ).toBe(false);
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [{ version: 5 }] }) }) }),
+    } as unknown as Database;
+    const unversioned = { op: 'upsert', nodeRef: 'self', body: 'revised' };
+    expect(await ensureSemanticExpansionResolution(db, 'repo', self, [unversioned])).toEqual([
+      unversioned,
+      { op: 'upsert', nodeRef: self, expectedVersion: 5, taskable: true },
+    ]);
+    const versioned = { op: 'upsert', nodeRef: 'self', expectedVersion: 4, body: 'revised' };
+    expect(await ensureSemanticExpansionResolution(db, 'repo', self, [versioned])).toEqual([
+      { ...versioned, taskable: true },
+    ]);
   });
 });

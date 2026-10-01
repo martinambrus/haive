@@ -47,7 +47,8 @@ export interface ApplyPlanPatchOptions {
   /** The task whose step produced this patch, if any. */
   sourceTaskId?: string | null;
   /**
-   * What to do with an op naming a node that does not exist.
+   * What to do with an op naming a node that does not exist, or, under
+   * `requireExpectedVersion`, changing or deleting one without its version.
    *
    * `fail` (the default) rejects the whole patch, which is right for a PERSON
    * editing the plan: a bad id is a mistake they should be told about, not
@@ -96,6 +97,18 @@ export interface ApplyPlanPatchOptions {
    * flipping a status has not answered that question.
    */
   marksReviewed?: boolean;
+  /**
+   * Refuse a change to an existing node's fields, or its deletion, that carries no
+   * `expectedVersion`, the way `onUnresolvableRef` refuses a stale ref.
+   *
+   * Set by `applyAgentPatch`. Without it an agent that left the version out skipped
+   * the check outright, so its edit silently replaced whatever a person had changed on
+   * the canvas since the agent read the plan. An op that only moves `ordinal` or adds
+   * code links is exempt: the sequencing step writes a whole build order at once, a
+   * node-level version would reject it over an unrelated edit to one child, and neither
+   * field overwrites what a person typed.
+   */
+  requireExpectedVersion?: boolean;
 }
 
 export interface ApplyPlanPatchResult {
@@ -668,6 +681,20 @@ async function applyOps(
   }
 
   async function updateNode(op: UpsertOp, row: NodeRow, opIndex: number): Promise<void> {
+    const writesFields =
+      op.title !== undefined ||
+      op.body !== undefined ||
+      op.kind !== undefined ||
+      op.status !== undefined ||
+      op.taskable !== undefined ||
+      op.parentRef !== undefined;
+    if (opts.requireExpectedVersion && writesFields && op.expectedVersion === undefined) {
+      throw new UnresolvableRefError(
+        'invalid',
+        `plan node ${row.id} was changed without its expectedVersion`,
+        opIndex,
+      );
+    }
     assertVersion(row, op.expectedVersion, opIndex);
 
     const set: Record<string, unknown> = {
@@ -791,6 +818,13 @@ async function applyOps(
 
       case 'delete': {
         const row = await resolveExisting(op.nodeRef, opIndex);
+        if (opts.requireExpectedVersion && op.expectedVersion === undefined) {
+          throw new UnresolvableRefError(
+            'invalid',
+            `plan node ${row.id} was deleted without its expectedVersion`,
+            opIndex,
+          );
+        }
         assertVersion(row, op.expectedVersion, opIndex);
         // The subtree goes with it via the parent_id cascade. Collect the ids
         // first so a later op in the same patch cannot reference a descendant
