@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { FOREIGN_TEMPLATE, localTemplateId, type LocalBundle } from '../src/project-state/index.js';
+import {
+  FOREIGN_TEMPLATE,
+  localTemplateId,
+  portableBundleSource,
+  type LocalBundle,
+} from '../src/project-state/index.js';
 
 describe('localTemplateId with a source two local bundles hold', () => {
   it('reads a zip source as foreign when two bundles hold the same item path', () => {
@@ -48,5 +53,21 @@ describe('localTemplateId with a source two local bundles hold', () => {
       items: new Map([['item-1', sourcePath]]),
     };
     expect(localTemplateId(portableId, [bundle])).toBe('custom.bundle-a.item-1');
+  });
+});
+
+describe('portableBundleSource', () => {
+  it('carries no credential a git URL was typed with', () => {
+    const at = (gitUrl: string) =>
+      portableBundleSource({ sourceType: 'git', gitUrl, gitBranch: 'main', name: 'b' });
+    const source = (gitUrl: string) => `git:${encodeURIComponent(gitUrl)}#main`;
+    const bare = source('https://example.com/b.git');
+    expect(at('https://user:secrettoken@example.com/b.git')).toBe(bare);
+    expect(at('https://secrettoken@example.com/b.git')).toBe(bare);
+    expect(at('https://user:secret@token@example.com/b.git')).toBe(bare);
+    expect(at('ssh://git:secrettoken@example.com/b.git')).toBe(
+      source('ssh://git@example.com/b.git'),
+    );
+    expect(at('git@example.com:b.git')).toBe(source('git@example.com:b.git'));
   });
 });

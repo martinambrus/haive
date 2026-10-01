@@ -13,6 +13,17 @@ export const FOREIGN_TEMPLATE = 'foreign';
 const LOCAL_CUSTOM = /^custom\.([^.]+)\.([^.]+)$/;
 const PORTABLE_CUSTOM = 'custom:';
 
+const USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)@/i;
+
+/** A remote with no credential left in it. An ssh URL keeps its user, a login, and loses its
+ *  password; any other URL loses its userinfo, since an http(s) username can itself be a token. */
+function withoutCredentials(url: string): string {
+  const match = USERINFO.exec(url);
+  if (!match) return url;
+  const user = /^ssh:/i.test(match[1]!) ? match[2]!.split(':')[0]! : '';
+  return `${match[1]}${user && `${user}@`}${url.slice(match[0].length)}`;
+}
+
 /** Where a bundle came from, the same on every install that ingested it. */
 export function portableBundleSource(bundle: {
   sourceType: 'git' | 'zip';
@@ -23,7 +34,7 @@ export function portableBundleSource(bundle: {
   // Each part is encoded on its own, since `#` is valid both in an scp-style remote path and in a
   // ref name: joined raw, one url#branch pair reads as another's.
   return bundle.sourceType === 'git'
-    ? `git:${encodeURIComponent(bundle.gitUrl ?? '')}#${encodeURIComponent(bundle.gitBranch ?? '')}`
+    ? `git:${encodeURIComponent(withoutCredentials(bundle.gitUrl ?? ''))}#${encodeURIComponent(bundle.gitBranch ?? '')}`
     : `zip:${encodeURIComponent(bundle.name)}`;
 }
 
