@@ -268,10 +268,10 @@ Phase 1 (the record):
   a record file without moving `project_state_sync` leaves A's own next sync with no base — and with
   no base the incoming side wins, so the stale file on disk overwrites the newer DB value. Traced as
   a sequence: A onboards (12 writes R1), upgrades (02 writes R2), refreshes, and `render_context`
-  goes back to R1. So each writer sets `base_snapshot` to what it wrote, `synced_hash` to the hash
-  of those files and `synced_head` to the commit holding them (NULL when 12's commit box is off),
-  and the sync merges against `base_snapshot`. Reading a base out of git at `synced_head` waits for
-  B3.1, which is when a checkout can move without a sync. A unit the merge leaves in conflict keeps
+  goes back to R1. So each writer sets `base_snapshot` to what it wrote, and the sync merges
+  against it. A watermark (the hash of the files and the commit holding them) has no reader until
+  B3.1, when a checkout can move without a sync, so B3.1 adds it with that reader rather than B1.4
+  writing columns nothing reads. A unit the merge leaves in conflict keeps
   its old base, so the next sync finds the same conflict again rather than settling it for the local
   side, until B1.5 asks the person. 02 must also list both files in `writtenPaths`, because 03's
   base stage list does not name it and a workflow task checks out HEAD.
@@ -314,6 +314,21 @@ Phase 1 (the record):
   Migration 0171, additive, the column declared last, the foreign key named
   `project_state_sync_repository_id_repositories_id_fk` (an inline `REFERENCES` takes Postgres'
   `_fkey` name and turns `schema-parity` red). Undo: drop the table and the column.
+
+  **As built, B1.4a (the writers; nothing reads the column yet).** `renderContextColumnSchema` and
+  `portableRender` live in `@haive/shared/project-state`; `renderTargetsFor`
+  (`step-engine/_render-targets.ts`) is 07's derivation moved unchanged, pinned through 07's
+  `detect`. `writeProjectStateRecord` (worker `project-state/write.ts`) parses the column value
+  first, so a context the schema refuses writes nothing at all: only a snapshot from before
+  2026-04-27 (when 12 began storing one) or a rollback's `{}` can be one, and it gets a warning and
+  no record, since the record must not invent a context. It then writes the files and, in one
+  transaction, takes an advisory lock on a per-repository key distinct from the plan mirror's,
+  sets the column and upserts the sync row. Files before the lock is the design above: two
+  overlapping writers (an onboarding beside an upgrade) can leave one's files with the other's
+  column, which the next sync converges. 12 writes whenever 07's context exists, 02 adds both
+  files to `writtenPaths`, and 04 writes only when it restored a snapshot. The repositories LIST
+  leaves the column out: MEASURED on 13 step-07 outputs, a context is 11-42 KB against ~3.3 KB for
+  the rest of a list row, and the list is polled every 5 s.
 
   Controls, each failing on main: B's render context equals A's on all 8 keys with an LLM custom
   agent in A's fixture (the smoke's current 3-field check passes a lossy derivation); a record
