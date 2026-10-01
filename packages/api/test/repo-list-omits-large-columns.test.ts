@@ -35,8 +35,10 @@ function noRows(): unknown {
   return query;
 }
 
-/** One repository holding both large columns. The fake db keeps the row whole, as the real one
- *  returns it; the list's own queries are the ones it has no builder for. */
+/** One repository holding both large columns. The route's query runs through the fake's own
+ *  `findMany`, which returns the columns that query names, as Postgres sends them; `fetched` keeps
+ *  those rows, since the route drops from the response what it does not ship. The list's other
+ *  queries are the ones the fake has no builder for. */
 function setup() {
   const fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
@@ -54,16 +56,26 @@ function setup() {
       rtkChoiceRecorded: true,
     },
   });
+  const fetched: Record<string, unknown>[] = [];
   h.db = {
-    query: { repositories: { findMany: async () => fake.rows(schema.repositories) } },
+    ...fake.db,
+    query: {
+      repositories: {
+        findMany: async (opts?: Record<string, unknown>) => {
+          const rows = await fake.db.query.repositories.findMany(opts);
+          fetched.push(...rows);
+          return rows;
+        },
+      },
+    },
     select: noRows,
   };
-  return fake;
+  return { fake, fetched };
 }
 
 describe('listing repositories', () => {
   it('leaves out the render context and the file tree, which the list polls every 5 seconds', async () => {
-    const fake = setup();
+    const { fake } = setup();
     const stored = fake.rows(schema.repositories)[0]!;
     expect(stored.renderContext).not.toBeNull();
     expect(stored.fileTree).not.toBeNull();
@@ -81,6 +93,16 @@ describe('listing repositories', () => {
     expect(repo).not.toHaveProperty('fileTree');
     expect(text).not.toContain(MARKER);
     expect(text).not.toContain('src/a.ts');
+  });
+
+  it('does not fetch the render context at all, only the tree the list reads its paths from', async () => {
+    const { fetched } = setup();
+
+    expect((await app.request('/')).status).toBe(200);
+
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]).not.toHaveProperty('renderContext');
+    expect(fetched[0]).toHaveProperty('fileTree');
   });
 
   it('still ships the top-level paths the list renders, read from the tree it leaves out', async () => {

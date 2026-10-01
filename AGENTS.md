@@ -2302,7 +2302,11 @@ refuses when a marker is missing or a run is live.
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
 gives: the hand list it replaced was `['.claude', KB_DIR, LEARNINGS_DIR]` from when `.claude`
 was the only CLI directory, so "start over" left the previous run's agents and skills on disk
-for every other CLI and the next run wrote on top of them.
+for every other CLI and the next run wrote on top of them. It takes back the project-state record
+12 writes too: its files under `.haive-data/state/` go by name like `.haive/install.json`, their
+directories only once empty, and the same transaction that clears `onboarded_at` nulls
+`repositories.render_context` and deletes the `project_state_sync` row, so no later sync can
+import the context onboarding was reset from.
 
 **The catalog is the CANDIDATE set, never the removal set.** 07 writes agents to the ENABLED
 providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and

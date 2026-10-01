@@ -420,7 +420,8 @@ export default function NewTaskPage() {
         '  • move anything in those directories that Haive did not write into the <dir>-legacy sibling\n' +
         '    first, so nothing of yours is deleted\n' +
         '  • delete from .claude/ only what Haive has a record of writing, and leave the rest\n' +
-        '  • delete the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
+        '  • delete the knowledge base and learnings, .ripgreprc, .haive/install.json and the\n' +
+        '    project-state record in .haive-data/state/\n' +
         '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
         'Kept and listed afterwards: your own files in .claude/, mcp_settings.json, any *-legacy directory,\n' +
         'and a settings.json that does not match what Haive wrote. Nested directories inside subfolders are\n' +

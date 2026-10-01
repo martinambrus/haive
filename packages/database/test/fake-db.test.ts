@@ -1,7 +1,9 @@
 import {
   and,
   asc,
+  desc,
   eq,
+  getTableColumns,
   gt,
   inArray,
   isNotNull,
@@ -161,6 +163,45 @@ describe('the fake database', () => {
       .orderBy(asc(t.createdAt))
       .limit(1);
     expect(rows).toEqual([{ name: 'b.md' }]);
+  });
+
+  it('reads a columns option as Drizzle does: any true selects only those, all false the rest', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('a.md', { description: 'about a' }));
+    const read = (columns: Record<string, boolean | undefined>) =>
+      fake.db.query.taskAttachments.findMany({ columns });
+    const every = Object.keys(getTableColumns(t));
+
+    expect(await read({ filename: true })).toEqual([{ filename: 'a.md' }]);
+    expect(await read({ filename: true, description: false })).toEqual([{ filename: 'a.md' }]);
+    expect(await read({ filename: true, description: undefined })).toEqual([{ filename: 'a.md' }]);
+
+    const [rest] = await read({ storedPath: false, description: false });
+    expect(Object.keys(rest!)).toEqual(
+      every.filter((k) => !['storedPath', 'description'].includes(k)),
+    );
+    expect(rest).toMatchObject({ filename: 'a.md', taskId: TASK });
+  });
+
+  it('orders by an array of orders, the first the primary', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('small.md', { sizeBytes: 1 }));
+    fake.insert(t, row('b.md', { sizeBytes: 5 }));
+    fake.insert(t, row('a.md', { sizeBytes: 5 }));
+    const names = async (orderBy: unknown[]) =>
+      (await fake.db.query.taskAttachments.findMany({ orderBy })).map((r) => r.filename);
+
+    expect(await names([desc(t.sizeBytes)])).toEqual(['b.md', 'a.md', 'small.md']);
+    expect(await names([asc(t.sizeBytes), desc(t.createdAt)])).toEqual([
+      'small.md',
+      'a.md',
+      'b.md',
+    ]);
+    expect(await names([desc(t.createdAt), asc(t.sizeBytes)])).toEqual([
+      'a.md',
+      'b.md',
+      'small.md',
+    ]);
   });
 
   it('takes back exactly what a failed transaction wrote', async () => {

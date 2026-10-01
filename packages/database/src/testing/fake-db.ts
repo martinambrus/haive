@@ -46,6 +46,16 @@ function columnKeys(table: PgTable): Map<unknown, string> {
   return new Map(Object.entries(getTableColumns(table)).map(([key, col]) => [col, key]));
 }
 
+/** What a `columns` option selects, as Drizzle reads it: any `true` selects only the columns named
+ *  true, otherwise every column but the ones named false. An `undefined` value and a name that is
+ *  no column of the table count for nothing. */
+function selectedColumns(table: PgTable, columns: Record<string, boolean | undefined>): string[] {
+  const every = Object.keys(getTableColumns(table));
+  const named = Object.entries(columns).filter(([k, v]) => v !== undefined && every.includes(k));
+  if (named.some(([, v]) => v === true)) return named.filter(([, v]) => v === true).map(([k]) => k);
+  return named.length === 0 ? [] : every.filter((k) => !named.some(([n]) => n === k));
+}
+
 interface Lazy<T> extends PromiseLike<T> {
   catch<B>(bad: (e: unknown) => B | PromiseLike<B>): Promise<T | B>;
   returning(fields?: Record<string, unknown>): Promise<T>;
@@ -255,11 +265,17 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     }
     const pred = opts.where === undefined ? () => true : compileWhere(table, opts.where);
     let rows = store.get(table)!.filter(pred);
-    if (opts.orderBy !== undefined) rows = sortBy(table, rows, opts.orderBy);
+    // Each order in turn, last first: the sort is stable, so the first order ends up primary.
+    for (const order of [opts.orderBy].flat().reverse()) {
+      if (order !== undefined) rows = sortBy(table, rows, order);
+    }
     if (typeof opts.limit === 'number') rows = rows.slice(0, opts.limit);
-    const columns = opts.columns as Record<string, boolean> | undefined;
+    const kept =
+      opts.columns === undefined
+        ? null
+        : selectedColumns(table, opts.columns as Record<string, boolean | undefined>);
     return rows.map((row) =>
-      columns ? Object.fromEntries(Object.keys(columns).map((k) => [k, row[k]])) : { ...row },
+      kept ? Object.fromEntries(kept.map((k) => [k, row[k]])) : { ...row },
     );
   }
 
