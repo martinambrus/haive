@@ -37,10 +37,25 @@ function canonicalHost(host: string): string {
   return host.toLowerCase();
 }
 
-/** A remote as every install names it: where it is (scheme, host, port, path), its host as the URL
- *  standard names it, no default port, and no userinfo but an ssh login, nor a query or a fragment,
- *  since each can carry a token. The path is the server's to compare, so it stays as typed. */
+/** An http(s) URL as the URL standard serializes it (host, port and path resolved, dot segments
+ *  included), without userinfo, query or fragment; null when the standard refuses it. */
+function standardHttpUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+/** A remote as every install names it, with no userinfo but an ssh login, nor a query or a fragment,
+ *  since each can carry a token. An http(s) URL is the standard's serialization; elsewhere the host
+ *  is the standard's and the path stays as typed, since the remote's own filesystem resolves it. */
 function portableRemote(url: string): string {
+  if (/^https?:\/\//i.test(url)) {
+    const standard = standardHttpUrl(url);
+    if (standard) return standard;
+  }
   const match = URL_PARTS.exec(url);
   if (!match) {
     const scp = parseScpLikeGitUrl(url);

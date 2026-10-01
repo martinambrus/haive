@@ -105,6 +105,16 @@ describe('portableBundleSource', () => {
     );
     expect(at('git@XN--XAMPLE-9UA.COM:b.git')).toBe(source('git@xn--xample-9ua.com:b.git'));
     expect(at('git@0x7f.1:b.git')).toBe(source('git@127.0.0.1:b.git'));
-    expect(at('https://ho\\st/b.git')).toBe(source('https://ho\\st/b.git'));
+    expect(at('https://ho\\st/b.git')).toBe(source('https://ho/st/b.git'));
+    expect(at('ssh://ho\\st/b.git')).toBe(source('ssh://ho\\st/b.git'));
+  });
+
+  it('resolves an http(s) path as the URL standard does, and keeps an ssh path as typed', () => {
+    const bare = source('https://example.com/b.git');
+    expect(at('https://example.com/a/../b.git')).toBe(bare);
+    expect(at('https://example.com/./b.git')).toBe(bare);
+    expect(at('https://example.com/b.git/')).toBe(source('https://example.com/b.git/'));
+    expect(at('https://example.com')).toBe(source('https://example.com/'));
+    expect(at('ssh://git@example.com/a/../b.git')).toBe(source('ssh://git@example.com/a/../b.git'));
   });
 });
