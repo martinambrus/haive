@@ -830,6 +830,28 @@ export const taskStepCliTouched = pgTable(
   ],
 );
 
+// --- Per-task step CLI choices -------------------------------------------
+// The CLI (and effort) a person picked for one (step, role) WITHIN one task. Every
+// resolver reads it before the user's saved preference, which a pick rewrites only when
+// the person asks for it to apply to later tasks too. A NULL provider is a choice as
+// well: this task cleared the slot, so the saved preference stays out of it.
+export const taskStepCliChoices = pgTable(
+  'task_step_cli_choices',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    stepId: varchar('step_id', { length: 128 }).notNull(),
+    role: varchar('role', { length: 32 }).notNull().default('default'),
+    cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'cascade',
+    }),
+    effortLevel: text('effort_level'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('task_step_cli_choices_pk').on(table.taskId, table.stepId, table.role)],
+);
+
 // --- CLI Invocations -----------------------------------------------------
 
 export const cliInvocations = pgTable(
