@@ -15,6 +15,7 @@ import {
   portableTemplateId,
   projectStateHash,
   renderProjectState,
+  sameValue,
   type ProjectStateClaim,
   type ProjectStateRecord,
 } from '../src/project-state/index.js';
@@ -293,6 +294,18 @@ describe('renderProjectState refuses what JSON cannot carry', () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.record.settings.x).toEqual({ a: 1 });
+  });
+
+  it('writes a negative zero as 0, which the record holds equal to it', () => {
+    const r = record();
+    r.settings.x = { a: -0 };
+    const files = renderProjectState(r);
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(Object.is((parsed.record.settings.x as { a: number }).a, 0)).toBe(true);
+    expect(sameValue(parsed.record.settings.x, r.settings.x)).toBe(true);
+    expect(renderProjectState(parsed.record)).toEqual(files);
   });
 
   it('refuses a record whose settings carries an own __proto__ key', () => {
