@@ -6,16 +6,21 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, type FormSchema } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import {
+  emptyProjectState,
+  normalizeProjectState,
+  renderProjectState,
+} from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { handleClone } from '../src/repo/clone.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
@@ -233,6 +238,52 @@ const planOf = (install: Install) =>
     .where(eq(schema.planNodes.repositoryId, install.repositoryId))
     .orderBy(asc(schema.planNodes.id));
 
+const RECORD_FORMAT = '.haive-data/state/format.json';
+const RECORD_RENDER = '.haive-data/state/project/render.json';
+
+/** The record that holds a render context: its five portable fields, and no other. */
+const recordOf = (context: Record<string, unknown>) => ({
+  ...emptyProjectState(),
+  render: {
+    projectInfo: context.projectInfo,
+    framework: context.framework,
+    acceptedAgentIds: context.acceptedAgentIds,
+    customAgentSpecs: context.customAgentSpecs,
+    lspLanguages: context.lspLanguages,
+  } as never,
+});
+
+const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
+
+/** The rows of a query, or why it failed: a column or table that is missing must fail the one check
+ *  that reads it, not end the run. */
+async function rowsOf<T>(db: Database, query: SQL): Promise<{ rows: T[] } | { error: string }> {
+  try {
+    return { rows: (await db.execute(query)) as unknown as T[] };
+  } catch (err) {
+    const cause = err instanceof Error ? err.cause : undefined;
+    const reason = cause instanceof Error ? cause : err;
+    return { error: reason instanceof Error ? reason.message : String(reason) };
+  }
+}
+
+interface ColumnRow {
+  column_name: string;
+  data_type: string;
+  is_nullable: string;
+  column_default: string | null;
+}
+const columnsOf = (db: Database, table: string, only?: string) =>
+  rowsOf<ColumnRow>(
+    db,
+    sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and table_name = ${table} and (${only ?? null}::text is null or column_name = ${only ?? null})`,
+  );
+/** `<type> <YES|NO>` for one column, or null where the query failed or the column is not there. */
+function shapeOf(cols: Awaited<ReturnType<typeof columnsOf>>, name: string): string | null {
+  const column = 'rows' in cols ? cols.rows.find((c) => c.column_name === name) : undefined;
+  return column === undefined ? null : `${column.data_type} ${column.is_nullable}`;
+}
+
 async function main(): Promise<void> {
   // Its own plain name per run, so it can only ever drop what it created.
   const nameB = `two_install_smoke_${randomBytes(4).toString('hex')}`;
@@ -361,6 +412,122 @@ async function main(): Promise<void> {
       posted.output.commitPerformed && posted.output.commitSha !== null,
       posted.output,
     );
+
+    // ---- the project record and render context 12 writes (B1.4a) ----------------------------
+    // The context 12 renders from is the one it recorded on its artifact rows.
+    const [snapshotRow] = await a.db
+      .select({ snapshot: schema.onboardingArtifacts.formValuesSnapshot })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, a.repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      )
+      .limit(1);
+    const contextA = (snapshotRow?.snapshot ?? null) as Record<string, unknown> | null;
+    const wantRecord = contextA === null ? null : recordOf(contextA);
+    const wantFiles = wantRecord === null ? null : renderProjectState(wantRecord);
+    const recordOnDisk = (rel: string) =>
+      readFile(path.join(a.repoPath, rel), 'utf8').then(
+        (text) => text,
+        () => null,
+      );
+    const recordKinds = await Promise.all(
+      [RECORD_FORMAT, RECORD_RENDER].map(async (rel) => ({
+        rel,
+        kind: (await lstatNoFollow(a.repoPath, rel))?.kind ?? null,
+      })),
+    );
+    check(
+      "A writes the project record's two files into its checkout",
+      recordKinds.every((f) => f.kind === 'file'),
+      recordKinds,
+    );
+    const inCommit = git(
+      a.repoPath,
+      'diff-tree',
+      '--no-commit-id',
+      '--name-only',
+      '-r',
+      posted.output.commitSha!,
+    ).split('\n');
+    check(
+      'and the commit 12 made holds both',
+      [RECORD_FORMAT, RECORD_RENDER].every((rel) => inCommit.includes(rel)),
+      inCommit,
+    );
+    const onDisk = {
+      format: await recordOnDisk(RECORD_FORMAT),
+      render: await recordOnDisk(RECORD_RENDER),
+    };
+    check(
+      "the record's render unit holds the portable fields of A's context, and only those",
+      wantFiles !== null &&
+        onDisk.format === wantFiles.get('format.json') &&
+        onDisk.render === wantFiles.get('project/render.json'),
+      { context: contextA, onDisk },
+    );
+    const columnA = await rowsOf<{ render_context: unknown }>(
+      a.db,
+      sql`select render_context from repositories where id = ${a.repositoryId}`,
+    );
+    check(
+      "A's render_context is its context with its RTK choice recorded",
+      contextA !== null &&
+        'rows' in columnA &&
+        columnA.rows.length === 1 &&
+        isDeepStrictEqual(asJson(columnA.rows[0]!.render_context), {
+          ...contextA,
+          rtkChoiceRecorded: true,
+        }),
+      columnA,
+    );
+    const syncA = await rowsOf<{ base_snapshot: unknown; last_error: string | null }>(
+      a.db,
+      sql`select base_snapshot, last_error from project_state_sync where repository_id = ${a.repositoryId}`,
+    );
+    check(
+      "A's sync starts from the record it wrote, with no error",
+      wantRecord !== null &&
+        'rows' in syncA &&
+        syncA.rows.length === 1 &&
+        isDeepStrictEqual(
+          asJson(syncA.rows[0]!.base_snapshot),
+          asJson(normalizeProjectState(wantRecord)),
+        ) &&
+        syncA.rows[0]!.last_error === null,
+      syncA,
+    );
+    const renderColumn = await columnsOf(a.db, 'repositories', 'render_context');
+    const syncColumns = await columnsOf(a.db, 'project_state_sync');
+    const constraints = await rowsOf<{ conname: string; contype: string; def: string }>(
+      a.db,
+      sql`select conname, contype, pg_get_constraintdef(oid) as def from pg_constraint where conrelid = to_regclass('project_state_sync')`,
+    );
+    const keys = 'rows' in constraints ? constraints.rows : [];
+    check(
+      'migration 0171 gives repositories a nullable render_context and creates project_state_sync as specified',
+      shapeOf(renderColumn, 'render_context') === 'jsonb YES' &&
+        'rows' in syncColumns &&
+        syncColumns.rows.length === 4 &&
+        shapeOf(syncColumns, 'repository_id') === 'uuid NO' &&
+        shapeOf(syncColumns, 'base_snapshot') === 'jsonb NO' &&
+        shapeOf(syncColumns, 'last_error') === 'text YES' &&
+        shapeOf(syncColumns, 'updated_at') === 'timestamp without time zone NO' &&
+        /now\(\)/.test(
+          String(syncColumns.rows.find((c) => c.column_name === 'updated_at')?.column_default),
+        ) &&
+        keys.some((k) => k.contype === 'p' && k.def === 'PRIMARY KEY (repository_id)') &&
+        keys.some(
+          (k) =>
+            k.contype === 'f' &&
+            k.conname === 'project_state_sync_repository_id_repositories_id_fk' &&
+            k.def === 'FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE',
+        ),
+      { renderColumn, syncColumns, constraints },
+    );
+
     await a.db
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date() })

@@ -253,9 +253,9 @@ repoRoutes.get('/', async (c) => {
   const repositories = await Promise.all(
     rows.map(async (repo) => {
       const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
-      // Strip the full fileTree (large, and this list is polled every 5s) and ship
-      // only the top-level paths the list UI actually renders.
-      const { fileTree, ...rest } = repo;
+      // Strip the full fileTree and the render context (both large, and this list is polled
+      // every 5s) and ship only the top-level paths the list UI actually renders.
+      const { fileTree, renderContext: _renderContext, ...rest } = repo;
       // Onboarded flag drives the "not onboarded yet" badge + Onboard CTA on the
       // repos page. Only meaningful for ready repos (cloning/error have no tree);
       // the check is a few parallel stats per repo.

@@ -5,3 +5,4 @@ export * from './codec.js';
 export * from './merge.js';
 export * from './ids.js';
 export * from './hash.js';
+export * from './render-context.js';

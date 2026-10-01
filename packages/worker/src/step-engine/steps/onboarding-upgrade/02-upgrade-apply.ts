@@ -30,6 +30,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
+import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
   cliRulesRegionRecord,
@@ -1421,6 +1422,21 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       plan.repositoryId,
       manifest.setHash,
     );
+
+    try {
+      writtenPaths.push(
+        ...(await writeProjectStateRecord(ctx.db, {
+          repositoryId: plan.repositoryId,
+          repoPath: ctx.repoPath,
+          context: renderCtx,
+          rtkChoiceRecorded: plan.rtkFollowsLive === true,
+        })),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warnings.push(`project state record write failed: ${message}`);
+      ctx.logger.warn({ err }, 'project state record write failed');
+    }
 
     ctx.logger.info(
       {

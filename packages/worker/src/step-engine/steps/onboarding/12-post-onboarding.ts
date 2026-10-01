@@ -30,6 +30,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
+import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
@@ -194,16 +195,19 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
  *  always (not gated by the commit checkbox) so versioning is in place even
  *  when the user defers committing. Idempotent on re-runs: upstream step
  *  machine guarantees 12-post-onboarding.apply runs once per task. */
-async function recordOnboardingArtifacts(
-  ctx: StepContext,
-): Promise<{ rowsWritten: number; installManifestWritten: boolean; warnings: string[] }> {
+async function recordOnboardingArtifacts(ctx: StepContext): Promise<{
+  rowsWritten: number;
+  installManifestWritten: boolean;
+  warnings: string[];
+  renderContext: TemplateRenderContext | null;
+}> {
   const warnings: string[] = [];
 
   const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
   if (!genPrev || !genPrev.detect) {
     warnings.push('onboarding-artifacts: 07-generate-files detect output missing, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — step 07 detect output missing');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: null };
   }
 
   const taskRows = await ctx.db
@@ -215,7 +219,7 @@ async function recordOnboardingArtifacts(
   if (!repositoryId) {
     warnings.push('onboarding-artifacts: task has no repository_id, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — task has no repository_id');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: null };
   }
 
   const detect = genPrev.detect as GenerateFilesDetect;
@@ -292,7 +296,7 @@ async function recordOnboardingArtifacts(
 
   if (expanded.length === 0) {
     ctx.logger.info('onboarding-artifacts: manifest produced no renderings for this context');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: renderCtx };
   }
 
   // Snapshot the render context so rollback/upgrade can reconstruct what was
@@ -366,7 +370,7 @@ async function recordOnboardingArtifacts(
     'onboarding-artifacts recorded',
   );
 
-  return { rowsWritten: rows.length, installManifestWritten, warnings };
+  return { rowsWritten: rows.length, installManifestWritten, warnings, renderContext: renderCtx };
 }
 
 /** Write the committed `.haive-data/` onboarding mirror from the repo's
@@ -626,10 +630,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // opts into an immediate commit here.
     let artifactRowsWritten = 0;
     let installManifestWritten = false;
+    let renderContext: TemplateRenderContext | null = null;
     try {
       const res = await recordOnboardingArtifacts(ctx);
       artifactRowsWritten = res.rowsWritten;
       installManifestWritten = res.installManifestWritten;
+      renderContext = res.renderContext;
       warnings.push(...res.warnings);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -667,6 +673,20 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(`haive-data mirror write failed: ${message}`);
         ctx.logger.warn({ err }, 'haive-data mirror write failed');
+      }
+      if (renderContext) {
+        try {
+          await writeProjectStateRecord(ctx.db, {
+            repositoryId: mirrorRepositoryId,
+            repoPath: ctx.repoPath,
+            context: renderContext,
+            rtkChoiceRecorded: true,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          warnings.push(`project state record write failed: ${message}`);
+          ctx.logger.warn({ err }, 'project state record write failed');
+        }
       }
     }
 
