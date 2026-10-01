@@ -181,6 +181,15 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   judges and ensembles lost at a fixed budget both point at an ablation, which P8 is the vehicle for.
   The paper's judges SELECTED among candidates while Haive's reviewers DETECT defects, so the result is
   a reason to measure, not a verdict.
+- **F14. The patch contract promises node versions the renders do not show (pre-existing, found while
+  answering a review of P4).** `PLAN_PATCH_CONTRACT` (`_plan-prompt.ts`), shared by all six plan
+  writers, says each node's `expectedVersion` is "shown beside each node below", but no plan render
+  carries one: `renderPlanMarkdown` and `buildPlanExpansionContext` emit none, and only
+  01-plan-build's target node and plan chat's focus node are given theirs. `assertVersion`
+  (`apply-patch.ts`) returns early when `expectedVersion` is absent, so an agent's edit to any other
+  existing node runs without the optimistic-concurrency check and can overwrite a person's concurrent
+  edit. 03-plan-sequence is unaffected: `keepOrderingOps` keeps only `nodeRef` and `ordinal`. → P4, P5,
+  D9.
 
 ## Phases
 
@@ -189,12 +198,19 @@ phase names its undo.
 
 ### P0. Stamp the build on every run (small; first)
 
-Each CLI run records the Haive build that produced it: the release tag on a published image, the
-commit plus a dirty flag in a dev checkout, and `unknown` when neither can be read, never a guess. A
-nullable column on `cli_invocations`, written with the row. Why first: P1 to P7 are each judged in the
-field by comparing runs before and after, and F10 leaves that to timestamps. Verification: a run
-started after the change carries the stamp, and a dirty dev checkout says so. Rollback: stop writing
-it; the column is additive and nullable, and a later change drops it.
+Each CLI run records the Haive build that produced it: the release tag on a published image; in a dev
+checkout, the commit when the tree is clean and a fingerprint of the tree's content when it is not;
+and `unknown` when none can be read, never a guess. A dirty flag alone would not do: the dev stack
+runs a bind-mounted checkout where prompts are edited without committing, so every edit on one HEAD
+would share one stamp. The fingerprint is the content's own hash (the tree the working copy would
+commit), so two identical states share it and any edit changes it, and it is taken when the worker
+starts, which the dev watcher does after every source change. A run whose build cannot be identified
+is marked as such and left out of before-and-after comparisons rather than grouped. A nullable column
+on `cli_invocations`, written with the row. Why first: P1 to P7 are each judged in the field by
+comparing runs before and after, and F10 leaves that to timestamps. Verification: two runs on one
+HEAD, before and after an uncommitted prompt edit, carry different stamps, and reverting the edit
+restores the first. Rollback: stop writing it; the column is additive and nullable, and a later change
+drops it.
 
 ### P1. Bound the sequence agents' plan context (recommended first change)
 
@@ -269,20 +285,24 @@ share and is cut by whole units, with the cut stated:
 - the transcript, newest turn first, as many whole turns as fit, with the number of earlier turns
   dropped.
 
-A patch to another node still has its id wherever the index reaches it. The prompt names
-`.haive-data/plan.md` in the workspace for any other body, and says the mirror can trail the canvas by
-one sweep. Verification: fixtures at each extreme (the 800-node plan, a focus node whose children
-carry long bodies, a transcript of many long turns) each assemble under the bound; a turn that patches
-a node outside the neighbourhood by id still lands; the ollama run in F4 no longer fails on size. D2
+Every node shown, in the neighbourhood and in the index alike, carries its current version (F14). A
+plan chat turn exists to patch nodes beyond the one in focus, and without a version such a patch skips
+the concurrency check. So a patch to another node has its id and version wherever the index reaches
+it. The prompt names `.haive-data/plan.md` in the workspace for any other body, and says the mirror
+can trail the canvas by one sweep. Verification: fixtures at each extreme (the 800-node plan, a focus
+node whose children carry long bodies, a transcript of many long turns) each assemble under the bound;
+a turn that patches a node outside the neighbourhood sends that node's version and lands, and one
+whose node changed meanwhile is refused and reported; the ollama run in F4 no longer fails on size. D2
 settles the transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
 
 `11f-plan-reconcile` and `01f-external-plan-sync` move to the bounded index, keeping depth 4 where it
-fits, which needs a depth parameter on `renderBoundedPlanIndexParts`. A source-scan test then pins the
-invariant for every later caller: no step prompt calls `renderPlanMarkdown` directly; prompts get the
-plan through the bounded helpers. Verification: that test fails on `main` and passes after; the 11f
-prompt for the 800-node plan stays under the bound. Rollback: revert.
+fits, which needs a depth parameter on `renderBoundedPlanIndexParts`, and the index they get shows
+each node's version, as P4's does (F14). A source-scan test then pins the invariant for every later
+caller: no step prompt calls `renderPlanMarkdown` directly; prompts get the plan through the bounded
+helpers. Verification: that test fails on `main` and passes after; the 11f prompt for the 800-node
+plan stays under the bound and names each node's version. Rollback: revert.
 
 ### P6. Make test edits during a fix visible, and ask for the behaviour fix
 
@@ -351,6 +371,10 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D8.** F6: learned guidance drops items past its cap without saying so. State the omission as the
   ledger does, or leave it, since it is a five-item nudge list by design. Not from the paper; found
   while checking F6.
+- **D9.** F14 beyond P4 and P5: 01-plan-build's and 02-plan-coverage's neighbourhood nodes carry no
+  version either. Show versions wherever a writer may patch, deciding whether the committed
+  `.haive-data/plan.md` mirror (which shares `renderPlanMarkdown`) shows them too, or refuse an agent
+  update that omits `expectedVersion`. Not from the paper; pre-existing.
 
 ## Decided
 
