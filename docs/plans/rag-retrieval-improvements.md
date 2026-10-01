@@ -26,10 +26,10 @@ How retrieval works today (resolve by symbol; line numbers drift):
 - **Embedding.** `qwen3-embedding:4b` (2,560 dims) through the in-stack Ollama. Documents and
   queries are embedded as raw text (`embedQueryOrNull`).
 - **Search.** `ragHybridSearch` fuses three rankers with RRF, k=60: dense (HNSW over `halfvec`, pool
-  50, which is 40 on the index path: F14), `english` full text through `plainto_tsquery` (which ANDs
-  every term; pool 50), and the identifier ranker (IDF-weighted, at most 3 candidates). The
-  knowledge reserve holds up to 2 slots for KB rows, `mergeHits` gives the global KB up to half the
-  page, and the SQL `LIMIT` is `top_k`.
+  50, which is 40 candidates on the index path: F14), `english` full text through
+  `plainto_tsquery` (which ANDs every term; pool 50), and the identifier ranker (IDF-weighted, at
+  most 3 candidates). The knowledge reserve holds up to 2 slots for KB rows, `mergeHits` gives the
+  global KB up to half the page, and the SQL `LIMIT` is `top_k`.
 - **Telemetry and eval.** `rag_query_log` records counts and score maxima per call, not which
   chunks came back. `packages/worker/scripts/rag-eval.ts` probes one query and reports where an
   expected path ranks. No golden set, recall@k or MRR exists.
@@ -219,9 +219,9 @@ collections from a million vectors up.
 
 **Verdict.** Haive does not use FAISS, but its dense half answers the same questions through
 pgvector, and at ~10⁴ vectors per repository it sits at the bottom of the guide's ladder, where
-compression and clustering do not apply. Three carries: the HNSW path returns only `efSearch`
-rows, so the configured pool of 50 is 40 (F14, measured); deleted vectors keep their index space
-(F15, measured); and an exact search is the recall baseline P0 should hold the HNSW path to.
+compression and clustering do not apply. Three carries: the HNSW path ends after `efSearch`
+candidates, so the configured pool of 50 is 40 (F14, measured); deleted vectors keep their index
+space (F15, measured); and an exact search is the recall baseline P0 should hold the HNSW path to.
 
 ## Findings
 
@@ -310,14 +310,16 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   identifiers, and `kotolňa` in 5 prose labels; `revízi` is in 235 chunks and `revizi` in 28. So
   each spelling misses part of the corpus lexically. The `unaccent` extension ships with the stack's
   Postgres (1.1) but is not installed; external and DDEV stores are unchecked. → P2(e), P3.
-- **F14. On the HNSW path the dense pool is 40, not 50.** `candidatePool` asks each ranker for 50,
-  but an HNSW index scan returns at most `hnsw.ef_search` rows, 40 by default. Measured on a
-  1,820-row store with the index path forced, the dense query `ragHybridSearch` runs (`LIMIT 50`)
-  returned 40 rows; `hnsw.iterative_scan` (`relaxed_order` or `strict_order`) or `ef_search` 100
-  returned 50. Left to itself, the planner chose an exact scan and sort at that size, iterative scan
-  on or off. `search.ts` records why the default stays: on the modest table it was measured on,
-  `ef_search` 100 flipped the planner to a 430 ms sequential scan against a 5 ms index scan, and
-  iterative scan would need a `SET LOCAL` inside a transaction. → P0, P3.
+- **F14. On the HNSW path the dense pool is 40 candidates, not 50.** `candidatePool` asks each
+  ranker for 50, but an HNSW index scan ends after `hnsw.ef_search` candidates, 40 by default, and
+  identical vectors share one. Measured on a 1,820-row store holding 1,634 distinct vectors, with
+  the index path forced, the dense query `ragHybridSearch` runs (`LIMIT 50`) returned 40 rows for
+  one query vector and 41 to 50 for eight others; `hnsw.iterative_scan` (`relaxed_order` or
+  `strict_order`) or `ef_search` 100 returned 50. Left to itself, the planner chose an exact scan
+  and sort at that size, iterative scan on or off. `search.ts` records why the default stays: on
+  the modest table it was measured on, `ef_search` 100 flipped the planner to a 430 ms sequential
+  scan against a 5 ms index scan, and iterative scan would need a `SET LOCAL` inside a
+  transaction. → P0, P3.
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.
@@ -334,7 +336,7 @@ invented users and tasks and a description of the repository rather than its tex
 single gold chunk, so they are judged in pairs instead of scored by recall. A script reports
 recall@k and MRR for k in {5, 8, 12, 20} against a store built from the current chunker, and its
 numbers are recorded here as the baseline. It also reports the dense pool's recall against an exact
-search on the same queries (S7's flat baseline), since the HNSW path returns 40 nearest by
+search on the same queries (S7's flat baseline), since the HNSW path keeps 40 candidates by
 approximation (F14). A nullable `hits` column on `rag_query_log` (source path, section, rank, each
 ranker's rank) makes real calls replayable from then on. Rollback: the column is additive and
 nullable; stop writing it, and drop it in a later change.
@@ -441,5 +443,6 @@ None yet.
   tsvector (the `english` half plus the identifier lexemes), and apply `plainto_tsquery`.
 - **F14.** In one transaction, `SET LOCAL enable_seqscan = off` and `enable_bitmapscan = off`, then
   count the rows the dense query returns for `LIMIT 50`, once as is and once with
-  `hnsw.iterative_scan` set.
+  `hnsw.iterative_scan` set. Bind the query vector as a parameter or a scalar subquery: one taken
+  from a join cannot use the index.
 - **F15.** Compare `pg_relation_size('idx_rag_vector_hnsw')` with the table's live row count.
