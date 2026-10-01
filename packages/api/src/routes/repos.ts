@@ -32,6 +32,7 @@ import {
   type ReadResult,
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
+import { writeBodyToHeld } from '../lib/held-write.js';
 import {
   ensureUploadsDir,
   truncateUploadFile,
@@ -443,25 +444,22 @@ repoRoutes.post('/upload', async (c) => {
     fh = await openFileNoFollow(storageRoot, archiveRel, 'create-exclusive', { fileMode: 0o644 });
     created = await fileIdentity(fh);
     const body = archiveField.stream() as unknown as ReadableStream<Uint8Array>;
-    const nodeStream = Readable.fromWeb(body as never);
-    let total = 0;
-    nodeStream.on('data', (buf: Buffer) => {
-      total += buf.length;
-    });
-    await pipeline(nodeStream, fh.createWriteStream());
-    // Counted off the stream rather than stat'ed back off the path. The multipart `size` checked
+    // Counted as it arrives rather than stat'ed back off the path. The multipart `size` checked
     // above is the client's claim, which is what this second check has always been guarding.
-    if (total > maxUploadBytes()) {
-      throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
-    }
+    await writeBodyToHeld(
+      body,
+      fh,
+      maxUploadBytes(),
+      () => new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`),
+    );
+    await fh.close();
   } catch (err) {
     if (fh) {
-      // The stream closes the handle at `finish` and `pipeline` destroys it on failure; a close
-      // after either is a no-op, and this also covers a stream that never started.
-      await fh.close().catch(() => {});
+      // Removed while the descriptor is still open, so its inode number cannot have been reused.
       if (created !== null) {
         await removeFileIfIdentityNoFollow(storageRoot, archiveRel, created).catch(() => {});
       }
+      await fh.close().catch(() => {});
     }
     await db.delete(schema.repositories).where(eq(schema.repositories.id, repo.id));
     if (err instanceof HttpError) throw err;

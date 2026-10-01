@@ -1,7 +1,20 @@
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+  type FileHandle,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
 
@@ -215,5 +228,65 @@ describe('an upload that fails after it claimed its name', () => {
     expect(res.status, `the upload fails (${String(res.error)})`).toBe(500);
     expect(fake.rows(schema.taskAttachments), 'no attachment was recorded').toEqual([]);
     expect(await readdir(up()), 'the file with no row is removed').toEqual([]);
+  });
+
+  // A removal judged on the inode is pinned only while the descriptor holding it is open: closed,
+  // its inode number can be reused by a file put at the name.
+  type Stat = (this: FileHandle, opts?: { bigint?: boolean }) => Promise<unknown>;
+  let proto: { stat: unknown };
+  let realStat: Stat;
+
+  beforeAll(async () => {
+    const probe = await open(fileURLToPath(import.meta.url), 'r');
+    proto = Object.getPrototypeOf(probe) as { stat: unknown };
+    realStat = proto.stat as Stat;
+    await probe.close();
+  });
+
+  afterEach(() => {
+    proto.stat = realStat;
+  });
+
+  /** Whether `name` still stood the first time the claimed descriptor closed. The handle is caught
+   *  where the claim reads its identity (the one `stat({ bigint: true })`), and `close` is wrapped
+   *  on it, since a FileHandle carries `close` as its own property. */
+  const watchFirstClose = (name: string): { caught: boolean; stood: boolean | null } => {
+    const seen = { caught: false, stood: null as boolean | null };
+    proto.stat = async function (this: FileHandle, opts?: { bigint?: boolean }) {
+      if (opts?.bigint === true && !seen.caught) {
+        seen.caught = true;
+        const close = this.close;
+        this.close = async () => {
+          seen.stood ??= existsSync(up(name));
+          return close.call(this);
+        };
+      }
+      return realStat.call(this, opts);
+    };
+    return seen;
+  };
+
+  it('releases the name while its descriptor is still open when the body fails mid-stream', async () => {
+    const seen = watchFirstClose('a.bin');
+
+    const res = await upload(
+      'a.bin',
+      stoppingBody(async () => {}),
+    );
+
+    expect(res.status, `the upload fails (${String(res.error)})`).toBe(500);
+    expect(seen.caught, 'the claim read the identity of the file it created').toBe(true);
+    expect(seen.stood, 'the name was gone before its descriptor first closed').toBe(false);
+  });
+
+  it('takes back the stored file while its descriptor is still open when the row insert fails', async () => {
+    failTheInsert();
+    const seen = watchFirstClose('a.md');
+
+    const res = await upload('a.md', 'mine');
+
+    expect(res.status, `the upload fails (${String(res.error)})`).toBe(500);
+    expect(seen.caught, 'the claim read the identity of the file it created').toBe(true);
+    expect(seen.stood, 'the file was gone before its descriptor first closed').toBe(false);
   });
 });

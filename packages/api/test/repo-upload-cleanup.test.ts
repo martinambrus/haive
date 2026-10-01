@@ -10,6 +10,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,18 +59,23 @@ const ARCHIVE = Buffer.from(`PK\n${'a line of an archive\n'.repeat(12)}`, 'utf8'
 
 type Write = (this: FileHandle, ...args: unknown[]) => Promise<unknown>;
 
-let proto: { write: unknown };
+type Stat = (this: FileHandle, opts?: { bigint?: boolean }) => Promise<unknown>;
+
+let proto: { write: unknown; stat: unknown };
 let realWrite: Write;
+let realStat: Stat;
 
 beforeAll(async () => {
   const probe = await open(fileURLToPath(import.meta.url), 'r');
-  proto = Object.getPrototypeOf(probe) as { write: unknown };
+  proto = Object.getPrototypeOf(probe) as { write: unknown; stat: unknown };
   realWrite = proto.write as Write;
+  realStat = proto.stat as Stat;
   await probe.close();
 });
 
 afterEach(() => {
   proto.write = realWrite;
+  proto.stat = realStat;
 });
 
 /** The first write of `content` lands its first half, runs `beforeThrow` and then fails; every
@@ -167,6 +173,37 @@ describe('POST /upload when the archive stream fails', () => {
     const stands = path.join(uploads, names[0]!);
     expect(await readFile(stands), 'it holds the other file’s bytes').toEqual(landed);
     expect((await lstat(stands)).ino, 'it is the other file’s inode').toBe(before.ino);
+  });
+
+  /** What the staging dir held the first time the descriptor whose identity the route read was
+   *  closed: a removal judged on the inode is only pinned while that descriptor is open. The
+   *  handle is caught where its identity is read (the one `stat({ bigint: true })`), and `close`
+   *  is wrapped on it, since a FileHandle carries `close` as its own property. */
+  const watchFirstClose = (): { caught: boolean; held: string[] | null } => {
+    const seen = { caught: false, held: null as string[] | null };
+    proto.stat = async function (this: FileHandle, opts?: { bigint?: boolean }) {
+      if (opts?.bigint === true && !seen.caught) {
+        seen.caught = true;
+        const close = this.close;
+        this.close = async () => {
+          seen.held ??= readdirSync(uploads).sort();
+          return close.call(this);
+        };
+      }
+      return realStat.call(this, opts);
+    };
+    return seen;
+  };
+
+  it('removes the partial archive while the descriptor it wrote through is still open', async () => {
+    failTheWriteOf(ARCHIVE, enospc());
+    const seen = watchFirstClose();
+
+    const res = await upload(ARCHIVE);
+
+    expect(res.status, `the upload fails (${String(res.error)})`).toBe(500);
+    expect(seen.caught, 'the route read the identity of the file it created').toBe(true);
+    expect(seen.held, 'the archive was gone before its descriptor first closed').toEqual([]);
   });
 
   it('D3 pin: removes the partial archive when the upload fails', async () => {

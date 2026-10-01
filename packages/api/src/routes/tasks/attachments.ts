@@ -40,6 +40,7 @@ import {
 } from '@haive/shared/attachments-fs';
 import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
+import { writeBodyToHeld } from '../../lib/held-write.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 
@@ -297,31 +298,19 @@ async function streamToFileWithCap(
   fh: FileHandle,
   maxBytes: number,
 ): Promise<number> {
-  const nodeStream = Readable.fromWeb(body as never);
-  // Streamed through the descriptor the caller already created and verified, so the bytes cannot
-  // land anywhere but that inode. The caller owns cleanup on failure, since it owns the name.
-  const writeStream = fh.createWriteStream();
-  let total = 0;
+  // Written through the descriptor the caller already created and verified, so the bytes cannot
+  // land anywhere but that inode, and left open: the caller owns cleanup on failure.
   try {
-    await new Promise<void>((resolve, reject) => {
-      nodeStream.on('data', (buf: Buffer) => {
-        total += buf.length;
-        if (total > maxBytes) {
-          nodeStream.destroy();
-          writeStream.destroy();
-          reject(new HttpError(413, `attachment exceeds ${maxBytes} bytes limit`));
-        }
-      });
-      nodeStream.on('error', reject);
-      writeStream.on('error', reject);
-      writeStream.on('finish', resolve);
-      nodeStream.pipe(writeStream);
-    });
+    return await writeBodyToHeld(
+      body,
+      fh,
+      maxBytes,
+      () => new HttpError(413, `attachment exceeds ${maxBytes} bytes limit`),
+    );
   } catch (err) {
     if (err instanceof HttpError) throw err;
     throw new HttpError(500, `attachment write failed: ${(err as Error).message}`);
   }
-  return total;
 }
 
 /** Make a freshly-created dir traversable + owned by the sandbox user. Best-effort
@@ -449,20 +438,25 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     await fh.close().catch(() => {});
     throw err;
   }
-  await fh.close().catch(() => {});
 
-  const row = await finalizeAttachment({
-    anchor,
-    uploadsRel,
-    destPath,
-    filename: safeName,
-    identity,
-    taskId,
-    userId,
-    sizeBytes: size,
-    contentType: headerContentType(c.req.header('content-type')),
-    description: query.description ?? null,
-  });
+  // Open until the row is recorded, so a take-back after a failed insert still pins the inode.
+  let row: Awaited<ReturnType<typeof finalizeAttachment>>;
+  try {
+    row = await finalizeAttachment({
+      anchor,
+      uploadsRel,
+      destPath,
+      filename: safeName,
+      identity,
+      taskId,
+      userId,
+      sizeBytes: size,
+      contentType: headerContentType(c.req.header('content-type')),
+      description: query.description ?? null,
+    });
+  } finally {
+    await fh.close().catch(() => {});
+  }
   return c.json({ attachment: toClient(row) }, 201);
 });
 
