@@ -67,12 +67,21 @@ describe('canonicalJson', () => {
 describe('claimFileName', () => {
   it('flattens the path, drops leading dots and ends with its own hash', () => {
     expect(claimFileName('.claude/agents/code-reviewer.md')).toMatch(
-      /^artifacts\/claude__agents__code-reviewer\.md~[0-9a-f]{8}\.json$/,
+      /^artifacts\/claude__agents__code-reviewer\.md~[0-9a-f]{32}\.json$/,
     );
   });
 
   it('keeps two paths that slug alike apart', () => {
     expect(claimFileName('.a/b')).not.toBe(claimFileName('a/b'));
+  });
+
+  it('keeps two paths apart whose slugs agree and whose hashes share eight hex digits', () => {
+    const a = '.a/.a/a/.a/.a/a/a/.a/a/.a/a/a/.a/.a/.a/a/.a/a/a/a';
+    const b = 'a/a/a/.a/a/a/.a/.a/.a/.a/.a/.a/.a/a/.a/.a/.a/a/a/a';
+    const parsed = parseProjectState(
+      renderProjectState({ ...emptyProjectState(), claims: [claim(a), claim(b)] }),
+    );
+    expect(parsed.ok && parsed.record.claims.map((c) => c.path)).toEqual([a, b]);
   });
 
   it('stays inside a file name the filesystem accepts', () => {

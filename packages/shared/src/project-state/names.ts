@@ -5,8 +5,9 @@ const SLUG_MAX_BYTES = 180;
 
 const NAME = /^[a-z0-9][a-z0-9-]*$/;
 
+// 128 bits, so that even keys chosen to collide do not share a file.
 const shortHash = (key: string): string =>
-  createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 8);
+  createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 32);
 
 function boundedSlug(slug: string): string {
   if (Buffer.byteLength(slug) <= SLUG_MAX_BYTES) return slug;
