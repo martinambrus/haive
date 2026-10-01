@@ -65,15 +65,16 @@
     "overrides": {
       "drizzle-orm": "0.45.2",
       "protobufjs": "^7.6.5",
-      "@grpc/grpc-js": "^1.14.4",
-      "dompurify": "^3.4.12",
+      "@grpc/grpc-js": "^1.14.5",
+      "dompurify": "^3.4.16",
       "uuid": "^11.1.1",
       "ws": "^8.21.1",
       "postcss": "^8.5.18",
       "esbuild": "^0.28.1",
       "sharp": "^0.35.4",
-      "brace-expansion": "^5.0.9",
-      "nanoid": "^3.3.18"
+      "brace-expansion": "^5.0.12",
+      "nanoid": "^3.3.18",
+      "markdown-it": "^14.3.1"
     },
     "patchedDependencies": {
       "postgres@3.4.9": "patches/postgres@3.4.9.patch"
