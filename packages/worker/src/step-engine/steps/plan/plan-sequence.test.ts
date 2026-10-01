@@ -1,7 +1,12 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
-import { SEQUENCE_AGENTS_PER_PASS, SEQUENCE_MAX_RUN_CHILDREN } from '@haive/shared/plan';
+import {
+  SEQUENCE_AGENTS_PER_PASS,
+  SEQUENCE_MAX_RUN_CHILDREN,
+  loadPlanEdges,
+  loadPlanSkeletons,
+} from '@haive/shared/plan';
 import { PLAN_PATCH_MAX_OPS } from '@haive/shared';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import {
@@ -10,6 +15,7 @@ import {
   collectDisagreements,
   computeTargets,
   foldSequenceResults,
+  planSequenceStep,
   sequenceForm,
   sequencePassComplete,
   tooWideNote,
@@ -23,6 +29,11 @@ import { SAFE_TITLE_CHARS } from '../_untrusted-repo.js';
 vi.mock('./_plan-prompt.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
   return { ...actual, applyAgentPatch: vi.fn() };
+});
+
+vi.mock('@haive/shared/plan', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/plan')>();
+  return { ...actual, loadPlanSkeletons: vi.fn(), loadPlanEdges: vi.fn() };
 });
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
@@ -519,5 +530,44 @@ describe('a sibling run too wide for one reply', () => {
     expect(note).toContain(`(${SEQUENCE_MAX_RUN_CHILDREN + 5} children), and 2 more.`);
     expect(note).not.toContain('Group 5');
     expect(note).not.toContain('\n');
+  });
+});
+
+describe('the dependencies-only pass', () => {
+  it('names a group too wide for one reply, as the agent pass does', async () => {
+    const children = Array.from({ length: SEQUENCE_MAX_RUN_CHILDREN + 1 }, (_, i) => ({
+      ...node(`w-${i}`, PARENT),
+      ordinal: i,
+    }));
+    vi.mocked(loadPlanSkeletons).mockResolvedValue([node(PARENT, null, 'Catalogue'), ...children]);
+    vi.mocked(loadPlanEdges).mockResolvedValue([]);
+    const noAskedRows = async () => [];
+    const db = {
+      select: () => ({
+        from: () => ({ innerJoin: () => ({ innerJoin: () => ({ where: noAskedRows }) }) }),
+      }),
+    };
+    const out = await planSequenceStep.apply(
+      { db, taskId: 't', taskStepId: 's', logger: { warn: () => {}, info: () => {} } } as never,
+      {
+        detected: {
+          repositoryId: '33333333-3333-4333-8333-333333333333',
+          nodeCount: children.length + 1,
+          decidedRuns: 0,
+          targets: [],
+          tooWide: [],
+          contradictoryRuns: 0,
+          cycles: 0,
+          ancestorDeps: 0,
+          agentsUsed: 0,
+          wave: 0,
+          disagreements: [],
+        },
+        formValues: { decision: 'deterministic_only' },
+      } as never,
+    );
+    expect(out.decision).toBe('deterministic_only');
+    expect(out.tooWide).toBe(1);
+    expect(out.degradedNote).toContain(`Catalogue (${SEQUENCE_MAX_RUN_CHILDREN + 1} children)`);
   });
 });

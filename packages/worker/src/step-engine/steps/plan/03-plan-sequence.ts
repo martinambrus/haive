@@ -849,7 +849,7 @@ export function createPlanSequenceStep(opts: {
        *  would hand every agent the edge-derived order as its starting point,
        *  and an agent anchored on the claim it is being used to check is not a
        *  second opinion. */
-      const settle = async (): Promise<SequenceTarget[]> => {
+      const settle = async (): Promise<void> => {
         const [nodes, edges] = await Promise.all([
           loadPlanSkeletons(ctx.db, d.repositoryId!),
           loadPlanEdges(ctx.db, d.repositoryId!),
@@ -863,13 +863,13 @@ export function createPlanSequenceStep(opts: {
         const { targets, tooWide } = computeTargets(nodes, edges, asked);
         result.remaining = targets.length;
         result.tooWide = tooWide.length;
-        if (result.reordered === 0) return tooWide;
+        if (tooWide.length > 0) result.degradedNote = tooWideNote(tooWide);
+        if (result.reordered === 0) return;
         try {
           await writePlanMirror(ctx.db, d.repositoryId!, ctx.repoPath);
         } catch (err) {
           ctx.logger.warn({ err }, 'plan mirror write failed after sequencing');
         }
-        return tooWide;
       };
 
       // The review answer. Checked FIRST and returning unconditionally, so the
@@ -900,9 +900,8 @@ export function createPlanSequenceStep(opts: {
           );
           result.edgesRemoved = removed.unlinked;
         }
-        const tooWide = await settle();
+        await settle();
         result.decision = 'sequenced';
-        if (tooWide.length > 0) result.degradedNote = tooWideNote(tooWide);
         return result;
       }
 
@@ -972,8 +971,7 @@ export function createPlanSequenceStep(opts: {
         );
       }
 
-      const tooWide = await settle();
-      if (tooWide.length > 0) result.degradedNote = tooWideNote(tooWide);
+      await settle();
       return result;
     },
   };
