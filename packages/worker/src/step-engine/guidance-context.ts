@@ -37,9 +37,11 @@ const SCAN_LIMIT = 100;
  *  block dropped, not the size of the corpus. Keyed on the fetched rows and NOT on the eligible
  *  ones, because the filtering happens after the limit — 100 rows of which 6 survive facet and
  *  repository matching is still a saturated scan, and claiming an exact count there would be this
- *  function's own defect in miniature. */
-export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string {
-  const count = atLeast ? `at least ${omitted}` : `${omitted}`;
+ *  function's own defect in miniature. A saturated scan speaks even when it dropped nothing it
+ *  read, since the rows past the limit were never read; null means there is nothing to say. */
+export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string | null {
+  if (omitted === 0 && !atLeast) return null;
+  const count = omitted === 0 ? 'possibly' : atLeast ? `at least ${omitted}` : `${omitted}`;
   const plural = omitted === 1 ? '' : 's';
   return `(${count} more approved lesson${plural} not shown — the repository's own and the most-observed are kept)`;
 }
@@ -168,10 +170,12 @@ export async function augmentPromptWithLearnedGuidance(
     // the way the task ledger and `loadPriorFixContext` state theirs, and LOGGED as well, so a
     // corpus that keeps overflowing is visible without reading a prompt.
     const omitted = eligible.length - lines.length;
-    if (omitted > 0) {
+    const scanSaturated = rows.length >= SCAN_LIMIT;
+    const notice = guidanceOmissionNotice(omitted, scanSaturated);
+    if (notice) {
       log.info(
-        { taskId, stepId, omitted, shown: lines.length },
-        'learned guidance over budget; items not shown',
+        { taskId, stepId, omitted, shown: lines.length, scanSaturated },
+        'learned guidance incomplete; items not shown',
       );
     }
 
@@ -182,7 +186,7 @@ export async function augmentPromptWithLearnedGuidance(
       '\n' +
       'Lessons a human approved after earlier runs of this step went wrong. Follow them.\n' +
       lines.join('\n') +
-      (omitted > 0 ? `\n${guidanceOmissionNotice(omitted, rows.length >= SCAN_LIMIT)}` : '')
+      (notice ? `\n${notice}` : '')
     );
   } catch (err) {
     log.warn({ err, taskId, stepId }, 'learned guidance lookup failed; prompt left unchanged');

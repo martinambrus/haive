@@ -186,6 +186,27 @@ describe('augmentPromptWithLearnedGuidance', () => {
     expect(out.match(/^- mine \d$/gm)).toHaveLength(5);
     expect(out).toContain('(at least 1 more approved lesson not shown');
   });
+
+  it('still speaks when a saturated scan showed everything it read', async () => {
+    // Five survivors fit the block whole, so nothing READ was dropped — but the rows past the
+    // limit were never read, and silence there would present the block as the complete list.
+    const db = fakeDb({
+      rows: [
+        ...Array.from({ length: 5 }, (_, i) => repoRow(`mine ${i}`)),
+        ...Array.from({ length: 95 }, () => ({
+          scope: 'repo' as const,
+          repositoryId: OTHER_REPO_ID,
+          facets: {},
+          guidance: 'another repository',
+        })),
+      ],
+    });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- mine \d$/gm)).toHaveLength(5);
+    expect(out).toContain('(possibly more approved lessons not shown');
+    const lines = out.trimEnd().split('\n');
+    expect(lines[lines.length - 1]!.startsWith('(possibly more')).toBe(true);
+  });
 });
 
 describe('guidanceOmissionNotice', () => {
@@ -193,6 +214,11 @@ describe('guidanceOmissionNotice', () => {
     expect(guidanceOmissionNotice(1, false)).toContain('1 more approved lesson not shown');
     expect(guidanceOmissionNotice(1, false)).not.toContain('lessons');
     expect(guidanceOmissionNotice(1, true)).toContain('at least 1 more approved lesson not shown');
+  });
+
+  it('has nothing to say only when nothing was dropped and the scan did not fill', () => {
+    expect(guidanceOmissionNotice(0, false)).toBeNull();
+    expect(guidanceOmissionNotice(0, true)).toContain('(possibly more approved lessons not shown');
   });
 
   it('names what survives rather than what went', () => {
