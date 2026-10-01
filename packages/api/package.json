@@ -32,13 +32,13 @@
     "@hono/node-server": "^2.1.1",
     "archiver": "^8.0.0",
     "bcrypt": "^6.0.0",
-    "bullmq": "^6.3.2",
+    "bullmq": "^6.3.9",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
-    "hono": "^4.13.5",
+    "hono": "^4.13.10",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
-    "ws": "^8.21.3",
+    "ws": "^8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
