@@ -328,6 +328,121 @@ async function main(): Promise<void> {
     { repositoryId, origin: 'user' },
   );
 
+  // An AGENT's change to an existing node carries the version it read, or a person's canvas
+  // edit made meanwhile is replaced without anyone knowing. The op without one is dropped and
+  // reported, the rest of the reply lands, and an ordinal-only reorder is exempt.
+  const agentOpts = {
+    repositoryId,
+    origin: 'llm' as const,
+    onUnresolvableRef: 'drop' as const,
+    requireExpectedVersion: true,
+  };
+  const nodeOf = async (id: string) =>
+    (await loadPlanNodes(db, repositoryId)).find((n) => n.id === id);
+  const authBefore = (await nodeOf(auth!.id))!;
+  const unversioned = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: auth!.id, body: 'agent rewrite' },
+        { op: 'delete', nodeRef: login!.id },
+        { op: 'upsert', nodeRef: 'agent-new', parentRef: root!.id, title: 'Agent addition' },
+      ],
+    },
+    agentOpts,
+  );
+  const authAfter = (await nodeOf(auth!.id))!;
+  check(
+    'an agent change or delete without its version is dropped and reported',
+    unversioned.dropped.length === 2 &&
+      unversioned.created.length === 1 &&
+      authAfter.body === authBefore.body &&
+      authAfter.version === authBefore.version &&
+      (await nodeOf(login!.id)) !== undefined,
+    unversioned,
+  );
+  const reordered = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: auth!.id, ordinal: authBefore.ordinal }] },
+    agentOpts,
+  );
+  check(
+    'an ordinal-only agent reorder needs no version',
+    reordered.updated.length === 1 && reordered.dropped.length === 0,
+    reordered,
+  );
+  const authNow = (await nodeOf(auth!.id))!;
+  const versioned = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: auth!.id,
+          expectedVersion: authNow.version,
+          body: 'agent rewrite',
+        },
+      ],
+    },
+    agentOpts,
+  );
+  check(
+    'an agent change carrying its version lands',
+    versioned.updated.length === 1 && (await nodeOf(auth!.id))?.body === 'agent rewrite',
+    versioned,
+  );
+  const scratch = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'sp', parentRef: root!.id, title: 'Scratch parent' },
+        { op: 'upsert', nodeRef: 'sc', parentRef: 'sp', title: 'Scratch child' },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+  const scratchParent = (await nodeOf(scratch.refs.sp!))!;
+  const scratchChild = (await nodeOf(scratch.refs.sc!))!;
+  const parentFirst = await applyPlanPatch(
+    db,
+    {
+      ops: [{ op: 'delete', nodeRef: scratchParent.id, expectedVersion: scratchParent.version }],
+    },
+    agentOpts,
+  );
+  check(
+    'an agent delete of a node that still has children is dropped, its version notwithstanding',
+    parentFirst.dropped.length === 1 &&
+      parentFirst.deleted.length === 0 &&
+      (await nodeOf(scratchChild.id)) !== undefined,
+    parentFirst,
+  );
+  const leafFirst = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'delete', nodeRef: scratchChild.id, expectedVersion: scratchChild.version },
+        { op: 'delete', nodeRef: scratchParent.id, expectedVersion: scratchParent.version },
+      ],
+    },
+    agentOpts,
+  );
+  check(
+    'an agent removes a subtree leaf by leaf, each delete carrying its version',
+    leafFirst.deleted.length === 2 && leafFirst.dropped.length === 0,
+    leafFirst,
+  );
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: auth!.id, body: authBefore.body },
+        { op: 'delete', nodeRef: unversioned.created[0]! },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+
   /* --- 6. a failing op rolls the WHOLE patch back -------------------------- */
 
   const beforeCount = (await nodes()).length;

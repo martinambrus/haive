@@ -28,7 +28,7 @@ Reply with ONE \`\`\`json fenced block and nothing else that matters. Its shape:
   "ops": [
     { "op": "upsert", "nodeRef": "tmp-api", "parentRef": "<parent uuid or another nodeRef>", "title": "Backend API", "kind": "component", "body": "markdown describing this part", "taskable": false },
     { "op": "upsert", "nodeRef": "<an existing node uuid>", "body": "revised text", "expectedVersion": 4 },
-    { "op": "delete", "nodeRef": "<uuid>" },
+    { "op": "delete", "nodeRef": "<uuid>", "expectedVersion": 2 },
     { "op": "link", "fromRef": "tmp-api", "toRef": "<uuid>", "kind": "depends_on", "note": "why" },
     { "op": "unlink", "fromRef": "<uuid>", "toRef": "<uuid>", "kind": "affects" }
   ]
@@ -42,9 +42,13 @@ Rules:
   one reply.
 - A NEW node MUST carry \`parentRef\` and \`title\`. Use \`"parentRef": null\` ONLY for
   the plan root, and only when there is no root yet — a repository has exactly one.
-- To CHANGE an existing node, send only the fields you are changing, plus its
-  \`expectedVersion\` (shown beside each node below). If someone else changed it
+- To CHANGE or DELETE an existing node, send only the fields you are changing,
+  plus its \`expectedVersion\`: the version shown for that node below. A change or
+  delete without one is left out of your reply, and if someone else changed the node
   first the whole reply is rejected and nothing is written, so do not guess.
+- A delete removes ONE node that has no children. To remove a subtree, delete its
+  deepest nodes first and its top node last, each with its own \`expectedVersion\`;
+  a delete of a node that still has children is left out of your reply.
 - \`kind\` is one of: \`component\` (a part of the system), \`decision\` (a choice to
   make or record), \`research\` (needs investigating first), \`external\` (a non-code
   blocker — legal, a domain, hosting, an account).
@@ -308,6 +312,9 @@ export async function applyAgentPatch(
     // An agent wrote these nodes, which is exactly what the drift signal asks
     // about: "has anyone looked at this since the code changed?".
     marksReviewed: true,
+    // An agent's reply can land minutes after it read the plan, so its edits to
+    // existing nodes must be checked against what a person changed meanwhile.
+    requireExpectedVersion: true,
     ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
   });
 }

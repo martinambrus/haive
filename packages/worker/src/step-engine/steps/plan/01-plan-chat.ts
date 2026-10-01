@@ -190,7 +190,10 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       nodeId,
       nodeTitle: node.title,
       nodeVersion: node.version,
-      planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { focusNodeId: nodeId }),
+      planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, {
+        focusNodeId: nodeId,
+        withVersions: true,
+      }),
       transcript: messages,
       pendingQuestion: last?.role === 'user' ? last.body : null,
     };

@@ -64,6 +64,10 @@ export interface RenderPlanOptions {
    *  computed from those same `depends_on` edges, so dropping the link lines while
    *  keeping it still told the agent the recorded order. */
   omitLinks?: boolean;
+  /** Show each node's `version` beside its ref, for an agent that may change any node it
+   *  is shown and must send that version back. Off for the committed mirror, whose every
+   *  line would otherwise change on every edit. */
+  withVersions?: boolean;
 }
 
 export function renderPlanMarkdownFrom(
@@ -118,6 +122,7 @@ export function renderPlanMarkdownFrom(
     const blockers = derived.blockedById.get(node.id) ?? [];
     const attrs = [
       `${PLAN_NODE_REF_PREFIX}${node.id}`,
+      ...(opts.withVersions ? [`version ${node.version}`] : []),
       node.kind,
       node.status,
       ...(node.taskable ? ['taskable'] : []),

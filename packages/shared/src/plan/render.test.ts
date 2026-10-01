@@ -145,6 +145,14 @@ describe('renderPlanMarkdownFrom', () => {
     expect(renderPlanMarkdownFrom(NODES, [], { focusNodeId: AUTH })).toContain('you are here');
   });
 
+  it('shows every node its version for an agent that must send it back, and never the mirror', () => {
+    const versioned = NODES.map((n) => ({ ...n, version: n.id === AUTH ? 7 : 3 }));
+    const forAgent = renderPlanMarkdownFrom(versioned, [], { withVersions: true });
+    expect(forAgent).toContain(`\`node:${AUTH}\` · \`version 7\``);
+    expect(forAgent.match(/`version \d+`/g)).toHaveLength(versioned.length);
+    expect(renderPlanMarkdownFrom(versioned, [])).not.toContain('version');
+  });
+
   it('says so when there is no plan', () => {
     expect(renderPlanMarkdownFrom([], [])).toContain('no plan yet');
   });
