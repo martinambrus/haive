@@ -2,6 +2,7 @@ import { sameValue, sortedSet } from './canonical.js';
 import { normalizeProjectState } from './codec.js';
 import { bundleFileName, claimFileName } from './names.js';
 import {
+  RENDER_SET_KEYS,
   SET_SETTINGS,
   type ProjectEnvironment,
   type ProjectRender,
@@ -108,13 +109,15 @@ function mergeSetValue(
   return mergeUnit(unit, base, local, incoming, out);
 }
 
-/** Key by key while both sides hold the file; as one unit when a side has none. */
+/** Key by key while both sides hold the file; as one unit when a side has none. A key named in
+ *  `setKeys` moves member by member, like a set setting. */
 function mergeObjectFile<T extends object>(
   file: string,
   base: T | null | undefined,
   local: T | null,
   incoming: T | null,
   out: Outcome,
+  setKeys: ReadonlySet<string> = new Set(),
 ): T | null {
   if (local === null || incoming === null) {
     return (
@@ -128,13 +131,13 @@ function mergeObjectFile<T extends object>(
   ]);
   const merged: Record<string, unknown> = {};
   for (const key of [...keys].sort()) {
-    const value = mergeUnit(
-      `${file}#${key}`,
-      (base as Record<string, unknown> | null | undefined)?.[key],
-      (local as Record<string, unknown>)[key],
-      (incoming as Record<string, unknown>)[key],
-      out,
-    );
+    const unit = `${file}#${key}`;
+    const b = (base as Record<string, unknown> | null | undefined)?.[key];
+    const l = (local as Record<string, unknown>)[key];
+    const i = (incoming as Record<string, unknown>)[key];
+    const value = setKeys.has(key)
+      ? mergeSetValue(unit, b, l, i, out)
+      : mergeUnit(unit, b, l, i, out);
     if (value !== undefined) merged[key] = value;
   }
   return merged as T;
@@ -190,6 +193,7 @@ export function mergeProjectState(input: ProjectStateMergeInput): ProjectStateMe
     local.render,
     incoming.render,
     out,
+    RENDER_SET_KEYS,
   );
   const cli = mergeMembers(base?.cli, local.cli, incoming.cli, out.hasBase);
 

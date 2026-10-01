@@ -6,8 +6,16 @@ export const PROJECT_STATE_DIR = '.haive-data/state';
 /** The record format this release reads and writes. A record written by a newer one is refused. */
 export const PROJECT_STATE_FORMAT = 1;
 
-/** Settings whose value is a set of strings: written sorted, merged member by member. */
+/** Settings whose value is a set of strings: written sorted, merged member by member. A setting
+ *  belongs here only while an absent one and an empty one mean the same, since a member merge can
+ *  empty it and a merged set is written back as the file's whole value. */
 export const SET_SETTINGS: ReadonlySet<string> = new Set(['scope-exclude-globs']);
+
+/** Render keys merged member by member rather than as one value. `acceptedAgentIds` is deliberately
+ *  NOT one: an empty list there means "no snapshot", which renders EVERY applicable agent
+ *  (`template-manifest.ts`), so two installs each dropping what the other kept would merge to a
+ *  wider set than either chose. It stays one value, and a person answers the conflict. */
+export const RENDER_SET_KEYS: ReadonlySet<string> = new Set(['lspLanguages']);
 
 const jsonObject = z.record(z.string(), z.unknown());
 

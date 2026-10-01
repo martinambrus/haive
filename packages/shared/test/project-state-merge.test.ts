@@ -177,6 +177,28 @@ describe('mergeProjectState, unit by unit', () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  it('moves each lsp language as the side that changed it says', () => {
+    const result = mergeProjectState({
+      base: edit((r) => (r.render!.lspLanguages = ['php'])),
+      local: edit((r) => (r.render!.lspLanguages = ['php', 'js'])),
+      incoming: edit((r) => (r.render!.lspLanguages = [])),
+    });
+    expect(result.merged.render?.lspLanguages).toEqual(['js']);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  // An empty acceptedAgentIds renders EVERY applicable agent, so a member merge of two narrowings
+  // would widen it past what either side chose. It stays one value, and a person answers.
+  it('holds two different narrowings of the accepted agents as a conflict', () => {
+    const result = mergeProjectState({
+      base: edit((r) => (r.render!.acceptedAgentIds = ['code-reviewer', 'test-writer'])),
+      local: edit((r) => (r.render!.acceptedAgentIds = ['code-reviewer'])),
+      incoming: edit((r) => (r.render!.acceptedAgentIds = ['test-writer'])),
+    });
+    expect(result.merged.render?.acceptedAgentIds).toEqual(['code-reviewer']);
+    expect(result.conflicts.map((c) => c.unit)).toEqual(['project/render.json#acceptedAgentIds']);
+  });
+
   it('reads a set in another order as the same set', () => {
     const result = mergeProjectState({
       base: base(),
