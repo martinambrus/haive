@@ -40,9 +40,9 @@ moving a project between installs "must work and be synced correctly and fully".
   files never conflict): `format.json` (schemaVersion), `project/environment.json`,
   `project/render.json` (projectInfo, framework, acceptedAgentIds, customAgentSpecs,
   lspLanguages), `cli/<provider>.json` (the repo-level CLI union), `settings/<name>.json` (one per
-  portable setting), `artifacts/<slug>~<h8>.json` (one claim per disk path: path, template, kind,
+  portable setting), `artifacts/<slug>~<h32>.json` (one claim per disk path: path, template, kind,
   schemaVersion, templateHash, writtenHash, haiveVersion — never the bytes, which are in git),
-  `bundles/<slug>~<h8>.json` (portable bundle descriptors). Canonical form: UTF-8, LF, 2-space,
+  `bundles/<slug>~<h32>.json` (portable bundle descriptors). Canonical form: UTF-8, LF, 2-space,
   sorted keys and sets, trailing newline, no timestamps, no install ids. Portable bundle template
   ids `custom:<gitUrl#branch|zip:name>:<sourcePath>`; an unmapped claim is `foreign` (claims its
   file, never offered). `applicable_template_ids` is recomputed on import, never carried.
@@ -211,18 +211,26 @@ Phase 1 (the record):
   checks a setting's name before storing it. The renderer writes each file with its schema's keys
   alone, and sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
   the renderers can take since all of them read those as sets. The merge goes key by key in a
-  project file both sides hold and file by file otherwise; a set moves member by member and never
-  conflicts (joined when there is no base); a claim both sides changed follows the bytes through
+  project file both sides hold and file by file otherwise; a set (a set setting, the CLI set,
+  `lspLanguages`) moves member by member and never conflicts (joined when there is no base); a side
+  that unset a set holds no member of it, and a set that empties that way stays unset;
+  `acceptedAgentIds` stays one value, since an empty list there means every applicable agent and two
+  narrowings would merge wider than either chose; a claim both sides changed follows the bytes through
   `diskHash`, an absent file standing for a removal; a conflict keeps the local value and names
   `<file>#<key>` or the file. Portable custom ids encode both parts (`custom:<source>:<path>`, each
-  URI-encoded), since a git URL holds colons. One maps back only when exactly one local bundle holds
-  its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it foreign rather
-  than guessing. Two keys of one project file can still conflict under
-  a merge a person drives, which the parser then refuses; the merges Haive drives resolve them per
-  key (B2.3). MEASURED: 70 tests, six mutations each caught (Codex round 1 added 20 controls, 16 of them
-  failing before), and `git merge-file` over all 28 pairs
-  of eight single-file edits merges cleanly to the render of the record merge, while two adjacent
-  settings edited in one pretty JSON file conflict.
+  URI-encoded), since a git URL holds colons, and a git source encodes its URL and branch apart,
+  since `#` is valid in both. The URL loses its credentials first: an ssh URL keeps its user, a
+  login, and loses its password, any other loses its userinfo, since an http(s) username can itself
+  be a token, so nothing typed into a bundle's URL reaches a committed file. One maps back only when
+  exactly one local bundle holds its source: two (two ZIP bundles of one name, or one git bundle
+  added twice) leave it foreign rather than guessing. Two keys of one project file can still
+  conflict under a merge a person drives, which the parser then refuses; the merges Haive drives
+  resolve them per key (B2.3). `gitBlobId` takes the repository's object format (sha1 or sha256),
+  since the two never agree on one file and the sync compares against ids read from the
+  repository. MEASURED: 99 tests, every mutation tried caught (Codex's five rounds added 29
+  controls, 22 of them failing before), and `git merge-file` over all 28 pairs of eight
+  single-file edits merges cleanly to the render of the record merge, while two adjacent settings
+  edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
   [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
   replaces `importHaiveDataMirror` (legacy files as fallback); 12/02 write `render_context`; 01's
@@ -329,9 +337,10 @@ Verified facts the survey added (2a610d56):
   (`packages/shared/test/fs-ratchet.json`); `HAIVE_INSTALL_ID` already supports a second install
   on one machine (docker-compose.yml header).
 
-Claim file names: slug = the path with `/` → `__` and leading dots dropped, `h8` = first 8 hex of
-sha256(path); the parser refuses a name that does not match its path; flat on purpose (mirroring
-`.claude/...` under `.haive-data` would plant directories tools scan).
+Claim file names: slug = the path with `/` → `__` and leading dots dropped, `h32` = the first 32
+hex of sha256(path), wide enough that paths chosen to collide still get two files; the parser
+refuses a name that does not match its path; flat on purpose (mirroring `.claude/...` under
+`.haive-data` would plant directories tools scan).
 
 `syncProjectStateFromCheckout(db, repoId, {reason})` — worker `src/project-state/sync.ts`, `db`
 explicit (the smoke drives two databases), under
