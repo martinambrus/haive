@@ -672,14 +672,18 @@ export default function PlanPage() {
   // tooltip because "how much of my plan is unordered" is the other, equally fair,
   // reading of the same question.
   const orderingRemaining = ordering?.groupsRemaining ?? 0;
+  const orderingTooWide = ordering?.groupsTooWide ?? 0;
   const orderingTitle = ordering?.activeTaskId
     ? 'An ordering pass is already running — wait for it to finish'
-    : orderingRemaining === 0
-      ? 'Order every group of sibling nodes so the plan can be followed by number'
-      : `${orderingRemaining} group(s) of sibling nodes still need a reader to decide their order (${ordering?.nodesRemaining ?? 0} nodes). ` +
-        (ordering && ordering.passesRemaining > 1
-          ? `One pass covers ${ordering.perPass}; ${ordering.passesRemaining} more passes to finish.`
-          : 'One more pass covers them all.');
+    : (orderingRemaining === 0
+        ? 'Order every group of sibling nodes so the plan can be followed by number.'
+        : `${orderingRemaining} group(s) of sibling nodes still need a reader to decide their order (${ordering?.nodesRemaining ?? 0} nodes). ` +
+          (ordering && ordering.passesRemaining > 1
+            ? `One pass covers ${ordering.perPass}; ${ordering.passesRemaining} more passes to finish.`
+            : 'One more pass covers them all.')) +
+      (orderingTooWide > 0
+        ? ` ${orderingTooWide} group(s) are too large for one agent to order and keep their stored order until each is split into smaller groups.`
+        : '');
 
   // What the Start button says. The pick is the lowest-numbered node that is
   // startable RIGHT NOW — its own prerequisites met, no container above it still

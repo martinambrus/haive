@@ -1677,6 +1677,9 @@ export interface PlanOrderingProgress {
   nodesRemaining: number;
   passesRemaining: number;
   perPass: number;
+  /** Groups too wide for one agent to order, which no pass asks about and neither count above
+   *  includes. They keep their stored order until they are split into smaller ones. */
+  groupsTooWide: number;
   /** An ordering pass already running. A second one would re-ask the same groups,
    *  because a row only counts as asked once it has answered. */
   activeTaskId: string | null;
