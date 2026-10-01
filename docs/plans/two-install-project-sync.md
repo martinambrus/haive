@@ -203,37 +203,38 @@ Phase 1 (the record):
   name, and a setting holding null or a set setting that is not a list of strings. The renderer
   normalizes the record and then validates it: each section against its schema, and every value for
   what JSON cannot carry (a non-finite number, a bigint, a function, an undefined array element, a
-  non-plain object, a cycle, a `__proto__` key), so a record either renders to files that read back
+  non-plain object, a cycle, a `__proto__` key) and every value nested deeper than 64 levels, which
+  keeps each later walk of it inside the stack, so a record either renders to files that read back
   as itself or throws `ProjectStateError`. "As itself" is under `sameValue`, the equality the merge
   decides with, so what JSON writes differently but no reader can tell apart passes: an undefined
   object property is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the
   same check on every file before its schema, since zod would drop a `__proto__` key and read the
-  record back without it. Every settings map has no prototype,
-  so an absent setting named like an `Object.prototype` member reads as absent, and the parser
-  checks a setting's name before storing it. The renderer writes each file with its schema's keys
-  alone, and sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
-  the renderers can take since all of them read those as sets. The merge goes key by key in a
-  project file both sides hold and file by file otherwise; a set (a set setting, the CLI set,
-  `lspLanguages`) moves member by member and never conflicts (joined when there is no base); a side
-  that unset a set holds no member of it, and a set that empties that way stays unset;
-  `acceptedAgentIds` stays one value, since an empty list there means every applicable agent and two
-  narrowings would merge wider than either chose; a claim both sides changed follows the bytes through
-  `diskHash`, an absent file standing for a removal; a conflict keeps the local value and names
-  `<file>#<key>` or the file. Portable custom ids encode both parts (`custom:<source>:<path>`, each
-  URI-encoded), since a git URL holds colons, and a git source encodes its URL and branch apart,
-  since `#` is valid in both. The URL is first reduced to where the remote is (scheme, host, port
-  and path), keeping only an ssh user, which is a login: userinfo, a query and a fragment can each
-  carry a token, so none reaches a committed file. A token pasted into a path segment reads like a
-  name and stays, which is why a bundle's credential is stored apart from its URL. One maps back
-  only when exactly one local bundle holds its source: two (two ZIP bundles of one name, or one git
-  bundle added twice) leave it foreign rather than guessing. Two keys of one project file can still
-  conflict under a merge a person drives, which the parser then refuses; the merges Haive drives
-  resolve them per key (B2.3). `gitBlobId` takes the repository's object format (sha1 or sha256),
-  since the two never agree on one file and the sync compares against ids read from the
-  repository. MEASURED: 100 tests, every mutation tried caught (Codex's seven rounds added 30
-  controls, 22 of them failing before), and `git merge-file` over all 28 pairs of eight
-  single-file edits merges cleanly to the render of the record merge, while two adjacent settings
-  edited in one pretty JSON file conflict.
+  record back without it. Every settings map has no prototype, so an absent setting named like an
+  `Object.prototype` member reads as absent, and the parser checks a setting's name before storing
+  it. The renderer writes each file with its schema's keys alone, and sorts every set
+  (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which the renderers can
+  take since all of them read those as sets. The merge goes key by key in a project file both sides
+  hold and file by file otherwise; a set (a set setting, the CLI set, `lspLanguages`) moves member
+  by member and never conflicts (joined when there is no base); a side that unset a set holds no
+  member of it, and a set that empties that way stays unset; `acceptedAgentIds` stays one value,
+  since an empty list there means every applicable agent and two narrowings would merge wider than
+  either chose; a claim both sides changed follows the bytes through `diskHash`, an absent file
+  standing for a removal; a conflict keeps the local value and names `<file>#<key>` or the file.
+  Portable custom ids encode both parts (`custom:<source>:<path>`, each URI-encoded), since a git
+  URL holds colons, and a git source encodes its URL and branch apart, since `#` is valid in both.
+  The URL is first reduced to where the remote is (scheme, host, port and path), the scheme and host
+  in lower case as both are case-insensitive (an scp address's host too), keeping only an ssh user,
+  which is a login: userinfo, a query and a fragment can each carry a token, so none reaches a
+  committed file. A token pasted into a path segment reads like a name and stays, which is why a
+  bundle's credential is stored apart from its URL. One maps back only when exactly one local bundle
+  holds its source: two (two ZIP bundles of one name, or one git bundle added twice) leave it
+  foreign rather than guessing. Two keys of one project file can still conflict under a merge a
+  person drives, which the parser then refuses; the merges Haive drives resolve them per key (B2.3).
+  `gitBlobId` takes the repository's object format (sha1 or sha256), since the two never agree on
+  one file and the sync compares against ids read from the repository. MEASURED: 104 tests, every
+  mutation tried caught (Codex's eight rounds added 34 controls, 26 of them failing before), and
+  `git merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
+  record merge, while two adjacent settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
   [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
   replaces `importHaiveDataMirror` (legacy files as fallback); 12/02 write `render_context`; 01's
