@@ -19,6 +19,7 @@ import {
   readdirNoFollow,
   readFileNoFollow,
   relUnder,
+  replaceHeldBytes,
 } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../../db.js';
@@ -360,16 +361,15 @@ fileRoutes.put('/:id/files/content', async (c) => {
       // Optimistic concurrency against the bytes the client actually rendered: an
       // agent re-run or a second tab can have rewritten the file since. Reported, not
       // resolved — a silent overwrite of either side is the wrong answer.
-      const current = await fh.readFile({ encoding: 'utf8' });
+      const original = await fh.readFile();
+      const current = original.toString('utf8');
       if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
         throw new HttpError(
           409,
           'File changed since it was loaded; reload to see the current version',
         );
       }
-      // Truncate first: a shorter body would otherwise leave the old tail behind.
-      await fh.truncate(0);
-      await fh.write(body.content, 0, 'utf8');
+      await replaceHeldBytes(fh, Buffer.from(body.content, 'utf8'), original);
       // This process runs as root while the sandbox user is uid 1000: without
       // this the agent's next edit of its own file fails, and only inside a
       // container. Through the descriptor, like every other step here.
