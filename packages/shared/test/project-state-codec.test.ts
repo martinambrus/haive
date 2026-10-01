@@ -316,6 +316,28 @@ describe('renderProjectState refuses what JSON cannot carry', () => {
   });
 });
 
+describe('a value with a key JSON does not write', () => {
+  const refused = (value: unknown) => {
+    const r = record();
+    r.settings.x = value;
+    return () => renderProjectState(r);
+  };
+
+  it('refuses an object with a symbol key', () => {
+    expect(refused({ a: 1, [Symbol('k')]: 2 })).toThrow(/holds a key JSON does not write/);
+  });
+
+  it('refuses an object with a non-enumerable key', () => {
+    expect(refused(Object.defineProperty({ a: 1 }, 'b', { value: 2 }))).toThrow(
+      /holds a key JSON does not write/,
+    );
+  });
+
+  it('refuses an array with a named property', () => {
+    expect(refused(Object.assign([1, 2], { extra: 3 }))).toThrow(/holds a key JSON does not write/);
+  });
+});
+
 describe('a value nested past the bound', () => {
   const nested = (levels: number): unknown => {
     let value: unknown = [];

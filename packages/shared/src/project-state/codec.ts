@@ -115,6 +115,9 @@ interface NotJson {
 // Far deeper than any record value; the bound keeps every walk of a value inside the stack.
 const MAX_DEPTH = 64;
 
+// A symbol, a non-enumerable key or an array's named property: JSON leaves each out unseen.
+const NOT_WRITTEN = 'holds a key JSON does not write';
+
 /** The first thing in `value` JSON cannot carry exactly, or null. */
 function notJson(
   value: unknown,
@@ -131,6 +134,7 @@ function notJson(
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      if (Reflect.ownKeys(value).length > value.length + 1) return { path, reason: NOT_WRITTEN };
       for (let i = 0; i < value.length; i++) {
         const found = notJson(value[i], [...path, String(i)], ancestors);
         if (found) return found;
@@ -141,6 +145,9 @@ function notJson(
     if (proto !== Object.prototype && proto !== null)
       return { path, reason: 'is not a plain object' };
     if (Object.hasOwn(value, '__proto__')) return { path, reason: 'holds a key named __proto__' };
+    if (Reflect.ownKeys(value).length !== Object.keys(value).length) {
+      return { path, reason: NOT_WRITTEN };
+    }
     for (const [key, child] of Object.entries(value)) {
       // JSON leaves an undefined property out, and so does the record's reader.
       if (child === undefined) continue;
