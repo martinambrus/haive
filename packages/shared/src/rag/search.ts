@@ -19,7 +19,8 @@ const EXCLUDE_TASK_ROWS = `source_type <> '${TASK_SOURCE_TYPE}'`;
  *  Recalibrate with packages/worker/scripts/rag-eval.ts against a populated DB. */
 export interface RagSearchConfig {
   /** Candidate pool size pulled from each of the dense and lexical rankers
-   *  before fusion. */
+   *  before fusion. On the HNSW path the dense half ends after `hnsw.ef_search`
+   *  candidates (40 by default, identical vectors sharing one), so it can return fewer. */
   candidatePool: number;
   /** RRF constant k. Larger = flatter rank weighting. 60 is the common default. */
   rrfK: number;
@@ -439,7 +440,7 @@ export async function ragHybridSearch(
     // the planner's estimated HNSW cost past a plain seq-scan+sort and reverts the
     // dense CTE to a full scan (measured: ef_search=100 -> 430ms seq scan vs the
     // default's 5ms index scan). At the default ef_search the planner keeps the
-    // index, and its candidate count is ample for the RRF fusion below. A selective
+    // index, which ends the dense half after 40 candidates (see `candidatePool`). A selective
     // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
     // own choice) — fast and exact — so no iterative_scan GUC (and thus no
     // transaction wrapper) is needed.
