@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getTableColumns, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
@@ -466,5 +466,73 @@ describe('writeProjectStateRecord: failures', () => {
     expect(s.events).not.toContain('begin');
     expect(s.columnOf(REPO)).toBeNull();
     expect(s.syncRows()).toEqual([]);
+  });
+});
+
+describe('writeProjectStateRecord: what a rejection names', () => {
+  // Read off the error by name and not by class, so the cases below run against a writer whose
+  // rejections carry no such field, and fail there for that reason.
+  const written = (err: unknown): string[] | undefined =>
+    (err as { written?: string[] } | null)?.written;
+  const rejection = (run: Promise<unknown>) =>
+    run.then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+  it.each([
+    ['takes the lock', 'beforeLock'],
+    ['sets the column', 'beforeUpdate'],
+    ['writes the sync row', 'beforeInsert'],
+  ] as const)(
+    'names both record files when the database %s, and still rejects with its reason',
+    async (_what, point) => {
+      const s = await setup();
+      s.fake.hooks[point] = () => {
+        throw new Error('database refused');
+      };
+
+      const err = await rejection(s.write(context(), true));
+
+      expect(err).toBeInstanceOf(Error);
+      expect([...(written(err) ?? [])].sort()).toEqual([FORMAT, RENDER]);
+      expect((err as Error).message).toContain('database refused');
+      expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+    },
+  );
+
+  it('names the file it wrote and not the one it could not, when a later file cannot be written', async () => {
+    const s = await setup();
+    await mkdir(join(s.root, STATE_DIR), { recursive: true });
+    await writeFile(join(s.root, STATE_DIR, 'project'), 'a file where the directory should be');
+
+    const err = await rejection(s.write(context(), true));
+
+    expect(err).toBeInstanceOf(Error);
+    expect(written(err)).toEqual([FORMAT]);
+    expect(s.events.filter(isWrite)).toEqual([]);
+  });
+
+  it('names no file when none could be written', async () => {
+    const s = await setup();
+    await writeFile(join(s.root, '.haive-data'), 'a file where the directory should be');
+
+    const err = await rejection(s.write(context(), true));
+
+    expect(err).toBeInstanceOf(Error);
+    expect(written(err)).toEqual([]);
+  });
+
+  it('names the paths a write that succeeds returns, so the two cannot disagree', async () => {
+    const s = await setup();
+    const ok = await s.write(context(), true);
+
+    const failing = await setup();
+    failing.fake.hooks.beforeLock = () => {
+      throw new Error('database refused');
+    };
+    const err = await rejection(failing.write(context(), true));
+
+    expect([...(written(err) ?? [])]).toEqual([...ok]);
   });
 });
