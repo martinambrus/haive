@@ -129,6 +129,18 @@ describe('renderPlanMarkdownFrom', () => {
     expect(renderPlanMarkdownFrom(NODES, edges)).toContain('depends on');
   });
 
+  it('omits what is DERIVED from those links too, under omitLinks', () => {
+    // `blocked by #N` is computed from the same `depends_on` edges, so a render that drops the
+    // link lines but keeps the attribute still hands the sequencing agent the recorded order.
+    // The test above cannot see that: its edge points at an ANCESTOR, which is never a sibling
+    // blocker, so its fixture never produces the attribute at all.
+    const edges = [{ fromNodeId: AUTH, toNodeId: DB, kind: 'depends_on' as const, note: null }];
+    expect(renderPlanMarkdownFrom(WITH_SIBLING, edges)).toContain('blocked by #1');
+    expect(renderPlanMarkdownFrom(WITH_SIBLING, edges, { omitLinks: true })).not.toContain(
+      'blocked by',
+    );
+  });
+
   it('marks the focused node', () => {
     expect(renderPlanMarkdownFrom(NODES, [], { focusNodeId: AUTH })).toContain('you are here');
   });
