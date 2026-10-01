@@ -76,7 +76,8 @@ export function isPathContainmentError(
 }
 
 /** A file judged under a private name that could not be moved back: it is still at `parkedAt`, and
- *  `code` is the errno of the move, so a caller that absorbs IO failures absorbs this one too. */
+ *  `code` is the errno of the move, so a caller that absorbs IO failures absorbs this one too.
+ *  `cause` is the move's own error, or an AggregateError of what broke before it and that error. */
 export class ParkedFileError extends Error {
   constructor(
     readonly rel: string,
@@ -617,16 +618,10 @@ export async function copyFileNoFollow(
       if (opts.owner) await dest.chown(opts.owner.uid, opts.owner.gid);
       ok = true;
     } finally {
-      await closeQuietly(dest);
       // A half-written destination is worse than none: the caller was told the copy failed, and a
-      // truncated `.env` reads as a valid one. Unlinked through the parent descriptor's path.
-      if (!ok) {
-        const cleanup = await walkDir(destAnchor, safeDest, destSegs).catch(() => null);
-        if (cleanup) {
-          await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
-          await closeQuietly(cleanup.fh);
-        }
-      }
+      // truncated `.env` reads as a valid one.
+      if (ok) await closeQuietly(dest);
+      else await removeCreated(destAnchor, safeDest, dest).catch(() => undefined);
     }
   } finally {
     await closeQuietly(src);
@@ -1077,6 +1072,30 @@ export async function removeFileIfNoFollow(
   return result === 'rewritten' ? 'kept' : result;
 }
 
+/** Which file a descriptor holds, kept to tell it later from another file at the same name. Bigints,
+ *  since an inode number past 2^53 does not survive a `Number`. */
+export interface FileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+export async function fileIdentity(fh: FileHandle): Promise<FileIdentity> {
+  const { dev, ino } = await fh.stat({ bigint: true });
+  return { dev, ino };
+}
+
+/** Delete the regular file at `rel` only while it is the file `identity` names. Parked first like
+ *  `removeFileIfNoFollow`, but judged on the inode alone: nothing is opened or read, so a file nobody
+ *  can read back goes like any other, and a file saved at `rel` meanwhile is kept whatever it holds. */
+export async function removeFileIfIdentityNoFollow(
+  anchor: string,
+  rel: string,
+  identity: FileIdentity,
+): Promise<'removed' | 'absent' | 'kept'> {
+  const result = await settleParked(anchor, rel, async () => 'keep', {}, false, identity);
+  return result === 'rewritten' ? 'kept' : result;
+}
+
 /** Replace the regular file's bytes with what `edit` returns (null keeps them), on its own inode and
  *  judged on the bytes it replaces: parked like `removeFileIfNoFollow`, so a save meanwhile is kept. */
 export async function rewriteFileIfNoFollow(
@@ -1097,12 +1116,25 @@ export async function rewriteFileIfNoFollow(
 
 type ParkedVerdict = 'remove' | 'keep' | Buffer;
 
+/** At most this many bytes of the leaf name the park name, so any leaf a filesystem accepts parks
+ *  under NAME_MAX (255) beside the pid and uuid; a shorter leaf parks under its whole name. */
+const PARK_LEAF_MAX_BYTES = 100;
+
+function parkLeaf(leaf: string): string {
+  const bytes = Buffer.from(leaf, 'utf8');
+  if (bytes.length <= PARK_LEAF_MAX_BYTES) return leaf;
+  let end = PARK_LEAF_MAX_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
 async function settleParked(
   anchor: string,
   rel: string,
   decide: (data: Buffer) => Promise<ParkedVerdict>,
   opts: { maxBytes?: number; repairPermissions?: boolean },
   writable: boolean,
+  identity?: FileIdentity,
 ): Promise<'removed' | 'rewritten' | 'absent' | 'kept'> {
   const safe = toSafeRel(rel);
   const segs = segments(safe);
@@ -1123,7 +1155,7 @@ async function settleParked(
     if (st === null) return 'absent';
     if (!st.isFile()) return 'kept';
 
-    const parked = `.${leaf}.haive-park-${process.pid}-${randomUUID()}`;
+    const parked = `.${parkLeaf(leaf)}.haive-park-${process.pid}-${randomUUID()}`;
     try {
       await withRepair(dir.fh, { repairPermissions: opts.repairPermissions }, () =>
         rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked)),
@@ -1132,19 +1164,32 @@ async function settleParked(
       if (ABSENT.has(errno(err) ?? '')) return 'absent';
       throw err;
     }
-    const putBack = async (): Promise<void> => {
+    // `earlier` is what broke before the put-back, so the error that names where the file is parked
+    // still says why it was being put back.
+    const putBack = async (earlier?: { error: unknown }): Promise<void> => {
       try {
         await restoreNoReplace(dir, parked, leaf);
       } catch (err) {
-        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), { cause: err });
+        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), {
+          cause:
+            earlier === undefined
+              ? err
+              : new AggregateError(
+                  [earlier.error, err],
+                  `${earlier.error}; putting the file back failed too: ${err}`,
+                ),
+        });
       }
     };
 
     let verdict: 'remove' | 'keep' | 'rewritten';
     try {
-      verdict = await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe);
+      verdict =
+        identity === undefined
+          ? await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe)
+          : await judgeIdentity(dir, parked, identity);
     } catch (err) {
-      await putBack();
+      await putBack({ error: err });
       throw err;
     }
     if (verdict !== 'remove') {
@@ -1154,7 +1199,7 @@ async function settleParked(
     try {
       await unlink(at(dir.fh.fd, parked));
     } catch (err) {
-      await putBack();
+      await putBack({ error: err });
       throw err;
     }
     return 'removed';
@@ -1219,6 +1264,17 @@ async function judgeParked(
   } finally {
     await closeQuietly(fh);
   }
+}
+
+/** Whether the parked entry is the file `identity` names, from its `lstat` alone. */
+async function judgeIdentity(
+  dir: HeldDir,
+  parked: string,
+  identity: FileIdentity,
+): Promise<'remove' | 'keep'> {
+  const st = await lstat(at(dir.fh.fd, parked), { bigint: true });
+  const same = st.dev === identity.dev && st.ino === identity.ino;
+  return same ? 'remove' : 'keep';
 }
 
 export interface RenameOptions extends EnsureDirOptions {
@@ -1350,16 +1406,40 @@ async function createExclusive(
     if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
     return fh;
   } catch (err) {
-    await closeQuietly(fh);
     // Leave nothing behind: a 0600 empty stub at a name a caller was told it could not have is
     // worse than no file, because the next attempt then fails EEXIST against our own leftover.
-    const cleanup = await walkDir(anchor, safe, segs).catch(() => null);
-    if (cleanup) {
-      await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
-      await closeQuietly(cleanup.fh);
-    }
+    // Best effort, as before: callers classify the error that stopped the create (403 for a link).
+    await removeCreated(anchor, safe, fh).catch(() => undefined);
     throw err;
   }
+}
+
+/** Removes the file `fh` created, judged on its inode so a file put at the name meanwhile is kept
+ *  whatever it holds, then closes `fh`. Held open until then, its inode cannot be reused. */
+async function removeCreated(anchor: string, rel: string, fh: FileHandle): Promise<void> {
+  try {
+    await removeFileIfIdentityNoFollow(anchor, rel, await fileIdentity(fh));
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
+/** `removeCreated`, then always throws: `err`, or both failures when the removal fails. */
+async function takeBackCreated(
+  anchor: string,
+  rel: string,
+  fh: FileHandle,
+  err: unknown,
+): Promise<never> {
+  try {
+    await removeCreated(anchor, rel, fh);
+  } catch (removeErr) {
+    throw new AggregateError(
+      [err, removeErr],
+      `${err}; removing the file it created failed too: ${removeErr}`,
+    );
+  }
+  throw err;
 }
 
 /** Write every byte. `FileHandle.write` may write short, and a partial config file that parses is
@@ -1370,6 +1450,24 @@ async function writeAll(fh: FileHandle, bytes: Buffer): Promise<void> {
     const res = await fh.write(bytes, written, bytes.length - written, written);
     written += res.bytesWritten;
   }
+}
+
+/** Write `bytes` into the file `createExclusive` just made for this call, then close it. A write
+ *  or sync that fails takes the file back rather than leaving it half-written at its name. */
+async function fillCreated(
+  anchor: string,
+  rel: string,
+  fh: FileHandle,
+  bytes: Buffer,
+  durable?: boolean,
+): Promise<void> {
+  try {
+    await writeAll(fh, bytes);
+    if (durable) await fh.sync();
+  } catch (err) {
+    return takeBackCreated(anchor, rel, fh, err);
+  }
+  await closeQuietly(fh);
 }
 
 /** Replace what `fh` holds with `next`, on the same inode. A write that fails while the process
@@ -1429,7 +1527,8 @@ export interface WriteFileOptions {
  *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
  * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
  *   whose identity matters.
- * - `create-exclusive` — refuses to replace anything at all.
+ * - `create-exclusive` — refuses to replace anything at all. A write that fails while the process
+ *   lives takes back the file it created, so the name is free again.
  */
 export async function writeFileNoFollow(
   anchor: string,
@@ -1442,12 +1541,7 @@ export async function writeFileNoFollow(
 
   if (mode === 'create-exclusive') {
     const fh = await createExclusive(anchor, rel, opts);
-    try {
-      await writeAll(fh, bytes);
-      if (opts.durable) await fh.sync();
-    } finally {
-      await closeQuietly(fh);
-    }
+    await fillCreated(anchor, rel, fh, bytes, opts.durable);
     return 'created';
   }
 
@@ -1539,7 +1633,7 @@ export interface UpdateFileOptions {
  * trade for keeping the inode, the owner and the mode, and it is why `replace-atomic` stays the
  * default for anything a machine parses. Node has no `flock`, so two concurrent updaters are
  * serialized at step level or not at all. A write that fails while the process lives puts the
- * bytes it read back.
+ * bytes it read back, or, for a file it created, takes that file back.
  *
  * `unchanged` is returned — and nothing written — when `update` returns `null` or the identical
  * string, so a re-run that has nothing to add does not touch the file's mtime.
@@ -1567,11 +1661,7 @@ export async function updateFileNoFollow(
       fileMode: opts.fileMode,
       owner: opts.owner,
     });
-    try {
-      await writeAll(created, Buffer.from(next, 'utf8'));
-    } finally {
-      await closeQuietly(created);
-    }
+    await fillCreated(anchor, safe, created, Buffer.from(next, 'utf8'));
     return 'created';
   }
 

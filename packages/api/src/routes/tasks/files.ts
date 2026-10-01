@@ -326,6 +326,20 @@ async function holdRepositoryRoot(
   return acquireRootClaim(db, repositoryId, 'edit');
 }
 
+/** The held file's bytes, or null when it is over the editor's cap. The read stops at cap + 1 as well
+ *  as the size check, since the sandbox writes this tree and a small file can grow before it. */
+async function readWithinCap(fh: FileHandle): Promise<Buffer | null> {
+  if ((await fh.stat()).size > MAX_FILE_CONTENT_BYTES) return null;
+  const buf = Buffer.allocUnsafe(MAX_FILE_CONTENT_BYTES + 1);
+  let filled = 0;
+  while (filled < buf.length) {
+    const { bytesRead } = await fh.read(buf, filled, buf.length - filled, filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return filled > MAX_FILE_CONTENT_BYTES ? null : buf.subarray(0, filled);
+}
+
 fileRoutes.put('/:id/files/content', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -361,7 +375,8 @@ fileRoutes.put('/:id/files/content', async (c) => {
       // Optimistic concurrency against the bytes the client actually rendered: an
       // agent re-run or a second tab can have rewritten the file since. Reported, not
       // resolved — a silent overwrite of either side is the wrong answer.
-      const original = await fh.readFile();
+      const original = await readWithinCap(fh);
+      if (original === null) throw new HttpError(413, 'File is too large to edit here');
       const current = original.toString('utf8');
       if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
         throw new HttpError(
