@@ -45,7 +45,13 @@ import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
 
 export type UpgradePlanBucket =
-  'unchanged' | 'clean_update' | 'conflict' | 'new_artifact' | 'user_deleted' | 'obsolete';
+  | 'unchanged'
+  | 'clean_update'
+  | 'adopt'
+  | 'conflict'
+  | 'new_artifact'
+  | 'user_deleted'
+  | 'obsolete';
 
 export interface UpgradePlanEntry {
   /** Stable per-row identifier used by step 02's form to refer to this entry. */
@@ -402,6 +408,8 @@ export function classifyEntry(args: {
 
   if (templateUnchanged && !customTemplateIdShifted) return 'unchanged';
   if (diskMatchesBaseline) return 'clean_update';
+  // The file already holds what this upgrade would write, such as one another install upgraded.
+  if (diskHash === current.writtenHash) return 'adopt';
   return 'conflict';
 }
 
@@ -556,6 +564,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const counts: Record<UpgradePlanBucket, number> = {
       unchanged: 0,
       clean_update: 0,
+      adopt: 0,
       conflict: 0,
       new_artifact: 0,
       user_deleted: 0,

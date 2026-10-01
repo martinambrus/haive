@@ -158,6 +158,7 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     counts: {
       unchanged: 0,
       clean_update: region ? 2 : 1,
+      adopt: 0,
       conflict: 1,
       new_artifact: region ? 1 : 2,
       user_deleted: 1,

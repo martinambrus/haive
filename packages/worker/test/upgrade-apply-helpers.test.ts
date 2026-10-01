@@ -119,6 +119,10 @@ describe('classifyApplyAction — primary buckets', () => {
     ).toBe('apply');
   });
 
+  it('adopt with nothing selected → adopt, which asks nothing', () => {
+    expect(classify('adopt', 'a.md', { entryId: 'sel-1' }, {})).toBe('adopt');
+  });
+
   it('clean_update with id not selected → skip', () => {
     expect(classify('clean_update', 'a.md', { entryId: 'sel-1' }, {})).toBe('skip');
   });

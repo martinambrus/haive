@@ -68,6 +68,7 @@ async function setup(agents: string | Buffer = AGENTS) {
     counts: {
       unchanged: 0,
       clean_update: 0,
+      adopt: 0,
       conflict: 0,
       new_artifact: 0,
       user_deleted: 0,
