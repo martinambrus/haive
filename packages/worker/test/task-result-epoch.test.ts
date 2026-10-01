@@ -13,6 +13,12 @@ vi.mock('../src/db.js', () => ({
     throw new Error('no database in this test');
   }),
 }));
+// The failed-task teardown would otherwise inspect every CLI's auth volume on the host's Docker.
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+}));
 
 const STEP_ID = 'epoch-fence-step';
 stepRegistry.register({
