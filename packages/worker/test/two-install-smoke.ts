@@ -234,9 +234,8 @@ const planOf = (install: Install) =>
     .orderBy(asc(schema.planNodes.id));
 
 async function main(): Promise<void> {
-  const nameA = new URL(urlA).pathname.slice(1);
-  // Its own name per run, so it can only ever drop what it created.
-  const nameB = `${nameA}_two_install_${randomBytes(4).toString('hex')}`;
+  // Its own plain name per run, so it can only ever drop what it created.
+  const nameB = `two_install_smoke_${randomBytes(4).toString('hex')}`;
   const urlB = new URL(urlA);
   urlB.pathname = `/${nameB}`;
   const admin = postgres(urlA, { max: 1, onnotice: () => {} });
