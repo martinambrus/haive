@@ -27,8 +27,14 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
+import {
+  loadLiveArtifacts,
+  pickRenderSnapshot,
+  type UpgradePlanOutput,
+} from './01-upgrade-plan.js';
 import {
   removeIfHaives,
   resolveBundleItemId,
@@ -704,6 +710,31 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         ...rowsToInsert,
       ];
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
+    }
+
+    try {
+      // A rollback that restored no snapshot (the upgrade only created files) records the context
+      // the rows still live carry, which is the one the repository had before the upgrade.
+      const recorded =
+        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx, detected.repositoryId));
+      if (recorded) {
+        // A choice is what the plan of the upgrade being undone found, not what the value looks like:
+        // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
+        const plan = (
+          await loadPreviousStepOutput(ctx.db, detected.rolledBackFromTaskId, '01-upgrade-plan')
+        )?.output as Pick<UpgradePlanOutput, 'rtkFollowsLive'> | null | undefined;
+        await writeProjectStateRecord(ctx.db, {
+          repositoryId: detected.repositoryId,
+          repoPath: ctx.repoPath,
+          context: recorded as unknown as TemplateRenderContext,
+          rtkChoiceRecorded:
+            plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean',
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warnings.push(`project state record write failed: ${message}`);
+      ctx.logger.warn({ err }, 'project state record write failed');
     }
 
     const installManifestWritten = await writeInstallManifest(

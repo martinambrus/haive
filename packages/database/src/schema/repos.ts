@@ -263,12 +263,25 @@ export const repositories = pgTable(
      *  existed", which the reconciliation treats as unprovable and refuses.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     rootClaimOwner: text('root_claim_owner'),
+    /** The context the templates were last written from, with the RTK choice flag beside it.
+     *  NULL until onboarding, an upgrade or a rollback records one. */
+    renderContext: jsonb('render_context'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),
     index('repositories_status_idx').on(table.status),
   ],
 );
+
+/** The record `.haive-data/state/` was last written from. */
+export const projectStateSync = pgTable('project_state_sync', {
+  repositoryId: uuid('repository_id')
+    .primaryKey()
+    .references(() => repositories.id, { onDelete: 'cascade' }),
+  baseSnapshot: jsonb('base_snapshot').notNull(),
+  lastError: text('last_error'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
 
 export const repoUploads = pgTable(
   'repo_uploads',

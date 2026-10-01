@@ -7,7 +7,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq, isNull } from 'drizzle-orm';
+import { isDeepStrictEqual } from 'node:util';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_DISK_PATH,
@@ -19,13 +20,22 @@ import {
   sha256Hex,
   type FormSchema,
 } from '@haive/shared';
+import {
+  emptyProjectState,
+  normalizeProjectState,
+  renderProjectState,
+} from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
 import { unclaimBackfilledEdits } from '../src/data-migrations.js';
 import { seedBlankScaffold } from '../src/repo/blank-scaffold.js';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
-import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import {
+  upgradePlanStep,
+  type UpgradePlanOutput,
+} from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
+import { getTemplateManifest } from '../src/step-engine/template-manifest.js';
 
 const log = logger.child({ module: 'upgrade-claims-smoke' });
 
@@ -58,6 +68,31 @@ function defaultValues(form: FormSchema | null): Record<string, unknown> {
   return values;
 }
 
+const RECORD_FORMAT = '.haive-data/state/format.json';
+const RECORD_RENDER = '.haive-data/state/project/render.json';
+const RECORD_PATHS = [RECORD_FORMAT, RECORD_RENDER];
+
+/** The record that holds a render context: its five portable fields, and no other. */
+const recordOf = (context: Record<string, unknown>) => ({
+  ...emptyProjectState(),
+  render: {
+    projectInfo: context.projectInfo,
+    framework: context.framework,
+    acceptedAgentIds: context.acceptedAgentIds,
+    customAgentSpecs: context.customAgentSpecs,
+    lspLanguages: context.lspLanguages,
+  } as never,
+});
+
+const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
+
+/** The deepest reason an error carries, where the driver wraps the database's own message. */
+function reasonOf(err: unknown): string {
+  const cause = err instanceof Error ? err.cause : undefined;
+  const reason = cause instanceof Error ? cause : err;
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 async function main(): Promise<void> {
   initDatabase(process.env.DATABASE_URL!);
   const db = getDb();
@@ -65,6 +100,7 @@ async function main(): Promise<void> {
   const repositoryId = randomUUID();
   const now = new Date();
   const repoPath = await mkdtemp(join(tmpdir(), 'upgrade-claims-smoke-'));
+  const createdRepoPath = await mkdtemp(join(tmpdir(), 'upgrade-claims-smoke-created-'));
 
   try {
     await db.insert(schema.users).values({
@@ -153,8 +189,8 @@ async function main(): Promise<void> {
       ])
       .returning({ id: schema.taskSteps.id });
 
-    const readOrNull = (rel: string) =>
-      readFile(join(repoPath, rel), 'utf8').then(
+    const readOrNull = (rel: string, root = repoPath) =>
+      readFile(join(root, rel), 'utf8').then(
         (text) => text,
         () => null,
       );
@@ -170,14 +206,77 @@ async function main(): Promise<void> {
           ),
         );
 
+    /** What the writers leave: the repository's render context and the sync row, or why they could
+     *  not be read, so that a missing column fails the checks that read it and not the run. */
+    const stateOf = async (repoId = repositoryId) => {
+      try {
+        const column = (await db.execute(
+          sql`select render_context from repositories where id = ${repoId}`,
+        )) as unknown as { render_context: unknown }[];
+        const sync = (await db.execute(
+          sql`select base_snapshot, last_error from project_state_sync where repository_id = ${repoId}`,
+        )) as unknown as { base_snapshot: unknown; last_error: string | null }[];
+        return { column: column[0]?.render_context ?? null, sync };
+      } catch (err) {
+        return { error: reasonOf(err) };
+      }
+    };
+    /** Nothing recorded and no record file, so what is read next is what the next step wrote; with
+     *  `staleSync` the sync row stays, stale and in error, so the next write has to replace it. */
+    const forgetState = async (staleSync = false, repoId = repositoryId, root = repoPath) => {
+      await db.execute(sql`update repositories set render_context = null where id = ${repoId}`);
+      await db.execute(
+        staleSync
+          ? sql`update project_state_sync set base_snapshot = '{"stale": true}'::jsonb, last_error = 'an earlier failure' where repository_id = ${repoId}`
+          : sql`delete from project_state_sync where repository_id = ${repoId}`,
+      );
+      await rm(join(root, '.haive-data/state'), { recursive: true, force: true });
+    };
+    /** Whether the state holds `context` with the RTK choice flag `recorded`, as its three parts. */
+    const stateHolds = async (
+      context: Record<string, unknown>,
+      recorded: boolean,
+      repoId = repositoryId,
+      root = repoPath,
+    ) => {
+      const state = await stateOf(repoId);
+      const want = recordOf(context);
+      const files = renderProjectState(want);
+      const onDisk = {
+        format: await readOrNull(RECORD_FORMAT, root),
+        render: await readOrNull(RECORD_RENDER, root),
+      };
+      const readable = !('error' in state);
+      return {
+        column:
+          readable &&
+          isDeepStrictEqual(
+            asJson(state.column),
+            asJson({ ...context, rtkChoiceRecorded: recorded }),
+          ),
+        files:
+          onDisk.format === files.get('format.json') &&
+          onDisk.render === files.get('project/render.json'),
+        sync:
+          readable &&
+          state.sync.length === 1 &&
+          isDeepStrictEqual(
+            asJson(state.sync[0]!.base_snapshot),
+            asJson(normalizeProjectState(want)),
+          ) &&
+          state.sync[0]!.last_error === null,
+        detail: { state, onDisk, want: { context, recorded } },
+      };
+    };
+
     const controller = new AbortController();
-    const ctxFor = (taskStepId: string, forTask = taskId): StepContext => ({
+    const ctxFor = (taskStepId: string, forTask = taskId, root = repoPath): StepContext => ({
       round: 0,
       taskId: forTask,
       taskStepId,
       userId,
-      repoPath,
-      workspacePath: repoPath,
+      repoPath: root,
+      workspacePath: root,
       sandboxWorkdir: '/haive/workdir',
       cliProviderId: null,
       db,
@@ -269,6 +368,23 @@ async function main(): Promise<void> {
       .update(schema.taskSteps)
       .set({ output: applied as unknown as Record<string, unknown>, status: 'done' })
       .where(eq(schema.taskSteps.id, applyRow!.id));
+
+    // ---- 02 records the plan's render context, and the record that holds it (B1.4a) -----------
+    const firstState = await stateHolds(plan.renderCtxSnapshot, plan.rtkFollowsLive === true);
+    check(
+      "an upgrade records the plan's render context, with the plan's RTK choice flag",
+      plan.rtkFollowsLive === true && firstState.column,
+      { ...firstState.detail, planFlag: plan.rtkFollowsLive ?? null },
+    );
+    check(
+      'and lists both record files among the paths it wrote',
+      RECORD_PATHS.every((p) => applied.writtenPaths?.includes(p)),
+      applied.writtenPaths,
+    );
+    check('and writes the record files as the codec renders that context', firstState.files, {
+      onDisk: firstState.detail.onDisk,
+    });
+    check('and moves the sync to that record, with no error', firstState.sync, firstState.detail);
     check('the missing file is written as new', (await readOrNull(removedBefore)) !== null);
 
     check(
@@ -369,12 +485,32 @@ async function main(): Promise<void> {
     );
     await writeFile(join(repoPath, CLI_RULES_DISK_PATH), agentsEdited);
 
+    // Cleared first, so that what is read after is what the rollback wrote, and its sync row stale,
+    // so that the write has to replace it.
+    await forgetState(true);
     const rolledBack = await upgradeRollbackStep.apply(rollbackCtx, {
       detected: rollback,
       formValues: {},
       iteration: 0,
       previousIterations: [],
     });
+    // The snapshot a rollback restores is the first target's prior one.
+    const restoredSnapshot =
+      rollback.targets.find((t) => t.priorFormValuesSnapshot)?.priorFormValuesSnapshot ?? null;
+    const restoredState =
+      restoredSnapshot === null
+        ? null
+        : await stateHolds(restoredSnapshot, typeof restoredSnapshot.rtkEnabled === 'boolean');
+    check(
+      'a rollback records the render context it restores, with the RTK choice that context holds',
+      typeof restoredSnapshot?.rtkEnabled === 'boolean' && restoredState?.column === true,
+      restoredState?.detail ?? 'no target carries a snapshot',
+    );
+    check(
+      'and writes the record files and moves the sync from it',
+      restoredState?.files === true && restoredState.sync,
+      restoredState?.detail ?? 'no target carries a snapshot',
+    );
     check(
       'the rollback puts the overwritten file back',
       (await readFile(join(repoPath, overwritten), 'utf8')) === overwrittenBytes,
@@ -629,8 +765,12 @@ async function main(): Promise<void> {
     secondValues.selectedReinstate = secondDetected.entries
       .filter((e) => e.diskPath === untouched)
       .map((e) => e.entryId);
+    // A plan stored before the RTK choice flag existed has none, which reads as no choice recorded.
+    const unflaggedPlan: UpgradePlanOutput = { ...secondPlan };
+    delete unflaggedPlan.rtkFollowsLive;
+    await forgetState();
     const secondApplied = await upgradeApplyStep.apply(secondApplyCtx, {
-      detected: secondPlan,
+      detected: unflaggedPlan,
       formValues: secondValues,
       iteration: 0,
       previousIterations: [],
@@ -639,6 +779,17 @@ async function main(): Promise<void> {
       .update(schema.taskSteps)
       .set({ output: secondApplied as unknown as Record<string, unknown>, status: 'done' })
       .where(eq(schema.taskSteps.id, secondApplyRow!.id));
+    const secondState = await stateHolds(secondPlan.renderCtxSnapshot, false);
+    check(
+      'an upgrade planned with no RTK choice flag records the choice as not recorded',
+      secondState.column,
+      secondState.detail,
+    );
+    check(
+      'and still lists both record files among the paths it wrote',
+      RECORD_PATHS.every((p) => secondApplied.writtenPaths?.includes(p)) && secondState.files,
+      { writtenPaths: secondApplied.writtenPaths, onDisk: secondState.detail.onDisk },
+    );
     check('the deleted file is reinstated', (await readOrNull(untouched)) === untouchedBytes);
     check(
       'the kept rules region is overwritten',
@@ -864,12 +1015,13 @@ async function main(): Promise<void> {
       title: string,
       stepIds: string[],
       metadata?: Record<string, unknown>,
+      at = { id: repositoryId, root: repoPath },
     ) => {
       const [t] = await db
         .insert(schema.tasks)
         .values({
           userId,
-          repositoryId,
+          repositoryId: at.id,
           type: 'onboarding_upgrade',
           title,
           status: 'running',
@@ -893,7 +1045,11 @@ async function main(): Promise<void> {
                 })),
               )
               .returning({ id: schema.taskSteps.id });
-      return { taskId: t!.id, ctxs: steps.map((st) => ctxFor(st.id, t!.id)), stepIds: steps };
+      return {
+        taskId: t!.id,
+        ctxs: steps.map((st) => ctxFor(st.id, t!.id, at.root)),
+        stepIds: steps,
+      };
     };
     const endTask = (id: string, status: 'completed' | 'cancelled') =>
       db
@@ -953,10 +1109,14 @@ async function main(): Promise<void> {
           eq(schema.onboardingArtifacts.repositoryId, repositoryId),
           isNull(schema.onboardingArtifacts.supersededAt),
         ),
-      );
+      )
+      .orderBy(schema.onboardingArtifacts.diskPath);
+    // Only a template the manifest still renders can come back as a clean update.
+    const rendered = new Set(getTemplateManifest().items.map((item) => item.id));
     let cleanPath: string | null = null;
     for (const r of liveNow) {
       if (r.templateKind === CLI_RULES_TEMPLATE_KIND) continue;
+      if (!rendered.has(r.templateId)) continue;
       if ([tracked, untouched, fresh, freshEdited, freshLinked].includes(r.diskPath)) continue;
       if ((await lstat(join(repoPath, r.diskPath)).catch(() => null))?.isFile() !== true) continue;
       const bytes = await readFile(join(repoPath, r.diskPath), 'utf8');
@@ -1058,6 +1218,10 @@ async function main(): Promise<void> {
       { mode: 'rollback' },
     );
     const fourthRollbackCtx = fourthRollbackTask.ctxs[0]!;
+    // The rows it restores from were written before RTK recorded a choice, so their snapshot holds none.
+    await db.execute(
+      sql`update onboarding_artifacts set form_values_snapshot = form_values_snapshot - 'rtkEnabled' where repository_id = ${repositoryId} and superseded_at is not null and form_values_snapshot is not null`,
+    );
     const fourthRollback = await upgradeRollbackStep.detect!(fourthRollbackCtx);
     const fourthRestore = (path: string) =>
       fourthRollback.targets.find((t) => t.diskPath === path)?.priorWrittenContent ?? null;
@@ -1077,12 +1241,30 @@ async function main(): Promise<void> {
       undoReinstate?.retiredRowId === untouchedRow.id,
       { undo: undoReinstate ?? null, row: untouchedRow.id },
     );
+    await forgetState();
     await upgradeRollbackStep.apply(fourthRollbackCtx, {
       detected: fourthRollback,
       formValues: {},
       iteration: 0,
       previousIterations: [],
     });
+    const legacySnapshot =
+      fourthRollback.targets.find((t) => t.priorFormValuesSnapshot)?.priorFormValuesSnapshot ??
+      null;
+    const legacyState =
+      legacySnapshot === null || typeof legacySnapshot.rtkEnabled === 'boolean'
+        ? null
+        : await stateHolds(legacySnapshot, false);
+    check(
+      'a rollback to a context from before RTK recorded a choice records the choice as not recorded',
+      legacyState?.column === true,
+      legacyState?.detail ?? { legacySnapshot },
+    );
+    check(
+      'and writes the record files from that context',
+      legacyState?.files === true && legacyState.sync,
+      legacyState?.detail ?? { legacySnapshot },
+    );
     check(
       'the rollback puts back what stood before the upgrade',
       (await readOrNull(tracked)) === trackedBytes &&
@@ -1094,6 +1276,138 @@ async function main(): Promise<void> {
       (await liveRowsAt(untouched)).length === 1,
     );
     await endTask(fourthRollbackTask.taskId, 'completed');
+
+    // ---- an upgrade that only creates files, and its rollback ------------------------------
+    // The rollback restores no snapshot, so the context it records has to come from the rows still
+    // live. RTK is off where those rows were written and on by the time of the upgrade, so the two
+    // contexts differ in the one field that tells them apart.
+    const created = { id: randomUUID(), root: createdRepoPath };
+    await db.insert(schema.repositories).values({
+      id: created.id,
+      userId,
+      name: 'upgrade-claims-smoke-created',
+      source: 'blank',
+      rtkEnabled: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await seedBlankScaffold(
+      db,
+      { userId, repositoryId: created.id, repoName: 'upgrade-claims-smoke-created' },
+      created.root,
+    );
+    const seededWith = await openTask(
+      'upgrade-claims-smoke created seeded',
+      ['01-upgrade-plan'],
+      undefined,
+      created,
+    );
+    const seededDetected = await upgradePlanStep.detect!(seededWith.ctxs[0]!);
+    await upgradePlanStep.apply(seededWith.ctxs[0]!, {
+      detected: seededDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await endTask(seededWith.taskId, 'completed');
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: true })
+      .where(eq(schema.repositories.id, created.id));
+
+    const creating = await openTask(
+      'upgrade-claims-smoke created upgrade',
+      ['01-upgrade-plan', '02-upgrade-apply'],
+      undefined,
+      created,
+    );
+    const [creatingPlanCtx, creatingApplyCtx] = creating.ctxs;
+    const creatingDetected = await upgradePlanStep.detect!(creatingPlanCtx!);
+    const creatingPlanned = await upgradePlanStep.apply(creatingPlanCtx!, {
+      detected: creatingDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: creatingPlanned as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, creating.stepIds[0]!.id));
+    const creatingPlan = await upgradeApplyStep.detect!(creatingApplyCtx!);
+    const creatingForm = upgradeApplyStep.form!(
+      creatingApplyCtx!,
+      creatingPlan,
+    ) as FormSchema | null;
+    const creatingApplied = await upgradeApplyStep.apply(creatingApplyCtx!, {
+      detected: creatingPlan,
+      formValues: defaultValues(creatingForm),
+      iteration: 0,
+      previousIterations: [],
+    });
+    await db
+      .update(schema.taskSteps)
+      .set({ output: creatingApplied as unknown as Record<string, unknown>, status: 'done' })
+      .where(eq(schema.taskSteps.id, creating.stepIds[1]!.id));
+    await endTask(creating.taskId, 'completed');
+
+    const undoCreated = await openTask(
+      'upgrade-claims-smoke created rollback',
+      ['04-upgrade-rollback'],
+      { mode: 'rollback' },
+      created,
+    );
+    const undoCreatedCtx = undoCreated.ctxs[0]!;
+    const undoDetected = await upgradeRollbackStep.detect!(undoCreatedCtx);
+    check(
+      'the upgrade only created files, and renders RTK as on where the rows it leaves live record it off',
+      undoDetected.targets.length === 0 &&
+        undoDetected.newArtifactsToUndo.length > 0 &&
+        seededDetected.renderCtxSnapshot.rtkEnabled === false &&
+        creatingPlan.renderCtxSnapshot.rtkEnabled === true,
+      {
+        targets: undoDetected.targets.length,
+        created: undoDetected.newArtifactsToUndo.map((u) => u.diskPath),
+        rowsRecord: seededDetected.renderCtxSnapshot.rtkEnabled ?? null,
+        upgradeRenders: creatingPlan.renderCtxSnapshot.rtkEnabled ?? null,
+      },
+    );
+    // Cleared, so that what is read after is what the rollback wrote.
+    await forgetState(true, created.id, created.root);
+    const undoneCreated = await upgradeRollbackStep.apply(undoCreatedCtx, {
+      detected: undoDetected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    const createdState = await stateHolds(
+      seededDetected.renderCtxSnapshot,
+      true,
+      created.id,
+      created.root,
+    );
+    check(
+      'a rollback of it records the render context the rows still live carry, with its RTK choice',
+      createdState.column,
+      createdState.detail,
+    );
+    check(
+      'and writes the record files and moves the sync from that context',
+      createdState.files && createdState.sync,
+      createdState.detail,
+    );
+    const stillThere = (
+      await Promise.all(
+        undoDetected.newArtifactsToUndo.map(async (u) =>
+          (await readOrNull(u.diskPath, created.root)) === null ? null : u.diskPath,
+        ),
+      )
+    ).filter((path) => path !== null);
+    check(
+      'the files the upgrade created are gone',
+      undoneCreated.revertedCount > 0 && stillThere.length === 0,
+      { reverted: undoneCreated.revertedCount, stillThere, warnings: undoneCreated.warnings },
+    );
+    await endTask(undoCreated.taskId, 'completed');
 
     // ---- the boot repair ----------------------------------------------------------------
     const h = h64;
@@ -1201,6 +1515,7 @@ async function main(): Promise<void> {
       log.warn({ err: cleanupErr }, 'cleanup failed');
     }
     await rm(repoPath, { recursive: true, force: true });
+    await rm(createdRepoPath, { recursive: true, force: true });
     process.exit(process.exitCode ?? 0);
   }
 }

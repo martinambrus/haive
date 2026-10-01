@@ -246,10 +246,105 @@ Phase 1 (the record):
   `git merge-file` over all 28 pairs of eight single-file edits merges cleanly to the render of the
   record merge, while two adjacent settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
-  [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
-  replaces `importHaiveDataMirror` (legacy files as fallback); 12/02 write `render_context`; 01's
-  `resolveRenderContext` reads it first; POST /tasks and upgrade-status accept a repo with a
-  render context. Control (smoke gaps): B's 01 throws today, plans after.
+  [B1.3]. `project_state_sync` table, `repositories.render_context`;
+  `syncProjectStateFromCheckout` replaces `importHaiveDataMirror` (legacy files as fallback);
+  12/02/04 write `render_context`; 01's `resolveRenderContext` reads it first; POST /tasks and
+  upgrade-status accept a repo with a render context. Control (smoke gaps): B's 01 throws today,
+  plans after.
+
+  **A commits the render context, because B cannot derive it.** MEASURED on the dev install across
+  13 step-07 detect outputs: `framework` and `lspLanguages` are reproducible from the committed
+  mirrors (13 of 13), but `acceptedAgentIds` and `customAgentSpecs` exist only in A's database —
+  `install.json` carries neither (5 of 33 agents missing on one repo), the agent folders overcount
+  (45 files against 33 accepted), and the README index is a human-facing table. A derivation that
+  is wrong is wrong SILENTLY, so B1.4 commits `.haive-data/state/format.json` and
+  `project/render.json` and nothing else: settings and environment stay out until B1.8, because
+  `PATCH /tooling` and `PATCH /exclusions` rewrite no file, so a record carrying them goes stale on
+  the first edit and the next sync reverts it. `projectInfo` is NOT reproducible either (docroot
+  differs on 7 of 7, since 07 reads 01's `enrichedData` while the mirror stores 01's detect data),
+  which is the second reason the file is committed rather than rebuilt.
+
+  **Writers: 12, 02 and 04, each stamping the sync in the same transaction.** A writer that rewrites
+  a record file without moving `project_state_sync` leaves A's own next sync with no base — and with
+  no base the incoming side wins, so the stale file on disk overwrites the newer DB value. Traced as
+  a sequence: A onboards (12 writes R1), upgrades (02 writes R2), refreshes, and `render_context`
+  goes back to R1. So each writer sets `base_snapshot` to what it wrote, and the sync merges
+  against it. A watermark (the hash of the files and the commit holding them) has no reader until
+  B3.1, when a checkout can move without a sync, so B3.1 adds it with that reader rather than B1.4
+  writing columns nothing reads. A unit the merge leaves in conflict keeps
+  its old base, so the next sync finds the same conflict again rather than settling it for the local
+  side, until B1.5 asks the person. 02 must also list both files in `writtenPaths`, because 03's
+  base stage list does not name it and a workflow task checks out HEAD.
+
+  **The legacy fallback becomes PER UNIT.** The plan's "no record → legacy files" rule would make a
+  partial record switch the whole legacy import off, so a repository carrying only
+  `render.json` would stop importing environment, tooling and exclusions. Each unit the record does
+  not cover is filled from its legacy file as today, fill-if-absent, which also keeps B0.1's MCP
+  consent hold and B0.3's `rtkEnabled` in one importer. B1.7 `git rm`s each legacy file in the
+  commit that first carries its unit. The importer re-adds
+  `ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` when it writes the column, since the record versions
+  itself through `format.json` and the column's readers gate on their own version.
+  The sync renders its local record before it merges (`renderProjectState`), which applies the
+  codec's depth bound, its descriptor walk and its unreadable-record refusal in one call: the
+  merge compares through canonical JSON, which recurses, and only the parser bounds what it
+  produces. It reads each record file as bytes and refuses one that is not valid UTF-8, since a
+  blob id computed from lossily decoded text matches no id git reports.
+
+  **`render_context` carries the whole snapshot, and an RTK choice is recorded explicitly.**
+  `upgrade-status` mirrors 01's choice of context for RTK (`recordedRtkProviders`,
+  `rtkChoiceFollowsLive`), so once 01 reads the column first, the banner must read it through the
+  same order or the two diverge: on a repository with RTK off, no rows and a git source, 01 probes
+  unrecorded RTK settings files while the banner stays silent about the removal the plan offers.
+  The column therefore holds the 8 `TemplateRenderContext` fields, the enabled provider names, and
+  a `rtkChoiceRecorded` flag that is STORED rather than inferred — 01's 07-detect fallback writes
+  `rtkEnabled: false` for a choice nobody made, and the next read takes that for a recorded one.
+  One resolution order lives in `@haive/shared` and is read by 01 and by the api. 04 is a writer
+  too: it restores a prior snapshot, so leaving it out makes 01 and the banner read different
+  contexts after a rollback.
+
+  **The gates gain one term, and only that term is guarded.** A shared helper in
+  `api/src/lib/onboarding-state.ts` adds `render_context IS NOT NULL AND the onboarding verdict is
+  onboarded` to `POST /tasks` and upgrade-status, checked only when the two existing terms fail.
+  The bare column is not enough: it would admit a repository during its own onboarding, after a
+  reset, and with a marker missing. The existing terms are left as they are — aligning them with
+  the verdict changes what already-reset repositories see and belongs in its own fix.
+  `applicable_template_ids` is NOT recomputed on import: with no claims a recomputed set makes
+  every applicable template read as changed, and 01's apply already fills it on B's first plan.
+
+  Migration 0171, additive, the column declared last, the foreign key named
+  `project_state_sync_repository_id_repositories_id_fk` (an inline `REFERENCES` takes Postgres'
+  `_fkey` name and turns `schema-parity` red). Undo: drop the table and the column.
+
+  **As built, B1.4a (the writers; nothing reads the column yet).** `renderContextColumnSchema` and
+  `portableRender` live in `@haive/shared/project-state`; `renderTargetsFor`
+  (`step-engine/_render-targets.ts`) is 07's derivation moved unchanged, pinned through 07's
+  `detect`. `writeProjectStateRecord` (worker `project-state/write.ts`) parses the column value
+  first, so a context the schema refuses writes nothing at all: only a snapshot from before
+  2026-04-27 (when 12 began storing one) or a rollback's `{}` can be one, and it gets a warning and
+  no record, since the record must not invent a context. It then writes the files and, in one
+  transaction, takes an advisory lock on a per-repository key distinct from the plan mirror's,
+  sets the column and upserts the sync row. Files before the lock is the design above: two
+  overlapping writers (an onboarding beside an upgrade) can leave one's files with the other's
+  column, which the next sync converges. 12 derives its context from 07's output before anything
+  else and writes whenever it exists, whatever recording the artifacts did. 02 adds both files to
+  `writtenPaths` even when the database half fails (the writer's rejection names the files it
+  wrote), since they are what a later sync takes as the intended context and 03 commits only what
+  02 lists. 04 writes the snapshot it restored or, for a rollback of an upgrade that only created
+  files (no snapshot among its targets), the one the rows still live after it carry. The RTK flag
+  is never read off the value, since 01's pre-RTK fallback stores a synthesized `false`: 02 takes
+  its plan's `rtkFollowsLive`, 04 the rolled-back upgrade's plan's (and a boolean in what it
+  restores), and 12 whether 07's output recorded RTK at all. The onboarding reset takes it all back: the two files by name, their directories only once
+  empty, and the column and the sync row in the transaction that clears `onboarded_at`. The
+  repositories LIST query does not fetch the column: MEASURED on 13 step-07 outputs, a context is
+  11-42 KB against ~3.3 KB for the rest of a list row, and the list is polled every 5 s.
+
+  Controls, each failing on main: B's render context equals A's on all 8 keys with an LLM custom
+  agent in A's fixture (the smoke's current 3-field check passes a lossy derivation); a record
+  holding only `render.json` still imports environment, tooling and exclusions; A onboards,
+  upgrades and refreshes with its render context unchanged; a portable-only column is completed or
+  01 throws a named error rather than a `TypeError`; on B with RTK off and no rows, 01's RTK
+  removals and upgrade-status agree. `smoke:mirror-import`, `smoke:mcp-import-consent` and
+  `smoke:repo-refresh` stay green unchanged.
 - **B1.5 feat: pending conflicts, asked, never chosen for the person** [B1.4].
   `project_state_conflicts`, the hold rules, `GET/POST /repos/:id/project-state/conflicts`, and
   the panel/banner resolution UI (browser check at 375/768/1280). Control (smoke): two installs

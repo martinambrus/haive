@@ -141,7 +141,7 @@ async function requireRepositoryId(ctx: StepContext): Promise<string> {
   return repoId;
 }
 
-async function loadLiveArtifacts(
+export async function loadLiveArtifacts(
   ctx: StepContext,
   repositoryId: string,
 ): Promise<LiveArtifactRow[]> {

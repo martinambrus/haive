@@ -59,6 +59,7 @@ import {
   unmanagedAgentsDir,
   type ArchiveFormat,
 } from '@haive/shared';
+import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
@@ -201,6 +202,8 @@ repoRoutes.get('/', async (c) => {
   const rows = await db.query.repositories.findMany({
     where: eq(schema.repositories.userId, userId),
     orderBy: [desc(schema.repositories.createdAt)],
+    // Large, and this list is polled every 5s.
+    columns: { renderContext: false },
   });
 
   // Per-repo task counts for the list badges. "Open" = non-terminal, matching
@@ -1521,7 +1524,16 @@ export function collectWrittenCliContent(
 
 /** `.haive/` is the git-excluded dir; only this one file in it is onboarding's. */
 const INSTALL_MANIFEST_PATH = '.haive/install.json';
-const ONBOARDING_RESET_FILES = ['.ripgreprc', INSTALL_MANIFEST_PATH];
+const ONBOARDING_RESET_FILES = [
+  '.ripgreprc',
+  INSTALL_MANIFEST_PATH,
+  `${PROJECT_STATE_DIR}/format.json`,
+  `${PROJECT_STATE_DIR}/project/render.json`,
+];
+
+/** What the record files above leave behind, and removed only once empty: a file somebody put
+ *  beside the record keeps the directory it is in. */
+const ONBOARDING_RESET_EMPTY_DIRS = [`${PROJECT_STATE_DIR}/project`, PROJECT_STATE_DIR];
 
 /** The one directory swept entry by entry rather than removed whole: `.claude` holds Haive's
  *  workflow config, commands and review files beside things Haive must not take back. */
@@ -2296,20 +2308,25 @@ export async function resetOnboardingArtifacts(
     if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);
   });
 
-  // A CLI's own dot-dir is not Haive's and is never a removal target, but one the reset has just
-  // emptied is left-over scaffolding rather than the user's — `rmdir` is used, so a directory
-  // holding anything at all (a `.codex/config.toml`, an `agents-legacy`) is untouched.
-  for (const parent of new Set(dirs.remove.map((rel) => rel.split('/')[0]!))) {
-    if (!parent.startsWith('.') || parent === ONBOARDING_SWEEP_DIR) continue;
-    await guard(parent, async () => {
-      const left = await readdirNoFollow(root, parent, { strict: true });
-      if (left !== null && left.length === 0 && (await removeNoFollow(root, parent))) {
-        removed.push(parent);
+  // `rmdir` only: a directory holding anything at all (a `.codex/config.toml`, an `agents-legacy`)
+  // is untouched.
+  const removeIfEmpty = (rel: string) =>
+    guard(rel, async () => {
+      const left = await readdirNoFollow(root, rel, { strict: true });
+      if (left !== null && left.length === 0 && (await removeNoFollow(root, rel))) {
+        removed.push(rel);
       }
     });
+
+  // A CLI's own dot-dir is not Haive's and is never a removal target, but one the reset has just
+  // emptied is left-over scaffolding rather than the user's.
+  for (const parent of new Set(dirs.remove.map((rel) => rel.split('/')[0]!))) {
+    if (!parent.startsWith('.') || parent === ONBOARDING_SWEEP_DIR) continue;
+    await removeIfEmpty(parent);
   }
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
+  for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {
     await guard(rel, async () => {
@@ -2782,11 +2799,18 @@ async function runOnboardingArtifactReset(
       live.map((row) => row.id),
     );
     // The completion stamp cannot outlive the files it vouches for: this is the "start over"
-    // action, and a repo whose artifacts are gone is not onboarded however it got marked.
+    // action, and a repo whose artifacts are gone is not onboarded however it got marked. The
+    // render context and its sync record describe the record files taken back above.
     await tx
       .update(schema.repositories)
-      .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
+      .set({
+        onboardedAt: null,
+        renderContext: null,
+        onboardingResetAt: resetStartedAt,
+        updatedAt: new Date(),
+      })
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+    await tx.delete(schema.projectStateSync).where(eq(schema.projectStateSync.repositoryId, id));
   });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }

@@ -30,6 +30,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
+import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
@@ -193,14 +194,20 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
 /** Record onboarding_artifacts rows and write `.haive/install.json`. Runs
  *  always (not gated by the commit checkbox) so versioning is in place even
  *  when the user defers committing. Idempotent on re-runs: upstream step
- *  machine guarantees 12-post-onboarding.apply runs once per task. */
+ *  machine guarantees 12-post-onboarding.apply runs once per task. `renderCtx` is
+ *  built from `detect`, step 07's output; both are null where 07 left none. */
 async function recordOnboardingArtifacts(
   ctx: StepContext,
-): Promise<{ rowsWritten: number; installManifestWritten: boolean; warnings: string[] }> {
+  detect: GenerateFilesDetect | null,
+  renderCtx: TemplateRenderContext | null,
+): Promise<{
+  rowsWritten: number;
+  installManifestWritten: boolean;
+  warnings: string[];
+}> {
   const warnings: string[] = [];
 
-  const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
-  if (!genPrev || !genPrev.detect) {
+  if (!detect || !renderCtx) {
     warnings.push('onboarding-artifacts: 07-generate-files detect output missing, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — step 07 detect output missing');
     return { rowsWritten: 0, installManifestWritten: false, warnings };
@@ -218,8 +225,6 @@ async function recordOnboardingArtifacts(
     return { rowsWritten: 0, installManifestWritten: false, warnings };
   }
 
-  const detect = genPrev.detect as GenerateFilesDetect;
-  const renderCtx = buildRenderContext(detect);
   const manifest = getTemplateManifest();
   const haiveExpanded = expandManifestFor(renderCtx, manifest);
 
@@ -626,8 +631,16 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // opts into an immediate commit here.
     let artifactRowsWritten = 0;
     let installManifestWritten = false;
+    let renderContext: TemplateRenderContext | null = null;
+    let rtkChoiceRecorded = false;
     try {
-      const res = await recordOnboardingArtifacts(ctx);
+      const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
+      const detect = genPrev?.detect ? (genPrev.detect as GenerateFilesDetect) : null;
+      // Derived ahead of the recording, which the project state record below must not depend on.
+      renderContext = detect ? buildRenderContext(detect) : null;
+      // A 07 output from before RTK shipped made no choice; buildRenderContext defaults it off.
+      rtkChoiceRecorded = detect?.rtkEnabled !== undefined;
+      const res = await recordOnboardingArtifacts(ctx, detect, renderContext);
       artifactRowsWritten = res.rowsWritten;
       installManifestWritten = res.installManifestWritten;
       warnings.push(...res.warnings);
@@ -667,6 +680,20 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(`haive-data mirror write failed: ${message}`);
         ctx.logger.warn({ err }, 'haive-data mirror write failed');
+      }
+      if (renderContext) {
+        try {
+          await writeProjectStateRecord(ctx.db, {
+            repositoryId: mirrorRepositoryId,
+            repoPath: ctx.repoPath,
+            context: renderContext,
+            rtkChoiceRecorded,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          warnings.push(`project state record write failed: ${message}`);
+          ctx.logger.warn({ err }, 'project state record write failed');
+        }
       }
     }
 
