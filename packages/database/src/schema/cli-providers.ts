@@ -218,7 +218,7 @@ export const openrouterModelCache = pgTable('openrouter_model_cache', {
 // this as the preferred provider when dispatching that step. Set by:
 //   - the runner whenever a step's CLI invocation is enqueued (so the
 //     last-actually-used wins, not just the dropdown click)
-//   - the UI dropdown when the user explicitly picks a CLI for a step
+//   - the UI when a person picks a step's CLI with "Also for my later tasks" ticked
 // FK cascade: deleting the user or the cli_provider drops the row.
 
 export const userStepCliPreferences = pgTable(

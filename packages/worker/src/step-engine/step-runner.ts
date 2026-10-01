@@ -156,12 +156,11 @@ async function loadLastCompletedFormValues(
   return rows[0]?.formValues ?? undefined;
 }
 
-/** Returns the user's explicit per-step CLI override (set via the task UI),
- *  validated as enabled, plus the effort/reasoning override stored beside it on
- *  the same preference row (null when none). Falls back to the task default CLI
- *  (and null effort) when no explicit override exists or the override's provider
- *  is disabled/deleted. Legacy auto-recorded rows (explicit=false) are ignored so
- *  the task provider wins. */
+/** Returns the CLI chosen for this (step, role) in this task, else the user's explicit
+ *  saved per-step override, validated as enabled, plus the effort/reasoning override
+ *  stored beside it (null when none). Falls back to the task default CLI (and null
+ *  effort) when neither exists or the chosen provider is disabled/deleted. Legacy
+ *  auto-recorded rows (explicit=false) are ignored so the task provider wins. */
 export async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -172,6 +171,19 @@ export async function resolvePreferredCli(
   taskId?: string,
   ignoreSaved = false,
 ): Promise<{ cliProviderId: string | null; effortLevel: string | null }> {
+  const usable = (id: string | null): id is string =>
+    !!id && providers.some((p) => p.id === id && p.enabled);
+  // A NULL provider is this task clearing the slot, so the saved preference stays out of it.
+  const taskChoice = (r: string) =>
+    taskId
+      ? db.query.taskStepCliChoices.findFirst({
+          where: and(
+            eq(schema.taskStepCliChoices.taskId, taskId),
+            eq(schema.taskStepCliChoices.stepId, stepId),
+            eq(schema.taskStepCliChoices.role, r),
+          ),
+        })
+      : Promise.resolve(undefined);
   // When the task set ignore_saved_step_clis, a saved pref is honored only where
   // the user explicitly (re)set it WITHIN this task (a task_step_cli_touched
   // marker for that exact role); otherwise the step falls back to the task
@@ -192,20 +204,33 @@ export async function resolvePreferredCli(
   // unset/disabled role falls through to the step's single 'default' pref, then
   // to the task provider, so partially-configured multi-CLI steps still run.
   if (role !== 'default') {
-    const roleRow = await db.query.userStepCliRolePreferences.findFirst({
-      where: and(
-        eq(schema.userStepCliRolePreferences.userId, userId),
-        eq(schema.userStepCliRolePreferences.stepId, stepId),
-        eq(schema.userStepCliRolePreferences.role, role),
-        eq(schema.userStepCliRolePreferences.explicit, true),
-      ),
-    });
-    if (roleRow) {
-      const p = providers.find((p) => p.id === roleRow.cliProviderId);
-      if (p && p.enabled && (!ignoreSaved || (await isTouched(role)))) {
-        return { cliProviderId: roleRow.cliProviderId, effortLevel: roleRow.effortLevel };
+    const roleChoice = await taskChoice(role);
+    if (roleChoice) {
+      if (usable(roleChoice.cliProviderId)) {
+        return { cliProviderId: roleChoice.cliProviderId, effortLevel: roleChoice.effortLevel };
+      }
+    } else {
+      const roleRow = await db.query.userStepCliRolePreferences.findFirst({
+        where: and(
+          eq(schema.userStepCliRolePreferences.userId, userId),
+          eq(schema.userStepCliRolePreferences.stepId, stepId),
+          eq(schema.userStepCliRolePreferences.role, role),
+          eq(schema.userStepCliRolePreferences.explicit, true),
+        ),
+      });
+      if (roleRow) {
+        const p = providers.find((p) => p.id === roleRow.cliProviderId);
+        if (p && p.enabled && (!ignoreSaved || (await isTouched(role)))) {
+          return { cliProviderId: roleRow.cliProviderId, effortLevel: roleRow.effortLevel };
+        }
       }
     }
+  }
+  const defaultChoice = await taskChoice('default');
+  if (defaultChoice) {
+    return usable(defaultChoice.cliProviderId)
+      ? { cliProviderId: defaultChoice.cliProviderId, effortLevel: defaultChoice.effortLevel }
+      : { cliProviderId: fallback, effortLevel: null };
   }
   const row = await db.query.userStepCliPreferences.findFirst({
     where: and(

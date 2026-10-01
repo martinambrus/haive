@@ -1013,6 +1013,7 @@ function makeDagMergeWaitDb(opts: {
       users: { findFirst: async () => undefined },
       cliInvocations: { findFirst: async () => opts.invocation },
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
     },
     // lockOwnedStep's ownership probe (select({id}).from(taskSteps).where(owned(id)).for(
     // 'update')) is distinguished by its columns argument and honours the same ownership
@@ -1644,6 +1645,7 @@ function makeSpawnDb() {
     query: {
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
     },
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown>) => {
@@ -1996,6 +1998,7 @@ function lostRowPhaseDb(opts: { agentRun?: Record<string, unknown>; invocation: 
       cliInvocations: { findFirst: async () => opts.invocation },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
     },
     select: (cols?: unknown) => ({
       from: (table: unknown) =>

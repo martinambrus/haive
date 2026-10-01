@@ -287,6 +287,7 @@ function makeMockDb(state: MockState): Database {
     },
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
       // Read only for a seat other than 'default'.
       userStepCliRolePreferences: { findFirst: async () => undefined },
       tasks: { findFirst: async () => undefined },

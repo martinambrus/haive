@@ -346,8 +346,8 @@ export const tasks = pgTable(
     /** Per-task "use my chosen CLI for all steps" toggle (New Task form). When
      *  true, the step-CLI resolver + UI ignore the user's pre-existing saved
      *  per-step CLI prefs and default every step to this task's cli_provider_id;
-     *  a step the user explicitly changes during the task is recorded in
-     *  task_step_cli_touched and honored. Default false = today's behavior. */
+     *  a step the user changes during the task is honored through its
+     *  task_step_cli_choices row. Default false = today's behavior. */
     ignoreSavedStepClis: boolean('ignore_saved_step_clis').notNull().default(false),
     /** False skips the LLM recap pass entirely. Separate from summary_cli_provider_id
      *  because an FK cannot carry an off value. */
@@ -811,9 +811,10 @@ export const taskStepAgentMinings = pgTable(
 // Records which (step, role) the user explicitly set a CLI for WITHIN a task
 // that has ignore_saved_step_clis=true. Under that flag the resolver + UI ignore
 // pre-existing global per-step prefs EXCEPT where a marker exists, so a mid-task
-// manual change still takes effect (and still writes the global pref, as normal)
-// while the auto-applied default stays the task's cli_provider_id. Keyed per
-// task_id => no cross-task bleed. Only written for flagged tasks.
+// manual change still takes effect while the auto-applied default stays the
+// task's cli_provider_id. Keyed per task_id => no cross-task bleed. No longer
+// written: a mid-task change is a task_step_cli_choices row now, and these are
+// still read for the tasks that predate it.
 export const taskStepCliTouched = pgTable(
   'task_step_cli_touched',
   {

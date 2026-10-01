@@ -202,6 +202,7 @@ function makeDb(
       cliInvocations: { findFirst: async () => opts.invocation ?? undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
     },
     update: () => ({
       set: (patch: Record<string, unknown>) => ({
