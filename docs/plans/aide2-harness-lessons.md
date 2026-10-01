@@ -198,23 +198,35 @@ it; the column is additive and nullable, and a later change drops it.
 
 ### P1. Bound the sequence agents' plan context (recommended first change)
 
-Invariant: a plan render that reaches a sequence agent is bounded and says what it left out. Two arms,
-in order:
+Invariant: a plan render that reaches a sequence agent is bounded and says what it left out, and every
+node it shows carries the fields today's render gives it, its build-order number included
+(`buildSequencePrompt` tells the agent each node has one). Two arms, in order:
 
 1. **Parity.** Build each agent's context with `buildPlanExpansionContext`, focused on the node whose
    children the agent orders: the shape 01 and 02 already use, links still omitted as the step
-   requires. This alone ends F1's breach of the provider-neutral bound, with the precedent of F3.
-2. **Role-sized.** The same neighbourhood with the outline cut to depth 1 or 2, or a small character
-   budget. F2 says 99.7% of this role's output stays inside what it is shown about its own node.
+   requires. That helper emits titles, refs, kinds and statuses but no build-order number, so it gains
+   the number for this caller; without it the arm would change two things at once. This alone ends
+   F1's breach of the provider-neutral bound, with the precedent of F3.
+2. **Role-sized.** The same neighbourhood and fields, with the outline cut to depth 1 or 2 or a small
+   character budget. F2 says 99.7% of this role's output stays inside what it is shown about its own
+   node.
 
 Trade-off, stated in the prompt: a node outside the neighbourhood carries no id, so the rare
-cross-subtree `depends_on` (0.3% in F2) can no longer be named. Verification: zero-token first, by
-building the prompts for a real 800-node plan and measuring them; then one wave per arm (12 agents,
-`SEQUENCE_AGENTS_PER_WAVE`) on the same plan, comparing cache-write tokens per agent, the step's
-`disagreements` count, order agreement between the arms per parent, and a person's spot check of the
-parents where the arms differ. The step has no ground truth by design (a disagreement is "two
-independent judgements … only a person can say which is right"), so that check is the grade. D1 picks
-the arm. Rollback: revert the builder call; no schema change.
+cross-subtree `depends_on` (0.3% in F2) can no longer be named.
+
+Arms are compared on the same parents from the same plan state, and two waves on one repository cannot
+give that: `loadAskedParents` collects every parent any sequence agent of the repository was ever asked
+about, and the step drops those from its targets, so a second wave orders different parents or none.
+Each arm therefore runs on its own copy of the repository and its plan, or through P8's harness; P7
+follows the same rule.
+
+Verification: zero-token first, by building the prompts for a real 800-node plan and measuring them;
+then one wave per arm (12 agents, `SEQUENCE_AGENTS_PER_WAVE`), each on its own copy of the same plan
+state, comparing cache-write tokens per agent, the step's `disagreements` count, order agreement
+between the arms per parent, and a person's spot check of the parents where the arms differ. The step
+has no ground truth by design (a disagreement is "two independent judgements … only a person can say
+which is right"), so that check is the grade. D1 picks the arm. Rollback: revert the builder call; no
+schema change.
 
 ### P2. Tell the fixer what the same check said last round (prompt only)
 
@@ -279,22 +291,29 @@ Cheap half first:
 - Each fix prompt (07's fix pass, 08b's fix pass and the DAG fix coder) gets one line: the defect is
   re-checked by checks the fixer cannot see, so fix the behaviour, and change a test's expectation only
   where the spec says it is wrong, naming that spec line in the reply.
-- Gate 2, and gate 3 when no gate-2 decision exists, lists the test files a fix pass changed, with the
-  round and the diff of each, as display copy under the rules the similar-sites row follows. 07b and
-  08c are told which test files a fix pass changed, as Haive-derived paths.
+- Each fix pass's test edits are recorded when the pass ends: the test files it changed, and a bounded
+  patch of each against its content before the pass, taken host-side. Nothing records that today. 08b
+  folds every pass into one cumulative list (`accumulateChanges`) and keeps no file content, so a later
+  pass's edit to a test an earlier pass wrote cannot be told apart, and later edits overwrite what a
+  diff would need. The evidence is captured at the pass and never rebuilt afterwards.
+- Gate 2, and gate 3 when no gate-2 decision exists, shows that record (the pass, its round and its
+  patch) as display copy under the rules the similar-sites row follows. 07b and 08c are told which
+  test files a fix pass changed, as Haive-derived paths.
 
 The heavier half is conditional on the cheap half showing test edits beside gate-2 rejections: re-run
-each changed test as it stood before the fix pass against the fixed code, and add the result to the
-gate row beside the spec line the fixer cited. It is evidence for a person, never a grade. Where the
-spec made the old expectation wrong, the old test is supposed to fail against a correct fix, so a
-failure there proves nothing on its own, and nothing loops back or fails a step on it. Verification:
-prompt tests, the gate row rendered from a fixture, and field counts. Rollback: display and prompt
-only.
+each changed test as it stood before the fix pass (its recorded content) against the fixed code, and
+add the result to the gate row beside the spec line the fixer cited. It is evidence for a person,
+never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail against
+a correct fix, so a failure there proves nothing on its own, and nothing loops back or fails a step on
+it. Verification: prompt tests; a two-pass fixture in which pass 0 writes a test and pass 1 edits it,
+recording the edit under pass 1 alone; the gate row rendered from that record; and field counts.
+Rollback: the record is additive, the rest display and prompt only.
 
 ### P7. A cheaper model on a narrow, high-volume seat (configuration, no code)
 
 F9 means nothing needs building. On the dev install, point `03-plan-sequence`'s `expand` seat at a
-cheaper provider, run one wave per provider on the same plan, and compare as P1 does, plus tokens and
+cheaper provider, run one wave per provider, each on its own copy of the same plan state (P1's rule:
+two waves on one repository order different parents), and compare as P1 does, plus tokens and
 failures. Local only: the preference is a user setting on the dev install, snapshotted before the run
 and restored after. If the cheaper seat holds up, D4 decides whether it becomes a product default.
 Rollback: restore the snapshot.
