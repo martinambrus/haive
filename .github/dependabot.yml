@@ -40,6 +40,9 @@ updates:
     ignore:
       - dependency-name: "drizzle-orm"
       - dependency-name: "drizzle-kit"
+      # Bumped by hand: pnpm refuses a lockfile whose root patch matches no installed version, so
+      # the bump that moves past patches/postgres@3.4.9.patch is where the patch is dropped or re-keyed.
+      - dependency-name: "postgres"
 
   # GitHub Actions pinned in the CI workflow.
   - package-ecosystem: github-actions

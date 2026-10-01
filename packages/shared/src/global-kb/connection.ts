@@ -163,7 +163,7 @@ function buildConnection(
     ollamaUrl: settings.ollamaUrl,
     embedModel: settings.embedModel,
     close: async () => {
-      await pg.end();
+      await pg.end({ timeout: 5 });
     },
   };
 }

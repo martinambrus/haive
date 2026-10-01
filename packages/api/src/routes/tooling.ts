@@ -30,10 +30,10 @@ tooling.post('/test-postgres', async (c) => {
     try {
       const rows = await sql`SELECT 1 AS ok`;
       const ok = Array.isArray(rows) && rows.length > 0;
-      await sql.end();
+      await sql.end({ timeout: 5 });
       return c.json({ ok, version: null });
     } catch (err) {
-      await sql.end().catch(() => {});
+      await sql.end({ timeout: 5 }).catch(() => {});
       return c.json({
         ok: false,
         error: err instanceof Error ? err.message : String(err),
