@@ -19,8 +19,11 @@ import {
 } from './record.js';
 
 export class ProjectStateError extends Error {
-  constructor(readonly problems: string[]) {
-    super(`the project state record is not valid: ${problems.join('; ')}`);
+  constructor(
+    readonly problems: string[],
+    options?: ErrorOptions,
+  ) {
+    super(`the project state record is not valid: ${problems.join('; ')}`, options);
   }
 }
 
@@ -35,28 +38,30 @@ const quote = (value: string): string => JSON.stringify(value);
 /** What no record may hold, written or read. */
 export function projectStateProblems(record: ProjectStateRecord): string[] {
   const problems: string[] = [];
+  // The walk goes first: it reads through descriptors, and zod would run a getter it then refuses.
   const check = (rel: string, schema: z.ZodType, value: unknown): void => {
-    const parsed = schema.safeParse(value);
-    if (!parsed.success) {
-      problems.push(...issues(rel, parsed.error));
+    const found = notJson(value);
+    if (found) {
+      problems.push(notJsonProblem(rel, found));
       return;
     }
-    const found = notJson(value);
-    if (found) problems.push(notJsonProblem(rel, found));
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) problems.push(...issues(rel, parsed.error));
   };
   for (const provider of record.cli) {
     if (!isRecordName(provider)) problems.push(`cli: ${quote(provider)} is not a record name`);
   }
   for (const [name, value] of Object.entries(record.settings)) {
+    const rel = `settings/${name}.json`;
+    const found = value === null || value === undefined ? null : notJson(value);
     if (!isRecordName(name)) {
       problems.push(`settings: ${quote(name)} is not a record name`);
     } else if (value === null || value === undefined) {
-      problems.push(`settings/${name}.json: holds no value`);
+      problems.push(`${rel}: holds no value`);
+    } else if (found) {
+      problems.push(notJsonProblem(rel, found));
     } else if (SET_SETTINGS.has(name) && !isStringList(value)) {
-      problems.push(`settings/${name}.json: is not a list of strings`);
-    } else {
-      const found = notJson(value);
-      if (found) problems.push(notJsonProblem(`settings/${name}.json`, found));
+      problems.push(`${rel}: is not a list of strings`);
     }
   }
   if (record.environment !== null) {
@@ -87,9 +92,9 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
 const renderOf = (r: ProjectRender): ProjectRender => ({
   projectInfo: r.projectInfo,
   framework: r.framework,
-  acceptedAgentIds: sortedSet(r.acceptedAgentIds),
+  acceptedAgentIds: plainSet(r.acceptedAgentIds),
   customAgentSpecs: r.customAgentSpecs,
-  lspLanguages: sortedSet(r.lspLanguages),
+  lspLanguages: plainSet(r.lspLanguages),
 });
 const claimOf = (c: ProjectStateClaim): ProjectStateClaim => ({
   path: c.path,
@@ -107,6 +112,11 @@ const bundleOf = (b: ProjectStateBundle): ProjectStateBundle => ({
 
 const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((v) => typeof v === 'string');
+
+/** A set sorted, or left as it came when it is not plain data, for validation to refuse: reading
+ *  its members first would run a getter one of them hides. */
+const plainSet = <T>(value: T): T =>
+  notJson(value) === null && isStringList(value) ? (sortedSet(value) as T) : value;
 
 interface NotJson {
   path: string[];
@@ -177,7 +187,7 @@ export function normalizeProjectState(record: ProjectStateRecord): ProjectStateR
   const settings = Object.create(null) as Record<string, unknown>;
   for (const name of Object.keys(record.settings).sort()) {
     const value = record.settings[name];
-    settings[name] = SET_SETTINGS.has(name) && isStringList(value) ? sortedSet(value) : value;
+    settings[name] = SET_SETTINGS.has(name) ? plainSet(value) : value;
   }
   return {
     environment: record.environment && {
@@ -185,7 +195,7 @@ export function normalizeProjectState(record: ProjectStateRecord): ProjectStateR
       confirmedValues: record.environment.confirmedValues,
     },
     render: record.render && renderOf(record.render),
-    cli: sortedSet(record.cli),
+    cli: plainSet(record.cli),
     settings,
     claims: record.claims
       .map(claimOf)
@@ -199,7 +209,14 @@ export function normalizeProjectState(record: ProjectStateRecord): ProjectStateR
 /** The record's files, relative to `PROJECT_STATE_DIR`, sorted by path. Throws
  *  `ProjectStateError` for a record no reader would accept. */
 export function renderProjectState(record: ProjectStateRecord): Map<string, string> {
-  const r = normalizeProjectState(record);
+  let r: ProjectStateRecord;
+  try {
+    // Normalizing reads the record's own containers once; one that cannot be read is invalid.
+    r = normalizeProjectState(record);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ProjectStateError([`the record cannot be read: ${reason}`], { cause: error });
+  }
   const problems = projectStateProblems(r);
   if (problems.length > 0) throw new ProjectStateError(problems);
   const files = new Map<string, string>();

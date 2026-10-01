@@ -358,6 +358,45 @@ describe('a value with a key JSON does not write', () => {
     );
   });
 
+  it('refuses a throwing getter in a project file with ProjectStateError, before zod reads it', () => {
+    const thrower = () =>
+      Object.defineProperty({}, 'name', {
+        enumerable: true,
+        get: () => {
+          throw new Error('getter');
+        },
+      });
+    const render = record();
+    render.render = { ...render.render!, projectInfo: thrower() };
+    expect(() => renderProjectState(render)).toThrow(ProjectStateError);
+    const environment = record();
+    environment.environment = { ...environment.environment!, envDetectData: thrower() };
+    expect(() => renderProjectState(environment)).toThrow(ProjectStateError);
+  });
+
+  it('refuses a set setting whose member is a getter, before anything reads it', () => {
+    const globs = Object.defineProperty(['vendor/**'], 1, {
+      enumerable: true,
+      get: () => {
+        throw new Error('getter');
+      },
+    });
+    const r = record();
+    r.settings['scope-exclude-globs'] = globs;
+    expect(() => renderProjectState(r)).toThrow(/holds an accessor/);
+  });
+
+  it('turns a throwing getter on the settings map into ProjectStateError', () => {
+    const r = record();
+    Object.defineProperty(r.settings, 'x', {
+      enumerable: true,
+      get: () => {
+        throw new Error('getter');
+      },
+    });
+    expect(() => renderProjectState(r)).toThrow(ProjectStateError);
+  });
+
   it('refuses a proxy, which can answer any of these checks falsely', () => {
     expect(refused(new Proxy({ a: 1 }, {}))).toThrow(/is a proxy/);
   });
