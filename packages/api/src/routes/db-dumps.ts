@@ -1,6 +1,4 @@
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -15,9 +13,9 @@ import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
+import { writeBodyToHeld } from '../lib/held-write.js';
 import {
   ensureUploadsDir,
-  truncateUploadFile,
   uploadFileRel,
   uploadFileRelOrThrow,
   uploadsRel,
@@ -192,27 +190,30 @@ dbDumpRoutes.put('/upload/:id/chunk', async (c) => {
   if (!rawBody) throw new HttpError(400, 'request body is empty');
   const anchor = uploadsStorageRoot();
   const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
-  const nodeStream = Readable.fromWeb(rawBody as never);
   // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
   // row already tracks and the claim above just verified, where appending trusted the file's
-  // current length. MEASURED on node v26.7.0, `createWriteStream({ start })` positions the write.
+  // current length. Rolled back through this same descriptor, never through the name.
   const fh = await openFileNoFollow(anchor, dumpRel, 'read-write', { strict: true }).catch(
     (err: unknown) => containmentHttpError(err, 'Dump path is outside the uploads directory'),
   );
   if (!fh) throw new HttpError(409, 'Dump is missing on disk');
-  let written = 0;
-  nodeStream.on('data', (buf: Buffer) => {
-    written += buf.length;
-  });
   try {
-    await pipeline(nodeStream, fh.createWriteStream({ start }));
+    const written = await writeBodyToHeld(
+      rawBody,
+      fh,
+      expectedLen,
+      () => new HttpError(400, `chunk body length exceeds expected ${expectedLen}`),
+      start,
+    );
+    if (written !== expectedLen) {
+      throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
+    }
+    await fh.close();
   } catch (err) {
-    await truncateUploadFile(anchor, dumpRel, Number(row.bytesReceived));
+    await fh.truncate(Number(row.bytesReceived)).catch(() => {});
+    await fh.close().catch(() => {});
+    if (err instanceof HttpError) throw err;
     throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
-  }
-  if (written !== expectedLen) {
-    await truncateUploadFile(anchor, dumpRel, Number(row.bytesReceived));
-    throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
   }
 
   const updated = await db
