@@ -156,8 +156,12 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   for 19 rounds. → P2, P3.
 - **F8. The 08b fix pass can make its own grader pass (thin).** Its prompt lets the agent decide that
   the TEST is wrong and fix the test, and those same tests then grade it; `buildTestFailureDiagnosis`
-  hands 07 the same three-way choice. All 7 stored 08b rows with fix passes edited tests during them
-  (3 tasks), and none went green that way. Too few to show gaming; the opening is structural. → P6.
+  hands 07 the same three-way choice. The stored rows cannot say how often that happens: each pass
+  record is cumulative (`accumulateChanges` folds pass 0 into every later one), so a fix pass's own
+  edits show only where it touched a file pass 0 had not. Across the 7 rows with fix passes (3 tasks)
+  that happened once (task 681f0f99, round 2); the other six list only files pass 0 already wrote, and
+  none of the 7 went green. The opening is structural, and P6's per-pass record is what would measure
+  it. → P6.
 - **F9. Per-seat provider routing already exists.** A fan-out resolves its provider per `roleKey`
   (`resolvePreferredCli`, called per seat in `step-runner.ts`), built so that 08c's refuter panel is
   not three copies of one model. The sequence agents dispatch as role `expand`. Moving a narrow,
@@ -307,20 +311,22 @@ part gets a share and is cut by whole units, with the cut stated:
 - the transcript: whole turns selected from the newest backward until its share is spent, rendered in
   chronological order after a line counting the earlier turns dropped.
 
-**Every update the turn applies is checked against the state its content was read from (F14).** A
-plan chat turn exists to patch nodes beyond the one in focus, so this is the half that makes bounding
-safe. The prompt is built from one read of the plan, and every node it shows carries that read's
-version. Any file the prompt sends the agent to for other bodies (`.haive-data/plan.md`) is rewritten
-from that same read before dispatch, so a body read there and a version read in the index describe
-one state, and an edit landing after the read moves the node's version and the patch is refused. An
-update to an existing node that carries no version is refused in this step, so a node the index does
-not reach cannot be changed unchecked.
+**Every node stays patchable, and every update is checked against the state its content was read
+from (F14).** A plan chat turn exists to patch nodes beyond the one in focus, so bounding must not
+take that away. The prompt is built from one read of the plan, and every node it shows carries that
+read's version. A node the index cannot hold is reached through a versioned source answering from the
+same read, a snapshot written for the dispatch or a lookup (D11), never through the committed
+`.haive-data/plan.md`, which carries no versions and can trail the canvas. A body and a version
+therefore always describe one state, and an edit landing after the read moves the node's version and
+the patch is refused. With every node reachable that way, an update to an existing node that carries
+no version is refused in this step without leaving any request without a path.
 
 Verification: fixtures at each extreme (the 800-node plan, a focus node whose children carry long
 bodies, a transcript of many long turns) each assemble under the bound, the transcript in order; a
-turn that patches a node outside the neighbourhood sends that node's version and lands; one whose node
-changed after the read, including one built on a body taken from the file, is refused and reported; an
-update with no version is refused; the ollama run in F4 no longer fails on size. D2 settles the
+turn that patches a node outside the neighbourhood sends that node's version and lands, and so does
+one that patches a node the index omits, through the versioned source; one whose node changed after
+the read is refused and reported; an update with no version is refused; the ollama run in F4 no longer
+fails on size. D2 settles the
 transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
@@ -353,12 +359,16 @@ Cheap half first:
 
 The heavier half is conditional on the cheap half showing test edits beside gate-2 rejections: re-run
 each changed test as it stood before the fix pass (its recorded content) against the fixed code, and
-add the result to the gate row beside the spec line the fixer cited. It is evidence for a person,
-never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail against
-a correct fix, so a failure there proves nothing on its own, and nothing loops back or fails a step on
-it. Verification: prompt tests; a two-pass fixture in which pass 0 writes a test and pass 1 edits it,
-recording the edit under pass 1 alone; the gate row rendered from that record; and field counts.
-Rollback: the record is additive, the rest display and prompt only.
+add the result to the gate row beside the spec line the fixer cited. The re-run never writes the
+task's integration worktree, which later fix and review steps read: it runs in a disposable snapshot
+of the fixed tree, uncommitted changes included. Where the suite can run only from that worktree (a
+runner that mounts it), the heavier half is not available and the row says so. It is evidence for a
+person, never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail
+against a correct fix, so a failure there proves nothing on its own, and nothing loops back or fails a
+step on it. Verification: prompt tests; a two-pass fixture in which pass 0 writes a test and pass 1
+edits it, recording the edit under pass 1 alone; the gate row rendered from that record; a heavier-half
+re-run that leaves the integration worktree byte-identical; and field counts. Rollback: the record is
+additive, the rest display and prompt only.
 
 ### P7. A cheaper model on a narrow, high-volume seat (configuration, no code)
 
@@ -409,6 +419,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D10.** F16: a sibling run too wide for one prompt or one patch. Order it in bounded slices, which
   needs a rule for combining slices into one order, or leave it to a person with the step saying so.
   Not from the paper; pre-existing.
+- **D11.** P4: how plan chat reaches a node its bounded index omits. A versioned snapshot written for
+  each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls that
+  answers from the dispatch's read.
 
 ## Decided
 
@@ -478,8 +491,10 @@ their step through `task_step_id`; a step recap's run carries `summary_for_step_
 - **Plan chat (F4).** The plan's size is `position('## The user is looking at' in prompt) -
   position('Here is the WHOLE plan' in prompt)`, and the transcript's is the span from `## Conversation
   so far` to `## What to do`.
-- **Fix-pass test edits (F8).** For `08b-test-management` rows, `output->>'fixPasses'` beside the
-  lengths of `output->'testsUpdated'`, `'testsCreated'` and `'testsDeleted'`, and
-  `output->>'testsPassed'`.
+- **Fix-pass test edits (F8).** For `08b-test-management` rows with more than one entry in
+  `iterations`, compare the test files (`applyOutput.testsUpdated` and `testsCreated`) of the first
+  entry with those of the last. A file only the last lists is the one fix-pass edit the cumulative
+  records prove; a file both list may or may not have been edited again. `output->>'testsPassed'` says
+  whether the row went green.
 - **Repeated lines (F11).** Split each `fix_loop.requested` diagnosis in `task_events` on newlines and
   compare the characters of all lines against those of the distinct lines, per source step.
