@@ -76,7 +76,8 @@ export function isPathContainmentError(
 }
 
 /** A file judged under a private name that could not be moved back: it is still at `parkedAt`, and
- *  `code` is the errno of the move, so a caller that absorbs IO failures absorbs this one too. */
+ *  `code` is the errno of the move, so a caller that absorbs IO failures absorbs this one too.
+ *  `cause` is the move's own error, or an AggregateError of what broke before it and that error. */
 export class ParkedFileError extends Error {
   constructor(
     readonly rel: string,
@@ -1132,11 +1133,21 @@ async function settleParked(
       if (ABSENT.has(errno(err) ?? '')) return 'absent';
       throw err;
     }
-    const putBack = async (): Promise<void> => {
+    // `earlier` is what broke before the put-back, so the error that names where the file is parked
+    // still says why it was being put back.
+    const putBack = async (earlier?: { error: unknown }): Promise<void> => {
       try {
         await restoreNoReplace(dir, parked, leaf);
       } catch (err) {
-        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), { cause: err });
+        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), {
+          cause:
+            earlier === undefined
+              ? err
+              : new AggregateError(
+                  [earlier.error, err],
+                  `${earlier.error}; putting the file back failed too: ${err}`,
+                ),
+        });
       }
     };
 
@@ -1144,7 +1155,7 @@ async function settleParked(
     try {
       verdict = await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe);
     } catch (err) {
-      await putBack();
+      await putBack({ error: err });
       throw err;
     }
     if (verdict !== 'remove') {
@@ -1154,7 +1165,7 @@ async function settleParked(
     try {
       await unlink(at(dir.fh.fd, parked));
     } catch (err) {
-      await putBack();
+      await putBack({ error: err });
       throw err;
     }
     return 'removed';
@@ -1353,13 +1364,41 @@ async function createExclusive(
     await closeQuietly(fh);
     // Leave nothing behind: a 0600 empty stub at a name a caller was told it could not have is
     // worse than no file, because the next attempt then fails EEXIST against our own leftover.
-    const cleanup = await walkDir(anchor, safe, segs).catch(() => null);
-    if (cleanup) {
-      await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
-      await closeQuietly(cleanup.fh);
-    }
+    // Best effort, as before: callers classify the error that stopped the create (403 for a link).
+    await removeCreated(anchor, safe, Buffer.alloc(0)).catch(() => undefined);
     throw err;
   }
+}
+
+/** Removes the file this call created, but only while it holds a prefix of `written`, so a file put
+ *  at the name meanwhile is kept. */
+function removeCreated(anchor: string, rel: string, written: Buffer): Promise<unknown> {
+  return removeFileIfNoFollow(
+    anchor,
+    rel,
+    (data) => written.subarray(0, data.length).equals(data),
+    {
+      maxBytes: written.length,
+    },
+  );
+}
+
+/** `removeCreated`, then always throws: `err`, or both failures when the removal fails. */
+async function takeBackCreated(
+  anchor: string,
+  rel: string,
+  written: Buffer,
+  err: unknown,
+): Promise<never> {
+  try {
+    await removeCreated(anchor, rel, written);
+  } catch (removeErr) {
+    throw new AggregateError(
+      [err, removeErr],
+      `${err}; removing the file it created failed too: ${removeErr}`,
+    );
+  }
+  throw err;
 }
 
 /** Write every byte. `FileHandle.write` may write short, and a partial config file that parses is
@@ -1370,6 +1409,25 @@ async function writeAll(fh: FileHandle, bytes: Buffer): Promise<void> {
     const res = await fh.write(bytes, written, bytes.length - written, written);
     written += res.bytesWritten;
   }
+}
+
+/** Write `bytes` into the file `createExclusive` just made for this call, then close it. A write
+ *  or sync that fails takes the file back rather than leaving it half-written at its name. */
+async function fillCreated(
+  anchor: string,
+  rel: string,
+  fh: FileHandle,
+  bytes: Buffer,
+  durable?: boolean,
+): Promise<void> {
+  try {
+    await writeAll(fh, bytes);
+    if (durable) await fh.sync();
+  } catch (err) {
+    await closeQuietly(fh);
+    return takeBackCreated(anchor, rel, bytes, err);
+  }
+  await closeQuietly(fh);
 }
 
 /** Replace what `fh` holds with `next`, on the same inode. A write that fails while the process
@@ -1429,7 +1487,8 @@ export interface WriteFileOptions {
  *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
  * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
  *   whose identity matters.
- * - `create-exclusive` — refuses to replace anything at all.
+ * - `create-exclusive` — refuses to replace anything at all. A write that fails while the process
+ *   lives takes back the file it created, so the name is free again.
  */
 export async function writeFileNoFollow(
   anchor: string,
@@ -1442,12 +1501,7 @@ export async function writeFileNoFollow(
 
   if (mode === 'create-exclusive') {
     const fh = await createExclusive(anchor, rel, opts);
-    try {
-      await writeAll(fh, bytes);
-      if (opts.durable) await fh.sync();
-    } finally {
-      await closeQuietly(fh);
-    }
+    await fillCreated(anchor, rel, fh, bytes, opts.durable);
     return 'created';
   }
 
@@ -1539,7 +1593,7 @@ export interface UpdateFileOptions {
  * trade for keeping the inode, the owner and the mode, and it is why `replace-atomic` stays the
  * default for anything a machine parses. Node has no `flock`, so two concurrent updaters are
  * serialized at step level or not at all. A write that fails while the process lives puts the
- * bytes it read back.
+ * bytes it read back, or, for a file it created, takes that file back.
  *
  * `unchanged` is returned — and nothing written — when `update` returns `null` or the identical
  * string, so a re-run that has nothing to add does not touch the file's mtime.
@@ -1567,11 +1621,7 @@ export async function updateFileNoFollow(
       fileMode: opts.fileMode,
       owner: opts.owner,
     });
-    try {
-      await writeAll(created, Buffer.from(next, 'utf8'));
-    } finally {
-      await closeQuietly(created);
-    }
+    await fillCreated(anchor, safe, created, Buffer.from(next, 'utf8'));
     return 'created';
   }
 
