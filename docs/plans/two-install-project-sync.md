@@ -202,11 +202,13 @@ Phase 1 (the record):
   that is not JSON or fails its schema, a claim outside the repository, a file under another unit's
   name, and a setting holding null or a set setting that is not a list of strings. The renderer
   normalizes the record and then validates it: each section against its schema, and every value for
-  what JSON cannot carry exactly (a non-finite number, a bigint, a function, an undefined array
-  element, a non-plain object, a cycle, a `__proto__` key), so a record either renders to files that
-  read back as itself or throws `ProjectStateError`; an undefined object property is left out, as
-  JSON leaves it. The parser runs the same check on every file before its schema, since zod would
-  drop a `__proto__` key and read the record back without it. Every settings map has no prototype,
+  what JSON cannot carry (a non-finite number, a bigint, a function, an undefined array element, a
+  non-plain object, a cycle, a `__proto__` key), so a record either renders to files that read back
+  as itself or throws `ProjectStateError`. "As itself" is under `sameValue`, the equality the merge
+  decides with, so what JSON writes differently but no reader can tell apart passes: an undefined
+  object property is left out, and a negative zero is written as 0 (`-0 === 0`). The parser runs the
+  same check on every file before its schema, since zod would drop a `__proto__` key and read the
+  record back without it. Every settings map has no prototype,
   so an absent setting named like an `Object.prototype` member reads as absent, and the parser
   checks a setting's name before storing it. The renderer writes each file with its schema's keys
   alone, and sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
@@ -228,7 +230,7 @@ Phase 1 (the record):
   conflict under a merge a person drives, which the parser then refuses; the merges Haive drives
   resolve them per key (B2.3). `gitBlobId` takes the repository's object format (sha1 or sha256),
   since the two never agree on one file and the sync compares against ids read from the
-  repository. MEASURED: 99 tests, every mutation tried caught (Codex's six rounds added 29
+  repository. MEASURED: 100 tests, every mutation tried caught (Codex's seven rounds added 30
   controls, 22 of them failing before), and `git merge-file` over all 28 pairs of eight
   single-file edits merges cleanly to the render of the record merge, while two adjacent settings
   edited in one pretty JSON file conflict.
