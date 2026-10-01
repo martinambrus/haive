@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { configService } from '@haive/shared';
@@ -29,18 +31,31 @@ interface Row {
   guidance: string;
 }
 
+interface Capture {
+  where?: SQL;
+  orderBy?: SQL[];
+}
+
 /** Stand-in for the two db.query.*.findFirst calls plus the one select chain
  *  augmentPromptWithLearnedGuidance makes. `rows` is what the select resolves to;
- *  passing a thrown error instead exercises the fail-soft path. */
+ *  passing a thrown error instead exercises the fail-soft path. `capture` receives the
+ *  query's WHERE and ORDER BY, which this stand-in does not apply. */
 function fakeDb(opts: {
   repositoryId?: string | null;
   stepGuidanceEnabled?: boolean;
   rows?: Row[] | Error;
+  capture?: Capture;
 }): Database {
   const chain = {
     from: () => chain,
-    where: () => chain,
-    orderBy: () => chain,
+    where: (where: SQL) => {
+      if (opts.capture) opts.capture.where = where;
+      return chain;
+    },
+    orderBy: (...orderBy: SQL[]) => {
+      if (opts.capture) opts.capture.orderBy = orderBy;
+      return chain;
+    },
     limit: () => {
       if (opts.rows instanceof Error) return Promise.reject(opts.rows);
       return Promise.resolve(opts.rows ?? []);
@@ -167,19 +182,14 @@ describe('augmentPromptWithLearnedGuidance', () => {
   });
 
   it('calls it a floor even when the filtering leaves few eligible rows', async () => {
-    // The FETCH is what the limit cuts, and filtering runs after it, so a saturated scan whose
-    // rows mostly belong to another repository is still saturated. Keying this on the eligible
+    // The FETCH is what the limit cuts, and facet matching runs after it, so a saturated scan
+    // whose rows are mostly another stack's is still saturated. Keying this on the eligible
     // count instead would promise an exact "1 more" while the corpus may hold others past the
     // limit — the very thing this notice exists to stop.
     const db = fakeDb({
       rows: [
         ...Array.from({ length: 6 }, (_, i) => repoRow(`mine ${i}`)),
-        ...Array.from({ length: 94 }, () => ({
-          scope: 'repo' as const,
-          repositoryId: OTHER_REPO_ID,
-          facets: {},
-          guidance: 'another repository',
-        })),
+        ...Array.from({ length: 94 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
       ],
     });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
@@ -193,12 +203,7 @@ describe('augmentPromptWithLearnedGuidance', () => {
     const db = fakeDb({
       rows: [
         ...Array.from({ length: 5 }, (_, i) => repoRow(`mine ${i}`)),
-        ...Array.from({ length: 95 }, () => ({
-          scope: 'repo' as const,
-          repositoryId: OTHER_REPO_ID,
-          facets: {},
-          guidance: 'another repository',
-        })),
+        ...Array.from({ length: 95 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
       ],
     });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
@@ -227,6 +232,32 @@ describe('guidanceOmissionNotice', () => {
     expect(guidanceOmissionNotice(3, false)).toContain(
       "the repository's own and the most-observed",
     );
+  });
+});
+
+describe('the scan', () => {
+  // The limit is applied in SQL, so a scope filtered only afterwards lets another repository's
+  // lessons, or higher-ranked global ones, fill all 100 rows and leave this repository's unread.
+  it("reads this repository's own lessons and global ones, its own first", async () => {
+    const capture: Capture = {};
+    await augmentPromptWithLearnedGuidance(fakeDb({ rows: [], capture }), TASK_ID, STEP_ID, PROMPT);
+    const dialect = new PgDialect();
+    const where = dialect.sqlToQuery(capture.where!);
+    expect(where.sql).toMatch(/"repository_id" = \$\d+/);
+    expect(where.params).toContain(REPO_ID);
+    expect(where.params).toContain('global');
+    const first = dialect.sqlToQuery(capture.orderBy![0]!);
+    expect(first.sql).toMatch(/"scope" = \$\d+ desc$/);
+    expect(first.params).toEqual(['repo']);
+  });
+
+  it('reads global lessons alone for a task with no repository', async () => {
+    const capture: Capture = {};
+    const db = fakeDb({ repositoryId: null, rows: [], capture });
+    await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    const where = new PgDialect().sqlToQuery(capture.where!);
+    expect(where.sql).not.toContain('"repository_id"');
+    expect(where.params).toContain('global');
   });
 });
 

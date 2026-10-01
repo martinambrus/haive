@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, or } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
@@ -23,8 +23,8 @@ const MAX_ITEMS = 5;
 const MAX_CHARS = 1500;
 
 /** Rows scanned before facet filtering. Global items are filtered in JS (see below),
- *  so the fetch has to be bounded by something; ordered by the same rank the block
- *  uses, so what an overflowing corpus drops is the least-observed and stalest. */
+ *  so the fetch has to be bounded by something; ordered as the block is, this
+ *  repository's own first, so what an overflowing corpus drops is the least-observed. */
 const SCAN_LIMIT = 100;
 
 /** Haive's note ABOUT the block, appended as its last line.
@@ -35,9 +35,9 @@ const SCAN_LIMIT = 100;
  *  occurrences and recency — so "the ones you are not seeing rank below these" is the useful
  *  half. `atLeast` is for a FETCH that filled `SCAN_LIMIT`: the count is then a floor on what this
  *  block dropped, not the size of the corpus. Keyed on the fetched rows and NOT on the eligible
- *  ones, because the filtering happens after the limit — 100 rows of which 6 survive facet and
- *  repository matching is still a saturated scan, and claiming an exact count there would be this
- *  function's own defect in miniature. A saturated scan speaks even when it dropped nothing it
+ *  ones, because facet matching happens after the limit — 100 rows of which 6 survive it is still
+ *  a saturated scan, and claiming an exact count there would be this function's own defect in
+ *  miniature. A saturated scan speaks even when it dropped nothing it
  *  read, since the rows past the limit were never read; null means there is nothing to say. */
 export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string | null {
   if (omitted === 0 && !atLeast) return null;
@@ -119,6 +119,17 @@ export async function augmentPromptWithLearnedGuidance(
     const gate = await resolveGate(db, taskId);
     if (!gate.enabled) return prompt;
 
+    // Scoped and ordered here rather than after the limit, or another repository's lessons and
+    // higher-ranked global ones could fill the scan and leave this repository's own unread.
+    const scopes = gate.repositoryId
+      ? or(
+          eq(schema.stepGuidance.scope, 'global'),
+          and(
+            eq(schema.stepGuidance.scope, 'repo'),
+            eq(schema.stepGuidance.repositoryId, gate.repositoryId),
+          ),
+        )
+      : eq(schema.stepGuidance.scope, 'global');
     const rows = await db
       .select({
         scope: schema.stepGuidance.scope,
@@ -127,8 +138,18 @@ export async function augmentPromptWithLearnedGuidance(
         guidance: schema.stepGuidance.guidance,
       })
       .from(schema.stepGuidance)
-      .where(and(eq(schema.stepGuidance.stepId, stepId), eq(schema.stepGuidance.status, 'active')))
-      .orderBy(desc(schema.stepGuidance.occurrences), desc(schema.stepGuidance.updatedAt))
+      .where(
+        and(
+          eq(schema.stepGuidance.stepId, stepId),
+          eq(schema.stepGuidance.status, 'active'),
+          scopes,
+        ),
+      )
+      .orderBy(
+        desc(eq(schema.stepGuidance.scope, 'repo')),
+        desc(schema.stepGuidance.occurrences),
+        desc(schema.stepGuidance.updatedAt),
+      )
       .limit(SCAN_LIMIT);
     if (rows.length === 0) return prompt;
 
