@@ -191,23 +191,23 @@ const notJsonProblem = (rel: string, found: NotJson): string =>
 /** The record as it is written: each object carrying its schema's keys alone, every set sorted
  *  and every list ordered by its key, so two equal states compare equal. */
 export function normalizeProjectState(record: ProjectStateRecord): ProjectStateRecord {
+  // Each container is read once, so a getter there cannot hand back a mix of two of them.
+  const { environment, render, cli, settings: source, claims, bundles } = record;
   const settings = Object.create(null) as Record<string, unknown>;
-  for (const name of Object.keys(record.settings).sort()) {
-    const value = record.settings[name];
+  for (const name of Object.keys(source).sort()) {
+    const value = source[name];
     settings[name] = SET_SETTINGS.has(name) ? plainSet(value) : value;
   }
   return {
-    environment: record.environment && {
-      envDetectData: record.environment.envDetectData,
-      confirmedValues: record.environment.confirmedValues,
+    environment: environment && {
+      envDetectData: environment.envDetectData,
+      confirmedValues: environment.confirmedValues,
     },
-    render: record.render && renderOf(record.render),
-    cli: plainSet(record.cli),
+    render: render && renderOf(render),
+    cli: plainSet(cli),
     settings,
-    claims: record.claims
-      .map(claimOf)
-      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
-    bundles: record.bundles
+    claims: claims.map(claimOf).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+    bundles: bundles
       .map(bundleOf)
       .sort((a, b) => (a.source < b.source ? -1 : a.source > b.source ? 1 : 0)),
   };

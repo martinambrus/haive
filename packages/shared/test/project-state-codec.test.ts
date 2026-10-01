@@ -411,6 +411,23 @@ describe('a value with a key JSON does not write', () => {
     expect(() => renderProjectState(getter)).toThrow(/holds an accessor/);
   });
 
+  it("reads each of the record's own containers once, never mixing two of them", () => {
+    const a = record();
+    const b = record();
+    b.environment = { envDetectData: { other: true }, confirmedValues: { other: true } };
+    b.render = { ...b.render!, framework: 'other' };
+    b.settings = { 'rtk-enabled': true };
+    const mixed = record();
+    for (const key of ['environment', 'render', 'settings'] as const) {
+      let reads = 0;
+      Object.defineProperty(mixed, key, {
+        enumerable: true,
+        get: () => (reads++ % 2 === 0 ? a : b)[key],
+      });
+    }
+    expect(renderProjectState(mixed)).toEqual(renderProjectState(a));
+  });
+
   it('refuses a proxy, which can answer any of these checks falsely', () => {
     expect(refused(new Proxy({ a: 1 }, {}))).toThrow(/is a proxy/);
   });
