@@ -308,8 +308,11 @@ part gets a share and is cut by whole units, with the cut stated:
 - every other node through the bounded index (`renderBoundedPlanIndexParts`: titles and ids, depth
   stepped down to fit), handed its share explicitly, since its default budget
   (`PLAN_INDEX_MAX_CHARS`, 120k) is itself over the bound;
-- the transcript: whole turns selected from the newest backward until its share is spent, rendered in
-  chronological order after a line counting the earlier turns dropped.
+- the transcript: the turn being answered always, whole, in a share reserved for it before anything
+  else is packed; then earlier turns, whole, selected from the newest backward until the rest of the
+  share is spent; all rendered in chronological order after a line counting the turns dropped. A
+  message larger than its reserved share is refused when submitted, with the limit stated, rather than
+  cut or left out: it is the person's own words, and the chat form sets no length limit today.
 
 **Every node stays patchable, and every update is checked against the state its content was read
 from (F14).** A plan chat turn exists to patch nodes beyond the one in focus, so bounding must not
@@ -323,11 +326,11 @@ no version is refused in this step without leaving any request without a path.
 
 Verification: fixtures at each extreme (the 800-node plan, a focus node whose children carry long
 bodies, a transcript of many long turns) each assemble under the bound, the transcript in order; a
-turn that patches a node outside the neighbourhood sends that node's version and lands, and so does
-one that patches a node the index omits, through the versioned source; one whose node changed after
-the read is refused and reported; an update with no version is refused; the ollama run in F4 no longer
-fails on size. D2 settles the
-transcript's scope. Rollback: revert.
+pending message at its reserved limit is answered, and one past it is refused at submit; a turn that
+patches a node outside the neighbourhood sends that node's version and lands, and so does one that
+patches a node the index omits, through the versioned source; one whose node changed after the read is
+refused and reported; an update with no version is refused; the ollama run in F4 no longer fails on
+size. D2 settles the transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
 
