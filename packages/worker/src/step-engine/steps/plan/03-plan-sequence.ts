@@ -4,6 +4,7 @@ import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/sha
 import {
   PLAN_NODE_REF_PREFIX,
   SEQUENCE_AGENTS_PER_PASS,
+  SEQUENCE_MAX_RUN_CHILDREN,
   applyPlanPatch,
   askedParents,
   sequenceAgentId,
@@ -14,6 +15,7 @@ import {
   loadPlanSkeletons,
   orderSiblingsByDependency,
   renderPlanMarkdown,
+  tooWideToSequence,
 } from '@haive/shared/plan';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
@@ -97,6 +99,9 @@ export interface PlanSequenceDetect {
    *  pass covered rather than leaving it invisible. */
   decidedRuns: number;
   targets: SequenceTarget[];
+  /** Undecided runs no agent is sent for (`tooWideToSequence`). Absent from a payload detected
+   *  before the cap existed. */
+  tooWide?: SequenceTarget[];
   /** Sibling runs whose own edges contradict each other, plus the plan-wide
    *  dependency knots. An agent is asked to repair these, and a person is shown
    *  them either way: neither can ever be satisfied. */
@@ -118,6 +123,9 @@ export interface PlanSequenceApply {
    *  disagreement is the finding, the removal is the optional response. */
   disagreements: number;
   edgesRemoved: number;
+  /** Undecided runs left in their stored order because no agent is sent for them. */
+  tooWide: number;
+  degradedNote?: string;
 }
 
 /** Matches 02-plan-coverage's cadence: modest waves, with a per-pass ceiling
@@ -294,13 +302,21 @@ async function applyDeterministicOrder(
 }
 
 /** The runs an agent still has to decide, in plan order so the fan-out works
- *  down the tree rather than jumping about. */
-function computeTargets(
+ *  down the tree rather than jumping about. A run too wide to ask about is reported
+ *  whatever an earlier pass did, since no pass will ask about it again. */
+export function computeTargets(
   nodes: PlanNodeSkeleton[],
   edges: PlanEdgeRecord[],
-): { targets: SequenceTarget[]; decidedRuns: number; contradictoryRuns: number } {
+  asked: ReadonlySet<string>,
+): {
+  targets: SequenceTarget[];
+  tooWide: SequenceTarget[];
+  decidedRuns: number;
+  contradictoryRuns: number;
+} {
   const titleById = new Map(nodes.map((n) => [n.id, n.title]));
   const targets: SequenceTarget[] = [];
+  const tooWide: SequenceTarget[] = [];
   let decidedRuns = 0;
   let contradictoryRuns = 0;
   for (const [parentId, run] of childrenByParent(nodes)) {
@@ -311,13 +327,15 @@ function computeTargets(
       decidedRuns++;
       continue;
     }
-    targets.push({
+    const target = {
       parentId,
       parentTitle: titleById.get(parentId) ?? 'unknown',
       childCount: run.length,
-    });
+    };
+    if (tooWideToSequence(run)) tooWide.push(target);
+    else if (!asked.has(parentId.toLowerCase())) targets.push(target);
   }
-  return { targets, decidedRuns, contradictoryRuns };
+  return { targets, tooWide, decidedRuns, contradictoryRuns };
 }
 
 async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
@@ -332,6 +350,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
       nodeCount: 0,
       decidedRuns: 0,
       targets: [],
+      tooWide: [],
       contradictoryRuns: 0,
       cycles: 0,
       ancestorDeps: 0,
@@ -348,13 +367,18 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     loadAskedParents(ctx, repositoryId),
   ]);
   const derived = computePlanSequence(nodes, edges);
-  const { targets, decidedRuns, contradictoryRuns } = computeTargets(nodes, edges);
+  const { targets, tooWide, decidedRuns, contradictoryRuns } = computeTargets(
+    nodes,
+    edges,
+    askedRepo,
+  );
   const state = askedState(rows);
   return {
     repositoryId,
     nodeCount: nodes.length,
     decidedRuns,
-    targets: targets.filter((t) => !askedRepo.has(t.parentId.toLowerCase())),
+    targets,
+    tooWide,
     contradictoryRuns,
     cycles: derived.cycles.length,
     ancestorDeps: derived.ancestorDeps.length,
@@ -436,6 +460,10 @@ export function buildSequencePrompt(
     'permanently. If you can see an existing link like that among these children, remove it with',
     'an `unlink` op.',
     '',
+    `A reply holds at most ${PLAN_PATCH_MAX_OPS} ops, and one over that is rejected whole: these ` +
+      `${children.length} upserts leave room for at most ${PLAN_PATCH_MAX_OPS - children.length} ` +
+      '`link` and `unlink` ops.',
+    '',
     PLAN_PATCH_CONTRACT,
   ].join('\n');
 }
@@ -446,10 +474,12 @@ async function buildWave(
   nodes: PlanNodeSkeleton[],
   wave: number,
 ) {
-  const slice = detected.targets.slice(
-    0,
-    dispatchCount(detected.targets.length, detected.agentsUsed),
+  const byParent = childrenByParent(nodes);
+  // A detect payload persisted before the width cap can still name a wider run.
+  const sendable = detected.targets.filter(
+    (t) => !tooWideToSequence(byParent.get(t.parentId) ?? []),
   );
+  const slice = sendable.slice(0, dispatchCount(sendable.length, detected.agentsUsed));
   if (slice.length === 0) return [];
   // Rendered ONCE per wave rather than per agent: it is the same document for
   // every one of them and a plan is thousands of nodes.
@@ -461,7 +491,6 @@ async function buildWave(
     // claim under test rather than a second reader of the work.
     omitLinks: true,
   });
-  const byParent = childrenByParent(nodes);
   return slice.map((target) => ({
     agentId: sequenceAgentId(target.parentId, wave),
     agentTitle: `Order: ${target.parentTitle}`,
@@ -653,6 +682,18 @@ export function collectDisagreements(
   return out;
 }
 
+export function tooWideNote(runs: SequenceTarget[]): string {
+  const named = runs
+    .slice(0, 5)
+    .map((r) => `${safeTitle(r.parentTitle)} (${r.childCount} children)`);
+  const more = runs.length > named.length ? `, and ${runs.length - named.length} more` : '';
+  return (
+    `${runs.length} group(s) have more than ${SEQUENCE_MAX_RUN_CHILDREN} children, more than one ` +
+    'agent can order in a single reply, so no agent was sent for them and they keep their stored ' +
+    `order until each is split into smaller groups: ${named.join('; ')}${more}.`
+  );
+}
+
 /** The end-of-pass review: edges an independent ordering contradicted.
  *
  *  Nothing is preselected. Neither reader outranks the other — the edge is an
@@ -700,6 +741,7 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
   if (detected.targets.length === 0) return null;
 
   const defects = detected.cycles + detected.ancestorDeps;
+  const tooWide = detected.tooWide?.length ?? 0;
   return {
     title: 'Put the plan in build order',
     description:
@@ -707,6 +749,11 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
       `dependencies they declare, and ${detected.targets.length} still need a reader to decide. ` +
       `That is up to ${detected.targets.length} agent runs at ${SEQUENCE_AGENTS_PER_WAVE} at a ` +
       'time — the largest thing this step spends, so it is asked for rather than assumed.' +
+      (tooWide > 0
+        ? ` ${tooWide} more group(s) have more than ${SEQUENCE_MAX_RUN_CHILDREN} children, more ` +
+          'than one agent can order in a single reply, so no agent is sent for them and they ' +
+          'keep their stored order.'
+        : '') +
       (defects > 0
         ? ` This plan also has ${defects} dependency(ies) that can never be satisfied ` +
           `(${detected.cycles} loop(s), ${detected.ancestorDeps} pointing at an own ancestor); ` +
@@ -791,6 +838,7 @@ export function createPlanSequenceStep(opts: {
         decision: 'nothing_to_do',
         disagreements: d.disagreements.length,
         edgesRemoved: 0,
+        tooWide: d.tooWide?.length ?? 0,
       };
       if (!d.repositoryId || d.nodeCount === 0) return result;
 
@@ -812,9 +860,10 @@ export function createPlanSequenceStep(opts: {
         // asked-set spans passes, and the undecided count would say a finished plan
         // still had 876 groups to go.
         const asked = await loadAskedParents(ctx, d.repositoryId!);
-        result.remaining = computeTargets(nodes, edges).targets.filter(
-          (t) => !asked.has(t.parentId.toLowerCase()),
-        ).length;
+        const { targets, tooWide } = computeTargets(nodes, edges, asked);
+        result.remaining = targets.length;
+        result.tooWide = tooWide.length;
+        if (tooWide.length > 0) result.degradedNote = tooWideNote(tooWide);
         if (result.reordered === 0) return;
         try {
           await writePlanMirror(ctx.db, d.repositoryId!, ctx.repoPath);
@@ -881,8 +930,7 @@ export function createPlanSequenceStep(opts: {
       const rows = await loadSequenceRows(ctx);
       const state = askedState(rows);
       const askedRepo = await loadAskedParents(ctx, d.repositoryId);
-      const { targets } = computeTargets(nodes, edges);
-      const pending = targets.filter((t) => !askedRepo.has(t.parentId.toLowerCase()));
+      const { targets: pending } = computeTargets(nodes, edges, askedRepo);
       result.remaining = pending.length;
       result.decision = 'sequenced';
 

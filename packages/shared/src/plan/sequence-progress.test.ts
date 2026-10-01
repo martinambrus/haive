@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   SEQUENCE_AGENTS_PER_PASS,
+  SEQUENCE_MAX_RUN_CHILDREN,
   askedParents,
   computeSequenceProgress,
   sequenceAgentId,
@@ -150,5 +151,33 @@ describe('computeSequenceProgress', () => {
     const p = computeSequenceProgress(many, [], new Set());
     expect(p.groupsRemaining).toBe(SEQUENCE_AGENTS_PER_PASS + 5);
     expect(p.passesRemaining).toBe(2);
+  });
+
+  it('counts a run too wide for one reply apart, since no pass asks about it', () => {
+    const run = (parent: string, width: number): PlanSequenceNode[] => [
+      node(parent, null),
+      ...Array.from({ length: width }, (_, i) => node(`${parent}-${i}`, parent)),
+    ];
+    const p = computeSequenceProgress(
+      [
+        ...run('wide', SEQUENCE_MAX_RUN_CHILDREN + 1),
+        ...run('widest-sent', SEQUENCE_MAX_RUN_CHILDREN),
+      ],
+      [],
+      new Set(),
+    );
+    expect(p).toMatchObject({
+      groupsRemaining: 1,
+      nodesRemaining: SEQUENCE_MAX_RUN_CHILDREN,
+      passesRemaining: 1,
+      groupsTooWide: 1,
+    });
+    // No pass asks about a wide run again, so an earlier pass's row does not hide it.
+    const asked = computeSequenceProgress(
+      run('wide', SEQUENCE_MAX_RUN_CHILDREN + 1),
+      [],
+      new Set(['wide']),
+    );
+    expect(asked.groupsTooWide).toBe(1);
   });
 });
