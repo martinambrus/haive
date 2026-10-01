@@ -195,7 +195,24 @@ Phase 1 (the record):
   types, canonical render, zod parse, three-way merge returning conflicts, claim naming, id
   mapping, state hash). Control: determinism, round-trip, the merge table, and a `git merge-file`
   property test (edits to different units merge cleanly; the same edits on one pretty JSON file
-  conflict).
+  conflict). **As built:** `@haive/shared/project-state`. The schemas are strict, so a new field is
+  a format bump, while a file no kind claims is left out and listed rather than refused, so a newer
+  release's additions survive an older parser. The parser refuses the whole record, with a reason of
+  its own for a newer format, on conflict markers anywhere, a missing or newer `format.json`, a file
+  that is not JSON or fails its schema, a claim outside the repository, a file under another unit's
+  name, and a setting holding null or a set setting that is not a list of strings. The renderer
+  throws on a record the parser would refuse, writes each file with its schema's keys alone, and
+  sorts every set (`acceptedAgentIds`, `lspLanguages`, the CLI set, declared set settings), which
+  the renderers can take since all of them read those as sets. The merge goes key by key in a
+  project file both sides hold and file by file otherwise; a set moves member by member and never
+  conflicts (joined when there is no base); a claim both sides changed follows the bytes through
+  `diskHash`, an absent file standing for a removal; a conflict keeps the local value and names
+  `<file>#<key>` or the file. Portable custom ids encode both parts (`custom:<source>:<path>`, each
+  URI-encoded), since a git URL holds colons. Two keys of one project file can still conflict under
+  a merge a person drives, which the parser then refuses; the merges Haive drives resolve them per
+  key (B2.3). MEASURED: 70 tests, six mutations each caught, and `git merge-file` over all 28 pairs
+  of eight single-file edits merges cleanly to the render of the record merge, while two adjacent
+  settings edited in one pretty JSON file conflict.
 - **B1.4 feat(worker,api): sync settings and render context; 01 and the gates read them**
   [B1.3]. `project_state_sync` table, `repositories.render_context`; `syncProjectStateFromCheckout`
   replaces `importHaiveDataMirror` (legacy files as fallback); 12/02 write `render_context`; 01's
