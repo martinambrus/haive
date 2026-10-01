@@ -391,6 +391,47 @@ async function main(): Promise<void> {
     versioned.updated.length === 1 && (await nodeOf(auth!.id))?.body === 'agent rewrite',
     versioned,
   );
+  const scratch = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'sp', parentRef: root!.id, title: 'Scratch parent' },
+        { op: 'upsert', nodeRef: 'sc', parentRef: 'sp', title: 'Scratch child' },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+  const scratchParent = (await nodeOf(scratch.refs.sp!))!;
+  const scratchChild = (await nodeOf(scratch.refs.sc!))!;
+  const parentFirst = await applyPlanPatch(
+    db,
+    {
+      ops: [{ op: 'delete', nodeRef: scratchParent.id, expectedVersion: scratchParent.version }],
+    },
+    agentOpts,
+  );
+  check(
+    'an agent delete of a node that still has children is dropped, its version notwithstanding',
+    parentFirst.dropped.length === 1 &&
+      parentFirst.deleted.length === 0 &&
+      (await nodeOf(scratchChild.id)) !== undefined,
+    parentFirst,
+  );
+  const leafFirst = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'delete', nodeRef: scratchChild.id, expectedVersion: scratchChild.version },
+        { op: 'delete', nodeRef: scratchParent.id, expectedVersion: scratchParent.version },
+      ],
+    },
+    agentOpts,
+  );
+  check(
+    'an agent removes a subtree leaf by leaf, each delete carrying its version',
+    leafFirst.deleted.length === 2 && leafFirst.dropped.length === 0,
+    leafFirst,
+  );
   await applyPlanPatch(
     db,
     {

@@ -48,7 +48,8 @@ export interface ApplyPlanPatchOptions {
   sourceTaskId?: string | null;
   /**
    * What to do with an op naming a node that does not exist, or, under
-   * `requireExpectedVersion`, changing or deleting one without its version.
+   * `requireExpectedVersion`, changing or deleting one without its version, or
+   * deleting one that still has children.
    *
    * `fail` (the default) rejects the whole patch, which is right for a PERSON
    * editing the plan: a bad id is a mistake they should be told about, not
@@ -106,7 +107,9 @@ export interface ApplyPlanPatchOptions {
    * the canvas since the agent read the plan. An op that only moves `ordinal` or adds
    * code links is exempt: the sequencing step writes a whole build order at once, a
    * node-level version would reject it over an unrelated edit to one child, and neither
-   * field overwrites what a person typed.
+   * field overwrites what a person typed. A delete of a node that still has children is
+   * refused too: the cascade would take descendants whose versions the agent never sent,
+   * so an agent removes a subtree leaf by leaf.
    */
   requireExpectedVersion?: boolean;
 }
@@ -838,6 +841,13 @@ async function applyOps(
               sql`${schema.planNodes.path} LIKE ${subtreeLikePattern(row.path)}`,
             ),
           );
+        if (opts.requireExpectedVersion && doomed.length > 1) {
+          throw new UnresolvableRefError(
+            'invalid',
+            `plan node ${row.id} still has children; delete them first, each with its expectedVersion`,
+            opIndex,
+          );
+        }
         await tx.delete(schema.planNodes).where(eq(schema.planNodes.id, row.id));
         // The cascade takes this subtree's edges with it, so a dependency graph
         // cached before now would report paths that no longer exist.

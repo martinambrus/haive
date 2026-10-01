@@ -46,6 +46,9 @@ Rules:
   plus its \`expectedVersion\`: the version shown for that node below. A change or
   delete without one is left out of your reply, and if someone else changed the node
   first the whole reply is rejected and nothing is written, so do not guess.
+- A delete removes ONE node that has no children. To remove a subtree, delete its
+  deepest nodes first and its top node last, each with its own \`expectedVersion\`;
+  a delete of a node that still has children is left out of your reply.
 - \`kind\` is one of: \`component\` (a part of the system), \`decision\` (a choice to
   make or record), \`research\` (needs investigating first), \`external\` (a non-code
   blocker — legal, a domain, hosting, an account).
