@@ -1446,6 +1446,15 @@ no longer lists what is attached.
 
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 
+**A sibling run too wide for one agent's reply is named, never sent.** The build-order step
+(`03-plan-sequence`) asks one agent per undecided run for an upsert per child plus the links it
+adds, and a patch holds `PLAN_PATCH_MAX_OPS` (500) ops, so a run past `SEQUENCE_MAX_RUN_CHILDREN`
+(half of that) keeps its stored order and the finished step names it (`degradedNote`), and the
+prompt states the op budget its reply has. `tooWideToSequence` is the one rule the fan-out and the
+plan page's Order count (`computeSequenceProgress`) share, so the count never promises a pass that
+would skip a group. At the cap the child list stays under `PLAN_EXPANSION_CONTEXT_MAX_CHARS`, since
+`safeTitle` caps a title at 200 characters. MEASURED: no stored run came near it (widest 33).
+
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
 (`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet
 `depends_on` of its own, **no ANCESTOR with one**, no open task on it, and a unit of work
