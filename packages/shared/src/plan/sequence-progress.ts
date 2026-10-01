@@ -1,3 +1,4 @@
+import { PLAN_PATCH_MAX_OPS } from '../schemas/plan.js';
 import {
   orderSiblingsByDependency,
   type PlanSequenceEdge,
@@ -21,6 +22,14 @@ import {
  *  number the user has to click through. Shared because the API quotes it when it
  *  says how many passes are left. */
 export const SEQUENCE_AGENTS_PER_PASS = 400;
+
+/** The widest sibling run one agent is asked to order: one upsert per child and room for as many
+ *  links again, inside one patch. */
+export const SEQUENCE_MAX_RUN_CHILDREN = PLAN_PATCH_MAX_OPS / 2;
+
+export function tooWideToSequence(run: readonly unknown[]): boolean {
+  return run.length > SEQUENCE_MAX_RUN_CHILDREN;
+}
 
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const SEQUENCE_AGENT_RE = new RegExp(`^plan-seq-(${UUID_SOURCE})-p(\\d+)$`, 'i');
@@ -91,6 +100,9 @@ export interface SequenceProgress {
   passesRemaining: number;
   /** The budget, so a caller can say what one pass covers without hardcoding it. */
   perPass: number;
+  /** Undecided runs no pass asks about (`tooWideToSequence`), so in neither count above: they
+   *  keep their stored order until they are split into smaller ones. */
+  groupsTooWide: number;
 }
 
 /**
@@ -98,9 +110,10 @@ export interface SequenceProgress {
  *
  * Deliberately NOT reusing the worker's `computeTargets`: that answers a richer
  * question (each target's title and child count, plus how many runs the edges
- * already settle) and is what builds the fan-out. This is the tally. The part that
- * must never diverge between them — whether a run's edges pin exactly one order —
- * is `orderSiblingsByDependency`, and both call it.
+ * already settle) and is what builds the fan-out. This is the tally. The parts that
+ * must never diverge between them — whether a run's edges pin exactly one order, and
+ * whether it is too wide to ask about — are `orderSiblingsByDependency` and
+ * `tooWideToSequence`, and both call them.
  */
 export function computeSequenceProgress(
   nodes: PlanSequenceNode[],
@@ -117,11 +130,16 @@ export function computeSequenceProgress(
 
   let groupsRemaining = 0;
   let nodesRemaining = 0;
+  let groupsTooWide = 0;
   for (const [parentId, run] of byParent) {
     // A run of one has no order to decide.
     if (run.length < 2) continue;
     if (asked.has(parentId.toLowerCase())) continue;
     if (orderSiblingsByDependency(run, edges).decided) continue;
+    if (tooWideToSequence(run)) {
+      groupsTooWide++;
+      continue;
+    }
     groupsRemaining++;
     nodesRemaining += run.length;
   }
@@ -131,5 +149,6 @@ export function computeSequenceProgress(
     nodesRemaining,
     passesRemaining: Math.ceil(groupsRemaining / SEQUENCE_AGENTS_PER_PASS),
     perPass: SEQUENCE_AGENTS_PER_PASS,
+    groupsTooWide,
   };
 }
