@@ -835,7 +835,8 @@ export const taskStepCliTouched = pgTable(
 // The CLI (and effort) a person picked for one (step, role) WITHIN one task. Every
 // resolver reads it before the user's saved preference, which a pick rewrites only when
 // the person asks for it to apply to later tasks too. A NULL provider is a choice as
-// well: this task cleared the slot, so the saved preference stays out of it.
+// well: this task cleared the slot, so the saved preference stays out of it, and deleting
+// the chosen provider leaves it that way.
 export const taskStepCliChoices = pgTable(
   'task_step_cli_choices',
   {
@@ -845,7 +846,7 @@ export const taskStepCliChoices = pgTable(
     stepId: varchar('step_id', { length: 128 }).notNull(),
     role: varchar('role', { length: 32 }).notNull().default('default'),
     cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
-      onDelete: 'cascade',
+      onDelete: 'set null',
     }),
     effortLevel: text('effort_level'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),

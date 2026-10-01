@@ -2,7 +2,9 @@
 -- user's saved (user, step, role) preference, so every LATER task of that user inherited a switch
 -- made to rescue one stuck run. The picker now writes here, and writes the saved preference too
 -- only when asked to. A NULL provider is a choice as well: the task cleared that slot, so the
--- saved preference stays out of it and the slot falls back as though none existed.
+-- saved preference stays out of it and the slot falls back as though none existed. Deleting the
+-- chosen provider leaves the slot that way too (SET NULL), as disabling it already does, rather
+-- than handing it back to the saved preference this task had moved away from.
 --
 -- Additive and idempotent. Rollback: revert `schema/tasks.ts` and
 --   DROP TABLE IF EXISTS "task_step_cli_choices";
@@ -27,7 +29,7 @@ END $$;
 
 DO $$ BEGIN
   ALTER TABLE "task_step_cli_choices" ADD CONSTRAINT "task_step_cli_choices_cli_provider_id_cli_providers_id_fk"
-    FOREIGN KEY ("cli_provider_id") REFERENCES "public"."cli_providers"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+    FOREIGN KEY ("cli_provider_id") REFERENCES "public"."cli_providers"("id") ON DELETE SET NULL ON UPDATE NO ACTION;
 EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
