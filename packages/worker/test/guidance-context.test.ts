@@ -165,6 +165,27 @@ describe('augmentPromptWithLearnedGuidance', () => {
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
     expect(out).toContain('(at least 95 more approved lessons not shown');
   });
+
+  it('calls it a floor even when the filtering leaves few eligible rows', async () => {
+    // The FETCH is what the limit cuts, and filtering runs after it, so a saturated scan whose
+    // rows mostly belong to another repository is still saturated. Keying this on the eligible
+    // count instead would promise an exact "1 more" while the corpus may hold others past the
+    // limit — the very thing this notice exists to stop.
+    const db = fakeDb({
+      rows: [
+        ...Array.from({ length: 6 }, (_, i) => repoRow(`mine ${i}`)),
+        ...Array.from({ length: 94 }, () => ({
+          scope: 'repo' as const,
+          repositoryId: OTHER_REPO_ID,
+          facets: {},
+          guidance: 'another repository',
+        })),
+      ],
+    });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- mine \d$/gm)).toHaveLength(5);
+    expect(out).toContain('(at least 1 more approved lesson not shown');
+  });
 });
 
 describe('guidanceOmissionNotice', () => {

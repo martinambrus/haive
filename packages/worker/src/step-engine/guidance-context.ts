@@ -33,8 +33,11 @@ const SCAN_LIMIT = 100;
  *  lesson, and wearing the entry marker would make that false. It names what SURVIVES rather
  *  than what went, because the order is the selection rule — repo-scoped first, then by
  *  occurrences and recency — so "the ones you are not seeing rank below these" is the useful
- *  half. `atLeast` is for a scan that filled `SCAN_LIMIT`: the count is then a floor on what
- *  this block dropped, not the size of the corpus. */
+ *  half. `atLeast` is for a FETCH that filled `SCAN_LIMIT`: the count is then a floor on what this
+ *  block dropped, not the size of the corpus. Keyed on the fetched rows and NOT on the eligible
+ *  ones, because the filtering happens after the limit — 100 rows of which 6 survive facet and
+ *  repository matching is still a saturated scan, and claiming an exact count there would be this
+ *  function's own defect in miniature. */
 export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string {
   const count = atLeast ? `at least ${omitted}` : `${omitted}`;
   const plural = omitted === 1 ? '' : 's';
@@ -179,7 +182,7 @@ export async function augmentPromptWithLearnedGuidance(
       '\n' +
       'Lessons a human approved after earlier runs of this step went wrong. Follow them.\n' +
       lines.join('\n') +
-      (omitted > 0 ? `\n${guidanceOmissionNotice(omitted, eligible.length >= SCAN_LIMIT)}` : '')
+      (omitted > 0 ? `\n${guidanceOmissionNotice(omitted, rows.length >= SCAN_LIMIT)}` : '')
     );
   } catch (err) {
     log.warn({ err, taskId, stepId }, 'learned guidance lookup failed; prompt left unchanged');
