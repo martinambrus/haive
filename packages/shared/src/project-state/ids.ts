@@ -42,7 +42,8 @@ export function portableTemplateId(
 }
 
 /** The local template id for a portable one, or `FOREIGN_TEMPLATE` when this install holds no
- *  bundle item at that source and path. */
+ *  bundle item at that source and path, or holds that source in more than one bundle, since
+ *  either could be meant. */
 export function localTemplateId(portableId: string, bundles: readonly LocalBundle[]): string {
   if (!portableId.startsWith(PORTABLE_CUSTOM)) return portableId;
   const parts = portableId.slice(PORTABLE_CUSTOM.length).split(':');
@@ -55,11 +56,11 @@ export function localTemplateId(portableId: string, bundles: readonly LocalBundl
   } catch {
     return FOREIGN_TEMPLATE;
   }
-  for (const bundle of bundles) {
-    if (bundle.source !== source) continue;
-    for (const [itemId, path] of bundle.items) {
-      if (path === sourcePath) return `custom.${bundle.bundleId}.${itemId}`;
-    }
+  const holders = bundles.filter((b) => b.source === source);
+  if (holders.length !== 1) return FOREIGN_TEMPLATE;
+  const bundle = holders[0]!;
+  for (const [itemId, path] of bundle.items) {
+    if (path === sourcePath) return `custom.${bundle.bundleId}.${itemId}`;
   }
   return FOREIGN_TEMPLATE;
 }
