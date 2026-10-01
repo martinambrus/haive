@@ -95,7 +95,11 @@ export async function fetchOrigin(args: {
     Object.assign(env, helper.env);
     argv.push(...helper.argv);
   }
-  const res = await gitRun(args.repoPath, [...argv, 'fetch', 'origin', args.branch], env);
+  const res = await gitRun(
+    args.repoPath,
+    [...argv, 'fetch', '--end-of-options', 'origin', `refs/heads/${args.branch}`],
+    env,
+  );
   if (res.code !== 0) {
     throw new Error(`git fetch failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
   }

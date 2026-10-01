@@ -108,3 +108,19 @@ export function hardenGitArgs(args: readonly string[]): string[] {
   const insertAt = GIT_CONFIG_SAFETY_ARGS.length + at + 1;
   return [...out.slice(0, insertAt), ...extra, ...out.slice(insertAt)];
 }
+
+// A control character, a space or one of ~^:?*[\ — the characters git's ref-name rules refuse.
+const REF_NAME_FORBIDDEN = /[\u0000- \u007f~^:?*[\\]/;
+
+/** Whether git accepts `name` as a branch name (`git check-ref-format --branch`), the bar a name a
+ *  person typed must clear before any git argv carries it. One starting with `-` would be read as
+ *  an option, and some options name a command to run. `@` alone is refused too: git reads it as
+ *  HEAD rather than as a branch. */
+export function isBranchName(name: string): boolean {
+  if (name === '' || name === '@' || name === 'HEAD' || name.startsWith('-')) return false;
+  if (REF_NAME_FORBIDDEN.test(name) || name.includes('..') || name.includes('@{')) return false;
+  if (name.endsWith('.')) return false;
+  return name
+    .split('/')
+    .every((part) => part !== '' && !part.startsWith('.') && !part.endsWith('.lock'));
+}
