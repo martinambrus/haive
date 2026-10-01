@@ -169,6 +169,16 @@ describe('classifyEntry', () => {
     ).toBe('clean_update');
   });
 
+  it('different template hash + disk already holding the new render → adopt', () => {
+    expect(
+      classifyEntry({
+        live: live({ templateContentHash: 'old', writtenHash: 'wh-A' }),
+        current: current({ templateContentHash: 'new', writtenHash: 'wh-NEW' }),
+        diskHash: 'wh-NEW',
+      }),
+    ).toBe('adopt');
+  });
+
   it('different template hash + disk diverged from baseline → conflict', () => {
     expect(
       classifyEntry({

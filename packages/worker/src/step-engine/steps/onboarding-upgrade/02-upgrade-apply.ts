@@ -51,7 +51,7 @@ const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
 
 /** Action the apply loop should take for a single plan entry. */
-export type ApplyAction = 'apply' | 'delete' | 'strip' | 'untrack' | 'keep' | 'skip';
+export type ApplyAction = 'apply' | 'adopt' | 'delete' | 'strip' | 'untrack' | 'keep' | 'skip';
 
 export interface ApplySelections {
   selectedUpdates: ReadonlySet<string>;
@@ -63,8 +63,8 @@ export interface ApplySelections {
 }
 
 /** Pure classifier for the apply loop. Splits the per-entry decision out of
- *  the imperative loop so the five branches (`apply`, `delete`, `untrack`,
- *  `keep`, `skip`) can be unit-tested without a DB or file system. The `untrack`
+ *  the imperative loop so each branch can be unit-tested without a DB or
+ *  file system. `adopt` asks nothing: the file already holds the render. The `untrack`
  *  branch — supersede the artifact row without touching disk — fires when
  *  the user skipped an obsolete custom-bundle row whose source bundle item
  *  is gone AND no other entry in the plan rewrites the same diskPath; that
@@ -75,6 +75,7 @@ export function classifyApplyAction(
   allEntries: ReadonlyArray<UpgradePlanEntry>,
   selections: ApplySelections,
 ): ApplyAction {
+  if (entry.bucket === 'adopt') return 'adopt';
   // What the plan did not read is never written, kept or removed; only its row may be untracked.
   const read = entry.unread === undefined;
   const shouldApply =
@@ -330,6 +331,9 @@ export interface UpgradeApplyOutput {
   appliedCount: number;
   skippedCount: number;
   deletedCount: number;
+  /** Paths already holding the render, recorded as current without a write. Optional because it is
+   *  read back from a persisted output that may predate it. */
+  adoptedCount?: number;
   warnings: string[];
   installManifestWritten: boolean;
   rulesImportStubs: RulesImportStubOutcome[];
@@ -387,6 +391,7 @@ async function resolvePlanFromStep(ctx: {
 }
 
 function groupEntriesForForm(entries: UpgradePlanEntry[]): {
+  adopted: UpgradePlanEntry[];
   cleanUpdates: UpgradePlanEntry[];
   newArtifacts: UpgradePlanEntry[];
   userDeleted: UpgradePlanEntry[];
@@ -396,6 +401,7 @@ function groupEntriesForForm(entries: UpgradePlanEntry[]): {
 } {
   const read = entries.filter((e) => e.unread === undefined);
   return {
+    adopted: read.filter((e) => e.bucket === 'adopt'),
     cleanUpdates: read.filter((e) => e.bucket === 'clean_update'),
     newArtifacts: read.filter((e) => e.bucket === 'new_artifact'),
     userDeleted: read.filter((e) => e.bucket === 'user_deleted'),
@@ -425,7 +431,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
   },
 
   form(_ctx, detected): FormSchema | null {
-    const { cleanUpdates, newArtifacts, userDeleted, conflicts, obsolete, unread } =
+    const { adopted, cleanUpdates, newArtifacts, userDeleted, conflicts, obsolete, unread } =
       groupEntriesForForm(detected.entries);
     const fields: FormSchema['fields'] = [];
 
@@ -591,6 +597,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     }
 
     if (fields.length === 0) return null;
+    if (adopted.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'adoptedNote',
+        label: 'Already up to date',
+        body:
+          'These already hold the new template, so they are recorded as up to date and not ' +
+          `rewritten:\n\n${adopted.map((e) => `- \`${e.diskPath}\``).join('\n')}`,
+        variant: 'info',
+      });
+    }
 
     return {
       title: 'Upgrade selections',
@@ -646,6 +663,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let appliedCount = 0;
     let skippedCount = 0;
     let deletedCount = 0;
+    // Live rows whose file already holds the render, each replaced by a row claiming it.
+    const adoptions: {
+      liveId: string;
+      row: typeof schema.onboardingArtifacts.$inferInsert;
+    }[] = [];
     const writtenPaths: string[] = [];
     const deletedPaths: string[] = [];
     const created: {
@@ -876,6 +898,38 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
       if (action === 'skip') {
         skippedCount += 1;
+        continue;
+      }
+
+      if (action === 'adopt') {
+        // The form parks between the plan and this apply, so the file is read again.
+        const rel = safeDiskRel(entry.diskPath);
+        let now: { content: string; hash: string } | null = null;
+        try {
+          now = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
+        } catch {
+          now = null;
+        }
+        if (now === null || !entry.liveArtifactId || now.hash !== entry.newContentHash) {
+          warnings.push(
+            `did not record ${entry.diskPath} as up to date: it changed after the upgrade was planned`,
+          );
+          skippedCount += 1;
+          continue;
+        }
+        adoptions.push({
+          liveId: entry.liveArtifactId,
+          row: artifactRow(
+            {
+              templateContentHash: entry.currentTemplateContentHash ?? '',
+              writtenHash: now.hash,
+              writtenContent: now.content,
+              lastObservedDiskHash: now.hash,
+              userModified: false,
+            },
+            'backfill',
+          ),
+        });
         continue;
       }
 
@@ -1245,15 +1299,34 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const retiredBefore = () =>
       retired.filter((r) => r.taskId !== ctx.taskId || r.sourceStepId !== '02-upgrade-apply');
     const baselineIds: string[] = [];
+    let adoptedCount = 0;
     if (
       rowsToSupersede.length > 0 ||
       insertPaths.length > 0 ||
       baselineRows.length > 0 ||
       keptInPlace.length > 0 ||
-      removalRecords.length > 0
+      removalRecords.length > 0 ||
+      adoptions.length > 0
     ) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
+        // Outside what a rollback restores: the upgrade wrote nothing there.
+        for (const adoption of adoptions) {
+          const [replaced] = await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.id, adoption.liveId),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            )
+            .returning({ id: schema.onboardingArtifacts.id });
+          // A retry finds the row an earlier attempt replaced already retired.
+          if (!replaced) continue;
+          await tx.insert(schema.onboardingArtifacts).values(adoption.row);
+          adoptedCount += 1;
+        }
         const records = [...removalRecords, ...preimageIds];
         if (records.length > 0) {
           // Retired in the instant the row at their path is, so the rollback takes the record.
@@ -1350,7 +1423,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     );
 
     ctx.logger.info(
-      { appliedCount, skippedCount, deletedCount, rowsInserted: rowsToInsert.length, warnings },
+      {
+        appliedCount,
+        skippedCount,
+        deletedCount,
+        adoptedCount,
+        rowsInserted: rowsToInsert.length,
+        warnings,
+      },
       'upgrade-apply complete',
     );
     const before = retiredBefore();
@@ -1360,6 +1440,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       appliedCount,
       skippedCount,
       deletedCount,
+      adoptedCount,
       warnings,
       installManifestWritten,
       rulesImportStubs,

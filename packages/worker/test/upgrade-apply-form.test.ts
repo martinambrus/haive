@@ -39,6 +39,7 @@ function plan(entries: UpgradePlanEntry[]): UpgradePlanOutput {
   const counts: Record<UpgradePlanBucket, number> = {
     unchanged: 0,
     clean_update: 0,
+    adopt: 0,
     conflict: 0,
     new_artifact: 0,
     user_deleted: 0,
@@ -237,6 +238,27 @@ describe('upgradeApplyStep.form() — empty plan returns null', () => {
       plan([entry('unchanged', '.claude/agents/same.md')]),
     );
     expect(result).toBeNull();
+  });
+});
+
+describe('upgradeApplyStep.form() — files already holding the new render', () => {
+  it('asks nothing when there is nothing else to ask', () => {
+    expect(callFormOrNull(plan([entry('adopt', '.claude/agents/current.md')]))).toBeNull();
+  });
+
+  it('names them in a note beside the questions it does ask', () => {
+    const schema = callForm(
+      plan([
+        entry('adopt', '.claude/agents/current.md'),
+        entry('clean_update', '.claude/agents/old.md'),
+      ]),
+    );
+    const note = schema.fields.find((f) => f.id === 'adoptedNote');
+    expect(note).toMatchObject({ type: 'note' });
+    expect((note as { body: string }).body).toContain('`.claude/agents/current.md`');
+    expect(
+      schema.fields.some((f) => 'options' in f && JSON.stringify(f).includes('current.md')),
+    ).toBe(false);
   });
 });
 

@@ -2780,6 +2780,18 @@ restored file is offered again at the next upgrade rather than classified `uncha
 stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
 is invisible there once a sibling rendering has one; the next upgrade still offers it.
 
+**A file already holding the new render is recorded, never asked about.** A live row whose
+template moved while its path already holds the current render (one another install upgraded and
+git brought here, or one a person brought up to date by hand) is `adopt`. It used to read as a
+`conflict`, since the bytes matched neither the row's baseline nor its render, and asked the person
+to choose between two identical files. 02 retires the row and inserts a `backfill` row claiming the
+render, writing nothing, and outside `writtenPaths`, `createdPaths` and `retiredRowIds`: 03 stages
+nothing for it, and a rollback, which restores only what the upgrade replaced, leaves it. The bytes
+are read again at apply, since the form parks between the plan and the apply, and a file changed
+meanwhile is left for the next upgrade; a retry finds the row already retired and records nothing
+more. A form shown for anything else names the adopted paths in a note, and an upgrade with nothing
+else to ask runs without one.
+
 **An upgrade or a rollback deletes a file only while it holds what Haive wrote there, judged on
 the bytes it deletes.** `removeIfHaives` (02, shared by 04) hashes them the way the plan compares
 them (the whole file, or the rules region alone) against the row's `writtenHash`, at APPLY time,

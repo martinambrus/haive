@@ -165,7 +165,13 @@ Phase 1 (the record):
 - **B1.2 fix(worker): an upgrade adopts a file that already holds the current render.** New
   `adopt` bucket in `classifyEntry` (live row, disk equals the current render); 02 supersedes the
   row with a render-claiming backfill row, outside `writtenPaths`/`createdPaths`/`retiredRowIds`.
-  Control: `upgrade-plan-classify.test.ts` (today `conflict`).
+  Control: `upgrade-plan-classify.test.ts` (today `conflict`). **As built:** `adopt` comes after
+  `clean_update`, so a file still holding its row's baseline is rewritten as before. 02 adopts with
+  no form choice, reads the bytes again at apply and leaves a file changed since for the next
+  upgrade, and inserts only once its supersede retired the row, so a retry adds nothing. The form
+  names adopted paths in a note only when it asks something else. Controls, each failing on main:
+  the classify case, `classifyApplyAction`, and `upgrade-apply-adopt.test.ts` (an agent file and the
+  rules region adopted, a retry recording nothing, a file edited after the plan left alone).
 - **B1.3 feat(shared): project-state record codec** (pure `packages/shared/src/project-state/`:
   types, canonical render, zod parse, three-way merge returning conflicts, claim naming, id
   mapping, state hash). Control: determinism, round-trip, the merge table, and a `git merge-file`
