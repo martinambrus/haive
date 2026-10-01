@@ -12,6 +12,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
 });
 import {
   augmentPromptWithLearnedGuidance,
+  guidanceOmissionNotice,
   isStepGuidanceEnabled,
 } from '../src/step-engine/guidance-context.js';
 
@@ -124,20 +125,61 @@ describe('augmentPromptWithLearnedGuidance', () => {
     expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
   });
 
-  it('caps at 5 items even when more are active', async () => {
+  it('caps at 5 items even when more are active, and says how many it is not showing', async () => {
     const db = fakeDb({ rows: Array.from({ length: 9 }, (_, i) => repoRow(`item ${i}`)) });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
     expect(out.match(/^- item \d$/gm)).toHaveLength(5);
+    // Without this line the block reads as the complete list — the one thing AGENTS.md forbids
+    // of a bounded block, and what the task ledger and loadPriorFixContext both state.
+    expect(out).toContain('(4 more approved lessons not shown');
+    // Last line, and NOT a `- ` entry: every bullet in this block is one whole lesson.
+    const lines = out.trimEnd().split('\n');
+    expect(lines[lines.length - 1]!.startsWith('(')).toBe(true);
+    expect(out.match(/^- /gm)).toHaveLength(5);
   });
 
-  it('caps the appended block at 1500 characters', async () => {
+  it('caps the appended block at 1500 characters, and says what the cap cost', async () => {
     const db = fakeDb({ rows: Array.from({ length: 5 }, () => repoRow('y'.repeat(400))) });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
     const block = out.slice(PROMPT.length);
     // Header lines sit outside the item budget; the ITEM lines are what is capped.
     const itemChars = (block.match(/^- y+$/gm) ?? []).join('\n').length;
     expect(itemChars).toBeLessThanOrEqual(1500);
-    expect(out.match(/^- y+$/gm)!.length).toBeLessThan(5);
+    const shown = out.match(/^- y+$/gm)!.length;
+    expect(shown).toBeLessThan(5);
+    // The LENGTH cap drops silently too, so it is disclosed on the same terms as the count cap.
+    expect(out).toContain(`(${5 - shown} more approved lesson`);
+  });
+
+  it('says nothing when it showed everything', async () => {
+    const db = fakeDb({ rows: Array.from({ length: 5 }, (_, i) => repoRow(`item ${i}`)) });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- item \d$/gm)).toHaveLength(5);
+    expect(out).not.toContain('not shown');
+  });
+
+  it('calls the count a floor when the scan itself filled up', async () => {
+    // 100 rows is SCAN_LIMIT: the corpus may hold more that would have been eligible, so the
+    // number this block dropped is a floor rather than the total.
+    const db = fakeDb({ rows: Array.from({ length: 100 }, (_, i) => repoRow(`item ${i}`)) });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out).toContain('(at least 95 more approved lessons not shown');
+  });
+});
+
+describe('guidanceOmissionNotice', () => {
+  it('reads as one lesson when exactly one went, saturated or not', () => {
+    expect(guidanceOmissionNotice(1, false)).toContain('1 more approved lesson not shown');
+    expect(guidanceOmissionNotice(1, false)).not.toContain('lessons');
+    expect(guidanceOmissionNotice(1, true)).toContain('at least 1 more approved lesson not shown');
+  });
+
+  it('names what survives rather than what went', () => {
+    // The order IS the selection rule, so "the ones you cannot see rank below these" is the
+    // half that helps; a bare count would not say which end was kept.
+    expect(guidanceOmissionNotice(3, false)).toContain(
+      "the repository's own and the most-observed",
+    );
   });
 });
 

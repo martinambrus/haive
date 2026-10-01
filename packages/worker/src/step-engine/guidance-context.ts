@@ -27,6 +27,20 @@ const MAX_CHARS = 1500;
  *  uses, so what an overflowing corpus drops is the least-observed and stalest. */
 const SCAN_LIMIT = 100;
 
+/** Haive's note ABOUT the block, appended as its last line.
+ *
+ *  No `- ` bullet, for the reason the ledger gives: every bullet in this block is one whole
+ *  lesson, and wearing the entry marker would make that false. It names what SURVIVES rather
+ *  than what went, because the order is the selection rule — repo-scoped first, then by
+ *  occurrences and recency — so "the ones you are not seeing rank below these" is the useful
+ *  half. `atLeast` is for a scan that filled `SCAN_LIMIT`: the count is then a floor on what
+ *  this block dropped, not the size of the corpus. */
+export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string {
+  const count = atLeast ? `at least ${omitted}` : `${omitted}`;
+  const plural = omitted === 1 ? '' : 's';
+  return `(${count} more approved lesson${plural} not shown — the repository's own and the most-observed are kept)`;
+}
+
 /** The gate's answer plus the repository it resolved, so a caller that needs both does
  *  not repeat the task lookup. `repositoryId` is null for a task with no repository and
  *  is meaningless when `enabled` is false. */
@@ -131,7 +145,8 @@ export async function augmentPromptWithLearnedGuidance(
 
     // Repo-scoped first: it was approved about THIS codebase, so when the char cap
     // truncates, the item that survives is the more specific one.
-    const selected = [...repoRows, ...globalRows].slice(0, MAX_ITEMS);
+    const eligible = [...repoRows, ...globalRows];
+    const selected = eligible.slice(0, MAX_ITEMS);
     if (selected.length === 0) return prompt;
 
     const lines: string[] = [];
@@ -144,13 +159,27 @@ export async function augmentPromptWithLearnedGuidance(
     }
     if (lines.length === 0) return prompt;
 
+    // Both caps used to drop in silence, so a sixth approved lesson — or one that pushed the
+    // block past MAX_CHARS — was simply absent and the list read as complete. That is the one
+    // thing AGENTS.md forbids of a bounded block: a truncated fact reads as a whole one. Stated
+    // the way the task ledger and `loadPriorFixContext` state theirs, and LOGGED as well, so a
+    // corpus that keeps overflowing is visible without reading a prompt.
+    const omitted = eligible.length - lines.length;
+    if (omitted > 0) {
+      log.info(
+        { taskId, stepId, omitted, shown: lines.length },
+        'learned guidance over budget; items not shown',
+      );
+    }
+
     return (
       prompt +
       '\n\n' +
       GUIDANCE_MARKER +
       '\n' +
       'Lessons a human approved after earlier runs of this step went wrong. Follow them.\n' +
-      lines.join('\n')
+      lines.join('\n') +
+      (omitted > 0 ? `\n${guidanceOmissionNotice(omitted, eligible.length >= SCAN_LIMIT)}` : '')
     );
   } catch (err) {
     log.warn({ err, taskId, stepId }, 'learned guidance lookup failed; prompt left unchanged');
