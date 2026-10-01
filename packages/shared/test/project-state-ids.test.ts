@@ -93,4 +93,18 @@ describe('portableBundleSource', () => {
     expect(at('https://example.com:4443/b.git')).toBe(source('https://example.com:4443/b.git'));
     expect(at('http://example.com:443/b.git')).toBe(source('http://example.com:443/b.git'));
   });
+
+  it('names a host as the URL standard does, in every form a remote can take', () => {
+    const idn = source('https://xn--xample-9ua.com/b.git');
+    expect(at('https://éxample.com/b.git')).toBe(idn);
+    expect(at('https://XN--XAMPLE-9UA.COM/b.git')).toBe(idn);
+    expect(at('https://[0:0:0:0:0:0:0:1]/b.git')).toBe(source('https://[::1]/b.git'));
+    expect(at('https://example.com:0443/b.git')).toBe(source('https://example.com/b.git'));
+    expect(at('ssh://git@ÉXAMPLE.com:2222/b.git')).toBe(
+      source('ssh://git@xn--xample-9ua.com:2222/b.git'),
+    );
+    expect(at('git@XN--XAMPLE-9UA.COM:b.git')).toBe(source('git@xn--xample-9ua.com:b.git'));
+    expect(at('git@0x7f.1:b.git')).toBe(source('git@127.0.0.1:b.git'));
+    expect(at('https://ho\\st/b.git')).toBe(source('https://ho\\st/b.git'));
+  });
 });

@@ -17,28 +17,42 @@ const PORTABLE_CUSTOM = 'custom:';
 
 const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#]*)@)?([^/?#]*)([^?#]*)/i;
 
+const HOST_PORT = /^(.*?)(?::(\d*))?$/;
+
 const DEFAULT_PORT: Readonly<Record<string, string>> = {
-  'http://': ':80',
-  'https://': ':443',
-  'ssh://': ':22',
+  'http://': '80',
+  'https://': '443',
+  'ssh://': '22',
 };
 
-/** A remote as every install names it: where it is (scheme, host, port, path), with the scheme and
- *  host in lower case and no default port, since neither names another remote, and no userinfo but
- *  an ssh login, nor a query or a fragment, since each can carry a token. */
+/** A host as the URL standard names it (lower case, IDNA, canonical IPv4 and IPv6), so every
+ *  spelling of one host is one; a host the standard reads otherwise is only folded to lower case. */
+function canonicalHost(host: string): string {
+  try {
+    const parsed = new URL(`http://${host}`);
+    if (parsed.pathname === '/') return parsed.hostname;
+  } catch {
+    // Folded below.
+  }
+  return host.toLowerCase();
+}
+
+/** A remote as every install names it: where it is (scheme, host, port, path), its host as the URL
+ *  standard names it, no default port, and no userinfo but an ssh login, nor a query or a fragment,
+ *  since each can carry a token. The path is the server's to compare, so it stays as typed. */
 function portableRemote(url: string): string {
   const match = URL_PARTS.exec(url);
   if (!match) {
     const scp = parseScpLikeGitUrl(url);
-    return scp ? `${scp.user ? `${scp.user}@` : ''}${scp.host.toLowerCase()}:${scp.path}` : url;
+    return scp ? `${scp.user ? `${scp.user}@` : ''}${canonicalHost(scp.host)}:${scp.path}` : url;
   }
-  const [, rawScheme = '', userinfo, rawHost = '', path = ''] = match;
+  const [, rawScheme = '', userinfo, authority = '', path = ''] = match;
   const scheme = rawScheme.toLowerCase();
-  const port = DEFAULT_PORT[scheme];
-  const host = rawHost.toLowerCase();
+  const [, host = '', rawPort = ''] = HOST_PORT.exec(authority)!;
+  const port = rawPort === '' ? '' : String(Number(rawPort));
+  const kept = port === '' || port === DEFAULT_PORT[scheme] ? '' : `:${port}`;
   const user = scheme === 'ssh://' ? (userinfo ?? '').split(':')[0]! : '';
-  const bare = port && host.endsWith(port) ? host.slice(0, -port.length) : host;
-  return `${scheme}${user && `${user}@`}${bare}${path}`;
+  return `${scheme}${user && `${user}@`}${canonicalHost(host)}${kept}${path}`;
 }
 
 /** Where a bundle came from, the same on every install that ingested it. */
