@@ -618,16 +618,10 @@ export async function copyFileNoFollow(
       if (opts.owner) await dest.chown(opts.owner.uid, opts.owner.gid);
       ok = true;
     } finally {
-      await closeQuietly(dest);
       // A half-written destination is worse than none: the caller was told the copy failed, and a
-      // truncated `.env` reads as a valid one. Unlinked through the parent descriptor's path.
-      if (!ok) {
-        const cleanup = await walkDir(destAnchor, safeDest, destSegs).catch(() => null);
-        if (cleanup) {
-          await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
-          await closeQuietly(cleanup.fh);
-        }
-      }
+      // truncated `.env` reads as a valid one.
+      if (ok) await closeQuietly(dest);
+      else await removeCreated(destAnchor, safeDest, dest).catch(() => undefined);
     }
   } finally {
     await closeQuietly(src);
@@ -1078,6 +1072,30 @@ export async function removeFileIfNoFollow(
   return result === 'rewritten' ? 'kept' : result;
 }
 
+/** Which file a descriptor holds, kept to tell it later from another file at the same name. Bigints,
+ *  since an inode number past 2^53 does not survive a `Number`. */
+export interface FileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+export async function fileIdentity(fh: FileHandle): Promise<FileIdentity> {
+  const { dev, ino } = await fh.stat({ bigint: true });
+  return { dev, ino };
+}
+
+/** Delete the regular file at `rel` only while it is the file `identity` names. Parked first like
+ *  `removeFileIfNoFollow`, but judged on the inode alone: nothing is opened or read, so a file nobody
+ *  can read back goes like any other, and a file saved at `rel` meanwhile is kept whatever it holds. */
+export async function removeFileIfIdentityNoFollow(
+  anchor: string,
+  rel: string,
+  identity: FileIdentity,
+): Promise<'removed' | 'absent' | 'kept'> {
+  const result = await settleParked(anchor, rel, async () => 'keep', {}, false, identity);
+  return result === 'rewritten' ? 'kept' : result;
+}
+
 /** Replace the regular file's bytes with what `edit` returns (null keeps them), on its own inode and
  *  judged on the bytes it replaces: parked like `removeFileIfNoFollow`, so a save meanwhile is kept. */
 export async function rewriteFileIfNoFollow(
@@ -1098,12 +1116,25 @@ export async function rewriteFileIfNoFollow(
 
 type ParkedVerdict = 'remove' | 'keep' | Buffer;
 
+/** At most this many bytes of the leaf name the park name, so any leaf a filesystem accepts parks
+ *  under NAME_MAX (255) beside the pid and uuid; a shorter leaf parks under its whole name. */
+const PARK_LEAF_MAX_BYTES = 100;
+
+function parkLeaf(leaf: string): string {
+  const bytes = Buffer.from(leaf, 'utf8');
+  if (bytes.length <= PARK_LEAF_MAX_BYTES) return leaf;
+  let end = PARK_LEAF_MAX_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
 async function settleParked(
   anchor: string,
   rel: string,
   decide: (data: Buffer) => Promise<ParkedVerdict>,
   opts: { maxBytes?: number; repairPermissions?: boolean },
   writable: boolean,
+  identity?: FileIdentity,
 ): Promise<'removed' | 'rewritten' | 'absent' | 'kept'> {
   const safe = toSafeRel(rel);
   const segs = segments(safe);
@@ -1124,7 +1155,7 @@ async function settleParked(
     if (st === null) return 'absent';
     if (!st.isFile()) return 'kept';
 
-    const parked = `.${leaf}.haive-park-${process.pid}-${randomUUID()}`;
+    const parked = `.${parkLeaf(leaf)}.haive-park-${process.pid}-${randomUUID()}`;
     try {
       await withRepair(dir.fh, { repairPermissions: opts.repairPermissions }, () =>
         rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked)),
@@ -1153,7 +1184,10 @@ async function settleParked(
 
     let verdict: 'remove' | 'keep' | 'rewritten';
     try {
-      verdict = await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe);
+      verdict =
+        identity === undefined
+          ? await judgeParked(dir, parked, decide, opts.maxBytes, writable, anchor, safe)
+          : await judgeIdentity(dir, parked, identity);
     } catch (err) {
       await putBack({ error: err });
       throw err;
@@ -1230,6 +1264,17 @@ async function judgeParked(
   } finally {
     await closeQuietly(fh);
   }
+}
+
+/** Whether the parked entry is the file `identity` names, from its `lstat` alone. */
+async function judgeIdentity(
+  dir: HeldDir,
+  parked: string,
+  identity: FileIdentity,
+): Promise<'remove' | 'keep'> {
+  const st = await lstat(at(dir.fh.fd, parked), { bigint: true });
+  const same = st.dev === identity.dev && st.ino === identity.ino;
+  return same ? 'remove' : 'keep';
 }
 
 export interface RenameOptions extends EnsureDirOptions {
@@ -1361,37 +1406,33 @@ async function createExclusive(
     if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
     return fh;
   } catch (err) {
-    await closeQuietly(fh);
     // Leave nothing behind: a 0600 empty stub at a name a caller was told it could not have is
     // worse than no file, because the next attempt then fails EEXIST against our own leftover.
     // Best effort, as before: callers classify the error that stopped the create (403 for a link).
-    await removeCreated(anchor, safe, Buffer.alloc(0)).catch(() => undefined);
+    await removeCreated(anchor, safe, fh).catch(() => undefined);
     throw err;
   }
 }
 
-/** Removes the file this call created, but only while it holds a prefix of `written`, so a file put
- *  at the name meanwhile is kept. */
-function removeCreated(anchor: string, rel: string, written: Buffer): Promise<unknown> {
-  return removeFileIfNoFollow(
-    anchor,
-    rel,
-    (data) => written.subarray(0, data.length).equals(data),
-    {
-      maxBytes: written.length,
-    },
-  );
+/** Removes the file `fh` created, judged on its inode so a file put at the name meanwhile is kept
+ *  whatever it holds, then closes `fh`. Held open until then, its inode cannot be reused. */
+async function removeCreated(anchor: string, rel: string, fh: FileHandle): Promise<void> {
+  try {
+    await removeFileIfIdentityNoFollow(anchor, rel, await fileIdentity(fh));
+  } finally {
+    await closeQuietly(fh);
+  }
 }
 
 /** `removeCreated`, then always throws: `err`, or both failures when the removal fails. */
 async function takeBackCreated(
   anchor: string,
   rel: string,
-  written: Buffer,
+  fh: FileHandle,
   err: unknown,
 ): Promise<never> {
   try {
-    await removeCreated(anchor, rel, written);
+    await removeCreated(anchor, rel, fh);
   } catch (removeErr) {
     throw new AggregateError(
       [err, removeErr],
@@ -1424,8 +1465,7 @@ async function fillCreated(
     await writeAll(fh, bytes);
     if (durable) await fh.sync();
   } catch (err) {
-    await closeQuietly(fh);
-    return takeBackCreated(anchor, rel, bytes, err);
+    return takeBackCreated(anchor, rel, fh, err);
   }
   await closeQuietly(fh);
 }

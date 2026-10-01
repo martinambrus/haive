@@ -1,3 +1,28 @@
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({
+  unlink: null as null | { error?: Error; before?: () => Promise<void>; fired: number },
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    // The first unlink of a PARKED entry, which is how a judged removal ends: it can fail, and
+    // something can take the name just before it. An unlink by name never matches.
+    unlink: async (target: Parameters<typeof real.unlink>[0]) => {
+      const fault = h.unlink;
+      if (fault !== null && String(target).includes('.haive-park-')) {
+        h.unlink = null;
+        fault.fired += 1;
+        await fault.before?.();
+        if (fault.error !== undefined) throw fault.error;
+      }
+      return real.unlink(target);
+    },
+  };
+});
+
 import type { Stats } from 'node:fs';
 import {
   lstat,
@@ -14,52 +39,73 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { openFileNoFollow, updateFileNoFollow, writeFileNoFollow } from '../src/fs-safe.js';
+import {
+  copyFileNoFollow,
+  openFileNoFollow,
+  updateFileNoFollow,
+  writeFileNoFollow,
+} from '../src/fs-safe.js';
 
 // Two primitives write into a file they have just created: `writeFileNoFollow` in create-exclusive
 // mode and `updateFileNoFollow` with `create: true`. A write that fails part-way while the process
 // lives (ENOSPC, EIO) must not leave the half-written file at its name, where a later
 // create-exclusive refuses it (EEXIST) and a later update reads it as the file's content and
-// appends to it. Taking it back is judged on the bytes removed, so a file put at the name
-// meanwhile is kept. The same holds for every other step that fails once the file exists: the
-// fsync of a durable write, and the `chmod` that finishes creating it.
+// appends to it. The same holds for every other step that fails once the file exists: the fsync of
+// a durable write, the `chmod` and `chown` that finish creating it, and a copy's own writes.
+//
+// What is taken back is the file THIS CALL created, judged on its inode: the entry at the name is
+// moved to a private name, and it is removed only if it is the file the call holds. A file put at
+// the name meanwhile is kept, whatever it holds: another file with the very bytes that landed (or
+// none, when the call wrote none) is told from the call's own by nothing else.
 //
 // The failure is injected at `FileHandle.prototype.write`, chosen by the BYTES written, as in
-// fs-safe-write-failure.test.ts; the later steps at `FileHandle.prototype.sync` and `.chmod`. A
-// removal that fails too is injected at `FileHandle.prototype.read`, which judging the bytes of
-// the parked file reaches. `fh.writeFile`, `fh.writev` and path-based calls never reach any of them.
+// fs-safe-write-failure.test.ts; the later steps at `FileHandle.prototype.sync`, `.chmod` and
+// `.chown`. The end of a removal is injected at the `unlink` of the private name (a module mock, as
+// in fs-safe-park-error.test.ts): it can fail, and a file can be saved at the name just before it.
+// `fh.writeFile`, `fh.writev` and path-based calls never reach the prototype faults.
+//
+// This process is not root, which D4 depends on: root reads a file created 0o200 anyway.
 
 const REL = 'src/new.txt';
 const NAME = 'new.txt';
 const SETTLES_MS = 5_000;
 // The mode the caller asks for, so a file that comes back with the default 0644 is a different file.
 const FILE_MODE = 0o640;
-// Half of it lands before the failure: a prefix of what the call was writing, which is what makes
-// removing it legitimate.
+// Half of it lands before the failure: a prefix of what the call was writing.
 const NEXT = `# created\n${'a line the failed write never finishes\n'.repeat(8)}`;
-// Not a prefix of NEXT and shorter than the half of it that lands, so a judge on length alone would
-// take it for the call's own leftover.
+// What the call's own file holds once the failed write has landed its half.
+const LANDED = NEXT.slice(0, Math.floor(Buffer.byteLength(NEXT) / 2));
+// Not a prefix of NEXT: a file nobody could take for the call's own.
 const PERSON = 'someone else saved this\n';
+
+interface CreateExtra {
+  fileMode?: number;
+  owner?: { uid: number; gid: number };
+}
 
 interface Creator {
   name: string;
-  create: (root: string, rel: string, text: string) => Promise<string>;
+  create: (root: string, rel: string, text: string, extra?: CreateExtra) => Promise<string>;
 }
 
 // The update appends to what it finds, as the AGENTS.md and KB callers do, so a leftover shows.
 const CREATORS: Creator[] = [
   {
     name: 'writeFileNoFollow create-exclusive',
-    create: (root, rel, text) =>
-      writeFileNoFollow(root, rel, text, { mode: 'create-exclusive', fileMode: FILE_MODE }),
+    create: (root, rel, text, extra) =>
+      writeFileNoFollow(root, rel, text, {
+        mode: 'create-exclusive',
+        fileMode: extra?.fileMode ?? FILE_MODE,
+        owner: extra?.owner,
+      }),
   },
   {
     name: 'updateFileNoFollow create:true',
-    create: (root, rel, text) =>
+    create: (root, rel, text, extra) =>
       updateFileNoFollow(root, rel, (current) => `${current ?? ''}${text}`, {
         create: true,
-        fileMode: FILE_MODE,
+        fileMode: extra?.fileMode ?? FILE_MODE,
+        owner: extra?.owner,
       }),
   },
 ];
@@ -70,8 +116,11 @@ const ENTRIES: Creator[] = [
   ...CREATORS,
   {
     name: 'openFileNoFollow create-exclusive',
-    create: async (root, rel) => {
-      const fh = await openFileNoFollow(root, rel, 'create-exclusive', { fileMode: FILE_MODE });
+    create: async (root, rel, _text, extra) => {
+      const fh = await openFileNoFollow(root, rel, 'create-exclusive', {
+        fileMode: extra?.fileMode ?? FILE_MODE,
+        owner: extra?.owner,
+      });
       await fh.close();
       return 'created';
     },
@@ -86,14 +135,6 @@ interface WriteFault {
   fired: number;
 }
 
-interface ReadFault {
-  /** Thrown by every read, once `beforeRead` has run. Without it reads go through. */
-  error?: Error;
-  /** Runs once, before the first read. */
-  beforeRead?: () => Promise<void>;
-  fired: number;
-}
-
 interface StepFault {
   error: Error;
   /** Runs before the error is thrown. */
@@ -101,10 +142,10 @@ interface StepFault {
   fired: number;
 }
 
-const fsError = (code: 'ENOSPC' | 'EIO', text: string, syscall = 'write'): Error =>
+const fsError = (code: 'ENOSPC' | 'EIO' | 'EPERM', text: string, syscall = 'write'): Error =>
   Object.assign(new Error(`${code}: ${text}, ${syscall}`), {
     code,
-    errno: code === 'ENOSPC' ? -28 : -5,
+    errno: code === 'ENOSPC' ? -28 : code === 'EIO' ? -5 : -1,
     syscall,
   });
 
@@ -116,8 +157,8 @@ const writeFault = (error: Error, beforeThrow?: () => Promise<void>): WriteFault
 });
 
 type Method = (this: FileHandle, ...args: unknown[]) => Promise<unknown>;
-type Patched = 'write' | 'read' | 'chmod' | 'sync';
-const PATCHED: Patched[] = ['write', 'read', 'chmod', 'sync'];
+type Patched = 'write' | 'chmod' | 'chown' | 'sync';
+const PATCHED: Patched[] = ['write', 'chmod', 'chown', 'sync'];
 
 let proto: Record<Patched, unknown>;
 let real: Record<Patched, Method>;
@@ -127,8 +168,8 @@ beforeAll(async () => {
   proto = Object.getPrototypeOf(probe) as Record<Patched, unknown>;
   real = {
     write: proto.write as Method,
-    read: proto.read as Method,
     chmod: proto.chmod as Method,
+    chown: proto.chown as Method,
     sync: proto.sync as Method,
   };
   await probe.close();
@@ -136,6 +177,7 @@ beforeAll(async () => {
 
 function disarm(): void {
   for (const name of PATCHED) proto[name] = real[name];
+  h.unlink = null;
 }
 
 afterEach(disarm);
@@ -174,25 +216,13 @@ function armWrite(...faults: WriteFault[]): void {
   };
 }
 
-/** The step that finishes creating the file (`chmod`) or makes a durable write durable (`sync`)
- *  fails, after the file exists and, for `sync`, after every byte is written. */
-function armStep(name: 'chmod' | 'sync', fault: StepFault): void {
+/** A step after the file exists fails: the `chmod` or `chown` that finish creating it, or the
+ *  `sync` that makes a durable write durable (after every byte is written). */
+function armStep(name: 'chmod' | 'chown' | 'sync', fault: StepFault): void {
   proto[name] = async function () {
     fault.fired += 1;
     await fault.beforeThrow?.();
     throw fault.error;
-  };
-}
-
-/** Reads through a file handle are what judging the bytes of a parked file does first. */
-function armRead(fault: ReadFault): void {
-  proto.read = async function (this: FileHandle, ...args: unknown[]) {
-    fault.fired += 1;
-    const hook = fault.beforeRead;
-    fault.beforeRead = undefined;
-    await hook?.();
-    if (fault.error !== undefined) throw fault.error;
-    return real.read.apply(this, args);
   };
 }
 
@@ -229,6 +259,7 @@ describe('a create that fails part-way', () => {
   let root: string;
   let dir: string;
   let file: string;
+  const self = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'fs-safe-cf-'));
@@ -249,11 +280,18 @@ describe('a create that fails part-way', () => {
     return found.length === 0 ? 'nothing' : found.join(', ');
   }
 
+  /** A file another party saves, to be put at the name inside a fault. */
+  async function otherFile(bytes: string): Promise<{ other: string; before: Stats }> {
+    const other = path.join(root, 'other.txt');
+    await writeFile(other, bytes, { encoding: 'utf8', mode: 0o600 });
+    return { other, before: await lstat(other) };
+  }
+
   /** The file another party put at the name is still there, byte for byte and inode for inode. */
-  async function expectOtherFileStands(before: Stats): Promise<void> {
+  async function expectOtherFileStands(before: Stats, bytes = PERSON): Promise<void> {
     const after = await lstat(file).catch(() => null);
     expect(after?.isFile(), 'the other file is still at the name (it was removed)').toBe(true);
-    expect(await readFile(file, 'utf8'), 'it holds the other file’s bytes').toBe(PERSON);
+    expect(await readFile(file, 'utf8'), 'it holds the other file’s bytes').toBe(bytes);
     expect(after?.ino, 'it is the other file’s inode').toBe(before.ino);
     expect((after?.mode ?? 0) & 0o777, 'it keeps the other file’s mode').toBe(before.mode & 0o777);
     expect(await readdir(dir), `nothing else is beside it (found: ${await whatIsIn(dir)})`).toEqual(
@@ -324,14 +362,14 @@ describe('a create that fails part-way', () => {
     { timeout: SETTLES_MS },
     async (c) => {
       const enospc = fsError('ENOSPC', 'no space left on device');
-      const eio = fsError('EIO', 'input/output error');
-      const reads: ReadFault = { error: eio, fired: 0 };
+      const eio = fsError('EIO', 'input/output error', 'unlink');
+      const removal = { error: eio, fired: 0 };
       armWrite(writeFault(enospc));
-      armRead(reads);
+      h.unlink = removal;
 
       const found = failuresIn(await rejection(c.create(root, REL, NEXT)));
       disarm();
-      const readable = `readable from the rejection: ${found.map(label).join(', ')} (reads of the leftover: ${reads.fired})`;
+      const readable = `readable from the rejection: ${found.map(label).join(', ')} (private names unlinked: ${removal.fired})`;
 
       expect(found, `the failed write (ENOSPC) is ${readable}`).toContain(enospc);
       expect(found, `the failed removal (EIO) is ${readable}`).toContain(eio);
@@ -341,9 +379,7 @@ describe('a create that fails part-way', () => {
   it.each(CREATORS)(
     'C3 $name keeps a different file put at the name before the removal',
     async (c) => {
-      const other = path.join(root, 'other.txt');
-      await writeFile(other, PERSON, { encoding: 'utf8', mode: 0o600 });
-      const before = await lstat(other);
+      const { other, before } = await otherFile(PERSON);
       const enospc = fsError('ENOSPC', 'no space left on device');
       // Replaces the entry the call created, so the name is taken by an inode that is not its own.
       armWrite(writeFault(enospc, () => rename(other, file)));
@@ -356,9 +392,7 @@ describe('a create that fails part-way', () => {
   );
 
   it('C3c writeFileNoFollow create-exclusive durable keeps a different file put at the name when the fsync fails', async () => {
-    const other = path.join(root, 'other.txt');
-    await writeFile(other, PERSON, { encoding: 'utf8', mode: 0o600 });
-    const before = await lstat(other);
+    const { other, before } = await otherFile(PERSON);
     const eio = fsError('EIO', 'input/output error', 'fsync');
     // Replaces the entry the call created, so the name is taken by an inode that is not its own.
     armStep('sync', { error: eio, beforeThrow: () => rename(other, file), fired: 0 });
@@ -377,22 +411,22 @@ describe('a create that fails part-way', () => {
   });
 
   it.each(CREATORS)(
-    'C3b $name never takes a file saved at the name while its leftover is judged',
+    'C3b $name never takes a file saved at the name while its leftover is parked under a private name',
     async (c) => {
       const enospc = fsError('ENOSPC', 'no space left on device');
-      // The first read of the leftover is the judging of its bytes. By then the leftover is no
-      // longer at the name, so a file saved there now is not the call's.
-      const judged: ReadFault = { beforeRead: () => writeFile(file, PERSON, 'utf8'), fired: 0 };
+      // The leftover is unlinked from its private name, so by then the name it was created under
+      // is free, and a file saved there now is not the call's.
+      const parked = { before: () => writeFile(file, PERSON, 'utf8'), fired: 0 };
       armWrite(writeFault(enospc));
-      armRead(judged);
+      h.unlink = parked;
 
       const err = await rejection(c.create(root, REL, NEXT));
       disarm();
 
       expect(err, 'the call rejects with the failed write’s own error').toBe(enospc);
       expect(
-        judged.fired,
-        'the leftover was read, under a private name, before anything was removed',
+        parked.fired,
+        'the leftover was taken off a private name, not unlinked from the name it was created under',
       ).toBeGreaterThan(0);
       const stands = await readFile(file, 'utf8').catch((e: unknown) => `unreadable: ${label(e)}`);
       expect(stands, 'the file saved meanwhile stands').toBe(PERSON);
@@ -419,8 +453,8 @@ describe('a create that fails part-way', () => {
     expect(await readdir(dir), 'nothing is beside it').toEqual([NAME]);
   });
 
-  // A prefix of what the call would write: even a judge on the bytes would accept it, so only
-  // scoping the removal to a file the call created keeps it.
+  // A prefix of what the call would write, and a file the call did not create: nothing it fails
+  // at may take it.
   const MINE = NEXT.slice(0, 40);
 
   it('C4b writeFileNoFollow create-exclusive refuses what is at the name and leaves it', async () => {
@@ -459,14 +493,11 @@ describe('a create that fails part-way', () => {
   });
 
   // The create itself leaves an empty file and then finishes it (a held-path check, `chmod`,
-  // `chown`). A step failing in between takes the file back before a byte was written into it, so
-  // what it may remove is a file holding no bytes.
+  // `chown`). A step failing in between takes the file back before a byte was written into it.
   it.each(ENTRIES)(
     'C9 $name keeps a different file put at the name when a step after the create fails',
     async (c) => {
-      const other = path.join(root, 'other.txt');
-      await writeFile(other, PERSON, { encoding: 'utf8', mode: 0o600 });
-      const before = await lstat(other);
+      const { other, before } = await otherFile(PERSON);
       const eio = fsError('EIO', 'input/output error', 'fchmod');
       // Replaces the entry the call created, so the name is taken by an inode that is not its own.
       const fault: StepFault = { error: eio, beforeThrow: () => rename(other, file), fired: 0 };
@@ -499,4 +530,149 @@ describe('a create that fails part-way', () => {
       ).toEqual([]);
     },
   );
+
+  // D1: a DIFFERENT file that no judge on content or size could tell from the call's own. A write
+  // path's own file holds the first half of the payload when its write fails; createExclusive's own
+  // file holds nothing, and so does a write path's when the payload is empty.
+  it.each(CREATORS)(
+    'D1 $name keeps a different file holding the very bytes that landed, put at the name',
+    async (c) => {
+      const { other, before } = await otherFile(LANDED);
+      const enospc = fsError('ENOSPC', 'no space left on device');
+      armWrite(writeFault(enospc, () => rename(other, file)));
+
+      const err = await rejection(c.create(root, REL, NEXT));
+      disarm();
+
+      expect(err, 'the call rejects with the failed write’s own error').toBe(enospc);
+      await expectOtherFileStands(before, LANDED);
+    },
+  );
+
+  it('D1 writeFileNoFollow create-exclusive durable keeps a different empty file put at the name when an empty write’s fsync fails', async () => {
+    const { other, before } = await otherFile('');
+    const eio = fsError('EIO', 'input/output error', 'fsync');
+    armStep('sync', { error: eio, beforeThrow: () => rename(other, file), fired: 0 });
+
+    const err = await rejection(
+      writeFileNoFollow(root, REL, '', {
+        mode: 'create-exclusive',
+        fileMode: FILE_MODE,
+        durable: true,
+      }),
+    );
+    disarm();
+
+    expect(err, 'the call rejects with the failed fsync’s own error').toBe(eio);
+    await expectOtherFileStands(before, '');
+  });
+
+  it.each(ENTRIES)(
+    'D1 $name keeps a different empty file put at the name when a step after the create fails',
+    async (c) => {
+      const { other, before } = await otherFile('');
+      const eio = fsError('EIO', 'input/output error', 'fchmod');
+      armStep('chmod', { error: eio, beforeThrow: () => rename(other, file), fired: 0 });
+
+      const err = await rejection(c.create(root, REL, NEXT));
+      disarm();
+
+      expect(err, 'the call rejects with the failed step’s own error').toBe(eio);
+      await expectOtherFileStands(before, '');
+    },
+  );
+
+  // D2: a copy creates its destination and fills it; the destination it made is the one it takes back.
+  it('D2 copyFileNoFollow keeps a different file put at the destination name when the copy fails', async () => {
+    await writeFile(path.join(root, 'origin.txt'), NEXT, { mode: 0o640 });
+    const { other, before } = await otherFile(LANDED);
+    const enospc = fsError('ENOSPC', 'no space left on device');
+    armWrite(writeFault(enospc, () => rename(other, file)));
+
+    const err = await rejection(copyFileNoFollow(root, 'origin.txt', root, REL));
+    disarm();
+
+    expect(err, 'the copy rejects with the failed write’s own error').toBe(enospc);
+    await expectOtherFileStands(before, LANDED);
+  });
+
+  it('D2 pin: copyFileNoFollow removes the half-copied destination when the copy fails', async () => {
+    await writeFile(path.join(root, 'origin.txt'), NEXT, { mode: 0o640 });
+    const enospc = fsError('ENOSPC', 'no space left on device');
+    const fault = writeFault(enospc);
+    armWrite(fault);
+
+    const err = await rejection(copyFileNoFollow(root, 'origin.txt', root, REL));
+    disarm();
+
+    expect(
+      fault.fired,
+      'the copy’s bytes reached FileHandle.prototype.write and failed',
+    ).toBeGreaterThan(0);
+    expect(err, 'the copy rejects with the failed write’s own error').toBe(enospc);
+    expect(
+      await readdir(dir),
+      `the half-copied destination is removed (found: ${await whatIsIn(dir)})`,
+    ).toEqual([]);
+  });
+
+  // D4: the file the call created is its own to take back whatever mode it has. Nothing is read to
+  // tell, so a file nobody can read back (0o200) goes like any other. Only a process that is not
+  // root can fail these on a judge that reads: root reads a 0o200 file anyway.
+  it.each(CREATORS)(
+    'D4 $name removes its own leftover when it was created with a mode nobody can read (0o200)',
+    async (c) => {
+      armWrite(writeFault(fsError('ENOSPC', 'no space left on device')));
+
+      await rejection(c.create(root, REL, NEXT, { fileMode: 0o200 }));
+      disarm();
+
+      expect(
+        await readdir(dir),
+        `nothing is left at the name or beside it (found: ${await whatIsIn(dir)})`,
+      ).toEqual([]);
+    },
+  );
+
+  it.each(ENTRIES)(
+    'D4 $name removes the file it created with a mode nobody can read (0o200) when the chown after it fails',
+    async (c) => {
+      const eperm = fsError('EPERM', 'operation not permitted', 'fchown');
+      const fault: StepFault = { error: eperm, fired: 0 };
+      armStep('chown', fault);
+
+      const err = await rejection(c.create(root, REL, NEXT, { fileMode: 0o200, owner: self }));
+      disarm();
+
+      expect(fault.fired, 'the chown after the chmod was reached and failed').toBeGreaterThan(0);
+      expect(err, 'the call rejects with the failed step’s own error').toBe(eperm);
+      expect(
+        await readdir(dir),
+        `nothing is left at the name or beside it (found: ${await whatIsIn(dir)})`,
+      ).toEqual([]);
+    },
+  );
+
+  it('D4 copyFileNoFollow removes the destination it created with a mode nobody can read (0o200)', async () => {
+    await writeFile(path.join(root, 'origin.txt'), NEXT, { mode: 0o640 });
+    const eperm = fsError('EPERM', 'operation not permitted', 'fchown');
+    const fault: StepFault = { error: eperm, fired: 0 };
+    armStep('chown', fault);
+
+    const err = await rejection(
+      copyFileNoFollow(root, 'origin.txt', root, REL, {
+        preserveMode: false,
+        mode: 0o200,
+        owner: self,
+      }),
+    );
+    disarm();
+
+    expect(fault.fired, 'the chown after the chmod was reached and failed').toBeGreaterThan(0);
+    expect(err, 'the copy rejects with the failed step’s own error').toBe(eperm);
+    expect(
+      await readdir(dir),
+      `nothing is left at the destination or beside it (found: ${await whatIsIn(dir)})`,
+    ).toEqual([]);
+  });
 });

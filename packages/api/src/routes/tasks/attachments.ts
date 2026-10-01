@@ -24,9 +24,11 @@ import {
   chmodNoFollow,
   chownNoFollow,
   ensureDirNoFollow,
+  fileIdentity,
   isPathContainmentError,
   openFileNoFollow,
-  removeNoFollow,
+  removeFileIfIdentityNoFollow,
+  type FileIdentity,
 } from '@haive/shared/fs-safe';
 import {
   pruneAfter,
@@ -195,6 +197,13 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
   }
 }
 
+/** A name claimed by creating it: where, the open descriptor, and which file that created. */
+interface ClaimedName {
+  rel: string;
+  fh: FileHandle;
+  identity: FileIdentity;
+}
+
 /** De-dupe within the file's OWN directory by appending ` (n)` before the
  *  extension, and create that directory. Per-directory because two folders'
  *  `README.md` are two documents, not a collision. A file name a generated file
@@ -204,7 +213,7 @@ async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
   relPath: string,
-): Promise<{ rel: string; fh: FileHandle }> {
+): Promise<ClaimedName> {
   const { dir: relDir, base } = splitAttachmentPath(relPath);
   await ensureDirTree(anchor, uploadsRel, relDir);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
@@ -222,13 +231,14 @@ async function createUniqueAttachment(
         'create-exclusive',
         { fileMode: 0o644 },
       );
+      const identity = await fileIdentity(fh);
       // Best-effort, as the chown here has always been: an api that is not root cannot hand the
       // file to the sandbox uid, and 0644 is world-readable, so the upload must not fail over it.
       await chownNoFollow(anchor, `${uploadsRel}/${rel(candidate)}`, {
         uid: NODE_UID,
         gid: NODE_GID,
       }).catch(() => {});
-      return { rel: rel(candidate), fh };
+      return { rel: rel(candidate), fh, identity };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
@@ -250,8 +260,8 @@ async function claimAttachmentName(
   anchor: string,
   uploadsRel: string,
   relPath: string,
-): Promise<{ rel: string; fh: FileHandle }> {
-  let section = null as Promise<{ rel: string; fh: FileHandle }> | null;
+): Promise<ClaimedName> {
+  let section = null as Promise<ClaimedName> | null;
   const settled: string[] = [];
   try {
     await withTaskAttachmentsLock(getDb(), taskId, (tx) => {
@@ -265,8 +275,13 @@ async function claimAttachmentName(
   } catch (err) {
     const claimed = section === null ? null : await section.catch(() => null);
     if (claimed !== null) {
+      // Closed after the removal: while it is open, no other file can take its inode number.
+      await removeFileIfIdentityNoFollow(
+        anchor,
+        `${uploadsRel}/${claimed.rel}`,
+        claimed.identity,
+      ).catch(() => {});
       await claimed.fh.close().catch(() => {});
-      await removeNoFollow(anchor, `${uploadsRel}/${claimed.rel}`).catch(() => {});
     }
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
   } finally {
@@ -345,6 +360,7 @@ async function finalizeAttachment(args: {
   uploadsRel: string;
   destPath: string;
   filename: string;
+  identity: FileIdentity;
   taskId: string;
   userId: string;
   sizeBytes: number;
@@ -378,7 +394,11 @@ async function finalizeAttachment(args: {
       .query.taskAttachments.findFirst({ where: eq(schema.taskAttachments.id, id) })
       .catch(() => null);
     if (found === undefined) {
-      await removeNoFollow(args.anchor, `${args.uploadsRel}/${args.filename}`).catch(() => {});
+      await removeFileIfIdentityNoFollow(
+        args.anchor,
+        `${args.uploadsRel}/${args.filename}`,
+        args.identity,
+      ).catch(() => {});
     }
     if (!found) throw err;
     row = found;
@@ -410,16 +430,23 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
 
   await ensureUploadsDir(anchor, uploadsRel).catch(uploadPathError);
 
-  const { rel: safeName, fh } = await claimAttachmentName(taskId, anchor, uploadsRel, relPath);
+  const {
+    rel: safeName,
+    fh,
+    identity,
+  } = await claimAttachmentName(taskId, anchor, uploadsRel, relPath);
   const destPath = join(dir, safeName);
   let size: number;
   try {
     size = await streamToFileWithCap(body, fh, maxBytes);
   } catch (err) {
     // The name was claimed by creating it, so an aborted or over-cap upload has to unclaim it —
-    // otherwise the next attempt collides with our own empty file.
+    // otherwise the next attempt collides with our own empty file. Removed while still open, so no
+    // other file can have taken its inode number.
+    await removeFileIfIdentityNoFollow(anchor, `${uploadsRel}/${safeName}`, identity).catch(
+      () => {},
+    );
     await fh.close().catch(() => {});
-    await removeNoFollow(anchor, `${uploadsRel}/${safeName}`).catch(() => {});
     throw err;
   }
   await fh.close().catch(() => {});
@@ -429,6 +456,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     uploadsRel,
     destPath,
     filename: safeName,
+    identity,
     taskId,
     userId,
     sizeBytes: size,
