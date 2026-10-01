@@ -194,20 +194,23 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
 /** Record onboarding_artifacts rows and write `.haive/install.json`. Runs
  *  always (not gated by the commit checkbox) so versioning is in place even
  *  when the user defers committing. Idempotent on re-runs: upstream step
- *  machine guarantees 12-post-onboarding.apply runs once per task. */
-async function recordOnboardingArtifacts(ctx: StepContext): Promise<{
+ *  machine guarantees 12-post-onboarding.apply runs once per task. `renderCtx` is
+ *  built from `detect`, step 07's output; both are null where 07 left none. */
+async function recordOnboardingArtifacts(
+  ctx: StepContext,
+  detect: GenerateFilesDetect | null,
+  renderCtx: TemplateRenderContext | null,
+): Promise<{
   rowsWritten: number;
   installManifestWritten: boolean;
   warnings: string[];
-  renderContext: TemplateRenderContext | null;
 }> {
   const warnings: string[] = [];
 
-  const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
-  if (!genPrev || !genPrev.detect) {
+  if (!detect || !renderCtx) {
     warnings.push('onboarding-artifacts: 07-generate-files detect output missing, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — step 07 detect output missing');
-    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: null };
+    return { rowsWritten: 0, installManifestWritten: false, warnings };
   }
 
   const taskRows = await ctx.db
@@ -219,11 +222,9 @@ async function recordOnboardingArtifacts(ctx: StepContext): Promise<{
   if (!repositoryId) {
     warnings.push('onboarding-artifacts: task has no repository_id, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — task has no repository_id');
-    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: null };
+    return { rowsWritten: 0, installManifestWritten: false, warnings };
   }
 
-  const detect = genPrev.detect as GenerateFilesDetect;
-  const renderCtx = buildRenderContext(detect);
   const manifest = getTemplateManifest();
   const haiveExpanded = expandManifestFor(renderCtx, manifest);
 
@@ -296,7 +297,7 @@ async function recordOnboardingArtifacts(ctx: StepContext): Promise<{
 
   if (expanded.length === 0) {
     ctx.logger.info('onboarding-artifacts: manifest produced no renderings for this context');
-    return { rowsWritten: 0, installManifestWritten: false, warnings, renderContext: renderCtx };
+    return { rowsWritten: 0, installManifestWritten: false, warnings };
   }
 
   // Snapshot the render context so rollback/upgrade can reconstruct what was
@@ -370,7 +371,7 @@ async function recordOnboardingArtifacts(ctx: StepContext): Promise<{
     'onboarding-artifacts recorded',
   );
 
-  return { rowsWritten: rows.length, installManifestWritten, warnings, renderContext: renderCtx };
+  return { rowsWritten: rows.length, installManifestWritten, warnings };
 }
 
 /** Write the committed `.haive-data/` onboarding mirror from the repo's
@@ -631,11 +632,17 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let artifactRowsWritten = 0;
     let installManifestWritten = false;
     let renderContext: TemplateRenderContext | null = null;
+    let rtkChoiceRecorded = false;
     try {
-      const res = await recordOnboardingArtifacts(ctx);
+      const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
+      const detect = genPrev?.detect ? (genPrev.detect as GenerateFilesDetect) : null;
+      // Derived ahead of the recording, which the project state record below must not depend on.
+      renderContext = detect ? buildRenderContext(detect) : null;
+      // A 07 output from before RTK shipped made no choice; buildRenderContext defaults it off.
+      rtkChoiceRecorded = detect?.rtkEnabled !== undefined;
+      const res = await recordOnboardingArtifacts(ctx, detect, renderContext);
       artifactRowsWritten = res.rowsWritten;
       installManifestWritten = res.installManifestWritten;
-      renderContext = res.renderContext;
       warnings.push(...res.warnings);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -680,7 +687,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             repositoryId: mirrorRepositoryId,
             repoPath: ctx.repoPath,
             context: renderContext,
-            rtkChoiceRecorded: true,
+            rtkChoiceRecorded,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
