@@ -100,6 +100,26 @@ describe("a step card's CLI", () => {
     expect(steps.map((s) => s.preferredCliProviderId)).toEqual([PICKED_CLI, null]);
   });
 
+  it('shows no effort for a slot whose chosen provider was deleted since', async () => {
+    const { fake, db, save } = setup();
+    save('08c-code-review', SAVED_CLI);
+    // What ON DELETE SET NULL leaves: the provider gone, the effort that went with it kept.
+    fake.insert(schema.taskStepCliChoices, {
+      taskId: TASK,
+      stepId: '08c-code-review',
+      role: 'default',
+      cliProviderId: null,
+      effortLevel: 'max',
+    });
+    const [step] = await enrichStepsWithCliPreferences(
+      db,
+      USER,
+      [{ stepId: '08c-code-review' }],
+      TASK,
+    );
+    expect(step).toMatchObject({ preferredCliProviderId: null, preferredEffortLevel: null });
+  });
+
   it("shows a role's own pick in this task", async () => {
     const { db, save, choose } = setup();
     save('08a-browser-verify', SAVED_CLI, 'fixer');

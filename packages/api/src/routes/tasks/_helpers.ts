@@ -270,9 +270,12 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
       const choice = choices?.get(role);
       return choice ? choice.cliProviderId : honor(role, saved);
     };
+    // A cleared slot has no effort, including one whose chosen provider was deleted since:
+    // SET NULL clears the provider and leaves the effort that went with it.
     const effort = (role: string, saved: string | null): string | null => {
       const choice = choices?.get(role);
-      return choice ? choice.effortLevel : honor(role, saved);
+      if (choice) return choice.cliProviderId ? choice.effortLevel : null;
+      return honor(role, saved);
     };
     return {
       ...s,
