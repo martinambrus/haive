@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { configService } from '@haive/shared';
@@ -10,8 +12,17 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return { ...actual, resolveTaskFacets };
 });
+
+// The module's own log line, which is the only trace a drop leaves when nothing is shown.
+const logInfo = vi.hoisted(() => vi.fn());
+vi.mock('@haive/shared', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared')>();
+  const child = { info: logInfo, warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  return { ...real, logger: { ...real.logger, child: () => child } };
+});
 import {
   augmentPromptWithLearnedGuidance,
+  guidanceOmissionNotice,
   isStepGuidanceEnabled,
 } from '../src/step-engine/guidance-context.js';
 
@@ -28,18 +39,31 @@ interface Row {
   guidance: string;
 }
 
+interface Capture {
+  where?: SQL;
+  orderBy?: SQL[];
+}
+
 /** Stand-in for the two db.query.*.findFirst calls plus the one select chain
  *  augmentPromptWithLearnedGuidance makes. `rows` is what the select resolves to;
- *  passing a thrown error instead exercises the fail-soft path. */
+ *  passing a thrown error instead exercises the fail-soft path. `capture` receives the
+ *  query's WHERE and ORDER BY, which this stand-in does not apply. */
 function fakeDb(opts: {
   repositoryId?: string | null;
   stepGuidanceEnabled?: boolean;
   rows?: Row[] | Error;
+  capture?: Capture;
 }): Database {
   const chain = {
     from: () => chain,
-    where: () => chain,
-    orderBy: () => chain,
+    where: (where: SQL) => {
+      if (opts.capture) opts.capture.where = where;
+      return chain;
+    },
+    orderBy: (...orderBy: SQL[]) => {
+      if (opts.capture) opts.capture.orderBy = orderBy;
+      return chain;
+    },
     limit: () => {
       if (opts.rows instanceof Error) return Promise.reject(opts.rows);
       return Promise.resolve(opts.rows ?? []);
@@ -78,6 +102,7 @@ const DRUPAL_PROJECT = {
 beforeEach(() => {
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   resolveTaskFacets.mockResolvedValue(DRUPAL_PROJECT);
+  logInfo.mockClear();
 });
 
 afterEach(() => {
@@ -124,20 +149,145 @@ describe('augmentPromptWithLearnedGuidance', () => {
     expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
   });
 
-  it('caps at 5 items even when more are active', async () => {
+  it('caps at 5 items even when more are active, and says how many it is not showing', async () => {
     const db = fakeDb({ rows: Array.from({ length: 9 }, (_, i) => repoRow(`item ${i}`)) });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
     expect(out.match(/^- item \d$/gm)).toHaveLength(5);
+    // Without this line the block reads as the complete list — the one thing AGENTS.md forbids
+    // of a bounded block, and what the task ledger and loadPriorFixContext both state.
+    expect(out).toContain('(4 more approved lessons not shown');
+    // Last line, and NOT a `- ` entry: every bullet in this block is one whole lesson.
+    const lines = out.trimEnd().split('\n');
+    expect(lines[lines.length - 1]!.startsWith('(')).toBe(true);
+    expect(out.match(/^- /gm)).toHaveLength(5);
   });
 
-  it('caps the appended block at 1500 characters', async () => {
+  it('caps the appended block at 1500 characters, and says what the cap cost', async () => {
     const db = fakeDb({ rows: Array.from({ length: 5 }, () => repoRow('y'.repeat(400))) });
     const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
     const block = out.slice(PROMPT.length);
     // Header lines sit outside the item budget; the ITEM lines are what is capped.
     const itemChars = (block.match(/^- y+$/gm) ?? []).join('\n').length;
     expect(itemChars).toBeLessThanOrEqual(1500);
-    expect(out.match(/^- y+$/gm)!.length).toBeLessThan(5);
+    const shown = out.match(/^- y+$/gm)!.length;
+    expect(shown).toBeLessThan(5);
+    // The LENGTH cap drops silently too, so it is disclosed on the same terms as the count cap.
+    expect(out).toContain(`(${5 - shown} more approved lesson`);
+  });
+
+  it('says nothing when it showed everything', async () => {
+    const db = fakeDb({ rows: Array.from({ length: 5 }, (_, i) => repoRow(`item ${i}`)) });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- item \d$/gm)).toHaveLength(5);
+    expect(out).not.toContain('not shown');
+  });
+
+  it('calls the count a floor when the scan itself filled up', async () => {
+    // 100 rows is SCAN_LIMIT: the corpus may hold more that would have been eligible, so the
+    // number this block dropped is a floor rather than the total.
+    const db = fakeDb({ rows: Array.from({ length: 100 }, (_, i) => repoRow(`item ${i}`)) });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out).toContain('(at least 95 more approved lessons not shown');
+  });
+
+  it('calls it a floor even when the filtering leaves few eligible rows', async () => {
+    // The FETCH is what the limit cuts, and facet matching runs after it, so a saturated scan
+    // whose rows are mostly another stack's is still saturated. Keying this on the eligible
+    // count instead would promise an exact "1 more" while the corpus may hold others past the
+    // limit — the very thing this notice exists to stop.
+    const db = fakeDb({
+      rows: [
+        ...Array.from({ length: 6 }, (_, i) => repoRow(`mine ${i}`)),
+        ...Array.from({ length: 94 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
+      ],
+    });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- mine \d$/gm)).toHaveLength(5);
+    expect(out).toContain('(at least 1 more approved lesson not shown');
+  });
+
+  it('still speaks when a saturated scan showed everything it read', async () => {
+    // Five survivors fit the block whole, so nothing READ was dropped — but the rows past the
+    // limit were never read, and silence there would present the block as the complete list.
+    const db = fakeDb({
+      rows: [
+        ...Array.from({ length: 5 }, (_, i) => repoRow(`mine ${i}`)),
+        ...Array.from({ length: 95 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
+      ],
+    });
+    const out = await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    expect(out.match(/^- mine \d$/gm)).toHaveLength(5);
+    expect(out).toContain('(possibly more approved lessons not shown');
+    const lines = out.trimEnd().split('\n');
+    expect(lines[lines.length - 1]!.startsWith('(possibly more')).toBe(true);
+  });
+
+  it('logs a saturated scan that left nothing to show, and leaves the prompt as built', async () => {
+    // No lesson survived the facet match, so there is no list to misread; the log is the trace.
+    const db = fakeDb({
+      rows: Array.from({ length: 100 }, () => globalRow({ framework: ['laravel'] }, 'other stack')),
+    });
+    expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
+    expect(logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ omitted: 0, shown: 0, scanSaturated: true }),
+      expect.any(String),
+    );
+  });
+
+  it('logs a lesson too long to show, and leaves the prompt as built', async () => {
+    const db = fakeDb({ rows: [repoRow('z'.repeat(1600))] });
+    expect(await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT)).toBe(PROMPT);
+    expect(logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ omitted: 1, shown: 0, scanSaturated: false }),
+      expect.any(String),
+    );
+  });
+});
+
+describe('guidanceOmissionNotice', () => {
+  it('reads as one lesson when exactly one went, saturated or not', () => {
+    expect(guidanceOmissionNotice(1, false)).toContain('1 more approved lesson not shown');
+    expect(guidanceOmissionNotice(1, false)).not.toContain('lessons');
+    expect(guidanceOmissionNotice(1, true)).toContain('at least 1 more approved lesson not shown');
+  });
+
+  it('has nothing to say only when nothing was dropped and the scan did not fill', () => {
+    expect(guidanceOmissionNotice(0, false)).toBeNull();
+    expect(guidanceOmissionNotice(0, true)).toContain('(possibly more approved lessons not shown');
+  });
+
+  it('names what survives rather than what went', () => {
+    // The order IS the selection rule, so "the ones you cannot see rank below these" is the
+    // half that helps; a bare count would not say which end was kept.
+    expect(guidanceOmissionNotice(3, false)).toContain(
+      "the repository's own and the most-observed",
+    );
+  });
+});
+
+describe('the scan', () => {
+  // The limit is applied in SQL, so a scope filtered only afterwards lets another repository's
+  // lessons, or higher-ranked global ones, fill all 100 rows and leave this repository's unread.
+  it("reads this repository's own lessons and global ones, its own first", async () => {
+    const capture: Capture = {};
+    await augmentPromptWithLearnedGuidance(fakeDb({ rows: [], capture }), TASK_ID, STEP_ID, PROMPT);
+    const dialect = new PgDialect();
+    const where = dialect.sqlToQuery(capture.where!);
+    expect(where.sql).toMatch(/"repository_id" = \$\d+/);
+    expect(where.params).toContain(REPO_ID);
+    expect(where.params).toContain('global');
+    const first = dialect.sqlToQuery(capture.orderBy![0]!);
+    expect(first.sql).toMatch(/"scope" = \$\d+ desc$/);
+    expect(first.params).toEqual(['repo']);
+  });
+
+  it('reads global lessons alone for a task with no repository', async () => {
+    const capture: Capture = {};
+    const db = fakeDb({ repositoryId: null, rows: [], capture });
+    await augmentPromptWithLearnedGuidance(db, TASK_ID, STEP_ID, PROMPT);
+    const where = new PgDialect().sqlToQuery(capture.where!);
+    expect(where.sql).not.toContain('"repository_id"');
+    expect(where.params).toContain('global');
   });
 });
 

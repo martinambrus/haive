@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, or } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
@@ -23,9 +23,28 @@ const MAX_ITEMS = 5;
 const MAX_CHARS = 1500;
 
 /** Rows scanned before facet filtering. Global items are filtered in JS (see below),
- *  so the fetch has to be bounded by something; ordered by the same rank the block
- *  uses, so what an overflowing corpus drops is the least-observed and stalest. */
+ *  so the fetch has to be bounded by something; ordered as the block is, this
+ *  repository's own first, so what an overflowing corpus drops is the least-observed. */
 const SCAN_LIMIT = 100;
+
+/** Haive's note ABOUT the block, appended as its last line.
+ *
+ *  No `- ` bullet, for the reason the ledger gives: every bullet in this block is one whole
+ *  lesson, and wearing the entry marker would make that false. It names what SURVIVES rather
+ *  than what went, because the order is the selection rule — repo-scoped first, then by
+ *  occurrences and recency — so "the ones you are not seeing rank below these" is the useful
+ *  half. `atLeast` is for a FETCH that filled `SCAN_LIMIT`: the count is then a floor on what this
+ *  block dropped, not the size of the corpus. Keyed on the fetched rows and NOT on the eligible
+ *  ones, because facet matching happens after the limit — 100 rows of which 6 survive it is still
+ *  a saturated scan, and claiming an exact count there would be this function's own defect in
+ *  miniature. A saturated scan speaks even when it dropped nothing it
+ *  read, since the rows past the limit were never read; null means there is nothing to say. */
+export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string | null {
+  if (omitted === 0 && !atLeast) return null;
+  const count = omitted === 0 ? 'possibly' : atLeast ? `at least ${omitted}` : `${omitted}`;
+  const plural = omitted === 1 ? '' : 's';
+  return `(${count} more approved lesson${plural} not shown — the repository's own and the most-observed are kept)`;
+}
 
 /** The gate's answer plus the repository it resolved, so a caller that needs both does
  *  not repeat the task lookup. `repositoryId` is null for a task with no repository and
@@ -100,6 +119,17 @@ export async function augmentPromptWithLearnedGuidance(
     const gate = await resolveGate(db, taskId);
     if (!gate.enabled) return prompt;
 
+    // Scoped and ordered here rather than after the limit, or another repository's lessons and
+    // higher-ranked global ones could fill the scan and leave this repository's own unread.
+    const scopes = gate.repositoryId
+      ? or(
+          eq(schema.stepGuidance.scope, 'global'),
+          and(
+            eq(schema.stepGuidance.scope, 'repo'),
+            eq(schema.stepGuidance.repositoryId, gate.repositoryId),
+          ),
+        )
+      : eq(schema.stepGuidance.scope, 'global');
     const rows = await db
       .select({
         scope: schema.stepGuidance.scope,
@@ -108,8 +138,18 @@ export async function augmentPromptWithLearnedGuidance(
         guidance: schema.stepGuidance.guidance,
       })
       .from(schema.stepGuidance)
-      .where(and(eq(schema.stepGuidance.stepId, stepId), eq(schema.stepGuidance.status, 'active')))
-      .orderBy(desc(schema.stepGuidance.occurrences), desc(schema.stepGuidance.updatedAt))
+      .where(
+        and(
+          eq(schema.stepGuidance.stepId, stepId),
+          eq(schema.stepGuidance.status, 'active'),
+          scopes,
+        ),
+      )
+      .orderBy(
+        desc(eq(schema.stepGuidance.scope, 'repo')),
+        desc(schema.stepGuidance.occurrences),
+        desc(schema.stepGuidance.updatedAt),
+      )
       .limit(SCAN_LIMIT);
     if (rows.length === 0) return prompt;
 
@@ -131,17 +171,31 @@ export async function augmentPromptWithLearnedGuidance(
 
     // Repo-scoped first: it was approved about THIS codebase, so when the char cap
     // truncates, the item that survives is the more specific one.
-    const selected = [...repoRows, ...globalRows].slice(0, MAX_ITEMS);
-    if (selected.length === 0) return prompt;
-
+    const eligible = [...repoRows, ...globalRows];
     const lines: string[] = [];
     let used = 0;
-    for (const r of selected) {
+    for (const r of eligible.slice(0, MAX_ITEMS)) {
       const line = `- ${r.guidance}`;
       if (used + line.length + 1 > MAX_CHARS) break;
       lines.push(line);
       used += line.length + 1;
     }
+
+    // Both caps used to drop in silence, so a sixth approved lesson — or one that pushed the
+    // block past MAX_CHARS — was simply absent and the list read as complete. That is the one
+    // thing AGENTS.md forbids of a bounded block: a truncated fact reads as a whole one. Stated
+    // the way the task ledger and `loadPriorFixContext` state theirs, and LOGGED as well, so a
+    // corpus that keeps overflowing is visible without reading a prompt.
+    const omitted = eligible.length - lines.length;
+    const scanSaturated = rows.length >= SCAN_LIMIT;
+    const notice = guidanceOmissionNotice(omitted, scanSaturated);
+    if (notice) {
+      log.info(
+        { taskId, stepId, omitted, shown: lines.length, scanSaturated },
+        'learned guidance incomplete; items not shown',
+      );
+    }
+    // Nothing shown leaves no list an agent could take for the whole one, so the prompt stays as built.
     if (lines.length === 0) return prompt;
 
     return (
@@ -150,7 +204,8 @@ export async function augmentPromptWithLearnedGuidance(
       GUIDANCE_MARKER +
       '\n' +
       'Lessons a human approved after earlier runs of this step went wrong. Follow them.\n' +
-      lines.join('\n')
+      lines.join('\n') +
+      (notice ? `\n${notice}` : '')
     );
   } catch (err) {
     log.warn({ err, taskId, stepId }, 'learned guidance lookup failed; prompt left unchanged');
