@@ -1211,10 +1211,10 @@ async function judgeParked(
       if (bytesRead === 0) break;
       filled += bytesRead;
     }
-    const verdict = await decide(buf.subarray(0, filled));
+    const original = buf.subarray(0, filled);
+    const verdict = await decide(original);
     if (!Buffer.isBuffer(verdict)) return verdict;
-    await fh.truncate(0);
-    await writeAll(fh, verdict);
+    await replaceHeldBytes(fh, verdict, original);
     return 'rewritten';
   } finally {
     await closeQuietly(fh);
@@ -1372,6 +1372,30 @@ async function writeAll(fh: FileHandle, bytes: Buffer): Promise<void> {
   }
 }
 
+/** Replace what `fh` holds with `next`, on the same inode. A write that fails while the process
+ *  lives puts `original` back and rethrows; if the put-back fails too, both errors are thrown. */
+export async function replaceHeldBytes(
+  fh: FileHandle,
+  next: Buffer,
+  original: Buffer,
+): Promise<void> {
+  await fh.truncate(0);
+  try {
+    await writeAll(fh, next);
+  } catch (err) {
+    try {
+      await fh.truncate(0);
+      await writeAll(fh, original);
+    } catch (putBackErr) {
+      throw new AggregateError(
+        [err, putBackErr],
+        `${err}; putting the original bytes back failed too: ${putBackErr}`,
+      );
+    }
+    throw err;
+  }
+}
+
 export type WriteMode = 'create-exclusive' | 'overwrite-in-place' | 'replace-atomic';
 
 export interface WriteFileOptions {
@@ -1404,7 +1428,7 @@ export interface WriteFileOptions {
  * - `replace-atomic` (default) — write a temp beside it and rename over. A concurrent reader sees
  *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
  * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
- *   whose identity matters (the api's knowledge editor).
+ *   whose identity matters.
  * - `create-exclusive` — refuses to replace anything at all.
  */
 export async function writeFileNoFollow(
@@ -1431,11 +1455,10 @@ export async function writeFileNoFollow(
 
   if (mode === 'overwrite-in-place') {
     // `openVerified` refuses a link or a non-regular file and verifies the descriptor, so the
-    // truncate below cannot reach anything but the file this call resolved.
+    // rewrite below cannot reach anything but the file this call resolved.
     const fh = await openVerified(anchor, safe, 'read-write');
     try {
-      await fh.truncate(0);
-      await writeAll(fh, bytes);
+      await replaceHeldBytes(fh, bytes, await fh.readFile());
       if (opts.durable) await fh.sync();
       if (opts.fileMode !== undefined) await fh.chmod(opts.fileMode);
       if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
@@ -1515,7 +1538,8 @@ export interface UpdateFileOptions {
  * Not crash-atomic, unlike `replace-atomic`: a crash mid-write leaves a truncated file. That is the
  * trade for keeping the inode, the owner and the mode, and it is why `replace-atomic` stays the
  * default for anything a machine parses. Node has no `flock`, so two concurrent updaters are
- * serialized at step level or not at all.
+ * serialized at step level or not at all. A write that fails while the process lives puts the
+ * bytes it read back.
  *
  * `unchanged` is returned — and nothing written — when `update` returns `null` or the identical
  * string, so a re-run that has nothing to add does not touch the file's mtime.
@@ -1563,11 +1587,11 @@ export async function updateFileNoFollow(
       if (bytesRead === 0) break;
       filled += bytesRead;
     }
-    const current = buf.subarray(0, filled).toString('utf8');
+    const original = buf.subarray(0, filled);
+    const current = original.toString('utf8');
     const next = await update(current);
     if (next === null || next === current) return 'unchanged';
-    await fh.truncate(0);
-    await writeAll(fh, Buffer.from(next, 'utf8'));
+    await replaceHeldBytes(fh, Buffer.from(next, 'utf8'), original);
     return 'updated';
   } finally {
     await closeQuietly(fh);
