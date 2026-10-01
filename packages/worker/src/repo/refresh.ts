@@ -73,7 +73,11 @@ async function sourceFor(
           return `the stored credential could not be read (${err instanceof Error ? err.message : String(err)})`;
         }
       }
-      const res = await gitRun(dest, [...argv, 'fetch', ...extra, 'origin', branch], env);
+      const res = await gitRun(
+        dest,
+        [...argv, 'fetch', ...extra, '--end-of-options', 'origin', `refs/heads/${branch}`],
+        env,
+      );
       return res.code === 0 ? null : scrubSecret(firstLine(res.stderr || res.stdout), secret);
     },
   };

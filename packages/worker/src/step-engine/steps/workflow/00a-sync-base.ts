@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
+import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   buildCredentialHelper,
@@ -69,7 +70,7 @@ async function fetchOrigin(
       return { ok: false, error: `credential load failed: ${(err as Error).message}` };
     }
   }
-  argv.push('fetch', 'origin', base);
+  argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
   const res = await gitRun(ctx.repoPath, argv, env);
   if (res.code !== 0) {
     return {
@@ -311,6 +312,9 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       };
     }
     const base = values.base?.trim() || d.baseBranch;
+    if (!isBranchName(base)) {
+      throw new Error(`${JSON.stringify(base)} is not a branch name git accepts`);
+    }
 
     if (!d.hasOrigin) {
       return { synced: false, base, strategy: 'skipped', behindBy: 0, reason: 'no origin remote' };
@@ -350,11 +354,22 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const ff = (): Promise<{ code: number; stderr: string; stdout: string }> =>
       onCurrent
         ? gitRun(ctx.repoPath, ['merge', '--ff-only', `origin/${base}`])
-        : gitRun(ctx.repoPath, ['fetch', 'origin', `${base}:refs/heads/${base}`]);
+        : gitRun(ctx.repoPath, [
+            'fetch',
+            '--end-of-options',
+            'origin',
+            `refs/heads/${base}:refs/heads/${base}`,
+          ]);
 
     let res = await ff();
     if (res.code !== 0) {
-      await gitRun(ctx.repoPath, ['fetch', '--deepen=50', 'origin', base]);
+      await gitRun(ctx.repoPath, [
+        'fetch',
+        '--deepen=50',
+        '--end-of-options',
+        'origin',
+        `refs/heads/${base}`,
+      ]);
       res = await ff();
     }
     if (res.code !== 0) {

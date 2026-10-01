@@ -422,7 +422,7 @@ async function fetchForSync(
       return { ok: false, error: `credential load failed: ${(err as Error).message}` };
     }
   }
-  argv.push('fetch', 'origin', base);
+  argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
   const res = await gitRun(cwd, argv, env);
   if (res.code !== 0) {
     return {

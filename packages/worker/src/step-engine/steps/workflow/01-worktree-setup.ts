@@ -2,6 +2,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
+import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
@@ -321,6 +322,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       // Prefer the base 00a-sync-base picked + freshened; fall back to a legacy form
       // value (older tasks) then the parent's current branch.
       base = args.detected.syncedBase ?? values.baseBranch ?? args.detected.currentBranch ?? 'main';
+    }
+    // A base from an older task's form or 00a output was never checked; it reaches git below.
+    if (!isBranchName(base)) {
+      throw new Error(`${JSON.stringify(base)} is not a branch name git accepts`);
     }
 
     await ensureGitExcludeEntry(ctx.repoPath);
