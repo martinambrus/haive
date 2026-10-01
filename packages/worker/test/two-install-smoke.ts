@@ -391,6 +391,15 @@ async function main(): Promise<void> {
         repoA.rtkEnabled === false,
       repoA,
     );
+    const mirrorA = JSON.parse(git(a.repoPath, 'show', 'HEAD:.haive-data/environment.json')) as {
+      envDetectData?: Record<string, unknown>;
+    };
+    const mirroredKeys = Object.keys(mirrorA.envDetectData ?? {});
+    check(
+      "A's committed environment mirror carries no prompt-only field",
+      mirroredKeys.length > 0 && !mirroredKeys.some((key) => key.startsWith('__')),
+      mirroredKeys,
+    );
 
     // ---- B clones --------------------------------------------------------------------------
     const b = await cloneInstall('B', dbB, path.join(tmp, 'storage-b'), remoteUrl);
