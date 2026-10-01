@@ -30,7 +30,11 @@ import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import { writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
-import { loadLiveArtifacts, pickRenderSnapshot } from './01-upgrade-plan.js';
+import {
+  loadLiveArtifacts,
+  pickRenderSnapshot,
+  type UpgradePlanOutput,
+} from './01-upgrade-plan.js';
 import {
   removeIfHaives,
   resolveBundleItemId,
@@ -714,11 +718,17 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       const recorded =
         snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx, detected.repositoryId));
       if (recorded) {
+        // A choice is what the plan of the upgrade being undone found, not what the value looks like:
+        // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
+        const plan = (
+          await loadPreviousStepOutput(ctx.db, detected.rolledBackFromTaskId, '01-upgrade-plan')
+        )?.output as Pick<UpgradePlanOutput, 'rtkFollowsLive'> | null | undefined;
         await writeProjectStateRecord(ctx.db, {
           repositoryId: detected.repositoryId,
           repoPath: ctx.repoPath,
           context: recorded as unknown as TemplateRenderContext,
-          rtkChoiceRecorded: typeof recorded.rtkEnabled === 'boolean',
+          rtkChoiceRecorded:
+            plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean',
         });
       }
     } catch (err) {

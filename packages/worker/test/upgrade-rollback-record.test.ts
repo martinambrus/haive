@@ -57,6 +57,7 @@ async function rollback(older: Record<string, unknown> | null) {
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
+    taskSteps: schema.taskSteps,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -64,6 +65,16 @@ async function rollback(older: Record<string, unknown> | null) {
     name: 'acme',
     source: 'blank',
     renderContext: { ...UPGRADE, rtkChoiceRecorded: true },
+  });
+  // The upgrade's plan found the RTK choice recorded: the choice a rollback records is the plan's.
+  fake.insert(schema.taskSteps, {
+    taskId: UPGRADE_TASK,
+    stepId: '01-upgrade-plan',
+    stepIndex: 1,
+    round: 0,
+    title: 'Plan upgrade',
+    status: 'done',
+    output: { repositoryId: REPO, entries: [], rtkFollowsLive: true },
   });
   const row = (over: Record<string, unknown>) =>
     fake.insert(schema.onboardingArtifacts, {
