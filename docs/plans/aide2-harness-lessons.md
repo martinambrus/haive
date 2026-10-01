@@ -369,9 +369,9 @@ The heavier half is conditional on the cheap half showing test edits beside gate
 each changed test as it stood before the fix pass, from its recorded reference, against the fixed
 code, and add the result to the gate row beside the spec line the fixer cited. The re-run never
 writes the task's integration worktree, which later fix and review steps read: it runs in a
-disposable snapshot of the fixed tree, uncommitted changes included. Where the suite can run only from that worktree (a
-runner that mounts it), the heavier half is not available and the row says so. It is evidence for a
-person, never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail
+disposable snapshot of the fixed tree, uncommitted changes included. Where the suite can run only
+from that worktree (a runner that mounts it), the heavier half is not available and the row says so.
+It is evidence for a person, never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail
 against a correct fix, so a failure there proves nothing on its own, and nothing loops back or fails a
 step on it. Verification: prompt tests; a two-pass fixture in which pass 0 writes a test and pass 1
 edits it, recording the edit under pass 1 alone; a third pass editing the same file, which leaves
