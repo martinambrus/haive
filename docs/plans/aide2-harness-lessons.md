@@ -332,11 +332,17 @@ transcript's scope. Rollback: revert.
 ### P5. Bound the remaining plan renders
 
 `11f-plan-reconcile` and `01f-external-plan-sync` move to the bounded index, keeping depth 4 where it
-fits, which needs a depth parameter on `renderBoundedPlanIndexParts`, and the index they get shows
-each node's version, as P4's does (F14). A source-scan test then pins the invariant for every later
-caller: no step prompt calls `renderPlanMarkdown` directly; prompts get the plan through the bounded
-helpers. Verification: that test fails on `main` and passes after; the 11f prompt for the 800-node
-plan stays under the bound and names each node's version. Rollback: revert.
+fits, which needs a depth parameter on `renderBoundedPlanIndexParts`. P4's two rules apply to them
+as they do to plan chat, because a bounded index is never a writer's whole inventory. Each writer has
+a focus shown whole with versions: for these two, the nodes code-linked to the paths the commits
+changed. Every other node stays reachable with its version through the source D11 picks, and every
+update is checked against the read it came from (F14). 01f stamps its watermark on any measured range
+(`01f-external-plan-sync.ts`), so a focus too large for the budget holds the watermark rather than
+letting it pass nodes the agent was not shown. A source-scan test then pins the invariant for every
+later caller: no step prompt calls `renderPlanMarkdown` directly; prompts get the plan through the
+bounded helpers. Verification: that test fails on `main` and passes after; the 11f prompt for the
+800-node plan stays under the bound and names each node's version; a fixture whose only affected
+node lies outside the index still gets a proposal for it. Rollback: revert.
 
 ### P6. Make test edits during a fix visible, and ask for the behaviour fix
 
@@ -345,8 +351,10 @@ Cheap half first:
 - Each fix prompt (07's fix pass, 08b's fix pass and the DAG fix coder) gets one line: the defect is
   re-checked by checks the fixer cannot see, so fix the behaviour, and change a test's expectation only
   where the spec says it is wrong, naming that spec line in the reply.
-- Each fix pass's test edits are recorded when the pass ends: the test files it changed, and a bounded
-  patch of each against its content before the pass, taken host-side. Nothing records that today. 08b
+- Each fix pass's test edits are recorded when the pass ends, host-side: the test files it changed;
+  each one's content before the pass, kept whole as an immutable reference (a blob), which the
+  heavier half replays from; and a bounded patch of each for display. A later pass editing the same
+  file adds its own reference and never rewrites an earlier one. Nothing records any of this today. 08b
   folds every pass into one cumulative list (`accumulateChanges`) and keeps no file content, so a later
   pass's edit to a test an earlier pass wrote cannot be told apart, and later edits overwrite what a
   diff would need. The evidence is captured at the pass and never rebuilt afterwards.
@@ -358,17 +366,18 @@ Cheap half first:
   changed, as Haive-derived paths.
 
 The heavier half is conditional on the cheap half showing test edits beside gate-2 rejections: re-run
-each changed test as it stood before the fix pass (its recorded content) against the fixed code, and
-add the result to the gate row beside the spec line the fixer cited. The re-run never writes the
-task's integration worktree, which later fix and review steps read: it runs in a disposable snapshot
-of the fixed tree, uncommitted changes included. Where the suite can run only from that worktree (a
+each changed test as it stood before the fix pass, from its recorded reference, against the fixed
+code, and add the result to the gate row beside the spec line the fixer cited. The re-run never
+writes the task's integration worktree, which later fix and review steps read: it runs in a
+disposable snapshot of the fixed tree, uncommitted changes included. Where the suite can run only from that worktree (a
 runner that mounts it), the heavier half is not available and the row says so. It is evidence for a
 person, never a grade. Where the spec made the old expectation wrong, the old test is supposed to fail
 against a correct fix, so a failure there proves nothing on its own, and nothing loops back or fails a
 step on it. Verification: prompt tests; a two-pass fixture in which pass 0 writes a test and pass 1
-edits it, recording the edit under pass 1 alone; the gate row rendered from that record; a heavier-half
-re-run that leaves the integration worktree byte-identical; and field counts. Rollback: the record is
-additive, the rest display and prompt only.
+edits it, recording the edit under pass 1 alone; a third pass editing the same file, which leaves
+pass 1's reference unchanged; the gate row rendered from that record; a heavier-half re-run that
+leaves the integration worktree byte-identical; and field counts. Rollback: the record is additive,
+the rest display and prompt only.
 
 ### P7. A cheaper model on a narrow, high-volume seat (configuration, no code)
 
@@ -419,9 +428,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D10.** F16: a sibling run too wide for one prompt or one patch. Order it in bounded slices, which
   needs a rule for combining slices into one order, or leave it to a person with the step saying so.
   Not from the paper; pre-existing.
-- **D11.** P4: how plan chat reaches a node its bounded index omits. A versioned snapshot written for
-  each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls that
-  answers from the dispatch's read.
+- **D11.** P4 and P5: how a bounded plan writer reaches a node its index omits. A versioned snapshot
+  written for each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls
+  that answers from the dispatch's read. One choice serves plan chat, 11f and 01f.
 
 ## Decided
 
