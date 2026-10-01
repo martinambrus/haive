@@ -100,8 +100,8 @@ export interface SequenceProgress {
   passesRemaining: number;
   /** The budget, so a caller can say what one pass covers without hardcoding it. */
   perPass: number;
-  /** Undecided runs no pass asks about (`tooWideToSequence`), so in neither count above: they
-   *  keep their stored order until they are split into smaller ones. */
+  /** Undecided runs no pass asks about (`tooWideToSequence`), so in neither count above, and
+   *  counted whatever an earlier pass did: they keep their stored order until they are split. */
   groupsTooWide: number;
 }
 
@@ -134,12 +134,12 @@ export function computeSequenceProgress(
   for (const [parentId, run] of byParent) {
     // A run of one has no order to decide.
     if (run.length < 2) continue;
-    if (asked.has(parentId.toLowerCase())) continue;
     if (orderSiblingsByDependency(run, edges).decided) continue;
     if (tooWideToSequence(run)) {
       groupsTooWide++;
       continue;
     }
+    if (asked.has(parentId.toLowerCase())) continue;
     groupsRemaining++;
     nodesRemaining += run.length;
   }

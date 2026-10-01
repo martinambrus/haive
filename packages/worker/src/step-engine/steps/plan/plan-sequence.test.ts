@@ -461,11 +461,24 @@ describe('a sibling run too wide for one reply', () => {
         ...run('fits', SEQUENCE_MAX_RUN_CHILDREN),
       ],
       [],
+      new Set(),
     );
     expect(targets.map((t) => t.parentId)).toEqual(['fits']);
     expect(tooWide).toEqual([
       { parentId: 'wide', parentTitle: 'Catalogue', childCount: SEQUENCE_MAX_RUN_CHILDREN + 1 },
     ]);
+  });
+
+  it('is named even when an earlier pass asked about it, while an asked target is not sent', () => {
+    // A pass from before the cap could ask about a wide run and have its reply rejected; no pass
+    // asks again, so what it left behind is reported rather than hidden by the asked-set.
+    const { targets, tooWide } = computeTargets(
+      [...run('wide', SEQUENCE_MAX_RUN_CHILDREN + 1), ...run('fits', 3)],
+      [],
+      new Set(['wide', 'fits']),
+    );
+    expect(targets).toEqual([]);
+    expect(tooWide.map((t) => t.parentId)).toEqual(['wide']);
   });
 
   it('tells the agent how many link ops its reply has room for', () => {

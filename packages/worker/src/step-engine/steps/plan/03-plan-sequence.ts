@@ -302,10 +302,12 @@ async function applyDeterministicOrder(
 }
 
 /** The runs an agent still has to decide, in plan order so the fan-out works
- *  down the tree rather than jumping about. */
+ *  down the tree rather than jumping about. A run too wide to ask about is reported
+ *  whatever an earlier pass did, since no pass will ask about it again. */
 export function computeTargets(
   nodes: PlanNodeSkeleton[],
   edges: PlanEdgeRecord[],
+  asked: ReadonlySet<string>,
 ): {
   targets: SequenceTarget[];
   tooWide: SequenceTarget[];
@@ -325,11 +327,13 @@ export function computeTargets(
       decidedRuns++;
       continue;
     }
-    (tooWideToSequence(run) ? tooWide : targets).push({
+    const target = {
       parentId,
       parentTitle: titleById.get(parentId) ?? 'unknown',
       childCount: run.length,
-    });
+    };
+    if (tooWideToSequence(run)) tooWide.push(target);
+    else if (!asked.has(parentId.toLowerCase())) targets.push(target);
   }
   return { targets, tooWide, decidedRuns, contradictoryRuns };
 }
@@ -363,15 +367,18 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     loadAskedParents(ctx, repositoryId),
   ]);
   const derived = computePlanSequence(nodes, edges);
-  const { targets, tooWide, decidedRuns, contradictoryRuns } = computeTargets(nodes, edges);
+  const { targets, tooWide, decidedRuns, contradictoryRuns } = computeTargets(
+    nodes,
+    edges,
+    askedRepo,
+  );
   const state = askedState(rows);
-  const unasked = (t: SequenceTarget) => !askedRepo.has(t.parentId.toLowerCase());
   return {
     repositoryId,
     nodeCount: nodes.length,
     decidedRuns,
-    targets: targets.filter(unasked),
-    tooWide: tooWide.filter(unasked),
+    targets,
+    tooWide,
     contradictoryRuns,
     cycles: derived.cycles.length,
     ancestorDeps: derived.ancestorDeps.length,
@@ -853,10 +860,8 @@ export function createPlanSequenceStep(opts: {
         // asked-set spans passes, and the undecided count would say a finished plan
         // still had 876 groups to go.
         const asked = await loadAskedParents(ctx, d.repositoryId!);
-        const unasked = (t: SequenceTarget) => !asked.has(t.parentId.toLowerCase());
-        const open = computeTargets(nodes, edges);
-        result.remaining = open.targets.filter(unasked).length;
-        const tooWide = open.tooWide.filter(unasked);
+        const { targets, tooWide } = computeTargets(nodes, edges, asked);
+        result.remaining = targets.length;
         result.tooWide = tooWide.length;
         if (result.reordered === 0) return tooWide;
         try {
@@ -926,8 +931,7 @@ export function createPlanSequenceStep(opts: {
       const rows = await loadSequenceRows(ctx);
       const state = askedState(rows);
       const askedRepo = await loadAskedParents(ctx, d.repositoryId);
-      const { targets } = computeTargets(nodes, edges);
-      const pending = targets.filter((t) => !askedRepo.has(t.parentId.toLowerCase()));
+      const { targets: pending } = computeTargets(nodes, edges, askedRepo);
       result.remaining = pending.length;
       result.decision = 'sequenced';
 

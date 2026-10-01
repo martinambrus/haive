@@ -172,5 +172,12 @@ describe('computeSequenceProgress', () => {
       passesRemaining: 1,
       groupsTooWide: 1,
     });
+    // No pass asks about a wide run again, so an earlier pass's row does not hide it.
+    const asked = computeSequenceProgress(
+      run('wide', SEQUENCE_MAX_RUN_CHILDREN + 1),
+      [],
+      new Set(['wide']),
+    );
+    expect(asked.groupsTooWide).toBe(1);
   });
 });
