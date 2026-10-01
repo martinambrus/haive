@@ -191,7 +191,7 @@ async function resolveInternal(
     pg,
     embeddingDimensions,
     close: async () => {
-      await pg.end();
+      await pg.end({ timeout: 5 });
     },
   };
 }
@@ -203,7 +203,7 @@ function resolveExternal(connectionString: string, embeddingDimensions: number):
     pg,
     embeddingDimensions,
     close: async () => {
-      await pg.end();
+      await pg.end({ timeout: 5 });
     },
   };
 }
