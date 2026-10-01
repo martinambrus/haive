@@ -401,3 +401,22 @@ describe('01 worktree setup proposals, copy and records that must not change', (
     expect(recorded(root, row)).toEqual({ branch: null, path: null });
   }, 30_000);
 });
+
+describe('01 worktree setup with a tag named like a branch', () => {
+  // git prints such a branch as `heads/<name>` under `%(refname:short)`, so a short-name list misses it.
+  it('C7: still proposes the recorded branch when a tag carries the same name', async () => {
+    const root = await setupRepo();
+    const ctx = mkCtx(root, await appliedOnce(root, 'feature/add-ddev'));
+    await git(root, ['tag', 'feature/add-ddev']);
+    await expectOwnBranchProposed(ctx, 'feature/add-ddev');
+  }, 30_000);
+
+  it('C8: still bumps past a branch that a same-named tag shadows', async () => {
+    const root = await setupRepo();
+    await git(root, ['branch', 'feature/add-ddev']);
+    await git(root, ['tag', 'feature/add-ddev']);
+    const d = await worktreeSetupStep.detect!(mkCtx(root, freshTask()));
+    expect(d.proposedBranch).toBe('feature/add-ddev-2');
+    expect(d.proposalBumpedFrom).toBe('feature/add-ddev');
+  }, 30_000);
+});

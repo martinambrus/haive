@@ -119,7 +119,11 @@ export function nextFreeBranchName(
  *  only weaken the uniqueness proposal, never block setup — the claim guard in apply is
  *  the check that has to be right. */
 async function listLocalBranches(repoPath: string): Promise<Set<string>> {
-  const res = await gitRun(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  const res = await gitRun(repoPath, [
+    'for-each-ref',
+    '--format=%(refname:lstrip=2)',
+    'refs/heads',
+  ]);
   if (res.code !== 0) return new Set();
   return new Set(
     res.stdout
