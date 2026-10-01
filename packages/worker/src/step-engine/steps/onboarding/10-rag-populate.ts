@@ -260,10 +260,10 @@ interface IncrementalSync {
   seen: Set<string>;
 }
 
-/** Stable composite key for a chunk row. Paths and section ids never contain
- *  NUL, so it round-trips unambiguously. */
+/** Stable composite key for a chunk row. A JSON triple, so no character a path or
+ *  section id holds can make two rows share a key. */
 export function chunkKey(sourcePath: string, sectionId: string, chunkIndex: number): string {
-  return `${sourcePath} ${sectionId} ${chunkIndex}`;
+  return JSON.stringify([sourcePath, sectionId, chunkIndex]);
 }
 
 /** Keys present in the existing index but not re-seen this run — their source
