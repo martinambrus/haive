@@ -190,6 +190,17 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   existing node runs without the optimistic-concurrency check and can overwrite a person's concurrent
   edit. 03-plan-sequence is unaffected: `keepOrderingOps` keeps only `nodeRef` and `ordinal`. → P4, P5,
   D9.
+- **F15. `03-plan-sequence` still shows its agents the edges they are asked to judge (pre-existing,
+  found while answering a review of P1).** `omitLinks` exists so the agent is "a second opinion" rather
+  than "an echo" of the recorded `depends_on` edges (its comment in `render.ts`), but it drops only the
+  link lines: `renderPlanMarkdownFrom` still gives every node with an unmet prerequisite a `blocked by
+  #N` attribute, derived from those same edges. → P1.
+- **F16. A wide sibling run cannot be sequenced (pre-existing, same review).** `computeTargets` makes
+  every undecided run of two or more children one target, with no width cap, and
+  `buildSequencePrompt` lists every child with its title and `node:` ref, so a few hundred long-titled
+  children pass the provider-neutral bound on their own. A run of more than 500 children cannot be
+  answered at all: the reply needs one upsert per child, and `planPatchSchema` caps a patch at
+  `PLAN_PATCH_MAX_OPS` (500). → P1, D10.
 
 ## Phases
 
@@ -214,9 +225,18 @@ drops it.
 
 ### P1. Bound the sequence agents' plan context (recommended first change)
 
-Invariant: a plan render that reaches a sequence agent is bounded and says what it left out, and every
-node it shows carries the fields today's render gives it, its build-order number included
-(`buildSequencePrompt` tells the agent each node has one). Two arms, in order:
+Two invariants, which both arms keep:
+
+- **The whole prompt is bounded and says what it left out**, the agent's own children included, and
+  no target asks for more ops than a patch accepts. A sibling run too wide for either (F16) is not sent
+  whole: it is ordered in bounded slices or left to a person, and the step says which (D10).
+- **The same fields everywhere.** Every node shown carries its build-order number, which
+  `buildSequencePrompt` tells the agent each node has, and none carries dependency information: no
+  links, and none of the `blocked by` hints derived from them. Today's render leaks those hints past
+  `omitLinks` (F15), so the baseline is corrected first. Otherwise the comparison would set agents that
+  can echo existing edges against agents that cannot.
+
+Two arms, in order:
 
 1. **Parity.** Build each agent's context with `buildPlanExpansionContext`, focused on the node whose
    children the agent orders: the shape 01 and 02 already use, links still omitted as the step
@@ -236,13 +256,13 @@ about, and the step drops those from its targets, so a second wave orders differ
 Each arm therefore runs on its own copy of the repository and its plan, or through P8's harness; P7
 follows the same rule.
 
-Verification: zero-token first, by building the prompts for a real 800-node plan and measuring them;
-then one wave per arm (12 agents, `SEQUENCE_AGENTS_PER_WAVE`), each on its own copy of the same plan
-state, comparing cache-write tokens per agent, the step's `disagreements` count, order agreement
-between the arms per parent, and a person's spot check of the parents where the arms differ. The step
-has no ground truth by design (a disagreement is "two independent judgements … only a person can say
-which is right"), so that check is the grade. D1 picks the arm. Rollback: revert the builder call; no
-schema change.
+Verification: zero-token first, by building the prompts for a real 800-node plan and for a parent with
+more than 500 children, and measuring them, with no `blocked by` hint in either; then one wave per arm
+(12 agents, `SEQUENCE_AGENTS_PER_WAVE`), each on its own copy of the same plan state, comparing
+cache-write tokens per agent, the step's `disagreements` count, order agreement between the arms per
+parent, and a person's spot check of the parents where the arms differ. The step has no ground truth
+by design (a disagreement is "two independent judgements … only a person can say which is right"), so
+that check is the grade. D1 picks the arm. Rollback: revert the builder call; no schema change.
 
 ### P2. Tell the fixer what the same check said last round (prompt only)
 
@@ -386,6 +406,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
   version either. Show versions wherever a writer may patch, deciding whether the committed
   `.haive-data/plan.md` mirror (which shares `renderPlanMarkdown`) shows them too, or refuse an agent
   update that omits `expectedVersion`. Not from the paper; pre-existing.
+- **D10.** F16: a sibling run too wide for one prompt or one patch. Order it in bounded slices, which
+  needs a rule for combining slices into one order, or leave it to a person with the step saying so.
+  Not from the paper; pre-existing.
 
 ## Decided
 
