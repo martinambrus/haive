@@ -122,8 +122,8 @@ export const createTaskRequestSchema = z
      *  workflow runs hands-free between gates. Defaults to true. */
     autoContinue: z.boolean().optional(),
     /** Per-task override: ignore the user's saved per-step CLI prefs and default
-     *  every step to this task's cliProviderId. Manual mid-task step changes
-     *  still save globally as usual (see tasks.ignore_saved_step_clis). */
+     *  every step to this task's cliProviderId. A step changed during the task still
+     *  runs on its new CLI (see tasks.ignore_saved_step_clis). */
     ignoreSavedStepClis: z.boolean().optional(),
     /** Plan-canvas node this task implements. Recorded in `plan_node_tasks`, so a
      *  node can seed several attempts and each one is traceable; when the task
@@ -308,7 +308,7 @@ export const setCliProviderRequestSchema = z.object({
   cliProviderId: z.string().uuid().nullable(),
   /** Which CLI role this preference targets. Omitted / 'default' uses the
    *  single per-step provider (legacy path); named roles (e.g. 'reviewer',
-   *  'corrector') are stored per (user, step, role) for multi-CLI steps. */
+   *  'corrector') are stored per (task, step, role) for multi-CLI steps. */
   role: z.string().max(32).optional(),
   /** Which round of the step to act on (see stepActionRequestSchema). Omitted →
    *  latest round. */
@@ -318,6 +318,9 @@ export const setCliProviderRequestSchema = z.object({
    *  effort). Validated against the resolved provider's effortScale server-side; an
    *  out-of-scale value (e.g. claude 'max' on codex) is dropped. */
   effortLevel: z.string().max(32).nullable().optional(),
+  /** The choice applies to this task alone unless set: then it is also saved as the user's
+   *  (step, role) preference, which every later task of theirs starts from. */
+  remember: z.boolean().optional(),
 });
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;

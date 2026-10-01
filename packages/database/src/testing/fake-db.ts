@@ -85,11 +85,17 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
   for(strength: string, config?: unknown): SelectQuery;
 }
 
+/** `ON CONFLICT (target) DO UPDATE`: the row whose target columns hold the inserted values takes
+ *  `set`, and an insert matching none goes in as a new row. */
+interface Insert extends Lazy<FakeRow[]> {
+  onConflictDoUpdate(conflict: { target: Column | Column[]; set: FakeRow }): Lazy<FakeRow[]>;
+}
+
 /** The handle a test casts to `Database`, and the transaction a section receives. */
 export interface FakeDbHandle<Q extends string = string> {
   query: Record<Q, FakeTableApi>;
   select(fields?: Record<string, unknown>): { from(table: PgTable): SelectQuery };
-  insert(table: PgTable): { values(values: FakeRow | FakeRow[]): Lazy<FakeRow[]> };
+  insert(table: PgTable): { values(values: FakeRow | FakeRow[]): Insert };
   update(table: PgTable): { set(values: FakeRow): { where(cond: unknown): Lazy<FakeRow[]> } };
   delete(table: PgTable): { where(cond: unknown): Lazy<FakeRow[]> };
   execute(query: unknown): Promise<void>;
@@ -307,6 +313,25 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return { ...row };
   }
 
+  function upsertRow(
+    ctx: TxContext | null,
+    table: PgTable,
+    values: FakeRow,
+    conflict: { target: Column[]; set: FakeRow },
+  ): FakeRow {
+    const keyOf = columnKeys(table);
+    const keys = conflict.target.map((col) => {
+      const key = keyOf.get(col);
+      if (key === undefined) {
+        throw new Error(`fake db: a conflict target is not a column of ${getTableName(table)}`);
+      }
+      return key;
+    });
+    const hit = store.get(table)!.find((row) => keys.every((k) => row[k] === values[k]));
+    if (!hit) return insertRow(ctx, table, values);
+    return update(ctx, table, (row) => row === hit, compileSet(table, conflict.set))[0]!;
+  }
+
   function update(
     ctx: TxContext | null,
     table: PgTable,
@@ -386,16 +411,22 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       ) as Record<Extract<keyof T, string>, FakeTableApi>,
       select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
       insert: (table: PgTable) => ({
-        values: (values: FakeRow | FakeRow[]) =>
-          lazy(
-            async () => {
-              await hooks.beforeInsert?.(table);
-              return (Array.isArray(values) ? values : [values]).map((v) =>
-                insertRow(ctx, table, v),
-              );
-            },
-            (rows, fields) => rows.map((row) => project(table, fields, row)),
-          ),
+        values: (values: FakeRow | FakeRow[]): Insert => {
+          const run = (conflict?: { target: Column[]; set: FakeRow }) =>
+            lazy(
+              async () => {
+                await hooks.beforeInsert?.(table);
+                return (Array.isArray(values) ? values : [values]).map((v) =>
+                  conflict ? upsertRow(ctx, table, v, conflict) : insertRow(ctx, table, v),
+                );
+              },
+              (rows, fields) => rows.map((row) => project(table, fields, row)),
+            );
+          return Object.assign(run(), {
+            onConflictDoUpdate: (c: { target: Column | Column[]; set: FakeRow }) =>
+              run({ target: [c.target].flat(), set: c.set }),
+          });
+        },
       }),
       update: (table: PgTable) => ({
         set: (values: FakeRow) => ({

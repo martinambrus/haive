@@ -219,6 +219,33 @@ describe('the fake database', () => {
     await expect(ended!.insert(t).values(row('late.md'))).rejects.toThrow(/after it ended/);
     expect(fake.rows(t)).toEqual([]);
   });
+
+  it('updates the row a conflict target matches, inserts otherwise, and rolls both back', async () => {
+    const { fake, row, names } = setup();
+    const upsert = (handle: FakeDbHandle, filename: string, sizeBytes: number) =>
+      handle
+        .insert(t)
+        .values(row(filename, { sizeBytes }))
+        .onConflictDoUpdate({ target: [t.taskId, t.filename], set: { sizeBytes } });
+
+    await upsert(fake.db, 'a.md', 1);
+    await upsert(fake.db, 'a.md', 2);
+    await upsert(fake.db, 'b.md', 3);
+    expect(fake.rows(t).map((r) => [r.filename, r.sizeBytes])).toEqual([
+      ['a.md', 2],
+      ['b.md', 3],
+    ]);
+
+    await expect(
+      fake.db.transaction(async (tx) => {
+        await upsert(tx, 'a.md', 9);
+        await upsert(tx, 'c.md', 9);
+        throw new Error('rollback');
+      }),
+    ).rejects.toThrow('rollback');
+    expect(names()).toEqual(['a.md', 'b.md']);
+    expect(fake.rows(t)[0]!.sizeBytes).toBe(2);
+  });
 });
 
 describe('the attachments lock on the fake', () => {

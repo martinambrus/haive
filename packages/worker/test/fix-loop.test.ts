@@ -95,6 +95,7 @@ function makeMockDb(state: MockState): Database {
     query: {
       tasks: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
+      taskStepCliChoices: { findFirst: async () => undefined },
     },
   } as unknown as Database;
 }

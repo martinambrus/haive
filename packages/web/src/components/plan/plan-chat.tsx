@@ -208,8 +208,9 @@ export function PlanChat({
         setLiveStep(step);
         // A conversation already running has a provider of its own; the picker must show THAT
         // rather than what a new conversation would start with — and it is the STEP's CLI, not the
-        // task's. Changing the CLI mid-conversation saves a step preference and leaves the task
-        // column alone, so reading the column put the old CLI back while the new one ran.
+        // task's. Changing the CLI mid-conversation records a step choice for this task and
+        // leaves the task column alone, so reading the column put the old CLI back while the new
+        // one ran.
         const [running] = stepCliProviderIds({
           step,
           taskCliProviderId: res.task.cliProviderId,

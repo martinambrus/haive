@@ -518,7 +518,7 @@ interface TaskDetailResponse {
  * effort, so the effort select falls back to the new CLI's default rather than briefly
  * showing a level the new CLI may not even expose.
  *
- * `role` is a cliRole id or a miningSeat id — both live in the same (user, step, role)
+ * `role` is a cliRole id or a miningSeat id — both live in the same (task, step, role)
  * table server-side, so the cliRoles list decides which map it belongs to here.
  */
 /** The preference fields applyCliPreference rewrites. Both a real step row and an
@@ -1293,11 +1293,12 @@ export default function TaskDetailPage() {
     role: string | undefined,
     round: number,
     effortLevel?: string,
+    remember?: boolean,
   ) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
     // Paint the pick before the round-trip; the 2s poll reconciles either way, same as
-    // the auto-continue flip above. Preferences are keyed by (user, step, role) with no
+    // the auto-continue flip above. A choice is keyed by (task, step, role) with no
     // round, so every round's row of this step moves together — matching what the
     // reload would return.
     //
@@ -1325,6 +1326,7 @@ export default function TaskDetailPage() {
         round,
         ...(role ? { role } : {}),
         ...(effortLevel !== undefined ? { effortLevel } : {}),
+        ...(remember ? { remember: true } : {}),
       });
       await reload();
     } catch (err) {
@@ -1998,8 +2000,15 @@ export default function TaskDetailPage() {
                   cliError={
                     stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
                   }
-                  onChangeCli={(cliProviderId, role, effortLevel) =>
-                    changeStepProvider(step.stepId, cliProviderId, role, step.round, effortLevel)
+                  onChangeCli={(cliProviderId, role, effortLevel, remember) =>
+                    changeStepProvider(
+                      step.stepId,
+                      cliProviderId,
+                      role,
+                      step.round,
+                      effortLevel,
+                      remember,
+                    )
                   }
                   autoContinue={task.autoContinue}
                   autoContinueBusy={autoContinueBusy}
@@ -2076,8 +2085,8 @@ export default function TaskDetailPage() {
             busyStepId={stepProviderBusy}
             error={stepProviderError}
             disabled={task.status === 'cancelled' || task.status === 'completed'}
-            onChangeCli={(stepId, cliProviderId, role, effortLevel) =>
-              changeStepProvider(stepId, cliProviderId, role, 0, effortLevel)
+            onChangeCli={(stepId, cliProviderId, role, effortLevel, remember) =>
+              changeStepProvider(stepId, cliProviderId, role, 0, effortLevel, remember)
             }
           />
         </div>
@@ -2250,11 +2259,11 @@ function SummaryCliCard({
  *  (its form auto-submits, as 08a-browser-verify's does in automated mode, or it has no
  *  form and the task is on auto-continue) therefore went straight from "not started" to
  *  "running on the task default", with stopping the step as the only lever. This is that
- *  missing window: the preference is keyed (user, step, role) and the worker resolves it
+ *  missing window: a choice is keyed (task, step, role) and the worker resolves it
  *  at dispatch, so a pick here lands on this task.
  *
  *  Over-lists rather than under-lists: a workflow task's execution path can drop some of
- *  these steps, and a preference for a step that never runs is inert. */
+ *  these steps, and a choice for a step that never runs is inert. */
 function UpcomingCliPanel({
   steps,
   providers,
@@ -2275,6 +2284,7 @@ function UpcomingCliPanel({
     cliProviderId: string | null,
     role?: string,
     effortLevel?: string,
+    remember?: boolean,
   ) => void;
 }) {
   if (steps.length === 0) {
@@ -2288,9 +2298,10 @@ function UpcomingCliPanel({
   return (
     <div className="flex flex-col gap-3">
       <div className="text-xs text-neutral-500">
-        CLI steps this task has not reached yet. Setting one here applies to this task and is
-        remembered for later tasks. Steps already started keep their picker on their own card. Some
-        of these may not run — the execution path chosen at triage can skip them.
+        CLI steps this task has not reached yet. Setting one here applies to this task, and to your
+        later tasks too when you tick &ldquo;Also for my later tasks&rdquo;. Steps already started
+        keep their picker on their own card. Some of these may not run — the execution path chosen
+        at triage can skip them.
       </div>
       {steps.map((s) => (
         <Card key={s.stepId} className="flex flex-col gap-2 p-3">
@@ -2312,8 +2323,8 @@ function UpcomingCliPanel({
             taskCliProviderId={taskCliProviderId}
             locked={disabled}
             busy={busyStepId === s.stepId}
-            onChange={(cliProviderId, role, effortLevel) =>
-              onChangeCli(s.stepId, cliProviderId, role, effortLevel)
+            onChange={(cliProviderId, role, effortLevel, remember) =>
+              onChangeCli(s.stepId, cliProviderId, role, effortLevel, remember)
             }
           />
           {error?.stepId === s.stepId && (
@@ -2457,7 +2468,12 @@ interface StepCardProps {
   taskCliProviderId: string | null;
   cliBusy: boolean;
   cliError: string | null;
-  onChangeCli: (cliProviderId: string | null, role?: string, effortLevel?: string) => Promise<void>;
+  onChangeCli: (
+    cliProviderId: string | null,
+    role?: string,
+    effortLevel?: string,
+    remember?: boolean,
+  ) => Promise<void>;
   /** Task-level auto-continue flag, shown as a checkbox on the CURRENT step
    *  card only (passed steps can't be auto-continued anymore). */
   autoContinue: boolean;

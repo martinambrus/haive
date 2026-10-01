@@ -183,6 +183,34 @@ async function loadTouchedRoles(
   return out;
 }
 
+interface TaskCliChoice {
+  cliProviderId: string | null;
+  effortLevel: string | null;
+}
+
+/** `task_step_cli_choices` as taskId -> stepId -> role -> choice: what was picked for a slot
+ *  WITHIN that task, read before any saved preference. A NULL provider is the task clearing
+ *  the slot, so the saved preference stays out of it there. */
+async function loadTaskCliChoices(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+): Promise<Map<string, Map<string, Map<string, TaskCliChoice>>>> {
+  const out = new Map<string, Map<string, Map<string, TaskCliChoice>>>();
+  if (taskIds.length === 0) return out;
+  const rows = await db
+    .select()
+    .from(schema.taskStepCliChoices)
+    .where(inArray(schema.taskStepCliChoices.taskId, taskIds));
+  for (const r of rows) {
+    const byStep = out.get(r.taskId) ?? new Map<string, Map<string, TaskCliChoice>>();
+    const byRole = byStep.get(r.stepId) ?? new Map<string, TaskCliChoice>();
+    byRole.set(r.role, { cliProviderId: r.cliProviderId, effortLevel: r.effortLevel });
+    byStep.set(r.stepId, byRole);
+    out.set(r.taskId, byStep);
+  }
+  return out;
+}
+
 export async function enrichStepsWithCliPreferences<T extends { stepId: string }>(
   db: ReturnType<typeof getDb>,
   userId: string,
@@ -221,29 +249,46 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
     ignoreSaved && stepIds.length > 0
       ? ((await loadTouchedRoles(db, [taskId])).get(taskId) ?? new Map<string, Set<string>>())
       : new Map<string, Set<string>>();
+  const choicesByStep =
+    stepIds.length > 0
+      ? ((await loadTaskCliChoices(db, [taskId])).get(taskId) ??
+        new Map<string, Map<string, TaskCliChoice>>())
+      : new Map<string, Map<string, TaskCliChoice>>();
   return steps.map((s) => {
     const roles = STEP_CLI_ROLES[s.stepId];
     const seats = STEP_MINING_SEATS[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
     const touchedRoles = touchedByStep.get(s.stepId);
+    const choices = choicesByStep.get(s.stepId);
     // Under ignoreSaved a saved pref surfaces only where a marker exists for that
     // exact role; gating the 'default' read by its own marker stops a flagged
     // multi-role step from leaking a pre-existing default pref via fallthrough.
     const honor = (role: string, value: string | null): string | null =>
       !ignoreSaved || touchedRoles?.has(role) ? value : null;
+    const provider = (role: string, saved: string | null): string | null => {
+      const choice = choices?.get(role);
+      return choice ? choice.cliProviderId : honor(role, saved);
+    };
+    // A cleared slot has no effort, including one whose chosen provider was deleted since:
+    // SET NULL clears the provider and leaves the effort that went with it.
+    const effort = (role: string, saved: string | null): string | null => {
+      const choice = choices?.get(role);
+      if (choice) return choice.cliProviderId ? choice.effortLevel : null;
+      return honor(role, saved);
+    };
     return {
       ...s,
-      preferredCliProviderId: honor('default', byStep.get(s.stepId) ?? null),
-      preferredEffortLevel: honor('default', byStepEffort.get(s.stepId) ?? null),
+      preferredCliProviderId: provider('default', byStep.get(s.stepId) ?? null),
+      preferredEffortLevel: effort('default', byStepEffort.get(s.stepId) ?? null),
       ...(roles
         ? {
             cliRoles: roles,
             cliRoleProviders: Object.fromEntries(
-              roles.map((r) => [r.id, honor(r.id, roleProviders.get(r.id) ?? null)]),
+              roles.map((r) => [r.id, provider(r.id, roleProviders.get(r.id) ?? null)]),
             ),
             cliRoleEfforts: Object.fromEntries(
-              roles.map((r) => [r.id, honor(r.id, roleEfforts.get(r.id) ?? null)]),
+              roles.map((r) => [r.id, effort(r.id, roleEfforts.get(r.id) ?? null)]),
             ),
           }
         : {}),
@@ -251,10 +296,10 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
         ? {
             miningSeats: seats,
             miningSeatProviders: Object.fromEntries(
-              seats.map((r) => [r.id, honor(r.id, roleProviders.get(r.id) ?? null)]),
+              seats.map((r) => [r.id, provider(r.id, roleProviders.get(r.id) ?? null)]),
             ),
             miningSeatEfforts: Object.fromEntries(
-              seats.map((r) => [r.id, honor(r.id, roleEfforts.get(r.id) ?? null)]),
+              seats.map((r) => [r.id, effort(r.id, roleEfforts.get(r.id) ?? null)]),
             ),
           }
         : {}),
@@ -264,9 +309,10 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
 
 /** Every CLI provider each task's CURRENT step will actually spend, keyed by task id.
  *
- *  `tasks.cli_provider_id` is the fallback of LAST RESORT, not the answer: an explicit
- *  per-step preference — and, on a fan-out/multi-role step, a per-seat one — overrides it,
- *  exactly as the worker's `resolvePreferredCli` resolves it at dispatch. The listing's usage
+ *  `tasks.cli_provider_id` is the fallback of LAST RESORT, not the answer: a per-step choice
+ *  made in the task, else an explicit saved preference — and, on a fan-out/multi-role step, a
+ *  per-seat one — overrides it, exactly as the worker's `resolvePreferredCli` resolves it at
+ *  dispatch. The listing's usage
  *  strip is scoped to the rows on screen and had only the task column to key on, so it named
  *  an allowance the tasks were not spending: MEASURED on the dev install, two tasks whose task
  *  provider was an ollama fixture had run 233 codex and 14 claude-code invocations and zero
@@ -275,7 +321,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
  *
  *  Same fall-through, `enabled` filter and dedup as web's `stepCliProviderIds`, which does
  *  this on the task DETAIL page from the already-enriched step objects. This is the batched
- *  server-side twin for listing rows, which carry no steps: three queries for a whole page.
+ *  server-side twin for listing rows, which carry no steps: a few queries for a whole page.
  *
  *  A task with no current step (or whose step has no pref) yields just its own provider, i.e.
  *  what the listing already showed. The result is never empty-by-accident: an empty array
@@ -305,17 +351,26 @@ export async function resolveCurrentStepCliProviderIds(
     db,
     tasks.filter((t) => t.ignoreSavedStepClis).map((t) => t.id),
   );
+  const choices = await loadTaskCliChoices(
+    db,
+    tasks.map((t) => t.id),
+  );
 
   for (const task of tasks) {
     const stepId = task.currentStepId;
     const touchedRoles = stepId ? touched.get(task.id)?.get(stepId) : undefined;
+    const stepChoices = stepId ? choices.get(task.id)?.get(stepId) : undefined;
     const honor = (role: string, value: string | null): string | null =>
       !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
+    const slot = (role: string, saved: string | null): string | null => {
+      const choice = stepChoices?.get(role);
+      return choice ? choice.cliProviderId : honor(role, saved);
+    };
     const usable = (id: string | null): string | null => (id && enabled.has(id) ? id : null);
     const roleProviders =
       (stepId ? prefs.roleByStep.get(stepId) : undefined) ?? new Map<string, string>();
     const stepDefault =
-      usable(stepId ? honor('default', prefs.byStep.get(stepId) ?? null) : null) ??
+      usable(stepId ? slot('default', prefs.byStep.get(stepId) ?? null) : null) ??
       task.cliProviderId ??
       null;
 
@@ -327,10 +382,10 @@ export async function resolveCurrentStepCliProviderIds(
     // The step default is kept even when every seat is set: it is the fallthrough for a seat
     // the user never touched, and it runs a fan-out step's summary pass.
     for (const seat of (stepId ? STEP_MINING_SEATS[stepId] : undefined) ?? []) {
-      push(usable(honor(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
+      push(usable(slot(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
     }
     for (const role of (stepId ? STEP_CLI_ROLES[stepId] : undefined) ?? []) {
-      push(usable(honor(role.id, roleProviders.get(role.id) ?? null)) ?? stepDefault);
+      push(usable(slot(role.id, roleProviders.get(role.id) ?? null)) ?? stepDefault);
     }
     out.set(task.id, ids);
   }
@@ -1109,8 +1164,8 @@ const MODEL_HEALTH_STEP_ID_SET = new Set<string>(MODEL_HEALTH_STEP_IDS);
  *  has no card and therefore no picker. A step that never pauses before dispatching (its
  *  form sets `autoSubmit`, or it has none and the task is on auto-continue) consequently
  *  had NO window at all in which to choose its CLI — 08a-browser-verify's Tester/Fixer
- *  being the reported case. Preferences are keyed (user, step, role) and read by the
- *  worker's resolvePreferredCli at DISPATCH time, so one written here lands on this task.
+ *  being the reported case. A choice is keyed (task, step, role) and read by the
+ *  worker's resolvePreferredCli at DISPATCH time, so one made here lands on this task.
  *
  *  Deliberately routed through enrichStepsWithCliPreferences rather than re-deriving:
  *  that function needs only `stepId`, and already resolves roles, fan-out seats and the

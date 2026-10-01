@@ -346,8 +346,8 @@ export const tasks = pgTable(
     /** Per-task "use my chosen CLI for all steps" toggle (New Task form). When
      *  true, the step-CLI resolver + UI ignore the user's pre-existing saved
      *  per-step CLI prefs and default every step to this task's cli_provider_id;
-     *  a step the user explicitly changes during the task is recorded in
-     *  task_step_cli_touched and honored. Default false = today's behavior. */
+     *  a step the user changes during the task is honored through its
+     *  task_step_cli_choices row. Default false = today's behavior. */
     ignoreSavedStepClis: boolean('ignore_saved_step_clis').notNull().default(false),
     /** False skips the LLM recap pass entirely. Separate from summary_cli_provider_id
      *  because an FK cannot carry an off value. */
@@ -811,9 +811,10 @@ export const taskStepAgentMinings = pgTable(
 // Records which (step, role) the user explicitly set a CLI for WITHIN a task
 // that has ignore_saved_step_clis=true. Under that flag the resolver + UI ignore
 // pre-existing global per-step prefs EXCEPT where a marker exists, so a mid-task
-// manual change still takes effect (and still writes the global pref, as normal)
-// while the auto-applied default stays the task's cli_provider_id. Keyed per
-// task_id => no cross-task bleed. Only written for flagged tasks.
+// manual change still takes effect while the auto-applied default stays the
+// task's cli_provider_id. Keyed per task_id => no cross-task bleed. No longer
+// written: a mid-task change is a task_step_cli_choices row now, and these are
+// still read for the tasks that predate it.
 export const taskStepCliTouched = pgTable(
   'task_step_cli_touched',
   {
@@ -828,6 +829,29 @@ export const taskStepCliTouched = pgTable(
     uniqueIndex('task_step_cli_touched_pk').on(table.taskId, table.stepId, table.role),
     index('task_step_cli_touched_task_id_idx').on(table.taskId),
   ],
+);
+
+// --- Per-task step CLI choices -------------------------------------------
+// The CLI (and effort) a person picked for one (step, role) WITHIN one task. Every
+// resolver reads it before the user's saved preference, which a pick rewrites only when
+// the person asks for it to apply to later tasks too. A NULL provider is a choice as
+// well: this task cleared the slot, so the saved preference stays out of it, and deleting
+// the chosen provider leaves it that way.
+export const taskStepCliChoices = pgTable(
+  'task_step_cli_choices',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    stepId: varchar('step_id', { length: 128 }).notNull(),
+    role: varchar('role', { length: 32 }).notNull().default('default'),
+    cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'set null',
+    }),
+    effortLevel: text('effort_level'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('task_step_cli_choices_pk').on(table.taskId, table.stepId, table.role)],
 );
 
 // --- CLI Invocations -----------------------------------------------------

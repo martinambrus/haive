@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { CliProvider } from '@/lib/api-client';
 
 /** A loop role or a fan-out seat: the addressable slot a CLI choice attaches to. */
@@ -12,7 +12,8 @@ type CliSlot = { id: string; label: string };
  *
  *  Shared by the step card and the task page's CLIs tab, which offers the same choice for
  *  a step the run has not reached yet (no task_steps row, so no card). Two copies of this
- *  grid would let the two surfaces disagree about what a step's CLI choice looks like. */
+ *  grid would let the two surfaces disagree about what a step's CLI choice looks like. A choice
+ *  applies to this task alone unless "Also for my later tasks" is ticked. */
 export function CliPickerGrid({
   providers,
   idPrefix,
@@ -44,8 +45,14 @@ export function CliPickerGrid({
   taskCliProviderId: string | null;
   locked?: boolean;
   busy?: boolean;
-  onChange: (cliProviderId: string | null, role?: string, effortLevel?: string) => void;
+  onChange: (
+    cliProviderId: string | null,
+    role?: string,
+    effortLevel?: string,
+    remember?: boolean,
+  ) => void;
 }) {
+  const [remember, setRemember] = useState(false);
   // Fixed widths, deliberately not intrinsic or flex-1: a native <select> sizes itself to
   // its widest option, so self-sizing controls re-laid-out the whole (wrapping) picker row
   // on every CLI switch. One width for the CLI dropdowns, one for the effort dropdowns,
@@ -111,7 +118,7 @@ export function CliPickerGrid({
         title="Reasoning/effort level for this step's CLI (overrides the CLI's default)"
         disabled={locked || busy}
         value={value}
-        onChange={(e) => void onChange(providerId || null, roleId, e.target.value)}
+        onChange={(e) => void onChange(providerId || null, roleId, e.target.value, remember)}
         className={effortSelectClass}
       >
         {scale.values.map((v) => (
@@ -142,7 +149,9 @@ export function CliPickerGrid({
                 id={`${idPrefix}-${roleDesc.id}`}
                 disabled={locked || busy}
                 value={roleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
-                onChange={(e) => void onChange(e.target.value || null, roleDesc.id)}
+                onChange={(e) =>
+                  void onChange(e.target.value || null, roleDesc.id, undefined, remember)
+                }
                 className={cliSelectClass}
               >
                 {cliOptions}
@@ -165,7 +174,9 @@ export function CliPickerGrid({
               id={idPrefix}
               disabled={locked || busy}
               value={defaultProviderId}
-              onChange={(e) => void onChange(e.target.value || null)}
+              onChange={(e) =>
+                void onChange(e.target.value || null, undefined, undefined, remember)
+              }
               className={cliSelectClass}
             >
               {cliOptions}
@@ -189,7 +200,7 @@ export function CliPickerGrid({
               id={`${idPrefix}-seat-${seat.id}`}
               disabled={locked || busy}
               value={seatProviders?.[seat.id] ?? ''}
-              onChange={(e) => void onChange(e.target.value || null, seat.id)}
+              onChange={(e) => void onChange(e.target.value || null, seat.id, undefined, remember)}
               className={cliSelectClass}
             >
               <option value="">(step default)</option>
@@ -199,6 +210,19 @@ export function CliPickerGrid({
           </div>
         </div>
       ))}
+      <label
+        className="col-span-full flex w-fit cursor-pointer items-center gap-1.5 text-xs text-neutral-400"
+        title="Off: a change here applies to this task only. On: it is also saved as your CLI for this step in later tasks."
+      >
+        <input
+          type="checkbox"
+          checked={remember}
+          disabled={locked || busy}
+          onChange={(e) => setRemember(e.target.checked)}
+          className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
+        />
+        Also for my later tasks
+      </label>
     </div>
   );
 }

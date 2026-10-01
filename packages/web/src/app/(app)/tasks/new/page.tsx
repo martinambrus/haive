@@ -1033,8 +1033,8 @@ export default function NewTaskPage() {
           </div>
           <p className="text-xs text-neutral-500">
             Ignores your saved per-step CLI choices and defaults every step to the CLI above, for
-            this task only — your saved choices are left untouched. Steps you change manually during
-            the task are still saved as usual.
+            this task only — your saved choices are left untouched. A step you change during the
+            task runs on its new CLI.
           </p>
         </div>
 

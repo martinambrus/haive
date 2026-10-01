@@ -119,9 +119,9 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
 
 /** Per-step MINING SEATS: the individually addressable agents inside a fan-out step,
  *  keyed by step id. A seat's id is the `roleKey` its dispatch carries, and per-seat
- *  provider choices are stored in the SAME `user_step_cli_role_preferences` table the
- *  loop roles above use — the table is keyed (user, step, role) and does not care which
- *  kind of seat a role names.
+ *  provider choices are stored in the SAME tables the loop roles above use —
+ *  `task_step_cli_choices`, and `user_step_cli_role_preferences` once saved — both keyed by
+ *  role, and neither cares which kind of seat a role names.
  *
  *  DELIBERATELY SEPARATE FROM STEP_CLI_ROLES, not an extension of it. That map's
  *  PRESENCE is the api/web marker for a multi-pass LOOP step and its LENGTH is
