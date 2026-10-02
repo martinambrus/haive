@@ -309,8 +309,12 @@ Phase 1 (the record):
   The bare column is not enough: it would admit a repository during its own onboarding, after a
   reset, and with a marker missing. The existing terms are left as they are — aligning them with
   the verdict changes what already-reset repositories see and belongs in its own fix.
-  `applicable_template_ids` is NOT recomputed on import: with no claims a recomputed set makes
-  every applicable template read as changed, and 01's apply already fills it on B's first plan.
+  `applicable_template_ids` follows the render context the sync writes, but only where claims
+  exist. A sync that changes the column of a repository holding a claim recomputes the set in the
+  same transaction through 01's own functions, so the set is what the plan renders, and
+  upgrade-status reports a claim outside it while 02 could still remove it. A repository with no
+  claims keeps its set until 01's first plan fills it: with no claims a recomputed set makes every
+  applicable template read as changed, and B1.6's import gives such a repository claims.
 
   Migration 0171, additive, the column declared last, the foreign key named
   `project_state_sync_repository_id_repositories_id_fk` (an inline `REFERENCES` takes Postgres'
@@ -370,6 +374,16 @@ Phase 1 (the record):
     (`historyOrigin`: the last completed onboarding's step 07 output, else the blank scaffold).
   - With a column, the RTK choice is its stored `rtkChoiceRecorded`, never whether it holds an
     `rtkEnabled`.
+
+  **As built, B1.4d (the sync writes the rendered set; the banner reads a claim outside it).** Codex
+  round 3 on #393 found the banner reading the set the previous apply left after a sync changed the
+  render context of a repository with claims, while 01 planned from the new column. The sync now
+  writes, in its transaction and after the column, exactly the set 01's apply would write
+  (`_upgrade-render.ts`, moved verbatim out of 01); no writer keeps an id its context does not
+  render, 04 included, and upgrade-status reports a claim outside the set while 02 could act on one
+  of its paths. An obsolete Haive file gains a keep choice (untracked, file left), and a rollback
+  puts back the rows an upgrade untracked. Controls: 33 failing on the base for their stated reason,
+  52 mutants caught.
 
   A column the sync wrote holds the portable fields alone. `renderContextFromColumn` (worker
   `_render-targets.ts`) completes each per-install field it lacks from the task user's CLIs through
@@ -537,8 +551,8 @@ explicit (the smoke drives two databases), under
    from disk only when its normalised hash equals `writtenHash`); a path in base that incoming no
    longer lists, local row unchanged → retire (remote removal); local-only additions kept; an
    import retiring every base claim stamps `onboarding_reset_at`; settings columns,
-   `render_context` and `applicable_template_ids` (via `expandManifestFor` +
-   `expandCustomBundlesFor` + `updateApplicableTemplateIds`) in the same transaction;
+   `render_context` and `applicable_template_ids` (01's `unionExpandedFor` over the resolved
+   context, as B1.4d does) in the same transaction;
    machine-local columns never written.
 6. Book-keeping: set `synced_head`, `synced_hash`, `base_snapshot`; merged ≠ incoming (local
    pending changes) → mark dirty and re-render.

@@ -2716,6 +2716,18 @@ Deterministic onboarding artifacts (agent specs, slash commands, `workflow-confi
 
 On worker boot, `syncTemplateManifestCache(db)` upserts the manifest into Postgres (`template_manifest_cache`) so the API can compute the current set hash without importing worker-side generators. Per-repo install state lives in `onboarding_artifacts`, one live row per `(repository_id, disk_path)`, soft-deleted via `superseded_at`.
 
+**The applicable set is what the render context renders, at every writer.** 12, 01, 02 and 04 write
+`repositories.applicable_template_ids` from the context they render, and a project-state sync that
+changes the render context of a repository with a claim writes it in the same transaction through
+01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render.
+upgrade-status compares a claim the set holds against the manifest, and reports a claim the set does
+not hold as changed while 02 could still act on one of its paths: one that is absent, one holding the
+bytes its row records as Haive's, or an RTK settings file whose hook can come out. A path 02 keeps (a
+person's bytes, a link, a file past 1 MiB) stays quiet, since no plan could finish it. Custom bundle
+items and the cli-rules region keep their per-repository comparison, and a NULL set reads as the
+installed one. A repository with no claim keeps its set until 01's first plan: with no claims a
+recomputed set makes every applicable template read as changed.
+
 **An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
 never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
 files and the two RTK settings files, gated on PHP LSP and on RTK, hashed `sha256('')` from the day
@@ -2903,9 +2915,11 @@ upgrade-status offers its rollback from what 02 recorded (`lastUpgradeRemovedCon
 rollback completes after it. It answers as
 onboarded for any repository an upgrade was started on, whether that upgrade is running, failed or
 finished, since POST /tasks starts one only on an onboarded repository and the banner shows nothing
-for any other. What a rollback puts back stays in the repository's
-applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
-removal again rather than dropping out of the banner's view.
+for any other. A file a rollback puts back whose template its
+snapshot does not render stays out of the applicable set, where upgrade-status reports it while it
+holds what its row records, so a file restored after RTK went off is offered for removal again. A
+rollback also puts back, live, every row the upgrade untracked (02's `untrackedRowIds`) while no
+live row records that path, touching nothing on disk.
 
 **One upgrade or rollback runs at a time, and a rollback undoes the newest upgrade once.** Both are
 `onboarding_upgrade` tasks, and two side by side apply and revert the same files: an upgrade parked
@@ -2976,8 +2990,8 @@ files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): i
 looks, reads RTK's choice in the same order, and judges each file by the predicate 01
 uses (`holdsRtkSettings`), so the banner offers the upgrade, and never one whose plan offers
 nothing. A repository never onboarded gets neither, since POST /tasks refuses it an upgrade.
-Switching RTK back on offers the settings files again, and the banner says so: the
-upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
+Switching RTK back on offers the settings files again, and the banner says so: an
+upgrade or a sync computed while it was off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of the context 01
 renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
@@ -2993,7 +3007,10 @@ predate RTK stays quiet. Only a re-onboarding writes the block.
 version declined, so the next upgrade offers only a newer one. On a live row it moves
 `templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
 render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
-for one it introduced. Skip records nothing, so the path is offered again.
+for one it introduced. Skip records nothing, so the path is offered again. An obsolete Haive file
+has no newer version to decline, so it is kept by "Keep these files, and stop tracking them": its row
+is superseded and the file left, and neither the plan nor the banner offers it again until a rollback
+of that upgrade puts the row back. Removal wins when one file is picked for both.
 `unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
 such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
 rollback copies get the two hashes swapped.

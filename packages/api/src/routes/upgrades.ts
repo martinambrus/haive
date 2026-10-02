@@ -370,14 +370,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
-  // Restrict comparisons to templates that are actually applicable to this
-  // repo's gating context (e.g. drupal LSP plugins skip when php-extended
-  // not selected). Worker writes `repositories.applicableTemplateIds` on
-  // every apply. Fallback for legacy repos without that snapshot: use the
-  // installed set itself, which means new-since-last-apply templates won't
-  // be flagged in the banner — user must run a manual upgrade to discover
-  // them, at which point the snapshot is populated and future banner runs
-  // see them correctly.
+  // The set is what the render context renders, written by every apply and by a sync that changes the
+  // column. A NULL set (legacy) reads as the installed one until an upgrade fills it.
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
