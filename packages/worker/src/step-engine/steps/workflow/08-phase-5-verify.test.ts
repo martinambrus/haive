@@ -39,6 +39,7 @@ vi.mock('../../task-ledger.js', async (importOriginal) => ({
   recordLedgerEntry,
 }));
 
+import { TaskCancelledError } from '../../step-definition.js';
 import {
   buildUnverifiedNote,
   buildVerifyDegradedNote,
@@ -583,6 +584,47 @@ describe('phase5VerifyStep.apply', () => {
 
       expect(ensureDdevPlaywrightBrowsers).not.toHaveBeenCalled();
       expect(killStalePlaywrightRuns).not.toHaveBeenCalled();
+    });
+  });
+
+  // The step runner tells a Stop from a failure only by `instanceof TaskCancelledError`, so the boot
+  // wrapper must not turn a cancel into the plain Error it makes of every other boot failure.
+  describe('a Stop during the boot stays a cancel', () => {
+    const smoke = () => runRuntimeSmoke(smokeCtx, { failOnDdevBootError: true });
+    const apply = () => runApply({ test: PHPUNIT }, { runTest: true });
+    const rejection = (run: () => Promise<unknown>) =>
+      run().then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    it('runRuntimeSmoke rethrows the cancel as it is, whatever message it carries', async () => {
+      const cancel = new TaskCancelledError('stopped from the task page');
+      ensureAppServing.mockRejectedValueOnce(cancel);
+
+      expect(await rejection(smoke), 'the cancel was rewrapped as a boot failure').toBe(cancel);
+    });
+
+    it('apply lets the cancel out of the earlier ensure as it is, before any slot execs', async () => {
+      const cancel = new TaskCancelledError('stopped from the task page');
+      ensureAppServing.mockRejectedValueOnce(cancel);
+
+      expect(await rejection(apply), 'the cancel was rewrapped as a boot failure').toBe(cancel);
+      expect(ddevExec, 'a slot ran against a runtime that never booted').not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['runRuntimeSmoke', smoke],
+      ['apply', apply],
+    ])('%s still rewraps an ordinary error that only mentions a cancel', async (_name, run) => {
+      ensureAppServing.mockRejectedValueOnce(new Error('task cancelled'));
+
+      const err = (await rejection(run)) as Error;
+
+      expect(err).not.toBeInstanceOf(TaskCancelledError);
+      expect(err.message).toBe(
+        'DDEV environment could not start for runtime verification: task cancelled',
+      );
     });
   });
 });

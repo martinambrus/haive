@@ -3,7 +3,11 @@ import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
@@ -413,8 +417,9 @@ function notProbed(url: string | null, reason: string): RuntimeSmoke {
 }
 
 /** What a failed DDEV boot leaves this step as: its own error, which `fixLoopOnError` classifies by
- *  message. */
+ *  message. A Stop is no boot failure and stays the cancel the step runner knows by its class. */
 function ddevBootError(err: unknown): Error {
+  if (err instanceof TaskCancelledError) return err;
   const message = err instanceof Error ? err.message : String(err);
   return new Error(`DDEV environment could not start for runtime verification: ${message}`);
 }
