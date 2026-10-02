@@ -25,6 +25,7 @@ import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
+import { collapseToLine } from '../_untrusted-repo.js';
 import {
   clearTaskPromotedDrafts,
   globalKbTopicKey,
@@ -224,7 +225,7 @@ const GLOBAL_ARTICLE_PROMPT_CHARS = 1500;
  *  MEASURED: the median active entry is ~3.3 KB and p90 is ~6 KB, so most
  *  articles here ARE cut. */
 export function renderExistingGlobalArticle(a: { title: string; body: string }): string {
-  const head = `--- ${a.title} ---`;
+  const head = `--- ${collapseToLine(a.title)} ---`;
   if (a.body.length <= GLOBAL_ARTICLE_PROMPT_CHARS) return `${head}\n${a.body}`;
   return [
     head,
@@ -246,7 +247,7 @@ export function renderOtherGlobalArticleTitles(titles: string[], omitted: number
   const lines = [
     '',
     'Other applicable house-standard articles — TITLES ONLY. Call `rag_search` with a title to read that entry in full; do it before you write a candidate that overlaps one of them:',
-    ...titles.map((t) => `- ${t}`),
+    ...titles.map((t) => `- ${collapseToLine(t)}`),
   ];
   if (omitted > 0) {
     lines.push(

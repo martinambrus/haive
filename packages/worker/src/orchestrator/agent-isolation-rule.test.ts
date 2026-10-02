@@ -107,7 +107,11 @@ describe('agentIsolationApplies', () => {
 
   it('is off when a global-KB digest TITLE names an agent path', () => {
     const req = isolatedRequest({
-      globalKbDigest: [{ category: 'standards', title: '.claude/agents/foo' }],
+      globalKbDigest: {
+        entries: [{ category: 'standards', title: '.claude/agents/foo' }],
+        omitted: 0,
+        scanSaturated: false,
+      },
     });
     expect(agentIsolationApplies(req)).toBe(false);
   });
@@ -131,12 +135,20 @@ describe('agentIsolationApplies', () => {
         ddevControl: { enabled: false, apiUrl: '', token: '' },
         userServers: { 'company-docs': { command: 'npx' } },
       },
-      globalKbDigest: [{ category: 'standards', title: 'Escape every interpolated label' }],
+      globalKbDigest: {
+        entries: [{ category: 'standards', title: 'Escape every interpolated label' }],
+        omitted: 0,
+        scanSaturated: false,
+      },
     } as Partial<DispatchRequest>);
     expect(agentIsolationApplies(benign)).toBe(true);
     // And the shapes a direct resolveDispatch caller passes: absent, null, empty.
     expect(agentIsolationApplies(isolatedRequest({ mcpSurface: null }))).toBe(true);
-    expect(agentIsolationApplies(isolatedRequest({ globalKbDigest: [] }))).toBe(true);
+    expect(
+      agentIsolationApplies(
+        isolatedRequest({ globalKbDigest: { entries: [], omitted: 0, scanSaturated: false } }),
+      ),
+    ).toBe(true);
   });
 
   it('scans a SHADOWED server name too, and that is deliberate', () => {

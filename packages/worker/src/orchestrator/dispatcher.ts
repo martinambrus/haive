@@ -34,7 +34,7 @@ import {
 import {
   resolveGlobalKbDigest,
   withGlobalKbDigest,
-  type GlobalKbDigestEntry,
+  type GlobalKbDigest,
 } from '../step-engine/steps/_global-kb-digest.js';
 import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -157,7 +157,7 @@ export interface DispatchRequest {
   /** Stack-matching global KB titles to advertise. Computed by
    *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
    *  unit tests. Empty means there is nothing to advertise. */
-  globalKbDigest?: GlobalKbDigestEntry[];
+  globalKbDigest?: GlobalKbDigest;
   /** Order providers with a learned `vision: false` LAST, without excluding any.
    *  The soft counterpart to the `vision` capability, for an input that has both
    *  a visual and a textual form (a PDF beside its extracted text): seeing it is
@@ -260,7 +260,7 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   // saving; the alternative is a scan that disagrees with what renders.
   const externalText = [
     ...Object.keys(req.mcpSurface?.userServers ?? {}),
-    ...(req.globalKbDigest ?? []).flatMap((entry) => [entry.title, entry.category]),
+    ...(req.globalKbDigest?.entries ?? []).flatMap((entry) => [entry.title, entry.category]),
     ...(injectedRules ? [injectedRules] : []),
   ].join('\n');
   if (externalText.length > 0 && promptNamesAgentPath(externalText, SANDBOX_WORKDIR)) return false;
@@ -562,9 +562,10 @@ function buildCliSidePlan(
     // advertises a door it does not have. Applied at the same choke point as the
     // boundaries above, which is what puts it in front of a model like muse that
     // never picks the tool on its own.
-    const digested = ragWired
-      ? withGlobalKbDigest(reachBounded, req.globalKbDigest ?? [])
-      : reachBounded;
+    const digested =
+      ragWired && req.globalKbDigest
+        ? withGlobalKbDigest(reachBounded, req.globalKbDigest)
+        : reachBounded;
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.

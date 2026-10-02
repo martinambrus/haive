@@ -9,6 +9,8 @@ import {
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
 import { FACET_FILTER_DIMENSIONS } from '@haive/shared/rag';
+import { omissionCount } from '../omission-count.js';
+import { collapseToLine } from './_untrusted-repo.js';
 
 // Prompt-side counterpart to rag_search.
 //
@@ -46,6 +48,12 @@ export interface GlobalKbDigestEntry {
   category: string;
 }
 
+export interface GlobalKbDigest {
+  entries: GlobalKbDigestEntry[];
+  omitted: number;
+  scanSaturated: boolean;
+}
+
 /** Does an entry apply to this project?
  *
  *  Mirrors the SQL predicate retrieval uses (`buildFacetClause`,
@@ -74,23 +82,37 @@ export function facetsMatchProject(
   return true;
 }
 
+export function selectDigest(
+  rows: Array<GlobalKbDigestEntry & { facets: GlobalKbFacets | null | undefined }>,
+  projectFacets: ProjectFacetSet,
+): GlobalKbDigest {
+  const matches = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
+  const entries = matches
+    .slice(0, GLOBAL_KB_DIGEST_MAX_TITLES)
+    .map((r) => ({ title: r.title, category: r.category }));
+  return {
+    entries,
+    omitted: matches.length - entries.length,
+    scanSaturated: rows.length >= DIGEST_SCAN_LIMIT,
+  };
+}
+
+const emptyDigest = (): GlobalKbDigest => ({ entries: [], omitted: 0, scanSaturated: false });
+
 /** The stack-matching global KB titles for a task, newest first.
  *
  *  Best-effort by contract: this runs on the dispatch path, where a global KB
  *  that is off, unreachable or empty must cost nothing but the digest. Every
- *  failure returns [] — the same fail-soft the global half of rag_search already
+ *  failure returns an empty digest — the same fail-soft the global half of rag_search already
  *  has (api/src/routes/rag.ts), for the same reason: retrieval degrading is
  *  never worth failing the work. */
-export async function resolveGlobalKbDigest(
-  db: Database,
-  taskId: string,
-): Promise<GlobalKbDigestEntry[]> {
+export async function resolveGlobalKbDigest(db: Database, taskId: string): Promise<GlobalKbDigest> {
   try {
     const [globalEnabled, digestEnabled] = await Promise.all([
       configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true),
       configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
     ]);
-    if (!globalEnabled || !digestEnabled) return [];
+    if (!globalEnabled || !digestEnabled) return emptyDigest();
 
     const projectFacets = await resolveTaskFacets(db, taskId);
 
@@ -112,24 +134,25 @@ export async function resolveGlobalKbDigest(
         .orderBy(desc(globalKbEntries.updatedAt))
         .limit(DIGEST_SCAN_LIMIT);
 
-      return rows
-        .filter((r) => facetsMatchProject(r.facets, projectFacets))
-        .slice(0, GLOBAL_KB_DIGEST_MAX_TITLES)
-        .map((r) => ({ title: r.title, category: r.category }));
+      return selectDigest(rows, projectFacets);
     });
   } catch {
-    return [];
+    return emptyDigest();
   }
 }
 
 /** Render the digest block. Grouped by category so an agent can tell a house
  *  standard from an anti-pattern without opening either. */
-export function globalKbDigestPrompt(entries: GlobalKbDigestEntry[]): string {
+export function globalKbDigestPrompt(
+  entries: GlobalKbDigestEntry[],
+  omission?: Pick<GlobalKbDigest, 'omitted' | 'scanSaturated'>,
+): string {
   const byCategory = new Map<string, string[]>();
   for (const e of entries) {
-    const list = byCategory.get(e.category) ?? [];
-    list.push(e.title);
-    byCategory.set(e.category, list);
+    const category = collapseToLine(e.category);
+    const list = byCategory.get(category) ?? [];
+    list.push(collapseToLine(e.title));
+    byCategory.set(category, list);
   }
   const lines = [
     DIGEST_MARKER,
@@ -143,6 +166,15 @@ export function globalKbDigestPrompt(entries: GlobalKbDigestEntry[]): string {
     lines.push(`${category}:`);
     for (const title of titles) lines.push(`- ${title}`);
   }
+  const omitted = omission?.omitted ?? 0;
+  const count = omissionCount(omitted, omission?.scanSaturated ?? false);
+  if (count !== null) {
+    // Not a bullet: every "- " line in this block is one title.
+    const plural = omitted === 1 ? '' : 's';
+    lines.push(
+      `(${count} more house standard${plural} for this stack not listed — the most recently updated are; rag_search searches all of them)`,
+    );
+  }
   lines.push('</haive_global_kb_index>');
   return lines.join('\n');
 }
@@ -150,7 +182,7 @@ export function globalKbDigestPrompt(entries: GlobalKbDigestEntry[]): string {
 /** Prepend the digest once. Marker-guarded like withMcpSurface, so nested prompt
  *  builders and retry paths cannot double-inject. An empty digest adds nothing —
  *  a heading over no titles is pure prompt cost. */
-export function withGlobalKbDigest(prompt: string, entries: GlobalKbDigestEntry[]): string {
-  if (entries.length === 0 || prompt.includes(DIGEST_MARKER)) return prompt;
-  return `${globalKbDigestPrompt(entries)}\n\n${prompt}`;
+export function withGlobalKbDigest(prompt: string, digest: GlobalKbDigest): string {
+  if (digest.entries.length === 0 || prompt.includes(DIGEST_MARKER)) return prompt;
+  return `${globalKbDigestPrompt(digest.entries, digest)}\n\n${prompt}`;
 }

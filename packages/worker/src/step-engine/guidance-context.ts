@@ -3,6 +3,7 @@ import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { resolveTaskFacets } from '@haive/shared/global-kb';
+import { omissionCount } from './omission-count.js';
 import { facetsMatchProject } from './steps/_global-kb-digest.js';
 
 const log = logger.child({ module: 'guidance-context' });
@@ -40,8 +41,8 @@ const SCAN_LIMIT = 100;
  *  miniature. A saturated scan speaks even when it dropped nothing it
  *  read, since the rows past the limit were never read; null means there is nothing to say. */
 export function guidanceOmissionNotice(omitted: number, atLeast: boolean): string | null {
-  if (omitted === 0 && !atLeast) return null;
-  const count = omitted === 0 ? 'possibly' : atLeast ? `at least ${omitted}` : `${omitted}`;
+  const count = omissionCount(omitted, atLeast);
+  if (count === null) return null;
   const plural = omitted === 1 ? '' : 's';
   return `(${count} more approved lesson${plural} not shown — the repository's own and the most-observed are kept)`;
 }
