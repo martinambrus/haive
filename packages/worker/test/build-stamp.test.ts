@@ -1,5 +1,15 @@
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -68,6 +78,14 @@ async function bornRepo(
   const dir = await unbornRepo();
   await put(dir, extra);
   await commit(dir, forced);
+  return dir;
+}
+
+async function scriptRepo(): Promise<string> {
+  const dir = await unbornRepo();
+  await put(dir, { 'bin/run.sh': '#!/bin/sh\n' });
+  await chmod(join(dir, 'bin/run.sh'), 0o755);
+  await commit(dir);
   return dir;
 }
 
@@ -193,6 +211,42 @@ describe('computeBuildStamp in a checkout', { timeout: 30_000 }, () => {
     const before = await snapshot(join(dir, '.git'));
     expect(await stamp(dir)).toMatch(/^tree:/);
     expect(await snapshot(join(dir, '.git'))).toEqual(before);
+  });
+
+  it('names the commit of a clean checkout whose filesystem cannot hold the exec bit', async () => {
+    const dir = await scriptRepo();
+    await git(dir, 'config', 'core.fileMode', 'false');
+    await chmod(join(dir, 'bin/run.sh'), 0o644);
+    expect(await git(dir, '--no-optional-locks', 'status', '--porcelain')).toBe('');
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
+  it('keeps the committed exec bit in the tree of an edit when the filesystem cannot hold it', async () => {
+    const dir = await scriptRepo();
+    await git(dir, 'config', 'core.fileMode', 'false');
+    await chmod(join(dir, 'bin/run.sh'), 0o644);
+    await put(dir, { 'a.txt': 'alpha edited\n' });
+    const edited = await stamp(dir);
+    await commit(dir);
+    expect(await git(dir, 'ls-tree', 'HEAD', 'bin/run.sh')).toMatch(/^100755 /);
+    expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+  });
+
+  it('names the commit of a clean checkout whose path holds a colon and a quote', async () => {
+    const dir = join(root, `odd:"${fixtures++}`);
+    await rename(await bornRepo(), dir);
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
+  it('names the commit of a clean checkout whose filesystem cannot hold a symlink', async () => {
+    const dir = await bornRepo();
+    await symlink('a.txt', join(dir, 'link'));
+    await commit(dir);
+    await git(dir, 'config', 'core.symlinks', 'false');
+    await rm(join(dir, 'link'));
+    await put(dir, { link: 'a.txt' });
+    expect(await git(dir, '--no-optional-locks', 'status', '--porcelain')).toBe('');
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
   });
 });
 

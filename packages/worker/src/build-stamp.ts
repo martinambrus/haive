@@ -50,16 +50,26 @@ async function gitStamp(top: string, env: NodeJS.ProcessEnv, deadline: number): 
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'build-stamp-'));
   try {
     await mkdir(path.join(tmp, 'objects'));
-    // No alternates: git would touch the mtimes of the real object files.
+    // Alternates serve only the seed read: a write through them touches the real object files.
     const scratch = {
       ...env,
       GIT_INDEX_FILE: path.join(tmp, 'index'),
       GIT_OBJECT_DIRECTORY: path.join(tmp, 'objects'),
     };
     // Split index off: a repository that enables it would get a sharedindex file in its .git.
-    const index = (args: string[]): Promise<string> =>
-      git(['-c', 'core.splitIndex=false', ...args], scratch);
+    const index = (args: string[], indexEnv: NodeJS.ProcessEnv = scratch): Promise<string> =>
+      git(['-c', 'core.splitIndex=false', ...args], indexEnv);
 
+    // Seeded from HEAD: with core.fileMode or core.symlinks off, add keeps the mode of an entry.
+    if (head !== null) {
+      const objects = path.resolve(top, (await git(['rev-parse', '--git-path', 'objects'])).trim());
+      // C-quoted: the variable is a colon-separated list, so a bare path with a colon splits.
+      const alternates = `"${objects.replace(/["\\]/g, '\\$&')}"`;
+      await index(['read-tree', head], {
+        ...scratch,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates,
+      });
+    }
     await index(['add', '-A']);
     const forced = (await git(['ls-files', '-ci', '--exclude-standard', '-z']))
       .split('\0')
