@@ -13,6 +13,7 @@ import {
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
+  withoutRtkHookEntry,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
@@ -155,6 +156,21 @@ async function rtkSettingsLeftovers(
   return found;
 }
 
+/** Whether 02 could still act on a claim's file: it is absent, holds its row's bytes, or is an RTK
+ *  settings file whose hook can come out. 02 keeps any other, so reporting one offers nothing. */
+async function removableClaim(
+  root: string,
+  claim: { templateId: string; diskPath: string; writtenHash: string },
+): Promise<boolean> {
+  const read = await readUpgradeFile(root, claim.diskPath);
+  if (read.kind === 'absent') return true;
+  if (read.kind === 'unread') return false;
+  return (
+    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
+    withoutRtkHookEntry(claim.templateId, read.text) !== null
+  );
+}
+
 /**
  * Report whether an upgrade is available for a repository by comparing the
  * installed artifact fingerprints against the worker-synced manifest cache.
@@ -243,6 +259,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
+      writtenHash: schema.onboardingArtifacts.writtenHash,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
       generatedAt: schema.onboardingArtifacts.generatedAt,
@@ -408,9 +425,19 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   if (cliRulesCurrent) {
     currentByTemplate.set(cliRulesCurrent.templateId, cliRulesCurrent);
   }
+  // A claim the set does not hold has no current entry, so it reads as changed while 02 could remove it.
+  const root = repo.storagePath ?? repo.localPath;
+  const outsideRemovable = new Set<string>();
+  if (root) {
+    for (const a of liveArtifacts) {
+      const id = a.templateId;
+      if (applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id)) continue;
+      if (await removableClaim(root, a)) outsideRemovable.add(id);
+    }
+  }
   const filteredInstalled = new Map(
     Array.from(distinctInstalled.entries()).filter(
-      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id),
+      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id),
     ),
   );
   // One row stands for every rendering of a template, so a rendering that is not current (a
@@ -518,7 +545,6 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
-  const root = repo.storagePath ?? repo.localPath;
   const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =
