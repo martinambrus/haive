@@ -2265,7 +2265,10 @@ Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all 
 
 **"Onboarded" is the RUN's verdict, not the artifacts'.** The four markers the API checks —
 `.claude/agents`, `.claude/skills`, `.claude/workflow-config.json`, `KB_DIR` — are all written
-by `07-generate-files`, the 8th of 27 registered onboarding steps, with the KB following at 08
+during the run. The first two stand for the agents and skills directory of any CLI in the
+catalog, since a run writes only its enabled CLIs' own directories, and a Codex-only run has no
+`.claude/agents`. They are written by `07-generate-files`, the 8th of 27 registered onboarding
+steps, with the KB following at 08
 and skills at 09_5. So from a third of the way in, a cancelled run and a run executing RIGHT
 NOW leave a tree indistinguishable from a finished one: a task created against such a repo was
 typed `workflow` and aimed at a knowledge base nobody finished building, and the repos list
@@ -2305,7 +2308,10 @@ project-state sync filled from the checkout's record. `renderContextAdmitsUpgrad
 (`api/src/lib/onboarding-state.ts`) is a third term, tried only after both fail. It requires that
 the column decodes (a refused one reads as NULL, as 01 reads it), that the repository is `ready`
 with a root, and that the verdict above calls it onboarded, which reads the reset epoch and
-refuses beside a live onboarding. The two older terms read neither.
+refuses beside a live onboarding. The two older terms read neither. A clone admitted only that way
+and recorded by no artifact row has never been planned on this install, so nothing there can say
+what changed. upgrade-status therefore offers it the first upgrade (`firstUpgradeOnThisInstall`),
+because the banner is the only place one starts.
 
 **That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
