@@ -183,7 +183,11 @@ export function admissionKindFromRuntimeMode(mode: RuntimeMode): 'ddev' | 'app' 
  *  does not restart the process). host: best-effort URL only (no relaunch). */
 export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRuntime> {
   try {
-    return await ensureAppServingInner(ctx);
+    const runtime = await ensureAppServingInner(ctx);
+    // Every branch still awaits after its own checks (the DDEV URL lookup takes up to 30 s), so the
+    // runtime reaches the caller only while the task is not stopped.
+    ctx.throwIfCancelled?.();
+    return runtime;
   } catch (err) {
     // A slot wait aborted because the task was stopped — normalise to TaskCancelledError so
     // the step runner's cancel path handles it (leave the step Stopped, don't re-fail or
@@ -277,9 +281,10 @@ export async function withDdevProgress<T>(
  *  status line: the latest `ddev start` output line plus an elapsed counter that
  *  ticks even through DDEV's silent "waiting for containers" dots phase, so a
  *  ~2-minute cold boot never looks frozen. Shared by 01c-ddev-env, 07c-ddev-
- *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws. */
+ *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws, except that a Stop
+ *  leaves as a TaskCancelledError, whether it lands during the runtime slot wait or the boot. */
 export async function ensureDdevWithProgress(
-  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal'>,
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal' | 'throwIfCancelled'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
   // Pre-flight, and FIRST of them: the files DDEV parses at start have to be YAML at all.
@@ -329,7 +334,11 @@ export async function ensureDdevWithProgress(
     (onLine) =>
       ensureDdevStarted(ctx.taskId, repoSubpath, { onProgress: onLine, signal: ctx.signal }),
     { initialLine: 'starting containers…' },
-  );
+  ).catch((err: unknown) => {
+    // The step runner tells a Stop from a failure only by `instanceof TaskCancelledError`.
+    if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
+    throw err;
+  });
   // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug
   // so the Editor tab's php-debug listener receives DBGp. Idempotent + restart-
   // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
@@ -340,6 +349,9 @@ export async function ensureDdevWithProgress(
   // local DB client can connect. Idempotent; runs on EVERY bring-up (re-resolves the db
   // IP after a restart). Never fails the bring-up.
   await maybeExposeDdevDbPort(ctx, handle, repoSubpath);
+  // The signal reaches only the slot wait, so a Stop during the boot or the wiring above goes
+  // unseen, and the caller would go on to migrate or import into a stopped task.
+  ctx.throwIfCancelled?.();
   return handle;
 }
 

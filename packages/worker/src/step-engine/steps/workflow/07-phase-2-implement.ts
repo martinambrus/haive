@@ -1,5 +1,9 @@
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { REPO_IS_DATA_ACTING_LINES, fencedAgentBlock } from '../_untrusted-repo.js';
 import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
@@ -376,6 +380,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
         else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
       } catch (err) {
+        if (err instanceof TaskCancelledError) throw err;
         ctx.logger.warn({ err }, 'fix-round browser desktop bring-up failed (non-fatal)');
       }
     },

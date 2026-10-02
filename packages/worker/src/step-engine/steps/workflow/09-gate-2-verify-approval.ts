@@ -3,7 +3,11 @@ import { eq } from 'drizzle-orm';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { FormSchema, StatusSummaryItem } from '@haive/shared';
 import { schema } from '@haive/database';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -693,6 +697,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         }
       }
     } catch (err) {
+      if (err instanceof TaskCancelledError) throw err;
       ctx.logger.warn({ err }, 'gate-2 live browser bring-up failed');
       liveBrowser = { available: false, appUrl: null, reason: (err as Error).message };
     }

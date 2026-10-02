@@ -3,14 +3,18 @@ import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
+import { ddevExec, type DdevRunnerHandle } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
-import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
+import { ensureAppServing, withDdevProgress, type ServingRuntime } from './_app-runtime.js';
 import {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
@@ -44,7 +48,6 @@ type SlotRunner = 'pm' | 'composer' | 'phpunit' | 'pytest' | 'phpcs' | 'phpstan'
 interface VerifyDetect {
   workspacePath: string;
   ddevMode: boolean;
-  repoSubpath: string | null;
   /** The project's test framework, carried over from 08b-test-management's detect — the only
    *  place it is identified. This step resolves a SlotCommand with a LABEL, not a framework,
    *  so it cannot classify an environment failure on its own. Optional because detect_output
@@ -293,10 +296,10 @@ async function runSlot(
   cmd: SlotCommand,
   ctx: StepContext,
   workspace: string,
-  repoSubpath: string | null,
+  handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
   if (cmd.kind === 'ddev') {
-    if (!repoSubpath) {
+    if (!handle) {
       return {
         ran: false,
         passed: false,
@@ -304,7 +307,6 @@ async function runSlot(
         output: 'DDEV runner unavailable — skipped',
       };
     }
-    const handle = runnerHandleForTask(ctx.taskId, repoSubpath);
     // A full suite is minutes of silence, and a fixed status line is indistinguishable from a
     // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
     // counter that ticks through silent phases.
@@ -414,6 +416,14 @@ function notProbed(url: string | null, reason: string): RuntimeSmoke {
   return { ran: false, passed: false, httpStatus: null, url, errorExcerpt: reason };
 }
 
+/** What a failed DDEV boot leaves this step as: its own error, which `fixLoopOnError` classifies by
+ *  message. A Stop is no boot failure and stays the cancel the step runner knows by its class. */
+function ddevBootError(err: unknown): Error {
+  if (err instanceof TaskCancelledError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`DDEV environment could not start for runtime verification: ${message}`);
+}
+
 /** Boot the app once (idempotent via ensureAppServing) and curl it from INSIDE its
  *  container, where loopback/DNS resolve. A DDEV boot error is fatal: without a
  *  running DDEV environment, following checks would verify the wrong thing (or
@@ -423,14 +433,12 @@ export async function runRuntimeSmoke(
   ctx: StepContext,
   opts: { failOnDdevBootError?: boolean } = {},
 ): Promise<RuntimeSmoke> {
-  let rt: Awaited<ReturnType<typeof ensureAppServing>>;
+  let rt: ServingRuntime;
   try {
     rt = await ensureAppServing(ctx);
   } catch (err) {
-    if (opts.failOnDdevBootError) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`DDEV environment could not start for runtime verification: ${message}`);
-    }
+    if (err instanceof TaskCancelledError) throw err;
+    if (opts.failOnDdevBootError) throw ddevBootError(err);
     ctx.logger.warn({ err }, 'runtime smoke could not start the app — recording as not probed');
     return notProbed(null, `Runtime smoke could not run: ${(err as Error).message}`);
   }
@@ -513,12 +521,10 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;
     let workspace = worktreeOutput?.worktreePath ?? ctx.workspacePath;
-    let repoSubpath: string | null = null;
     let ddevMode = false;
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     if (ws && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'))) {
       ddevMode = true;
-      repoSubpath = ws.repoSubpath;
       workspace = ws.workspace;
     }
     // 08b-test-management runs immediately before this step (index 7.9 against 8), so its
@@ -527,7 +533,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const testFramework =
       ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
     const slots = await resolveSlots(workspace, ddevMode);
-    return { workspacePath: workspace, ddevMode, repoSubpath, testFramework, ...slots };
+    return { workspacePath: workspace, ddevMode, testFramework, ...slots };
   },
 
   form(_ctx, detected): FormSchema {
@@ -565,12 +571,24 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     };
     const {
       workspacePath,
-      repoSubpath,
+      ddevMode,
       testFramework,
       test: testCmd,
       lint: lintCmd,
       typecheck: typeCmd,
     } = args.detected;
+
+    // A runner gone since 01c reads as a failing check and spends a fix round on "No such
+    // container", so DDEV mode ensures it first, with the boot-failure routing the smoke has.
+    let runtime: ServingRuntime | undefined;
+    if (ddevMode) {
+      try {
+        runtime = await ensureAppServing(ctx);
+      } catch (err) {
+        throw ddevBootError(err);
+      }
+    }
+    const ddevHandle = runtime?.mode === 'ddev' ? runtime.handle : null;
 
     // The DDEV web image ships no browser runtime, and a full suite is exactly where that
     // surfaces on a repo whose root `test` script drives one. 08b provisions before its own
@@ -580,15 +598,15 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       values.runTest &&
       testCmd &&
       testCmd.kind === 'ddev' &&
-      repoSubpath &&
+      ddevHandle &&
       testFramework === 'playwright'
     ) {
-      await ensureDdevPlaywrightBrowsers(runnerHandleForTask(ctx.taskId, repoSubpath), '');
-      await killStalePlaywrightRuns(runnerHandleForTask(ctx.taskId, repoSubpath));
+      await ensureDdevPlaywrightBrowsers(ddevHandle, '');
+      await killStalePlaywrightRuns(ddevHandle);
     }
     let test =
       values.runTest && testCmd
-        ? await runSlot(testCmd, ctx, workspacePath, repoSubpath)
+        ? await runSlot(testCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
     // routes ANY failing check back to implementation — so without this a missing browser
@@ -600,11 +618,11 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     if (testEnvBlocker) test = { ...test, ran: false };
     const lint =
       values.runLint && lintCmd
-        ? await runSlot(lintCmd, ctx, workspacePath, repoSubpath)
+        ? await runSlot(lintCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await runSlot(typeCmd, ctx, workspacePath, repoSubpath)
+        ? await runSlot(typeCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
 
     const passed =
@@ -619,7 +637,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       // A DDEV boot failure is an environment failure, not a failed test result. Do
       // not let it be recorded as a benign "not probed" smoke result and allow the
       // workflow to continue; fail this retryable step instead.
-      failOnDdevBootError: args.detected.ddevMode,
+      failOnDdevBootError: ddevMode,
     });
 
     ctx.logger.info(

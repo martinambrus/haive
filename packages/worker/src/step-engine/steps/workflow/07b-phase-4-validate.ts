@@ -2,7 +2,12 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
-import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+  type StepLoopPassRecord,
+} from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
@@ -688,6 +693,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
         else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
       } catch (err) {
+        if (err instanceof TaskCancelledError) throw err;
         ctx.logger.warn({ err }, 'validation browser desktop bring-up failed (non-fatal)');
       }
     },
