@@ -92,6 +92,11 @@ export function resolveStackVersions(
   };
 }
 
+// Widens matching only; must never move into FACET_VALUE_ALIASES, which rewrites stored facets.
+const PROJECT_FRAMEWORK_FAMILIES: Readonly<Record<string, readonly string[]>> = {
+  drupal7: ['drupal'],
+};
+
 /** Extract the project facet set from a persisted 01-env-detect value, tolerating
  *  the detect-column shape ({ data: EnvDetectData }), the apply-output shape
  *  ({ enrichedData: EnvDetectData }), or a bare EnvDetectData (plan §3.2).
@@ -154,6 +159,15 @@ export function extractProjectFacets(
       ...new Set(facets[dim]!.map((v) => canonicalizeFacetValue(dim, v)).filter(Boolean)),
     ];
   }
+
+  facets.framework = [
+    ...new Set([
+      ...facets.framework,
+      ...Object.entries(PROJECT_FRAMEWORK_FAMILIES).flatMap(([token, family]) =>
+        facets.framework.includes(token) ? family : [],
+      ),
+    ]),
+  ];
 
   return facets;
 }

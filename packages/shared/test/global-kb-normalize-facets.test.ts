@@ -6,6 +6,7 @@ import {
   orphanFacetMajors,
   orphanFacetMajorSql,
   FACET_TRIM_CODE_POINTS_SQL,
+  FACET_VALUE_ALIAS_PAIRS,
   trimFacetValueSql,
 } from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
@@ -99,6 +100,20 @@ describe('canonicalFacetValueSql', () => {
     // The SQL is generated from the same table, so the pairing is asserted rather than assumed.
     expect(normalizeFacets({ database: ['  PostgreSQL '] })).toEqual({ database: ['postgres'] });
     expect(canonicalFacetValueSql('k', 'v')).toContain("'postgres'");
+  });
+});
+
+describe('drupal7 is not a stored-vocabulary alias', () => {
+  it('leaves a drupal7 entry as written', () => {
+    expect(normalizeFacets({ framework: ['drupal7'] }).framework).toEqual(['drupal7']);
+  });
+
+  it('has no alias pair that folds drupal7', () => {
+    expect(FACET_VALUE_ALIAS_PAIRS.some((pair) => pair.from === 'drupal7')).toBe(false);
+  });
+
+  it('does not mention drupal7 in the generated backfill SQL', () => {
+    expect(canonicalFacetValueSql('k', 'v')).not.toContain('drupal7');
   });
 });
 

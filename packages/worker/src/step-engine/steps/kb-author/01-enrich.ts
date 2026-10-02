@@ -225,6 +225,8 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '   technology (e.g. "drupal", "postgres", "php"). Add a MAJOR version ONLY when the rule',
     '   is genuinely specific to it — a rule that holds across majors must NOT name one, because',
     '   naming a dimension RESTRICTS the entry to it and an omitted dimension applies to all.',
+    '   `drupal` with no major covers every Drupal major, 7 included; a rule that does not hold on 7',
+    '   must list the majors it does hold on.',
     ...(detected.hasRepo
       ? [
           '   Do NOT read the scope off the repository in front of you. What it happens to have',
