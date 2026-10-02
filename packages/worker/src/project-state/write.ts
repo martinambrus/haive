@@ -32,12 +32,21 @@ export interface ProjectStateRecordInput {
  *  on disk by then, whatever the database kept, so that whoever commits the repository commits them. */
 export class ProjectStateWriteError extends Error {
   readonly written: string[];
+  /** The column could not be cleared either, so it still outranks the rows its writer wrote. */
+  readonly columnStale: boolean;
 
-  constructor(cause: unknown, written: string[]) {
+  constructor(cause: unknown, written: string[], columnStale = false) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = 'ProjectStateWriteError';
     this.written = written;
+    this.columnStale = columnStale;
   }
+}
+
+/** A writer reports a failed record write as a warning, unless the column it leaves would outrank the
+ *  rows it wrote: that one fails the step, which a retry runs again. */
+export function failIfColumnStale(err: unknown): void {
+  if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
 /** Writes the record holding the context's render unit, then moves the repository's render context
@@ -74,15 +83,15 @@ export async function writeProjectStateRecord(
         .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
     });
   } catch (err) {
-    await clearRenderContext(db, repositoryId);
-    throw new ProjectStateWriteError(err, written);
+    const cleared = await clearRenderContext(db, repositoryId);
+    throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
 }
 
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it
  *  is cleared and every reader falls back to those rows' snapshot. */
-async function clearRenderContext(db: Database, repositoryId: string): Promise<void> {
+async function clearRenderContext(db: Database, repositoryId: string): Promise<boolean> {
   try {
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
@@ -91,7 +100,8 @@ async function clearRenderContext(db: Database, repositoryId: string): Promise<v
         .set({ renderContext: null })
         .where(eq(schema.repositories.id, repositoryId));
     });
+    return true;
   } catch {
-    // The write's own failure is what the caller reports.
+    return false;
   }
 }

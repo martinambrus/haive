@@ -27,7 +27,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { writeProjectStateRecord } from '../../../project-state/write.js';
+import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
 import {
@@ -803,6 +803,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         });
       }
     } catch (err) {
+      failIfColumnStale(err);
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');

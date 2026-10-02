@@ -30,7 +30,11 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
-import { ProjectStateWriteError, writeProjectStateRecord } from '../../../project-state/write.js';
+import {
+  failIfColumnStale,
+  ProjectStateWriteError,
+  writeProjectStateRecord,
+} from '../../../project-state/write.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
   cliRulesRegionRecord,
@@ -1468,6 +1472,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         })),
       );
     } catch (err) {
+      failIfColumnStale(err);
       // The files stand on disk whatever the database kept, and the commit stages what is listed here.
       if (err instanceof ProjectStateWriteError) writtenPaths.push(...err.written);
       const message = err instanceof Error ? err.message : String(err);

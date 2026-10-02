@@ -8,7 +8,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { renderContextColumnSchema } from '@haive/shared/project-state';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import {
+  failIfColumnStale,
+  ProjectStateWriteError,
+  writeProjectStateRecord,
+} from '../src/project-state/write.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -92,6 +96,7 @@ async function setup(seedColumn: Context | null = null) {
     });
   return {
     root,
+    fake,
     write,
     statements,
     renderContext: () => fake.rows(repositories).find((r) => r.id === REPO)?.[column] ?? null,
@@ -152,9 +157,31 @@ describe('writeProjectStateRecord: a context the column schema refuses', () => {
     const s = await setup({ ...valid(), rtkChoiceRecorded: true });
     await symlink(tmpdir(), join(s.root, '.haive-data'));
 
-    await expect(s.write(valid())).rejects.toThrow();
+    const err = await s.write(valid()).catch((e: unknown) => e);
 
+    expect(err).toBeInstanceOf(ProjectStateWriteError);
+    expect((err as ProjectStateWriteError).columnStale).toBe(false);
+    expect(() => failIfColumnStale(err)).not.toThrow();
     expect(s.renderContext()).toBeNull();
     expect(s.syncRows()).toEqual([]);
+  });
+
+  // A writer catches the failure as a warning, which would leave this column outranking its rows.
+  it('marks the column stale when it cannot be cleared either, which fails the writer', async () => {
+    const s = await setup({ ...valid(), rtkChoiceRecorded: true });
+    await symlink(tmpdir(), join(s.root, '.haive-data'));
+    s.fake.hooks.beforeUpdate = () => {
+      throw new Error('connection lost');
+    };
+
+    const err = await s.write(valid()).catch((e: unknown) => e);
+
+    expect((err as ProjectStateWriteError).columnStale).toBe(true);
+    expect(() => failIfColumnStale(err)).toThrow(err as Error);
+    expect(s.renderContext()).not.toBeNull();
+  });
+
+  it('lets any other error through as a warning', () => {
+    expect(() => failIfColumnStale(new Error('not a record write'))).not.toThrow();
   });
 });
