@@ -7,6 +7,7 @@ import {
   partitionFindings,
 } from './08d2-adversarial-qa-review.js';
 import type { StepContext, StepApplyArgs } from '../../step-definition.js';
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
 const detected: Parameters<NonNullable<typeof adversarialQaReviewStep.form>>[1] = {
   ran: true,
@@ -88,6 +89,22 @@ describe('formatQaFixDiagnosis', () => {
     const d = formatQaFixDiagnosis(['- finding a'], 'also harden X');
     expect(d).toContain('- finding a');
     expect(d).toContain('also harden X');
+  });
+  it('fences the finding lines and leaves the framing and the reviewer instructions outside', () => {
+    const d = formatQaFixDiagnosis(['- finding a', '- finding b'], 'also harden X');
+    expect(d).toContain(`${UNTRUSTED_OPEN}\n- finding a\n- finding b\n${UNTRUSTED_CLOSE}`);
+    expect(d.indexOf('the developer asked to fix the findings below')).toBeLessThan(
+      d.indexOf(UNTRUSTED_OPEN),
+    );
+    expect(d.indexOf('Findings to fix:')).toBeLessThan(d.indexOf(UNTRUSTED_OPEN));
+    expect(d.indexOf('Reviewer instructions:\nalso harden X')).toBeGreaterThan(
+      d.indexOf(UNTRUSTED_CLOSE),
+    );
+  });
+  it('opens no fence when only the reviewer instructions are left', () => {
+    const d = formatQaFixDiagnosis([], 'also harden X');
+    expect(d).toContain('also harden X');
+    expect(d).not.toContain(UNTRUSTED_OPEN);
   });
 });
 

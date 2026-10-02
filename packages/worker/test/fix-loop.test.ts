@@ -24,6 +24,7 @@ import {
   UNTRUSTED_OPEN,
   fencedAgentBlock,
 } from '../src/step-engine/steps/_untrusted-repo.js';
+import { formatQaFixDiagnosis } from '../src/step-engine/steps/workflow/08d2-adversarial-qa-review.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -647,6 +648,16 @@ function gate2Diagnosis(person: string): string {
   ].join('\n');
 }
 
+/** A gate 1.5 "Fix all" request: 500 agent-written finding lines, then the reviewer's words. */
+function qaDiagnosis(feedback: string): string {
+  const findings = Array.from(
+    { length: 500 },
+    (_, i) =>
+      `- [high] race @ src/m${String(i).padStart(3, '0')}.ts:${i}: ${'impact '.repeat(40)}— fix: ${'patch '.repeat(20)}`,
+  );
+  return formatQaFixDiagnosis(findings, feedback);
+}
+
 const fenceBodies = (text: string): string[] =>
   text
     .split(UNTRUSTED_OPEN)
@@ -935,6 +946,42 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
     const bodies = fenceBodies(second);
     expect(bodies).toHaveLength(2);
     for (const body of bodies) expect(body.length).toBeLessThan(800);
+  });
+
+  it('hands 07 the findings of an adversarial-QA fix request bounded and the reviewer words whole', async () => {
+    const feedback = numbered('reviewer', 40);
+    const diagnosis = qaDiagnosis(feedback);
+    expect(diagnosis.length).toBeGreaterThan(100_000);
+    const r = await loadFixLoopDiagnosis(
+      ctxWith([ev('08d2-adversarial-qa-review', 4, diagnosis)], 4),
+    );
+    expect(r?.humanSourced).toBe(true);
+    expect(r?.diagnosis).toContain(`Reviewer instructions:\n${feedback}`);
+    expect(fencesAlternate(r?.diagnosis ?? '')).toBe(true);
+    const bodies = fenceBodies(r?.diagnosis ?? '');
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] ?? '';
+    expect(body.split(OMISSION)).toHaveLength(2);
+    const marker = body.match(OMISSION)?.[0] ?? '';
+    expect(body.length).toBeLessThanOrEqual(6000 + marker.length + 2);
+  });
+
+  it('shows the oscillation gate the findings of an adversarial-QA request bounded', () => {
+    const feedback = numbered('reviewer', 40);
+    const [, second = ''] = (
+      buildOscillationEscalationSchema(
+        '08c-code-review',
+        '08d2-adversarial-qa-review',
+        'tool output',
+        qaDiagnosis(feedback),
+      ).infoSections ?? []
+    ).map((section) => section.body);
+    expect(second).toContain(`Reviewer instructions:\n${feedback}`);
+    expect(fencesAlternate(second)).toBe(true);
+    const bodies = fenceBodies(second);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatch(OMISSION);
+    expect(bodies[0]?.length).toBeLessThan(1600);
   });
 });
 
