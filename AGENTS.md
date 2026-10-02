@@ -219,7 +219,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### Step engine
 
 - [Fix loop](docs/architecture/fix-loop.md): `loop_back` rounds, DAG-mode fix rounds, failures no
-  agent can repair. `_fix-loop.ts`, `_test-env-guard.ts`, `loadPriorFixContext`.
+  agent can repair, a long diagnosis kept by both ends. `_fix-loop.ts`, `_test-env-guard.ts`,
+  `loadPriorFixContext`, `excerptDiagnosis`.
 - [Step summaries](docs/architecture/step-summaries.md): the "What the agent did" panel,
   remembered and per-task CLI choices. `_step-summary.ts`, `task_step_cli_choices`.
 - [Staged agent bodies](docs/architecture/staged-agent-bodies.md): document bodies written to
@@ -248,7 +249,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Retrieval protocol](docs/architecture/retrieval-protocol.md): the discover-then-ground block
   and its variants. `_retrieval-guidance.ts`.
 - [Prompt containment](docs/architecture/prompt-containment.md): repo-is-data guards, fences,
-  values on prompt lines. `_untrusted-repo.ts`, `fencedAgentBlock`.
+  values on prompt lines. `_untrusted-repo.ts`, `fencedAgentBlock`, `balanceFences`.
 - [RAG embedding failures](docs/architecture/rag-embedding-failures.md): no hash vectors, embed
   timeouts, lexical-only repos. `_rag-embed-health.ts`, `ensureRagSchema`.
 - [Identifier search](docs/architecture/identifier-search.md): identifiers indexed whole, IDF
