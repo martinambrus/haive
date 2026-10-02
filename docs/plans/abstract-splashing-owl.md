@@ -1,8 +1,9 @@
 # Enforced house rules from the global KB, plus three found-not-fixed fixes
 
-> **In progress** 2026-10-03: approved. PR1 built (the Drupal 7 facet family, plus an
-> inherited-key guard on the facet alias lookup that its build found). Line numbers are as of
-> writing; resolve by symbol.
+> **In progress** 2026-10-03: approved. PR1 shipped (#398: the Drupal 7 facet family with the
+> major the token implies, plus an inherited-key guard on the facet alias lookup). PR2 built (the
+> title list states its omission; global KB titles collapsed in the list and in step 11). Line
+> numbers are as of writing; resolve by symbol.
 
 ## Context
 
