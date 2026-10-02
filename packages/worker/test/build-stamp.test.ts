@@ -1,0 +1,225 @@
+import { execFile } from 'node:child_process';
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { computeBuildStamp, currentBuildStamp, initBuildStamp } from '../src/build-stamp.js';
+
+const run = promisify(execFile);
+const STAMP_FORM = /^(?:(?:commit|tree):[0-9a-f]{40}|release:.+|unknown)$/;
+
+let root: string;
+let env: NodeJS.ProcessEnv;
+let fixtures = 0;
+
+beforeAll(async () => {
+  root = await mkdtemp(join(tmpdir(), 'haive-build-stamp-test-'));
+  env = {
+    ...process.env,
+    HOME: root,
+    XDG_CONFIG_HOME: root,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  delete env.HAIVE_VERSION;
+});
+
+afterAll(async () => {
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+const git = async (cwd: string, ...args: string[]): Promise<string> =>
+  (await run('git', args, { cwd, env })).stdout.trim();
+
+async function put(dir: string, files: Record<string, string>): Promise<void> {
+  for (const [name, text] of Object.entries(files)) {
+    await mkdir(dirname(join(dir, name)), { recursive: true });
+    await writeFile(join(dir, name), text);
+  }
+}
+
+async function commit(dir: string, forced: string[] = []): Promise<void> {
+  await git(dir, 'add', '-A');
+  if (forced.length > 0) await git(dir, '--literal-pathspecs', 'add', '-f', '--', ...forced);
+  await git(dir, 'commit', '-q', '-m', 'c');
+}
+
+async function unbornRepo(): Promise<string> {
+  const dir = join(root, `repo-${fixtures++}`);
+  await mkdir(dir);
+  await git(dir, 'init', '-q', '-b', 'main');
+  for (const [key, value] of [
+    ['user.name', 'T'],
+    ['user.email', 't@example.com'],
+    ['gc.auto', '0'],
+    ['commit.gpgsign', 'false'],
+  ] as const) {
+    await git(dir, 'config', key, value);
+  }
+  await put(dir, { '.gitignore': '*.log\n', 'a.txt': 'alpha\n', 'sub/b.txt': 'bravo\n' });
+  return dir;
+}
+
+async function bornRepo(
+  extra: Record<string, string> = {},
+  forced: string[] = [],
+): Promise<string> {
+  const dir = await unbornRepo();
+  await put(dir, extra);
+  await commit(dir, forced);
+  return dir;
+}
+
+const stamp = (startDir: string, over: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) =>
+  computeBuildStamp({ startDir, env, ...over });
+
+const commitStamp = async (dir: string): Promise<string> =>
+  `commit:${await git(dir, 'rev-parse', 'HEAD')}`;
+
+async function snapshot(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const name of (await readdir(dir, { recursive: true })).sort()) {
+    const st = await lstat(join(dir, name));
+    out.push(`${name} ${st.size} ${st.mtimeMs}`);
+  }
+  return out;
+}
+
+describe('computeBuildStamp in a checkout', { timeout: 30_000 }, () => {
+  it('names the commit of a clean checkout', async () => {
+    const dir = await bornRepo();
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
+  it('names the tree an edit would commit', async () => {
+    const dir = await bornRepo();
+    const clean = await stamp(dir);
+    await put(dir, { 'a.txt': 'alpha edited\n' });
+    const edited = await stamp(dir);
+    expect(edited).not.toBe(clean);
+    await commit(dir);
+    expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+  });
+
+  it('returns to the commit once the edit is reverted', async () => {
+    const dir = await bornRepo();
+    const clean = await stamp(dir);
+    await put(dir, { 'a.txt': 'alpha edited\n' });
+    expect(await stamp(dir)).toMatch(/^tree:/);
+    await put(dir, { 'a.txt': 'alpha\n' });
+    expect(await stamp(dir)).toBe(clean);
+  });
+
+  it('counts an untracked file that no ignore rule matches', async () => {
+    const dir = await bornRepo();
+    const clean = await stamp(dir);
+    await put(dir, { 'new.txt': 'new\n' });
+    const untracked = await stamp(dir);
+    expect(untracked).not.toBe(clean);
+    await commit(dir);
+    expect(untracked).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+  });
+
+  it('ignores a file an ignore rule matches', async () => {
+    const dir = await bornRepo();
+    await put(dir, { 'debug.log': 'noise\n', 'sub/trace.log': 'noise\n' });
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
+  it('counts a tracked file an ignore rule matches, edited and then deleted', async () => {
+    const dir = await bornRepo({ 'keep.log': 'forced\n' }, ['keep.log']);
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+    await put(dir, { 'keep.log': 'forced edited\n' });
+    const edited = await stamp(dir);
+    await git(dir, 'commit', '-q', '-a', '-m', 'edit');
+    expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+    await rm(join(dir, 'keep.log'));
+    const deleted = await stamp(dir);
+    await git(dir, 'commit', '-q', '-a', '-m', 'delete');
+    expect(deleted).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+  });
+
+  it('reads the name of such a file literally, not as a pathspec', async () => {
+    const dir = await bornRepo({ ':(top)keep.log': 'forced\n' }, [':(top)keep.log']);
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
+  it('names the tree of a checkout whose HEAD is unborn', async () => {
+    const dir = await unbornRepo();
+    const unborn = await stamp(dir);
+    await git(dir, 'add', '-A');
+    expect(unborn).toBe(`tree:${await git(dir, 'write-tree')}`);
+  });
+
+  it('answers the same from a subdirectory as from the top', async () => {
+    const dir = await bornRepo();
+    await put(dir, { 'a.txt': 'alpha edited\n', 'new.txt': 'new\n' });
+    expect(await stamp(join(dir, 'sub'))).toBe(await stamp(dir));
+  });
+
+  it('lets the checkout decide over the release version', async () => {
+    const dir = await bornRepo();
+    expect(await stamp(dir, { env: { ...env, HAIVE_VERSION: '0.2.0' } })).toBe(
+      await commitStamp(dir),
+    );
+  });
+
+  it('answers unknown when HEAD names an object that is missing, whatever the version', async () => {
+    const dir = await bornRepo();
+    await writeFile(join(dir, '.git/refs/heads/main'), `${'de'.repeat(20)}\n`);
+    expect(await stamp(dir, { env: { ...env, HAIVE_VERSION: '0.2.0' } })).toBe('unknown');
+  });
+
+  it('answers unknown within the timeout when git never answers', async () => {
+    const dir = await bornRepo();
+    const shim = join(root, 'shim');
+    await mkdir(shim);
+    await writeFile(join(shim, 'git'), '#!/bin/sh\nexec sleep 30\n');
+    await chmod(join(shim, 'git'), 0o755);
+    const started = Date.now();
+    const result = await stamp(dir, {
+      env: { ...env, PATH: `${shim}:${env.PATH}` },
+      timeoutMs: 300,
+    });
+    expect(result).toBe('unknown');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('writes nothing under .git, even with the split index enabled', async () => {
+    const dir = await bornRepo();
+    await git(dir, 'config', 'core.splitIndex', 'true');
+    await put(dir, { 'a.txt': 'alpha edited\n', 'new.txt': 'new\n' });
+    const before = await snapshot(join(dir, '.git'));
+    expect(await stamp(dir)).toMatch(/^tree:/);
+    expect(await snapshot(join(dir, '.git'))).toEqual(before);
+  });
+});
+
+describe('computeBuildStamp outside a checkout', { timeout: 30_000 }, () => {
+  it.each([
+    ['a release version', '0.2.0', 'release:0.2.0'],
+    ['a release candidate', '0.3.0-rc.1', 'release:0.3.0-rc.1'],
+    ['the dev sentinel', '0.0.0-dev', 'unknown'],
+    ['an empty version', '', 'unknown'],
+    ['no version', undefined, 'unknown'],
+  ])('with %s', async (_name, version, expected) => {
+    const plain = join(root, 'plain', 'x', 'y');
+    await mkdir(plain, { recursive: true });
+    expect(await stamp(plain, { env: { ...env, HAIVE_VERSION: version } })).toBe(expected);
+  });
+
+  it('answers a valid stamp for a start directory that does not exist', async () => {
+    expect(await stamp(join(root, 'missing', 'dir'))).toMatch(STAMP_FORM);
+  });
+});
+
+describe('the stamp of this process', { timeout: 60_000 }, () => {
+  it('is null until initBuildStamp has run, and then holds what it computed', async () => {
+    expect(currentBuildStamp()).toBeNull();
+    const computed = await initBuildStamp();
+    expect(computed).toMatch(STAMP_FORM);
+    expect(currentBuildStamp()).toBe(computed);
+    expect(await initBuildStamp()).toBe(computed);
+  });
+});

@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+
+const stamp = vi.hoisted(() => `tree:${'ab'.repeat(20)}`);
+vi.mock('../src/build-stamp.js', () => ({ currentBuildStamp: () => stamp }));
+
 import {
   StepSupersededError,
+  insertOwnedRun,
   lockOwnedStep,
   updateOwnedStep,
 } from '../src/step-engine/step-ownership.js';
@@ -92,5 +97,42 @@ describe('lockOwnedStep', () => {
   it('answers false once a Retry or a Skip took the row', async () => {
     const { db } = lockDb([]);
     expect(await lockOwnedStep(db, 'step1')).toBe(false);
+  });
+});
+
+function runDb() {
+  const inserted: Record<string, unknown>[] = [];
+  const tx = {
+    select: lockDb([{ id: 'step1' }]).db.select,
+    insert: () => ({
+      values: (row: Record<string, unknown>) => ({
+        returning: async () => {
+          inserted.push(row);
+          return [{ id: 'run1', ...row }];
+        },
+      }),
+    }),
+  };
+  const db = {
+    transaction: async <T>(fn: (handle: typeof tx) => Promise<T>) => fn(tx),
+  } as unknown as Database;
+  return { db, inserted };
+}
+
+describe('insertOwnedRun', () => {
+  const values = { taskId: 'task1', taskStepId: 'step1', mode: 'cli', prompt: 'p' } as const;
+
+  it('stamps the build on the run it records', async () => {
+    const { db, inserted } = runDb();
+    const run = await insertOwnedRun(db, 'step1', values);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.haiveBuild).toBe(stamp);
+    expect(run.haiveBuild).toBe(stamp);
+  });
+
+  it('keeps the stamp whatever the caller passes', async () => {
+    const { db, inserted } = runDb();
+    await insertOwnedRun(db, 'step1', { ...values, haiveBuild: null });
+    expect(inserted[0]!.haiveBuild).toBe(stamp);
   });
 });

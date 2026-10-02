@@ -39,6 +39,7 @@ import type {
   StepCapability,
   StepStatus,
 } from '@haive/shared';
+import { currentBuildStamp } from '../build-stamp.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -3358,6 +3359,7 @@ async function maybeEnqueueStepSummary(
         mode: 'cli',
         prompt: plan.effectivePrompt ?? prompt,
         agentTitle: 'Step summary',
+        haiveBuild: currentBuildStamp(),
       })
       .returning({ id: schema.cliInvocations.id });
     if (!invRow) return;
@@ -3459,6 +3461,7 @@ async function recordSummaryEnqueueFailure(
       exitCode: -1,
       errorMessage: err instanceof Error ? err.message : String(err),
       endedAt: now,
+      haiveBuild: currentBuildStamp(),
     });
   } catch (writeErr) {
     logger.warn({ err: writeErr, taskStepId }, 'could not record step summary enqueue failure');

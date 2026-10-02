@@ -1,5 +1,6 @@
 import { logger, configService, CONFIG_KEYS } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
+import { initBuildStamp } from './build-stamp.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
@@ -58,6 +59,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
+  const buildStamp = initBuildStamp();
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
   // Reap any cli sandbox containers left behind by a prior worker that died
   // mid-job (tsx watch restart, SIGKILL, OOM). BullMQ will redeliver the
@@ -107,6 +109,7 @@ async function main(): Promise<void> {
     logger.warn({ err }, 'stalled-task redrive on boot failed');
   });
 
+  await buildStamp;
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);
   const taskWorker = startTaskWorker();

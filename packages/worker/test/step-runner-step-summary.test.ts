@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
+
+const stamp = vi.hoisted(() => `tree:${'ab'.repeat(20)}`);
+vi.mock('../src/build-stamp.js', () => ({ currentBuildStamp: () => stamp }));
+
 import { advanceStep, buildAgentMiningSummaryPrompt } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -316,6 +320,36 @@ describe('per-step summarizer provider choice', () => {
     );
     expect(summaries(enqueued)).toHaveLength(0);
     expect(state.inserts.filter((i) => i.row.agentTitle === 'Step summary')).toHaveLength(0);
+  });
+});
+
+describe('the build stamp on a recap run', () => {
+  const recapRow = (state: MockState) => {
+    const rows = state.inserts.filter(
+      (i) => i.table === 'cli_invocations' && i.row.agentTitle === 'Step summary',
+    );
+    expect(rows).toHaveLength(1);
+    return rows[0]!.row;
+  };
+
+  it('stamps the build on the run it inserts', async () => {
+    const { state } = await runToDone(undefined, [makeProvider()]);
+    const recap = recapRow(state);
+    expect(recap.cliProviderId).toBe('prov-1');
+    expect(recap.haiveBuild).toBe(stamp);
+  });
+
+  it('stamps the build on the failure it records when the recap cannot be dispatched', async () => {
+    const { state } = await runToDone(
+      { summaryCliProviderId: 'prov-ollama', summaryLlmEnabled: true },
+      [
+        makeProvider(),
+        makeProvider({ id: 'prov-ollama', label: 'Ollama', name: 'ollama', authMode: 'api_key' }),
+      ],
+    );
+    const failure = recapRow(state);
+    expect(failure.exitCode).toBe(-1);
+    expect(failure.haiveBuild).toBe(stamp);
   });
 });
 
