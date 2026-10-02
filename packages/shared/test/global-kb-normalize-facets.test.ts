@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalFacetValueSql,
+  canonicalizeFacetValue,
   FACET_MAJOR_PARENTS,
   normalizeFacets,
   orphanFacetMajors,
@@ -86,6 +87,18 @@ describe('extractProjectFacets normalisation', () => {
 // One definition, two engines — the shape `identifierTsvSql` established. A hand-written SQL
 // copy of this rule is exactly what drifted: the backfill lowercased and did neither the trim
 // nor the alias, so legacy rows were rewritten into tokens no project reports.
+describe('canonicalizeFacetValue and inherited keys', () => {
+  it('returns a free-text value named like an Object prototype member as written', () => {
+    expect(canonicalizeFacetValue('database', 'constructor')).toBe('constructor');
+    expect(canonicalizeFacetValue('database', 'toString')).toBe('tostring');
+    expect(canonicalizeFacetValue('constructor', 'name')).toBe('name');
+  });
+
+  it('still folds a real alias', () => {
+    expect(canonicalizeFacetValue('database', ' PostgreSQL ')).toBe('postgres');
+  });
+});
+
 describe('canonicalFacetValueSql', () => {
   it('trims and lowercases before folding an alias, in that order', () => {
     const sql = canonicalFacetValueSql('kv.key', 'v');
