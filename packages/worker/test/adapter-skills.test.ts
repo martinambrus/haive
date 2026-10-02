@@ -14,9 +14,10 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { SANDBOX_USER_HOME } from '../src/sandbox/sandbox-identity.js';
 
 // Each CLI's model should see the repository's skills, described, and none of the vendor's own
-// skills competing with them. What each CLI needed was MEASURED on the wire (AGENTS.md, "Skills
-// per CLI"), so every adapter is listed here, including the ones that need nothing: a CLI whose
-// row is missing is how a capability set goes stale without a test noticing.
+// skills competing with them. What each CLI needed was MEASURED on the wire
+// (docs/architecture/skills-per-cli.md), so every adapter is listed here, including the ones that
+// need nothing: a CLI whose row is missing is how a capability set goes stale without a test
+// noticing.
 
 const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
   ({
