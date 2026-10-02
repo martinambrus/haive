@@ -232,6 +232,14 @@ describe('computeBuildStamp in a checkout', { timeout: 30_000 }, () => {
     expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
   });
 
+  it('names the commit of a clean sparse checkout', async () => {
+    const dir = await bornRepo({ 'other/c.txt': 'charlie\n' });
+    await git(dir, 'sparse-checkout', 'set', 'sub');
+    expect(await git(dir, 'ls-files', '-t', 'other/c.txt')).toBe('S other/c.txt');
+    expect(await git(dir, '--no-optional-locks', 'status', '--porcelain')).toBe('');
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
+  });
+
   it('names the commit of a clean checkout whose path holds a colon and a quote', async () => {
     const dir = join(root, `odd:"${fixtures++}`);
     await rename(await bornRepo(), dir);

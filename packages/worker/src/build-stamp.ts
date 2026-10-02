@@ -78,7 +78,8 @@ async function gitStamp(top: string, env: NodeJS.ProcessEnv, deadline: number): 
     for (const file of forced) if (await exists(path.join(top, file))) present.push(file);
     if (present.length > 0) await index(['--literal-pathspecs', 'add', '-f', '--', ...present]);
 
-    const tree = objectId(await index(['write-tree']));
+    // Missing objects allowed: a sparse checkout's skip-worktree entries name blobs only the real store holds.
+    const tree = objectId(await index(['write-tree', '--missing-ok']));
     return tree === headTree ? `commit:${head}` : `tree:${tree}`;
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
