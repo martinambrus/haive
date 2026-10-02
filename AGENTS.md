@@ -2995,6 +2995,8 @@ upgrade or a sync computed while it was off left their ids out of `applicable_te
 counts an RTK template as applicable again while RTK is on and the providers of the context 01
 renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
+A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
+snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
 First comes the repository's render context column, whose RTK choice is its stored
 `rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
 with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
