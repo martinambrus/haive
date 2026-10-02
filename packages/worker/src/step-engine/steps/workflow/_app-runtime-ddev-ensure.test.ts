@@ -60,6 +60,25 @@ describe('ensureDdevWithProgress', () => {
     await expect(ensureDdevWithProgress(ctx, SUBPATH)).rejects.toBe(lookalike);
   });
 
+  // A Stop after admission, or during a warm start, is not seen by the ensure itself, so the boot
+  // returns as if nothing happened, and the caller's migration or import must not run on it.
+  it('rechecks for a Stop once the boot returns, and goes no further', async () => {
+    const cancel = new TaskCancelledError();
+    const findFirst = vi.fn(async () => null);
+    const stopped = {
+      taskId: 'task-1',
+      signal: stop.signal,
+      db: { query: { tasks: { findFirst } } },
+      throwIfCancelled: () => {
+        throw cancel;
+      },
+    } as never;
+    ensureDdevStarted.mockResolvedValueOnce(HANDLE);
+
+    await expect(ensureDdevWithProgress(stopped, SUBPATH)).rejects.toBe(cancel);
+    expect(findFirst, 'the debug and database wiring ran after the Stop').not.toHaveBeenCalled();
+  });
+
   it('hands the step abort signal to the ensure and returns the live handle', async () => {
     ensureDdevStarted.mockResolvedValueOnce(HANDLE);
 

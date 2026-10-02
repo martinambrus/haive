@@ -278,9 +278,9 @@ export async function withDdevProgress<T>(
  *  ticks even through DDEV's silent "waiting for containers" dots phase, so a
  *  ~2-minute cold boot never looks frozen. Shared by 01c-ddev-env, 07c-ddev-
  *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws, except that a Stop
- *  during its runtime slot wait leaves as a TaskCancelledError. */
+ *  leaves as a TaskCancelledError, whether it lands during the runtime slot wait or the boot. */
 export async function ensureDdevWithProgress(
-  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal'>,
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal' | 'throwIfCancelled'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
   // Pre-flight, and FIRST of them: the files DDEV parses at start have to be YAML at all.
@@ -335,6 +335,9 @@ export async function ensureDdevWithProgress(
     if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
     throw err;
   });
+  // The signal reaches only the slot wait, so a Stop during a warm start or a boot past admission
+  // returns here unseen, and the caller would go on to migrate or import into a stopped task.
+  ctx.throwIfCancelled?.();
   // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug
   // so the Editor tab's php-debug listener receives DBGp. Idempotent + restart-
   // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
