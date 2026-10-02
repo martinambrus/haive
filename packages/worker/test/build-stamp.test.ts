@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { computeBuildStamp, currentBuildStamp, initBuildStamp } from '../src/build-stamp.js';
 
 const run = promisify(execFile);
-const STAMP_FORM = /^(?:(?:commit|tree):[0-9a-f]{40}|release:.+|unknown)$/;
+const STAMP_FORM = /^(?:(?:commit|tree):(?:[0-9a-f]{40}|[0-9a-f]{64})|release:.+|unknown)$/;
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -55,10 +55,10 @@ async function commit(dir: string, forced: string[] = []): Promise<void> {
   await git(dir, 'commit', '-q', '-m', 'c');
 }
 
-async function unbornRepo(): Promise<string> {
+async function unbornRepo(...initArgs: string[]): Promise<string> {
   const dir = join(root, `repo-${fixtures++}`);
   await mkdir(dir);
-  await git(dir, 'init', '-q', '-b', 'main');
+  await git(dir, 'init', '-q', '-b', 'main', ...initArgs);
   for (const [key, value] of [
     ['user.name', 'T'],
     ['user.email', 't@example.com'],
@@ -230,6 +230,13 @@ describe('computeBuildStamp in a checkout', { timeout: 30_000 }, () => {
     await commit(dir);
     expect(await git(dir, 'ls-tree', 'HEAD', 'bin/run.sh')).toMatch(/^100755 /);
     expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
+  });
+
+  it('names the commit of a clean SHA-256 checkout', async () => {
+    const dir = await unbornRepo('--object-format=sha256');
+    await commit(dir);
+    expect(await commitStamp(dir)).toMatch(/^commit:[0-9a-f]{64}$/);
+    expect(await stamp(dir)).toBe(await commitStamp(dir));
   });
 
   it('names the commit of a clean sparse checkout', async () => {

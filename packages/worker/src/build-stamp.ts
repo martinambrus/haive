@@ -7,7 +7,7 @@ import { gitExec } from './repo/git-exec.js';
 
 const UNKNOWN = 'unknown';
 const DEFAULT_TIMEOUT_MS = 30_000;
-const OBJECT_ID = /^[0-9a-f]{40}$/;
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 let stamp: string | null = null;
 let started: Promise<string> | undefined;
@@ -20,7 +20,7 @@ const exists = (target: string): Promise<boolean> =>
 
 function objectId(output: string): string {
   const id = output.trim();
-  if (!OBJECT_ID.test(id)) throw new Error('git did not answer with a 40-hex object id');
+  if (!OBJECT_ID.test(id)) throw new Error('git did not answer with an object id');
   return id;
 }
 
