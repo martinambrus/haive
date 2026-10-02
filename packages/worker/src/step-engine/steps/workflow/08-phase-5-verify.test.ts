@@ -521,13 +521,25 @@ describe('phase5VerifyStep.apply', () => {
   });
 
   describe('what the earlier ensure leaves as it was', () => {
-    it('ensures the runtime exactly once per pass', async () => {
+    // The checks can run for minutes, and a runner reclaimed or recreated meanwhile must not leave
+    // the smoke probing the handle from before them: gate 2 reads a failed smoke as a reject.
+    it('ensures again right before the smoke, which probes the runner as it is then', async () => {
+      const REPLACED = { container: 'haive-ddev-replaced', projectDir: '/repos/u/r' };
+      ensureAppServing
+        .mockResolvedValueOnce(DDEV_RUNTIME)
+        .mockResolvedValueOnce({ ...DDEV_RUNTIME, handle: REPLACED });
+
       await runApply(
         { test: PHPUNIT, lint: PHPCS, typecheck: PHPSTAN },
         { runTest: true, runLint: true, runTypecheck: true },
       );
 
-      expect(ensureAppServing).toHaveBeenCalledTimes(1);
+      expect(ensureAppServing).toHaveBeenCalledTimes(2);
+      expect(new Set(slotExecs().map((c) => c[0].container))).toEqual(new Set([ENSURED.container]));
+      const probe = ddevExec.mock.calls.find((c) => String(c[1]).includes('curl'));
+      expect(probe?.[0].container, 'the smoke probed the handle from before the checks').toBe(
+        REPLACED.container,
+      );
     });
 
     it('probes the smoke through the ensured runtime and reports its url', async () => {

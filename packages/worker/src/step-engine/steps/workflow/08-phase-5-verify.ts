@@ -425,18 +425,17 @@ function ddevBootError(err: unknown): Error {
 }
 
 /** Boot the app once (idempotent via ensureAppServing) and curl it from INSIDE its
- *  container, where loopback/DNS resolve. A runtime the caller already ensured is passed as
- *  `runtime` and is not ensured again. A DDEV boot error is fatal: without a
+ *  container, where loopback/DNS resolve. A DDEV boot error is fatal: without a
  *  running DDEV environment, following checks would verify the wrong thing (or
  *  nothing at all), so the step must stop as retryable. Probe failures after a
  *  successful boot remain recorded in the smoke result for gate-2 review. */
 export async function runRuntimeSmoke(
   ctx: StepContext,
-  opts: { failOnDdevBootError?: boolean; runtime?: ServingRuntime } = {},
+  opts: { failOnDdevBootError?: boolean } = {},
 ): Promise<RuntimeSmoke> {
-  let rt = opts.runtime;
+  let rt: ServingRuntime;
   try {
-    rt ??= await ensureAppServing(ctx);
+    rt = await ensureAppServing(ctx);
   } catch (err) {
     if (err instanceof TaskCancelledError) throw err;
     if (opts.failOnDdevBootError) throw ddevBootError(err);
@@ -639,7 +638,6 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       // not let it be recorded as a benign "not probed" smoke result and allow the
       // workflow to continue; fail this retryable step instead.
       failOnDdevBootError: ddevMode,
-      runtime,
     });
 
     ctx.logger.info(
