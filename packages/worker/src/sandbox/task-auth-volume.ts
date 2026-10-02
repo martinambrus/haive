@@ -52,8 +52,8 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
  *  otherwise stop at an interactive prompt nothing can answer.
  *
  *  `ollama` sits with the claude family because it IS the claude binary pointed at another
- *  endpoint (see AGENTS.md) and its authConfigPaths are `~/.claude`, the same mount rtk
- *  writes into for the rest of them. It was the one family member missing here, so it had
+ *  endpoint (see docs/architecture/cli-adapters.md) and its authConfigPaths are `~/.claude`,
+ *  the same mount rtk writes into for the rest of them. It was the one family member missing here, so it had
  *  been silently skipped. `grok` and `antigravity` stay out: rtk has an `--agent antigravity`
  *  mode, but where it writes has not been measured against antigravity's own
  *  `~/.gemini/antigravity-cli` mount, and a guess here writes into a live auth volume. */

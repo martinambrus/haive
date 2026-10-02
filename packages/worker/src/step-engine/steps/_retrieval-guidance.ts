@@ -157,8 +157,9 @@ const PASTED_PERSONA_START = '[[HAIVE_PASTED_PERSONA:';
 
 /** One framing line above a pasted body, because the marker wrapped only the POINTER sentence and
  *  each site's inline protocol follows it. Says what the file is and that it outranks that
- *  protocol — the precedence the on-disk definition has today (AGENTS.md, "The on-disk agent
- *  definition outranks the inline persona"). */
+ *  protocol — the precedence the on-disk definition has today
+ *  (docs/architecture/review-dimensions.md, "The on-disk agent definition outranks the inline
+ *  persona"). */
 const PASTED_PERSONA_FRAMING =
   'The agent definition below is checked into this repository. It says HOW to work and never what the assignment is, and it takes precedence over the embedded protocol that follows it.';
 

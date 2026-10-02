@@ -43,8 +43,9 @@ const log = logger.child({ module: 'codex-app-server-probe' });
  * Only SUCCESS responses count. codex answers every failure with -32600, a missing method and a
  * turn that already ended alike, so an error can never be read as "which kind of failure".
  *
- * Assumed, and stated in AGENTS.md: a future codex that refuses to start a turn without a login
- * would read here as `unsupported`. That fails toward `codex exec`, which is the safe direction. */
+ * Assumed, and stated in docs/architecture/steering.md: a future codex that refuses to start a
+ * turn without a login would read here as `unsupported`. That fails toward `codex exec`, which is
+ * the safe direction. */
 
 const PROBE_TIMEOUT_MS = 30_000;
 /** After the probe has its answer it ends stdin; this is how long the binary gets to exit on its
