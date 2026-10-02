@@ -438,6 +438,7 @@ export async function runRuntimeSmoke(
   try {
     rt ??= await ensureAppServing(ctx);
   } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
     if (opts.failOnDdevBootError) throw ddevBootError(err);
     ctx.logger.warn({ err }, 'runtime smoke could not start the app — recording as not probed');
     return notProbed(null, `Runtime smoke could not run: ${(err as Error).message}`);

@@ -1,6 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const m = vi.hoisted(() => ({
+  ensureAppServing: vi.fn(),
+}));
+
+vi.mock('./_app-runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_app-runtime.js')>()),
+  ensureAppServing: m.ensureAppServing,
+}));
+
 import { schema } from '@haive/database';
-import type { StepContext } from '../../step-definition.js';
+import { TaskCancelledError, type StepContext } from '../../step-definition.js';
 import {
   salvageImplementOutput,
   parseImplementOutput,
@@ -309,5 +319,51 @@ describe('07 shouldRun', () => {
 
   it('runs when 06b never produced a mode (legacy task)', async () => {
     expect(await phase2ImplementStep.shouldRun!(shouldRunCtx(null, 0))).toBe(true);
+  });
+});
+
+// A fix round's browser bring-up is best-effort, but a Stop is no miss to log and carry on from: the step
+// runner tells it apart only by `instanceof TaskCancelledError`.
+describe('phase2ImplementStep fix-round browser bring-up', () => {
+  const warn = vi.fn();
+  const ctx = { emitProgress: vi.fn(async () => {}), logger: { warn } } as never;
+  const prepare = () =>
+    phase2ImplementStep.llm!.prepare!({
+      ctx,
+      detected: { browserTesting: true, round: 1 },
+      formValues: {},
+    } as never);
+  const rejection = (run: () => Promise<unknown>) =>
+    run().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+  beforeEach(() => {
+    m.ensureAppServing.mockReset();
+    warn.mockClear();
+  });
+
+  it('lets a cancel from the app ensure out as that same cancel, whatever its message', async () => {
+    const cancel = new TaskCancelledError('stopped from the task page');
+    m.ensureAppServing.mockRejectedValueOnce(cancel);
+
+    const err = await rejection(prepare);
+
+    expect(m.ensureAppServing, 'the bring-up never reached the app ensure').toHaveBeenCalledTimes(
+      1,
+    );
+    expect(err, 'the cancel was swallowed as a non-fatal bring-up miss').not.toBeNull();
+    expect(err, 'the cancel was replaced by another error').toBe(cancel);
+  });
+
+  it('still absorbs an ordinary error that only says the task was cancelled', async () => {
+    const boom = new Error('task cancelled');
+    m.ensureAppServing.mockRejectedValueOnce(boom);
+
+    await expect(prepare()).resolves.toBeUndefined();
+
+    expect(m.ensureAppServing).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
   });
 });

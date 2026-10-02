@@ -1,4 +1,62 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const m = vi.hoisted(() => ({
+  resolveBrowserRuntime: vi.fn(),
+  loadPreviousStepOutput: vi.fn(),
+  resolveTaskDirectAccess: vi.fn(),
+  isStepGuidanceEnabled: vi.fn(),
+  resolveSpecView: vi.fn(),
+  collectImplementationFiles: vi.fn(),
+  loadPlanImpactContext: vi.fn(),
+  ensureAppServing: vi.fn(),
+  recordLedgerEntry: vi.fn(),
+  resolveScreenshotRoot: vi.fn(),
+  buildScreenshotManifest: vi.fn(),
+}));
+
+vi.mock('./_browser-runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_browser-runtime.js')>()),
+  resolveBrowserRuntime: m.resolveBrowserRuntime,
+}));
+vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
+  loadPreviousStepOutput: m.loadPreviousStepOutput,
+}));
+vi.mock('../../../sandbox/_browser-access.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/_browser-access.js')>()),
+  resolveTaskDirectAccess: m.resolveTaskDirectAccess,
+}));
+vi.mock('../../guidance-context.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../guidance-context.js')>()),
+  isStepGuidanceEnabled: m.isStepGuidanceEnabled,
+}));
+vi.mock('./_spec-artifact.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_spec-artifact.js')>()),
+  resolveSpecView: m.resolveSpecView,
+}));
+vi.mock('./_impl-changes.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_impl-changes.js')>()),
+  collectImplementationFiles: m.collectImplementationFiles,
+}));
+vi.mock('./_plan-impact.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_plan-impact.js')>()),
+  loadPlanImpactContext: m.loadPlanImpactContext,
+}));
+vi.mock('./_app-runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_app-runtime.js')>()),
+  ensureAppServing: m.ensureAppServing,
+}));
+vi.mock('../../task-ledger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../task-ledger.js')>()),
+  recordLedgerEntry: m.recordLedgerEntry,
+}));
+vi.mock('./_screenshots.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_screenshots.js')>()),
+  resolveScreenshotRoot: m.resolveScreenshotRoot,
+  buildScreenshotManifest: m.buildScreenshotManifest,
+}));
+
+import { TaskCancelledError } from '../../step-definition.js';
 import {
   appHealthFailures,
   browserVerifyStep,
@@ -256,5 +314,143 @@ describe('appHealthFailures: an error page at HTTP 200', () => {
       URL,
     );
     expect(out.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+const rejection = (run: () => Promise<unknown>) =>
+  run().then(
+    () => null,
+    (e: unknown) => e,
+  );
+
+// detect's live browser bring-up is best-effort, but a Stop is no failure to degrade around: the step
+// runner tells it apart only by `instanceof TaskCancelledError`.
+describe('08a live browser bring-up in detect', () => {
+  const warn = vi.fn();
+  const ctx = {
+    taskId: 'task-1',
+    workspacePath: '/repos/u/r',
+    db: {},
+    emitProgress: vi.fn(async () => {}),
+    logger: { info: vi.fn(), warn },
+  } as never;
+  const detect = () => browserVerifyStep.detect!(ctx);
+
+  beforeEach(() => {
+    m.resolveBrowserRuntime.mockReset().mockResolvedValue({
+      browserTesting: true,
+      available: true,
+      skipReason: null,
+      ddevMode: true,
+      appRunnerMode: false,
+      appUrl: 'https://app.ddev.site',
+      appBooted: true,
+      envImageTag: null,
+      repoSubpath: 'u/r',
+      workspace: '/repos/u/r',
+    });
+    m.loadPreviousStepOutput.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.isStepGuidanceEnabled.mockReset().mockResolvedValue(false);
+    m.resolveSpecView
+      .mockReset()
+      .mockResolvedValue({ text: 'the spec', spec: 'the spec', condensed: false });
+    m.collectImplementationFiles
+      .mockReset()
+      .mockResolvedValue({ files: [], total: 0, truncated: false });
+    m.loadPlanImpactContext.mockReset().mockResolvedValue(null);
+    m.ensureAppServing.mockReset();
+    warn.mockClear();
+  });
+
+  it('lets a cancel from the app ensure out as that same cancel, whatever its message', async () => {
+    const cancel = new TaskCancelledError('stopped from the task page');
+    m.ensureAppServing.mockRejectedValueOnce(cancel);
+
+    const err = await rejection(detect);
+
+    expect(m.ensureAppServing, 'the bring-up never reached the app ensure').toHaveBeenCalledTimes(
+      1,
+    );
+    expect(err, 'the cancel was swallowed into liveBrowser.reason').not.toBeNull();
+    expect(err, 'the cancel was replaced by another error').toBe(cancel);
+  });
+
+  it('still turns an ordinary error that only says the task was cancelled into liveBrowser.reason', async () => {
+    const boom = new Error('task cancelled');
+    m.ensureAppServing.mockRejectedValueOnce(boom);
+
+    const detected = await detect();
+
+    expect(m.ensureAppServing).toHaveBeenCalledTimes(1);
+    expect(detected.liveBrowser).toEqual({
+      available: false,
+      appUrl: 'https://app.ddev.site',
+      probe: null,
+      reason: 'task cancelled',
+    });
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
+  });
+});
+
+// The health probe after a tester pass is best-effort, but a Stop is no probe failure: the step runner
+// tells it apart only by `instanceof TaskCancelledError`.
+describe('08a app-health probe after a tester pass', () => {
+  const warn = vi.fn();
+  const ctx = {
+    taskId: 'task-1',
+    taskStepId: 'step-1',
+    round: 0,
+    repoPath: '/repos/u/r',
+    workspacePath: '/repos/u/r',
+    db: {},
+    logger: { info: vi.fn(), warn },
+  } as never;
+  const TESTER_PASS =
+    '```json\n' +
+    JSON.stringify({ passed: true, failures: [], visual_verdict: 'SKIPPED', notes: '' }) +
+    '\n```';
+  const apply = () =>
+    browserVerifyStep.apply(ctx, {
+      detected: { available: true, mode: 'mcp', appUrl: 'https://app.ddev.site' },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      llmOutput: TESTER_PASS,
+    } as never);
+
+  beforeEach(() => {
+    m.ensureAppServing.mockReset();
+    m.recordLedgerEntry.mockReset().mockResolvedValue(undefined);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.buildScreenshotManifest
+      .mockReset()
+      .mockResolvedValue({ artifactPath: '/repos/u/r/.haive/screenshots.json', count: 1 });
+    warn.mockClear();
+  });
+
+  it('lets a cancel from the app ensure out as that same cancel, whatever its message', async () => {
+    const cancel = new TaskCancelledError('stopped from the task page');
+    m.ensureAppServing.mockRejectedValueOnce(cancel);
+
+    const err = await rejection(apply);
+
+    expect(
+      m.ensureAppServing,
+      'the health probe never reached the app ensure',
+    ).toHaveBeenCalledTimes(1);
+    expect(err, 'the cancel was swallowed as a health probe that could not run').not.toBeNull();
+    expect(err, 'the cancel was replaced by another error').toBe(cancel);
+  });
+
+  it('still leaves the tester verdict alone when an ordinary error only says the task was cancelled', async () => {
+    const boom = new Error('task cancelled');
+    m.ensureAppServing.mockRejectedValueOnce(boom);
+
+    const out = await apply();
+
+    expect(m.ensureAppServing).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ method: 'mcp', source: 'tester', passed: true, failures: [] });
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
   });
 });

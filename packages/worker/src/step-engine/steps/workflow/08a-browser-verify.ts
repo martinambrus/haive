@@ -3,7 +3,12 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
-import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+  type StepLoopPassRecord,
+} from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import {
@@ -489,6 +494,7 @@ async function bringUpLiveBrowser(
     }
     return { available: true, appUrl, mailpitUrl, probe };
   } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
     ctx.logger.warn({ err }, '08a live browser bring-up failed');
     return {
       available: false,
@@ -1255,6 +1261,7 @@ async function checkAppHealth(
     const logTail = runtime.mode === 'ddev' ? await ddevContainerFailureLogs(runtime.handle) : '';
     failures.push(...appHealthFailures(probe, logTail, url));
   } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
     // Best-effort, exactly like the screenshot manifest below it: a health probe must never be
     // able to fail a verification by failing itself. An unreachable app is already caught by
     // the tester, which cannot test what it cannot load.

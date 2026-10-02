@@ -230,6 +230,42 @@ describe('runRuntimeSmoke', () => {
       errorExcerpt: 'Runtime smoke could not run: host runtime unavailable',
     });
   });
+
+  // Without failOnDdevBootError a boot error is recorded as "not probed", but a Stop is no boot error:
+  // the step runner tells it apart only by `instanceof TaskCancelledError`.
+  describe('without failOnDdevBootError, a Stop during the boot', () => {
+    const smoke = () => runRuntimeSmoke(smokeCtx, { failOnDdevBootError: false });
+    const rejection = (run: () => Promise<unknown>) =>
+      run().then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    it('stays a cancel, whatever message it carries', async () => {
+      const cancel = new TaskCancelledError('stopped from the task page');
+      ensureAppServing.mockRejectedValueOnce(cancel);
+
+      const err = await rejection(smoke);
+
+      expect(ensureAppServing, 'the smoke never reached the runtime ensure').toHaveBeenCalledTimes(
+        1,
+      );
+      expect(err, 'the cancel was recorded as a smoke that could not run').not.toBeNull();
+      expect(err, 'the cancel was replaced by another error').toBe(cancel);
+    });
+
+    it('still records an ordinary error that only says the task was cancelled as not probed', async () => {
+      ensureAppServing.mockRejectedValueOnce(new Error('task cancelled'));
+
+      await expect(smoke()).resolves.toEqual({
+        ran: false,
+        passed: false,
+        httpStatus: null,
+        url: null,
+        errorExcerpt: expect.stringContaining('task cancelled'),
+      });
+    });
+  });
 });
 
 describe('phase5VerifyStep.fixLoopOnError', () => {

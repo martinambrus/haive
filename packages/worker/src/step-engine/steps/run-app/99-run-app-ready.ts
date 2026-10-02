@@ -2,7 +2,11 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  TaskCancelledError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { ensureAppServing } from '../workflow/_app-runtime.js';
 import { ddevMailpitUrls, runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -117,6 +121,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         );
       }
     } catch (err) {
+      if (err instanceof TaskCancelledError) throw err;
       ctx.logger.warn(
         { err, taskId: ctx.taskId },
         'run-app-ready: runtime/browser bring-up failed',
