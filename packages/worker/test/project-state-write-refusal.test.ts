@@ -52,7 +52,9 @@ const valid = (): Context => ({
   projectInfo: { name: 'acme', framework: 'drupal' },
   framework: 'drupal',
   acceptedAgentIds: ['security-auditor', 'code-reviewer'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert' }],
+  customAgentSpecs: [
+    { id: 'billing-expert', title: 'Billing expert', description: 'Knows the billing module' },
+  ],
   agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
   lspLanguages: ['php-extended'],
   rtkEnabled: true,
