@@ -78,6 +78,59 @@ describe('provider-neutral plan expansion context', () => {
   });
 });
 
+describe('an ancestor chain deeper than the budget', () => {
+  const DEPTH = 200;
+  const uuid = (n: number): string =>
+    `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
+
+  function deepPlan(): { nodes: PlanNodeSkeleton[]; focus: PlanNodeSkeleton } {
+    const nodes: PlanNodeSkeleton[] = [];
+    let path: string | null = null;
+    for (let i = 0; i <= DEPTH; i += 1) {
+      path = planNodePath(path, uuid(i));
+      nodes.push(
+        node(uuid(i), `Level ${i} ${'x'.repeat(512)}`, i === 0 ? null : uuid(i - 1), path),
+      );
+    }
+    const focus = nodes[DEPTH]!;
+    for (let i = 0; i < 250; i += 1) {
+      const id = uuid(DEPTH + 1 + i);
+      nodes.push(node(id, `Child ${i} ${'x'.repeat(512)}`, focus.id, planNodePath(focus.path, id)));
+    }
+    return { nodes, focus };
+  }
+
+  it('drops the most distant ancestors, counts them on one line, and stays inside the budget', () => {
+    const { nodes, focus } = deepPlan();
+    const text = buildPlanExpansionContext(nodes, focus, 48_000);
+    const lines = text.split('\n');
+    const shown = lines.filter((line) => line.startsWith('- Ancestor: '));
+    const omissions = lines.filter((line) =>
+      /^- \d+ more distant ancestor\(s\) not shown$/.test(line),
+    );
+
+    expect(text.length).toBeLessThanOrEqual(48_000);
+    expect(omissions).toEqual([`- ${DEPTH - shown.length} more distant ancestor(s) not shown`]);
+    expect(lines.indexOf(omissions[0]!) + 1).toBe(lines.indexOf(shown[0]!));
+    expect(shown.map((line) => /`node:([^`]+)`/.exec(line)![1])).toEqual(
+      Array.from({ length: shown.length }, (_, i) => uuid(DEPTH - shown.length + i)),
+    );
+    expect(lines.filter((line) => line.startsWith('- Target: '))).toEqual([
+      expect.stringContaining(`\`node:${focus.id}\``),
+    ]);
+    expect(shown.join('\n').length).toBeGreaterThan(48_000 * 0.95);
+  });
+
+  it('shows every ancestor while the exact path fits', () => {
+    const { nodes, focus } = deepPlan();
+    const text = buildPlanExpansionContext(nodes, focus);
+
+    expect(text.length).toBeLessThanOrEqual(PLAN_EXPANSION_CONTEXT_MAX_CHARS);
+    expect(text.split('\n').filter((line) => line.startsWith('- Ancestor: '))).toHaveLength(DEPTH);
+    expect(text).not.toContain('more distant ancestor');
+  });
+});
+
 describe('expansion context titles', () => {
   it('collapses every title it renders, not only the focused one', () => {
     const root = node('root', 'Product', null, '0001');

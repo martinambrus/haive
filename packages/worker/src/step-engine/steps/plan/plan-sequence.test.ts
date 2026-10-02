@@ -547,6 +547,38 @@ describe('a sibling run too wide for one reply', () => {
     expect(whole.length + childrenChars).toBeGreaterThan(SEQUENCE_CONTEXT_BUDGET);
   });
 
+  it('keeps the widest run inside the budget under a chain of ancestors deeper than it', () => {
+    const title = 'x'.repeat(512);
+    const chainId = (i: number) => `eeeeeeee-0000-4000-8000-${String(i).padStart(12, '0')}`;
+    const chain: PlanNodeSkeleton[] = [];
+    for (let i = 0; i <= 200; i += 1) {
+      const parentPath = i === 0 ? null : chain[i - 1]!.path;
+      chain.push({
+        ...node(chainId(i), i === 0 ? null : chainId(i - 1), title),
+        path: planNodePath(parentPath, chainId(i)),
+      });
+    }
+    const parent = chain[200]!;
+    const nodes = [
+      ...chain,
+      ...Array.from({ length: SEQUENCE_MAX_RUN_CHILDREN }, (_, i) => ({
+        ...node(uuid(i), parent.id, title),
+        path: planNodePath(parent.path, uuid(i)),
+      })),
+    ];
+    const prompt = buildSequencePrompt(
+      { parentId: parent.id, parentTitle: title, childCount: SEQUENCE_MAX_RUN_CHILDREN },
+      nodes,
+      computePlanSequence(nodes, []).sequenceById,
+    );
+    const { context, children } = variablePart(prompt);
+
+    expect(children).toHaveLength(SEQUENCE_MAX_RUN_CHILDREN);
+    expect(context.length + children.join('\n').length).toBeLessThanOrEqual(
+      SEQUENCE_CONTEXT_BUDGET,
+    );
+  });
+
   it('names at most five of them in the note and counts the rest', () => {
     const runs = Array.from({ length: 7 }, (_, i) => ({
       parentId: uuid(i),
