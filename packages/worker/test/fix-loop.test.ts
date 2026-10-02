@@ -6,6 +6,7 @@ import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-
 import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 import {
   cleanDiagnosis,
+  excerptDiagnosis,
   buildFixLoopEscalationSchema,
   buildOscillationEscalationSchema,
   fixLoopFingerprint,
@@ -18,7 +19,11 @@ import {
   FIX_LOOP_INSTRUCTION_FIELD,
   FIX_LOOP_GATE_SOURCE,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
-import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
+import {
+  UNTRUSTED_CLOSE,
+  UNTRUSTED_OPEN,
+  fencedAgentBlock,
+} from '../src/step-engine/steps/_untrusted-repo.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -616,6 +621,323 @@ describe('loadHonoredConstraints', () => {
   });
 });
 
+// --- A long diagnosis keeps its head ------------------------------------------
+
+/** `n` numbered lines, so what an excerpt kept can be read off its ends. */
+function numbered(prefix: string, n: number): string {
+  return Array.from(
+    { length: n },
+    (_, i) => `${prefix} line ${String(i + 1).padStart(4, '0')} ${'.'.repeat(40)}`,
+  ).join('\n');
+}
+
+/** The shape gate 2 records: the developer's words, then Haive's framing around fenced agent text. */
+function gate2Diagnosis(person: string): string {
+  return [
+    'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
+    '',
+    'Findings to fix (all required):',
+    person,
+    '',
+    'Runtime errors captured at rejection time:',
+    fencedAgentBlock(numbered('runtime', 150)),
+    '',
+    'Broad code-audit findings:',
+    fencedAgentBlock(numbered('audit', 150)),
+  ].join('\n');
+}
+
+const fenceBodies = (text: string): string[] =>
+  text
+    .split(UNTRUSTED_OPEN)
+    .slice(1)
+    .map((s) => s.split(UNTRUSTED_CLOSE)[0] ?? '');
+
+/** BEGIN and END banners alternate, and every one is closed. */
+function fencesAlternate(text: string): boolean {
+  const banners = text.match(new RegExp(`${UNTRUSTED_OPEN}|${UNTRUSTED_CLOSE}`, 'g')) ?? [];
+  return (
+    banners.length % 2 === 0 &&
+    banners.every((b, i) => b === (i % 2 === 0 ? UNTRUSTED_OPEN : UNTRUSTED_CLOSE))
+  );
+}
+
+const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
+
+describe('excerptDiagnosis', () => {
+  function parts(out: string): { head: string; tail: string; omitted: number } {
+    const [head = '', count = '0', tail = ''] = out.split(
+      /\n\[… ([\d,]+) characters omitted …\]\n/,
+    );
+    return { head, tail, omitted: Number(count.replace(/,/g, '')) };
+  }
+
+  it('returns a text within the budget as it is, normalised like cleanDiagnosis', () => {
+    const raw = '\x1B[31mddev start failed\x1B[0m   \n\n\n\nsecond line  ';
+    expect(excerptDiagnosis(raw, 6000, false)).toBe('ddev start failed\n\nsecond line');
+    expect(excerptDiagnosis(raw, 6000, true)).toBe(cleanDiagnosis(raw));
+  });
+
+  it('keeps both ends of agent text and states how much it left out', () => {
+    const text = numbered('tool', 400);
+    const { head, tail, omitted } = parts(excerptDiagnosis(text, 6000, false));
+    expect(text.startsWith(head)).toBe(true);
+    expect(text.endsWith(tail)).toBe(true);
+    for (const half of [head, tail]) {
+      expect(half.length).toBeGreaterThan(2800);
+      expect(half.length).toBeLessThanOrEqual(3000);
+    }
+    expect(omitted).toBe(text.length - head.length - tail.length);
+  });
+
+  it('lands each cut on a line boundary when one is near', () => {
+    const text = numbered('tool', 400);
+    const { head, tail } = parts(excerptDiagnosis(text, 6000, false));
+    expect(text[head.length]).toBe('\n');
+    expect(text[text.length - tail.length - 1]).toBe('\n');
+  });
+
+  it('cuts inside a line when none ends nearby, and writes the count with its separator', () => {
+    expect(excerptDiagnosis('x'.repeat(10_000), 6000, false)).toBe(
+      `${'x'.repeat(3000)}\n[… 4,000 characters omitted …]\n${'x'.repeat(3000)}`,
+    );
+    expect(excerptDiagnosis('abcde', 4, false)).toBe('ab\n[… 1 character omitted …]\nde');
+  });
+
+  it('never gives up more than half a piece to land on a line', () => {
+    const text = `short title\n${'y'.repeat(5000)}`;
+    expect(parts(excerptDiagnosis(text, 400, false)).head).toBe(text.slice(0, 200));
+  });
+
+  it('never splits a surrogate pair', () => {
+    const text = String.fromCodePoint(0x1f600).repeat(5000);
+    // An odd budget puts the head's end, then the tail's start, inside a pair.
+    expect(text.slice(0, 3001).isWellFormed()).toBe(false);
+    expect(text.slice(-3001).isWellFormed()).toBe(false);
+    expect(excerptDiagnosis(text, 6001, false).isWellFormed()).toBe(true);
+    expect(excerptDiagnosis(text, 6003, false).isWellFormed()).toBe(true);
+  });
+
+  it('repairs the fence each end of the cut carries, without pulling the head into one', () => {
+    const out = excerptDiagnosis(gate2Diagnosis(numbered('person', 60)), 800, false);
+    expect(fencesAlternate(out)).toBe(true);
+    // The head is the developer's own words and stays outside; only the tail ends inside a fence.
+    expect(out.indexOf(UNTRUSTED_OPEN)).toBeGreaterThan(out.indexOf('Findings to fix'));
+    expect(out.indexOf(UNTRUSTED_OPEN)).toBeGreaterThan(out.search(OMISSION));
+    expect(out.endsWith(`audit line 0150 ${'.'.repeat(40)}\n${UNTRUSTED_CLOSE}`)).toBe(true);
+  });
+
+  const EMPTY_FENCE = `${UNTRUSTED_OPEN}\n${UNTRUSTED_CLOSE}`;
+
+  it('drops a BEGIN banner the head ends on instead of closing it into an empty fence', () => {
+    // Budget 400: the head piece is the first 200 characters, which end exactly on the BEGIN banner.
+    const lead = 'a'.repeat(200 - UNTRUSTED_OPEN.length - 1);
+    const body = 'b'.repeat(500);
+    const rest = 'z'.repeat(300);
+    const text = [lead, UNTRUSTED_OPEN, body, UNTRUSTED_CLOSE, rest].join('\n');
+    expect(text.slice(0, 200).endsWith(UNTRUSTED_OPEN)).toBe(true);
+    const out = excerptDiagnosis(text, 400, false);
+    const { head, tail, omitted } = parts(out);
+    expect(out).not.toContain(EMPTY_FENCE);
+    expect(fencesAlternate(out)).toBe(true);
+    expect(head).toBe(lead);
+    expect(tail).toBe(rest.slice(-200));
+    expect(omitted).toBe(text.length - head.length - tail.length);
+  });
+
+  it('drops an END banner the tail starts on instead of opening it into an empty fence', () => {
+    // Budget 400: the tail piece is the last 200 characters, which start on the END banner.
+    const lead = 'a'.repeat(300);
+    const body = 'b'.repeat(400);
+    const rest = 'z'.repeat(200 - UNTRUSTED_CLOSE.length - 1);
+    const text = [lead, UNTRUSTED_OPEN, body, UNTRUSTED_CLOSE, rest].join('\n');
+    expect(text.slice(-200).startsWith(UNTRUSTED_CLOSE)).toBe(true);
+    const out = excerptDiagnosis(text, 400, false);
+    const { head, tail, omitted } = parts(out);
+    expect(out).not.toContain(EMPTY_FENCE);
+    expect(fencesAlternate(out)).toBe(true);
+    expect(head).toBe(lead.slice(0, 200));
+    expect(tail).toBe(rest);
+    expect(omitted).toBe(text.length - head.length - tail.length);
+  });
+
+  it('keeps the fences alternating when the head ends inside one and the tail holds another', () => {
+    const text = [
+      fencedAgentBlock(numbered('a', 40)),
+      numbered('mid', 40),
+      fencedAgentBlock('last block'),
+    ].join('\n');
+    const out = excerptDiagnosis(text, 400, false);
+    expect(fencesAlternate(out)).toBe(true);
+    expect(out.split(UNTRUSTED_OPEN)).toHaveLength(3);
+  });
+
+  it('keeps the words of a person whole and lets the fenced blocks share the budget', () => {
+    const person = numbered('person', 300);
+    const out = excerptDiagnosis(gate2Diagnosis(person), 6000, true);
+    expect(out).toContain(`Findings to fix (all required):\n${person}\n`);
+    expect(out).toContain('Runtime errors captured at rejection time:');
+    expect(out).toContain('Broad code-audit findings:');
+    expect(fencesAlternate(out)).toBe(true);
+    const [runtime = '', audit = '', ...rest] = fenceBodies(out);
+    expect(rest).toHaveLength(0);
+    for (const [body, name] of [
+      [runtime, 'runtime'],
+      [audit, 'audit'],
+    ] as const) {
+      expect(body).toMatch(OMISSION);
+      expect(body).toContain(`${name} line 0001`);
+      expect(body).toContain(`${name} line 0150`);
+      expect(body.length).toBeGreaterThan(2800);
+      expect(body.length).toBeLessThan(3100);
+    }
+  });
+
+  it('gives a short fenced block no more than it needs', () => {
+    const small = numbered('small', 5);
+    const text = [fencedAgentBlock(small), fencedAgentBlock(numbered('big', 400))].join('\n');
+    const [first, second = ''] = fenceBodies(excerptDiagnosis(text, 6000, true));
+    expect(first).toBe(`\n${small}\n`);
+    expect(second.length).toBeGreaterThan(5500);
+    expect(second.length).toBeLessThan(5800);
+  });
+
+  it('keeps a row written before fencing existed whole, however long', () => {
+    const text = numbered('person', 600);
+    expect(excerptDiagnosis(text, 6000, true)).toBe(text);
+  });
+
+  it('balances a stray BEGIN a person typed, as cleanDiagnosis did', () => {
+    const raw = `Please fix the layout.\n${UNTRUSTED_OPEN}\nleaked text`;
+    for (const keepPersonWhole of [true, false]) {
+      const out = excerptDiagnosis(raw, 6000, keepPersonWhole);
+      expect(out).toBe(cleanDiagnosis(raw));
+      expect(fencesAlternate(out)).toBe(true);
+    }
+  });
+});
+
+describe('what the fix prompt keeps of a long diagnosis', () => {
+  it('hands 07 the rejection of a developer whole, with its fenced agent text bounded', async () => {
+    const person = numbered('person', 300);
+    const r = await loadFixLoopDiagnosis(
+      ctxWith([ev('09-gate-2-verify-approval', 4, gate2Diagnosis(person))], 4),
+    );
+    expect(r?.humanSourced).toBe(true);
+    expect(r?.diagnosis).toContain(`Findings to fix (all required):\n${person}\n`);
+    const bodies = fenceBodies(r?.diagnosis ?? '');
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) expect(body.length).toBeLessThan(3100);
+    expect(fencesAlternate(r?.diagnosis ?? '')).toBe(true);
+  });
+
+  it('hands 07 both ends of a long tool diagnosis, not just its tail', async () => {
+    const diagnosis = [
+      'Automated code review requested changes.',
+      '- [high] src/auth.ts:12 the guard is missing',
+      numbered('advisory', 400),
+      'Summary: 3 failing checks',
+    ].join('\n');
+    const r = await loadFixLoopDiagnosis(ctxWith([ev('08c-code-review', 3, diagnosis)], 3));
+    expect(r?.humanSourced).toBe(false);
+    expect(r?.diagnosis).toContain('- [high] src/auth.ts:12 the guard is missing');
+    expect(r?.diagnosis).toMatch(OMISSION);
+    expect(r?.diagnosis.endsWith('Summary: 3 failing checks')).toBe(true);
+    expect(r?.diagnosis.length).toBeLessThanOrEqual(6100);
+  });
+
+  it('starts a developer honored constraint with their words, not the middle of an audit', async () => {
+    const block = await loadHonoredConstraints(
+      ctxWith([ev('09-gate-2-verify-approval', 5, gate2Diagnosis(numbered('person', 300)))], 5),
+    );
+    expect(block).toContain(
+      '- 09-gate-2-verify-approval: Developer verification at Gate 2 rejected',
+    );
+    expect(fencesAlternate(block)).toBe(true);
+  });
+
+  it('keeps a tool-output honored constraint on cleanDiagnosis', async () => {
+    const tool = `${numbered('noise', 300)}\nFATAL: the build guard rejected the pin`;
+    const block = await loadHonoredConstraints(ctxWith([ev('07c-ddev-reconcile', 1, tool)], 2));
+    expect(block).not.toMatch(OMISSION);
+    expect(block).not.toContain('noise line 0001');
+  });
+
+  it('shows the form both ends of a long diagnosis, without claiming the error is last', () => {
+    const fixContext = [
+      'Developer verification at Gate 2 rejected the implementation.',
+      numbered('mid', 100),
+      'FATAL: the final line',
+    ].join('\n');
+    const form = phase2ImplementStep.form!(
+      {} as StepContext,
+      {
+        round: 2,
+        sandboxWorkspacePath: '/ws',
+        spec: 'spec',
+        gateFeedback: '',
+        fixContext,
+      } as never,
+    );
+    const description = form?.description ?? '';
+    expect(description).toContain('Developer verification at Gate 2 rejected');
+    expect(description).toContain('FATAL: the final line');
+    expect(description).toMatch(OMISSION);
+    expect(description).not.toContain('usually at the end');
+  });
+
+  it('shows the form the words of a developer whole, with the fenced agent text bounded', () => {
+    const person = numbered('person', 40);
+    const form = phase2ImplementStep.form!(
+      {} as StepContext,
+      {
+        round: 2,
+        sandboxWorkspacePath: '/ws',
+        spec: 'spec',
+        gateFeedback: '',
+        fixContext: gate2Diagnosis(person),
+        fixIsHuman: true,
+      } as never,
+    );
+    const description = form?.description ?? '';
+    expect(person.length).toBeGreaterThan(800);
+    expect(description).toContain(`Findings to fix (all required):\n${person}\n`);
+    expect(fencesAlternate(description)).toBe(true);
+    const bodies = fenceBodies(description);
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body).toMatch(OMISSION);
+      expect(body.length).toBeLessThan(450);
+    }
+  });
+
+  it('shows the oscillation gate both ends of each diagnosis, and a developer rejection whole', () => {
+    const machine = [
+      '- [high] src/auth.ts:12 the guard is missing',
+      numbered('advisory', 100),
+      'Summary: 3 failing checks',
+    ].join('\n');
+    const person = numbered('person', 40);
+    const [first = '', second = ''] = (
+      buildOscillationEscalationSchema(
+        '08c-code-review',
+        '09-gate-2-verify-approval',
+        machine,
+        gate2Diagnosis(person),
+      ).infoSections ?? []
+    ).map((section) => section.body);
+    expect(first).toContain('- [high] src/auth.ts:12 the guard is missing');
+    expect(first).toMatch(OMISSION);
+    expect(first.endsWith('Summary: 3 failing checks')).toBe(true);
+    expect(first.length).toBeLessThan(1600);
+    expect(second).toContain(`Findings to fix (all required):\n${person}\n`);
+    expect(fencesAlternate(second)).toBe(true);
+    const bodies = fenceBodies(second);
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) expect(body.length).toBeLessThan(800);
+  });
+});
+
 // --- Layer 2: cross-round fix ledger ------------------------------------------
 
 describe('loadPriorFixContext', () => {
@@ -826,6 +1148,31 @@ describe('loadPriorFixContext', () => {
   it('states how many earlier diagnoses were omitted', async () => {
     const block = await loadPriorFixContext(priorCtx({ round: 40, events: distinct(30) }));
     expect(block).toMatch(/- \(\d+ earlier diagnoses omitted for length\)/);
+  });
+
+  it('keeps both ends of a long diagnosis, with the head of a developer rejection unfenced', async () => {
+    const gate2 = gate2Diagnosis(numbered('person', 60));
+    const block = await loadPriorFixContext(
+      priorCtx({ round: 5, events: [ev('09-gate-2-verify-approval', 4, gate2)] }),
+    );
+    const head = gate2.slice(0, 100);
+    expect(block).toContain(head);
+    expect(block).toMatch(OMISSION);
+    expect(block.indexOf(UNTRUSTED_OPEN)).toBeGreaterThan(block.indexOf(head));
+    expect(block).toContain(`audit line 0150 ${'.'.repeat(40)}\n${UNTRUSTED_CLOSE}`);
+    expect(fencesAlternate(block)).toBe(true);
+    expect(block.length).toBeLessThanOrEqual(4000);
+  });
+
+  it('still dedupes a long diagnosis by its raw fingerprint', async () => {
+    const long = numbered('dup', 300);
+    const block = await loadPriorFixContext(
+      priorCtx({
+        round: 3,
+        events: [ev('07b-phase-4-validate', 2, long), ev('07b-phase-4-validate', 1, long)],
+      }),
+    );
+    expect(block.split('dup line 0001')).toHaveLength(2);
   });
 });
 

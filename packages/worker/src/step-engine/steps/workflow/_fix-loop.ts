@@ -3,7 +3,12 @@ import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
-import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
+import {
+  UNTRUSTED_CLOSE,
+  UNTRUSTED_OPEN,
+  balanceFences,
+  fencedAgentBlock,
+} from '../_untrusted-repo.js';
 
 // Durable channel for the fix-loop diagnosis. When a downstream step finds a blocking
 // defect it returns `loop_back`; handleResult records the diagnosis here and re-enters
@@ -101,7 +106,8 @@ export function buildOscillationEscalationSchema(
   diagA: string,
   diagB: string,
 ): FormSchema {
-  const tail = (s: string): string => (s.length > 1500 ? s.slice(-1500) : s);
+  const excerpt = (step: string, diagnosis: string): string =>
+    excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(step));
   return {
     title: `Fix loop is oscillating between ${stepA} and ${stepB}`,
     description:
@@ -111,12 +117,12 @@ export function buildOscillationEscalationSchema(
     infoSections: [
       {
         title: `Constraint from ${stepA}`,
-        body: tail(diagA) || '(no diagnosis recorded)',
+        body: excerpt(stepA, diagA) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
       {
         title: `Conflicting change from ${stepB}`,
-        body: tail(diagB) || '(no diagnosis recorded)',
+        body: excerpt(stepB, diagB) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
     ],
@@ -177,12 +183,104 @@ export interface FixLoopRequest {
  *  text: that copy changes shape over time, so pattern-matching it is brittle and
  *  risks eating the real error. Instead the fix-mode prompt instructs the agent to
  *  locate the actual error within the output (the LLM is the dynamic extractor).
- *  Keeps the tail when very long — CLI errors put the summary last. */
+ *  Keeps the tail when very long — CLI errors put the summary last. Read only by the
+ *  actionability check and the tool-output sources of `loadHonoredConstraints`; the fix prompt,
+ *  its form and the prior-rounds block use `excerptDiagnosis`. */
 export function cleanDiagnosis(raw: string): string {
   // `cleanText` keeps the TAIL, and a gate-2 diagnosis carries fences inside it — so the
   // slice can drop a BEGIN and leave its contents loose. Repaired, never re-cut: the limit
   // is what the budget allows and the banner is 37 characters.
   return balanceFences(cleanText(raw, 6000));
+}
+
+/** What the fix prompt keeps of one diagnosis: this many characters of agent text. */
+const DIAGNOSIS_BUDGET = 6000;
+
+/** How far a cut may move to land on a line boundary, and never more than half its piece. */
+const EXCERPT_LINE_SNAP = 200;
+
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
+const snapWindow = (piece: number): number => Math.min(EXCERPT_LINE_SNAP, Math.floor(piece / 2));
+
+const omissionLine = (n: number): string =>
+  `[… ${n.toLocaleString('en-US')} character${n === 1 ? '' : 's'} omitted …]`;
+
+function headPiece(text: string, max: number): string {
+  let end = max;
+  if (isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
+  if (text[end] !== '\n') {
+    const lineEnd = text.lastIndexOf('\n', end - 1);
+    if (lineEnd !== -1 && lineEnd >= end - snapWindow(max)) end = lineEnd;
+  }
+  return text.slice(0, end);
+}
+
+function tailPiece(text: string, max: number): string {
+  let start = text.length - max;
+  if (isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1))) {
+    start += 1;
+  }
+  if (start > 0 && text[start - 1] !== '\n') {
+    const lineEnd = text.indexOf('\n', start);
+    if (lineEnd !== -1 && lineEnd < start + snapWindow(max)) start = lineEnd + 1;
+  }
+  return text.slice(start);
+}
+
+/** The first and last halves of `budget` around one line stating the count dropped. Each end is
+ *  repaired alone: one repair over both would fence a head that sits outside any fence. */
+function cutMiddle(text: string, budget: number, repair: (piece: string) => string): string {
+  const headLines = headPiece(text, Math.ceil(budget / 2)).split('\n');
+  const tailLines = tailPiece(text, Math.floor(budget / 2)).split('\n');
+  // A BEGIN ending the head, or an END starting the tail, would be repaired into an empty fence.
+  if (headLines.at(-1) === UNTRUSTED_OPEN) headLines.pop();
+  if (tailLines[0] === UNTRUSTED_CLOSE) tailLines.shift();
+  const head = headLines.join('\n');
+  const tail = tailLines.join('\n');
+  const omitted = omissionLine(text.length - head.length - tail.length);
+  return [repair(head), omitted, repair(tail)].join('\n');
+}
+
+/** Cut what sits between BEGIN and END banners so the blocks share `budget`, shortest first.
+ *  A BEGIN with no END after it is ordinary text. */
+function cutFencedBodies(text: string, budget: number): string {
+  const bodies: { start: number; end: number; share: number }[] = [];
+  let open = text.indexOf(UNTRUSTED_OPEN);
+  while (open !== -1) {
+    const start = open + UNTRUSTED_OPEN.length;
+    const end = text.indexOf(UNTRUSTED_CLOSE, start);
+    if (end === -1) break;
+    bodies.push({ start, end, share: 0 });
+    open = text.indexOf(UNTRUSTED_OPEN, end + UNTRUSTED_CLOSE.length);
+  }
+  let remaining = budget;
+  let left = bodies.length;
+  for (const body of [...bodies].sort((a, b) => a.end - a.start - (b.end - b.start))) {
+    body.share = Math.floor(remaining / left);
+    remaining -= Math.min(body.share, body.end - body.start);
+    left -= 1;
+  }
+  let out = '';
+  let copied = 0;
+  for (const { start, end, share } of bodies) {
+    const body = text.slice(start, end);
+    out += text.slice(copied, start);
+    out += body.length > share ? cutMiddle(body, share, (piece) => piece) : body;
+    copied = end;
+  }
+  return out + text.slice(copied);
+}
+
+/** `raw` normalised like `cleanText`, cut to `budget` characters of agent text. Within it the
+ *  text is returned whole; over it the first and last halves stay around one line stating what
+ *  was omitted, since a diagnosis puts its findings first and its summary last. With
+ *  `keepPersonWhole` only the contents of untrusted fences count against the budget — a
+ *  person's words sit outside them and are never cut. Fences are balanced either way. */
+export function excerptDiagnosis(raw: string, budget: number, keepPersonWhole: boolean): string {
+  const text = cleanText(raw, Infinity);
+  if (keepPersonWhole) return balanceFences(cutFencedBodies(text, budget));
+  return text.length > budget ? cutMiddle(text, budget, balanceFences) : balanceFences(text);
 }
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
@@ -393,9 +491,10 @@ export async function loadFixLoopDiagnosis(
   for (const r of rows) {
     const p = r.payload as { diagnosis?: string; round?: number; sourceStepId?: string } | null;
     if (p?.round === ctx.round) {
-      const d = cleanDiagnosis((p.diagnosis ?? '').trim());
+      const humanSourced = HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '');
+      const d = excerptDiagnosis((p.diagnosis ?? '').trim(), DIAGNOSIS_BUDGET, humanSourced);
       if (d.length === 0) return null;
-      return { diagnosis: d, humanSourced: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '') };
+      return { diagnosis: d, humanSourced };
     }
   }
   return null;
@@ -489,7 +588,13 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     if (p.round > ctx.round) continue;
     if (!HONORED_CONSTRAINT_SOURCES.has(p.sourceStepId)) continue;
     if (!latestPerSource.has(p.sourceStepId)) {
-      latestPerSource.set(p.sourceStepId, cleanDiagnosis((p.diagnosis ?? '').trim()));
+      const text = (p.diagnosis ?? '').trim();
+      latestPerSource.set(
+        p.sourceStepId,
+        HUMAN_REJECT_SOURCES.has(p.sourceStepId)
+          ? excerptDiagnosis(text, DIAGNOSIS_BUDGET, true)
+          : cleanDiagnosis(text),
+      );
     }
   }
   // Priority sources first; everything else keeps its newest-first order (sort is stable, so
@@ -520,8 +625,8 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
   const entries = ordered.map(([src, d]) => {
     const label = `- ${src}: `;
     const room = Math.max(HONORED_ENTRY_MIN, perEntry - label.length);
-    // Head-slice: a constraint states its rule up front (cleanDiagnosis already kept the tail
-    // of raw tool output, which is where those put their summary). Balanced afterwards: a
+    // Head-slice: a constraint states its rule up front (tool output arrives tail-kept by
+    // cleanDiagnosis, its summary last; a person's words arrive whole). Balanced afterwards: a
     // gate-2 constraint carries fences INSIDE it, and a head slice keeps the BEGIN and drops
     // the END — which would swallow the rest of the prompt, this block being unfenced by
     // design (a honored constraint is the developer's).
@@ -584,14 +689,11 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
       fingerprint?: string;
     } | null;
     if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
-    const diag = cleanDiagnosis((p.diagnosis ?? '').trim());
-    if (diag.length === 0) continue;
+    const short = excerptDiagnosis((p.diagnosis ?? '').trim(), PRIOR_FIX_ENTRY_LIMIT, false);
+    if (short.length === 0) continue;
     const fp = p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '');
     if (seenFp.has(fp)) continue;
     seenFp.add(fp);
-    const short = balanceFences(
-      diag.length > PRIOR_FIX_ENTRY_LIMIT ? diag.slice(-PRIOR_FIX_ENTRY_LIMIT) : diag,
-    );
     entries.push({
       line: `- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`,
       human: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? ''),

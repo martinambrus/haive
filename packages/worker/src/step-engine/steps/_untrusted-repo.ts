@@ -295,8 +295,8 @@ export const collapseToLine = (s: string | null | undefined): string =>
 
 /** Repair a fence a SLICE cut in half.
  *
- *  Several consumers keep only the tail of a long diagnosis (`cleanDiagnosis` at 6,000
- *  characters, the prior-round entry at 400), and a diagnosis can now arrive with a fence
+ *  Several consumers cut a long diagnosis (`cleanDiagnosis` keeps its last 6,000 characters,
+ *  `excerptDiagnosis` its first and last parts), and a diagnosis can now arrive with a fence
  *  already inside it — `formatRejectDiagnosis` contains the runtime output and the audit
  *  findings where it joins them to the developer's own words. A TAIL slice keeps the END
  *  banner and drops the BEGIN, which leaves the contained text loose in the trusted region
