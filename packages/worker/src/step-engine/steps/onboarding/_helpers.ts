@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { and, desc, eq, isNull } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   CLI_PROVIDER_CATALOG,
   getCliProviderMetadata,
@@ -70,7 +70,7 @@ export async function loadCliProviderMetadata(
  *  writing to a dir no CLI asked for; the write/verify steps (09_5/09_6) pass
  *  ['.claude/skills'] so they always have somewhere to target. */
 export async function resolveSkillTargetDirs(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   fallback: string[] = [],
 ): Promise<string[]> {

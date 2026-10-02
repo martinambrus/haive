@@ -716,7 +716,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       // A rollback that restored no snapshot (the upgrade only created files) records the context
       // the rows still live carry, which is the one the repository had before the upgrade.
       const recorded =
-        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx, detected.repositoryId));
+        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx.db, detected.repositoryId));
       if (recorded) {
         // A choice is what the plan of the upgrade being undone found, not what the value looks like:
         // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
