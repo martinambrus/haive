@@ -241,6 +241,11 @@ HEAD, before and after an uncommitted prompt edit, carry different stamps, and r
 restores the first. Rollback: stop writing it; the column is additive and nullable, and a later change
 drops it.
 
+**Status: shipped in #396** as `cli_invocations.haive_build` (docs/architecture/cli-adapters.md), checked
+on 40 fixture cases against an independent `write-tree`, `.git` unchanged in each; the live check on the
+dev stack follows the merge. **As built:** the stamp is taken once at worker boot and names the build
+that inserted the row; the dist of `@haive/shared` and `@haive/database` is not covered.
+
 ### P1. Bound the sequence agents' plan context (recommended first change)
 
 Two invariants, which both arms keep:

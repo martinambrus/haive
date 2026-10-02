@@ -236,7 +236,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### CLI adapters
 
 - [CLI adapter system](docs/architecture/cli-adapters.md): capabilities, claude-binary wrappers,
-  `model_identity`, `tool_usage`, `resolveDispatch`. `base-adapter.ts`, `tool-usage.ts`.
+  `model_identity`, `tool_usage`, `haive_build`, `resolveDispatch`. `base-adapter.ts`,
+  `tool-usage.ts`, `build-stamp.ts`.
 - [Steering](docs/architecture/steering.md): mid-run steers per CLI, the codex app-server and its
   fallback, the steer echo. `codex-app-server.ts`, `steer-echo.ts`.
 - [Skills per CLI](docs/architecture/skills-per-cli.md): what each CLI needs to list repo skills,
