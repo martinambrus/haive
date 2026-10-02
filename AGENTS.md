@@ -256,6 +256,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   ranking. `identifiers.ts`.
 - [Knowledge reserve in retrieval](docs/architecture/knowledge-reserve.md): KB slots on every
   page. `applyKnowledgeReserve`, `mergeHits`.
+- [Global knowledge base](docs/architecture/global-kb.md): instance-wide house standards, the title
+  list, facets and framework families. `_global-kb-digest.ts`, `extractProjectFacets`.
 
 ### Plans and attachments
 
