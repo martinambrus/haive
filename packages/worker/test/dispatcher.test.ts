@@ -526,9 +526,11 @@ describe('resolveDispatch', () => {
 });
 
 describe('global KB digest', () => {
-  const digest = [
-    { title: 'DDEV post-start hooks cannot inject settings', category: 'tech_pattern' },
-  ];
+  const digest = {
+    entries: [{ title: 'DDEV post-start hooks cannot inject settings', category: 'tech_pattern' }],
+    omitted: 0,
+    scanSaturated: false,
+  };
 
   it('advertises the titles when the rag server is wired', () => {
     const plan = resolveDispatch({
@@ -568,7 +570,7 @@ describe('global KB digest', () => {
     const plan = resolveDispatch({
       providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
       mcpSurface: surface(true),
-      globalKbDigest: [],
+      globalKbDigest: { entries: [], omitted: 0, scanSaturated: false },
       input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
       invokeOpts: {},
     });

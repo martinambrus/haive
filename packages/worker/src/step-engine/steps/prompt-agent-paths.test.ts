@@ -507,6 +507,19 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         { category: 'testing', title: 'Assert the invariant, not the rendering' },
       ]),
   },
+  {
+    // The omission line renders only when an omission is passed, which the entries above never do.
+    label: 'globalKbDigestPrompt (omission notice)',
+    exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
+    build: () =>
+      globalKbDigestPrompt(
+        [
+          { category: 'standards', title: 'Escape every interpolated label' },
+          { category: 'testing', title: 'Assert the invariant, not the rendering' },
+        ],
+        { omitted: 5, scanSaturated: false },
+      ),
+  },
   // CONCRETE fixtures, for the same reason as appReachPrompt: `mcpSurfacePrompt` branches on
   // `surface?.rag.enabled`, `chromeDevtools.enabled`, `ddevControl.enabled`, `opts.noBuiltInTools`
   // and `opts.noRepo`, and a permissive proxy is truthy for all of them — so it emitted only the
@@ -1789,6 +1802,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(digest).toContain('standards:');
     expect(digest).toContain('- Escape every interpolated label');
     expect(digest).toContain('testing:');
+    expect(digest).toContain('(5 more house standards for this stack not listed');
 
     // The selector's per-persona block, where an id and its description reach the model.
     const selector = await textFor('_agent-selector buildAgentSelectorPrompt');
