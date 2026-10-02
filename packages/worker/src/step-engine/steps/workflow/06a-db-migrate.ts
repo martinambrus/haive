@@ -4,13 +4,8 @@ import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import {
-  runnerHandleForTask,
-  ddevExec,
-  ddevSnapshot,
-  ddevMigratedSnapshotName,
-} from '../../../sandbox/ddev-runner.js';
-import { withDdevProgress } from './_app-runtime.js';
+import { ddevExec, ddevSnapshot, ddevMigratedSnapshotName } from '../../../sandbox/ddev-runner.js';
+import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
 // Runs the framework's DB migrations inside the task's DDEV environment, after
 // gate-1 (spec approved) and before implementation. Critical when an old DB was
@@ -191,7 +186,9 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
       throw new Error('06a-db-migrate: task has no repository');
     }
 
-    const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath);
+    // The runner can be gone since 01c; a handle rebuilt from the task id execs into nothing,
+    // which the Drupal probe below would read as an uninstalled site.
+    const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
 
     // Pre-flight (Drupal): `drush updatedb` requires a bootstrappable, installed
     // site with a wired DB connection. On a site that was never installed — no

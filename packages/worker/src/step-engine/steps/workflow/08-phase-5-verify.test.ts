@@ -1,13 +1,42 @@
+import { tmpdir } from 'node:os';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 
-const { ensureAppServing } = vi.hoisted(() => ({ ensureAppServing: vi.fn() }));
+const {
+  ensureAppServing,
+  withDdevProgress,
+  ddevExec,
+  runnerHandleForTask,
+  ensureDdevPlaywrightBrowsers,
+  killStalePlaywrightRuns,
+  recordLedgerEntry,
+} = vi.hoisted(() => ({
+  ensureAppServing: vi.fn(),
+  withDdevProgress: vi.fn(
+    <T>(_ctx: unknown, _label: string, run: (onLine: (l: string) => void) => T) => run(() => {}),
+  ),
+  ddevExec: vi.fn(),
+  runnerHandleForTask: vi.fn(),
+  ensureDdevPlaywrightBrowsers: vi.fn(),
+  killStalePlaywrightRuns: vi.fn(),
+  recordLedgerEntry: vi.fn(),
+}));
 
 // withDdevProgress must be a real passthrough, not a stub: runSlot wraps every check in it,
 // so a mock that omits it makes the module throw the moment a test reaches a slot.
-vi.mock('./_app-runtime.js', () => ({
-  ensureAppServing,
-  withDdevProgress: <T>(_ctx: unknown, _label: string, run: (onLine: (l: string) => void) => T) =>
-    run(() => {}),
+vi.mock('./_app-runtime.js', () => ({ ensureAppServing, withDdevProgress }));
+vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
+  runnerHandleForTask,
+  ddevExec,
+}));
+vi.mock('../../../sandbox/ddev-playwright.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/ddev-playwright.js')>()),
+  ensureDdevPlaywrightBrowsers,
+  killStalePlaywrightRuns,
+}));
+vi.mock('../../task-ledger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../task-ledger.js')>()),
+  recordLedgerEntry,
 }));
 
 import {
@@ -307,5 +336,253 @@ describe('buildVerifyDegradedNote', () => {
 
   it('is empty on the green path', () => {
     expect(buildVerifyDegradedNote(null, '')).toBe('');
+  });
+});
+
+// The slots (test, lint, typecheck) exec into the task's DDEV runner. A runner gone since 01c reads
+// as a failing check, which spends a fix round on "No such container", so the runtime is ensured first.
+describe('phase5VerifyStep.apply', () => {
+  const RAW = { container: 'haive-ddev-raw', projectDir: '/repos/u/r' };
+  const ENSURED = { container: 'haive-ddev-ensured', projectDir: '/repos/u/r' };
+  const DDEV_RUNTIME = { mode: 'ddev', url: 'http://r.ddev.site', handle: ENSURED };
+  const PHPUNIT = buildVerifyCommand({ runner: 'phpunit' }, true)!;
+  const PHPCS = buildVerifyCommand({ runner: 'phpcs' }, true)!;
+  const PHPSTAN = buildVerifyCommand({ runner: 'phpstan' }, true)!;
+  const HOST_CHECK = {
+    kind: 'host' as const,
+    label: 'node -e 0',
+    argv: [process.execPath, '-e', '0'],
+  };
+  const UNAVAILABLE = 'DDEV runner unavailable — skipped';
+  const applyCtx = {
+    taskId: 'task-1',
+    taskStepId: 'step-1',
+    round: 0,
+    db: {},
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const route = (msg: string) => (phase5VerifyStep.fixLoopOnError as (m: string) => boolean)(msg);
+
+  function runApply(detected: Record<string, unknown>, formValues: Record<string, boolean>) {
+    return phase5VerifyStep.apply(applyCtx, {
+      detected: {
+        workspacePath: '/repos/u/r',
+        ddevMode: true,
+        testFramework: null,
+        test: null,
+        lint: null,
+        typecheck: null,
+        ...detected,
+      },
+      formValues,
+      iteration: 0,
+      previousIterations: [],
+    } as never);
+  }
+
+  const slotExecs = () => ddevExec.mock.calls.filter((c) => !String(c[1]).includes('curl'));
+
+  beforeEach(() => {
+    runnerHandleForTask.mockReset().mockReturnValue(RAW);
+    ensureAppServing.mockReset().mockResolvedValue(DDEV_RUNTIME);
+    ddevExec
+      .mockReset()
+      .mockImplementation(async (_handle: unknown, args: string) =>
+        args.includes('curl')
+          ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+          : { exitCode: 0, output: 'ok' },
+      );
+    ensureDdevPlaywrightBrowsers
+      .mockReset()
+      .mockResolvedValue({ attempted: true, ok: true, note: null });
+    killStalePlaywrightRuns.mockReset().mockResolvedValue(0);
+    recordLedgerEntry.mockReset().mockResolvedValue(undefined);
+  });
+
+  describe('in DDEV mode, ensures the runtime before a check execs into it', () => {
+    it('ensures the runtime before the first slot exec', async () => {
+      await runApply({ test: PHPUNIT }, { runTest: true });
+
+      const ensureAt = ensureAppServing.mock.invocationCallOrder[0];
+      const firstExecAt = ddevExec.mock.invocationCallOrder[0];
+      expect(ensureAt, 'the runtime was never ensured').toBeDefined();
+      expect(firstExecAt, 'no check exec ran').toBeDefined();
+      expect(ensureAt!, 'the first exec ran before the runtime was ensured').toBeLessThan(
+        firstExecAt!,
+      );
+    });
+
+    it('runs every slot on the handle the ensure returned', async () => {
+      await runApply(
+        { test: PHPUNIT, lint: PHPCS, typecheck: PHPSTAN },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+
+      expect(slotExecs().map((c) => c[1])).toEqual([
+        'exec vendor/bin/phpunit',
+        'exec vendor/bin/phpcs',
+        'exec vendor/bin/phpstan analyse',
+      ]);
+      expect(slotExecs().map((c) => c[0].container)).toEqual([
+        ENSURED.container,
+        ENSURED.container,
+        ENSURED.container,
+      ]);
+    });
+
+    it('hands the ensured handle to both playwright helpers', async () => {
+      await runApply({ test: PHPUNIT, testFramework: 'playwright' }, { runTest: true });
+
+      expect(ensureDdevPlaywrightBrowsers).toHaveBeenCalledTimes(1);
+      expect(killStalePlaywrightRuns).toHaveBeenCalledTimes(1);
+      expect(ensureDdevPlaywrightBrowsers.mock.calls[0]![0].container).toBe(ENSURED.container);
+      expect(killStalePlaywrightRuns.mock.calls[0]![0].container).toBe(ENSURED.container);
+    });
+
+    it('provisions playwright only after the runtime is ensured', async () => {
+      await runApply({ test: PHPUNIT, testFramework: 'playwright' }, { runTest: true });
+
+      const ensureAt = ensureAppServing.mock.invocationCallOrder[0]!;
+      expect(
+        ensureDdevPlaywrightBrowsers.mock.invocationCallOrder[0]!,
+        'the browsers were provisioned before the runtime was ensured',
+      ).toBeGreaterThan(ensureAt);
+      expect(
+        killStalePlaywrightRuns.mock.invocationCallOrder[0]!,
+        'stale runs were swept before the runtime was ensured',
+      ).toBeGreaterThan(ensureAt);
+    });
+
+    it('fails the step at a boot failure, before any slot or helper execs', async () => {
+      ensureAppServing.mockRejectedValueOnce(new Error('DDEV cannot start: boot failed'));
+
+      await expect(
+        runApply({ test: PHPUNIT, testFramework: 'playwright' }, { runTest: true }),
+      ).rejects.toThrow(/boot failed/);
+
+      expect(ddevExec, 'a slot ran against a runtime that never booted').not.toHaveBeenCalled();
+      expect(ensureDdevPlaywrightBrowsers).not.toHaveBeenCalled();
+      expect(killStalePlaywrightRuns).not.toHaveBeenCalled();
+    });
+
+    it('reports a slot as unavailable when the ensured runtime is not a ddev runner', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
+
+      const out = await runApply({ test: PHPUNIT }, { runTest: true });
+
+      expect(out.test).toEqual({
+        ran: false,
+        passed: false,
+        command: PHPUNIT.label,
+        output: UNAVAILABLE,
+      });
+      expect(
+        ddevExec,
+        'a slot exec went through a handle no ensure returned',
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('what the earlier ensure leaves as it was', () => {
+    it('ensures the runtime exactly once per pass', async () => {
+      await runApply(
+        { test: PHPUNIT, lint: PHPCS, typecheck: PHPSTAN },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+
+      expect(ensureAppServing).toHaveBeenCalledTimes(1);
+    });
+
+    it('probes the smoke through the ensured runtime and reports its url', async () => {
+      const out = await runApply({ test: PHPUNIT }, { runTest: true });
+
+      const probe = ddevExec.mock.calls.find((c) => String(c[1]).includes('curl'));
+      expect(probe?.[0].container).toBe(ENSURED.container);
+      expect(out.runtimeSmoke).toMatchObject({
+        ran: true,
+        passed: true,
+        httpStatus: 200,
+        url: 'http://r.ddev.site',
+      });
+    });
+
+    it.each([
+      [
+        'an agent-authored .ddev defect',
+        'DDEV cannot start: DDEV config is not valid YAML: .ddev/config.yaml cannot be parsed — ' +
+          'Nested mappings are not allowed in compact mappings at line 14, column 13.',
+        true,
+      ],
+      [
+        'a host-level failure',
+        "ddev start failed: your DDEV version 'v1.25.3' doesn't meet the constraint '= v1.24.8'",
+        false,
+      ],
+    ])('routes %s the way the smoke wrapper did', async (_name, cause, routed) => {
+      ensureAppServing.mockRejectedValue(new Error(cause));
+
+      const err = await runApply({ test: PHPUNIT }, { runTest: true }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+
+      expect(err?.message).toBe(
+        `DDEV environment could not start for runtime verification: ${cause}`,
+      );
+      expect(route(err!.message)).toBe(routed);
+    });
+
+    it('keeps a non-DDEV boot failure advisory', async () => {
+      ensureAppServing.mockRejectedValue(new Error('host runtime unavailable'));
+
+      const out = await runApply({ ddevMode: false }, {});
+
+      expect(out.runtimeSmoke).toMatchObject({
+        ran: false,
+        passed: false,
+        errorExcerpt: 'Runtime smoke could not run: host runtime unavailable',
+      });
+    });
+
+    it('in non-DDEV mode ensures once, after the host checks, and execs into no ddev runner', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), test: HOST_CHECK },
+        { runTest: true },
+      );
+
+      expect(out.test).toMatchObject({ ran: true, passed: true });
+      expect(ensureAppServing).toHaveBeenCalledTimes(1);
+      expect(
+        withDdevProgress.mock.invocationCallOrder[0]!,
+        'the host check ran after the runtime was ensured',
+      ).toBeLessThan(ensureAppServing.mock.invocationCallOrder[0]!);
+      expect(ddevExec).not.toHaveBeenCalled();
+    });
+
+    it('reports a slot as unavailable when the ensure finds no runtime', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
+
+      const out = await runApply({ test: PHPUNIT }, { runTest: true });
+
+      expect(out.test).toEqual({
+        ran: false,
+        passed: false,
+        command: PHPUNIT.label,
+        output: UNAVAILABLE,
+      });
+      expect(ddevExec).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no playwright test framework', { testFramework: null }, { runTest: true }],
+      ['the test slot unticked', { testFramework: 'playwright' }, { runTest: false }],
+    ])('does not provision playwright with %s', async (_name, detected, formValues) => {
+      await runApply({ test: PHPUNIT, ...detected }, formValues);
+
+      expect(ensureDdevPlaywrightBrowsers).not.toHaveBeenCalled();
+      expect(killStalePlaywrightRuns).not.toHaveBeenCalled();
+    });
   });
 });
