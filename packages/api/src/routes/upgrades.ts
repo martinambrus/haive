@@ -677,9 +677,8 @@ export async function insertUpgradeTask<T>(
   });
 }
 
-/** Whether the upgrade a rollback would undo removed a file, a rules region or an RTK block. A
- *  removal leaves no live row, so an upgrade that only removed things has no other trace a rollback
- *  could be offered from. */
+/** Whether the upgrade a rollback would undo removed a file, a rules region or an RTK block, or
+ *  untracked a row: none leaves a live row, so nothing else could offer that rollback. */
 export async function lastUpgradeRemovedContent(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
@@ -693,8 +692,12 @@ export async function lastUpgradeRemovedContent(
       and(eq(schema.taskSteps.taskId, latest), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
     )
     .limit(1);
-  const output = applied?.output as { removedPaths?: unknown; rtkBlockStrips?: unknown } | null;
-  return [output?.removedPaths, output?.rtkBlockStrips].some(
+  const output = applied?.output as {
+    removedPaths?: unknown;
+    rtkBlockStrips?: unknown;
+    untrackedRowIds?: unknown;
+  } | null;
+  return [output?.removedPaths, output?.rtkBlockStrips, output?.untrackedRowIds].some(
     (l) => Array.isArray(l) && l.length > 0,
   );
 }

@@ -60,6 +60,7 @@ export interface ApplySelections {
   selectedReinstate: ReadonlySet<string>;
   selectedObsoleteRemovals: ReadonlySet<string>;
   selectedRtkHookStrips: ReadonlySet<string>;
+  selectedObsoleteUntracks?: ReadonlySet<string>;
   conflictChoices: ReadonlyMap<string, ConflictChoice>;
 }
 
@@ -67,10 +68,10 @@ export interface ApplySelections {
  *  the imperative loop so each branch can be unit-tested without a DB or
  *  file system. `adopt` asks nothing: the file already holds the render. The `untrack`
  *  branch — supersede the artifact row without touching disk — fires when
- *  the user skipped an obsolete custom-bundle row whose source bundle item
- *  is gone AND no other entry in the plan rewrites the same diskPath; that
- *  combination signals the file is now user-owned and should drop out of
- *  drift tracking on the next upgrade. */
+ *  the user picked an obsolete file to be kept, or skipped an obsolete custom-bundle
+ *  row whose source bundle item is gone AND no other entry in the plan rewrites the
+ *  same diskPath; that combination signals the file is now user-owned and should
+ *  drop out of drift tracking on the next upgrade. */
 export function classifyApplyAction(
   entry: UpgradePlanEntry,
   allEntries: ReadonlyArray<UpgradePlanEntry>,
@@ -100,6 +101,14 @@ export function classifyApplyAction(
   if (shouldDelete) return 'delete';
   if (read && entry.bucket === 'obsolete' && selections.selectedRtkHookStrips.has(entry.entryId)) {
     return 'strip';
+  }
+  if (
+    read &&
+    entry.bucket === 'obsolete' &&
+    entry.liveArtifactId !== null &&
+    selections.selectedObsoleteUntracks?.has(entry.entryId)
+  ) {
+    return 'untrack';
   }
 
   const shouldUntrackDangling =
@@ -541,6 +550,22 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         defaults: [],
       });
     }
+    const keepable = obsolete.filter(
+      (e) => !e.templateId.startsWith('custom.') && e.liveArtifactId !== null,
+    );
+    if (keepable.length > 0) {
+      fields.push({
+        type: 'multi-select',
+        id: 'selectedObsoleteUntracks',
+        label: 'Keep these files, and stop tracking them',
+        description:
+          `${keepable.length} artifact(s) Haive no longer manages. Select to leave the file where ` +
+          'it is and stop tracking it, so later upgrades do not offer it again. A file also ' +
+          'selected for deletion is deleted.',
+        options: toOptions(keepable),
+        defaults: [],
+      });
+    }
     if (strippable.length > 0) {
       fields.push({
         type: 'multi-select',
@@ -652,6 +677,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       toStringArray(values.selectedObsoleteRemovals),
     );
     const selectedRtkHookStrips = new Set<string>(toStringArray(values.selectedRtkHookStrips));
+    const selectedObsoleteUntracks = new Set<string>(
+      toStringArray(values.selectedObsoleteUntracks),
+    );
 
     const conflictChoices = new Map<string, ConflictChoice>();
     for (const e of plan.entries) {
@@ -684,6 +712,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const removedPaths: string[] = [];
 
     const rowsToSupersede: string[] = [];
+    // Rows whose file is left alone, which a rollback puts back.
+    const untrackedRowIds: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Superseded baselines of what a hook strip replaced.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -782,6 +812,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       selectedReinstate,
       selectedObsoleteRemovals,
       selectedRtkHookStrips,
+      selectedObsoleteUntracks,
       conflictChoices,
     };
 
@@ -982,6 +1013,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
       if (action === 'untrack' && entry.liveArtifactId) {
         rowsToSupersede.push(entry.liveArtifactId);
+        untrackedRowIds.push(entry.liveArtifactId);
         skippedCount += 1;
         continue;
       }
@@ -1483,6 +1515,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       ],
       removedPaths,
       rtkBlockStrips,
+      untrackedRowIds,
     };
   },
 };
