@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fencedAgentBlock } from '../_untrusted-repo.js';
 import {
   renderTaskHistoryDigest,
   type DigestStepInput,
@@ -151,5 +152,31 @@ describe('renderTaskHistoryDigest', () => {
     expect(d.tier).toBe('high');
     expect(d.text.length).toBeLessThanOrEqual(20000 + 60);
     expect(d.text).toContain('digest truncated');
+  });
+
+  const count = (s: string, needle: string): number => s.split(needle).length - 1;
+
+  it('closes a fence the per-diagnosis cap cuts in half', () => {
+    const diagnosis = `Findings to fix (all required):\n${fencedAgentBlock('a'.repeat(3000))}`;
+    const d = renderTaskHistoryDigest(
+      [],
+      [ev('fix_loop.requested', { round: 1, sourceStepId: '08d2-qa-fix', diagnosis })],
+    );
+    expect(d.tier).toBe('low');
+    expect(count(d.text, UNTRUSTED_OPEN)).toBe(1);
+    expect(count(d.text, UNTRUSTED_CLOSE)).toBe(1);
+  });
+
+  it('closes a fence the tier cap cuts in half, before its own truncation line', () => {
+    const events: DigestEventInput[] = [];
+    for (let i = 1; i <= 12; i += 1) {
+      const diagnosis = `Findings to fix (all required):\n${fencedAgentBlock('b'.repeat(2000))}`;
+      events.push(ev('fix_loop.requested', { round: i, sourceStepId: '08d2-qa-fix', diagnosis }));
+    }
+    const d = renderTaskHistoryDigest([], events);
+    expect(d.tier).toBe('high');
+    expect(d.text).toContain('digest truncated');
+    expect(count(d.text, UNTRUSTED_OPEN)).toBe(count(d.text, UNTRUSTED_CLOSE));
+    expect(d.text.lastIndexOf(UNTRUSTED_CLOSE)).toBeLessThan(d.text.indexOf('digest truncated'));
   });
 });
