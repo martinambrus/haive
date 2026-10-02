@@ -335,9 +335,6 @@ export async function ensureDdevWithProgress(
     if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
     throw err;
   });
-  // The signal reaches only the slot wait, so a Stop during a warm start or a boot past admission
-  // returns here unseen, and the caller would go on to migrate or import into a stopped task.
-  ctx.throwIfCancelled?.();
   // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug
   // so the Editor tab's php-debug listener receives DBGp. Idempotent + restart-
   // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
@@ -348,6 +345,9 @@ export async function ensureDdevWithProgress(
   // local DB client can connect. Idempotent; runs on EVERY bring-up (re-resolves the db
   // IP after a restart). Never fails the bring-up.
   await maybeExposeDdevDbPort(ctx, handle, repoSubpath);
+  // The signal reaches only the slot wait, so a Stop during the boot or the wiring above goes
+  // unseen, and the caller would go on to migrate or import into a stopped task.
+  ctx.throwIfCancelled?.();
   return handle;
 }
 

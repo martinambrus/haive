@@ -62,13 +62,12 @@ describe('ensureDdevWithProgress', () => {
 
   // A Stop after admission, or during a warm start, is not seen by the ensure itself, so the boot
   // returns as if nothing happened, and the caller's migration or import must not run on it.
-  it('rechecks for a Stop once the boot returns, and goes no further', async () => {
+  it('rechecks for a Stop that landed during the boot before it returns the handle', async () => {
     const cancel = new TaskCancelledError();
-    const findFirst = vi.fn(async () => null);
     const stopped = {
       taskId: 'task-1',
       signal: stop.signal,
-      db: { query: { tasks: { findFirst } } },
+      db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
       throwIfCancelled: () => {
         throw cancel;
       },
@@ -76,7 +75,31 @@ describe('ensureDdevWithProgress', () => {
     ensureDdevStarted.mockResolvedValueOnce(HANDLE);
 
     await expect(ensureDdevWithProgress(stopped, SUBPATH)).rejects.toBe(cancel);
-    expect(findFirst, 'the debug and database wiring ran after the Stop').not.toHaveBeenCalled();
+  });
+
+  it('rechecks for a Stop that landed during the debug and database wiring', async () => {
+    const cancel = new TaskCancelledError();
+    let stopPressed = false;
+    // Both wirings read the task row first, so the Stop lands while they run.
+    const findFirst = vi.fn(async () => {
+      stopPressed = true;
+      return null;
+    });
+    const stoppedMidWiring = {
+      taskId: 'task-1',
+      signal: stop.signal,
+      db: { query: { tasks: { findFirst } } },
+      throwIfCancelled: () => {
+        if (stopPressed) throw cancel;
+      },
+    } as never;
+    ensureDdevStarted.mockResolvedValueOnce(HANDLE);
+
+    await expect(ensureDdevWithProgress(stoppedMidWiring, SUBPATH)).rejects.toBe(cancel);
+    expect(
+      findFirst,
+      'the wiring never ran, so the Stop never landed during it',
+    ).toHaveBeenCalled();
   });
 
   it('hands the step abort signal to the ensure and returns the live handle', async () => {
