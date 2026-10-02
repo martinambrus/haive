@@ -1,15 +1,24 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 
-const { ensureDdevStarted } = vi.hoisted(() => ({ ensureDdevStarted: vi.fn() }));
+const { ensureDdevStarted, ddevPrimaryUrl } = vi.hoisted(() => ({
+  ensureDdevStarted: vi.fn(),
+  ddevPrimaryUrl: vi.fn(),
+}));
 
 vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
   ensureDdevStarted,
+  ddevPrimaryUrl,
 }));
 
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { TaskCancelledError } from '../../step-definition.js';
-import { ensureDdevWithProgress } from './_app-runtime.js';
+import { ensureAppServing, ensureDdevWithProgress } from './_app-runtime.js';
 
 const SUBPATH = 'haive-test-user/haive-test-repo';
 const HANDLE = { container: 'haive-ddev-ensured', projectDir: `/repos/${SUBPATH}` };
@@ -112,5 +121,50 @@ describe('ensureDdevWithProgress', () => {
       SUBPATH,
       expect.objectContaining({ signal: stop.signal }),
     );
+  });
+});
+
+describe('ensureAppServing', () => {
+  const USER = '00000000-0000-4000-8000-0000000000a1';
+  const REPO = '00000000-0000-4000-8000-0000000000b1';
+  const TASK = '00000000-0000-4000-8000-000000000001';
+
+  let root = '';
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // The DDEV branch looks up the project URL (up to 30 s) after its last bring-up check, so a Stop
+  // landing then must still keep the runtime from reaching the step.
+  it('rechecks for a Stop that landed while the DDEV URL resolved', async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'haive-serving-stop-'));
+    await mkdir(path.join(root, '.ddev'), { recursive: true });
+    await writeFile(path.join(root, '.ddev/config.yaml'), 'name: serving-stop\n');
+    const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
+
+    const cancel = new TaskCancelledError();
+    let stopPressed = false;
+    ensureDdevStarted.mockReset().mockResolvedValueOnce(HANDLE);
+    ddevPrimaryUrl.mockReset().mockImplementationOnce(async () => {
+      stopPressed = true;
+      return 'https://serving-stop.ddev.site';
+    });
+
+    const serving = ensureAppServing({
+      db: fake.db as unknown as Database,
+      taskId: TASK,
+      repoPath: root,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      throwIfCancelled: () => {
+        if (stopPressed) throw cancel;
+      },
+    });
+
+    await expect(serving).rejects.toBe(cancel);
+    expect(
+      ddevPrimaryUrl,
+      'the URL lookup never ran, so the Stop never landed during it',
+    ).toHaveBeenCalled();
   });
 });

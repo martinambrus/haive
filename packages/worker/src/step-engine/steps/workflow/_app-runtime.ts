@@ -183,7 +183,11 @@ export function admissionKindFromRuntimeMode(mode: RuntimeMode): 'ddev' | 'app' 
  *  does not restart the process). host: best-effort URL only (no relaunch). */
 export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRuntime> {
   try {
-    return await ensureAppServingInner(ctx);
+    const runtime = await ensureAppServingInner(ctx);
+    // Every branch still awaits after its own checks (the DDEV URL lookup takes up to 30 s), so the
+    // runtime reaches the caller only while the task is not stopped.
+    ctx.throwIfCancelled?.();
+    return runtime;
   } catch (err) {
     // A slot wait aborted because the task was stopped — normalise to TaskCancelledError so
     // the step runner's cancel path handles it (leave the step Stopped, don't re-fail or
