@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getTableColumns, getTableName, is } from 'drizzle-orm';
@@ -62,14 +62,20 @@ const valid = (): Context => ({
 });
 
 /** A repository, the database that would hold its render context, and the statements it is sent. */
-async function setup() {
+async function setup(seedColumn: Context | null = null) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-refusal-'));
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
   const fake = createFakeDb({ repositories, projectStateSync: sync });
-  fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   const column = keyOf(repositories, 'render_context');
+  fake.insert(repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    [column]: seedColumn,
+  });
 
   const statements: string[] = [];
   fake.hooks.beforeLock = () => void statements.push('lock');
@@ -122,18 +128,32 @@ describe('writeProjectStateRecord: a context the column schema refuses', () => {
       (): Context => ({ ...valid(), someUnknownKey: 'x' }),
       /someUnknownKey/,
     ],
-  ] as const)('rejects %s and writes no file and no row', async (_what, bad, reason) => {
-    const refused = bad();
-    expect(
-      renderContextColumnSchema.safeParse({ ...refused, rtkChoiceRecorded: true }).success,
-    ).toBe(false);
-    const s = await setup();
+  ] as const)(
+    'rejects %s, writes no file or sync row, and clears the column',
+    async (_what, bad, reason) => {
+      const refused = bad();
+      expect(
+        renderContextColumnSchema.safeParse({ ...refused, rtkChoiceRecorded: true }).success,
+      ).toBe(false);
+      const s = await setup({ ...valid(), rtkChoiceRecorded: true });
 
-    await expect(s.write(refused)).rejects.toThrow(reason);
+      await expect(s.write(refused)).rejects.toThrow(reason);
 
-    expect(existsSync(join(s.root, STATE_DIR))).toBe(false);
-    expect(await listFiles(s.root)).toEqual([]);
-    expect(s.statements).toEqual([]);
+      expect(existsSync(join(s.root, STATE_DIR))).toBe(false);
+      expect(await listFiles(s.root)).toEqual([]);
+      expect(s.statements).toEqual(['lock', 'update repositories']);
+      expect(s.renderContext()).toBeNull();
+      expect(s.syncRows()).toEqual([]);
+    },
+  );
+
+  // The column would otherwise read as newer than the rows the writer just wrote.
+  it('clears the column when a record file cannot be written', async () => {
+    const s = await setup({ ...valid(), rtkChoiceRecorded: true });
+    await symlink(tmpdir(), join(s.root, '.haive-data'));
+
+    await expect(s.write(valid())).rejects.toThrow();
+
     expect(s.renderContext()).toBeNull();
     expect(s.syncRows()).toEqual([]);
   });

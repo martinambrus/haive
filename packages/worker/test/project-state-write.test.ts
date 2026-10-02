@@ -458,14 +458,14 @@ describe('writeProjectStateRecord: failures', () => {
     },
   );
 
-  it('writes nothing to the database when the files cannot be written', async () => {
+  // The column it leaves is cleared, since it would otherwise read as newer than the writer's rows.
+  it('writes no sync row, and only clears the column, when the files cannot be written', async () => {
     const s = await setup();
     await writeFile(join(s.root, '.haive-data'), 'a file where the directory should be');
 
     await expect(s.write(context(), true)).rejects.toThrow();
 
-    expect(s.events.filter(isWrite)).toEqual([]);
-    expect(s.events).not.toContain('begin');
+    expect(s.events.filter(isWrite)).toEqual(['update repositories']);
     expect(s.columnOf(REPO)).toBeNull();
     expect(s.syncRows()).toEqual([]);
   });
@@ -512,7 +512,7 @@ describe('writeProjectStateRecord: what a rejection names', () => {
 
     expect(err).toBeInstanceOf(Error);
     expect(written(err)).toEqual([FORMAT]);
-    expect(s.events.filter(isWrite)).toEqual([]);
+    expect(s.events.filter(isWrite)).toEqual(['update repositories']);
   });
 
   it('names no file when none could be written', async () => {
