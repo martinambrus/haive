@@ -6,7 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,7 @@ import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { logger, type FormSchema } from '@haive/shared';
+import { logger, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   emptyProjectState,
@@ -23,6 +23,7 @@ import {
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { handleClone, handleScan } from '../src/repo/clone.js';
+import { handleRefresh } from '../src/repo/refresh.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 import {
   TaskCancelledError,
@@ -30,6 +31,10 @@ import {
   type StepDefinition,
 } from '../src/step-engine/step-definition.js';
 import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  BASELINE_AGENT_SPECS,
+  FRAMEWORK_AGENT_SPECS,
+} from '../src/step-engine/steps/onboarding/_agent-templates.js';
 import { detectionConfirmationStep } from '../src/step-engine/steps/onboarding/02-detection-confirmation.js';
 import { toolingInfrastructureStep } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
 import { agentDiscoveryStep } from '../src/step-engine/steps/onboarding/06_5-agent-discovery.js';
@@ -280,9 +285,12 @@ const LLM_AGENTS = {
 };
 
 /** An install's upgrade plan: its task and step rows, and 01's detect, or why it could not plan. */
-async function upgradePlan(
-  install: Install,
-): Promise<{ taskId: string; plan: UpgradePlanDetect | null; error: string | null }> {
+async function upgradePlan(install: Install): Promise<{
+  taskId: string;
+  stepId: string;
+  plan: UpgradePlanDetect | null;
+  error: string | null;
+}> {
   const [upgrade] = await install.db
     .insert(schema.tasks)
     .values({
@@ -305,10 +313,10 @@ async function upgradePlan(
     .returning({ id: schema.taskSteps.id });
   try {
     const plan = await upgradePlanStep.detect!(ctxFor(install, upgrade!.id, planRow!.id));
-    return { taskId: upgrade!.id, plan, error: null };
+    return { taskId: upgrade!.id, stepId: planRow!.id, plan, error: null };
   } catch (err) {
     if (!(err instanceof RenderContextUnresolvedError)) throw err;
-    return { taskId: upgrade!.id, plan: null, error: err.message };
+    return { taskId: upgrade!.id, stepId: planRow!.id, plan: null, error: err.message };
   }
 }
 
@@ -862,6 +870,142 @@ async function main(): Promise<void> {
     await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
     const dirty = git(a.repoPath, 'status', '--porcelain');
     check("a second 12 run leaves A's checkout clean", dirty === '', dirty.split('\n'));
+
+    // ---- a teammate's render change reaches a repository with claims (B1.4d) ----------------
+    // The seed clone pulls A's commit and commits a record that adds an agent A did not accept and
+    // drops one it did, and each install refreshes onto it. It goes last: the checkout moves, which
+    // the B1.7 check above must not see.
+    const acceptedA = (contextA?.acceptedAgentIds ?? []) as string[];
+    const newAgent =
+      [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()].find(
+        (spec) => !acceptedA.includes(spec.id),
+      )?.id ?? null;
+    check(
+      'a baseline or framework agent is left for a teammate to add',
+      newAgent !== null,
+      acceptedA,
+    );
+    const droppedAgent =
+      BASELINE_AGENT_SPECS.find(
+        (spec) => spec.id !== 'code-reviewer' && acceptedA.includes(spec.id),
+      )?.id ?? null;
+    check('and one A accepted is left for a teammate to drop', droppedAgent !== null, acceptedA);
+    const droppedRows = await a.db
+      .select({
+        diskPath: schema.onboardingArtifacts.diskPath,
+        writtenHash: schema.onboardingArtifacts.writtenHash,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, a.repositoryId),
+          eq(schema.onboardingArtifacts.templateId, `agent.${droppedAgent}`),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    check('and A claims at least one file of it', droppedRows.length > 0, droppedRows);
+    git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+    if (contextA !== null && newAgent !== null && droppedAgent !== null) {
+      const teamRecord = recordOf({
+        ...contextA,
+        acceptedAgentIds: [...acceptedA.filter((id) => id !== droppedAgent), newAgent],
+      });
+      for (const [rel, text] of renderProjectState(teamRecord)) {
+        const abs = path.join(seed, '.haive-data/state', rel);
+        await mkdir(path.dirname(abs), { recursive: true });
+        await writeFile(abs, text);
+      }
+      git(seed, 'add', '.haive-data/state');
+      git(seed, 'commit', '-q', '-m', 'a teammate swaps an agent');
+      git(seed, 'push', '-q', 'origin', 'HEAD:main');
+    }
+    const refresh = (install: Install, storage: string) =>
+      handleRefresh(
+        {
+          repositoryId: install.repositoryId,
+          userId: install.userId,
+          source: 'git_https',
+          remoteUrl,
+          branch: 'main',
+        },
+        install.db,
+        path.join(tmp!, storage),
+      );
+    const repoStateOf = (install: Install) =>
+      rowsOf<{
+        render_context: { acceptedAgentIds?: string[] } | null;
+        applicable_template_ids: string[] | null;
+        status_message: string | null;
+      }>(
+        install.db,
+        sql`select render_context, applicable_template_ids, status_message from repositories where id = ${install.repositoryId}`,
+      );
+
+    await refresh(a, 'storage-a');
+    const refreshedA = await repoStateOf(a);
+    const setA =
+      'rows' in refreshedA ? (refreshedA.rows[0]?.applicable_template_ids ?? null) : null;
+    const nextPlan = await upgradePlan(a);
+    if (nextPlan.plan !== null) {
+      await upgradePlanStep.apply(ctxFor(a, nextPlan.taskId, nextPlan.stepId), {
+        detected: nextPlan.plan,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      });
+    }
+    await a.db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, nextPlan.taskId));
+    const plannedA = await repoStateOf(a);
+    const setAfterPlanA =
+      'rows' in plannedA ? (plannedA.rows[0]?.applicable_template_ids ?? null) : null;
+    check(
+      "K5': after a refresh A's applicable set holds the agent a teammate's record added and not the one it dropped, and is the set A's own plan writes",
+      newAgent !== null &&
+        setA !== null &&
+        setA.includes(`agent.${newAgent}`) &&
+        !setA.includes(`agent.${droppedAgent}`) &&
+        isDeepStrictEqual(setA, setAfterPlanA),
+      { newAgent, droppedAgent, setA, setAfterPlanA, refreshed: refreshedA },
+    );
+    const droppedState = await Promise.all(
+      droppedRows.map(async (row) => ({
+        diskPath: row.diskPath,
+        bucket: nextPlan.plan?.entries.find((e) => e.diskPath === row.diskPath)?.bucket ?? null,
+        holdsRecordedBytes:
+          sha256Hex(
+            normalizeContent(
+              await readFile(path.join(a.repoPath, row.diskPath), 'utf8').catch(() => ''),
+            ),
+          ) === row.writtenHash,
+      })),
+    );
+    check(
+      "K5': A's plan offers each file of the agent the record dropped as obsolete, each still holding what its row records",
+      droppedState.length > 0 &&
+        droppedState.every((f) => f.bucket === 'obsolete' && f.holdsRecordedBytes),
+      droppedState,
+    );
+
+    // B holds no claim, so the sync leaves its set NULL while it takes the agent into its column. The
+    // upgrade task the plan above opened for B is cancelled first: a live one makes the sync defer.
+    await b.db
+      .update(schema.tasks)
+      .set({ status: 'cancelled' })
+      .where(eq(schema.tasks.id, upgradeB.taskId));
+    await refresh(b, 'storage-b');
+    const refreshedB = await repoStateOf(b);
+    const rowB = 'rows' in refreshedB ? refreshedB.rows[0] : undefined;
+    check(
+      "B, which holds no claim, keeps a NULL applicable set while its render_context takes the teammate's agent",
+      newAgent !== null &&
+        rowB !== undefined &&
+        rowB.applicable_template_ids === null &&
+        (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
+      refreshedB,
+    );
 
     for (const name of Object.keys(KNOWN_GAPS)) {
       if (gapsChecked.has(name)) continue;
