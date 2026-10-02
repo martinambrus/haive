@@ -519,7 +519,7 @@ describe('a sibling run too wide for one reply', () => {
       computePlanSequence(nodes, []).sequenceById,
     );
     expect(prompt).toContain(
-      `these 7 upserts leave room for at most ${PLAN_PATCH_MAX_OPS - 7} \`link\` and \`unlink\` ops`,
+      `these 7 upserts leave room for at most ${PLAN_PATCH_MAX_OPS - 7} \`link\` ops`,
     );
   });
 

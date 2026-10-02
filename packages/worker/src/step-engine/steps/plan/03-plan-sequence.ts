@@ -106,8 +106,8 @@ export interface PlanSequenceDetect {
    *  before the cap existed. */
   tooWide?: SequenceTarget[];
   /** Sibling runs whose own edges contradict each other, plus the plan-wide
-   *  dependency knots. An agent is asked to repair these, and a person is shown
-   *  them either way: neither can ever be satisfied. */
+   *  dependency knots. A person is shown them: neither can ever be satisfied, and
+   *  no agent is shown the edges to repair them. */
   contradictoryRuns: number;
   cycles: number;
   ancestorDeps: number;
@@ -481,12 +481,11 @@ export function buildSequencePrompt(
     '',
     'Never point a `depends_on` at the parent above or at any ancestor, and never close a loop',
     'between two nodes. Neither can ever be satisfied, so both strand every node on them',
-    'permanently. If you can see an existing link like that among these children, remove it with',
-    'an `unlink` op.',
+    'permanently.',
     '',
     `A reply holds at most ${PLAN_PATCH_MAX_OPS} ops, and one over that is rejected whole: these ` +
       `${children.length} upserts leave room for at most ${PLAN_PATCH_MAX_OPS - children.length} ` +
-      '`link` and `unlink` ops.',
+      '`link` ops.',
     '',
     PLAN_PATCH_CONTRACT,
   ].join('\n');
