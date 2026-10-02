@@ -185,10 +185,35 @@ describe('extractProjectFacets — confirmed overrides', () => {
   });
 
   it('gives a confirmed Drupal7 the drupal7 family, detected token first', () => {
-    expect(extractProjectFacets(detected, { framework: 'Drupal7' }).framework).toEqual([
-      'drupal7',
-      'drupal',
-    ]);
+    const f = extractProjectFacets(detected, { framework: 'Drupal7' });
+    expect(f.framework).toEqual(['drupal7', 'drupal']);
+    expect(f.frameworkMajor).toEqual(['7']);
+  });
+
+  it('derives major 7 when a misdetection is corrected to drupal7, dropping the wrong major', () => {
+    const f = extractProjectFacets(
+      { data: { project: { framework: 'drupal', frameworkMajor: '10', primaryLanguage: 'php' } } },
+      { framework: 'drupal7' },
+    );
+    expect(f.framework).toEqual(['drupal7', 'drupal']);
+    expect(f.frameworkMajor).toEqual(['7']);
+  });
+
+  it('derives major 7 for a corrected drupal7 when detection had no major', () => {
+    const f = extractProjectFacets(
+      { data: { project: { framework: 'general', primaryLanguage: 'php' } } },
+      { framework: 'drupal7' },
+    );
+    expect(f.frameworkMajor).toEqual(['7']);
+  });
+
+  it('keeps the detected major when the confirmation differs only in case', () => {
+    const f = extractProjectFacets(
+      { data: { project: { framework: 'laravel', frameworkMajor: '11', primaryLanguage: 'php' } } },
+      { framework: 'Laravel' },
+    );
+    expect(f.framework).toEqual(['laravel']);
+    expect(f.frameworkMajor).toEqual(['11']);
   });
 
   it('gives a confirmed laravel no family', () => {

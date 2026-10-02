@@ -27,7 +27,9 @@ then filters out.
 `normalizeFacets` (`schema.ts`) canonicalise what is STORED, and the schema ensure's backfill
 rewrites stored rows through the same rule, so an alias there changes every existing entry's
 scope. A framework FAMILY widens only what a project MATCHES: `PROJECT_FRAMEWORK_FAMILIES`
-(`facets.ts`) adds `drupal` beside a project's `drupal7`. `01-env-detect` reports a Drupal 7 site
+(`facets.ts`) adds `drupal` beside a project's `drupal7`, and the major `7` the token implies, so a
+project a person corrected to Drupal 7 at the confirmation form matches a `drupal` + `7` entry too
+(the detected major is kept only while the confirmed framework is the detected one). `01-env-detect` reports a Drupal 7 site
 as `drupal7` (and 8+ as `drupal`), so before the family a D7 project matched no `framework: drupal`
 entry at all — MEASURED, the user's own "no inline svgs" rule reached none of the 8 Drupal repos on
 the dev install, all of them D7. The family never joins the alias table, which would rewrite stored

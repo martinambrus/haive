@@ -93,8 +93,11 @@ export function resolveStackVersions(
 }
 
 // Widens matching only; must never move into FACET_VALUE_ALIASES, which rewrites stored facets.
-const PROJECT_FRAMEWORK_FAMILIES: Readonly<Record<string, readonly string[]>> = {
-  drupal7: ['drupal'],
+// A versioned token implies its major, as 01-env-detect's extractFrameworkMajor derives it.
+const PROJECT_FRAMEWORK_FAMILIES: Readonly<
+  Record<string, { readonly family: readonly string[]; readonly major?: string }>
+> = {
+  drupal7: { family: ['drupal'], major: '7' },
 };
 
 /** Extract the project facet set from a persisted 01-env-detect value, tolerating
@@ -124,7 +127,12 @@ export function extractProjectFacets(
   // a corrected `laravel` with a major read from `drupal/core` would anchor the KB
   // to a version of something this project is not.
   const frameworkMajor = data.project?.frameworkMajor;
-  if (framework === detectedFramework && typeof frameworkMajor === 'string' && frameworkMajor) {
+  const sameFramework =
+    typeof framework === 'string' &&
+    typeof detectedFramework === 'string' &&
+    canonicalizeFacetValue('framework', framework) ===
+      canonicalizeFacetValue('framework', detectedFramework);
+  if (sameFramework && typeof frameworkMajor === 'string' && frameworkMajor) {
     facets.frameworkMajor.push(frameworkMajor);
   }
 
@@ -160,14 +168,11 @@ export function extractProjectFacets(
     ];
   }
 
-  facets.framework = [
-    ...new Set([
-      ...facets.framework,
-      ...Object.entries(PROJECT_FRAMEWORK_FAMILIES).flatMap(([token, family]) =>
-        facets.framework.includes(token) ? family : [],
-      ),
-    ]),
-  ];
+  for (const [token, { family, major }] of Object.entries(PROJECT_FRAMEWORK_FAMILIES)) {
+    if (!facets.framework.includes(token)) continue;
+    facets.framework = [...new Set([...facets.framework, ...family])];
+    if (major) facets.frameworkMajor = [...new Set([...facets.frameworkMajor, major])];
+  }
 
   return facets;
 }

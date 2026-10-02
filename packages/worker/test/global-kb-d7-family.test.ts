@@ -27,6 +27,21 @@ describe('a Drupal 7 project against global KB entry facets', () => {
   });
 });
 
+describe('a project the user corrected to Drupal 7', () => {
+  it('matches an entry scoped to drupal major 7', () => {
+    const corrected = extractProjectFacets(
+      { data: { project: { framework: 'drupal', frameworkMajor: '10', primaryLanguage: 'php' } } },
+      { framework: 'Drupal7' },
+    );
+    expect(facetsMatchProject({ framework: ['drupal'], frameworkMajor: ['7'] }, corrected)).toBe(
+      true,
+    );
+    expect(facetsMatchProject({ framework: ['drupal'], frameworkMajor: ['10'] }, corrected)).toBe(
+      false,
+    );
+  });
+});
+
 describe('a Drupal 10 project against global KB entry facets', () => {
   it('rejects an entry scoped to drupal7', () => {
     expect(facetsMatchProject({ framework: ['drupal7'] }, d10)).toBe(false);
