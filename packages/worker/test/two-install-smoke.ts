@@ -38,6 +38,7 @@ import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-
 import {
   RenderContextUnresolvedError,
   upgradePlanStep,
+  type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
@@ -52,7 +53,6 @@ const urlA = process.env.DATABASE_URL;
  *  passes fails the run, so the PR that closes one removes it here. */
 const KNOWN_GAPS: Record<string, string> = {
   'B holds a live claim for every path A claims': 'B1.6',
-  "B's upgrade plan resolves its render context": 'B1.4',
   "B's upgrade plan reads every claimed path as unchanged": 'B1.6',
   "a second 12 run leaves A's checkout clean": 'B1.7',
 };
@@ -188,6 +188,8 @@ async function runStep<D, O>(
   taskId: string,
   taskStepId: string,
   overrides: Record<string, unknown> = {},
+  /** What a step's LLM pass answered, for the steps that read one (06_5-agent-discovery). */
+  llmOutput?: unknown,
 ): Promise<{ detected: D; output: O }> {
   const ctx = ctxFor(install, taskId, taskStepId);
   const detected = await step.detect!(ctx);
@@ -195,13 +197,14 @@ async function runStep<D, O>(
     .update(schema.taskSteps)
     .set({ detectOutput: detected, status: 'running' })
     .where(eq(schema.taskSteps.id, taskStepId));
-  const form = step.form ? await step.form(ctx, detected) : null;
+  const form = step.form ? await step.form(ctx, detected, llmOutput) : null;
   const formValues = { ...defaultValues(form), ...overrides };
   const output = await step.apply(ctx, {
     detected,
     formValues,
     iteration: 0,
     previousIterations: [],
+    llmOutput,
   });
   await install.db
     .update(schema.taskSteps)
@@ -254,6 +257,101 @@ const recordOf = (context: Record<string, unknown>) => ({
 });
 
 const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
+
+/** The one custom agent A's agent discovery accepts, as the model's own answer proposes it. */
+const LLM_CUSTOM_ID = 'billing-expert';
+const LLM_AGENTS = {
+  predefined: {},
+  custom: [
+    {
+      id: LLM_CUSTOM_ID,
+      label: 'Billing expert',
+      hint: 'Knows the billing module',
+      recommended: true,
+      body: {
+        title: 'Billing expert',
+        description: 'Knows the billing module',
+        color: 'blue',
+        field: 'billing',
+        tools: ['Read', 'Grep'],
+      },
+    },
+  ],
+};
+
+/** An install's upgrade plan: its task and step rows, and 01's detect, or why it could not plan. */
+async function upgradePlan(
+  install: Install,
+): Promise<{ taskId: string; plan: UpgradePlanDetect | null; error: string | null }> {
+  const [upgrade] = await install.db
+    .insert(schema.tasks)
+    .values({
+      userId: install.userId,
+      repositoryId: install.repositoryId,
+      type: 'onboarding_upgrade',
+      title: 'two-install-smoke',
+      status: 'running',
+    })
+    .returning({ id: schema.tasks.id });
+  const [planRow] = await install.db
+    .insert(schema.taskSteps)
+    .values({
+      taskId: upgrade!.id,
+      stepId: '01-upgrade-plan',
+      stepIndex: 1,
+      title: 'Plan upgrade',
+      status: 'running',
+    })
+    .returning({ id: schema.taskSteps.id });
+  try {
+    const plan = await upgradePlanStep.detect!(ctxFor(install, upgrade!.id, planRow!.id));
+    return { taskId: upgrade!.id, plan, error: null };
+  } catch (err) {
+    if (!(err instanceof RenderContextUnresolvedError)) throw err;
+    return { taskId: upgrade!.id, plan: null, error: err.message };
+  }
+}
+
+const CONTEXT_KEYS = [
+  'projectInfo',
+  'framework',
+  'acceptedAgentIds',
+  'customAgentSpecs',
+  'agentTargets',
+  'lspLanguages',
+  'rtkEnabled',
+  'enabledCliProviders',
+] as const;
+
+const sortedBy = (value: unknown, key: string): unknown =>
+  Array.isArray(value)
+    ? [...(value as Record<string, string>[])].sort((x, y) =>
+        x[key]! < y[key]! ? -1 : x[key]! > y[key]! ? 1 : 0,
+      )
+    : value;
+
+/** The keys of `got` that differ from `want`, each set compared sorted since every renderer reads it
+ *  as one, and `rtkEnabled` against the install's live switch, which is what a clone follows. The
+ *  key list is the comparison's first line: a context carrying another key, or missing one, differs. */
+function contextDiffers(
+  want: Record<string, unknown>,
+  got: Record<string, unknown>,
+  liveRtk: unknown,
+): string[] {
+  const keys = Object.keys(got).sort();
+  if (!isDeepStrictEqual(keys, [...CONTEXT_KEYS].sort())) return [`keys: ${keys.join(',')}`];
+  const normalize: Record<string, (v: unknown) => unknown> = {
+    acceptedAgentIds: sorted,
+    lspLanguages: sorted,
+    agentTargets: (v) => sortedBy(v, 'dir'),
+    enabledCliProviders: (v) => sortedBy(v, 'name'),
+  };
+  return CONTEXT_KEYS.filter((key) => {
+    if (key === 'rtkEnabled') return got[key] !== liveRtk;
+    const norm = normalize[key] ?? ((v: unknown) => v);
+    return !isDeepStrictEqual(asJson(norm(got[key])), asJson(norm(want[key])));
+  });
+}
 
 /** The rows of a query, or why it failed: a column or table that is missing must fail the one check
  *  that reads it, not end the run. */
@@ -387,7 +485,7 @@ async function main(): Promise<void> {
       ollamaUrl: 'http://only-on-a:11434',
       rtkEnabled: false,
     });
-    await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep));
+    await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep), {}, LLM_AGENTS);
     const generated = await runStep(a, generateFilesStep, taskA, rowOf(generateFilesStep));
     const rendered = generated.detected;
     check(
@@ -426,6 +524,14 @@ async function main(): Promise<void> {
       )
       .limit(1);
     const contextA = (snapshotRow?.snapshot ?? null) as Record<string, unknown> | null;
+    check(
+      "A's context holds the custom agent its LLM pass proposed",
+      contextA !== null &&
+        Array.isArray(contextA.customAgentSpecs) &&
+        (contextA.customAgentSpecs as { id?: unknown }[]).some((s) => s.id === LLM_CUSTOM_ID) &&
+        (contextA.acceptedAgentIds as string[]).includes(LLM_CUSTOM_ID),
+      contextA?.customAgentSpecs,
+    );
     const wantRecord = contextA === null ? null : recordOf(contextA);
     const wantFiles = wantRecord === null ? null : renderProjectState(wantRecord);
     const recordOnDisk = (rel: string) =>
@@ -694,45 +800,28 @@ async function main(): Promise<void> {
       { a: pathsA.length, b: pathsB.length },
     );
 
-    const [upgrade] = await b.db
-      .insert(schema.tasks)
-      .values({
-        userId: b.userId,
-        repositoryId: b.repositoryId,
-        type: 'onboarding_upgrade',
-        title: 'two-install-smoke',
-        status: 'running',
-      })
-      .returning({ id: schema.tasks.id });
-    const [planRow] = await b.db
-      .insert(schema.taskSteps)
-      .values({
-        taskId: upgrade!.id,
-        stepId: '01-upgrade-plan',
-        stepIndex: 1,
-        title: 'Plan upgrade',
-        status: 'running',
-      })
-      .returning({ id: schema.taskSteps.id });
-    let entries: { diskPath: string; bucket: string }[] | null = null;
-    let contextB: Record<string, unknown> | null = null;
-    let planError: string | null = null;
-    try {
-      const planB = await upgradePlanStep.detect!(ctxFor(b, upgrade!.id, planRow!.id));
-      entries = planB.entries;
-      contextB = planB.renderCtxSnapshot;
-    } catch (err) {
-      if (!(err instanceof RenderContextUnresolvedError)) throw err;
-      planError = err.message;
-    }
+    const upgradeB = await upgradePlan(b);
+    const entries = upgradeB.plan?.entries ?? null;
+    const contextB = upgradeB.plan?.renderCtxSnapshot ?? null;
+    const planError = upgradeB.error;
+    const differing =
+      contextB !== null && contextA !== null
+        ? contextDiffers(contextA, contextB, repoB?.rtkEnabled)
+        : null;
     check(
       "B's upgrade plan resolves its render context",
-      contextB !== null &&
-        contextB.framework === rendered.framework &&
-        // Both are sets to every renderer, so the record may store them sorted.
-        isDeepStrictEqual(sorted(contextB.acceptedAgentIds), sorted(rendered.acceptedAgentIds)) &&
-        isDeepStrictEqual(sorted(contextB.lspLanguages), sorted(rendered.lspLanguages)),
-      planError ?? contextB,
+      contextB !== null && contextA !== null && differing!.length === 0,
+      planError ?? { differing, contextA, contextB },
+    );
+    const claimed = new Set(pathsA);
+    const conflicts = entries
+      ?.filter((e) => claimed.has(e.diskPath) && e.bucket === 'conflict')
+      .map((e) => e.diskPath);
+    const unplanned = entries ? pathsA.filter((p) => !entries.some((e) => e.diskPath === p)) : null;
+    check(
+      "no path A claims is a conflict in B's plan",
+      entries !== null && unplanned!.length === 0 && conflicts!.length === 0,
+      planError ?? { conflicts, unplanned },
     );
     const notUnchanged = entries
       ?.filter((e) => e.bucket !== 'unchanged')
@@ -741,6 +830,33 @@ async function main(): Promise<void> {
       "B's upgrade plan reads every claimed path as unchanged",
       entries !== null && entries.length > 0 && notUnchanged!.length === 0,
       notUnchanged ?? planError,
+    );
+
+    // A reads its own record again, and its own plan must still call every path it claims unchanged.
+    await handleScan(
+      {
+        repositoryId: a.repositoryId,
+        userId: a.userId,
+        source: 'git_https',
+        localPath: a.repoPath,
+      },
+      a.db,
+    );
+    const upgradeA = await upgradePlan(a);
+    await a.db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, upgradeA.taskId));
+    const changedOnA = upgradeA.plan?.entries
+      .filter((e) => claimed.has(e.diskPath) && e.bucket !== 'unchanged')
+      .map((e) => `${e.diskPath}: ${e.bucket}`);
+    const unplannedOnA = upgradeA.plan
+      ? pathsA.filter((p) => !upgradeA.plan!.entries.some((e) => e.diskPath === p))
+      : null;
+    check(
+      "after a rescan of A, A's own plan reads every path it claims as unchanged",
+      upgradeA.plan !== null && unplannedOnA!.length === 0 && changedOnA!.length === 0,
+      upgradeA.error ?? { changedOnA, unplannedOnA },
     );
 
     await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
