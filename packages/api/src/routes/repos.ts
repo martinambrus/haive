@@ -86,6 +86,7 @@ import {
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
+  checkOnboardingMarkers,
   LIVE_TASK_STATUSES,
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
@@ -879,13 +880,6 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
   return c.json({ repository: rest });
 });
 
-const ONBOARDING_MARKERS = [
-  KB_DIR,
-  '.claude/agents',
-  '.claude/skills',
-  '.claude/workflow-config.json',
-];
-
 /**
  * Top-level entries Haive itself puts in a repository, so a tree holding only
  * these has no source to mine.
@@ -936,29 +930,6 @@ export async function hasOnboardableSource(root: string): Promise<boolean> {
   if (entries === null) return true;
   const scaffold = getScaffoldEntries();
   return entries.some((e) => !scaffold.has(e.name));
-}
-
-/** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
- *  one of them is written by 07-generate-files, the 8th of 27 onboarding steps, so a
- *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
- *  combines this with the repo's onboarding task history. Marker checks run in parallel;
- *  results keep marker order so the detail endpoint's present/missing lists stay stable. */
-export async function checkOnboardingMarkers(
-  root: string,
-): Promise<{ present: string[]; missing: string[] }> {
-  const results = await Promise.all(
-    ONBOARDING_MARKERS.map(async (rel) => {
-      // `pathExists` is `stat`-based: it followed a link and read a dangling one as absent, so a
-      // linked `.claude/agents` counted as installed while the definitions it named lived outside
-      // the tree — and these counts are what the onboarded verdict and `mark-onboarded` rest on.
-      const info = await lstatNoFollow(root, rel);
-      return [rel, info !== null && (info.kind === 'file' || info.kind === 'directory')] as const;
-    }),
-  );
-  return {
-    present: results.filter(([, ok]) => ok).map(([rel]) => rel),
-    missing: results.filter(([, ok]) => !ok).map(([rel]) => rel),
-  };
 }
 
 /** Every directory onboarding fills with agents or skills, plus Haive's own knowledge dirs.
@@ -1877,8 +1848,8 @@ export interface OnboardingResetProvenance {
  * an entry in neither is MOVED to the `-legacy` sibling rather than deleted with the directory.
  * Everything else is decided by location.
  *
- * Exported beside `stripHaiveContent` and `checkOnboardingMarkers` so the filesystem half is
- * testable without a request: the route adds only the row reads and the DB writes around it.
+ * Exported beside `stripHaiveContent` so the filesystem half is testable without a request: the
+ * route adds only the row reads and the DB writes around it.
  */
 export async function resetOnboardingArtifacts(
   root: string,

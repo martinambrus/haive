@@ -11,10 +11,10 @@ import {
 } from '@haive/shared';
 import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import { checkOnboardingMarkers } from '../src/lib/onboarding-state.js';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
 import { MAX_FILE_CONTENT_BYTES } from '../src/routes/tasks/_helpers.js';
 import {
-  checkOnboardingMarkers,
   classifyResetFailure,
   collectWrittenCliContent,
   mayRemoveSweptDirWhole,
