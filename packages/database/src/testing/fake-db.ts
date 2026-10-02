@@ -115,6 +115,11 @@ export interface FakeDbHandle<Q extends string = string> {
 export function createFakeDb<const T extends Record<string, PgTable>>(tables: T) {
   const list = Object.values(tables);
   const store = new Map<PgTable, FakeRow[]>(list.map((t) => [t, []]));
+  const tableRows = (table: PgTable): FakeRow[] => {
+    const rows = store.get(table);
+    if (!rows) throw new Error(`fake db: ${getTableName(table)} was not given to createFakeDb`);
+    return rows;
+  };
   /** Insertion order, so a row a rollback puts back returns to where it was. */
   const seq = new WeakMap<FakeRow, number>();
   let inserted = 0;
@@ -264,7 +269,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       }
     }
     const pred = opts.where === undefined ? () => true : compileWhere(table, opts.where);
-    let rows = store.get(table)!.filter(pred);
+    let rows = tableRows(table).filter(pred);
     // Each order in turn, last first: the sort is stable, so the first order ends up primary.
     for (const order of [opts.orderBy].flat().reverse()) {
       if (order !== undefined) rows = sortBy(table, rows, order);
@@ -315,15 +320,15 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     const row: FakeRow = Object.fromEntries(Object.keys(cols).map((k) => [k, null]));
     Object.assign(row, { id: randomUUID() }, 'createdAt' in cols ? { createdAt: now() } : {});
     Object.assign(row, values);
-    if (store.get(table)!.some((r) => r.id === row.id)) {
+    if (tableRows(table).some((r) => r.id === row.id)) {
       throw new Error(`fake db: duplicate key on ${getTableName(table)}`);
     }
     seq.set(row, (inserted += 1));
-    store.get(table)!.push(row);
+    tableRows(table).push(row);
     log?.push(() =>
       store.set(
         table,
-        store.get(table)!.filter((r) => r !== row),
+        tableRows(table).filter((r) => r !== row),
       ),
     );
     return { ...row };
@@ -343,7 +348,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       }
       return key;
     });
-    const hit = store.get(table)!.find((row) => keys.every((k) => row[k] === values[k]));
+    const hit = tableRows(table).find((row) => keys.every((k) => row[k] === values[k]));
     if (!hit) return insertRow(ctx, table, values);
     return update(ctx, table, (row) => row === hit, compileSet(table, conflict.set))[0]!;
   }
@@ -355,7 +360,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     values: (row: FakeRow) => FakeRow,
   ): FakeRow[] {
     const log = undoLog(ctx);
-    const hit = store.get(table)!.filter(match);
+    const hit = tableRows(table).filter(match);
     for (const row of hit) {
       const next = values(row);
       const before = Object.fromEntries(Object.keys(next).map((k) => [k, row[k]]));
@@ -367,7 +372,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
 
   function remove(ctx: TxContext | null, table: PgTable, match: Pred): FakeRow[] {
     const log = undoLog(ctx);
-    const rows = store.get(table)!;
+    const rows = tableRows(table);
     const gone = rows.filter(match);
     store.set(
       table,
@@ -376,7 +381,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     log?.push(() =>
       store.set(
         table,
-        [...store.get(table)!, ...gone].sort((a, b) => seq.get(a)! - seq.get(b)!),
+        [...tableRows(table), ...gone].sort((a, b) => seq.get(a)! - seq.get(b)!),
       ),
     );
     for (const child of list) {
@@ -396,7 +401,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
 
   /** Test-side setup only: change a stored row in place. */
   function patch(table: PgTable, id: string, values: FakeRow): void {
-    const row = store.get(table)!.find((r) => r.id === id);
+    const row = tableRows(table).find((r) => r.id === id);
     if (!row) throw new Error(`fake db: no ${getTableName(table)} row ${id}`);
     Object.assign(row, values);
   }

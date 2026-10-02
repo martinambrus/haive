@@ -216,8 +216,8 @@ type SelectBuilder = ReturnType<ReturnType<FakeDbHandle['select']>['from']>;
 async function setup(seed: Seed = {}) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-sync-'));
   dirs.push(root);
-  const { repositories, projectStateSync: sync, tasks } = schema;
-  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks });
+  const { repositories, projectStateSync: sync, tasks, onboardingArtifacts } = schema;
+  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks, onboardingArtifacts });
   // Columns the sync must leave as they are, set as persistDetection and the mirror import leave them.
   fake.insert(repositories, {
     id: REPO,
