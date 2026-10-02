@@ -15,7 +15,10 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
-import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import {
+  recomputeSyncedApplicableSets,
+  syncProjectStateFromCheckout,
+} from '../src/project-state/sync.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
   expandManifestFor,
@@ -628,6 +631,24 @@ describe('D1: an applied sync on a repository with claims writes the set', () =>
     expect(outcome).toBe('applied');
     expect(s.setOf()).toEqual(D1_SET);
     expect(withoutRecomputed(s.rowOf())).toEqual(withoutRecomputed(before));
+  });
+});
+
+describe('D11: a set an earlier sync left behind its column is recomputed at boot', () => {
+  it('writes the set 01 computes for the column, on a repository with claims', async () => {
+    const s = await setup({ column: column(TEAM), base: TEAM, set: P, claims: BASE_CLAIMS });
+
+    await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
+
+    expect(s.setOf()).toEqual(D1_SET);
+  });
+
+  it('leaves the set of a repository with no claim to 01', async () => {
+    const s = await setup({ column: column(TEAM), base: TEAM, set: P, claims: [] });
+
+    await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
+
+    expect(s.setOf()).toEqual(P);
   });
 });
 

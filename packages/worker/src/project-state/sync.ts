@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
@@ -191,6 +191,25 @@ async function writeApplicableTemplateIds(
     logger,
   });
   await updateApplicableTemplateIds(tx, repositoryId, expanded);
+}
+
+/** A sync from before the set followed the column moved the column alone, and no later sync of the
+ *  same files repairs the set it left. Run at boot; where a writer wrote both, it writes the same set. */
+export async function recomputeSyncedApplicableSets(db: Database): Promise<void> {
+  const repos = await db
+    .select({ id: schema.repositories.id, userId: schema.repositories.userId })
+    .from(schema.repositories)
+    .where(isNotNull(schema.repositories.renderContext));
+  for (const repo of repos) {
+    try {
+      await db.transaction(async (tx) => {
+        await lockProjectState(tx, repo.id);
+        await writeApplicableTemplateIds(tx, { repositoryId: repo.id, userId: repo.userId });
+      });
+    } catch (err) {
+      logger.warn({ err, repositoryId: repo.id }, 'applicable template ids not recomputed');
+    }
+  }
 }
 
 /** Merges the render unit of the checkout's project state record into the repository's render
