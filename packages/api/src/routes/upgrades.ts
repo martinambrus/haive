@@ -17,7 +17,14 @@ import {
   type RollbackUpgradeResponse,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import { historyOrigin, pickSnapshotRow, type SnapshotRowFacts } from '@haive/shared/project-state';
+import {
+  historyOrigin,
+  readRenderContextColumn,
+  renderContextOrigin,
+  renderContextProviderNames,
+  type RenderContextOrigin,
+  type SnapshotRowFacts,
+} from '@haive/shared/project-state';
 import {
   importRulesFilesFor,
   readUpgradeFile,
@@ -74,17 +81,31 @@ function snapshotProviderNames(providers: unknown): string[] {
   });
 }
 
+/** The providers whose RTK settings files 01's render context reads, or null when it recorded no
+ *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's. */
+function rtkProviderNames(
+  origin: RenderContextOrigin<SnapshotRowFacts & { snapshotProviders: unknown }>,
+  enabledNames: readonly string[],
+): string[] | null {
+  if (origin.from === 'column') {
+    return origin.rtkRecorded ? renderContextProviderNames(origin.column, enabledNames) : null;
+  }
+  return origin.from === 'snapshot' && origin.rtkRecorded
+    ? snapshotProviderNames(origin.row.snapshotProviders)
+    : null;
+}
+
 /** Whether 01's render context follows the repository's RTK switch, which it does only when the
- *  snapshot it renders from recorded a choice: the newest live one, else the 07 detect output of
- *  the last completed onboarding, else, for a blank repository, the scaffold's own. */
+ *  context it renders from recorded a choice: the column's stored flag, else the newest live
+ *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
+ *  repository, the scaffold's own. */
 async function rtkChoiceFollowsLive(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  liveRows: ReadonlyArray<SnapshotRowFacts>,
+  origin: RenderContextOrigin<SnapshotRowFacts>,
   source: string,
 ): Promise<boolean> {
-  const row = pickSnapshotRow(liveRows);
-  if (row) return row.rtkRecorded === true;
+  if (origin.from !== 'history') return origin.rtkRecorded;
   const [onboarding] = await db
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -152,6 +173,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       localPath: true,
       rtkEnabled: true,
       source: true,
+      renderContext: true,
+      status: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -339,11 +364,14 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
+  const origin = renderContextOrigin({
+    column: readRenderContextColumn(repo.renderContext),
+    rows: liveArtifacts,
+  });
+  const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
-  const rtkRow = repo.rtkEnabled ? pickSnapshotRow(liveArtifacts) : null;
-  const rtkProviders =
-    rtkRow?.rtkRecorded === true ? snapshotProviderNames(rtkRow.snapshotProviders) : null;
+  const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
   if (rtkProviders) {
     for (const m of manifestCache) {
       if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {
@@ -480,10 +508,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
-  const rulesImports = await rulesImportGaps(
-    repo.storagePath ?? repo.localPath,
-    ruleProviderRows.filter((p) => p.enabled).map((p) => p.name),
-  );
+  const rulesImports = await rulesImportGaps(repo.storagePath ?? repo.localPath, enabledNames);
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
@@ -494,7 +519,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     !repo.rtkEnabled &&
     root &&
     (repo.source === 'blank' || liveArtifacts.length === 0) &&
-    (await rtkChoiceFollowsLive(db, repositoryId, liveArtifacts, repo.source))
+    (await rtkChoiceFollowsLive(db, repositoryId, origin, repo.source))
       ? await rtkSettingsLeftovers(root, new Set(liveArtifacts.map((a) => a.diskPath)))
       : [];
 

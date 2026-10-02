@@ -17,7 +17,12 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
-import { historyOrigin, pickSnapshotRow } from '@haive/shared/project-state';
+import {
+  historyOrigin,
+  pickSnapshotRow,
+  readRenderContextColumn,
+  renderContextOrigin,
+} from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -32,6 +37,7 @@ import {
   loadBundlesForExpansion,
   type BundleWithMeta,
 } from '../../_custom-bundle-loader.js';
+import { renderContextFromColumn } from '../../_render-targets.js';
 import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
   cliRulesRegionRecord,
@@ -187,31 +193,61 @@ export async function loadLiveArtifacts(
 export function pickRenderSnapshot(
   liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
 ): Record<string, unknown> | null {
-  const facts = liveRows.map((r) => ({
+  return pickSnapshotRow(liveRows.map(snapshotFacts))?.formValuesSnapshot ?? null;
+}
+
+function snapshotFacts(r: Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>) {
+  return {
     id: r.id,
     generatedAt: r.generatedAt,
     hasSnapshot: Boolean(r.formValuesSnapshot),
     rtkRecorded: typeof r.formValuesSnapshot?.rtkEnabled === 'boolean',
     formValuesSnapshot: r.formValuesSnapshot,
-  }));
-  return pickSnapshotRow(facts)?.formValuesSnapshot ?? null;
+  };
 }
 
-/** Load the render context for this repository. Tries a live artifact's snapshot
- *  first, then falls back to the most recent completed onboarding task's step 07
- *  detect output (used for lazy backfill). */
+/** Load the render context for this repository. Tries its render context column
+ *  first, then a live artifact's snapshot, then falls back to the most recent
+ *  completed onboarding task's step 07 detect output (used for lazy backfill). */
 async function resolveRenderContext(
   ctx: StepContext,
   repositoryId: string,
   liveRows: LiveArtifactRow[],
 ): Promise<ResolvedRenderContext | null> {
-  const snapshot = pickRenderSnapshot(liveRows);
-  if (snapshot) {
+  const [repo] = await ctx.db
+    .select({
+      renderContext: schema.repositories.renderContext,
+      rtkEnabled: schema.repositories.rtkEnabled,
+      source: schema.repositories.source,
+      name: schema.repositories.name,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const column = readRenderContextColumn(repo?.renderContext);
+  if (column.kind === 'refused') {
+    ctx.logger.warn(
+      { repositoryId, problems: column.problems },
+      'upgrade-plan: render context column refused, reading it as NULL',
+    );
+  }
+  const origin = renderContextOrigin({ column, rows: liveRows.map(snapshotFacts) });
+  if (origin.from === 'column') {
+    const providerRows = await ctx.db
+      .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.userId, ctx.userId));
     return withLiveRtk(
-      ctx,
-      repositoryId,
-      snapshot as unknown as TemplateRenderContext,
-      typeof snapshot.rtkEnabled === 'boolean',
+      repo,
+      renderContextFromColumn(origin.column, providerRows),
+      origin.rtkRecorded,
+    );
+  }
+  if (origin.from === 'snapshot') {
+    return withLiveRtk(
+      repo,
+      origin.row.formValuesSnapshot as unknown as TemplateRenderContext,
+      origin.rtkRecorded,
     );
   }
 
@@ -228,11 +264,6 @@ async function resolveRenderContext(
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
   const priorTaskId = priorOnboarding[0]?.id ?? null;
-  const [repo] = await ctx.db
-    .select({ source: schema.repositories.source, name: schema.repositories.name })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .limit(1);
   let detect: Partial<GenerateFilesDetect> | null = null;
   if (priorTaskId) {
     const stepRow = await ctx.db
@@ -320,7 +351,7 @@ async function resolveRenderContext(
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
   };
-  return withLiveRtk(ctx, repositoryId, recorded, history.rtkRecorded);
+  return withLiveRtk(repo, recorded, history.rtkRecorded);
 }
 
 /** A render context, and whether its RTK choice is the repository's live one. */
@@ -331,19 +362,12 @@ interface ResolvedRenderContext {
 
 /** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
  *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
-async function withLiveRtk(
-  ctx: StepContext,
-  repositoryId: string,
+function withLiveRtk(
+  repo: { rtkEnabled: boolean } | undefined,
   recorded: TemplateRenderContext,
   recordedChoice: boolean,
-): Promise<ResolvedRenderContext> {
-  if (!recordedChoice) return { renderCtx: recorded, rtkLive: false };
-  const [repo] = await ctx.db
-    .select({ rtkEnabled: schema.repositories.rtkEnabled })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .limit(1);
-  return repo
+): ResolvedRenderContext {
+  return recordedChoice && repo
     ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
     : { renderCtx: recorded, rtkLive: false };
 }

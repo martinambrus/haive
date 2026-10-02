@@ -40,7 +40,14 @@ const portable = () => ({
   },
   framework: 'drupal',
   acceptedAgentIds: ['security-auditor', 'code-reviewer'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert', tools: ['Read'] }],
+  customAgentSpecs: [
+    {
+      id: 'billing-expert',
+      title: 'Billing expert',
+      description: 'Knows the billing module',
+      tools: ['Read'],
+    },
+  ],
   lspLanguages: ['php-extended', 'css'],
 });
 
@@ -202,5 +209,298 @@ describe('portableRender', () => {
     const before = JSON.stringify(given);
     portableRender()(given);
     expect(JSON.stringify(given)).toBe(before);
+  });
+});
+
+// ---- the resolution order both 01 and the banner read (B1.4c) --------------------------------------
+
+interface Row {
+  id: string;
+  generatedAt: Date | null;
+  hasSnapshot: boolean | null;
+  rtkRecorded: boolean | null;
+}
+type ColumnRead =
+  | { kind: 'absent' }
+  | { kind: 'refused'; problems: string[] }
+  | { kind: 'column'; column: Record<string, unknown> };
+type Origin =
+  | { from: 'column'; column: Record<string, unknown>; rtkRecorded: boolean }
+  | { from: 'snapshot'; row: Row; rtkRecorded: boolean }
+  | { from: 'history'; refused: string[] | null };
+type History = { kind: 'onboarding'; rtkRecorded: boolean } | { kind: 'blank' } | { kind: 'none' };
+
+const readColumn = () => added<(value: unknown) => ColumnRead>('readRenderContextColumn');
+const originOf = () =>
+  added<(input: { column: ColumnRead; rows: Row[] }) => Origin>('renderContextOrigin');
+const historyOf = () =>
+  added<
+    (input: {
+      onboarding: { detected: boolean; rtkRecorded: boolean } | null;
+      source: string;
+    }) => History
+  >('historyOrigin');
+const pickRow = () => added<(rows: Row[]) => Row | null>('pickSnapshotRow');
+const namesOf = () =>
+  added<(column: Record<string, unknown>, enabledNames: string[]) => string[]>(
+    'renderContextProviderNames',
+  );
+
+const row = (
+  id: string,
+  at: number | null,
+  hasSnapshot: boolean | null,
+  rtkRecorded: boolean | null,
+): Row => ({ id, generatedAt: at === null ? null : new Date(at), hasSnapshot, rtkRecorded });
+
+describe('S1: readRenderContextColumn', () => {
+  it('reads a NULL or a missing column as absent, and nothing else', () => {
+    expect(readColumn()(null)).toEqual({ kind: 'absent' });
+    expect(readColumn()(undefined)).toEqual({ kind: 'absent' });
+  });
+
+  it('reads a column the schema accepts as itself, adding no field to it', () => {
+    expect(readColumn()(full())).toEqual({ kind: 'column', column: full() });
+    expect(readColumn()(portableOnly())).toEqual({ kind: 'column', column: portableOnly() });
+  });
+
+  it.each([
+    ['an empty object', {}, ['projectInfo', 'rtkChoiceRecorded']],
+    ['an unknown key beside a full context', { ...full(), somethingNew: 1 }, []],
+    [
+      'a context without rtkChoiceRecorded',
+      without(full(), 'rtkChoiceRecorded'),
+      ['rtkChoiceRecorded'],
+    ],
+    ['a context missing a portable field', without(portableOnly(), 'framework'), ['framework']],
+    ['text', 'not a context', []],
+    ['a number', 5, []],
+    ['zero', 0, []],
+    ['false', false, []],
+    ['an empty string', '', []],
+    ['a list', [], []],
+  ])(
+    'refuses %s, with the problems the schema found, and never as absent',
+    (_name, value, named) => {
+      const read = readColumn()(value);
+      expect(read.kind).toBe('refused');
+      if (read.kind !== 'refused') return;
+      expect(read.problems.length).toBeGreaterThan(0);
+      for (const problem of read.problems) expect(typeof problem).toBe('string');
+      for (const field of named) expect(read.problems.join('\n')).toContain(field);
+    },
+  );
+});
+
+describe('S1: renderContextOrigin', () => {
+  const ROWS: Record<string, Row[]> = {
+    'a recorded row older than an unrecorded one': [
+      row('a', 1, true, true),
+      row('b', 2, true, null),
+    ],
+    'an unrecorded row only': [row('a', 1, true, null)],
+    'rows carrying no snapshot': [row('a', 1, null, null), row('b', 2, false, false)],
+    'no rows': [],
+  };
+  const WANT_ROW: Record<string, { row: Row; rtkRecorded: boolean } | null> = {
+    'a recorded row older than an unrecorded one': {
+      row: row('a', 1, true, true),
+      rtkRecorded: true,
+    },
+    'an unrecorded row only': { row: row('a', 1, true, null), rtkRecorded: false },
+    'rows carrying no snapshot': null,
+    'no rows': null,
+  };
+
+  const withFlags = (rtkEnabled: boolean | 'absent', recorded: boolean, base = full()) => {
+    const column = { ...base, rtkChoiceRecorded: recorded };
+    if (rtkEnabled === 'absent') delete (column as Record<string, unknown>).rtkEnabled;
+    else (column as Record<string, unknown>).rtkEnabled = rtkEnabled;
+    return column;
+  };
+
+  it.each(Object.entries(ROWS))(
+    'puts a valid column first, whatever the rows say: %s',
+    (_name, rows) => {
+      for (const rtkEnabled of ['absent', true, false] as const) {
+        for (const recorded of [true, false]) {
+          const column = withFlags(rtkEnabled, recorded);
+          const origin = originOf()({ column: { kind: 'column', column }, rows });
+          // The flag is the stored one, whether the column holds rtkEnabled or not, and whatever it says.
+          expect({ rtkEnabled, recorded, origin }).toEqual({
+            rtkEnabled,
+            recorded,
+            origin: { from: 'column', column, rtkRecorded: recorded },
+          });
+        }
+      }
+      const bare = withFlags('absent', true, portableOnly());
+      expect(originOf()({ column: { kind: 'column', column: bare }, rows })).toEqual({
+        from: 'column',
+        column: bare,
+        rtkRecorded: true,
+      });
+    },
+  );
+
+  it.each(Object.entries(ROWS))(
+    'leaves the rows and the history to a NULL or a refused column: %s',
+    (name, rows) => {
+      const refused = readColumn()({});
+      expect(refused.kind).toBe('refused');
+      const reads: [string, ColumnRead][] = [
+        ['absent', { kind: 'absent' }],
+        ['refused', refused],
+      ];
+      for (const [label, column] of reads) {
+        const origin = originOf()({ column, rows });
+        const want = WANT_ROW[name];
+        if (want) {
+          expect({ label, origin }).toEqual({
+            label,
+            origin: { from: 'snapshot', row: want.row, rtkRecorded: want.rtkRecorded },
+          });
+        } else if (column.kind === 'refused') {
+          expect(origin.from).toBe('history');
+          const refusedProblems = (origin as { refused: string[] | null }).refused;
+          expect(refusedProblems).toEqual(column.problems);
+        } else {
+          expect({ label, origin }).toEqual({ label, origin: { from: 'history', refused: null } });
+        }
+      }
+    },
+  );
+
+  // The design's table: each value a column can hold, read as a reader reads it, against each state
+  // of the rows. A column the schema accepts is the origin whatever the rows say, and one it refuses
+  // or one that is absent leaves the rows, then the history, exactly as they were.
+  const VALUES: [string, unknown, 'column' | 'refused' | 'absent'][] = [
+    ['a full column', full(), 'column'],
+    ['a portable-only column', portableOnly(), 'column'],
+    ['an empty object', {}, 'refused'],
+    ['an unknown key', { ...full(), somethingNew: 1 }, 'refused'],
+    ['no rtkChoiceRecorded', without(full(), 'rtkChoiceRecorded'), 'refused'],
+    ['null', null, 'absent'],
+    ['undefined', undefined, 'absent'],
+  ];
+
+  it.each(Object.entries(ROWS))('crosses every column value with the rows: %s', (name, rows) => {
+    for (const [label, value, kind] of VALUES) {
+      const origin = originOf()({ column: readColumn()(value), rows });
+      const want = WANT_ROW[name];
+      if (kind === 'column') {
+        const column = value as Record<string, unknown>;
+        expect({ label, origin }).toEqual({
+          label,
+          origin: { from: 'column', column, rtkRecorded: column.rtkChoiceRecorded },
+        });
+      } else if (want) {
+        expect({ label, origin }).toEqual({
+          label,
+          origin: { from: 'snapshot', row: want.row, rtkRecorded: want.rtkRecorded },
+        });
+      } else {
+        expect({ label, from: origin.from }).toEqual({ label, from: 'history' });
+        const refused = (origin as { refused: string[] | null }).refused;
+        if (kind === 'refused') expect(refused?.length ?? 0).toBeGreaterThan(0);
+        else expect(refused).toBeNull();
+      }
+    }
+  });
+
+  it('takes the newest recorded row among several, whatever order the rows come in', () => {
+    const rows = [row('a', 1, true, true), row('b', 3, true, null), row('c', 2, true, true)];
+    for (const order of [rows, [...rows].reverse()]) {
+      expect(originOf()({ column: { kind: 'absent' }, rows: order })).toEqual({
+        from: 'snapshot',
+        row: row('c', 2, true, true),
+        rtkRecorded: true,
+      });
+    }
+  });
+});
+
+describe('S2: historyOrigin', () => {
+  it('reads a repository with no completed onboarding as blank when it is, and as nothing otherwise', () => {
+    expect(historyOf()({ onboarding: null, source: 'blank' })).toEqual({ kind: 'blank' });
+    expect(historyOf()({ onboarding: null, source: 'git_https' })).toEqual({ kind: 'none' });
+    expect(historyOf()({ onboarding: null, source: 'local_path' })).toEqual({ kind: 'none' });
+  });
+
+  it('reads a completed onboarding with no step 07 output as nothing, blank or not', () => {
+    for (const source of ['blank', 'git_https']) {
+      for (const rtkRecorded of [true, false]) {
+        expect(historyOf()({ onboarding: { detected: false, rtkRecorded }, source })).toEqual({
+          kind: 'none',
+        });
+      }
+    }
+  });
+
+  it('reads a completed onboarding with step 07 output as that output, with its RTK flag', () => {
+    for (const source of ['blank', 'git_https']) {
+      expect(historyOf()({ onboarding: { detected: true, rtkRecorded: true }, source })).toEqual({
+        kind: 'onboarding',
+        rtkRecorded: true,
+      });
+      expect(historyOf()({ onboarding: { detected: true, rtkRecorded: false }, source })).toEqual({
+        kind: 'onboarding',
+        rtkRecorded: false,
+      });
+    }
+  });
+});
+
+describe('S3: pickSnapshotRow', () => {
+  // The table of 01's pickRenderSnapshot (upgrade-plan-classify.test.ts), on the facts shape.
+  it('renders from a row that recorded an RTK choice ahead of one from before RTK', () => {
+    const recorded = row('c', 1, true, true);
+    expect(pickRow()([row('a', 0, false, false), row('b', 2, true, null), recorded])).toEqual(
+      recorded,
+    );
+    expect(pickRow()([row('a', 0, true, null)])).toEqual(row('a', 0, true, null));
+    expect(pickRow()([row('a', 0, false, false)])).toBeNull();
+    expect(pickRow()([])).toBeNull();
+  });
+
+  it('takes the newest recorded row, whatever order the rows come in, and the higher id on a tie', () => {
+    const older = row('a', 1, true, true);
+    const newer = row('b', 2, true, true);
+    expect(pickRow()([older, newer])).toEqual(newer);
+    expect(pickRow()([newer, older])).toEqual(newer);
+    expect(pickRow()([row('a', 1, true, true), row('b', 1, true, true)])).toEqual(
+      row('b', 1, true, true),
+    );
+  });
+
+  it('takes the newest row with a snapshot when none recorded a choice, and dates a row with no date last', () => {
+    expect(pickRow()([row('a', 1, true, null), row('b', 2, true, null)])).toEqual(
+      row('b', 2, true, null),
+    );
+    expect(pickRow()([row('a', null, true, null), row('b', 1, true, null)])).toEqual(
+      row('b', 1, true, null),
+    );
+  });
+
+  it('does not change the rows it is given', () => {
+    const rows = [row('a', 1, true, true), row('b', 2, true, true)];
+    const before = JSON.stringify(rows);
+    pickRow()(rows);
+    expect(JSON.stringify(rows)).toBe(before);
+  });
+});
+
+describe('S4: renderContextProviderNames', () => {
+  it("gives the column's own names when it holds them", () => {
+    expect(namesOf()(full(), ['gemini'])).toEqual(['claude-code', 'codex']);
+  });
+
+  it('gives its own names even when it holds none', () => {
+    expect(namesOf()({ ...full(), enabledCliProviders: [] }, ['claude-code'])).toEqual([]);
+  });
+
+  it("gives the caller's enabled names when the column holds no list", () => {
+    expect(namesOf()(portableOnly(), ['gemini', 'codex'])).toEqual(['gemini', 'codex']);
+    expect(namesOf()(portableOnly(), [])).toEqual([]);
   });
 });

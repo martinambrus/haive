@@ -1,7 +1,9 @@
 import { getCliProviderMetadata } from '@haive/shared';
+import type { RenderContextColumn } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { CliProviderName, CliRulesFileMode } from '../cli-adapters/types.js';
 import type { AgentRenderTarget } from './steps/onboarding/_agent-templates.js';
+import type { TemplateRenderContext } from './template-manifest.js';
 
 export interface RenderTargets {
   enabledCliProviders: Array<{
@@ -58,4 +60,23 @@ export function renderTargetsFor(
     }
   }
   return { enabledCliProviders, agentTargets: Array.from(agentTargetsByDir.values()) };
+}
+
+/** The render context of a column. One the sync wrote holds no per-install fields, so each it lacks
+ *  is derived from the user's providers as 07 derives it, and one it holds is kept, [] included. */
+export function renderContextFromColumn(
+  column: RenderContextColumn,
+  providerRows: ReadonlyArray<{ name: CliProviderName; enabled: boolean }>,
+): TemplateRenderContext {
+  const derived = renderTargetsFor(providerRows, column.lspLanguages);
+  return {
+    projectInfo: column.projectInfo,
+    framework: column.framework,
+    acceptedAgentIds: column.acceptedAgentIds,
+    customAgentSpecs: column.customAgentSpecs,
+    agentTargets: column.agentTargets ?? derived.agentTargets,
+    lspLanguages: column.lspLanguages,
+    rtkEnabled: column.rtkEnabled ?? false,
+    enabledCliProviders: column.enabledCliProviders ?? derived.enabledCliProviders,
+  } as unknown as TemplateRenderContext;
 }
