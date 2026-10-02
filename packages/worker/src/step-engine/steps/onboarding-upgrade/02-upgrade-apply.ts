@@ -354,6 +354,9 @@ export interface UpgradeApplyOutput {
   /** Every rules file this run took an RTK block out of, with the record of what it held, so a
    *  rollback puts the block back. Optional likewise. */
   rtkBlockStrips?: RtkBlockStrip[];
+  /** Every row this run untracked: superseded with its file left alone, so a rollback puts it back
+   *  live. Optional likewise. */
+  untrackedRowIds?: string[];
 }
 
 /** What a row records about the bytes at its path. */
