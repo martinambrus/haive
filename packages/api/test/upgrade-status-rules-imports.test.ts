@@ -640,6 +640,27 @@ describe('upgrade-status and a clone holding a render context column', () => {
     expect(body.changedTemplateIds).toContain(CLI_RULES_TEMPLATE_ID);
   });
 
+  // With every CLI off nothing incidental (the rules region, an import, RTK) can make the banner
+  // offer the upgrade, and the banner is the only place one starts.
+  it('U13: offers the first upgrade on this install to a clone no row records, CLIs off', async () => {
+    state.rows.set(schema.cliProviders, [{ ...claude, enabled: false }]);
+
+    const body = await status();
+
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.firstUpgradeOnThisInstall).toBe(true);
+  });
+
+  it('U13b: says nothing of a first upgrade once a row records the repository', async () => {
+    inSync([claude]);
+    clone();
+
+    const body = await status();
+
+    expect(body.firstUpgradeOnThisInstall).toBeUndefined();
+  });
+
   // U2: the banner's half of what 01 offers on the same repository (upgrade-plan-render-context.test.ts, W2)
   it('U2: offers the RTK settings file it finds for removal once RTK is off, as the plan does', async () => {
     await mkdir(path.join(repo, '.claude'), { recursive: true });

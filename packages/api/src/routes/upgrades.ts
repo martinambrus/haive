@@ -466,6 +466,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   const isOnboarded = distinctInstalled.size > 0;
+  let firstUpgradeOnThisInstall = false;
   if (!isOnboarded) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
@@ -505,6 +506,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       };
       return c.json(res);
     }
+    // Only the render context admitted it, and no row says what is installed: this install has
+    // never planned it, and the banner is the only place an upgrade starts.
+    firstUpgradeOnThisInstall = !priorOnboarding && !anyUpgrade;
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
@@ -524,6 +528,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       : [];
 
   const hasUpgradeAvailable =
+    firstUpgradeOnThisInstall ||
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
     missingRulesImports.length > 0 ||
     rtkBlockLeftovers.length > 0 ||
@@ -575,6 +580,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
     ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),
     ...(rtkSettingsLeft.length > 0 ? { rtkSettingsLeftovers: rtkSettingsLeft } : {}),
+    ...(firstUpgradeOnThisInstall ? { firstUpgradeOnThisInstall } : {}),
   };
   return c.json(res);
 });

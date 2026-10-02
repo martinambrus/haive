@@ -53,6 +53,10 @@ export const upgradeStatusResponseSchema = z.object({
    *  RTK's hook in a repository that switched RTK off. An upgrade offers to take them out, so they
    *  set `hasUpgradeAvailable`. Omitted when there are none. */
   rtkSettingsLeftovers: z.array(z.string()).optional(),
+  /** This install has never planned the repository: only its render context column admitted it,
+   *  and no row records anything, so nothing here can say what changed. It sets
+   *  `hasUpgradeAvailable`. Omitted otherwise. */
+  firstUpgradeOnThisInstall: z.boolean().optional(),
 });
 
 export type UpgradeStatusResponse = z.infer<typeof upgradeStatusResponseSchema>;
