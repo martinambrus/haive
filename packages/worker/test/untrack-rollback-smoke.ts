@@ -18,7 +18,11 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
-import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import {
+  expandManifestFor,
+  getTemplateManifest,
+  REFERENCE_CONTEXT,
+} from '../src/step-engine/template-manifest.js';
 
 const log = logger.child({ module: 'untrack-rollback-smoke' });
 
@@ -340,6 +344,11 @@ async function main(): Promise<void> {
       (await w2.liveAt(dangling.diskPath)).length === 0 &&
         (await readOrNull(w2.root, dangling.diskPath)) === bodyOf(dangling.diskPath),
     );
+    // The upgrade being undone wrote a set of its own, which an untrack-only rollback must still rewrite.
+    await db
+      .update(schema.repositories)
+      .set({ applicableTemplateIds: ['agent.stale'] })
+      .where(eq(schema.repositories.id, w2.repositoryId));
     const failure2 = await w2.rollback();
     const danglingRows = await w2.liveAt(dangling.diskPath);
     check(
@@ -355,6 +364,21 @@ async function main(): Promise<void> {
       'O5b: and the rollback of an upgrade that only untracked a row does not say there is nothing to revert',
       !w2.warnings().some((w) => w.includes('nothing to revert')),
       w2.warnings(),
+    );
+
+    const [set2] = await db
+      .select({ ids: schema.repositories.applicableTemplateIds })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, w2.repositoryId));
+    const rendered = [
+      ...new Set(
+        expandManifestFor(REFERENCE_CONTEXT, getTemplateManifest()).map((r) => r.templateId),
+      ),
+    ].sort();
+    check(
+      'O5e: and that rollback writes the set the restored rows render, not the one the upgrade left',
+      JSON.stringify(set2?.ids ?? null) === JSON.stringify(rendered),
+      { ids: set2?.ids, rendered },
     );
 
     // ---- O5c: a live row stands at the path when the rollback runs ------------------------------

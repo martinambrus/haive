@@ -770,23 +770,24 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       });
     }
 
+    // A rollback that restored no snapshot (the upgrade only created files or untracked rows) takes
+    // the context the rows live now carry, which is the one the repository had before the upgrade.
+    const recorded =
+      snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx.db, detected.repositoryId));
+
     // Refresh applicable_template_ids from a fresh expansion against the
     // restored render context. After a rollback the repo's gating may differ
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
-    if (snapshot) {
+    if (recorded) {
       const applicableExpanded = expandManifestFor(
-        snapshot as unknown as TemplateRenderContext,
+        recorded as unknown as TemplateRenderContext,
         manifest,
       );
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
     try {
-      // A rollback that restored no snapshot (the upgrade only created files) records the context
-      // the rows still live carry, which is the one the repository had before the upgrade.
-      const recorded =
-        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx.db, detected.repositoryId));
       if (recorded) {
         // A choice is what the plan of the upgrade being undone found, not what the value looks like:
         // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
