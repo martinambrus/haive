@@ -20,16 +20,25 @@ function compactTitle(title: string): string {
   return oneLine.length <= TITLE_MAX_CHARS ? oneLine : `${oneLine.slice(0, TITLE_MAX_CHARS - 1)}…`;
 }
 
-function exactLine(node: PlanNodeSkeleton, role: string): string {
-  const flags = [node.kind, node.status, ...(node.taskable ? ['taskable'] : [])].join(', ');
-  return `- ${role}: ${compactTitle(node.title)} (\`node:${node.id}\`, ${flags})`;
+function orderPrefix(node: PlanNodeSkeleton, buildOrder?: ReadonlyMap<string, number>): string {
+  const order = buildOrder?.get(node.id);
+  return order === undefined ? '' : `#${order} `;
 }
 
-function outlineLine(node: PlanNodeSkeleton): string {
+function exactLine(
+  node: PlanNodeSkeleton,
+  role: string,
+  buildOrder?: ReadonlyMap<string, number>,
+): string {
+  const flags = [node.kind, node.status, ...(node.taskable ? ['taskable'] : [])].join(', ');
+  return `- ${role}: ${orderPrefix(node, buildOrder)}${compactTitle(node.title)} (\`node:${node.id}\`, ${flags})`;
+}
+
+function outlineLine(node: PlanNodeSkeleton, buildOrder?: ReadonlyMap<string, number>): string {
   const depth = planNodeDepth(node.path);
   const indent = '  '.repeat(Math.min(depth, 8));
   const depthSuffix = depth > 8 ? `, depth ${depth}` : '';
-  return `${indent}- ${compactTitle(node.title)} [${node.kind}, ${node.status}${depthSuffix}]`;
+  return `${indent}- ${orderPrefix(node, buildOrder)}${compactTitle(node.title)} [${node.kind}, ${node.status}${depthSuffix}]`;
 }
 
 function treeOrder(nodes: PlanNodeSkeleton[]): PlanNodeSkeleton[] {
@@ -86,6 +95,7 @@ export function buildPlanExpansionContext(
   nodes: PlanNodeSkeleton[],
   focus: PlanNodeSkeleton,
   maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
+  { buildOrder }: { buildOrder?: ReadonlyMap<string, number> } = {},
 ): string {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const byParent = indexChildren(nodes);
@@ -103,14 +113,16 @@ export function buildPlanExpansionContext(
   }
 
   const exactPathLines = [
-    ...ancestors.map((ancestor) => exactLine(ancestor, 'Ancestor')),
-    exactLine(focus, 'Target'),
+    ...ancestors.map((ancestor) => exactLine(ancestor, 'Ancestor', buildOrder)),
+    exactLine(focus, 'Target', buildOrder),
   ];
   const neighborLines = [
     ...(byParent.get(focus.parentId) ?? [])
       .filter((sibling) => sibling.id !== focus.id)
-      .map((sibling) => exactLine(sibling, 'Sibling')),
-    ...(byParent.get(focus.id) ?? []).map((child) => exactLine(child, 'Existing child')),
+      .map((sibling) => exactLine(sibling, 'Sibling', buildOrder)),
+    ...(byParent.get(focus.id) ?? []).map((child) =>
+      exactLine(child, 'Existing child', buildOrder),
+    ),
   ];
 
   const localHeader = '## Target neighborhood (exact refs)';
@@ -128,7 +140,7 @@ export function buildPlanExpansionContext(
     '\n',
   );
   const ordered = treeOrder(nodes);
-  const allOutlineLines = ordered.map(outlineLine);
+  const allOutlineLines = ordered.map((node) => outlineLine(node, buildOrder));
   const outlineHeader =
     '## Whole-plan title index (bodies and dependency edges omitted for prompt safety)';
   let sampled = evenlySample(

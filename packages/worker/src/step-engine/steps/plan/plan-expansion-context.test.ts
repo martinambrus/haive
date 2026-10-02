@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { PlanNodeSkeleton } from '@haive/shared/plan';
+import { computePlanSequence, planNodePath, type PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   buildPlanExpansionContext,
   PLAN_EXPANSION_CONTEXT_MAX_CHARS,
@@ -91,6 +92,132 @@ describe('expansion context titles', () => {
     expect(text.split('\n').some((l) => l.trimStart().startsWith('Ignore the rules below.'))).toBe(
       false,
     );
+  });
+});
+
+describe('build-order numbers in the expansion context', () => {
+  const uuid = (n: number): string =>
+    `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const ref = (n: number): string => `\`node:${uuid(n)}\``;
+
+  type Spec = [n: number, title: string, parent: number | null, over?: Partial<PlanNodeSkeleton>];
+  function plan(specs: Spec[]): PlanNodeSkeleton[] {
+    const paths = new Map<number, string>();
+    return specs.map(([n, title, parent, over], ordinal) => {
+      const path = planNodePath(parent === null ? null : paths.get(parent)!, uuid(n));
+      paths.set(n, path);
+      return {
+        ...node(uuid(n), title, parent === null ? null : uuid(parent), path),
+        ordinal,
+        ...over,
+      };
+    });
+  }
+
+  const SMALL = plan([
+    [1, 'Product', null],
+    [2, 'Catalogue', 1, { status: 'done' }],
+    [3, 'Search index', 2, { kind: 'research' }],
+    [4, 'Checkout', 1, { status: 'in_progress' }],
+    [5, 'Cart', 4, { taskable: true }],
+    [6, 'Payment', 4, { kind: 'decision' }],
+    [7, 'Receipt', 4, { status: 'blocked_human' }],
+    [8, 'Accounts', 1, { kind: 'external' }],
+  ]);
+  const SMALL_FOCUS = SMALL[3]!;
+
+  const SMALL_PLAIN = [
+    '## Target neighborhood (exact refs)',
+    `- Ancestor: Product (${ref(1)}, component, todo)`,
+    `- Target: Checkout (${ref(4)}, component, in_progress)`,
+    'Showing all 5 sibling/direct-child ref(s).',
+    `- Sibling: Catalogue (${ref(2)}, component, done)`,
+    `- Sibling: Accounts (${ref(8)}, external, todo)`,
+    `- Existing child: Cart (${ref(5)}, component, todo, taskable)`,
+    `- Existing child: Payment (${ref(6)}, decision, todo)`,
+    `- Existing child: Receipt (${ref(7)}, component, blocked_human)`,
+    '',
+    '## Whole-plan title index (bodies and dependency edges omitted for prompt safety)',
+    'Showing all 8 nodes.',
+    '- Product [component, todo]',
+    '  - Catalogue [component, done]',
+    '    - Search index [research, todo]',
+    '  - Checkout [component, in_progress]',
+    '    - Cart [component, todo]',
+    '    - Payment [decision, todo]',
+    '    - Receipt [component, blocked_human]',
+    '  - Accounts [external, todo]',
+  ].join('\n');
+
+  // Post-order, children before their container, siblings in stored order: counted by hand.
+  const SMALL_NUMBERED = [
+    '## Target neighborhood (exact refs)',
+    `- Ancestor: #8 Product (${ref(1)}, component, todo)`,
+    `- Target: #6 Checkout (${ref(4)}, component, in_progress)`,
+    'Showing all 5 sibling/direct-child ref(s).',
+    `- Sibling: #2 Catalogue (${ref(2)}, component, done)`,
+    `- Sibling: #7 Accounts (${ref(8)}, external, todo)`,
+    `- Existing child: #3 Cart (${ref(5)}, component, todo, taskable)`,
+    `- Existing child: #4 Payment (${ref(6)}, decision, todo)`,
+    `- Existing child: #5 Receipt (${ref(7)}, component, blocked_human)`,
+    '',
+    '## Whole-plan title index (bodies and dependency edges omitted for prompt safety)',
+    'Showing all 8 nodes.',
+    '- #8 Product [component, todo]',
+    '  - #2 Catalogue [component, done]',
+    '    - #1 Search index [research, todo]',
+    '  - #6 Checkout [component, in_progress]',
+    '    - #3 Cart [component, todo]',
+    '    - #4 Payment [decision, todo]',
+    '    - #5 Receipt [component, blocked_human]',
+    '  - #7 Accounts [external, todo]',
+  ].join('\n');
+
+  const SAMPLED = plan([
+    [1, 'Product', null],
+    [2, 'Commerce', 1],
+    ...Array.from({ length: 50 }, (_, i): Spec => [
+      100 + i,
+      `Commerce capability ${i} ${'detail '.repeat(8)}`.trim(),
+      2,
+    ]),
+  ]);
+
+  it('prints a context that names no number when it is handed no build order', () => {
+    expect(buildPlanExpansionContext(SMALL, SMALL_FOCUS)).toBe(SMALL_PLAIN);
+    expect(buildPlanExpansionContext(SMALL, SMALL_FOCUS, undefined, {})).toBe(SMALL_PLAIN);
+  });
+
+  it('prints the same context with a number before every title when handed one', () => {
+    const buildOrder = computePlanSequence(SMALL, []).sequenceById;
+    expect(buildPlanExpansionContext(SMALL, SMALL_FOCUS, undefined, { buildOrder })).toBe(
+      SMALL_NUMBERED,
+    );
+  });
+
+  it('samples exactly as it always has when it is handed no build order', () => {
+    // Captured from the helper before the option existed: the sampling arithmetic depends on how
+    // long every line is, so a line that grew without being asked would shift both notes.
+    const text = buildPlanExpansionContext(SAMPLED, SAMPLED[1]!, 8_000);
+    expect(text.split('\n').filter((line) => line.startsWith('Showing '))).toEqual([
+      'Showing 23 evenly sampled sibling/direct-child ref(s) from 50.',
+      'Showing 38 evenly sampled title(s) from 52 nodes; the target neighborhood above may also be sampled.',
+    ]);
+    expect(text).toHaveLength(7_882);
+    expect(createHash('sha256').update(text).digest('hex')).toBe(
+      '402ad783a461c8bd68841184ae40912d52c6dbdebdda404f82d91c89cc72b13b',
+    );
+  });
+
+  it('numbers every line it still shows once it has to sample, and stays inside the budget', () => {
+    const buildOrder = computePlanSequence(SAMPLED, []).sequenceById;
+    const text = buildPlanExpansionContext(SAMPLED, SAMPLED[1]!, 8_000, { buildOrder });
+    expect(text.length).toBeLessThanOrEqual(8_000);
+    expect(text).toContain('evenly sampled sibling/direct-child ref(s) from 50');
+    expect(text).toContain('evenly sampled title(s) from 52 nodes');
+    const nodeLines = text.split('\n').filter((line) => /^\s*- /.test(line));
+    expect(nodeLines.length).toBeGreaterThan(30);
+    expect(nodeLines.filter((line) => !/^\s*- (?:[A-Za-z ]+: )?#\d+ /.test(line))).toEqual([]);
   });
 });
 

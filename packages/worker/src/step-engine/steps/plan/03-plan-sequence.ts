@@ -14,7 +14,6 @@ import {
   loadPlanEdges,
   loadPlanSkeletons,
   orderSiblingsByDependency,
-  renderPlanMarkdown,
   tooWideToSequence,
 } from '@haive/shared/plan';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
@@ -29,6 +28,10 @@ import {
   applyAgentPatchOnce,
   parsePlanPatch,
 } from './_plan-prompt.js';
+import {
+  PLAN_EXPANSION_CONTEXT_MAX_CHARS,
+  buildPlanExpansionContext,
+} from './_plan-expansion-context.js';
 import {
   REPO_IS_DATA_AUTHORING_LINES,
   UNTRUSTED_FENCE_LEGEND,
@@ -131,12 +134,13 @@ export interface PlanSequenceApply {
 /** Matches 02-plan-coverage's cadence: modest waves, with a per-pass ceiling
  *  that is a runaway guard rather than a number the user has to click through. */
 const SEQUENCE_AGENTS_PER_WAVE = 12;
+export const SEQUENCE_CONTEXT_BUDGET = PLAN_EXPANSION_CONTEXT_MAX_CHARS;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_RE = new RegExp(`^${UUID_SOURCE}$`, 'i');
 
 /** The node id behind a ref, as `applyPlanPatch` resolves it.
  *
- *  `renderPlanMarkdown` prints every id as `node:<uuid>` and the patch contract
+ *  The prompt prints every id as `node:<uuid>` and the patch contract
  *  tells the agent to COPY ids rather than retype them, so an agent obeying both
  *  replies with the prefix — MEASURED on one 400-agent pass, 250 of 400 replies
  *  carried it. The applier strips it (`normalizeOpRefs`), so those agents' ORDER
@@ -415,9 +419,26 @@ export function sequencePassComplete(pendingTargets: number, agentsUsed: number)
 
 export function buildSequencePrompt(
   target: SequenceTarget,
-  children: PlanNodeSkeleton[],
-  planMarkdown: string,
+  nodes: PlanNodeSkeleton[],
+  buildOrder: ReadonlyMap<string, number>,
 ): string {
+  const parent = nodes.find((n) => n.id === target.parentId);
+  if (!parent) throw new Error(`plan node ${target.parentId} is not among the nodes to sequence`);
+  const orderOf = (node: PlanNodeSkeleton): number => {
+    const order = buildOrder.get(node.id);
+    if (order === undefined) throw new Error(`plan node ${node.id} has no build-order number`);
+    return order;
+  };
+  const children = childrenByParent(nodes).get(target.parentId) ?? [];
+  const childLines = children.map(
+    (child, i) => `${i}. #${orderOf(child)} ${safeTitle(child.title)} (\`node:${child.id}\`)`,
+  );
+  const context = buildPlanExpansionContext(
+    nodes,
+    parent,
+    SEQUENCE_CONTEXT_BUDGET - childLines.join('\n').length,
+    { buildOrder },
+  );
   return [
     'You are deciding the ORDER in which one part of a project plan gets built.',
     '',
@@ -429,18 +450,21 @@ export function buildSequencePrompt(
     '',
     UNTRUSTED_FENCE_LEGEND.join('\n'),
     '',
-    'Here is the plan as it stands, for context on what exists elsewhere. Every node carries',
-    'its current build-order number, so you can see where your part sits in the whole.',
+    'Here is the plan around your node, for context on what exists elsewhere: its ancestors, its',
+    'siblings and its children, each with an id, then a sampled outline of the rest of the plan by',
+    'title alone. The lines beside each part say how much of it is shown. Every node shown carries',
+    'its current build-order number as `#N`, so you can see where your part sits in the whole. A',
+    'node that appears only in the outline has no id, so it cannot be named in a `depends_on`.',
     '',
-    fencedAgentBlock(planMarkdown),
+    fencedAgentBlock(context),
     '',
     '## Your node',
-    `${safeTitle(target.parentTitle)} (\`node:${target.parentId}\`)`,
+    `#${orderOf(parent)} ${safeTitle(target.parentTitle)} (\`node:${target.parentId}\`)`,
     '',
     'Its children, in their CURRENT order — which is the order an agent happened to write them',
     'in, not a considered one:',
     '',
-    ...children.map((c, i) => `${i}. ${safeTitle(c.title)} (\`node:${c.id}\`)`),
+    ...childLines,
     '',
     'Decide the order a developer would actually build these in: foundations, data shapes and',
     'contracts before the things that use them; a thing before the thing that tests or presents',
@@ -475,27 +499,21 @@ async function buildWave(
   wave: number,
 ) {
   const byParent = childrenByParent(nodes);
-  // A detect payload persisted before the width cap can still name a wider run.
-  const sendable = detected.targets.filter(
-    (t) => !tooWideToSequence(byParent.get(t.parentId) ?? []),
-  );
+  // A detect payload persisted before the width cap can still name a wider run, and one persisted
+  // before the plan was edited can still name a run that is gone.
+  const sendable = detected.targets.filter((t) => {
+    const run = byParent.get(t.parentId);
+    return run !== undefined && !tooWideToSequence(run);
+  });
   const slice = sendable.slice(0, dispatchCount(sendable.length, detected.agentsUsed));
   if (slice.length === 0) return [];
-  // Rendered ONCE per wave rather than per agent: it is the same document for
-  // every one of them and a plan is thousands of nodes.
-  const planMarkdown = await renderPlanMarkdown(ctx.db, detected.repositoryId!, {
-    titlesOnly: true,
-    maxDepth: 3,
-    // The order this agent returns is COMPARED against the recorded
-    // `depends_on` edges. Showing it those edges would make it an echo of the
-    // claim under test rather than a second reader of the work.
-    omitLinks: true,
-  });
+  const edges = await loadPlanEdges(ctx.db, detected.repositoryId!);
+  const buildOrder = computePlanSequence(nodes, edges).sequenceById;
   return slice.map((target) => ({
     agentId: sequenceAgentId(target.parentId, wave),
     agentTitle: `Order: ${target.parentTitle}`,
     roleKey: 'expand',
-    prompt: buildSequencePrompt(target, byParent.get(target.parentId) ?? [], planMarkdown),
+    prompt: buildSequencePrompt(target, nodes, buildOrder),
   }));
 }
 
@@ -635,7 +653,7 @@ export function agentOrdinals(rows: MiningRow[]): Map<string, number> {
  * The independent second opinion.
  *
  * Each agent was asked to order one sibling run WITHOUT being shown the
- * `depends_on` edges among those siblings (`omitLinks` on the plan render). So
+ * `depends_on` edges among those siblings (the plan context carries none). So
  * where its stated order puts a node BEFORE something that node is recorded as
  * waiting for, two independent judgements have contradicted each other about
  * the same pair.
