@@ -2308,10 +2308,11 @@ project-state sync filled from the checkout's record. `renderContextAdmitsUpgrad
 (`api/src/lib/onboarding-state.ts`) is a third term, tried only after both fail. It requires that
 the column decodes (a refused one reads as NULL, as 01 reads it), that the repository is `ready`
 with a root, and that the verdict above calls it onboarded, which reads the reset epoch and
-refuses beside a live onboarding. The two older terms read neither. A clone admitted only that way
-and recorded by no artifact row has never been planned on this install, so nothing there can say
-what changed. upgrade-status therefore offers it the first upgrade (`firstUpgradeOnThisInstall`),
-because the banner is the only place one starts.
+refuses beside a live onboarding. The two older terms read neither. For a clone the column admits
+and no artifact row records, nothing on this install can say what changed. upgrade-status
+therefore offers it the first upgrade (`firstUpgradeOnThisInstall`) until a row records it,
+because the banner is the only place one starts. The offer outlives an upgrade task: one cancelled
+at 02's form has written no row.
 
 **That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
