@@ -124,7 +124,10 @@ export const FACET_VALUE_ALIAS_PAIRS: ReadonlyArray<{
  *  the entry side trades one silent mismatch for another. */
 export function canonicalizeFacetValue(dimension: string, value: string): string {
   const v = value.trim().toLowerCase();
-  return FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]?.[v] ?? v;
+  const table = Object.hasOwn(FACET_VALUE_ALIASES, dimension)
+    ? FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]
+    : undefined;
+  return table && Object.hasOwn(table, v) ? (table[v] ?? v) : v;
 }
 
 /** The characters the SQL engine trims from a facet value, as `chr()` code points.

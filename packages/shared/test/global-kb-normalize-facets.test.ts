@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalFacetValueSql,
+  canonicalizeFacetValue,
   FACET_MAJOR_PARENTS,
   normalizeFacets,
   orphanFacetMajors,
   orphanFacetMajorSql,
   FACET_TRIM_CODE_POINTS_SQL,
+  FACET_VALUE_ALIAS_PAIRS,
   trimFacetValueSql,
 } from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
@@ -85,6 +87,18 @@ describe('extractProjectFacets normalisation', () => {
 // One definition, two engines — the shape `identifierTsvSql` established. A hand-written SQL
 // copy of this rule is exactly what drifted: the backfill lowercased and did neither the trim
 // nor the alias, so legacy rows were rewritten into tokens no project reports.
+describe('canonicalizeFacetValue and inherited keys', () => {
+  it('returns a free-text value named like an Object prototype member as written', () => {
+    expect(canonicalizeFacetValue('database', 'constructor')).toBe('constructor');
+    expect(canonicalizeFacetValue('database', 'toString')).toBe('tostring');
+    expect(canonicalizeFacetValue('constructor', 'name')).toBe('name');
+  });
+
+  it('still folds a real alias', () => {
+    expect(canonicalizeFacetValue('database', ' PostgreSQL ')).toBe('postgres');
+  });
+});
+
 describe('canonicalFacetValueSql', () => {
   it('trims and lowercases before folding an alias, in that order', () => {
     const sql = canonicalFacetValueSql('kv.key', 'v');
@@ -99,6 +113,20 @@ describe('canonicalFacetValueSql', () => {
     // The SQL is generated from the same table, so the pairing is asserted rather than assumed.
     expect(normalizeFacets({ database: ['  PostgreSQL '] })).toEqual({ database: ['postgres'] });
     expect(canonicalFacetValueSql('k', 'v')).toContain("'postgres'");
+  });
+});
+
+describe('drupal7 is not a stored-vocabulary alias', () => {
+  it('leaves a drupal7 entry as written', () => {
+    expect(normalizeFacets({ framework: ['drupal7'] }).framework).toEqual(['drupal7']);
+  });
+
+  it('has no alias pair that folds drupal7', () => {
+    expect(FACET_VALUE_ALIAS_PAIRS.some((pair) => pair.from === 'drupal7')).toBe(false);
+  });
+
+  it('does not mention drupal7 in the generated backfill SQL', () => {
+    expect(canonicalFacetValueSql('k', 'v')).not.toContain('drupal7');
   });
 });
 
