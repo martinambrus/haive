@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { cliProviderNameSchema } from '../schemas/cli-providers.js';
+import { newestArtifactsFirst } from '../templates/manifest.js';
 import { renderSchema, type ProjectRender } from './record.js';
 
 const agentTargetSchema = z.strictObject({
@@ -36,4 +37,39 @@ export function portableRender(context: { [K in keyof ProjectRender]: unknown })
     customAgentSpecs: context.customAgentSpecs,
     lspLanguages: context.lspLanguages,
   } as ProjectRender;
+}
+
+/** What a reader knows of one live artifact row's render-context snapshot. */
+export interface SnapshotRowFacts {
+  id: string;
+  generatedAt: Date | null;
+  /** Null when the database answered NULL: the row holds no snapshot at all. */
+  hasSnapshot: boolean | null;
+  /** The snapshot holds a boolean `rtkEnabled`. Null for a snapshot without one. */
+  rtkRecorded: boolean | null;
+}
+
+/** The row an upgrade renders from: the newest that recorded an RTK choice (a snapshot from before
+ *  RTK would keep the live RTK switch out of the plan), else the newest holding a snapshot. */
+export function pickSnapshotRow<R extends SnapshotRowFacts>(rows: readonly R[]): R | null {
+  const newest = newestArtifactsFirst(rows);
+  return (
+    newest.find((r) => r.rtkRecorded === true) ?? newest.find((r) => r.hasSnapshot === true) ?? null
+  );
+}
+
+export type HistoryOrigin =
+  { kind: 'onboarding'; rtkRecorded: boolean } | { kind: 'blank' } | { kind: 'none' };
+
+/** Where a repository with no usable row recovers its context: the step 07 output of its last
+ *  completed onboarding, else the blank scaffold's. An onboarding without that output has none. */
+export function historyOrigin(input: {
+  /** Null when no onboarding completed. */
+  onboarding: { detected: boolean; rtkRecorded: boolean } | null;
+  source: string;
+}): HistoryOrigin {
+  const { onboarding, source } = input;
+  if (onboarding === null) return source === 'blank' ? { kind: 'blank' } : { kind: 'none' };
+  if (!onboarding.detected) return { kind: 'none' };
+  return { kind: 'onboarding', rtkRecorded: onboarding.rtkRecorded };
 }

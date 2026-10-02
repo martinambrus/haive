@@ -9,7 +9,6 @@ import {
   computeSetHash,
   getHaiveVersion,
   holdsRtkSettings,
-  newestArtifactsFirst,
   normalizeContent,
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
@@ -18,6 +17,7 @@ import {
   type RollbackUpgradeResponse,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { historyOrigin, pickSnapshotRow, type SnapshotRowFacts } from '@haive/shared/project-state';
 import {
   importRulesFilesFor,
   readUpgradeFile,
@@ -65,20 +65,10 @@ export async function rulesImportGaps(
   return { missing, linked };
 }
 
-/** The providers the newest live snapshot that recorded an RTK choice names, the one 01's
- *  `pickRenderSnapshot` renders RTK from. None for a repository whose snapshots predate RTK. */
-export function recordedRtkProviders(
-  rows: ReadonlyArray<{
-    id: string;
-    generatedAt: Date | null;
-    rtkRecorded: boolean | null;
-    snapshotProviders: unknown;
-  }>,
-): string[] | null {
-  const row = newestArtifactsFirst(rows).find((r) => r.rtkRecorded === true);
-  if (!row) return null;
-  if (!Array.isArray(row.snapshotProviders)) return [];
-  return row.snapshotProviders.flatMap((p: unknown) => {
+/** The providers a snapshot's `enabledCliProviders` names. */
+function snapshotProviderNames(providers: unknown): string[] {
+  if (!Array.isArray(providers)) return [];
+  return providers.flatMap((p: unknown) => {
     const name = (p as { name?: unknown } | null)?.name;
     return typeof name === 'string' ? [name] : [];
   });
@@ -90,12 +80,11 @@ export function recordedRtkProviders(
 async function rtkChoiceFollowsLive(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  liveRows: ReadonlyArray<{ hasSnapshot: boolean | null; rtkRecorded: boolean | null }>,
+  liveRows: ReadonlyArray<SnapshotRowFacts>,
   source: string,
 ): Promise<boolean> {
-  if (liveRows.some((r) => r.hasSnapshot === true)) {
-    return liveRows.some((r) => r.rtkRecorded === true);
-  }
+  const row = pickSnapshotRow(liveRows);
+  if (row) return row.rtkRecorded === true;
   const [onboarding] = await db
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -108,7 +97,7 @@ async function rtkChoiceFollowsLive(
     )
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
-  if (!onboarding) return source === 'blank';
+  if (!onboarding) return historyOrigin({ onboarding: null, source }).kind === 'blank';
   const [generate] = await db
     .select({
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
@@ -121,7 +110,11 @@ async function rtkChoiceFollowsLive(
       ),
     )
     .limit(1);
-  return generate?.recorded === true;
+  const history = historyOrigin({
+    onboarding: { detected: generate !== undefined, rtkRecorded: generate?.recorded === true },
+    source,
+  });
+  return history.kind === 'onboarding' && history.rtkRecorded;
 }
 
 /** The RTK settings files no live row records that still hold RTK's render or hook, which 01 offers
@@ -348,7 +341,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   );
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
-  const rtkProviders = repo.rtkEnabled ? recordedRtkProviders(liveArtifacts) : null;
+  const rtkRow = repo.rtkEnabled ? pickSnapshotRow(liveArtifacts) : null;
+  const rtkProviders =
+    rtkRow?.rtkRecorded === true ? snapshotProviderNames(rtkRow.snapshotProviders) : null;
   if (rtkProviders) {
     for (const m of manifestCache) {
       if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {

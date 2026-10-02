@@ -14,10 +14,10 @@ import {
   getCliProviderMetadata,
   getHaiveVersion,
   holdsRtkSettings,
-  newestArtifactsFirst,
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { historyOrigin, pickSnapshotRow } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -187,9 +187,14 @@ export async function loadLiveArtifacts(
 export function pickRenderSnapshot(
   liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
 ): Record<string, unknown> | null {
-  const rows = newestArtifactsFirst(liveRows);
-  const recorded = rows.find((r) => typeof r.formValuesSnapshot?.rtkEnabled === 'boolean');
-  return (recorded ?? rows.find((r) => r.formValuesSnapshot))?.formValuesSnapshot ?? null;
+  const facts = liveRows.map((r) => ({
+    id: r.id,
+    generatedAt: r.generatedAt,
+    hasSnapshot: Boolean(r.formValuesSnapshot),
+    rtkRecorded: typeof r.formValuesSnapshot?.rtkEnabled === 'boolean',
+    formValuesSnapshot: r.formValuesSnapshot,
+  }));
+  return pickSnapshotRow(facts)?.formValuesSnapshot ?? null;
 }
 
 /** Load the render context for this repository. Tries a live artifact's snapshot
@@ -223,7 +228,32 @@ async function resolveRenderContext(
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
   const priorTaskId = priorOnboarding[0]?.id ?? null;
-  if (!priorTaskId) {
+  const [repo] = await ctx.db
+    .select({ source: schema.repositories.source, name: schema.repositories.name })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  let detect: Partial<GenerateFilesDetect> | null = null;
+  if (priorTaskId) {
+    const stepRow = await ctx.db
+      .select({ detectOutput: schema.taskSteps.detectOutput })
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, priorTaskId),
+          eq(schema.taskSteps.stepId, '07-generate-files'),
+        ),
+      )
+      .limit(1);
+    detect = (stepRow[0]?.detectOutput ?? null) as Partial<GenerateFilesDetect> | null;
+  }
+  const history = historyOrigin({
+    onboarding: priorTaskId
+      ? { detected: detect !== null, rtkRecorded: detect?.rtkEnabled !== undefined }
+      : null,
+    source: repo?.source ?? '',
+  });
+  if (history.kind === 'blank') {
     // A repository created BLANK has its scaffold seeded at init and has never
     // been onboarded, so there is no snapshot and no step-07 output to recover
     // from — the one state this function otherwise reports as unresolvable,
@@ -234,32 +264,14 @@ async function resolveRenderContext(
     // once but every trace is gone" is genuinely ambiguous, and adopting files
     // against a blank context there would record the wrong baseline for a later
     // rollback. Throwing stays the honest answer for that case.
-    const [repo] = await ctx.db
-      .select({ source: schema.repositories.source, name: schema.repositories.name })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .limit(1);
-    if (repo?.source !== 'blank') return null;
     const renderCtx = await buildBlankRenderContext(ctx.db, {
       userId: ctx.userId,
       repositoryId,
-      repoName: repo.name ?? null,
+      repoName: repo?.name ?? null,
     });
     return { renderCtx, rtkLive: true };
   }
-
-  const stepRow = await ctx.db
-    .select({ detectOutput: schema.taskSteps.detectOutput })
-    .from(schema.taskSteps)
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, priorTaskId),
-        eq(schema.taskSteps.stepId, '07-generate-files'),
-      ),
-    )
-    .limit(1);
-  const detect = (stepRow[0]?.detectOutput ?? null) as Partial<GenerateFilesDetect> | null;
-  if (!detect) return null;
+  if (history.kind === 'none' || !detect) return null;
 
   // Onboarding tasks completed before the manifest-versioning work stored
   // detectOutput without `agentTargets`. Fall back to a claude-agents default
@@ -308,7 +320,7 @@ async function resolveRenderContext(
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
   };
-  return withLiveRtk(ctx, repositoryId, recorded, detect.rtkEnabled !== undefined);
+  return withLiveRtk(ctx, repositoryId, recorded, history.rtkRecorded);
 }
 
 /** A render context, and whether its RTK choice is the repository's live one. */
