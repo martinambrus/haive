@@ -2726,7 +2726,9 @@ bytes its row records as Haive's, or an RTK settings file whose hook can come ou
 person's bytes, a link, a file past 1 MiB) stays quiet, since no plan could finish it. Custom bundle
 items and the cli-rules region keep their per-repository comparison, and a NULL set reads as the
 installed one. A repository with no claim keeps its set until 01's first plan: with no claims a
-recomputed set makes every applicable template read as changed.
+recomputed set makes every applicable template read as changed. Boot recomputes the set of every
+repository with a column and a claim (`recomputeSyncedApplicableSets`), since a sync from before
+the set followed the column moved the column alone and no later sync of the same files repairs it.
 
 **An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
 never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
