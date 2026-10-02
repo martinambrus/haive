@@ -477,21 +477,26 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ),
       columns: { id: true },
     });
+    // The banner is the only place an upgrade starts, so a clone only its column admits is offered
+    // one until a row records it, whatever became of an upgrade that recorded nothing.
+    firstUpgradeOnThisInstall =
+      !priorOnboarding && (await renderContextAdmitsUpgrade(db, userId, repo));
     // POST /tasks starts an upgrade only on an onboarded repository, so one any upgrade ran on is one.
-    const [anyUpgrade] = priorOnboarding
-      ? []
-      : await db
-          .select({ id: schema.tasks.id })
-          .from(schema.tasks)
-          .where(
-            and(
-              eq(schema.tasks.repositoryId, repositoryId),
-              eq(schema.tasks.userId, userId),
-              eq(schema.tasks.type, 'onboarding_upgrade'),
-            ),
-          )
-          .limit(1);
-    if (!priorOnboarding && !anyUpgrade && !(await renderContextAdmitsUpgrade(db, userId, repo))) {
+    const [anyUpgrade] =
+      priorOnboarding || firstUpgradeOnThisInstall
+        ? []
+        : await db
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(
+              and(
+                eq(schema.tasks.repositoryId, repositoryId),
+                eq(schema.tasks.userId, userId),
+                eq(schema.tasks.type, 'onboarding_upgrade'),
+              ),
+            )
+            .limit(1);
+    if (!priorOnboarding && !firstUpgradeOnThisInstall && !anyUpgrade) {
       const res: UpgradeStatusResponse = {
         repositoryId,
         hasUpgradeAvailable: false,
@@ -506,9 +511,6 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       };
       return c.json(res);
     }
-    // Only the render context admitted it, and no row says what is installed: this install has
-    // never planned it, and the banner is the only place an upgrade starts.
-    firstUpgradeOnThisInstall = !priorOnboarding && !anyUpgrade;
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.

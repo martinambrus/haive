@@ -652,6 +652,18 @@ describe('upgrade-status and a clone holding a render context column', () => {
     expect(body.firstUpgradeOnThisInstall).toBe(true);
   });
 
+  // A first upgrade cancelled at 02's form writes no row, and the next one must still be offered.
+  it('U13c: keeps offering the first upgrade after an upgrade that recorded no row', async () => {
+    state.rows.set(schema.cliProviders, [{ ...claude, enabled: false }]);
+    state.rows.set(schema.tasks, [{ id: 'upgrade-1', metadata: null }]);
+
+    const body = await status();
+
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.firstUpgradeOnThisInstall).toBe(true);
+  });
+
   it('U13b: says nothing of a first upgrade once a row records the repository', async () => {
     inSync([claude]);
     clone();

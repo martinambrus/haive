@@ -37,7 +37,7 @@ interface UpgradeStatusResponse {
   rtkBlockLeftovers?: string[];
   /** RTK settings files no row records that still hold its hook; an upgrade offers to take it out. */
   rtkSettingsLeftovers?: string[];
-  /** A clone this install has never planned; older API versions omit it. */
+  /** A clone no row on this install records; older API versions omit it. */
   firstUpgradeOnThisInstall?: boolean;
 }
 
