@@ -50,7 +50,11 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
-import { loadOnboardingTaskFacts, NO_ONBOARDING_TASKS } from '../../lib/onboarding-state.js';
+import {
+  loadOnboardingTaskFacts,
+  NO_ONBOARDING_TASKS,
+  renderContextAdmitsUpgrade,
+} from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
@@ -459,7 +463,27 @@ taskRoutes.post('/', async (c) => {
       columns: { id: true },
     });
     if (!priorOnboarding && !priorArtifact) {
-      throw new HttpError(409, 'No completed onboarding found for this repository; cannot upgrade');
+      const repo = await db.query.repositories.findFirst({
+        where: and(
+          eq(schema.repositories.id, body.repositoryId),
+          eq(schema.repositories.userId, userId),
+        ),
+        columns: {
+          id: true,
+          renderContext: true,
+          status: true,
+          storagePath: true,
+          localPath: true,
+          onboardedAt: true,
+          onboardingResetAt: true,
+        },
+      });
+      if (!repo || !(await renderContextAdmitsUpgrade(db, userId, repo))) {
+        throw new HttpError(
+          409,
+          'No completed onboarding found for this repository; cannot upgrade',
+        );
+      }
     }
   }
 

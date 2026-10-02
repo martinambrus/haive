@@ -13,6 +13,7 @@ import {
   RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 
 const { state } = vi.hoisted(() => ({
@@ -552,5 +553,229 @@ describe('upgrade-status and the RTK settings files no row records', () => {
     expect((await status()).rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
     state.rows.set(schema.taskSteps, [{ recorded: false }]);
     expect((await status()).rtkSettingsLeftovers).toBeUndefined();
+  });
+});
+
+/**
+ * B1.4c controls U1-U12 (design-c.md "Controls"). The hand mock above ignores every WHERE, so no case
+ * here can hold a task row: the states of the onboarding verdict that need one are POST /tasks's, in
+ * upgrade-gate-render-context.test.ts, which asks the same function.
+ */
+describe('upgrade-status and a clone holding a render context column', () => {
+  const claudeRtk = { templateId: 'rtk.claude-settings', schemaVersion: 1, contentHash: 'h-rtk-c' };
+  const geminiRtk = { templateId: 'rtk.gemini-settings', schemaVersion: 1, contentHash: 'h-rtk-g' };
+  const portableOnly = (over: Record<string, unknown> = {}) => ({
+    projectInfo: { name: 'acme' },
+    framework: 'drupal',
+    acceptedAgentIds: ['code-reviewer'],
+    customAgentSpecs: [],
+    lspLanguages: [],
+    rtkChoiceRecorded: true,
+    ...over,
+  });
+  const fullColumn = (over: Record<string, unknown> = {}) =>
+    portableOnly({
+      agentTargets: [{ dir: '.gemini/agents', format: 'markdown' }],
+      enabledCliProviders: [{ name: 'gemini', rulesFile: 'GEMINI.md', rulesFileMode: 'import' }],
+      rtkEnabled: true,
+      ...over,
+    });
+
+  let repo: string;
+  const markers = async (except?: string) => {
+    for (const rel of [KB_DIR, '.claude/agents', '.claude/skills']) {
+      if (rel !== except) await mkdir(path.join(repo, rel), { recursive: true });
+    }
+    if (except !== '.claude/workflow-config.json') {
+      await mkdir(path.join(repo, '.claude'), { recursive: true });
+      await writeFile(path.join(repo, '.claude/workflow-config.json'), '{}\n', 'utf8');
+    }
+  };
+
+  /** A clone: the sync gave it a column, and nothing else of Haive's is recorded. */
+  const clone = (over: Record<string, unknown> = {}) => {
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: null,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+      source: 'git_https',
+      status: 'ready',
+      onboardedAt: null,
+      onboardingResetAt: null,
+      renderContext: portableOnly(),
+      ...over,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-column-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    await markers();
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, []);
+    for (const t of [claudeRtk, geminiRtk]) {
+      state.rows.get(schema.templateManifestCache)!.push({
+        ...t,
+        templateKind: 'rtk-config',
+        setHash: 's',
+      });
+    }
+    clone();
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  // U1
+  it('U1: is onboarded, and offers an upgrade, for a clone no row records', async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.installedTemplateSetHash).toBeNull();
+    expect(body.changedTemplateIds).toContain(CLI_RULES_TEMPLATE_ID);
+  });
+
+  // U2: the banner's half of what 01 offers on the same repository (upgrade-plan-render-context.test.ts, W2)
+  it('U2: offers the RTK settings file it finds for removal once RTK is off, as the plan does', async () => {
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+    await writeFile(
+      path.join(repo, 'AGENTS.md'),
+      `# rules\n${RTK_REF_MARKER_START}\nRTK is here.\n${RTK_REF_MARKER_END}\n`,
+      'utf8',
+    );
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+    expect(body.rtkBlockLeftovers).toEqual(['AGENTS.md']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  // U3
+  it("U3: adds claude's RTK template once RTK is on, for the CLIs the caller has enabled", async () => {
+    clone({ rtkEnabled: true });
+    const body = await status();
+    expect(body.changedTemplateIds).toContain(claudeRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+  });
+
+  // U4
+  it("U4: reads the providers a full column names, not the caller's", async () => {
+    clone({ rtkEnabled: true, renderContext: fullColumn() });
+    const body = await status();
+    expect(body.changedTemplateIds).toContain(geminiRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+  });
+
+  it('U4b: reads the providers of a column that holds an empty list as none', async () => {
+    clone({ rtkEnabled: true, renderContext: fullColumn({ enabledCliProviders: [] }) });
+    const body = await status();
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+  });
+
+  // U5
+  it('U5: reads the column ahead of the rows: a column that recorded no RTK choice adds no RTK template', async () => {
+    inSync([claude]);
+    for (const t of [claudeRtk, geminiRtk]) {
+      state.rows.get(schema.templateManifestCache)!.push({
+        ...t,
+        templateKind: 'rtk-config',
+        setHash: 's',
+      });
+    }
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        hasSnapshot: true,
+        rtkRecorded: true,
+        snapshotProviders: [{ name: 'claude-code' }],
+      })),
+    );
+    clone({
+      rtkEnabled: true,
+      applicableTemplateIds: ['agent.x'],
+      renderContext: portableOnly({ rtkChoiceRecorded: false }),
+    });
+    const body = await status();
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+  });
+
+  it('U5b: does not offer the RTK settings file a column that recorded no choice leaves, as the plan does not', async () => {
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+    clone({ renderContext: portableOnly({ rtkChoiceRecorded: false }) });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+  });
+
+  // U6, and the states of the same verdict that need no task row
+  it.each([KB_DIR, '.claude/agents', '.claude/skills', '.claude/workflow-config.json'])(
+    'U6: is not onboarded with %s missing from the checkout',
+    async (missing) => {
+      await rm(repo, { recursive: true, force: true });
+      await mkdir(repo, { recursive: true });
+      await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+      await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+      await markers(missing);
+      const body = await status();
+      expect(body.isOnboarded).toBe(false);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    },
+  );
+
+  it.each(['error', 'cloning'])(
+    'U7: is not onboarded while the repository is %s',
+    async (repoStatus) => {
+      clone({ status: repoStatus });
+      const body = await status();
+      expect(body.isOnboarded).toBe(false);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    },
+  );
+
+  it('U8: is not onboarded after a reset that nothing answered', async () => {
+    clone({ onboardingResetAt: new Date(1000) });
+    expect((await status()).isOnboarded).toBe(false);
+  });
+
+  it('U9: is onboarded again once the repository was stamped after its reset', async () => {
+    clone({ onboardingResetAt: new Date(1000), onboardedAt: new Date(2000) });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('U12: reads the local path of a repository that has no storage path', async () => {
+    clone({ storagePath: null, localPath: repo });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('U10: is not onboarded for a repository with no checkout to read', async () => {
+    clone({ storagePath: null, localPath: null });
+    expect((await status()).isOnboarded).toBe(false);
+  });
+
+  it.each([
+    ['NULL', { renderContext: null }],
+    ['absent', { renderContext: undefined }],
+    ['an empty object', { renderContext: {} }],
+    ['an unknown key', { renderContext: portableOnly({ somethingNew: true }) }],
+    ['no rtkChoiceRecorded', { renderContext: portableOnly({ rtkChoiceRecorded: undefined }) }],
+  ])('U11: is not onboarded when the column is %s', async (_name, over) => {
+    clone(over);
+    const body = await status();
+    expect(body.isOnboarded).toBe(false);
+    expect(body.hasUpgradeAvailable).toBe(false);
   });
 });

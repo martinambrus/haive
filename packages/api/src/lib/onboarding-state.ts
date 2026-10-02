@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { readRenderContextColumn } from '@haive/shared/project-state';
 import type { Database } from '../db.js';
 
 /**
@@ -289,4 +290,33 @@ export function resolveOnboardingVerdict(input: {
     inProgressTaskId,
     canMarkOnboarded: markersPresent && !onboarded && inProgressTaskId === null && !resetUnanswered,
   };
+}
+
+/** Whether the render context column vouches for an upgrade no row or onboarding does, as on a
+ *  clone: 01 renders from it, and the repos page shows the repository as onboarded. */
+export async function renderContextAdmitsUpgrade(
+  db: Database,
+  userId: string,
+  repo: {
+    id: string;
+    renderContext: unknown;
+    status: string;
+    storagePath: string | null;
+    localPath: string | null;
+    onboardedAt: Date | null;
+    onboardingResetAt: Date | null;
+  },
+): Promise<boolean> {
+  if (readRenderContextColumn(repo.renderContext).kind !== 'column') return false;
+  const root = repo.storagePath ?? repo.localPath;
+  if (repo.status !== 'ready' || !root) return false;
+  const { missing } = await checkOnboardingMarkers(root);
+  const facts =
+    (await loadOnboardingTaskFacts(db, userId, [repo.id])).get(repo.id) ?? NO_ONBOARDING_TASKS;
+  return resolveOnboardingVerdict({
+    missing,
+    onboardedAt: repo.onboardedAt,
+    onboardingResetAt: repo.onboardingResetAt,
+    facts,
+  }).onboarded;
 }

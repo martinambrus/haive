@@ -34,7 +34,7 @@ import {
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { LIVE_TASK_STATUSES } from '../lib/onboarding-state.js';
+import { LIVE_TASK_STATUSES, renderContextAdmitsUpgrade } from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -490,7 +490,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
             ),
           )
           .limit(1);
-    if (!priorOnboarding && !anyUpgrade) {
+    if (!priorOnboarding && !anyUpgrade && !(await renderContextAdmitsUpgrade(db, userId, repo))) {
       const res: UpgradeStatusResponse = {
         repositoryId,
         hasUpgradeAvailable: false,
