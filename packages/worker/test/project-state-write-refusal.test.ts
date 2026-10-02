@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getTableColumns, getTableName, is } from 'drizzle-orm';
@@ -8,7 +8,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { renderContextColumnSchema } from '@haive/shared/project-state';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import {
+  failIfColumnStale,
+  ProjectStateWriteError,
+  writeProjectStateRecord,
+} from '../src/project-state/write.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -52,7 +56,9 @@ const valid = (): Context => ({
   projectInfo: { name: 'acme', framework: 'drupal' },
   framework: 'drupal',
   acceptedAgentIds: ['security-auditor', 'code-reviewer'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert' }],
+  customAgentSpecs: [
+    { id: 'billing-expert', title: 'Billing expert', description: 'Knows the billing module' },
+  ],
   agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
   lspLanguages: ['php-extended'],
   rtkEnabled: true,
@@ -60,14 +66,20 @@ const valid = (): Context => ({
 });
 
 /** A repository, the database that would hold its render context, and the statements it is sent. */
-async function setup() {
+async function setup(seedColumn: Context | null = null) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-refusal-'));
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
   const fake = createFakeDb({ repositories, projectStateSync: sync });
-  fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   const column = keyOf(repositories, 'render_context');
+  fake.insert(repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    [column]: seedColumn,
+  });
 
   const statements: string[] = [];
   fake.hooks.beforeLock = () => void statements.push('lock');
@@ -84,6 +96,7 @@ async function setup() {
     });
   return {
     root,
+    fake,
     write,
     statements,
     renderContext: () => fake.rows(repositories).find((r) => r.id === REPO)?.[column] ?? null,
@@ -120,19 +133,55 @@ describe('writeProjectStateRecord: a context the column schema refuses', () => {
       (): Context => ({ ...valid(), someUnknownKey: 'x' }),
       /someUnknownKey/,
     ],
-  ] as const)('rejects %s and writes no file and no row', async (_what, bad, reason) => {
-    const refused = bad();
-    expect(
-      renderContextColumnSchema.safeParse({ ...refused, rtkChoiceRecorded: true }).success,
-    ).toBe(false);
-    const s = await setup();
+  ] as const)(
+    'rejects %s, writes no file or sync row, and clears the column',
+    async (_what, bad, reason) => {
+      const refused = bad();
+      expect(
+        renderContextColumnSchema.safeParse({ ...refused, rtkChoiceRecorded: true }).success,
+      ).toBe(false);
+      const s = await setup({ ...valid(), rtkChoiceRecorded: true });
 
-    await expect(s.write(refused)).rejects.toThrow(reason);
+      await expect(s.write(refused)).rejects.toThrow(reason);
 
-    expect(existsSync(join(s.root, STATE_DIR))).toBe(false);
-    expect(await listFiles(s.root)).toEqual([]);
-    expect(s.statements).toEqual([]);
+      expect(existsSync(join(s.root, STATE_DIR))).toBe(false);
+      expect(await listFiles(s.root)).toEqual([]);
+      expect(s.statements).toEqual(['lock', 'update repositories']);
+      expect(s.renderContext()).toBeNull();
+      expect(s.syncRows()).toEqual([]);
+    },
+  );
+
+  // The column would otherwise read as newer than the rows the writer just wrote.
+  it('clears the column when a record file cannot be written', async () => {
+    const s = await setup({ ...valid(), rtkChoiceRecorded: true });
+    await symlink(tmpdir(), join(s.root, '.haive-data'));
+
+    const err = await s.write(valid()).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ProjectStateWriteError);
+    expect((err as ProjectStateWriteError).columnStale).toBe(false);
+    expect(() => failIfColumnStale(err)).not.toThrow();
     expect(s.renderContext()).toBeNull();
     expect(s.syncRows()).toEqual([]);
+  });
+
+  // A writer catches the failure as a warning, which would leave this column outranking its rows.
+  it('marks the column stale when it cannot be cleared either, which fails the writer', async () => {
+    const s = await setup({ ...valid(), rtkChoiceRecorded: true });
+    await symlink(tmpdir(), join(s.root, '.haive-data'));
+    s.fake.hooks.beforeUpdate = () => {
+      throw new Error('connection lost');
+    };
+
+    const err = await s.write(valid()).catch((e: unknown) => e);
+
+    expect((err as ProjectStateWriteError).columnStale).toBe(true);
+    expect(() => failIfColumnStale(err)).toThrow(err as Error);
+    expect(s.renderContext()).not.toBeNull();
+  });
+
+  it('lets any other error through as a warning', () => {
+    expect(() => failIfColumnStale(new Error('not a record write'))).not.toThrow();
   });
 });

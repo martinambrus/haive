@@ -24,6 +24,7 @@ import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { holdImportedMcpServers } from './sandbox/mcp-config.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
+import { recomputeSyncedApplicableSets } from './project-state/sync.js';
 
 const log = logger.child({ module: 'data-migrations' });
 
@@ -101,6 +102,7 @@ const DATA_MIGRATIONS: DataMigration[] = [
   // boot for the whole rewrite; every examined row is written (an unobservable one as
   // `coverage: 'none'`), which is what makes the selection shrink to nothing.
   { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
+  { id: 'recomputeSyncedApplicableSets', kind: 'convergent', run: recomputeSyncedApplicableSets },
   // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.

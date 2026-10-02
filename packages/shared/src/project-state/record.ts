@@ -30,7 +30,7 @@ export const renderSchema = z.strictObject({
   projectInfo: jsonObject,
   framework: z.string().nullable(),
   acceptedAgentIds: z.array(z.string()),
-  customAgentSpecs: z.array(jsonObject),
+  customAgentSpecs: z.array(z.looseObject({ id: z.string(), description: z.string() })),
   lspLanguages: z.array(z.string()),
 });
 

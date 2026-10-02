@@ -5,7 +5,7 @@ import {
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { and, desc, eq, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_RULES_END,
@@ -27,7 +27,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { writeProjectStateRecord } from '../../../project-state/write.js';
+import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
 import {
@@ -114,6 +114,9 @@ interface RollbackDetect {
   /** Rules files the upgrade took an RTK block out of. Absent from a payload detected before the
    *  upgrade recorded them. */
   rtkBlockStrips?: RtkBlockStrip[];
+  /** Rows the upgrade untracked, each put back live where no live row stands at its path. Absent
+   *  from a payload detected before the upgrade recorded them. */
+  untrackedRowIds?: string[];
 }
 
 interface RollbackOutput extends RollbackDetect {
@@ -270,7 +273,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       ?.output as
       | Pick<
           UpgradeApplyOutput,
-          'createdPaths' | 'retiredRowIds' | 'removedPaths' | 'rtkBlockStrips'
+          'createdPaths' | 'retiredRowIds' | 'removedPaths' | 'rtkBlockStrips' | 'untrackedRowIds'
         >
       | null
       | undefined;
@@ -387,11 +390,13 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const rtkBlockStrips = (applied?.rtkBlockStrips ?? []).filter((s) =>
       RTK_BLOCK_FILES.includes(s.file),
     );
+    const untrackedRowIds = applied?.untrackedRowIds ?? [];
     if (
       targets.length === 0 &&
       newArtifactsToUndo.length === 0 &&
       unrecordedRewrites.length === 0 &&
-      rtkBlockStrips.length === 0
+      rtkBlockStrips.length === 0 &&
+      untrackedRowIds.length === 0
     ) {
       warnings.push(
         'no live rows or recorded removals attributable to the prior upgrade task; nothing to revert',
@@ -406,6 +411,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       unrecordedRewrites,
       warnings,
       rtkBlockStrips,
+      untrackedRowIds,
     };
   },
 
@@ -448,10 +454,25 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
             .from(schema.onboardingArtifacts)
             .where(inArray(schema.onboardingArtifacts.id, putBackIds))
         : [];
+    const untrackedIds = detected.untrackedRowIds ?? [];
+    const untrackedRows =
+      untrackedIds.length > 0
+        ? await ctx.db
+            .select()
+            .from(schema.onboardingArtifacts)
+            .where(
+              and(
+                inArray(schema.onboardingArtifacts.id, untrackedIds),
+                eq(schema.onboardingArtifacts.repositoryId, detected.repositoryId),
+                isNotNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            )
+        : [];
     const candidateBundleItemIds = new Set<string>();
     for (const templateId of [
       ...detected.targets.map((t) => t.templateId),
       ...retiredRows.map((r) => r.templateId),
+      ...untrackedRows.map((r) => r.templateId),
     ]) {
       const id = extractBundleItemId(templateId);
       if (id) candidateBundleItemIds.add(id);
@@ -657,6 +678,57 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
     }
 
+    // A row the upgrade untracked goes back live where nothing records its path now, an earlier
+    // attempt of this rollback aside. The file was never touched, so nothing on disk changes.
+    if (untrackedRows.length > 0) {
+      const standing = new Set(
+        (
+          await ctx.db
+            .select({ diskPath: schema.onboardingArtifacts.diskPath })
+            .from(schema.onboardingArtifacts)
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.repositoryId, detected.repositoryId),
+                inArray(
+                  schema.onboardingArtifacts.diskPath,
+                  untrackedRows.map((r) => r.diskPath),
+                ),
+                ne(schema.onboardingArtifacts.taskId, ctx.taskId),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            )
+        ).map((r) => r.diskPath),
+      );
+      for (const row of untrackedRows) {
+        if (standing.has(row.diskPath) || rowsToInsert.some((r) => r.diskPath === row.diskPath)) {
+          warnings.push(
+            `did not put back the row for ${row.diskPath}: another row records that path now`,
+          );
+          continue;
+        }
+        rowsToInsert.push({
+          userId: ctx.userId,
+          repositoryId: detected.repositoryId,
+          taskId: ctx.taskId,
+          diskPath: row.diskPath,
+          templateId: row.templateId,
+          templateKind: row.templateKind,
+          templateSchemaVersion: row.templateSchemaVersion,
+          templateContentHash: row.templateContentHash,
+          writtenHash: row.writtenHash,
+          writtenContent: row.writtenContent,
+          lastObservedDiskHash: row.lastObservedDiskHash,
+          userModified: row.userModified,
+          formValuesSnapshot: row.formValuesSnapshot,
+          sourceStepId: '04-upgrade-rollback',
+          source: 'rollback' as const,
+          haiveVersion,
+          bundleItemId: resolveBundleItemId(row.templateId, liveBundleItemIds),
+        });
+        revertedCount += 1;
+      }
+    }
+
     // Defensive: supersede every live row at the diskPaths we are about to
     // insert (in addition to the explicit upgrade row ids and the new-artifact
     // undo ids), then insert. Wrapped in a single transaction so a
@@ -698,25 +770,24 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       });
     }
 
+    // A rollback that restored no snapshot (the upgrade only created files or untracked rows) takes
+    // the context the rows live now carry, which is the one the repository had before the upgrade.
+    const recorded =
+      snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx.db, detected.repositoryId));
+
     // Refresh applicable_template_ids from a fresh expansion against the
     // restored render context. After a rollback the repo's gating may differ
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
-    if (snapshot) {
-      // What the rollback put back is installed again, so it is compared again whatever the snapshot
-      // renders: a file restored after RTK went off would otherwise drop out of the banner's view.
-      const applicableExpanded = [
-        ...expandManifestFor(snapshot as unknown as TemplateRenderContext, manifest),
-        ...rowsToInsert,
-      ];
+    if (recorded) {
+      const applicableExpanded = expandManifestFor(
+        recorded as unknown as TemplateRenderContext,
+        manifest,
+      );
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
     try {
-      // A rollback that restored no snapshot (the upgrade only created files) records the context
-      // the rows still live carry, which is the one the repository had before the upgrade.
-      const recorded =
-        snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx, detected.repositoryId));
       if (recorded) {
         // A choice is what the plan of the upgrade being undone found, not what the value looks like:
         // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
@@ -732,6 +803,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         });
       }
     } catch (err) {
+      failIfColumnStale(err);
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');

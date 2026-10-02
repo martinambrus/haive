@@ -2265,7 +2265,10 @@ Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all 
 
 **"Onboarded" is the RUN's verdict, not the artifacts'.** The four markers the API checks —
 `.claude/agents`, `.claude/skills`, `.claude/workflow-config.json`, `KB_DIR` — are all written
-by `07-generate-files`, the 8th of 27 registered onboarding steps, with the KB following at 08
+during the run. The first two stand for the agents and skills directory of any CLI in the
+catalog, since a run writes only its enabled CLIs' own directories, and a Codex-only run has no
+`.claude/agents`. They are written by `07-generate-files`, the 8th of 27 registered onboarding
+steps, with the KB following at 08
 and skills at 09_5. So from a third of the way in, a cancelled run and a run executing RIGHT
 NOW leave a tree indistinguishable from a finished one: a task created against such a repo was
 typed `workflow` and aimed at a knowledge base nobody finished building, and the repos list
@@ -2297,6 +2300,19 @@ Cleared by `DELETE /repos/:id/onboarding-artifacts`, since the stamp must not ou
 it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run that did all
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
 refuses when a marker is missing or a run is live.
+
+**A clone is admitted to an upgrade by its render context column.** A repository cloned from
+another install's onboarded commit has neither of the two things POST /tasks and upgrade-status
+gate an upgrade on, a completed onboarding task or a live artifact row, only the column the
+project-state sync filled from the checkout's record. `renderContextAdmitsUpgrade`
+(`api/src/lib/onboarding-state.ts`) is a third term, tried only after both fail. It requires that
+the column decodes (a refused one reads as NULL, as 01 reads it), that the repository is `ready`
+with a root, and that the verdict above calls it onboarded, which reads the reset epoch and
+refuses beside a live onboarding. The two older terms read neither. For a clone the column admits
+and no artifact row records, nothing on this install can say what changed. upgrade-status
+therefore offers it the first upgrade (`firstUpgradeOnThisInstall`) until a row records it,
+because the banner is the only place one starts. The offer outlives an upgrade task: one cancelled
+at 02's form has written no row.
 
 **That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
@@ -2700,6 +2716,20 @@ Deterministic onboarding artifacts (agent specs, slash commands, `workflow-confi
 
 On worker boot, `syncTemplateManifestCache(db)` upserts the manifest into Postgres (`template_manifest_cache`) so the API can compute the current set hash without importing worker-side generators. Per-repo install state lives in `onboarding_artifacts`, one live row per `(repository_id, disk_path)`, soft-deleted via `superseded_at`.
 
+**The applicable set is what the render context renders, at every writer.** 12, 01, 02 and 04 write
+`repositories.applicable_template_ids` from the context they render, and a project-state sync that
+changes the render context of a repository with a claim writes it in the same transaction through
+01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render.
+upgrade-status compares a claim the set holds against the manifest, and reports a claim the set does
+not hold as changed while 02 could still act on one of its paths: one that is absent, one holding the
+bytes its row records as Haive's, or an RTK settings file whose hook can come out. A path 02 keeps (a
+person's bytes, a link, a file past 1 MiB) stays quiet, since no plan could finish it. Custom bundle
+items and the cli-rules region keep their per-repository comparison, and a NULL set reads as the
+installed one. A repository with no claim keeps its set until 01's first plan: with no claims a
+recomputed set makes every applicable template read as changed. Boot recomputes the set of every
+repository with a column and a claim (`recomputeSyncedApplicableSets`), since a sync from before
+the set followed the column moved the column alone and no later sync of the same files repairs it.
+
 **An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
 never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
 files and the two RTK settings files, gated on PHP LSP and on RTK, hashed `sha256('')` from the day
@@ -2887,9 +2917,11 @@ upgrade-status offers its rollback from what 02 recorded (`lastUpgradeRemovedCon
 rollback completes after it. It answers as
 onboarded for any repository an upgrade was started on, whether that upgrade is running, failed or
 finished, since POST /tasks starts one only on an onboarded repository and the banner shows nothing
-for any other. What a rollback puts back stays in the repository's
-applicable set whatever its snapshot renders, so a file restored after RTK went off is offered for
-removal again rather than dropping out of the banner's view.
+for any other. A file a rollback puts back whose template its
+snapshot does not render stays out of the applicable set, where upgrade-status reports it while it
+holds what its row records, so a file restored after RTK went off is offered for removal again. A
+rollback also puts back, live, every row the upgrade untracked (02's `untrackedRowIds`) while no
+live row records that path, touching nothing on disk.
 
 **One upgrade or rollback runs at a time, and a rollback undoes the newest upgrade once.** Both are
 `onboarding_upgrade` tasks, and two side by side apply and revert the same files: an upgrade parked
@@ -2957,23 +2989,32 @@ file git ignores out of the commit, whichever provider it belongs to. 01 names t
 block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
 repository and reports the files still holding a block (`rtkBlockLeftovers`), and the settings
 files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): it looks where 01
-looks, reads RTK's choice through the same snapshots, and judges each file by the predicate 01
+looks, reads RTK's choice in the same order, and judges each file by the predicate 01
 uses (`holdsRtkSettings`), so the banner offers the upgrade, and never one whose plan offers
 nothing. A repository never onboarded gets neither, since POST /tasks refuses it an upgrade.
-Switching RTK back on offers the settings files again, and the banner says so: the
-upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
-counts an RTK template as applicable again while RTK is on and the providers of a snapshot that
-recorded the choice read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders
-from too). 01 renders from such a snapshot ahead of one from before RTK (`pickRenderSnapshot`), and
-both take the newest (`newestArtifactsFirst`, `@haive/shared`), since an upgrade replaces only the
-paths it writes and rows from several runs stay live side by side, so the banner and the plan read
-the same one, and a repository whose snapshots all predate RTK stays quiet. Only a re-onboarding writes the block.
+Switching RTK back on offers the settings files again, and the banner says so: an
+upgrade or a sync computed while it was off left their ids out of `applicable_template_ids`, so upgrade-status
+counts an RTK template as applicable again while RTK is on and the providers of the context 01
+renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
+Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
+A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
+snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
+First comes the repository's render context column, whose RTK choice is its stored
+`rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
+with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
+recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
+since an upgrade replaces only the paths it writes and rows from several runs stay live side by
+side. So the banner and the plan read the same context, and a repository whose snapshots all
+predate RTK stays quiet. Only a re-onboarding writes the block.
 
 **"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
 version declined, so the next upgrade offers only a newer one. On a live row it moves
 `templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
 render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
-for one it introduced. Skip records nothing, so the path is offered again.
+for one it introduced. Skip records nothing, so the path is offered again. An obsolete Haive file
+has no newer version to decline, so it is kept by "Keep these files, and stop tracking them": its row
+is superseded and the file left, and neither the plan nor the banner offers it again until a rollback
+of that upgrade puts the row back. Removal wins when one file is picked for both.
 `unclaimBackfilledEdits` (`data-migrations.ts`) brings the rows written before into that shape: only
 such a row has `user_modified` with `written_hash` equal to `last_observed_disk_hash`, and it and its
 rollback copies get the two hashes swapped.

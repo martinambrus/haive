@@ -126,7 +126,8 @@ export const repositories = pgTable(
     /** Snapshot of template_ids that the worker's template manifest expanded
      *  to non-empty renderings against this repo's render context (gating
      *  applied: e.g. drupal-php-lsp items only listed when the user opted into
-     *  php-extended LSP). Populated on every onboarding/upgrade/rollback apply.
+     *  php-extended LSP). Populated on every onboarding/upgrade/rollback apply,
+     *  and by a project-state sync that changes the render context of a repository with a claim.
      *  Null for repos onboarded before this column existed — API treats null
      *  as "use the live row set as the applicable domain". */
     applicableTemplateIds: text('applicable_template_ids').array(),

@@ -687,10 +687,25 @@ async function main(): Promise<void> {
         .select({ applicable: schema.repositories.applicableTemplateIds })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, seededId));
+      const putBackRows = await db
+        .select({ writtenHash: schema.onboardingArtifacts.writtenHash })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, seededId),
+            eq(schema.onboardingArtifacts.diskPath, SETTINGS),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      const putBack = await readFile(join(seededPath, SETTINGS), 'utf8').catch(() => null);
       check(
-        'and the template it put back applies again, so the banner can offer it',
-        seededRepo?.applicable?.includes(RTK_ITEM) === true,
-        seededRepo?.applicable,
+        'and the file it put back is a claim outside the applicable set, holding what its row records, which the banner reports',
+        seededRepo?.applicable !== null &&
+          seededRepo?.applicable?.includes(RTK_ITEM) === false &&
+          putBackRows.length === 1 &&
+          putBack !== null &&
+          sha256Hex(normalizeContent(putBack)) === putBackRows[0]!.writtenHash,
+        { applicable: seededRepo?.applicable, rows: putBackRows.length },
       );
 
       // A person deletes the file while the form is parked: it was gone before the step ran.

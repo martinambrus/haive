@@ -530,7 +530,7 @@ export function expandCustomBundlesFor(
  *  templates that are actually applicable to the repo's gating context (e.g.
  *  drupal-php-lsp items only when the user opted into php-extended LSP). */
 export async function updateApplicableTemplateIds(
-  db: Database,
+  db: Database | DbTx,
   repositoryId: string,
   expanded: Pick<ExpandedRendering, 'templateId'>[],
 ): Promise<void> {

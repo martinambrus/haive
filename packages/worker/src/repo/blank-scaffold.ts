@@ -1,6 +1,6 @@
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { schema } from '@haive/database';
 import { getCliProviderMetadata } from '@haive/shared';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
@@ -53,7 +53,7 @@ function blankProjectInfo(name: string | null): ProjectInfo {
  * `resolveRenderContext` cannot reconstruct from history.
  */
 export async function buildBlankRenderContext(
-  db: Database,
+  db: Database | DbTx,
   args: { userId: string; repositoryId: string; repoName: string | null },
 ): Promise<TemplateRenderContext> {
   const providerRows = await db

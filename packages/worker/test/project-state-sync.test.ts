@@ -83,7 +83,9 @@ const render = (over: Partial<ProjectRender> = {}): ProjectRender => ({
   },
   framework: 'drupal',
   acceptedAgentIds: ['code-reviewer', 'security-auditor'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert' }],
+  customAgentSpecs: [
+    { id: 'billing-expert', title: 'Billing expert', description: 'Knows the billing module' },
+  ],
   lspLanguages: ['css', 'php-extended'],
   ...over,
 });
@@ -127,7 +129,13 @@ const TEAM = render({
   },
   framework: 'drupal10',
   acceptedAgentIds: ['code-reviewer', 'qa-lead'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert, second edition' }],
+  customAgentSpecs: [
+    {
+      id: 'billing-expert',
+      title: 'Billing expert, second edition',
+      description: 'Knows the billing module',
+    },
+  ],
   lspLanguages: ['css', 'twig'],
 });
 const LATER = render({ framework: 'drupal11', lspLanguages: ['css', 'php-extended', 'twig'] });
@@ -138,7 +146,9 @@ const contextA = (): Json => ({
   projectInfo: { name: 'acme', framework: 'drupal', docroot: 'web', testFrameworks: ['phpunit'] },
   framework: 'drupal',
   acceptedAgentIds: ['security-auditor', 'code-reviewer'],
-  customAgentSpecs: [{ id: 'billing-expert', title: 'Billing expert' }],
+  customAgentSpecs: [
+    { id: 'billing-expert', title: 'Billing expert', description: 'Knows the billing module' },
+  ],
   agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
   lspLanguages: ['php-extended', 'css'],
   rtkEnabled: true,
@@ -206,8 +216,8 @@ type SelectBuilder = ReturnType<ReturnType<FakeDbHandle['select']>['from']>;
 async function setup(seed: Seed = {}) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-sync-'));
   dirs.push(root);
-  const { repositories, projectStateSync: sync, tasks } = schema;
-  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks });
+  const { repositories, projectStateSync: sync, tasks, onboardingArtifacts } = schema;
+  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks, onboardingArtifacts });
   // Columns the sync must leave as they are, set as persistDetection and the mirror import leave them.
   fake.insert(repositories, {
     id: REPO,
@@ -738,7 +748,11 @@ describe('syncProjectStateFromCheckout: a local record the codec would refuse', 
   const SHAPES: Record<string, (levels: number) => ProjectRender> = {
     projectInfo: (levels) => render({ projectInfo: nest(levels) }),
     customAgentSpecs: (levels) =>
-      render({ customAgentSpecs: [{ id: 'billing-expert', deep: nest(levels) }] }),
+      render({
+        customAgentSpecs: [
+          { id: 'billing-expert', description: 'Knows the billing module', deep: nest(levels) },
+        ],
+      }),
   };
   const accepted = (r: ProjectRender): boolean => {
     try {

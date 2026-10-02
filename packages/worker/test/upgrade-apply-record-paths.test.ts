@@ -91,8 +91,11 @@ describe('02 reports the record files it wrote', () => {
 
   it('lists both, and so the commit step stages both, when only the database half failed', async () => {
     const s = await setup();
+    // The write's lock is refused; the one that clears the column goes through.
+    let locks = 0;
     s.fake.hooks.beforeLock = () => {
-      throw new Error('database refused');
+      locks += 1;
+      if (locks === 1) throw new Error('database refused');
     };
 
     const out = await s.apply();
@@ -105,5 +108,14 @@ describe('02 reports the record files it wrote', () => {
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(out.writtenPaths).toEqual(expect.arrayContaining(RECORD_PATHS));
     expect(appliedWrittenPaths(out)).toEqual(expect.arrayContaining(RECORD_PATHS));
+  });
+
+  it('fails the step when the column cannot be cleared either', async () => {
+    const s = await setup();
+    s.fake.hooks.beforeLock = () => {
+      throw new Error('database refused');
+    };
+
+    await expect(s.apply()).rejects.toThrow('database refused');
   });
 });

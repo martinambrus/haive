@@ -174,9 +174,10 @@ Phase 1 (the record):
   rendering an empty context (Codex round 1; MEASURED without those steps: framework null, no LSP,
   no agents, 7 files), against which every later check would pass empty. Passing today: the round
   trip, the mirror (environment, tooling without its machine-local keys, exclusions, the RTK switch)
-  and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan resolves a render context
-  naming A's framework, agents and LSP languages (B1.4) and reads every claimed path `unchanged`
-  (B1.6), and a second 12 run leaves A's checkout clean (B1.7; today `.haive/install.json` differs).
+  and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan reads every claimed path
+  `unchanged` (B1.6), and a second 12 run leaves A's checkout clean (B1.7; today
+  `.haive/install.json` differs). B1.4c closed the gap of B's upgrade plan resolving a render
+  context naming A's framework, agents and LSP languages.
   A listed gap no check names fails the run too. The scenarios that need machinery not built yet (a
   sweep, the record, conflicts) arrive with the PRs that build it, each with its own check.
   MEASURED: 17 checks, 4 gaps, 35 paths claimed on A; a passing check listed as a gap and a listed
@@ -291,7 +292,7 @@ Phase 1 (the record):
   blob id computed from lossily decoded text matches no id git reports.
 
   **`render_context` carries the whole snapshot, and an RTK choice is recorded explicitly.**
-  `upgrade-status` mirrors 01's choice of context for RTK (`recordedRtkProviders`,
+  `upgrade-status` mirrors 01's choice of context for RTK (its RTK add-back and
   `rtkChoiceFollowsLive`), so once 01 reads the column first, the banner must read it through the
   same order or the two diverge: on a repository with RTK off, no rows and a git source, 01 probes
   unrecorded RTK settings files while the banner stays silent about the removal the plan offers.
@@ -308,8 +309,12 @@ Phase 1 (the record):
   The bare column is not enough: it would admit a repository during its own onboarding, after a
   reset, and with a marker missing. The existing terms are left as they are — aligning them with
   the verdict changes what already-reset repositories see and belongs in its own fix.
-  `applicable_template_ids` is NOT recomputed on import: with no claims a recomputed set makes
-  every applicable template read as changed, and 01's apply already fills it on B's first plan.
+  `applicable_template_ids` follows the render context the sync writes, but only where claims
+  exist. A sync that changes the column of a repository holding a claim recomputes the set in the
+  same transaction through 01's own functions, so the set is what the plan renders, and
+  upgrade-status reports a claim outside it while 02 could still remove it. A repository with no
+  claims keeps its set until 01's first plan fills it: with no claims a recomputed set makes every
+  applicable template read as changed, and B1.6's import gives such a repository claims.
 
   Migration 0171, additive, the column declared last, the foreign key named
   `project_state_sync_repository_id_repositories_id_fk` (an inline `REFERENCES` takes Postgres'
@@ -359,6 +364,46 @@ Phase 1 (the record):
   `last_error` only on an existing row: a new row needs a base, and any base record turns the next
   first import into a conflict. A column the sync creates records `rtkChoiceRecorded: true`, since
   B follows its live RTK switch, which B0.3 imported from A's tooling.
+
+  **As built, B1.4c (01 and the banner read the column first).** One order in
+  `@haive/shared/project-state` decides for both:
+  - `readRenderContextColumn` reads NULL as absent, and a column the schema refuses as absent too
+    (01 logs it).
+  - `renderContextOrigin` takes the column; else the newest live snapshot (`pickSnapshotRow`: the
+    newest that recorded an RTK choice, else the newest holding one); else the history
+    (`historyOrigin`: the last completed onboarding's step 07 output, else the blank scaffold).
+  - With a column, the RTK choice is its stored `rtkChoiceRecorded`, never whether it holds an
+    `rtkEnabled`.
+
+  **As built, B1.4d (the sync writes the rendered set; the banner reads a claim outside it).** Codex
+  round 3 on #393 found the banner reading the set the previous apply left after a sync changed the
+  render context of a repository with claims, while 01 planned from the new column. The sync now
+  writes, in its transaction and after the column, exactly the set 01's apply would write
+  (`_upgrade-render.ts`, moved verbatim out of 01); no writer keeps an id its context does not
+  render, 04 included, and upgrade-status reports a claim outside the set while 02 could act on one
+  of its paths. An obsolete Haive file gains a keep choice (untracked, file left), and a rollback
+  puts back the rows an upgrade untracked. Controls: 33 failing on the base for their stated reason,
+  52 mutants caught.
+
+  A column the sync wrote holds the portable fields alone. `renderContextFromColumn` (worker
+  `_render-targets.ts`) completes each per-install field it lacks from the task user's CLIs through
+  `renderTargetsFor`, 07's own derivation. It keeps every field the column holds, `[]` included,
+  and gives an absent `rtkEnabled` `false`. Nothing is left missing, so 01 needed no new error. The
+  banner names the providers through `renderContextProviderNames`, the same rule.
+
+  The gates' new term is `renderContextAdmitsUpgrade` (`api/src/lib/onboarding-state.ts`, where
+  the onboarding markers moved from the route). It requires that the column decodes, that the
+  repository is `ready` with a root, and that `resolveOnboardingVerdict` calls it onboarded. POST
+  /tasks and upgrade-status try it only after their own two terms fail.
+
+  A render unit's custom agent must carry a string `id` and `description` (a loose object), the
+  two fields 01's agents index renders. So a hand-edited record is refused at the sync rather than
+  throwing in 01.
+
+  A characterization grid pinned both answers before the refactor, and holds after it with every
+  no-column answer unchanged: 01 across 80 cells × 3 column states, the banner across 80 × 4.
+  MEASURED: `smoke:two-install` ends `TWO_INSTALL_OK` with 30 checks and 3 gaps (B1.6 twice and
+  B1.7), and B's plan matches A's context on all 8 keys with an LLM custom agent in A's fixture.
 
   Controls, each failing on main: B's render context equals A's on all 8 keys with an LLM custom
   agent in A's fixture (the smoke's current 3-field check passes a lossy derivation); a record
@@ -506,8 +551,8 @@ explicit (the smoke drives two databases), under
    from disk only when its normalised hash equals `writtenHash`); a path in base that incoming no
    longer lists, local row unchanged → retire (remote removal); local-only additions kept; an
    import retiring every base claim stamps `onboarding_reset_at`; settings columns,
-   `render_context` and `applicable_template_ids` (via `expandManifestFor` +
-   `expandCustomBundlesFor` + `updateApplicableTemplateIds`) in the same transaction;
+   `render_context` and `applicable_template_ids` (01's `unionExpandedFor` over the resolved
+   context, as B1.4d does) in the same transaction;
    machine-local columns never written.
 6. Book-keeping: set `synced_head`, `synced_hash`, `base_snapshot`; merged ≠ incoming (local
    pending changes) → mark dirty and re-render.

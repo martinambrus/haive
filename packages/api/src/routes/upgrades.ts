@@ -9,15 +9,23 @@ import {
   computeSetHash,
   getHaiveVersion,
   holdsRtkSettings,
-  newestArtifactsFirst,
   normalizeContent,
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
+  withoutRtkHookEntry,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import {
+  historyOrigin,
+  readRenderContextColumn,
+  renderContextOrigin,
+  renderContextProviderNames,
+  type RenderContextOrigin,
+  type SnapshotRowFacts,
+} from '@haive/shared/project-state';
 import {
   importRulesFilesFor,
   readUpgradeFile,
@@ -27,7 +35,7 @@ import {
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { LIVE_TASK_STATUSES } from '../lib/onboarding-state.js';
+import { LIVE_TASK_STATUSES, renderContextAdmitsUpgrade } from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -65,37 +73,40 @@ export async function rulesImportGaps(
   return { missing, linked };
 }
 
-/** The providers the newest live snapshot that recorded an RTK choice names, the one 01's
- *  `pickRenderSnapshot` renders RTK from. None for a repository whose snapshots predate RTK. */
-export function recordedRtkProviders(
-  rows: ReadonlyArray<{
-    id: string;
-    generatedAt: Date | null;
-    rtkRecorded: boolean | null;
-    snapshotProviders: unknown;
-  }>,
-): string[] | null {
-  const row = newestArtifactsFirst(rows).find((r) => r.rtkRecorded === true);
-  if (!row) return null;
-  if (!Array.isArray(row.snapshotProviders)) return [];
-  return row.snapshotProviders.flatMap((p: unknown) => {
+/** The providers a snapshot's `enabledCliProviders` names. */
+function snapshotProviderNames(providers: unknown): string[] {
+  if (!Array.isArray(providers)) return [];
+  return providers.flatMap((p: unknown) => {
     const name = (p as { name?: unknown } | null)?.name;
     return typeof name === 'string' ? [name] : [];
   });
 }
 
+/** The providers whose RTK settings files 01's render context reads, or null when it recorded no
+ *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's. */
+function rtkProviderNames(
+  origin: RenderContextOrigin<SnapshotRowFacts & { snapshotProviders: unknown }>,
+  enabledNames: readonly string[],
+): string[] | null {
+  if (origin.from === 'column') {
+    return origin.rtkRecorded ? renderContextProviderNames(origin.column, enabledNames) : null;
+  }
+  return origin.from === 'snapshot' && origin.rtkRecorded
+    ? snapshotProviderNames(origin.row.snapshotProviders)
+    : null;
+}
+
 /** Whether 01's render context follows the repository's RTK switch, which it does only when the
- *  snapshot it renders from recorded a choice: the newest live one, else the 07 detect output of
- *  the last completed onboarding, else, for a blank repository, the scaffold's own. */
+ *  context it renders from recorded a choice: the column's stored flag, else the newest live
+ *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
+ *  repository, the scaffold's own. */
 async function rtkChoiceFollowsLive(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  liveRows: ReadonlyArray<{ hasSnapshot: boolean | null; rtkRecorded: boolean | null }>,
+  origin: RenderContextOrigin<SnapshotRowFacts>,
   source: string,
 ): Promise<boolean> {
-  if (liveRows.some((r) => r.hasSnapshot === true)) {
-    return liveRows.some((r) => r.rtkRecorded === true);
-  }
+  if (origin.from !== 'history') return origin.rtkRecorded;
   const [onboarding] = await db
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -108,7 +119,7 @@ async function rtkChoiceFollowsLive(
     )
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
-  if (!onboarding) return source === 'blank';
+  if (!onboarding) return historyOrigin({ onboarding: null, source }).kind === 'blank';
   const [generate] = await db
     .select({
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
@@ -121,7 +132,11 @@ async function rtkChoiceFollowsLive(
       ),
     )
     .limit(1);
-  return generate?.recorded === true;
+  const history = historyOrigin({
+    onboarding: { detected: generate !== undefined, rtkRecorded: generate?.recorded === true },
+    source,
+  });
+  return history.kind === 'onboarding' && history.rtkRecorded;
 }
 
 /** The RTK settings files no live row records that still hold RTK's render or hook, which 01 offers
@@ -139,6 +154,21 @@ async function rtkSettingsLeftovers(
     }
   }
   return found;
+}
+
+/** Whether 02 could still act on a claim's file: it is absent, holds its row's bytes, or is an RTK
+ *  settings file whose hook can come out. 02 keeps any other, so reporting one offers nothing. */
+async function removableClaim(
+  root: string,
+  claim: { templateId: string; diskPath: string; writtenHash: string },
+): Promise<boolean> {
+  const read = await readUpgradeFile(root, claim.diskPath);
+  if (read.kind === 'absent') return true;
+  if (read.kind === 'unread') return false;
+  return (
+    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
+    withoutRtkHookEntry(claim.templateId, read.text) !== null
+  );
 }
 
 /**
@@ -159,6 +189,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       localPath: true,
       rtkEnabled: true,
       source: true,
+      renderContext: true,
+      status: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -225,6 +259,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
+      writtenHash: schema.onboardingArtifacts.writtenHash,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
       generatedAt: schema.onboardingArtifacts.generatedAt,
@@ -335,20 +370,19 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
-  // Restrict comparisons to templates that are actually applicable to this
-  // repo's gating context (e.g. drupal LSP plugins skip when php-extended
-  // not selected). Worker writes `repositories.applicableTemplateIds` on
-  // every apply. Fallback for legacy repos without that snapshot: use the
-  // installed set itself, which means new-since-last-apply templates won't
-  // be flagged in the banner — user must run a manual upgrade to discover
-  // them, at which point the snapshot is populated and future banner runs
-  // see them correctly.
+  // The set is what the render context renders, written by every apply and by a sync that changes the
+  // column. A NULL set (legacy) reads as the installed one until an upgrade fills it.
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
+  const origin = renderContextOrigin({
+    column: readRenderContextColumn(repo.renderContext),
+    rows: liveArtifacts,
+  });
+  const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
-  const rtkProviders = repo.rtkEnabled ? recordedRtkProviders(liveArtifacts) : null;
+  const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
   if (rtkProviders) {
     for (const m of manifestCache) {
       if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {
@@ -385,9 +419,19 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   if (cliRulesCurrent) {
     currentByTemplate.set(cliRulesCurrent.templateId, cliRulesCurrent);
   }
+  // A claim the set does not hold has no current entry, so it reads as changed while 02 could remove it.
+  const root = repo.storagePath ?? repo.localPath;
+  const outsideRemovable = new Set<string>();
+  if (root) {
+    for (const a of liveArtifacts) {
+      const id = a.templateId;
+      if (applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id)) continue;
+      if (await removableClaim(root, a)) outsideRemovable.add(id);
+    }
+  }
   const filteredInstalled = new Map(
     Array.from(distinctInstalled.entries()).filter(
-      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id),
+      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id),
     ),
   );
   // One row stands for every rendering of a template, so a rendering that is not current (a
@@ -443,6 +487,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   const isOnboarded = distinctInstalled.size > 0;
+  let firstUpgradeOnThisInstall = false;
   if (!isOnboarded) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
@@ -453,21 +498,26 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       ),
       columns: { id: true },
     });
+    // The banner is the only place an upgrade starts, so a clone only its column admits is offered
+    // one until a row records it, whatever became of an upgrade that recorded nothing.
+    firstUpgradeOnThisInstall =
+      !priorOnboarding && (await renderContextAdmitsUpgrade(db, userId, repo));
     // POST /tasks starts an upgrade only on an onboarded repository, so one any upgrade ran on is one.
-    const [anyUpgrade] = priorOnboarding
-      ? []
-      : await db
-          .select({ id: schema.tasks.id })
-          .from(schema.tasks)
-          .where(
-            and(
-              eq(schema.tasks.repositoryId, repositoryId),
-              eq(schema.tasks.userId, userId),
-              eq(schema.tasks.type, 'onboarding_upgrade'),
-            ),
-          )
-          .limit(1);
-    if (!priorOnboarding && !anyUpgrade) {
+    const [anyUpgrade] =
+      priorOnboarding || firstUpgradeOnThisInstall
+        ? []
+        : await db
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(
+              and(
+                eq(schema.tasks.repositoryId, repositoryId),
+                eq(schema.tasks.userId, userId),
+                eq(schema.tasks.type, 'onboarding_upgrade'),
+              ),
+            )
+            .limit(1);
+    if (!priorOnboarding && !firstUpgradeOnThisInstall && !anyUpgrade) {
       const res: UpgradeStatusResponse = {
         repositoryId,
         hasUpgradeAvailable: false,
@@ -485,25 +535,22 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
-  const rulesImports = await rulesImportGaps(
-    repo.storagePath ?? repo.localPath,
-    ruleProviderRows.filter((p) => p.enabled).map((p) => p.name),
-  );
+  const rulesImports = await rulesImportGaps(repo.storagePath ?? repo.localPath, enabledNames);
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
-  const root = repo.storagePath ?? repo.localPath;
   const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =
     !repo.rtkEnabled &&
     root &&
     (repo.source === 'blank' || liveArtifacts.length === 0) &&
-    (await rtkChoiceFollowsLive(db, repositoryId, liveArtifacts, repo.source))
+    (await rtkChoiceFollowsLive(db, repositoryId, origin, repo.source))
       ? await rtkSettingsLeftovers(root, new Set(liveArtifacts.map((a) => a.diskPath)))
       : [];
 
   const hasUpgradeAvailable =
+    firstUpgradeOnThisInstall ||
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
     missingRulesImports.length > 0 ||
     rtkBlockLeftovers.length > 0 ||
@@ -555,6 +602,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
     ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),
     ...(rtkSettingsLeft.length > 0 ? { rtkSettingsLeftovers: rtkSettingsLeft } : {}),
+    ...(firstUpgradeOnThisInstall ? { firstUpgradeOnThisInstall } : {}),
   };
   return c.json(res);
 });
@@ -623,9 +671,8 @@ export async function insertUpgradeTask<T>(
   });
 }
 
-/** Whether the upgrade a rollback would undo removed a file, a rules region or an RTK block. A
- *  removal leaves no live row, so an upgrade that only removed things has no other trace a rollback
- *  could be offered from. */
+/** Whether the upgrade a rollback would undo removed a file, a rules region or an RTK block, or
+ *  untracked a row: none leaves a live row, so nothing else could offer that rollback. */
 export async function lastUpgradeRemovedContent(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
@@ -639,8 +686,12 @@ export async function lastUpgradeRemovedContent(
       and(eq(schema.taskSteps.taskId, latest), eq(schema.taskSteps.stepId, '02-upgrade-apply')),
     )
     .limit(1);
-  const output = applied?.output as { removedPaths?: unknown; rtkBlockStrips?: unknown } | null;
-  return [output?.removedPaths, output?.rtkBlockStrips].some(
+  const output = applied?.output as {
+    removedPaths?: unknown;
+    rtkBlockStrips?: unknown;
+    untrackedRowIds?: unknown;
+  } | null;
+  return [output?.removedPaths, output?.rtkBlockStrips, output?.untrackedRowIds].some(
     (l) => Array.isArray(l) && l.length > 0,
   );
 }

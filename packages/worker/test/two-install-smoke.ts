@@ -6,7 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,7 @@ import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { logger, type FormSchema } from '@haive/shared';
+import { logger, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   emptyProjectState,
@@ -23,6 +23,7 @@ import {
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { handleClone, handleScan } from '../src/repo/clone.js';
+import { handleRefresh } from '../src/repo/refresh.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 import {
   TaskCancelledError,
@@ -30,6 +31,10 @@ import {
   type StepDefinition,
 } from '../src/step-engine/step-definition.js';
 import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  BASELINE_AGENT_SPECS,
+  FRAMEWORK_AGENT_SPECS,
+} from '../src/step-engine/steps/onboarding/_agent-templates.js';
 import { detectionConfirmationStep } from '../src/step-engine/steps/onboarding/02-detection-confirmation.js';
 import { toolingInfrastructureStep } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
 import { agentDiscoveryStep } from '../src/step-engine/steps/onboarding/06_5-agent-discovery.js';
@@ -38,6 +43,7 @@ import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-
 import {
   RenderContextUnresolvedError,
   upgradePlanStep,
+  type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
@@ -52,7 +58,6 @@ const urlA = process.env.DATABASE_URL;
  *  passes fails the run, so the PR that closes one removes it here. */
 const KNOWN_GAPS: Record<string, string> = {
   'B holds a live claim for every path A claims': 'B1.6',
-  "B's upgrade plan resolves its render context": 'B1.4',
   "B's upgrade plan reads every claimed path as unchanged": 'B1.6',
   "a second 12 run leaves A's checkout clean": 'B1.7',
 };
@@ -188,6 +193,8 @@ async function runStep<D, O>(
   taskId: string,
   taskStepId: string,
   overrides: Record<string, unknown> = {},
+  /** What a step's LLM pass answered, for the steps that read one (06_5-agent-discovery). */
+  llmOutput?: unknown,
 ): Promise<{ detected: D; output: O }> {
   const ctx = ctxFor(install, taskId, taskStepId);
   const detected = await step.detect!(ctx);
@@ -195,13 +202,14 @@ async function runStep<D, O>(
     .update(schema.taskSteps)
     .set({ detectOutput: detected, status: 'running' })
     .where(eq(schema.taskSteps.id, taskStepId));
-  const form = step.form ? await step.form(ctx, detected) : null;
+  const form = step.form ? await step.form(ctx, detected, llmOutput) : null;
   const formValues = { ...defaultValues(form), ...overrides };
   const output = await step.apply(ctx, {
     detected,
     formValues,
     iteration: 0,
     previousIterations: [],
+    llmOutput,
   });
   await install.db
     .update(schema.taskSteps)
@@ -254,6 +262,104 @@ const recordOf = (context: Record<string, unknown>) => ({
 });
 
 const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
+
+/** The one custom agent A's agent discovery accepts, as the model's own answer proposes it. */
+const LLM_CUSTOM_ID = 'billing-expert';
+const LLM_AGENTS = {
+  predefined: {},
+  custom: [
+    {
+      id: LLM_CUSTOM_ID,
+      label: 'Billing expert',
+      hint: 'Knows the billing module',
+      recommended: true,
+      body: {
+        title: 'Billing expert',
+        description: 'Knows the billing module',
+        color: 'blue',
+        field: 'billing',
+        tools: ['Read', 'Grep'],
+      },
+    },
+  ],
+};
+
+/** An install's upgrade plan: its task and step rows, and 01's detect, or why it could not plan. */
+async function upgradePlan(install: Install): Promise<{
+  taskId: string;
+  stepId: string;
+  plan: UpgradePlanDetect | null;
+  error: string | null;
+}> {
+  const [upgrade] = await install.db
+    .insert(schema.tasks)
+    .values({
+      userId: install.userId,
+      repositoryId: install.repositoryId,
+      type: 'onboarding_upgrade',
+      title: 'two-install-smoke',
+      status: 'running',
+    })
+    .returning({ id: schema.tasks.id });
+  const [planRow] = await install.db
+    .insert(schema.taskSteps)
+    .values({
+      taskId: upgrade!.id,
+      stepId: '01-upgrade-plan',
+      stepIndex: 1,
+      title: 'Plan upgrade',
+      status: 'running',
+    })
+    .returning({ id: schema.taskSteps.id });
+  try {
+    const plan = await upgradePlanStep.detect!(ctxFor(install, upgrade!.id, planRow!.id));
+    return { taskId: upgrade!.id, stepId: planRow!.id, plan, error: null };
+  } catch (err) {
+    if (!(err instanceof RenderContextUnresolvedError)) throw err;
+    return { taskId: upgrade!.id, stepId: planRow!.id, plan: null, error: err.message };
+  }
+}
+
+const CONTEXT_KEYS = [
+  'projectInfo',
+  'framework',
+  'acceptedAgentIds',
+  'customAgentSpecs',
+  'agentTargets',
+  'lspLanguages',
+  'rtkEnabled',
+  'enabledCliProviders',
+] as const;
+
+const sortedBy = (value: unknown, key: string): unknown =>
+  Array.isArray(value)
+    ? [...(value as Record<string, string>[])].sort((x, y) =>
+        x[key]! < y[key]! ? -1 : x[key]! > y[key]! ? 1 : 0,
+      )
+    : value;
+
+/** The keys of `got` that differ from `want`, each set compared sorted since every renderer reads it
+ *  as one, and `rtkEnabled` against the install's live switch, which is what a clone follows. The
+ *  key list is the comparison's first line: a context carrying another key, or missing one, differs. */
+function contextDiffers(
+  want: Record<string, unknown>,
+  got: Record<string, unknown>,
+  liveRtk: unknown,
+): string[] {
+  const keys = Object.keys(got).sort();
+  if (!isDeepStrictEqual(keys, [...CONTEXT_KEYS].sort())) return [`keys: ${keys.join(',')}`];
+  const normalize: Record<string, (v: unknown) => unknown> = {
+    acceptedAgentIds: sorted,
+    lspLanguages: sorted,
+    agentTargets: (v) => sortedBy(v, 'dir'),
+    enabledCliProviders: (v) => sortedBy(v, 'name'),
+  };
+  return CONTEXT_KEYS.filter((key) => {
+    if (key === 'rtkEnabled') return got[key] !== liveRtk;
+    const norm = normalize[key] ?? ((v: unknown) => v);
+    return !isDeepStrictEqual(asJson(norm(got[key])), asJson(norm(want[key])));
+  });
+}
 
 /** The rows of a query, or why it failed: a column or table that is missing must fail the one check
  *  that reads it, not end the run. */
@@ -387,7 +493,7 @@ async function main(): Promise<void> {
       ollamaUrl: 'http://only-on-a:11434',
       rtkEnabled: false,
     });
-    await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep));
+    await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep), {}, LLM_AGENTS);
     const generated = await runStep(a, generateFilesStep, taskA, rowOf(generateFilesStep));
     const rendered = generated.detected;
     check(
@@ -426,6 +532,14 @@ async function main(): Promise<void> {
       )
       .limit(1);
     const contextA = (snapshotRow?.snapshot ?? null) as Record<string, unknown> | null;
+    check(
+      "A's context holds the custom agent its LLM pass proposed",
+      contextA !== null &&
+        Array.isArray(contextA.customAgentSpecs) &&
+        (contextA.customAgentSpecs as { id?: unknown }[]).some((s) => s.id === LLM_CUSTOM_ID) &&
+        (contextA.acceptedAgentIds as string[]).includes(LLM_CUSTOM_ID),
+      contextA?.customAgentSpecs,
+    );
     const wantRecord = contextA === null ? null : recordOf(contextA);
     const wantFiles = wantRecord === null ? null : renderProjectState(wantRecord);
     const recordOnDisk = (rel: string) =>
@@ -694,45 +808,28 @@ async function main(): Promise<void> {
       { a: pathsA.length, b: pathsB.length },
     );
 
-    const [upgrade] = await b.db
-      .insert(schema.tasks)
-      .values({
-        userId: b.userId,
-        repositoryId: b.repositoryId,
-        type: 'onboarding_upgrade',
-        title: 'two-install-smoke',
-        status: 'running',
-      })
-      .returning({ id: schema.tasks.id });
-    const [planRow] = await b.db
-      .insert(schema.taskSteps)
-      .values({
-        taskId: upgrade!.id,
-        stepId: '01-upgrade-plan',
-        stepIndex: 1,
-        title: 'Plan upgrade',
-        status: 'running',
-      })
-      .returning({ id: schema.taskSteps.id });
-    let entries: { diskPath: string; bucket: string }[] | null = null;
-    let contextB: Record<string, unknown> | null = null;
-    let planError: string | null = null;
-    try {
-      const planB = await upgradePlanStep.detect!(ctxFor(b, upgrade!.id, planRow!.id));
-      entries = planB.entries;
-      contextB = planB.renderCtxSnapshot;
-    } catch (err) {
-      if (!(err instanceof RenderContextUnresolvedError)) throw err;
-      planError = err.message;
-    }
+    const upgradeB = await upgradePlan(b);
+    const entries = upgradeB.plan?.entries ?? null;
+    const contextB = upgradeB.plan?.renderCtxSnapshot ?? null;
+    const planError = upgradeB.error;
+    const differing =
+      contextB !== null && contextA !== null
+        ? contextDiffers(contextA, contextB, repoB?.rtkEnabled)
+        : null;
     check(
       "B's upgrade plan resolves its render context",
-      contextB !== null &&
-        contextB.framework === rendered.framework &&
-        // Both are sets to every renderer, so the record may store them sorted.
-        isDeepStrictEqual(sorted(contextB.acceptedAgentIds), sorted(rendered.acceptedAgentIds)) &&
-        isDeepStrictEqual(sorted(contextB.lspLanguages), sorted(rendered.lspLanguages)),
-      planError ?? contextB,
+      contextB !== null && contextA !== null && differing!.length === 0,
+      planError ?? { differing, contextA, contextB },
+    );
+    const claimed = new Set(pathsA);
+    const conflicts = entries
+      ?.filter((e) => claimed.has(e.diskPath) && e.bucket === 'conflict')
+      .map((e) => e.diskPath);
+    const unplanned = entries ? pathsA.filter((p) => !entries.some((e) => e.diskPath === p)) : null;
+    check(
+      "no path A claims is a conflict in B's plan",
+      entries !== null && unplanned!.length === 0 && conflicts!.length === 0,
+      planError ?? { conflicts, unplanned },
     );
     const notUnchanged = entries
       ?.filter((e) => e.bucket !== 'unchanged')
@@ -743,9 +840,172 @@ async function main(): Promise<void> {
       notUnchanged ?? planError,
     );
 
+    // A reads its own record again, and its own plan must still call every path it claims unchanged.
+    await handleScan(
+      {
+        repositoryId: a.repositoryId,
+        userId: a.userId,
+        source: 'git_https',
+        localPath: a.repoPath,
+      },
+      a.db,
+    );
+    const upgradeA = await upgradePlan(a);
+    await a.db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, upgradeA.taskId));
+    const changedOnA = upgradeA.plan?.entries
+      .filter((e) => claimed.has(e.diskPath) && e.bucket !== 'unchanged')
+      .map((e) => `${e.diskPath}: ${e.bucket}`);
+    const unplannedOnA = upgradeA.plan
+      ? pathsA.filter((p) => !upgradeA.plan!.entries.some((e) => e.diskPath === p))
+      : null;
+    check(
+      "after a rescan of A, A's own plan reads every path it claims as unchanged",
+      upgradeA.plan !== null && unplannedOnA!.length === 0 && changedOnA!.length === 0,
+      upgradeA.error ?? { changedOnA, unplannedOnA },
+    );
+
     await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
     const dirty = git(a.repoPath, 'status', '--porcelain');
     check("a second 12 run leaves A's checkout clean", dirty === '', dirty.split('\n'));
+
+    // ---- a teammate's render change reaches a repository with claims (B1.4d) ----------------
+    // The seed clone pulls A's commit and commits a record that adds an agent A did not accept and
+    // drops one it did, and each install refreshes onto it. It goes last: the checkout moves, which
+    // the B1.7 check above must not see.
+    const acceptedA = (contextA?.acceptedAgentIds ?? []) as string[];
+    const newAgent =
+      [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()].find(
+        (spec) => !acceptedA.includes(spec.id),
+      )?.id ?? null;
+    check(
+      'a baseline or framework agent is left for a teammate to add',
+      newAgent !== null,
+      acceptedA,
+    );
+    const droppedAgent =
+      BASELINE_AGENT_SPECS.find(
+        (spec) => spec.id !== 'code-reviewer' && acceptedA.includes(spec.id),
+      )?.id ?? null;
+    check('and one A accepted is left for a teammate to drop', droppedAgent !== null, acceptedA);
+    const droppedRows = await a.db
+      .select({
+        diskPath: schema.onboardingArtifacts.diskPath,
+        writtenHash: schema.onboardingArtifacts.writtenHash,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, a.repositoryId),
+          eq(schema.onboardingArtifacts.templateId, `agent.${droppedAgent}`),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    check('and A claims at least one file of it', droppedRows.length > 0, droppedRows);
+    git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+    if (contextA !== null && newAgent !== null && droppedAgent !== null) {
+      const teamRecord = recordOf({
+        ...contextA,
+        acceptedAgentIds: [...acceptedA.filter((id) => id !== droppedAgent), newAgent],
+      });
+      for (const [rel, text] of renderProjectState(teamRecord)) {
+        const abs = path.join(seed, '.haive-data/state', rel);
+        await mkdir(path.dirname(abs), { recursive: true });
+        await writeFile(abs, text);
+      }
+      git(seed, 'add', '.haive-data/state');
+      git(seed, 'commit', '-q', '-m', 'a teammate swaps an agent');
+      git(seed, 'push', '-q', 'origin', 'HEAD:main');
+    }
+    const refresh = (install: Install, storage: string) =>
+      handleRefresh(
+        {
+          repositoryId: install.repositoryId,
+          userId: install.userId,
+          source: 'git_https',
+          remoteUrl,
+          branch: 'main',
+        },
+        install.db,
+        path.join(tmp!, storage),
+      );
+    const repoStateOf = (install: Install) =>
+      rowsOf<{
+        render_context: { acceptedAgentIds?: string[] } | null;
+        applicable_template_ids: string[] | null;
+        status_message: string | null;
+      }>(
+        install.db,
+        sql`select render_context, applicable_template_ids, status_message from repositories where id = ${install.repositoryId}`,
+      );
+
+    await refresh(a, 'storage-a');
+    const refreshedA = await repoStateOf(a);
+    const setA =
+      'rows' in refreshedA ? (refreshedA.rows[0]?.applicable_template_ids ?? null) : null;
+    const nextPlan = await upgradePlan(a);
+    if (nextPlan.plan !== null) {
+      await upgradePlanStep.apply(ctxFor(a, nextPlan.taskId, nextPlan.stepId), {
+        detected: nextPlan.plan,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      });
+    }
+    await a.db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, nextPlan.taskId));
+    const plannedA = await repoStateOf(a);
+    const setAfterPlanA =
+      'rows' in plannedA ? (plannedA.rows[0]?.applicable_template_ids ?? null) : null;
+    check(
+      "K5': after a refresh A's applicable set holds the agent a teammate's record added and not the one it dropped, and is the set A's own plan writes",
+      newAgent !== null &&
+        setA !== null &&
+        setA.includes(`agent.${newAgent}`) &&
+        !setA.includes(`agent.${droppedAgent}`) &&
+        isDeepStrictEqual(setA, setAfterPlanA),
+      { newAgent, droppedAgent, setA, setAfterPlanA, refreshed: refreshedA },
+    );
+    const droppedState = await Promise.all(
+      droppedRows.map(async (row) => ({
+        diskPath: row.diskPath,
+        bucket: nextPlan.plan?.entries.find((e) => e.diskPath === row.diskPath)?.bucket ?? null,
+        holdsRecordedBytes:
+          sha256Hex(
+            normalizeContent(
+              await readFile(path.join(a.repoPath, row.diskPath), 'utf8').catch(() => ''),
+            ),
+          ) === row.writtenHash,
+      })),
+    );
+    check(
+      "K5': A's plan offers each file of the agent the record dropped as obsolete, each still holding what its row records",
+      droppedState.length > 0 &&
+        droppedState.every((f) => f.bucket === 'obsolete' && f.holdsRecordedBytes),
+      droppedState,
+    );
+
+    // B holds no claim, so the sync leaves its set NULL while it takes the agent into its column. The
+    // upgrade task the plan above opened for B is cancelled first: a live one makes the sync defer.
+    await b.db
+      .update(schema.tasks)
+      .set({ status: 'cancelled' })
+      .where(eq(schema.tasks.id, upgradeB.taskId));
+    await refresh(b, 'storage-b');
+    const refreshedB = await repoStateOf(b);
+    const rowB = 'rows' in refreshedB ? refreshedB.rows[0] : undefined;
+    check(
+      "B, which holds no claim, keeps a NULL applicable set while its render_context takes the teammate's agent",
+      newAgent !== null &&
+        rowB !== undefined &&
+        rowB.applicable_template_ids === null &&
+        (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
+      refreshedB,
+    );
 
     for (const name of Object.keys(KNOWN_GAPS)) {
       if (gapsChecked.has(name)) continue;

@@ -30,7 +30,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { writeProjectStateRecord } from '../../../project-state/write.js';
+import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
@@ -690,6 +690,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             rtkChoiceRecorded,
           });
         } catch (err) {
+          failIfColumnStale(err);
           const message = err instanceof Error ? err.message : String(err);
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');

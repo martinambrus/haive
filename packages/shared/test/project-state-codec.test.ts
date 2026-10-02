@@ -14,6 +14,7 @@ import {
   portableBundleSource,
   portableTemplateId,
   projectStateHash,
+  renderContextColumnSchema,
   renderProjectState,
   sameValue,
   type ProjectStateClaim,
@@ -595,4 +596,103 @@ describe('hashes', () => {
       projectStateHash(a),
     );
   });
+});
+
+describe("S5: a render unit's custom agents", () => {
+  const spec = (): Record<string, unknown> => ({
+    id: 'billing-expert',
+    description: 'Knows the billing module',
+    title: 'Billing expert',
+    color: 'blue',
+    tools: ['Read', 'Grep'],
+    executionSteps: [{ title: 'Read', body: 'Read the module.' }],
+    extra: { nested: [1, 2, { deep: true }] },
+  });
+  const recordWith = (specs: unknown[]): ProjectStateRecord => {
+    const r = record();
+    r.render = { ...r.render!, customAgentSpecs: specs as never };
+    return r;
+  };
+  const parsedWith = (specs: unknown[]) => {
+    const files = renderProjectState(record());
+    const render = JSON.parse(files.get('project/render.json')!) as Record<string, unknown>;
+    return parseProjectState(
+      withFile(files, 'project/render.json', canonicalJson({ ...render, customAgentSpecs: specs })),
+    );
+  };
+  const column = (specs: unknown[]) => ({
+    projectInfo: { name: 'p' },
+    framework: 'drupal',
+    acceptedAgentIds: ['billing-expert'],
+    customAgentSpecs: specs,
+    lspLanguages: [],
+    rtkChoiceRecorded: true,
+  });
+
+  const WITHOUT: [string, unknown[], string][] = [
+    ['has no id', [{ description: 'd' }], 'customAgentSpecs.0.id'],
+    ['has no description', [{ id: 'a' }], 'customAgentSpecs.0.description'],
+    ['has an id that is not a string', [{ id: 5, description: 'd' }], 'customAgentSpecs.0.id'],
+    [
+      'has a description that is not a string',
+      [{ id: 'a', description: null }],
+      'customAgentSpecs.0.description',
+    ],
+    [
+      'is second and has no description',
+      [{ id: 'a', description: 'd' }, { id: 'b' }],
+      'customAgentSpecs.1.description',
+    ],
+    ['is not an object', [['a']], 'customAgentSpecs.0'],
+  ];
+
+  it.each(WITHOUT)(
+    'refuses a record whose custom spec %s, naming the field',
+    (_name, specs, path) => {
+      const parsed = parsedWith(specs);
+      expect(parsed.ok).toBe(false);
+      expect(!parsed.ok && parsed.problems.join('\n')).toContain(`project/render.json: ${path}`);
+    },
+  );
+
+  it.each(WITHOUT)('refuses to write a record whose custom spec %s', (_name, specs, path) => {
+    expect(() => renderProjectState(recordWith(specs))).toThrow(ProjectStateError);
+    expect(() => renderProjectState(recordWith(specs))).toThrow(path);
+  });
+
+  it.each(WITHOUT)('refuses the same spec in the column: it %s', (_name, specs, path) => {
+    const verdict = renderContextColumnSchema.safeParse(column(specs));
+    expect(verdict.success).toBe(false);
+    const paths = (verdict.error?.issues ?? []).map((i) => i.path.join('.'));
+    expect(paths).toContain(path);
+  });
+
+  it('round-trips a spec carrying both fields and others, byte for byte', () => {
+    const r = recordWith([spec()]);
+    const files = renderProjectState(r);
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.record.render!.customAgentSpecs).toEqual([spec()]);
+    expect(renderProjectState(parsed.record)).toEqual(files);
+  });
+
+  it('keeps every key of such a spec in the column too', () => {
+    const verdict = renderContextColumnSchema.safeParse(column([spec()]));
+    expect(verdict.success).toBe(true);
+    expect(verdict.data?.customAgentSpecs).toEqual([spec()]);
+  });
+
+  // An LLM names the agents it proposes (06_5-agent-discovery) and nothing holds the id to the
+  // bundle-id grammar there, so a record that refused such an id would refuse A's own onboarding.
+  it.each(['Billing_Expert', 'billing.expert', 'Billing Expert', '-billing', 'billing/expert'])(
+    'accepts an LLM custom agent whose id is %j, outside the bundle-id grammar',
+    (id) => {
+      const specs = [{ ...spec(), id }];
+      const files = renderProjectState(recordWith(specs));
+      const parsed = parseProjectState(files);
+      expect(parsed.ok && parsed.record.render!.customAgentSpecs).toEqual(specs);
+      expect(renderContextColumnSchema.safeParse(column(specs)).success).toBe(true);
+    },
+  );
 });

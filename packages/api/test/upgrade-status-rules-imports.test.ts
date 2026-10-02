@@ -13,6 +13,7 @@ import {
   RTK_REF_MARKER_START,
   sha256Hex,
 } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 
 const { state } = vi.hoisted(() => ({
@@ -552,5 +553,682 @@ describe('upgrade-status and the RTK settings files no row records', () => {
     expect((await status()).rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
     state.rows.set(schema.taskSteps, [{ recorded: false }]);
     expect((await status()).rtkSettingsLeftovers).toBeUndefined();
+  });
+});
+
+/**
+ * B1.4c controls U1-U12 (design-c.md "Controls"). The hand mock above ignores every WHERE, so no case
+ * here can hold a task row: the states of the onboarding verdict that need one are POST /tasks's, in
+ * upgrade-gate-render-context.test.ts, which asks the same function.
+ */
+describe('upgrade-status and a clone holding a render context column', () => {
+  const claudeRtk = { templateId: 'rtk.claude-settings', schemaVersion: 1, contentHash: 'h-rtk-c' };
+  const geminiRtk = { templateId: 'rtk.gemini-settings', schemaVersion: 1, contentHash: 'h-rtk-g' };
+  const portableOnly = (over: Record<string, unknown> = {}) => ({
+    projectInfo: { name: 'acme' },
+    framework: 'drupal',
+    acceptedAgentIds: ['code-reviewer'],
+    customAgentSpecs: [],
+    lspLanguages: [],
+    rtkChoiceRecorded: true,
+    ...over,
+  });
+  const fullColumn = (over: Record<string, unknown> = {}) =>
+    portableOnly({
+      agentTargets: [{ dir: '.gemini/agents', format: 'markdown' }],
+      enabledCliProviders: [{ name: 'gemini', rulesFile: 'GEMINI.md', rulesFileMode: 'import' }],
+      rtkEnabled: true,
+      ...over,
+    });
+
+  let repo: string;
+  const markers = async (except?: string) => {
+    for (const rel of [KB_DIR, '.claude/agents', '.claude/skills']) {
+      if (rel !== except) await mkdir(path.join(repo, rel), { recursive: true });
+    }
+    if (except !== '.claude/workflow-config.json') {
+      await mkdir(path.join(repo, '.claude'), { recursive: true });
+      await writeFile(path.join(repo, '.claude/workflow-config.json'), '{}\n', 'utf8');
+    }
+  };
+
+  /** A clone: the sync gave it a column, and nothing else of Haive's is recorded. */
+  const clone = (over: Record<string, unknown> = {}) => {
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: null,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+      source: 'git_https',
+      status: 'ready',
+      onboardedAt: null,
+      onboardingResetAt: null,
+      renderContext: portableOnly(),
+      ...over,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-column-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    await markers();
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, []);
+    for (const t of [claudeRtk, geminiRtk]) {
+      state.rows.get(schema.templateManifestCache)!.push({
+        ...t,
+        templateKind: 'rtk-config',
+        setHash: 's',
+      });
+    }
+    clone();
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  // U1
+  it('U1: is onboarded, and offers an upgrade, for a clone no row records', async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.installedTemplateSetHash).toBeNull();
+    expect(body.changedTemplateIds).toContain(CLI_RULES_TEMPLATE_ID);
+  });
+
+  // With every CLI off nothing incidental (the rules region, an import, RTK) can make the banner
+  // offer the upgrade, and the banner is the only place one starts.
+  it('U13: offers the first upgrade on this install to a clone no row records, CLIs off', async () => {
+    state.rows.set(schema.cliProviders, [{ ...claude, enabled: false }]);
+
+    const body = await status();
+
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.firstUpgradeOnThisInstall).toBe(true);
+  });
+
+  // A first upgrade cancelled at 02's form writes no row, and the next one must still be offered.
+  it('U13c: keeps offering the first upgrade after an upgrade that recorded no row', async () => {
+    state.rows.set(schema.cliProviders, [{ ...claude, enabled: false }]);
+    state.rows.set(schema.tasks, [{ id: 'upgrade-1', metadata: null }]);
+
+    const body = await status();
+
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+    expect(body.firstUpgradeOnThisInstall).toBe(true);
+  });
+
+  it('U13b: says nothing of a first upgrade once a row records the repository', async () => {
+    inSync([claude]);
+    clone();
+
+    const body = await status();
+
+    expect(body.firstUpgradeOnThisInstall).toBeUndefined();
+  });
+
+  // U2: the banner's half of what 01 offers on the same repository (upgrade-plan-render-context.test.ts, W2)
+  it('U2: offers the RTK settings file it finds for removal once RTK is off, as the plan does', async () => {
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+    await writeFile(
+      path.join(repo, 'AGENTS.md'),
+      `# rules\n${RTK_REF_MARKER_START}\nRTK is here.\n${RTK_REF_MARKER_END}\n`,
+      'utf8',
+    );
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
+    expect(body.rtkBlockLeftovers).toEqual(['AGENTS.md']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  // U3
+  it("U3: adds claude's RTK template once RTK is on, for the CLIs the caller has enabled", async () => {
+    clone({ rtkEnabled: true });
+    const body = await status();
+    expect(body.changedTemplateIds).toContain(claudeRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+  });
+
+  // U4
+  it("U4: reads the providers a full column names, not the caller's", async () => {
+    clone({ rtkEnabled: true, renderContext: fullColumn() });
+    const body = await status();
+    expect(body.changedTemplateIds).toContain(geminiRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+  });
+
+  it('U4b: reads the providers of a column that holds an empty list as none', async () => {
+    clone({ rtkEnabled: true, renderContext: fullColumn({ enabledCliProviders: [] }) });
+    const body = await status();
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+  });
+
+  // U5
+  it('U5: reads the column ahead of the rows: a column that recorded no RTK choice adds no RTK template', async () => {
+    inSync([claude]);
+    for (const t of [claudeRtk, geminiRtk]) {
+      state.rows.get(schema.templateManifestCache)!.push({
+        ...t,
+        templateKind: 'rtk-config',
+        setHash: 's',
+      });
+    }
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        hasSnapshot: true,
+        rtkRecorded: true,
+        snapshotProviders: [{ name: 'claude-code' }],
+      })),
+    );
+    clone({
+      rtkEnabled: true,
+      applicableTemplateIds: ['agent.x'],
+      renderContext: portableOnly({ rtkChoiceRecorded: false }),
+    });
+    const body = await status();
+    expect(body.changedTemplateIds).not.toContain(claudeRtk.templateId);
+    expect(body.changedTemplateIds).not.toContain(geminiRtk.templateId);
+  });
+
+  it('U5b: does not offer the RTK settings file a column that recorded no choice leaves, as the plan does not', async () => {
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+    clone({ renderContext: portableOnly({ rtkChoiceRecorded: false }) });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+  });
+
+  // U6, and the states of the same verdict that need no task row
+  it.each([KB_DIR, '.claude/agents', '.claude/skills', '.claude/workflow-config.json'])(
+    'U6: is not onboarded with %s missing from the checkout',
+    async (missing) => {
+      await rm(repo, { recursive: true, force: true });
+      await mkdir(repo, { recursive: true });
+      await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+      await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+      await markers(missing);
+      const body = await status();
+      expect(body.isOnboarded).toBe(false);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    },
+  );
+
+  it.each(['error', 'cloning'])(
+    'U7: is not onboarded while the repository is %s',
+    async (repoStatus) => {
+      clone({ status: repoStatus });
+      const body = await status();
+      expect(body.isOnboarded).toBe(false);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    },
+  );
+
+  it('U8: is not onboarded after a reset that nothing answered', async () => {
+    clone({ onboardingResetAt: new Date(1000) });
+    expect((await status()).isOnboarded).toBe(false);
+  });
+
+  it('U9: is onboarded again once the repository was stamped after its reset', async () => {
+    clone({ onboardingResetAt: new Date(1000), onboardedAt: new Date(2000) });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('U12: reads the local path of a repository that has no storage path', async () => {
+    clone({ storagePath: null, localPath: repo });
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('U10: is not onboarded for a repository with no checkout to read', async () => {
+    clone({ storagePath: null, localPath: null });
+    expect((await status()).isOnboarded).toBe(false);
+  });
+
+  it.each([
+    ['NULL', { renderContext: null }],
+    ['absent', { renderContext: undefined }],
+    ['an empty object', { renderContext: {} }],
+    ['an unknown key', { renderContext: portableOnly({ somethingNew: true }) }],
+    ['no rtkChoiceRecorded', { renderContext: portableOnly({ rtkChoiceRecorded: undefined }) }],
+  ])('U11: is not onboarded when the column is %s', async (_name, over) => {
+    clone(over);
+    const body = await status();
+    expect(body.isOnboarded).toBe(false);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+});
+
+/**
+ * D10 (design-d's U7, renamed: B1.4c's U7 is above) and N12 (design-227.md). The sets are the worker's
+ * in project-state-sync-applicable.test.ts: P is what 01 computes for the claims, D1_SET what a sync
+ * that imports a teammate's agent writes in the same transaction, and TEAM2_SET what a sync that
+ * drops security-auditor writes.
+ */
+describe('D10: upgrade-status and the set a project-state sync wrote', () => {
+  const PLUGIN_JSON =
+    'plugin.drupal-php-lsp..claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json';
+  const PLUGIN_LSP =
+    'plugin.drupal-php-lsp..claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.lsp.json';
+  const PLUGIN_MARKETPLACE =
+    'plugin.drupal-php-lsp..claude/plugins/drupal-php-lsp/.claude-plugin/marketplace.json';
+  const P = [
+    'agent.code-reviewer',
+    'agent.security-auditor',
+    'agents-index',
+    'cli-rules',
+    PLUGIN_JSON,
+    PLUGIN_LSP,
+    PLUGIN_MARKETPLACE,
+    'workflow-config',
+  ];
+  const D1_SET = [
+    'agent.code-reviewer',
+    'agent.security-auditor',
+    'agent.test-writer',
+    'agents-index',
+    'cli-rules',
+    PLUGIN_JSON,
+    PLUGIN_LSP,
+    PLUGIN_MARKETPLACE,
+    'workflow-config',
+  ];
+  const TEAM2_SET = [
+    'agent.code-reviewer',
+    'agents-index',
+    'cli-rules',
+    PLUGIN_JSON,
+    PLUGIN_LSP,
+    PLUGIN_MARKETPLACE,
+    'workflow-config',
+  ];
+  /** Every rendering of BASE, as the worker's BASE_CLAIMS records them. */
+  const CLAIMS: [string, string][] = [
+    ['.claude/workflow-config.json', 'workflow-config'],
+    ['.claude/agents/README.md', 'agents-index'],
+    ['.codex/agents/README.md', 'agents-index'],
+    ['.claude/agents/code-reviewer.md', 'agent.code-reviewer'],
+    ['.codex/agents/code-reviewer.toml', 'agent.code-reviewer'],
+    ['.claude/agents/security-auditor.md', 'agent.security-auditor'],
+    ['.codex/agents/security-auditor.toml', 'agent.security-auditor'],
+    ['.claude/plugins/drupal-php-lsp/.claude-plugin/marketplace.json', PLUGIN_MARKETPLACE],
+    [
+      '.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json',
+      PLUGIN_JSON,
+    ],
+    ['.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.lsp.json', PLUGIN_LSP],
+    ['AGENTS.md', 'cli-rules'],
+  ];
+  const SA_FILES = ['.claude/agents/security-auditor.md', '.codex/agents/security-auditor.toml'];
+  const recordedBody = (diskPath: string) => `${diskPath}: the body its row records\n`;
+  const kindOf = (id: string) =>
+    id.startsWith('agent.') ? 'agent' : id.startsWith('plugin.') ? 'plugin-file' : id;
+  const owner = [
+    claude,
+    { ...claude, name: 'codex' },
+    { ...claude, name: 'gemini', enabled: false },
+  ];
+
+  let repo: string;
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-applicable-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    const block = buildCliRulesBlockFromProviders(owner)!;
+    const artifact = (diskPath: string, templateId: string) => ({
+      id: `claim-${diskPath}`,
+      diskPath,
+      templateId,
+      templateSchemaVersion: 1,
+      templateContentHash:
+        templateId === CLI_RULES_TEMPLATE_ID ? sha256Hex(normalizeContent(block)) : 'h1',
+      writtenHash: SA_FILES.includes(diskPath)
+        ? sha256Hex(normalizeContent(recordedBody(diskPath)))
+        : 'w',
+      bundleItemId: null,
+      haiveVersion: null,
+      generatedAt: null,
+    });
+    state.rows = new Map<unknown, unknown[]>([
+      [
+        schema.templateManifestCache,
+        D1_SET.filter((id) => id !== CLI_RULES_TEMPLATE_ID).map((id) => ({
+          templateId: id,
+          templateKind: kindOf(id),
+          schemaVersion: 1,
+          contentHash: 'h1',
+          setHash: 's',
+        })),
+      ],
+      [schema.cliProviders, owner],
+      [schema.onboardingArtifacts, CLAIMS.map(([diskPath, id]) => artifact(diskPath, id))],
+    ]);
+    state.onboarded = false;
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const withSet = (applicableTemplateIds: string[]) => {
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+  };
+
+  it('reads the claims against the set 01 computed as up to date', async () => {
+    withSet(P);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('reads the agent a sync added to the set as changed, and offers the upgrade', async () => {
+    withSet(D1_SET);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual(['agent.test-writer']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('N12: reads the agent a sync dropped from the set as changed while its files hold what its rows record', async () => {
+    for (const diskPath of SA_FILES) {
+      await mkdir(path.dirname(path.join(repo, diskPath)), { recursive: true });
+      await writeFile(path.join(repo, diskPath), recordedBody(diskPath), 'utf8');
+    }
+    withSet(TEAM2_SET);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual(['agent.security-auditor']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+});
+
+/**
+ * design-227.md Decision 1: a claim the set does not hold is reported as changed while 02 could still
+ * remove one of its paths, which is when the path is absent, holds the bytes its row records, or is an
+ * RTK settings file whose hook it can take out. N1, N2, N5, N6 and N8a fail without it; the rest are
+ * pins. O4 is the keep choice's banner side: the claim is reported until an untrack supersedes it.
+ */
+describe('upgrade-status and a claim outside the applicable set', () => {
+  const SA = 'agent.security-auditor';
+  const SA_PATH = '.claude/agents/security-auditor.md';
+  const RTK = 'rtk.claude-settings';
+  const SETTINGS = '.claude/settings.json';
+  // Not normalize-stable: CRLF line ends, trailing spaces and extra blank lines.
+  const BODY = 'recorded body  \r\nwith CRLF line ends\r\nand trailing spaces   \r\n\r\n\r\n';
+  let root: string;
+  let outside: string;
+  let rows = 0;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'upgrade-status-outside-'));
+    outside = await mkdtemp(path.join(tmpdir(), 'upgrade-status-outside-out-'));
+    await writeFile(path.join(root, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(root, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    inSync([claude]);
+    state.rows.get(schema.templateManifestCache)!.push(
+      {
+        templateId: SA,
+        templateKind: 'agent',
+        schemaVersion: 1,
+        contentHash: 'h-sa',
+        setHash: 's',
+      },
+      {
+        templateId: RTK,
+        templateKind: 'rtk-config',
+        schemaVersion: 1,
+        contentHash: 'h-rtk',
+        setHash: 's',
+      },
+    );
+    state.onboarded = false;
+    repoRow();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  const repoRow = (over: Record<string, unknown> = {}) => {
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: root,
+      localPath: null,
+      source: 'git_https',
+      rtkEnabled: false,
+      ...over,
+    };
+  };
+
+  /** A live row for a template at a path, whose recorded body is written there unless `file` says
+   *  what the path holds instead (null: nothing). */
+  async function claim(c: {
+    templateId: string;
+    diskPath: string;
+    hash: string;
+    body: string;
+    file?: string | null;
+    bundleItemId?: string | null;
+  }) {
+    rows += 1;
+    state.rows.get(schema.onboardingArtifacts)!.push({
+      id: `row-${rows}`,
+      diskPath: c.diskPath,
+      templateId: c.templateId,
+      templateSchemaVersion: 1,
+      templateContentHash: c.hash,
+      writtenHash: sha256Hex(normalizeContent(c.body)),
+      bundleItemId: c.bundleItemId ?? null,
+      haiveVersion: null,
+      generatedAt: null,
+    });
+    const file = c.file === undefined ? c.body : c.file;
+    if (file !== null) {
+      await mkdir(path.dirname(path.join(root, c.diskPath)), { recursive: true });
+      await writeFile(path.join(root, c.diskPath), file, 'utf8');
+    }
+  }
+  const reads = async () => {
+    const body = await status();
+    return [body.changedTemplateIds, body.hasUpgradeAvailable];
+  };
+  const sa = (over: { file?: string | null; body?: string } = {}) =>
+    claim({ templateId: SA, diskPath: SA_PATH, hash: 'h-sa', body: BODY, ...over });
+  const settings = (over: { file?: string | null } = {}) =>
+    claim({
+      templateId: RTK,
+      diskPath: SETTINGS,
+      hash: 'h-rtk',
+      body: buildClaudeSettingsJson(),
+      ...over,
+    });
+  const editedSettings = buildClaudeSettingsJson().replace('{\n', '{\n  "model": "ours",\n');
+
+  it('N1: reports an agent the set no longer holds while its file holds the body its row records', async () => {
+    expect(normalizeContent(BODY)).not.toBe(BODY);
+    await sa();
+    expect(await reads()).toEqual([[SA], true]);
+  });
+
+  it('N2: and while the file is gone', async () => {
+    await sa({ file: null });
+    expect(await reads()).toEqual([[SA], true]);
+  });
+
+  it('N5: reports an installed RTK settings file once RTK is off and the set lacks its template', async () => {
+    await settings();
+    expect(await reads()).toEqual([[RTK], true]);
+  });
+
+  it('N6: and one edited around the hook, which 02 can strip', async () => {
+    await settings({ file: editedSettings });
+    expect(await reads()).toEqual([[RTK], true]);
+  });
+
+  it('N8a: reports a template a release removed from the manifest', async () => {
+    await claim({
+      templateId: 'agent.retired',
+      diskPath: '.claude/agents/retired.md',
+      hash: 'h-r',
+      body: 'retired body\n',
+    });
+    expect(await reads()).toEqual([['agent.retired'], true]);
+  });
+
+  it('N3: reports nothing for a file holding other bytes, which 02 keeps', async () => {
+    await sa({ file: "a person's own agent\n" });
+    expect(await reads()).toEqual([[], false]);
+  });
+
+  it('N4: nor for a link to a file holding the body, nor one past the read cap', async () => {
+    await sa({ file: null });
+    await writeFile(path.join(outside, 'sa.md'), BODY, 'utf8');
+    await mkdir(path.dirname(path.join(root, SA_PATH)), { recursive: true });
+    await symlink(path.join(outside, 'sa.md'), path.join(root, SA_PATH));
+    expect(await reads(), 'a link').toEqual([[], false]);
+
+    await rm(path.join(root, SA_PATH));
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows.get(schema.onboardingArtifacts)!.slice(0, 2),
+    );
+    await sa({ body: BODY + 'x'.repeat(RULES_FILE_READ_CAP) });
+    expect(await reads(), 'past the cap').toEqual([[], false]);
+  });
+
+  it('N7: nor for an RTK settings file the hook was taken out of', async () => {
+    await settings({ file: '{\n  "model": "ours"\n}\n' });
+    expect(await reads()).toEqual([[], false]);
+  });
+
+  it('N8b: keeps reporting a template the manifest dropped while the set still holds it', async () => {
+    repoRow({ applicableTemplateIds: ['agent.x', 'agent.retired'] });
+    await claim({
+      templateId: 'agent.retired',
+      diskPath: '.claude/agents/retired.md',
+      hash: 'h-r',
+      body: 'retired body\n',
+    });
+    expect(await reads()).toEqual([['agent.retired'], true]);
+  });
+
+  it('N9: reads a per-repository claim by its own comparison, a dangling custom one not at all', async () => {
+    const custom = {
+      templateId: 'custom.b1.i1',
+      diskPath: '.claude/skills/x/SKILL.md',
+      hash: 'h-c',
+      body: 'skill body\n',
+    };
+    state.rows.set(schema.customBundleItems, [
+      { itemId: 'i1', bundleId: 'b1', kind: 'skill', schemaVersion: 1, contentHash: 'h-c' },
+    ]);
+    await claim({ ...custom, bundleItemId: 'i1' });
+    expect(await reads(), 'a live item').toEqual([[], false]);
+
+    state.rows.set(schema.customBundleItems, []);
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows.get(schema.onboardingArtifacts)!.slice(0, 2),
+    );
+    await claim({ ...custom, bundleItemId: null });
+    expect(await reads(), 'a dangling row').toEqual([[], false]);
+  });
+
+  it('N10: reads a NULL set as the installed templates, so nothing is outside it', async () => {
+    repoRow({ applicableTemplateIds: null });
+    await sa();
+    expect(await reads()).toEqual([[], false]);
+  });
+
+  it('N11: looks outside the set after the RTK add-back: with RTK on its template is in it', async () => {
+    repoRow({ rtkEnabled: true });
+    await settings();
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        hasSnapshot: true,
+        rtkRecorded: true,
+        snapshotProviders: [{ name: 'claude-code' }],
+      })),
+    );
+    expect(await reads()).toEqual([[], false]);
+  });
+
+  it('O4: reports an obsolete Haive claim while its row is live, and nothing once an untrack superseded the row', async () => {
+    await sa();
+    expect(await reads(), 'row live').toEqual([[SA], true]);
+
+    // The untrack supersedes the row and leaves the file where it is.
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).filter(
+        (r) => r.templateId !== SA,
+      ),
+    );
+    expect(await reads(), 'row superseded').toEqual([[], false]);
+  });
+});
+
+/** The keep choice's rollback offer: an upgrade that only untracked a row wrote and removed nothing,
+ *  and its undo is the only way to get the row back. */
+describe('upgrade-status and an upgrade that only untracked a row', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-untracked-'));
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: [],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+    state.rows = new Map<unknown, unknown[]>([
+      [
+        schema.templateManifestCache,
+        [{ templateId: 'agent.x', schemaVersion: 1, contentHash: 'h1', setHash: 's' }],
+      ],
+      [schema.tasks, [{ id: 'upgrade-1', metadata: null }]],
+      [schema.taskSteps, [{ output: { untrackedRowIds: ['row-1'] } }]],
+    ]);
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('O6: offers its rollback', async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasPriorUpgrade).toBe(true);
+  });
+
+  it('offers none for an upgrade that untracked, wrote and removed nothing', async () => {
+    state.rows.set(schema.taskSteps, [{ output: { untrackedRowIds: [], removedPaths: [] } }]);
+    const body = await status();
+    expect(body.isOnboarded).toBe(true);
+    expect(body.hasPriorUpgrade).toBe(false);
   });
 });

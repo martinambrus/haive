@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { schema } from '@haive/database';
 import { agentSpecSchema, skillEntrySchema } from '@haive/shared';
 import type { BundleForExpansion, BundleItemForExpansion } from './template-manifest.js';
@@ -23,7 +23,7 @@ export interface BundleWithMeta extends BundleForExpansion {
  *  throwing — a corrupt row should never block the rest of the onboarding
  *  / upgrade. */
 export async function loadBundlesForExpansion(
-  db: Database,
+  db: Database | DbTx,
   repositoryId: string,
   logger: LoaderLogger,
 ): Promise<BundleWithMeta[]> {

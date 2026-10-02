@@ -1,38 +1,33 @@
 import { readUpgradeFile, rtkBlockFiles, type UnreadReason } from '@haive/shared/rules-files';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  buildCliRulesBlockFromProviders,
-  CLI_RULES_DISK_PATH,
   CLI_RULES_END,
-  CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_START,
-  CLI_RULES_TEMPLATE_ID,
   CLI_PROVIDER_LIST,
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
-  getCliProviderMetadata,
   getHaiveVersion,
   holdsRtkSettings,
-  newestArtifactsFirst,
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
-  expandCustomBundlesFor,
   expandManifestFor,
   getTemplateManifest,
   updateApplicableTemplateIds,
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
+import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import {
-  extractBundleItemId,
-  loadBundlesForExpansion,
-  type BundleWithMeta,
-} from '../../_custom-bundle-loader.js';
-import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+  loadLiveArtifacts,
+  pickRenderSnapshot,
+  resolveRenderContext,
+  unionExpandedFor,
+  type LiveArtifactRow,
+} from '../../_upgrade-render.js';
 import {
   cliRulesRegionRecord,
   enabledImportRulesFiles,
@@ -40,9 +35,9 @@ import {
   missingRulesImportStubs,
   readAgentsRulesRegion,
 } from '../onboarding/_rules-files.js';
-import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
-import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
+
+export { loadLiveArtifacts, pickRenderSnapshot, type LiveArtifactRow };
 
 export type UpgradePlanBucket =
   | 'unchanged'
@@ -116,20 +111,6 @@ export interface UpgradePlanOutput extends UpgradePlanDetect {
   backfilledRows: number;
 }
 
-export interface LiveArtifactRow {
-  id: string;
-  diskPath: string;
-  templateId: string;
-  templateKind: string;
-  templateContentHash: string;
-  templateSchemaVersion: number;
-  writtenHash: string;
-  formValuesSnapshot: Record<string, unknown> | null;
-  sourceStepId: string;
-  bundleItemId: string | null;
-  generatedAt: Date | null;
-}
-
 async function requireRepositoryId(ctx: StepContext): Promise<string> {
   const row = await ctx.db
     .select({ repositoryId: schema.tasks.repositoryId })
@@ -139,201 +120,6 @@ async function requireRepositoryId(ctx: StepContext): Promise<string> {
   const repoId = row[0]?.repositoryId ?? null;
   if (!repoId) throw new Error('upgrade-plan: task has no repository_id');
   return repoId;
-}
-
-export async function loadLiveArtifacts(
-  ctx: StepContext,
-  repositoryId: string,
-): Promise<LiveArtifactRow[]> {
-  const rows = await ctx.db
-    .select({
-      id: schema.onboardingArtifacts.id,
-      diskPath: schema.onboardingArtifacts.diskPath,
-      templateId: schema.onboardingArtifacts.templateId,
-      templateKind: schema.onboardingArtifacts.templateKind,
-      templateContentHash: schema.onboardingArtifacts.templateContentHash,
-      templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
-      writtenHash: schema.onboardingArtifacts.writtenHash,
-      formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
-      sourceStepId: schema.onboardingArtifacts.sourceStepId,
-      bundleItemId: schema.onboardingArtifacts.bundleItemId,
-      generatedAt: schema.onboardingArtifacts.generatedAt,
-    })
-    .from(schema.onboardingArtifacts)
-    .where(
-      and(
-        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-    );
-  return rows.map((r) => ({
-    id: r.id,
-    diskPath: r.diskPath,
-    templateId: r.templateId,
-    templateKind: r.templateKind,
-    templateContentHash: r.templateContentHash,
-    templateSchemaVersion: r.templateSchemaVersion,
-    writtenHash: r.writtenHash,
-    formValuesSnapshot: (r.formValuesSnapshot ?? null) as Record<string, unknown> | null,
-    sourceStepId: r.sourceStepId,
-    bundleItemId: r.bundleItemId,
-    generatedAt: r.generatedAt ?? null,
-  }));
-}
-
-/** The live snapshot to render from: the newest that recorded an RTK choice, since a snapshot from
- *  before RTK would keep the repository's RTK switch from reaching the upgrade, and the upgrade
- *  banner reads the same one. */
-export function pickRenderSnapshot(
-  liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
-): Record<string, unknown> | null {
-  const rows = newestArtifactsFirst(liveRows);
-  const recorded = rows.find((r) => typeof r.formValuesSnapshot?.rtkEnabled === 'boolean');
-  return (recorded ?? rows.find((r) => r.formValuesSnapshot))?.formValuesSnapshot ?? null;
-}
-
-/** Load the render context for this repository. Tries a live artifact's snapshot
- *  first, then falls back to the most recent completed onboarding task's step 07
- *  detect output (used for lazy backfill). */
-async function resolveRenderContext(
-  ctx: StepContext,
-  repositoryId: string,
-  liveRows: LiveArtifactRow[],
-): Promise<ResolvedRenderContext | null> {
-  const snapshot = pickRenderSnapshot(liveRows);
-  if (snapshot) {
-    return withLiveRtk(
-      ctx,
-      repositoryId,
-      snapshot as unknown as TemplateRenderContext,
-      typeof snapshot.rtkEnabled === 'boolean',
-    );
-  }
-
-  const priorOnboarding = await ctx.db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'onboarding'),
-        eq(schema.tasks.status, 'completed'),
-      ),
-    )
-    .orderBy(desc(schema.tasks.completedAt))
-    .limit(1);
-  const priorTaskId = priorOnboarding[0]?.id ?? null;
-  if (!priorTaskId) {
-    // A repository created BLANK has its scaffold seeded at init and has never
-    // been onboarded, so there is no snapshot and no step-07 output to recover
-    // from — the one state this function otherwise reports as unresolvable,
-    // which the backfill turns into a thrown error. Rebuild the same context
-    // init used, from the same builder, so the seeded files can be adopted.
-    //
-    // Scoped to `source: 'blank'` on purpose: for any other repo, "onboarded
-    // once but every trace is gone" is genuinely ambiguous, and adopting files
-    // against a blank context there would record the wrong baseline for a later
-    // rollback. Throwing stays the honest answer for that case.
-    const [repo] = await ctx.db
-      .select({ source: schema.repositories.source, name: schema.repositories.name })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .limit(1);
-    if (repo?.source !== 'blank') return null;
-    const renderCtx = await buildBlankRenderContext(ctx.db, {
-      userId: ctx.userId,
-      repositoryId,
-      repoName: repo.name ?? null,
-    });
-    return { renderCtx, rtkLive: true };
-  }
-
-  const stepRow = await ctx.db
-    .select({ detectOutput: schema.taskSteps.detectOutput })
-    .from(schema.taskSteps)
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, priorTaskId),
-        eq(schema.taskSteps.stepId, '07-generate-files'),
-      ),
-    )
-    .limit(1);
-  const detect = (stepRow[0]?.detectOutput ?? null) as Partial<GenerateFilesDetect> | null;
-  if (!detect) return null;
-
-  // Onboarding tasks completed before the manifest-versioning work stored
-  // detectOutput without `agentTargets`. Fall back to a claude-agents default
-  // so expandManifestFor doesn't trip on undefined fan-out arrays during the
-  // lazy-backfill path. The resulting context reflects best-effort recovery;
-  // conflicts get surfaced to the user via the plan UI.
-  const fallbackAgentTargets: TemplateRenderContext['agentTargets'] = [
-    { dir: '.claude/agents', format: 'markdown', supportsLsp: false },
-  ];
-
-  const lspLanguages = detect.lspLanguages ?? [];
-  const hasCapableProvider = (detect.cliProviders ?? []).some(
-    (provider) => getCliProviderMetadata(provider.name).supportsLsp,
-  );
-  const agentTargets = (detect.agentTargets ?? fallbackAgentTargets).map((target) => ({
-    ...target,
-    supportsLsp:
-      target.supportsLsp ??
-      (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
-  }));
-
-  const recorded: TemplateRenderContext = {
-    projectInfo: detect.projectInfo ?? {
-      name: null,
-      framework: null,
-      primaryLanguage: null,
-      description: null,
-      localUrl: null,
-      databaseType: null,
-      databaseVersion: null,
-      webserver: null,
-      docroot: null,
-      runtimeVersions: {},
-      testFrameworks: [],
-      testPaths: [],
-      buildTool: null,
-      commands: [],
-      containerType: null,
-    },
-    framework: detect.framework ?? null,
-    acceptedAgentIds: detect.acceptedAgentIds ?? [],
-    customAgentSpecs: detect.customAgentSpecs ?? [],
-    agentTargets,
-    lspLanguages,
-    // A detect output from before rtk shipped recorded no choice: off, not the column's default.
-    rtkEnabled: detect.rtkEnabled ?? false,
-    enabledCliProviders: detect.enabledCliProviders ?? [],
-  };
-  return withLiveRtk(ctx, repositoryId, recorded, detect.rtkEnabled !== undefined);
-}
-
-/** A render context, and whether its RTK choice is the repository's live one. */
-interface ResolvedRenderContext {
-  renderCtx: TemplateRenderContext;
-  rtkLive: boolean;
-}
-
-/** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
- *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
-async function withLiveRtk(
-  ctx: StepContext,
-  repositoryId: string,
-  recorded: TemplateRenderContext,
-  recordedChoice: boolean,
-): Promise<ResolvedRenderContext> {
-  if (!recordedChoice) return { renderCtx: recorded, rtkLive: false };
-  const [repo] = await ctx.db
-    .select({ rtkEnabled: schema.repositories.rtkEnabled })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .limit(1);
-  return repo
-    ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
-    : { renderCtx: recorded, rtkLive: false };
 }
 
 export async function readDiskContent(
@@ -433,8 +219,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
   async detect(ctx): Promise<UpgradePlanDetect> {
     const repositoryId = await requireRepositoryId(ctx);
     const manifest = getTemplateManifest();
-    const liveRows = await loadLiveArtifacts(ctx, repositoryId);
-    const resolved = await resolveRenderContext(ctx, repositoryId, liveRows);
+    const liveRows = await loadLiveArtifacts(ctx.db, repositoryId);
+    const resolved = await resolveRenderContext(ctx.db, {
+      repositoryId,
+      userId: ctx.userId,
+      liveRows,
+      logger: ctx.logger,
+    });
     if (!resolved) {
       throw new RenderContextUnresolvedError(
         'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
@@ -442,7 +233,12 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     }
     const { renderCtx } = resolved;
 
-    const expanded = await unionExpandedFor(ctx, renderCtx, repositoryId);
+    const expanded = await unionExpandedFor(ctx.db, {
+      repositoryId,
+      userId: ctx.userId,
+      renderCtx,
+      logger: ctx.logger,
+    });
     const installedTemplateSetHash =
       liveRows.length > 0 ? computeInstalledSetHashFromRows(liveRows) : null;
 
@@ -601,13 +397,23 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     let backfilledRows = 0;
 
     if (detected.ranBackfill) {
-      const liveRows = await loadLiveArtifacts(ctx, detected.repositoryId);
-      const resolved = await resolveRenderContext(ctx, detected.repositoryId, liveRows);
+      const liveRows = await loadLiveArtifacts(ctx.db, detected.repositoryId);
+      const resolved = await resolveRenderContext(ctx.db, {
+        repositoryId: detected.repositoryId,
+        userId: ctx.userId,
+        liveRows,
+        logger: ctx.logger,
+      });
       if (!resolved) {
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
       const { renderCtx } = resolved;
-      const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
+      const expanded = await unionExpandedFor(ctx.db, {
+        repositoryId: detected.repositoryId,
+        userId: ctx.userId,
+        renderCtx,
+        logger: ctx.logger,
+      });
       // An offered conflict stays unrecorded until 02 writes it: a row would belong to this upgrade
       // with no prior, which a rollback takes for a file the upgrade introduced and deletes.
       const offered = new Set(
@@ -671,82 +477,17 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     // so legacy repos onboarded before the column existed get populated on
     // their first upgrade attempt. Joins the manifest expansion with bundle
     // expansion so custom items show up in the per-repo applicable set.
-    const applicableExpanded = await unionExpandedFor(
-      ctx,
-      detected.renderCtxSnapshot as unknown as TemplateRenderContext,
-      detected.repositoryId,
-    );
+    const applicableExpanded = await unionExpandedFor(ctx.db, {
+      repositoryId: detected.repositoryId,
+      userId: ctx.userId,
+      renderCtx: detected.renderCtxSnapshot as unknown as TemplateRenderContext,
+      logger: ctx.logger,
+    });
     await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
 
     return { ...detected, backfilledRows };
   },
 };
-
-/** Union the deterministic Haive-template expansion with the per-repo
- *  custom-bundle expansion, deduping on diskPath (Haive items take priority
- *  on collision — should not happen in practice). Wraps the two
- *  responsibilities so plan/backfill/applicable-set computations all see the
- *  same combined set without copy-pasting the merge loop. */
-async function unionExpandedFor(
-  ctx: StepContext,
-  renderCtx: TemplateRenderContext,
-  repositoryId: string,
-): Promise<ExpandedRendering[]> {
-  const manifest = getTemplateManifest();
-  const haiveExpanded = expandManifestFor(renderCtx, manifest);
-
-  const bundles: BundleWithMeta[] = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
-  const customExpanded = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
-
-  const out: ExpandedRendering[] = [];
-  const seen = new Set<string>();
-  for (const r of haiveExpanded) {
-    if (seen.has(r.diskPath)) continue;
-    seen.add(r.diskPath);
-    out.push(r);
-  }
-  for (const r of customExpanded) {
-    if (seen.has(r.diskPath)) {
-      ctx.logger.warn(
-        { diskPath: r.diskPath, templateId: r.templateId },
-        'upgrade-plan: bundle rendering collides with Haive template, dropping bundle row',
-      );
-      continue;
-    }
-    seen.add(r.diskPath);
-    out.push(r);
-  }
-
-  // Current-side expansion of the AGENTS.md cli-rules region. It is per-repo
-  // (built from the repo owner's current enabled providers, sorted by name),
-  // so it is not in the global manifest — recompute it here exactly the way
-  // step 12 and the API do, so a rules change surfaces as drift. A null block
-  // (no rules-bearing provider) means the region is obsolete: omit it so a live
-  // row with no current match classifies as `obsolete` (region removal).
-  const ruleRows = await ctx.db
-    .select({
-      name: schema.cliProviders.name,
-      rulesContent: schema.cliProviders.rulesContent,
-      enabled: schema.cliProviders.enabled,
-    })
-    .from(schema.cliProviders)
-    .where(eq(schema.cliProviders.userId, ctx.userId));
-  const cliRulesBlock = buildCliRulesBlockFromProviders(ruleRows);
-  if (cliRulesBlock && !seen.has(CLI_RULES_DISK_PATH)) {
-    const writtenHash = sha256Hex(normalizeContent(cliRulesBlock));
-    out.push({
-      templateId: CLI_RULES_TEMPLATE_ID,
-      templateKind: CLI_RULES_TEMPLATE_KIND,
-      templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
-      templateContentHash: writtenHash,
-      diskPath: CLI_RULES_DISK_PATH,
-      content: cliRulesBlock,
-      writtenHash,
-    });
-  }
-  return out;
-}
 
 function computeInstalledSetHashFromRows(rows: LiveArtifactRow[]): string {
   const parts = rows

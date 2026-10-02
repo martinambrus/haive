@@ -37,6 +37,8 @@ interface UpgradeStatusResponse {
   rtkBlockLeftovers?: string[];
   /** RTK settings files no row records that still hold its hook; an upgrade offers to take it out. */
   rtkSettingsLeftovers?: string[];
+  /** A clone no row on this install records; older API versions omit it. */
+  firstUpgradeOnThisInstall?: boolean;
 }
 
 export interface UpgradeAvailableBannerProps {
@@ -166,7 +168,9 @@ export function UpgradeAvailableBanner({
           <span className="text-neutral-300">
             {showTemplateCount && (
               <>
-                {haiveChangedCount} template(s) changed
+                {status.firstUpgradeOnThisInstall && haiveChangedCount === 0
+                  ? 'not upgraded on this install yet'
+                  : `${haiveChangedCount} template(s) changed`}
                 {bundleChanges.length > 0 && (
                   <>
                     ; {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)

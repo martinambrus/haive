@@ -11,10 +11,10 @@ import {
 } from '@haive/shared';
 import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import { checkOnboardingMarkers } from '../src/lib/onboarding-state.js';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
 import { MAX_FILE_CONTENT_BYTES } from '../src/routes/tasks/_helpers.js';
 import {
-  checkOnboardingMarkers,
   classifyResetFailure,
   collectWrittenCliContent,
   mayRemoveSweptDirWhole,
@@ -146,6 +146,48 @@ describe('checkOnboardingMarkers', () => {
     const { present, missing } = await checkOnboardingMarkers('/definitely/not/a/path');
     expect(present).toEqual([]);
     expect(missing).toHaveLength(4);
+  });
+
+  // 07 and 09_5 write into each ENABLED provider's own directories, so a run with claude off
+  // leaves no `.claude/agents` or `.claude/skills` at all.
+  it.each([
+    ['codex', '.codex/agents', '.agents/skills'],
+    ['gemini', '.gemini/agents', '.gemini/skills'],
+    ['grok', '.grok/agents', '.grok/skills'],
+  ])('finds every marker a run with only %s enabled installs', async (_cli, agents, skills) => {
+    const root = await repo('markers-cli-');
+    await mkdir(path.join(root, KB_DIR), { recursive: true });
+    await mkdir(path.join(root, '.claude'), { recursive: true });
+    await writeFile(path.join(root, '.claude/workflow-config.json'), '{}\n');
+    await mkdir(path.join(root, agents), { recursive: true });
+    await mkdir(path.join(root, skills), { recursive: true });
+
+    const { present, missing } = await checkOnboardingMarkers(root);
+    expect(missing).toEqual([]);
+    expect(present).toHaveLength(4);
+  });
+
+  it("misses agents while no CLI's agents directory is there", async () => {
+    const root = await repo('markers-noagents-');
+    await installMarkers(root);
+    await rm(path.join(root, '.claude/agents'), { recursive: true, force: true });
+    await mkdir(path.join(root, '.agents/skills'), { recursive: true });
+
+    const { missing } = await checkOnboardingMarkers(root);
+    expect(missing).toEqual(['.claude/agents']);
+  });
+
+  it("does not count another CLI's agents directory that is a link", async () => {
+    const root = await repo('markers-cli-link-');
+    const outside = await repo('markers-cli-link-out-');
+    await installMarkers(root);
+    await rm(path.join(root, '.claude/agents'), { recursive: true, force: true });
+    await mkdir(path.join(outside, 'agents'), { recursive: true });
+    await mkdir(path.join(root, '.codex'), { recursive: true });
+    await symlink(path.join(outside, 'agents'), path.join(root, '.codex/agents'));
+
+    const { missing } = await checkOnboardingMarkers(root);
+    expect(missing).toEqual(['.claude/agents']);
   });
 });
 

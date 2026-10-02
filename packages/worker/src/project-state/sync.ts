@@ -1,7 +1,7 @@
 import { isUtf8 } from 'node:buffer';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
@@ -18,6 +18,12 @@ import {
   type ProjectStateConflict,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import {
+  loadLiveArtifacts,
+  resolveRenderContext,
+  unionExpandedFor,
+} from '../step-engine/_upgrade-render.js';
+import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { lockProjectState } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -166,8 +172,49 @@ function keptRender(
   return kept as ProjectRender;
 }
 
+/** The set 01's apply writes from the column just written, which upgrade-status compares a
+ *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
+async function writeApplicableTemplateIds(
+  tx: Tx,
+  { repositoryId, userId }: { repositoryId: string; userId: string },
+): Promise<void> {
+  const liveRows = await loadLiveArtifacts(tx, repositoryId);
+  if (liveRows.length === 0) return;
+  const resolved = await resolveRenderContext(tx, { repositoryId, userId, liveRows, logger });
+  if (resolved === null) {
+    throw new Error('the render context column just written did not resolve');
+  }
+  const expanded = await unionExpandedFor(tx, {
+    repositoryId,
+    userId,
+    renderCtx: resolved.renderCtx,
+    logger,
+  });
+  await updateApplicableTemplateIds(tx, repositoryId, expanded);
+}
+
+/** A sync from before the set followed the column moved the column alone, and no later sync of the
+ *  same files repairs the set it left. Run at boot; where a writer wrote both, it writes the same set. */
+export async function recomputeSyncedApplicableSets(db: Database): Promise<void> {
+  const repos = await db
+    .select({ id: schema.repositories.id, userId: schema.repositories.userId })
+    .from(schema.repositories)
+    .where(isNotNull(schema.repositories.renderContext));
+  for (const repo of repos) {
+    try {
+      await db.transaction(async (tx) => {
+        await lockProjectState(tx, repo.id);
+        await writeApplicableTemplateIds(tx, { repositoryId: repo.id, userId: repo.userId });
+      });
+    } catch (err) {
+      logger.warn({ err, repositoryId: repo.id }, 'applicable template ids not recomputed');
+    }
+  }
+}
+
 /** Merges the render unit of the checkout's project state record into the repository's render
- *  context against the base the last sync or writer recorded. Writes the column and the sync row only. */
+ *  context against the base the last sync or writer recorded. Writes the column and the sync row, and
+ *  for a repository with a claim the applicable template ids, all in one transaction. */
 export async function syncProjectStateFromCheckout(
   db: Database,
   { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
@@ -209,7 +256,10 @@ export async function syncProjectStateFromCheckout(
     if (checkout.kind === 'refused') return refuse(checkout.reason);
 
     const [repo] = await tx
-      .select({ renderContext: schema.repositories.renderContext })
+      .select({
+        renderContext: schema.repositories.renderContext,
+        userId: schema.repositories.userId,
+      })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
       .for('update');
@@ -252,6 +302,7 @@ export async function syncProjectStateFromCheckout(
         .set({ renderContext: next.data })
         .where(eq(schema.repositories.id, repositoryId));
       wrote = true;
+      await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
     }
 
     const lastError =
