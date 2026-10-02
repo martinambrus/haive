@@ -2298,6 +2298,15 @@ it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run 
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
 refuses when a marker is missing or a run is live.
 
+**A clone is admitted to an upgrade by its render context column.** A repository cloned from
+another install's onboarded commit has neither of the two things POST /tasks and upgrade-status
+gate an upgrade on, a completed onboarding task or a live artifact row, only the column the
+project-state sync filled from the checkout's record. `renderContextAdmitsUpgrade`
+(`api/src/lib/onboarding-state.ts`) is a third term, tried only after both fail. It requires that
+the column decodes (a refused one reads as NULL, as 01 reads it), that the repository is `ready`
+with a root, and that the verdict above calls it onboarded, which reads the reset epoch and
+refuses beside a live onboarding. The two older terms read neither.
+
 **That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
 gives: the hand list it replaced was `['.claude', KB_DIR, LEARNINGS_DIR]` from when `.claude`
@@ -2957,17 +2966,21 @@ file git ignores out of the commit, whichever provider it belongs to. 01 names t
 block, so the form says what will change. `GET /repos/:id/upgrade-status` reads no RTK settings template as current for such a
 repository and reports the files still holding a block (`rtkBlockLeftovers`), and the settings
 files no row records that 01 would offer for removal (`rtkSettingsLeftovers`): it looks where 01
-looks, reads RTK's choice through the same snapshots, and judges each file by the predicate 01
+looks, reads RTK's choice in the same order, and judges each file by the predicate 01
 uses (`holdsRtkSettings`), so the banner offers the upgrade, and never one whose plan offers
 nothing. A repository never onboarded gets neither, since POST /tasks refuses it an upgrade.
 Switching RTK back on offers the settings files again, and the banner says so: the
 upgrade that switched it off left their ids out of `applicable_template_ids`, so upgrade-status
-counts an RTK template as applicable again while RTK is on and the providers of a snapshot that
-recorded the choice read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders
-from too). 01 renders from such a snapshot ahead of one from before RTK (`pickRenderSnapshot`), and
-both take the newest (`newestArtifactsFirst`, `@haive/shared`), since an upgrade replaces only the
-paths it writes and rows from several runs stay live side by side, so the banner and the plan read
-the same one, and a repository whose snapshots all predate RTK stays quiet. Only a re-onboarding writes the block.
+counts an RTK template as applicable again while RTK is on and the providers of the context 01
+renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
+Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
+First comes the repository's render context column, whose RTK choice is its stored
+`rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
+with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
+recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
+since an upgrade replaces only the paths it writes and rows from several runs stay live side by
+side. So the banner and the plan read the same context, and a repository whose snapshots all
+predate RTK stays quiet. Only a re-onboarding writes the block.
 
 **"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
 version declined, so the next upgrade offers only a newer one. On a live row it moves
