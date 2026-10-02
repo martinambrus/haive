@@ -1178,8 +1178,8 @@ export function ddevExec(
 const DDEV_OUTPUT_TAIL = 1500;
 
 /** Lines of each container's log to quote, and the ceiling on the whole captured block.
- *  Sized so DDEV_OUTPUT_TAIL plus this still fits inside the 6000-char budget cleanDiagnosis
- *  applies before the fix agent reads it — the cause has to survive all the way there. */
+ *  Sized so DDEV_OUTPUT_TAIL plus this, headings included, stays under 5000 characters: inside the
+ *  6000 excerptDiagnosis keeps whole, so the cause reaches the fix agent uncut. */
 const CONTAINER_LOG_TAIL_LINES = 80;
 const CONTAINER_LOG_MAX_CHARS = 3000;
 

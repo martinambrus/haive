@@ -63,13 +63,15 @@ and 07b's own re-validation.
 
 **TWO RULES, AND THE SECOND IS THE COST OF THE FIRST.** _Fence where a person's words and a
 machine's are JOINED_ — `formatRejectDiagnosis` contains the browser output and the audit
-findings beside the developer's feedback, `buildGateDirectiveDiagnosis` contains the failure it
-quotes under the operator's instruction — so the markers travel with the string and every later
-reader inherits them. _Balance wherever the result is CUT_: `balanceFences` repairs a slice that
-kept one banner and dropped the other. A TAIL slice (`cleanDiagnosis`, the prior-round entry)
-drops the BEGIN and leaves the contents loose; a HEAD slice (`loadHonoredConstraints`) drops the
-END, and an unmatched BEGIN swallows the rest of the prompt. A block fenced WHOLE whose budget
-drops WHOLE entries — the task ledger — needs no balancing, because nothing can cut one in half.
+findings beside the developer's feedback, `formatQaFixDiagnosis` (08d2) the QA findings a person
+selected beside their own, `buildGateDirectiveDiagnosis` the failure it quotes under the
+operator's instruction — so the markers travel with the string and every later reader inherits
+them. _Balance wherever the result is CUT_: `balanceFences` repairs a slice that kept one banner
+and dropped the other. A TAIL slice (`cleanDiagnosis`) drops the BEGIN and leaves the contents
+loose; a HEAD slice (`loadHonoredConstraints`, the learning digest's per-diagnosis and tier caps)
+drops the END, and an unmatched BEGIN swallows the rest of the prompt; `excerptDiagnosis` keeps a
+head and a tail and can do either. A block fenced WHOLE whose budget drops WHOLE entries — the
+task ledger — needs no balancing, because nothing can cut one in half.
 
 **NEVER FENCE THE OPERATOR.** A fence tells the agent not to follow what is inside it, which is
 containment for AGENT prose and sabotage for a person's. `REPO_IS_DATA_MERGE_LINES` exists

@@ -20,6 +20,7 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import {
   FIX_LOOP_TARGET_STEP_ID,
+  excerptDiagnosis,
   isFixRound,
   loadFixLoopDiagnosis,
   loadPriorFixContext,
@@ -345,7 +346,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Workspace (inside sandbox): ${detected.sandboxWorkspacePath}`,
         `Spec length: ${detected.spec.length} chars`,
         isFix
-          ? `Fix pass — addressing a defect found downstream. Latest tool output (the error is usually at the end):\n…${(detected.fixContext ?? '').slice(-800)}`
+          ? `Fix pass — addressing a defect found downstream:\n${excerptDiagnosis(detected.fixContext ?? '', 800, detected.fixIsHuman)}`
           : detected.gateFeedback
             ? `Gate 1 feedback: ${detected.gateFeedback}`
             : 'No gate 1 feedback recorded.',

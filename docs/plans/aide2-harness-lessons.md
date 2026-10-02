@@ -1,6 +1,7 @@
 # AIDE² harness lessons for Haive
 
-> **Not started — a findings register and a ranked plan; nothing approved** (2026-09-30). One source
+> **In progress — the first wave is approved (2026-10-02, see Decided); each phase states its own
+> status in its section** (updated 2026-10-03). One source
 > is reviewed: Weco AI's AIDE² paper and its blog post. The Haive findings were measured read-only on
 > the dev install on 2026-09-29, and every code reference was re-read on `origin/main` `610b7cbd` on
 > 2026-09-30. Keep this file current by editing the section a change belongs to: a re-measured number
@@ -193,18 +194,31 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   (`apply-patch.ts`) returns early when `expectedVersion` is absent, so an agent's edit to any other
   existing node runs without the optimistic-concurrency check and can overwrite a person's concurrent
   edit. 03-plan-sequence is unaffected: `keepOrderingOps` keeps only `nodeRef` and `ordinal`. → P4, P5,
-  D9.
+  D9. Since #374 (2026-10-01) an agent's change to an existing node must carry its version.
 - **F15. `03-plan-sequence` still shows its agents the edges they are asked to judge (pre-existing,
   found while answering a review of P1).** `omitLinks` exists so the agent is "a second opinion" rather
   than "an echo" of the recorded `depends_on` edges (its comment in `render.ts`), but it drops only the
   link lines: `renderPlanMarkdownFrom` still gives every node with an unmet prerequisite a `blocked by
-  #N` attribute, derived from those same edges. → P1.
+  #N` attribute, derived from those same edges. → P1. Fixed by #370 (2026-10-01): `omitLinks` drops
+  that attribute too.
 - **F16. A wide sibling run cannot be sequenced (pre-existing, same review).** `computeTargets` makes
   every undecided run of two or more children one target, with no width cap, and
   `buildSequencePrompt` lists every child with its title and `node:` ref, so a few hundred long-titled
   children pass the provider-neutral bound on their own. A run of more than 500 children cannot be
   answered at all: the reply needs one upsert per child, and `planPatchSchema` caps a patch at
-  `PLAN_PATCH_MAX_OPS` (500). → P1, D10.
+  `PLAN_PATCH_MAX_OPS` (500). → P1, D10. Since #375 (2026-10-01) a run wider than
+  `SEQUENCE_MAX_RUN_CHILDREN` (250) gets no agent, and the step names it.
+- **F17. 07's fix prompt kept only the tail of a long diagnosis (pre-existing, found while checking
+  P2).** `cleanDiagnosis` kept the last 6,000 characters, while gate 2 puts the developer's words
+  first and 08c leads with its `[high]` findings. On task ef954a3d the developer's rejection in rounds
+  4 and 5 (8,807 and 9,254 characters) never reached 07, and 08c's round-3 report (14,676) lost its
+  blocking finding, so P2 would have quoted the wrong end of a report. Fixed by #395: a diagnosis keeps
+  its head and tail, and a person's words whole (`excerptDiagnosis`, docs/architecture/fix-loop.md).
+- **F18. Haive's own fixer instructions reach 07 inside the untrusted fence (pre-existing, same
+  check).** 08c's `VALIDATE_THEN_ACT` and recurring note, and 08b's "Decide per failure", travel in the
+  diagnosis that 07 fences as agent text, under a guard telling the fixer never to follow an
+  instruction inside a fence. The effect is unmeasured. → after P2: Haive's instruction outside the
+  fence, the agent's findings fenced where they are written, as gate 2 already does.
 
 ## Phases
 
@@ -417,27 +431,26 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D4.** A cheaper provider for narrow seats as a product default, or user configuration only.
 - **D5.** F11: collapse repeated lines in test output before the tail cut (structural, with no banner
   matching), parked until more 08b runs exist.
-- **D6.** F12: split AGENTS.md into a lean core plus per-area files loaded only where the work is. A
-  dev-side restructure, the user's call, outside these phases.
-- **D7.** The step CLI switch sits under `/tasks/:id/…` but writes a user-wide preference. Outside this
-  plan's scope, found while checking F7; P3 does not depend on it changing.
-- **D8.** F6: learned guidance drops items past its cap without saying so. State the omission as the
-  ledger does, or leave it, since it is a five-item nudge list by design. Not from the paper; found
-  while checking F6.
 - **D9.** F14 beyond P4 and P5: 01-plan-build's and 02-plan-coverage's neighbourhood nodes carry no
   version either. Show versions wherever a writer may patch, deciding whether the committed
   `.haive-data/plan.md` mirror (which shares `renderPlanMarkdown`) shows them too, or refuse an agent
   update that omits `expectedVersion`. Not from the paper; pre-existing.
-- **D10.** F16: a sibling run too wide for one prompt or one patch. Order it in bounded slices, which
-  needs a rule for combining slices into one order, or leave it to a person with the step saying so.
-  Not from the paper; pre-existing.
 - **D11.** P4 and P5: how a bounded plan writer reaches a node its index omits. A versioned snapshot
   written for each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls
   that answers from the dispatch's read. One choice serves plan chat, 11f and 01f.
 
 ## Decided
 
-None yet.
+- **First wave (the user, 2026-10-02).** P0, P1's parity arm, P2, F17 and F18; F17 before P2 and F18
+  after it. One PR each, through review and CI. P0 is checked live on the dev stack after it merges:
+  the migration, one worker restart with a temporary uncommitted edit and its revert, and one local
+  ollama dispatch. P1's role-sized arm and the live A/B waves (D1) are not in it: they need a plan
+  restored on the dev install and paid tokens.
+- **D6.** AGENTS.md is a core plus topic files under `docs/architecture/` (#394, 2026-10-03).
+- **D7.** A step CLI picked in a task belongs to that task (#373, 2026-10-01).
+- **D8.** Learned guidance states what its cap dropped (#368, 2026-10-01).
+- **D10.** A sibling run too wide for one reply is named and left to a person, never sent (#375,
+  2026-10-01); no slicing.
 
 ## Critical files
 

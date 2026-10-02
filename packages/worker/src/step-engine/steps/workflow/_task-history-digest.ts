@@ -7,6 +7,7 @@ import {
   severityRank,
 } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { balanceFences } from '../_untrusted-repo.js';
 
 /* ------------------------------------------------------------------ */
 /* Task-history digest — mines the PERSISTED run history (fix-loop     */
@@ -260,7 +261,7 @@ export function renderTaskHistoryDigest(
     lines.push('', '## What blocked it (round by round)');
     for (const d of diagnoses) {
       lines.push(
-        `- round ${d.round} via ${d.source || 'review'}: ${clip(d.diagnosis, DIAGNOSIS_ITEM_CAP[tier])}`,
+        `- round ${d.round} via ${d.source || 'review'}: ${balanceFences(clip(d.diagnosis, DIAGNOSIS_ITEM_CAP[tier]))}`,
       );
     }
   }
@@ -302,7 +303,7 @@ export function renderTaskHistoryDigest(
 
   let text = lines.join('\n').trim();
   if (text.length > TIER_TOTAL_CAP[tier]) {
-    text = `${text.slice(0, TIER_TOTAL_CAP[tier])}\n… [digest truncated at ${tier}-tier cap]`;
+    text = `${balanceFences(text.slice(0, TIER_TOTAL_CAP[tier]))}\n… [digest truncated at ${tier}-tier cap]`;
   }
 
   return { text, tier, maxRound, fixLoopCount, findingCount, steerCount };

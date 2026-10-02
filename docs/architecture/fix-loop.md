@@ -74,3 +74,21 @@ dedupe, which suppresses an entry only on an exact text match and so missed ever
 block had cut mid-string. Both blocks now drop WHOLE oldest entries and state the omission:
 a truncated fact reads as a complete one, and the newest rounds are what the pass is
 downstream of.
+
+**A long diagnosis keeps its head as well as its tail.** A gate-2 rejection opens with the
+developer's "Findings to fix (all required):" and appends the fenced runtime output and audit
+after it (`formatRejectDiagnosis`), and 08c leads with its `[high]` findings, but 07 used to
+receive the LAST 6,000 chars of every diagnosis (`cleanText` via `cleanDiagnosis`). MEASURED on
+task ef954a3d: gate-2 rounds 4 and 5 (8,807 and 9,254 chars, the developer's words starting at
+character 319) reached 07 only from char 2,807 and 3,254, and 08c's round 3 (14,676 chars) lost
+its `[high]` finding. `excerptDiagnosis` (`_fix-loop.ts`) now serves every reader that shows a
+diagnosis to 07 or to a person. For a person's source (`HUMAN_REJECT_SOURCES`) the text OUTSIDE
+the fences — their words and Haive's framing — stays whole and only the fenced agent parts are
+cut, head and tail; any other source is cut head and tail as a whole; one marker states what was
+omitted and the fences stay balanced. Budgets: 6,000 for the defect block and the honored
+constraints, 1,500 per side of the oscillation gate, 800 for 07's form, and 400 per prior-round
+entry, where a person's entry is cut too because that block is background. A person's text stays
+bounded only because each producer fences the machine part it joins to it: gate 2 does, and so
+does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
+07's prompt before, 8,806 after). The fingerprints are untouched (`FINGERPRINT_TAIL_LIMIT`,
+`task-ledger.ts`), so dedupe and the oscillation guard compare exactly as before.
