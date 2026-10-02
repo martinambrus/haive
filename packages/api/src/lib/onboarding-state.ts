@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { readRenderContextColumn } from '@haive/shared/project-state';
@@ -177,6 +178,19 @@ export const ONBOARDING_MARKERS = [
   '.claude/workflow-config.json',
 ];
 
+/** 07 and 09_5 write agents and skills only into each enabled CLI's own directory, so these two
+ *  markers stand for that directory of any CLI in the catalog. */
+const MARKER_CANDIDATES: Readonly<Record<string, readonly string[]>> = {
+  '.claude/agents': [
+    ...new Set(
+      CLI_PROVIDER_LIST.flatMap((p) =>
+        p.projectAgentsDir !== null && p.agentFileFormat !== null ? [p.projectAgentsDir] : [],
+      ),
+    ),
+  ],
+  '.claude/skills': [...new Set(CLI_PROVIDER_LIST.map((p) => p.projectSkillsDir))],
+};
+
 /** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
  *  one of them is written by 07-generate-files, the 8th of 27 onboarding steps, so a
  *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
@@ -190,8 +204,13 @@ export async function checkOnboardingMarkers(
       // `pathExists` is `stat`-based: it followed a link and read a dangling one as absent, so a
       // linked `.claude/agents` counted as installed while the definitions it named lived outside
       // the tree — and these counts are what the onboarded verdict and `mark-onboarded` rest on.
-      const info = await lstatNoFollow(root, rel);
-      return [rel, info !== null && (info.kind === 'file' || info.kind === 'directory')] as const;
+      const found = await Promise.all(
+        (MARKER_CANDIDATES[rel] ?? [rel]).map(async (candidate) => {
+          const info = await lstatNoFollow(root, candidate);
+          return info !== null && (info.kind === 'file' || info.kind === 'directory');
+        }),
+      );
+      return [rel, found.includes(true)] as const;
     }),
   );
   return {

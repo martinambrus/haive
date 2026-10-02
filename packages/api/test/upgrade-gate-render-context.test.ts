@@ -208,6 +208,21 @@ describe('POST /tasks starts an upgrade on a repository only its render context 
     expect(t.upgrades()).toHaveLength(1);
   });
 
+  it('A1b: admits a clone whose onboarding wrote only codex agents and skills', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'upgrade-gate-codex-'));
+    dirs.push(root);
+    for (const dir of [KB_DIR, '.codex/agents', '.agents/skills', '.claude']) {
+      await mkdir(path.join(root, dir), { recursive: true });
+    }
+    await writeFile(path.join(root, '.claude/workflow-config.json'), '{}\n', 'utf8');
+    const t = await world({ root });
+
+    const res = await startUpgrade();
+
+    expect(res.status).toBe(201);
+    expect(t.upgrades()).toHaveLength(1);
+  });
+
   // A2
   it.each([...LIVE_TASK_STATUSES])(
     'A2: refuses beside an onboarding that is %s',
