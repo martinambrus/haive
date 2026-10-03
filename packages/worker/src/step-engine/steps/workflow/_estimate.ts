@@ -10,6 +10,8 @@ import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 
 /** Ceiling on how many prior tasks to gather as anchors. */
 export const MAX_ANCHORS = 30;
+/** Bound task-id IN clauses well below PostgreSQL's bind-parameter ceiling. */
+const TASK_LOOKUP_BATCH_SIZE = 500;
 /** Per-anchor description budget when an anchor is rendered into a prompt / panel. */
 export const ANCHOR_DESC_CAP = 240;
 /** Require several measured runs before replacing the broader-history baseline. */
@@ -251,17 +253,20 @@ async function fetchPreferredTaskRows(
   ids: string[],
 ): Promise<PriorTaskRow[]> {
   if (ids.length === 0) return [];
-  const rows = await db.query.tasks.findMany({
-    where: and(
-      inArray(schema.tasks.id, ids),
-      eq(schema.tasks.repositoryId, repositoryId),
-      eq(schema.tasks.type, 'workflow'),
-      eq(schema.tasks.status, 'completed'),
-      ne(schema.tasks.id, taskId),
-    ),
-    columns: PRIOR_TASK_COLUMNS,
-  });
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byId = new Map<string, PriorTaskRow>();
+  for (let offset = 0; offset < ids.length; offset += TASK_LOOKUP_BATCH_SIZE) {
+    const rows = await db.query.tasks.findMany({
+      where: and(
+        inArray(schema.tasks.id, ids.slice(offset, offset + TASK_LOOKUP_BATCH_SIZE)),
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+        ne(schema.tasks.id, taskId),
+      ),
+      columns: PRIOR_TASK_COLUMNS,
+    });
+    for (const row of rows) byId.set(row.id, row);
+  }
   return ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
 }
 

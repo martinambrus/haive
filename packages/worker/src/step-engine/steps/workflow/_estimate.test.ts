@@ -368,6 +368,30 @@ describe('buildAnchors', () => {
     expect(anchors.slice(0, 2).map((a) => a.title)).toEqual(['old-plan-1', 'old-plan-2']);
   });
 
+  it('bounds task lookup parameters for plan histories larger than PostgreSQL permits', async () => {
+    const ids = Array.from({ length: 65_536 }, (_, i) => `plan-${i}`);
+    const measured = [ids[0]!, ids[32_768]!, ids[65_535]!].map((id) => prior(id, 'quick_bugfix'));
+    const { db, findMany } = mockDb(
+      [],
+      measured.map((p) => p.id),
+    );
+    const dialect = new PgDialect();
+    const parameterCounts: number[] = [];
+    findMany.mockImplementation(async ({ where }) => {
+      const { params } = dialect.sqlToQuery(where);
+      parameterCounts.push(params.length);
+      const wanted = new Set(params);
+      // SQL result order differs from the plan ranking, even across lookup batches.
+      return measured.filter((p) => wanted.has(p.id)).reverse();
+    });
+
+    const anchors = await buildAnchors(db, 'current', 'repo', ids, 'quick_bugfix');
+
+    expect(anchors.map((a) => a.title)).toEqual(measured.map((p) => p.id));
+    expect(parameterCounts.length).toBeGreaterThan(1);
+    expect(Math.max(...parameterCounts)).toBeLessThan(1000);
+  });
+
   it('pages broader recent history past unmeasured rows even without preferred ids', async () => {
     const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
       prior(`unmeasured-${i}`, 'full_workflow'),

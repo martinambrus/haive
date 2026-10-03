@@ -15,7 +15,9 @@ latest 30 tasks would leave older bugfixes unreachable. Within the path, plan pr
 semantic ordering remain useful scope signals. Anchors with no measurable effort do not count.
 Plan and semantic retrieval prioritize the current path before applying measured-anchor
 budgets, so older relevant matches cannot be crowded out by other paths. Plan retrieval
-returns the full ordered candidate set for batched timing hydration. Semantic retrieval
+returns the full ordered candidate set for batched task lookup and timing hydration. Task-id
+lookups use bounded IN clauses so large plan histories cannot exceed PostgreSQL's bind-parameter
+limit; lookup batches preserve the candidate order. Semantic retrieval
 resolves eligible completed same-path task ids from Postgres and binds that set into the
 vector query, pages past unmeasured results using the same timing calculation as hydration,
 then tops up with measured matches on other paths when needed. This also works with external RAG
