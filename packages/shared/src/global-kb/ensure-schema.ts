@@ -124,6 +124,36 @@ export async function ensureGlobalKbSchema(
     );
   });
 
+  // The approval (`enforced_hash`) is cleared by a trigger whenever an active entry leaves `active`.
+  await exec(
+    `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS enforce jsonb, ADD COLUMN IF NOT EXISTS enforced_hash TEXT, ADD COLUMN IF NOT EXISTS enforced_at TIMESTAMP, ADD COLUMN IF NOT EXISTS enforced_by uuid`,
+  );
+  await exec(
+    `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_enforced ON ${ENTRIES_TABLE} (namespace) WHERE enforced_hash IS NOT NULL`,
+  );
+  await exec(`
+    CREATE OR REPLACE FUNCTION global_kb_clear_enforced_hash() RETURNS trigger AS $$
+    BEGIN
+      NEW.enforced_hash := NULL;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `);
+  await step(async (tx) => {
+    const triggerExists = await tx.unsafe(
+      `SELECT 1 FROM pg_trigger WHERE tgname = 'trg_global_kb_clear_enforced_hash' AND tgrelid = '${ENTRIES_TABLE}'::regclass`,
+    );
+    if (triggerExists.length === 0) {
+      await tx.unsafe(`
+        CREATE TRIGGER trg_global_kb_clear_enforced_hash
+          BEFORE UPDATE OF status ON ${ENTRIES_TABLE}
+          FOR EACH ROW
+          WHEN (OLD.status = 'active' AND NEW.status IS DISTINCT FROM 'active')
+          EXECUTE FUNCTION global_kb_clear_enforced_hash()
+      `);
+    }
+  });
+
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS
   //    namespace/user_id/entry_id/facets. pgvector primary, jsonb fallback.
   if (usedPgvector) {

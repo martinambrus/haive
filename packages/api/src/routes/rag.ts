@@ -20,6 +20,7 @@ import {
 } from '@haive/shared/rag';
 import {
   extractProjectFacets,
+  resolveGlobalKbEnabled,
   resolveTaskStackContext,
   stackProjectName,
   withGlobalKb,
@@ -365,7 +366,7 @@ ragRoutes.post('/search', async (c) => {
   // failure must never break per-repo retrieval (plan §6.4). ---
   let globalHits: RagSearchHit[] = [];
   let globalBodies = new Map<string, GlobalKbEntryBody>();
-  const globalEnabled = await configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
+  const globalEnabled = await resolveGlobalKbEnabled(configService);
   if (globalEnabled) {
     try {
       const result = await withGlobalKb(db, async ({ conn, settings }) => {
