@@ -80,6 +80,23 @@ describe('resolveEstimate', () => {
     expect(r.hours).toBe(2);
     expect(r.rationale).toContain('no path scaling needed');
   });
+
+  it('recomputes the explanation when valid AI output omits its rationale', () => {
+    const r = resolveEstimate(
+      { estimatedHours: 5 },
+      {
+        ...detected,
+        anchors: history,
+        executionPath: 'quick_bugfix',
+        heuristicReason: 'old mixed-path explanation',
+      },
+    );
+    expect(r.hours).toBe(5);
+    expect(r.source).toBe('llm');
+    expect(r.rationale).toContain('prior quick_bugfix task(s)');
+    expect(r.rationale).toContain('no path scaling needed');
+    expect(r.rationale).not.toContain('old mixed-path explanation');
+  });
 });
 
 describe('estimateStep.llm', () => {

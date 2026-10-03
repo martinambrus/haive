@@ -132,16 +132,16 @@ export function resolveEstimate(
   llmOutput: unknown,
   detected: EstimateDetect,
 ): { hours: number; source: 'llm' | 'heuristic'; rationale: string; confidence: string } {
+  const baseline = heuristicEstimate(detected.anchors, detected.executionPath);
   const parsed = parseEstimateOutput(llmOutput);
   if (parsed) {
     return {
       hours: parsed.estimatedHours,
       source: 'llm',
-      rationale: parsed.rationale || detected.heuristicReason,
+      rationale: parsed.rationale || baseline.reason,
       confidence: parsed.confidence,
     };
   }
-  const baseline = heuristicEstimate(detected.anchors, detected.executionPath);
   return {
     hours: baseline.hours,
     source: 'heuristic',
