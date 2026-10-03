@@ -23,6 +23,18 @@ one line (`collapseToLine`), as step 11's article headers and title list are, so
 agent-authored title cannot open a line of its own; the isolation scan still reads the raw values,
 and its verdict is the same for either.
 
+**Each entry may carry a one-line description** — what the rule says and when it applies, like a
+skill's frontmatter description — shown beside its title as `- title — description`, so a model
+can judge relevance without fetching the body. `normalizeGlobalKbDescription` (`schema.ts`) is the
+one rule for every writer and for the render: collapsed to one line, capped at 300 characters at a
+word with an ellipsis, empty is null, and idempotent, so the isolation scan reads exactly the value
+the render shows. A person's text over the cap is refused, never cut; a model's is cut. It is
+written by the enrich task (a description the author stated wins over the model's), by the global
+promotions in `08-knowledge-acquisition` and `11-phase-8-learning` (the project name scrubbed, and
+08's repo-own backstop scanning it like the body), and kept through `09_6_4`'s merge, inheriting the
+superseded entry's when the draft has none. It is never embedded, so a description-only edit queues
+no re-embed.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a
