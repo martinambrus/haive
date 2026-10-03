@@ -237,6 +237,7 @@ repoRoutes.get('/', async (c) => {
     db,
     userId,
     rows.map((r) => r.id),
+    rows.filter((r) => r.source === 'blank').map((r) => r.id),
   );
   // Which repositories still hold live artifact rows, so a reset repo whose re-run failed at a
   // late step offers the manual button here too. Without it the list and the detail page would
@@ -2462,7 +2463,10 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   if (!root) throw new HttpError(409, 'Repository has no resolvable path');
 
   const { present, missing } = await checkOnboardingMarkers(root);
-  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  const facts =
+    (await loadOnboardingTaskFacts(db, userId, [id], repo.source === 'blank' ? [id] : [])).get(
+      id,
+    ) ?? NO_ONBOARDING_TASKS;
   const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
     source: repo.source,
     missing,

@@ -37,7 +37,9 @@ repository with no onboarding task history and no reset. This path requires no o
 setting up DDEV alone writes no KB, agents or skills, and scaffold seeding is best-effort.
 The next task must remain a workflow after those first files appear. `loadOnboardingTaskFacts` reads
 completed workflows separately from onboarding history, so an earlier setup task also receives
-the corrected verdict without a backfill. Workflow completion evidence lives only in task
+the same verdict without a backfill. Workflow history is aggregated with `max(completed_at)` for blank repositories
+only, returning one row per repository on each poll instead of transferring every finished task.
+Workflow completion evidence lives only in task
 history, and never stamps `onboarded_at`: such a stamp would outlive a later onboarding attempt
 and make its failed run read as complete once its markers existed. A plan build, a failed
 or cancelled workflow, and a workflow on an imported repository provide no such evidence.

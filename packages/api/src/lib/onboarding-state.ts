@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -39,7 +39,7 @@ export const LIVE_TASK_STATUSES = [
  * rather than a boolean so the comparison happens where the epoch already is, instead of as a
  * per-repository predicate inside one query.
  *
- * One query for the whole page, like `loadOnboardingTaskFacts` beside it.
+ * One query for the whole page.
  */
 export async function loadNewestLiveArtifactAt(
   db: Database,
@@ -118,54 +118,66 @@ export const NO_ONBOARDING_TASKS: OnboardingTaskFacts = {
 };
 
 /**
- * Onboarding history and successful workflow completions for a set of repositories, in one query.
+ * Onboarding history, with optional successful workflow completion evidence for blank repositories.
  *
- * Rows are folded in JS to pick the newest live onboarding id and maximum completion dates.
- * Workflow rows contribute only their completion date, leaving onboarding history untouched.
+ * Onboarding rows are folded to pick the newest live id and completion date. Workflow history
+ * is aggregated in SQL, returning at most one row per blank repository rather than transferring
+ * and sorting every completed task on each poll. Callers pass the blank IDs they already loaded;
+ * the SQL also verifies source and reset state. Other callers need only onboarding history.
  */
 export async function loadOnboardingTaskFacts(
   db: Database,
   userId: string,
   repositoryIds: string[],
+  blankRepositoryIds: string[] = [],
 ): Promise<Map<string, OnboardingTaskFacts>> {
   const byRepo = new Map<string, OnboardingTaskFacts>();
   if (repositoryIds.length === 0) return byRepo;
 
-  const rows = await db
-    .select({
-      id: schema.tasks.id,
-      repositoryId: schema.tasks.repositoryId,
-      status: schema.tasks.status,
-      type: schema.tasks.type,
-      completedAt: schema.tasks.completedAt,
-    })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.userId, userId),
-        or(
+  const [rows, workflowCompletions] = await Promise.all([
+    db
+      .select({
+        id: schema.tasks.id,
+        repositoryId: schema.tasks.repositoryId,
+        status: schema.tasks.status,
+        completedAt: schema.tasks.completedAt,
+      })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.userId, userId),
           eq(schema.tasks.type, 'onboarding'),
-          and(eq(schema.tasks.type, 'workflow'), eq(schema.tasks.status, 'completed')),
+          inArray(schema.tasks.repositoryId, repositoryIds),
         ),
-        inArray(schema.tasks.repositoryId, repositoryIds),
-      ),
-    )
-    .orderBy(desc(schema.tasks.createdAt));
+      )
+      .orderBy(desc(schema.tasks.createdAt)),
+    blankRepositoryIds.length === 0
+      ? Promise.resolve([])
+      : db
+          .select({
+            repositoryId: schema.tasks.repositoryId,
+            completedAt: max(schema.tasks.completedAt),
+          })
+          .from(schema.tasks)
+          .innerJoin(schema.repositories, eq(schema.tasks.repositoryId, schema.repositories.id))
+          .where(
+            and(
+              eq(schema.tasks.userId, userId),
+              eq(schema.repositories.userId, userId),
+              eq(schema.tasks.type, 'workflow'),
+              eq(schema.tasks.status, 'completed'),
+              eq(schema.repositories.source, 'blank'),
+              isNull(schema.repositories.onboardingResetAt),
+              inArray(schema.tasks.repositoryId, blankRepositoryIds),
+              inArray(schema.tasks.repositoryId, repositoryIds),
+            ),
+          )
+          .groupBy(schema.tasks.repositoryId),
+  ]);
 
   for (const row of rows) {
     if (!row.repositoryId) continue;
     const entry = byRepo.get(row.repositoryId) ?? { ...NO_ONBOARDING_TASKS };
-    if (row.type === 'workflow') {
-      if (
-        row.completedAt !== null &&
-        (entry.newestCompletedWorkflowAt == null ||
-          row.completedAt > entry.newestCompletedWorkflowAt)
-      ) {
-        entry.newestCompletedWorkflowAt = row.completedAt;
-      }
-      byRepo.set(row.repositoryId, entry);
-      continue;
-    }
     entry.hasAny = true;
     if (row.status === 'completed') {
       entry.hasCompleted = true;
@@ -182,6 +194,12 @@ export async function loadOnboardingTaskFacts(
     if (!entry.liveTaskId && (LIVE_TASK_STATUSES as readonly string[]).includes(row.status)) {
       entry.liveTaskId = row.id;
     }
+    byRepo.set(row.repositoryId, entry);
+  }
+  for (const row of workflowCompletions) {
+    if (!row.repositoryId || row.completedAt === null) continue;
+    const entry = byRepo.get(row.repositoryId) ?? { ...NO_ONBOARDING_TASKS };
+    entry.newestCompletedWorkflowAt = row.completedAt;
     byRepo.set(row.repositoryId, entry);
   }
   return byRepo;
@@ -361,7 +379,9 @@ export async function renderContextAdmitsUpgrade(
   if (repo.status !== 'ready' || !root) return false;
   const { missing } = await checkOnboardingMarkers(root);
   const facts =
-    (await loadOnboardingTaskFacts(db, userId, [repo.id])).get(repo.id) ?? NO_ONBOARDING_TASKS;
+    (
+      await loadOnboardingTaskFacts(db, userId, [repo.id], repo.source === 'blank' ? [repo.id] : [])
+    ).get(repo.id) ?? NO_ONBOARDING_TASKS;
   return resolveOnboardingVerdict({
     source: repo.source,
     missing,

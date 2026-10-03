@@ -381,7 +381,7 @@ async function main(): Promise<void> {
     });
     check(
       'unfinished workflows and plan builds supply no onboarding evidence',
-      !(await loadOnboardingTaskFacts(db, userId, [blankId])).has(blankId),
+      !(await loadOnboardingTaskFacts(db, userId, [blankId], [blankId])).has(blankId),
     );
     await db.insert(schema.tasks).values({
       userId,
@@ -392,7 +392,42 @@ async function main(): Promise<void> {
       status: 'completed',
       completedAt: AFTER_RESET,
     });
-    const blankFacts = (await loadOnboardingTaskFacts(db, userId, [blankId])).get(blankId)!;
+    // Created later but completed earlier: SQL must choose by completion date, not row order.
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: blankId,
+      type: 'workflow',
+      title: 'older completion',
+      status: 'completed',
+      completedAt: BEFORE_RESET,
+      createdAt: new Date(),
+    });
+    const importedId = randomUUID();
+    await db.insert(schema.repositories).values({
+      id: importedId,
+      userId,
+      name: 'imported',
+      source: 'git_https',
+    });
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: importedId,
+      type: 'workflow',
+      title: 'imported workflow',
+      status: 'completed',
+      completedAt: AFTER_RESET,
+    });
+    const completionFacts = await loadOnboardingTaskFacts(
+      db,
+      userId,
+      [blankId, importedId],
+      [blankId, importedId],
+    );
+    check(
+      'the workflow aggregate excludes imported repositories even if requested',
+      !completionFacts.has(importedId),
+    );
+    const blankFacts = completionFacts.get(blankId)!;
     check(
       'a setup-only completion is read without becoming an onboarding run',
       blankFacts.newestCompletedWorkflowAt?.getTime() === AFTER_RESET.getTime() &&
@@ -417,7 +452,9 @@ async function main(): Promise<void> {
       title: 'abandoned onboarding',
       status: 'cancelled',
     });
-    const mixedFacts = (await loadOnboardingTaskFacts(db, userId, [blankId])).get(blankId)!;
+    const mixedFacts = (await loadOnboardingTaskFacts(db, userId, [blankId], [blankId])).get(
+      blankId,
+    )!;
     check(
       'mixed history cannot cover for abandoned onboarding',
       !resolveOnboardingVerdict({
