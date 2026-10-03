@@ -169,13 +169,21 @@ const MAX_RANGES_PER_FILE = 20;
  *  recorded and the fence falls back to whole-file scope. */
 const MAX_DIFF_BUFFER_BYTES = 64 * 1024 * 1024;
 
+interface DiffHunk {
+  start: number;
+  count: number;
+}
+
+interface DiffFile {
+  deleted: boolean;
+  hunks: DiffHunk[];
+}
+
 /**
- * Which lines each file's diff wrote, from `git diff --unified=0` output.
+ * Every path of a `git diff --unified=0` output with its hunks, uncapped, in diff order.
  *
  * Line numbers are taken from the `+` side of each hunk header, so they address the file
- * AS THE AGENT WILL READ IT rather than some pre-change numbering. A `+c,0` hunk is a pure
- * deletion and has no new-side span; it is recorded as the single line `c` (where the
- * removal sits) and the legend says a bare number can mean that.
+ * AS THE AGENT WILL READ IT rather than some pre-change numbering.
  *
  * The path is read from the `+++ b/<path>` line rather than the `diff --git a/… b/…` header,
  * which is ambiguous for a path containing a space. A path git chose to QUOTE (control
@@ -183,29 +191,19 @@ const MAX_DIFF_BUFFER_BYTES = 64 * 1024 * 1024;
  * so the file is simply left unannotated — the same "not recorded" state that resolves to
  * whole-file scope. Failing to the wider scope is the only safe direction.
  */
-export function parseChangedLineRanges(diff: string): ChangedLineNotes {
-  const notes: ChangedLineNotes = {};
+function parseDiffHunks(diff: string): Map<string, DiffFile> {
+  const files = new Map<string, DiffFile>();
   let path: string | null = null;
   let deleted = false;
-  let ranges: string[] = [];
-  let dropped = 0;
+  let hunks: DiffHunk[] = [];
+  // A removed `-- x` reads `--- x`, so only the lines before a file's first `@@` are header.
+  let inHeader = false;
 
   const flush = (): void => {
-    if (path) {
-      if (deleted) notes[path] = 'deleted';
-      else if (ranges.length > 0) {
-        notes[path] =
-          `lines ${ranges.join(', ')}` + (dropped > 0 ? ` (+${dropped} more ranges)` : '');
-      } else {
-        // A diff entry with no hunks: a mode change, or a rename with no edits. Saying so
-        // beats leaving it indistinguishable from a file nothing measured.
-        notes[path] = 'no line changes (mode or rename only)';
-      }
-    }
+    if (path) files.set(path, { deleted, hunks });
     path = null;
     deleted = false;
-    ranges = [];
-    dropped = 0;
+    hunks = [];
   };
 
   const strip = (side: string, prefix: string): string =>
@@ -214,34 +212,59 @@ export function parseChangedLineRanges(diff: string): ChangedLineNotes {
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       flush();
+      inHeader = true;
       continue;
     }
     // `---` always precedes `+++`, so the old side is recorded first and used only when the
     // new side turns out to be /dev/null — a deleted file names its path nowhere else.
-    if (line.startsWith('--- ')) {
+    if (inHeader && line.startsWith('--- ')) {
       const source = line.slice(4).trim();
       if (source !== '/dev/null') path = strip(source, 'a/');
       continue;
     }
-    if (line.startsWith('+++ ')) {
+    if (inHeader && line.startsWith('+++ ')) {
       const target = line.slice(4).trim();
       if (target === '/dev/null') deleted = true;
       else path = strip(target, 'b/');
       continue;
     }
     if (!line.startsWith('@@')) continue;
+    inHeader = false;
     const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (!m) continue;
     const start = Number.parseInt(m[1]!, 10);
     const count = m[2] === undefined ? 1 : Number.parseInt(m[2], 10);
     if (!Number.isFinite(start)) continue;
-    if (ranges.length >= MAX_RANGES_PER_FILE) {
-      dropped += 1;
-      continue;
-    }
-    ranges.push(count <= 1 ? String(start) : `${start}-${start + count - 1}`);
+    hunks.push({ start, count });
   }
   flush();
+  return files;
+}
+
+const hunkLabel = ({ start, count }: DiffHunk): string =>
+  count <= 1 ? String(start) : `${start}-${start + count - 1}`;
+
+/**
+ * Which lines each file's diff wrote, from `git diff --unified=0` output.
+ *
+ * A `+c,0` hunk is a pure deletion and has no new-side span; it is recorded as the single
+ * line `c` (where the removal sits) and the legend says a bare number can mean that.
+ */
+export function parseChangedLineRanges(diff: string): ChangedLineNotes {
+  const notes: ChangedLineNotes = {};
+  for (const [path, { deleted, hunks }] of parseDiffHunks(diff)) {
+    if (deleted) notes[path] = 'deleted';
+    else if (hunks.length > 0) {
+      const dropped = hunks.length - MAX_RANGES_PER_FILE;
+      notes[path] =
+        `lines ${hunks.slice(0, MAX_RANGES_PER_FILE).map(hunkLabel).join(', ')}` +
+        (dropped > 0 ? ` (+${dropped} more ranges)` : '');
+    } else {
+      // A diff entry with no hunks: a mode change, or a rename with no edits. Saying so
+      // beats leaving it indistinguishable from a file nothing measured.
+      notes[path] = 'no line changes (mode or rename only)';
+    }
+  }
   return notes;
 }
 
@@ -282,6 +305,57 @@ async function resolveDiffBase(
   }
 }
 
+async function readChangeDiff(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<string | null> {
+  const base = await resolveDiffBase(worktreePath, baseBranch);
+  if (!base) return null;
+  try {
+    const { stdout } = await gitExec(
+      // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
+      // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
+      // under the name it now has on disk.
+      [
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--unified=0',
+        '--no-color',
+        '--no-renames',
+        base,
+        '--',
+      ],
+      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES },
+    );
+    return stdout.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** A binary or mode-only change prints no ---/+++ line, so only this list names its path. */
+async function readChangedPaths(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<string[] | null> {
+  const base = await resolveDiffBase(worktreePath, baseBranch);
+  if (!base) return null;
+  try {
+    const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
+      cwd: worktreePath,
+    });
+    const fields = stdout.split('\0');
+    const paths: string[] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      if (fields[i] !== 'D') paths.push(fields[i + 1]!);
+    }
+    return paths;
+  } catch {
+    return null;
+  }
+}
+
 /** The per-file line notes for this worktree, or an empty map when the diff cannot be
  *  read. Empty is a legitimate answer and never an error: the renderer states that an
  *  unannotated file has no recorded range, and the scope fence treats it as wholly in
@@ -290,20 +364,8 @@ async function changedLineNotes(
   worktreePath: string,
   baseBranch: string | null,
 ): Promise<ChangedLineNotes> {
-  const base = await resolveDiffBase(worktreePath, baseBranch);
-  if (!base) return {};
-  try {
-    const { stdout } = await gitExec(
-      // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
-      // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
-      // under the name it now has on disk.
-      ['-c', 'core.quotePath=false', 'diff', '--unified=0', '--no-color', '--no-renames', base],
-      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES },
-    );
-    return parseChangedLineRanges(stdout.toString());
-  } catch {
-    return {};
-  }
+  const diff = await readChangeDiff(worktreePath, baseBranch);
+  return diff === null ? {} : parseChangedLineRanges(diff);
 }
 
 /**
@@ -318,19 +380,7 @@ export async function collectImplementationFiles(
   ctx: StepContext,
   worktreePath: string,
 ): Promise<ImplementationFileSet> {
-  const files = new Set<string>();
-  const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
-  const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;
-  for (const f of touched ?? []) files.add(f);
-  if (files.size === 0) {
-    const issues = await ctx.db
-      .select({ filesModified: schema.taskDagIssues.filesModified })
-      .from(schema.taskDagIssues)
-      .where(eq(schema.taskDagIssues.taskId, ctx.taskId));
-    for (const row of issues) {
-      for (const f of (row.filesModified ?? []) as string[]) files.add(f);
-    }
-  }
+  const files = await reportedFiles(ctx);
   const scan = await dirtyWorktreeFiles(worktreePath);
   for (const f of scan.files) files.add(f);
   const all = [...files];
@@ -339,9 +389,7 @@ export async function collectImplementationFiles(
   // Which lines of each file the change wrote. Measured against the task's fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-  const baseBranch = (worktree?.output as { baseBranch?: string } | null)?.baseBranch ?? null;
-  const measured = await changedLineNotes(worktreePath, baseBranch);
+  const measured = await changedLineNotes(worktreePath, await taskBaseBranch(ctx));
   for (const p of scan.untracked) measured[p] ??= 'new file';
   // Only the files the prompt will actually list, so the persisted set carries no notes for
   // files nobody was given.
@@ -358,6 +406,72 @@ export async function collectImplementationFiles(
     scanError: scan.error,
     changedLines,
   };
+}
+
+async function reportedFiles(ctx: StepContext): Promise<Set<string>> {
+  const files = new Set<string>();
+  const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
+  const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;
+  for (const f of touched ?? []) files.add(f);
+  if (files.size === 0) {
+    const issues = await ctx.db
+      .select({ filesModified: schema.taskDagIssues.filesModified })
+      .from(schema.taskDagIssues)
+      .where(eq(schema.taskDagIssues.taskId, ctx.taskId));
+    for (const row of issues) {
+      for (const f of (row.filesModified ?? []) as string[]) files.add(f);
+    }
+  }
+  return files;
+}
+
+async function taskBaseBranch(ctx: StepContext): Promise<string | null> {
+  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  return (worktree?.output as { baseBranch?: string } | null)?.baseBranch ?? null;
+}
+
+/** `whole`: no line is known, so every line counts. `ranges`: inclusive, new-side line numbers. */
+export interface ChangedFileLines {
+  whole: boolean;
+  ranges: [number, number][];
+}
+
+/** A Map because a path is repository text, and a plain object answers `constructor` for one. */
+export type ChangedLineMap = Map<string, ChangedFileLines>;
+
+/** A pure deletion (`+c,0`) has no new-side span; it touches the lines either side of it. */
+const hunkLines = ({ start, count }: DiffHunk): [number, number] =>
+  count === 0 ? [start, start + 1] : [start, start + count - 1];
+
+/** The lines this change wrote per path, uncapped; null when no scope can be stated. */
+export async function collectChangedLineMap(
+  ctx: StepContext,
+  worktreePath: string,
+): Promise<ChangedLineMap | null> {
+  const reported = await reportedFiles(ctx);
+  const scan = await dirtyWorktreeFiles(worktreePath);
+  // Without the scan an untracked file is invisible, and a file nothing names reads as untouched.
+  if (scan.error !== null) return null;
+  const baseBranch = await taskBaseBranch(ctx);
+  const diff = await readChangeDiff(worktreePath, baseBranch);
+  const named = await readChangedPaths(worktreePath, baseBranch);
+  // Without the list a binary or mode-only change is absent, and absent reads as untouched.
+  if (named === null) return null;
+  const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);
+  // A path git quoted never matches a tool's report, so it would read as untouched.
+  if ([...diffed.keys(), ...scan.files].some((p) => p.startsWith('"'))) return null;
+
+  const map: ChangedLineMap = new Map();
+  for (const [path, file] of diffed) {
+    if (!file.deleted) {
+      map.set(path, { whole: file.hunks.length === 0, ranges: file.hunks.map(hunkLines) });
+    }
+  }
+  // Named by git status, an agent or the path list, but no hunk says which lines: all count.
+  for (const path of [...scan.files, ...reported, ...named]) {
+    if (!diffed.has(path)) map.set(path, { whole: true, ranges: [] });
+  }
+  return map.size > 0 ? map : null;
 }
 
 /**

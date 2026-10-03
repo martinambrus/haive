@@ -1,5 +1,7 @@
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const {
   ensureAppServing,
@@ -9,6 +11,7 @@ const {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
   recordLedgerEntry,
+  collectChangedLineMap,
 } = vi.hoisted(() => ({
   ensureAppServing: vi.fn(),
   withDdevProgress: vi.fn(
@@ -19,6 +22,7 @@ const {
   ensureDdevPlaywrightBrowsers: vi.fn(),
   killStalePlaywrightRuns: vi.fn(),
   recordLedgerEntry: vi.fn(),
+  collectChangedLineMap: vi.fn(),
 }));
 
 // withDdevProgress must be a real passthrough, not a stub: runSlot wraps every check in it,
@@ -38,8 +42,13 @@ vi.mock('../../task-ledger.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../task-ledger.js')>()),
   recordLedgerEntry,
 }));
+vi.mock('./_impl-changes.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_impl-changes.js')>()),
+  collectChangedLineMap,
+}));
 
 import { TaskCancelledError } from '../../step-definition.js';
+import type { ChangedFileLines, ChangedLineMap } from './_impl-changes.js';
 import {
   buildUnverifiedNote,
   buildVerifyDegradedNote,
@@ -293,6 +302,42 @@ describe('phase5VerifyStep.fixLoopOnError', () => {
   });
 });
 
+describe('phase5VerifyStep.fixLoop.evaluate', () => {
+  const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+  const failedLint = (over: Record<string, unknown>) => ({
+    ran: true,
+    passed: false,
+    command: 'vendor/bin/phpcs',
+    output: '',
+    ...over,
+  });
+  const diagnosisFor = (lint: unknown) =>
+    phase5VerifyStep.fixLoop!.evaluate({
+      test: skipped,
+      lint,
+      typecheck: skipped,
+      passed: false,
+      runtimeSmoke: null,
+    } as never);
+
+  it('gives an output stored without a scope the diagnosis it always had: its last 2000 characters', () => {
+    const output = `${'a'.repeat(1500)}${'b'.repeat(2000)}`;
+
+    expect(diagnosisFor(failedLint({ output }))).toEqual({
+      blocking: true,
+      diagnosis: `### lint failed (\`vendor/bin/phpcs\`)\n${'b'.repeat(2000)}`,
+    });
+  });
+
+  it('hands a scoped failure over whole, since its list is already bounded and cut at whole lines', () => {
+    const output = ['src/a.php:3: [ERROR] m (S.A)', 'x'.repeat(2500)].join('\n');
+
+    expect(
+      diagnosisFor(failedLint({ output, scope: { blocking: 2, preExisting: 4 } }))?.diagnosis,
+    ).toBe(`### lint failed (\`vendor/bin/phpcs\`)\n${output}`);
+  });
+});
+
 describe('buildUnverifiedNote', () => {
   const cmd = { kind: 'host' as const, label: 'pnpm run test', argv: ['pnpm', 'run', 'test'] };
   const ran = { ran: true, passed: true, command: 'pnpm run test', output: '' };
@@ -341,6 +386,24 @@ describe('buildUnverifiedNote', () => {
       ),
     ).toBe('');
   });
+
+  // A slot that was selected and could not run carries a note saying why, and "not selected"
+  // beside it would contradict that note.
+  it('does not call a slot that was selected but could not run unticked', () => {
+    const notRun = {
+      ran: false,
+      passed: false,
+      command: 'vendor/bin/phpcs',
+      output: 'vendor/bin/phpcs not found — lint not run',
+      note: 'vendor/bin/phpcs not found — lint not run',
+    };
+    const note = buildUnverifiedNote(
+      { test: null, lint: cmd, typecheck: null },
+      { test: skipped, lint: notRun, typecheck: skipped },
+    );
+    expect(note).toContain('No runner was detected in this workspace for: test, typecheck');
+    expect(note).not.toContain('not selected');
+  });
 });
 
 // This step's fixLoop routes ANY failing check back to implementation, so an environment
@@ -373,6 +436,21 @@ describe('buildVerifyDegradedNote', () => {
 
   it('is empty on the green path', () => {
     expect(buildVerifyDegradedNote(null, '')).toBe('');
+  });
+
+  it('ends with the lint note, which says the lint verdict is unscoped or the lint did not run', () => {
+    expect(buildVerifyDegradedNote(null, '', 'lint verdict unscoped: project script')).toBe(
+      'lint verdict unscoped: project script',
+    );
+    const note = buildVerifyDegradedNote(
+      blocker,
+      'No runner was detected for: test.',
+      'vendor/bin/phpcs not found — lint not run',
+    );
+    expect(note.endsWith('vendor/bin/phpcs not found — lint not run')).toBe(true);
+    expect(note.indexOf('No runner was detected')).toBeLessThan(
+      note.indexOf('vendor/bin/phpcs not found'),
+    );
   });
 });
 
@@ -434,6 +512,7 @@ describe('phase5VerifyStep.apply', () => {
       .mockResolvedValue({ attempted: true, ok: true, note: null });
     killStalePlaywrightRuns.mockReset().mockResolvedValue(0);
     recordLedgerEntry.mockReset().mockResolvedValue(undefined);
+    collectChangedLineMap.mockReset().mockResolvedValue(null);
   });
 
   describe('in DDEV mode, ensures the runtime before a check execs into it', () => {
@@ -512,11 +591,53 @@ describe('phase5VerifyStep.apply', () => {
         passed: false,
         command: PHPUNIT.label,
         output: UNAVAILABLE,
+        note: 'DDEV runner unavailable — test not run',
       });
       expect(
         ddevExec,
         'a slot exec went through a handle no ensure returned',
       ).not.toHaveBeenCalled();
+    });
+
+    // A suite its environment stopped did run as selected; "not selected" would say otherwise.
+    it('does not call a test suite its environment blocked "not selected"', async () => {
+      ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+        args.includes('curl')
+          ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+          : {
+              exitCode: 1,
+              output:
+                "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium-1/chrome-linux/chrome",
+            },
+      );
+
+      const out = await runApply(
+        { test: PHPUNIT, testFramework: 'playwright' },
+        { runTest: true, runLint: false, runTypecheck: false },
+      );
+
+      expect(out.test.ran).toBe(false);
+      expect(out.degradedNote).toContain('NOT known to be green');
+      expect(out.degradedNote).not.toContain('not selected');
+    });
+
+    // The user ticked these slots; "not selected" would say the opposite of what happened.
+    it('names every slot whose runner was unavailable in the card note, and calls none of them unselected', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
+
+      const out = await runApply(
+        { test: PHPUNIT, lint: PHPCS, typecheck: PHPSTAN },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+
+      expect(out.degradedNote).toContain('No verification check ran this pass');
+      for (const slot of ['test', 'lint', 'typecheck']) {
+        expect(out.degradedNote).toContain(`DDEV runner unavailable — ${slot} not run`);
+        expect(recordLedgerEntry.mock.calls[0]![3].text).toContain(
+          `${slot}: DDEV runner unavailable — ${slot} not run`,
+        );
+      }
+      expect(out.degradedNote).not.toContain('not selected');
     });
   });
 
@@ -620,6 +741,7 @@ describe('phase5VerifyStep.apply', () => {
         passed: false,
         command: PHPUNIT.label,
         output: UNAVAILABLE,
+        note: 'DDEV runner unavailable — test not run',
       });
       expect(ddevExec).not.toHaveBeenCalled();
     });
@@ -673,6 +795,715 @@ describe('phase5VerifyStep.apply', () => {
       expect(err.message).toBe(
         'DDEV environment could not start for runtime verification: task cancelled',
       );
+    });
+  });
+
+  it('keeps the tail of a long host check output, as the DDEV path does', async () => {
+    ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+    const noisy = {
+      kind: 'host' as const,
+      label: 'noisy',
+      argv: [
+        process.execPath,
+        '-e',
+        "process.stdout.write('x'.repeat(6000) + 'END'); process.exitCode = 1",
+      ],
+    };
+
+    const out = await runApply(
+      { ddevMode: false, workspacePath: tmpdir(), test: noisy },
+      { runTest: true },
+    );
+
+    expect(out.test.output).toHaveLength(4000);
+    expect(out.test.output.endsWith('END')).toBe(true);
+  });
+
+  describe('lint limited to the lines the change wrote', () => {
+    const PHPCS_HOST = buildVerifyCommand({ runner: 'phpcs' }, false)!;
+    const WHOLE: ChangedFileLines = { whole: true, ranges: [] };
+    const changed = (entries: Record<string, ChangedFileLines>): ChangedLineMap =>
+      new Map(Object.entries(entries));
+    const rangesIn = (file: string, ...r: [number, number][]) =>
+      changed({ [file]: { whole: false, ranges: r } });
+    const reportJson = (
+      files: Record<string, number[]>,
+      type: 'ERROR' | 'WARNING' = 'ERROR',
+    ): string =>
+      JSON.stringify({
+        totals: { errors: 0, warnings: 0 },
+        files: Object.fromEntries(
+          Object.entries(files).map(([file, lines]) => [
+            file,
+            {
+              errors: type === 'ERROR' ? lines.length : 0,
+              warnings: type === 'WARNING' ? lines.length : 0,
+              messages: lines.map((line) => ({
+                message: `Problem on line ${line}`,
+                source: 'Drupal.Test.Sniff',
+                severity: 5,
+                fixable: false,
+                type,
+                line,
+                column: 1,
+              })),
+            },
+          ]),
+        ),
+      });
+    const ledgerText = (): string => recordLedgerEntry.mock.calls[0]![3].text as string;
+    const evaluate = (out: unknown) => phase5VerifyStep.fixLoop!.evaluate(out as never);
+    const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const REPORT_FLAG = '--report-json=';
+    const FLAGGED_ARGV_LENGTH = 3;
+
+    /** The first slot run lasts `ms` on the clock the step times its runs with. */
+    function firstRunTakes(ms: number): void {
+      vi.useFakeTimers({ toFake: ['performance'] });
+      withDdevProgress.mockImplementationOnce((async (
+        _ctx: unknown,
+        _label: string,
+        run: (onLine: () => void) => Promise<unknown>,
+      ) => {
+        try {
+          return await run(() => {});
+        } finally {
+          vi.advanceTimersByTime(ms);
+        }
+      }) as never);
+    }
+
+    let workspace: string;
+    beforeEach(async () => {
+      workspace = await mkdtemp(path.join(tmpdir(), 'verify-lint-'));
+    });
+    afterEach(async () => {
+      vi.useRealTimers();
+      await rm(workspace, { recursive: true, force: true });
+    });
+
+    describe('on the host', () => {
+      /** A `vendor/bin/phpcs` that logs its argv, then answers as told: the flagged run (one that
+       *  asks for a JSON report) writes `report` where it was asked to, the plain run does not. */
+      const FAKE_PHPCS = `
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync('calls.log', JSON.stringify(args) + '\\n');
+const plan = JSON.parse(fs.readFileSync('fake-phpcs.json', 'utf8'));
+const flag = args.find((a) => a.startsWith('${REPORT_FLAG}'));
+const run = flag ? plan.flagged : plan.plain;
+if (flag && typeof run.report === 'string') {
+  fs.writeFileSync(flag.slice('${REPORT_FLAG}'.length), run.report);
+}
+process.stdout.write(run.console ?? '');
+process.exitCode = run.exit;
+`;
+      interface Answer {
+        exit: number;
+        console?: string;
+        report?: string;
+      }
+      async function installPhpcs(
+        plan: { flagged: Answer; plain?: Answer },
+        root = workspace,
+      ): Promise<void> {
+        const bin = path.join(root, 'vendor/bin/phpcs');
+        await mkdir(path.dirname(bin), { recursive: true });
+        await writeFile(bin, `#!${process.execPath}\n${FAKE_PHPCS}`);
+        await chmod(bin, 0o755);
+        await writeFile(
+          path.join(root, 'fake-phpcs.json'),
+          JSON.stringify({ plain: { exit: 2 }, ...plan }),
+        );
+      }
+      const calls = async (root = workspace): Promise<string[][]> =>
+        (await readFile(path.join(root, 'calls.log'), 'utf8').catch(() => ''))
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as string[]);
+      const reportsLeft = () => readdir(path.join(workspace, '.haive/verify'));
+
+      function lintApply(map: ChangedLineMap | null, lint = PHPCS_HOST, root = workspace) {
+        collectChangedLineMap.mockResolvedValue(map);
+        return runApply({ ddevMode: false, workspacePath: root, lint }, { runLint: true });
+      }
+
+      beforeEach(() => {
+        ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      });
+
+      it('passes a failing phpcs whose every violation is on a line the change did not write', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: reportJson({ 'src/legacy.php': [3, 4, 90] }) },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '3 pre-existing violation(s) elsewhere predate this change — not blocking.',
+          scope: { blocking: 0, preExisting: 3 },
+        });
+        expect(out.passed).toBe(true);
+        expect(evaluate(out)).toBeNull();
+        expect(ledgerText()).toContain(
+          'lint: `vendor/bin/phpcs` passes on changed lines (3 pre-existing)',
+        );
+        expect(out.degradedNote).toBeUndefined();
+        expect(ddevExec).not.toHaveBeenCalled();
+      });
+
+      it('asks for the JSON report under .haive/verify with the workspace as basepath, and removes it', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: reportJson({ 'src/legacy.php': [3] }) },
+        });
+
+        await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        const [argv, ...rest] = await calls();
+        expect(rest).toEqual([]);
+        expect(argv).toHaveLength(FLAGGED_ARGV_LENGTH);
+        expect(argv![0]).toBe('--report=full');
+        expect(argv![1]).toMatch(
+          new RegExp(
+            `^${REPORT_FLAG}${escaped(workspace)}/\\.haive/verify/phpcs-[0-9a-f]{16}\\.json$`,
+          ),
+        );
+        expect(argv![2]).toBe(`--basepath=${workspace}`);
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it('fails on the violations on lines the change wrote, and says how many it left', async () => {
+        await installPhpcs({
+          flagged: {
+            exit: 2,
+            report: reportJson({ 'src/a.php': [3, 11, 12, 90], 'src/legacy.php': [5] }),
+          },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: [
+            'src/a.php:11: [ERROR] Problem on line 11 (Drupal.Test.Sniff)',
+            'src/a.php:12: [ERROR] Problem on line 12 (Drupal.Test.Sniff)',
+            '3 pre-existing violation(s) elsewhere predate this change — do not edit code to clear them.',
+          ].join('\n'),
+          scope: { blocking: 2, preExisting: 3 },
+        });
+        expect(out.passed).toBe(false);
+        expect(evaluate(out)).toEqual({
+          blocking: true,
+          diagnosis: `### lint failed (\`vendor/bin/phpcs\`)\n${out.lint.output}`,
+        });
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` FAILS on lines this change wrote');
+        expect(out.degradedNote).toBeUndefined();
+      });
+
+      it('counts every line of a file only git or an agent named', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: reportJson({ 'src/new.php': [1, 500] }) },
+        });
+
+        const out = await lintApply(changed({ 'src/new.php': WHOLE }));
+
+        expect(out.lint.scope).toEqual({ blocking: 2, preExisting: 0 });
+        expect(out.lint.output).toContain('src/new.php:500:');
+        expect(out.lint.output).not.toContain('pre-existing');
+      });
+
+      it('passes a phpcs that exits 0 and wrote no report, without running it again', async () => {
+        await installPhpcs({ flagged: { exit: 0 } });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '',
+        });
+        expect(await calls()).toHaveLength(1);
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` passes;');
+      });
+
+      it('passes a phpcs that exits 0 and left a report cut off, without running it again', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: '{"files":{"src/a.php":{"messages":[{"message":"x"' },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '',
+        });
+        expect(await calls()).toHaveLength(1);
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it('fails on an error on a line the change wrote even though phpcs exits 0', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: reportJson({ 'src/a.php': [11, 90] }) },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: [
+            'src/a.php:11: [ERROR] Problem on line 11 (Drupal.Test.Sniff)',
+            '1 pre-existing violation(s) elsewhere predate this change — do not edit code to clear them.',
+          ].join('\n'),
+          scope: { blocking: 1, preExisting: 1 },
+        });
+        expect(out.passed).toBe(false);
+        expect(evaluate(out)).toEqual({
+          blocking: true,
+          diagnosis: `### lint failed (\`vendor/bin/phpcs\`)\n${out.lint.output}`,
+        });
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` FAILS on lines this change wrote');
+        expect(await calls()).toHaveLength(1);
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it.each([0, 1, 2])(
+        'fails on a warning on a line the change wrote, whatever phpcs exits with (%i)',
+        async (exit) => {
+          await installPhpcs({
+            flagged: { exit, report: reportJson({ 'src/a.php': [11] }, 'WARNING') },
+          });
+
+          const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+          expect(out.lint).toEqual({
+            ran: true,
+            passed: false,
+            command: 'vendor/bin/phpcs',
+            output: 'src/a.php:11: [WARNING] Problem on line 11 (Drupal.Test.Sniff)',
+            scope: { blocking: 1, preExisting: 0 },
+          });
+          expect(out.passed).toBe(false);
+          expect(await calls()).toHaveLength(1);
+        },
+      );
+
+      it('passes, counting what predates the change, when phpcs exits 0 and none of it is on a line the change wrote', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: reportJson({ 'src/legacy.php': [3, 4, 90] }) },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '3 pre-existing violation(s) elsewhere predate this change — not blocking.',
+          scope: { blocking: 0, preExisting: 3 },
+        });
+        expect(out.passed).toBe(true);
+        expect(evaluate(out)).toBeNull();
+        expect(ledgerText()).toContain(
+          'lint: `vendor/bin/phpcs` passes on changed lines (3 pre-existing)',
+        );
+        expect(await calls()).toHaveLength(1);
+      });
+
+      it('passes a phpcs that exits 0 with a clean report', async () => {
+        await installPhpcs({ flagged: { exit: 0, report: reportJson({ 'src/a.php': [] }) } });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '',
+          scope: { blocking: 0, preExisting: 0 },
+        });
+        expect(out.passed).toBe(true);
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` passes;');
+        expect(await calls()).toHaveLength(1);
+      });
+
+      it('re-runs the original command and keeps its verdict when phpcs wrote no report', async () => {
+        await installPhpcs({
+          flagged: { exit: 255, console: 'PHP Fatal error: Permission denied' },
+          plain: { exit: 2, console: 'FILE: src/a.php\nFOUND 1 ERROR' },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        const all = await calls();
+        expect(all).toHaveLength(2);
+        expect(all[0]).toHaveLength(FLAGGED_ARGV_LENGTH);
+        expect(all[1]).toEqual([]);
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: 'FILE: src/a.php\nFOUND 1 ERROR',
+          note: 'lint verdict unscoped: phpcs wrote no report',
+        });
+        expect(out.passed).toBe(false);
+        expect(out.degradedNote).toContain('lint verdict unscoped: phpcs wrote no report');
+        expect(evaluate(out)?.diagnosis).toBe(
+          '### lint failed (`vendor/bin/phpcs`)\nFILE: src/a.php\nFOUND 1 ERROR',
+        );
+      });
+
+      it('re-runs the original command when the report is cut off, and removes what was left', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: '{"files":{"src/a.php":{"messages":[{"message":"x"' },
+          plain: { exit: 2, console: 'raw report' },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(await calls()).toHaveLength(2);
+        expect(out.lint).toMatchObject({
+          passed: false,
+          output: 'raw report',
+          note: 'lint verdict unscoped: the report is malformed',
+        });
+        expect(out.lint.scope).toBeUndefined();
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it.each([
+        ['wrote no report', undefined],
+        ['left a report cut off', '{"files":{"src/a.php":{"messages":[{"message":"x"'],
+      ])(
+        'does not re-run a flagged run that used the whole time limit and %s',
+        async (_name, report) => {
+          await installPhpcs({
+            flagged: { exit: 1, console: 'partial console', report },
+            plain: { exit: 2, console: 'raw report' },
+          });
+          firstRunTakes(600_000);
+
+          const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+          expect(await calls()).toHaveLength(1);
+          expect(out.lint).toEqual({
+            ran: false,
+            passed: false,
+            command: 'vendor/bin/phpcs',
+            output: 'partial console',
+            note: 'phpcs reached its time limit — lint not verified',
+          });
+          expect(out.passed).toBe(true);
+          expect(out.degradedNote).toContain('phpcs reached its time limit — lint not verified');
+          expect(evaluate(out)).toBeNull();
+          expect(await reportsLeft()).toEqual([]);
+        },
+      );
+
+      it('still re-runs a flagged run that failed far inside the time limit', async () => {
+        await installPhpcs({
+          flagged: { exit: 255 },
+          plain: { exit: 2, console: 'raw report' },
+        });
+        firstRunTakes(60_000);
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(await calls()).toHaveLength(2);
+        expect(out.lint.note).toBe('lint verdict unscoped: phpcs wrote no report');
+      });
+
+      it('runs the original command once, unflagged, when the change could not be measured', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) },
+          plain: { exit: 2, console: 'raw report' },
+        });
+
+        const out = await lintApply(null);
+
+        expect(await calls()).toEqual([[]]);
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: 'raw report',
+          note: 'lint verdict unscoped: the change could not be measured',
+        });
+      });
+
+      it('puts no note on an unscoped lint that passes', async () => {
+        await installPhpcs({ flagged: { exit: 0 }, plain: { exit: 0, console: 'clean' } });
+
+        const out = await lintApply(null);
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: 'clean',
+        });
+        expect(out.degradedNote).toBeUndefined();
+      });
+
+      it('does not block, and says the lint did not run, when vendor/bin/phpcs is missing', async () => {
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        const note = 'vendor/bin/phpcs not found — lint not run';
+        expect(out.lint).toEqual({
+          ran: false,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: note,
+          note,
+        });
+        expect(out.passed).toBe(true);
+        expect(evaluate(out)).toBeNull();
+        expect(out.degradedNote).toContain(note);
+        expect(out.degradedNote).not.toContain('not selected');
+        expect(ledgerText()).toContain(`lint: ${note}`);
+      });
+
+      it('treats an exit 127 from phpcs the same way, without a second run', async () => {
+        await installPhpcs({ flagged: { exit: 127, console: 'env: php: not found' } });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toMatchObject({
+          ran: false,
+          passed: false,
+          note: 'vendor/bin/phpcs not found — lint not run',
+        });
+        expect(out.passed).toBe(true);
+        expect(await calls()).toHaveLength(1);
+      });
+
+      it('runs a project lint script exactly as before, noting that its verdict is unscoped', async () => {
+        const record =
+          "require('node:fs').appendFileSync('calls.log', JSON.stringify(process.argv.slice(1)) + '\\n');";
+        const script = (exit: number) => ({
+          kind: 'host' as const,
+          label: 'composer phpcs',
+          argv: [process.execPath, '-e', `${record} process.exit(${exit})`],
+        });
+
+        const failing = await lintApply(rangesIn('src/a.php', [10, 12]), script(1));
+        const passing = await lintApply(rangesIn('src/a.php', [10, 12]), script(0));
+
+        expect(await calls()).toEqual([[], []]);
+        expect(collectChangedLineMap).not.toHaveBeenCalled();
+        expect(failing.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'composer phpcs',
+          output: '',
+          note: 'lint verdict unscoped: project script',
+        });
+        expect(failing.degradedNote).toContain('lint verdict unscoped: project script');
+        expect(passing.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'composer phpcs',
+          output: '',
+        });
+      });
+
+      it('falls back to the unscoped verdict when the report directory cannot be made', async () => {
+        await installPhpcs({ flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) } });
+        await writeFile(path.join(workspace, '.haive'), 'a file where the directory should be');
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(await calls()).toEqual([[]]);
+        expect(out.lint.note).toBe(
+          'lint verdict unscoped: the report directory could not be prepared',
+        );
+      });
+
+      it('falls back to the unscoped verdict for a workspace path a shell command cannot carry', async () => {
+        const spaced = path.join(workspace, 'with space');
+        await mkdir(spaced);
+        await installPhpcs(
+          { flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) } },
+          spaced,
+        );
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]), PHPCS_HOST, spaced);
+
+        expect(await calls(spaced)).toEqual([[]]);
+        expect(out.lint.note).toBe(
+          'lint verdict unscoped: the report directory could not be prepared',
+        );
+      });
+
+      // Root writes into a 0555 directory, so there is no unwritable directory to observe as root.
+      it.skipIf(process.getuid?.() === 0)(
+        'does not repair a report directory the worker cannot write, which is the unscoped fallback',
+        async () => {
+          await installPhpcs({
+            flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) },
+            plain: { exit: 2, console: 'raw report' },
+          });
+          const dir = path.join(workspace, '.haive/verify');
+          await mkdir(dir, { recursive: true });
+          await chmod(dir, 0o555);
+          try {
+            const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+            expect(out.lint).toMatchObject({
+              passed: false,
+              output: 'raw report',
+              note: 'lint verdict unscoped: phpcs wrote no report',
+            });
+          } finally {
+            await chmod(dir, 0o755);
+          }
+        },
+      );
+    });
+
+    describe('in DDEV mode', () => {
+      const PHPCS = buildVerifyCommand({ runner: 'phpcs' }, true)!;
+      const FLAGGED =
+        /^exec vendor\/bin\/phpcs --report=full --report-json=\/var\/www\/html\/\.haive\/verify\/phpcs-[0-9a-f]{16}\.json --basepath=\/var\/www\/html$/;
+
+      /** The container writes the report at its path; the host sees it under the workspace. */
+      function runnerAnswers(plan: { flagged: [number, string | null]; plain?: [number, string] }) {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) => {
+          if (args.includes('curl')) {
+            return { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' };
+          }
+          const target = /--report-json=(\S+)/.exec(args)?.[1];
+          if (target === undefined)
+            return { exitCode: plan.plain?.[0] ?? 2, output: plan.plain?.[1] ?? '' };
+          const [exitCode, report] = plan.flagged;
+          if (report !== null) await writeFile(target.replace('/var/www/html', workspace), report);
+          return { exitCode, output: 'console report' };
+        });
+      }
+
+      function lintApply(map: ChangedLineMap | null) {
+        collectChangedLineMap.mockResolvedValue(map);
+        return runApply({ workspacePath: workspace, lint: PHPCS }, { runLint: true });
+      }
+
+      it('asks the container for the report at the project mount and scopes what it wrote', async () => {
+        runnerAnswers({
+          flagged: [2, reportJson({ 'src/a.php': [11], 'src/legacy.php': [3, 4] })],
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([expect.stringMatching(FLAGGED)]);
+        expect(out.lint).toMatchObject({
+          ran: true,
+          passed: false,
+          command: 'ddev exec vendor/bin/phpcs',
+          scope: { blocking: 1, preExisting: 2 },
+        });
+        expect(out.lint.output).toContain('src/a.php:11: [ERROR] Problem on line 11');
+        expect(await readdir(path.join(workspace, '.haive/verify'))).toEqual([]);
+      });
+
+      it('passes when only pre-existing violations remain', async () => {
+        runnerAnswers({ flagged: [2, reportJson({ 'src/legacy.php': [3, 4] })] });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toMatchObject({
+          ran: true,
+          passed: true,
+          scope: { blocking: 0, preExisting: 2 },
+        });
+        expect(out.passed).toBe(true);
+      });
+
+      it('fails on a violation on a line the change wrote even though the container exits 0', async () => {
+        runnerAnswers({
+          flagged: [0, reportJson({ 'src/a.php': [11], 'src/legacy.php': [3, 4] })],
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([expect.stringMatching(FLAGGED)]);
+        expect(out.lint).toMatchObject({
+          ran: true,
+          passed: false,
+          command: 'ddev exec vendor/bin/phpcs',
+          scope: { blocking: 1, preExisting: 2 },
+        });
+        expect(out.lint.output).toContain('src/a.php:11: [ERROR] Problem on line 11');
+        expect(out.passed).toBe(false);
+      });
+
+      it('does not block, and says the lint did not run, on exit 127', async () => {
+        runnerAnswers({ flagged: [127, null] });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toMatchObject({
+          ran: false,
+          note: 'vendor/bin/phpcs not found — lint not run',
+        });
+        expect(out.passed).toBe(true);
+        expect(slotExecs()).toHaveLength(1);
+      });
+
+      it('re-runs exactly the original command when the container wrote no report', async () => {
+        runnerAnswers({ flagged: [255, null], plain: [2, 'raw report'] });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([
+          expect.stringMatching(FLAGGED),
+          'exec vendor/bin/phpcs',
+        ]);
+        expect(out.lint).toMatchObject({
+          passed: false,
+          output: 'raw report',
+          note: 'lint verdict unscoped: phpcs wrote no report',
+        });
+      });
+
+      it('does not re-run a flagged run that used the whole time limit', async () => {
+        runnerAnswers({ flagged: [1, null], plain: [2, 'raw report'] });
+        firstRunTakes(600_000);
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([expect.stringMatching(FLAGGED)]);
+        expect(out.lint).toEqual({
+          ran: false,
+          passed: false,
+          command: 'ddev exec vendor/bin/phpcs',
+          output: 'console report',
+          note: 'phpcs reached its time limit — lint not verified',
+        });
+      });
+
+      it('reports the runner as unavailable without measuring the change or making a directory', async () => {
+        ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: false,
+          passed: false,
+          command: PHPCS.label,
+          output: UNAVAILABLE,
+          note: 'DDEV runner unavailable — lint not run',
+        });
+        expect(collectChangedLineMap).not.toHaveBeenCalled();
+        expect(await readdir(workspace)).toEqual([]);
+      });
     });
   });
 });

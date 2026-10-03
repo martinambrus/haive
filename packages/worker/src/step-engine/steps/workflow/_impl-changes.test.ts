@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -13,6 +13,7 @@ vi.mock('../onboarding/_helpers.js', () => ({
 const {
   assertReviewableChange,
   changedFilesBlock,
+  collectChangedLineMap,
   collectImplementationFiles,
   fileCoverage,
   isDocsOnlyChange,
@@ -435,6 +436,15 @@ describe('parseChangedLineRanges', () => {
     expect(notes['big.ts']!.startsWith('lines 1, 11, 21')).toBe(true);
   });
 
+  it('renders the capped string exactly, now that the ranges behind it are kept uncapped', () => {
+    const hunks = Array.from({ length: 25 }, (_, i) => `@@ -1,0 +${i * 10 + 1},1 @@`);
+    const notes = parseChangedLineRanges(
+      diff('diff --git a/big.ts b/big.ts', '--- a/big.ts', '+++ b/big.ts', ...hunks),
+    );
+    const listed = Array.from({ length: 20 }, (_, i) => i * 10 + 1).join(', ');
+    expect(notes['big.ts']).toBe(`lines ${listed} (+5 more ranges)`);
+  });
+
   it('says so when a diff entry has no hunks at all', () => {
     // A mode change or a pure rename. Distinct from a file nothing measured, which carries
     // no note and is treated as wholly in scope.
@@ -443,6 +453,52 @@ describe('parseChangedLineRanges', () => {
     );
     expect(notes['x']).toBe('no line changes (mode or rename only)');
   });
+
+  // A removed `-- x` reads `--- x` in a diff, and an added `++ x` reads `+++ x`.
+  it('reads a removed `-- x` line as hunk content, not as the old-side header', () => {
+    const notes = parseChangedLineRanges(
+      diff(
+        'diff --git a/q.sql b/q.sql',
+        '--- a/q.sql',
+        '+++ b/q.sql',
+        '@@ -3 +2,0 @@ select 2;',
+        '--- sql comment',
+        '@@ -9,0 +9,2 @@',
+        '+a',
+        '+b',
+        'diff --git a/other.sql b/other.sql',
+        '--- a/other.sql',
+        '+++ b/other.sql',
+        '@@ -1 +1 @@',
+        '+x',
+      ),
+    );
+    expect(notes).toEqual({ 'q.sql': 'lines 2, 9-10', 'other.sql': 'lines 1' });
+  });
+
+  it.each([
+    ['text', '+++ added'],
+    ['text that reads like the null device', '+++ /dev/null'],
+  ])(
+    'reads an added `++ x` line (%s) as hunk content, not as the new-side header',
+    (_name, line) => {
+      const notes = parseChangedLineRanges(
+        diff(
+          'diff --git a/q.sql b/q.sql',
+          '--- a/q.sql',
+          '+++ b/q.sql',
+          '@@ -5,0 +5 @@ select 4;',
+          line,
+          'diff --git a/other.sql b/other.sql',
+          '--- a/other.sql',
+          '+++ b/other.sql',
+          '@@ -1 +1 @@',
+          '+x',
+        ),
+      );
+      expect(notes).toEqual({ 'q.sql': 'lines 5', 'other.sql': 'lines 1' });
+    },
+  );
 
   it('returns nothing for output it cannot read', () => {
     expect(parseChangedLineRanges('')).toEqual({});
@@ -591,5 +647,258 @@ describe('collectImplementationFiles — line notes against a real repo', () => 
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('collectChangedLineMap', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
+
+  /** The agents' own account of the change: 07's `filesTouched`, else the DAG issues' files. */
+  function ctxFor(reported: { touched?: string[]; dag?: string[] } = {}): StepContextLike {
+    loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '01-worktree-setup'
+        ? { output: { baseBranch: 'main' } }
+        : { output: { filesTouched: reported.touched ?? [] } },
+    );
+    return {
+      taskId: 't1',
+      db: {
+        select: () => ({
+          from: () => ({ where: () => Promise.resolve([{ filesModified: reported.dag ?? [] }]) }),
+        }),
+      },
+    } as unknown as StepContextLike;
+  }
+
+  /** A repo with `files` committed on `main`, and a `task` branch forked from it. */
+  async function inRepo(
+    files: Record<string, string | Buffer>,
+    run: (dir: string) => Promise<void>,
+  ): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-map-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      for (const [name, content] of Object.entries(files)) {
+        await writeFile(path.join(dir, name), content);
+      }
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await git(dir, ['checkout', '-b', 'task']);
+      await run(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('keeps every hunk, where the prompt notes stop at 20', async () => {
+    const lines = Array.from({ length: 50 }, (_, i) => `l${i}`);
+    await inRepo({ 'app.php': `${lines.join('\n')}\n` }, async (dir) => {
+      const edited = lines.map((l, i) => (i % 2 === 0 ? `${l}!` : l));
+      await writeFile(path.join(dir, 'app.php'), `${edited.join('\n')}\n`);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      const app = map?.get('app.php');
+      expect(app?.whole).toBe(false);
+      expect(app?.ranges).toHaveLength(25);
+      expect(app?.ranges[0]).toEqual([1, 1]);
+      expect(app?.ranges[24]).toEqual([49, 49]);
+      const notes = await collectImplementationFiles(ctxFor(), dir);
+      expect(notes.changedLines?.['app.php']).toContain('(+5 more ranges)');
+    });
+  });
+
+  it('covers the line a pure deletion sits after and the line after it', async () => {
+    await inRepo({ 'app.php': 'a\nb\nc\nd\ne\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'app.php'), 'a\nb\nd\ne\n');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 3]] });
+    });
+  });
+
+  it('counts an untracked file whole, since no diff has an old side for it', async () => {
+    await inRepo({ 'app.php': 'a\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'brand-new.php'), 'fresh\n');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('brand-new.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
+  it('reads a file only the diff names, from committed work with a clean tree', async () => {
+    await inRepo({ 'app.php': 'a\nb\nc\nd\ne\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'app.php'), 'a\nb\nCHANGED\nd\ne\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[3, 3]] });
+    });
+  });
+
+  it('counts whole a file git status or an agent names but the diff has no lines for', async () => {
+    await inRepo({ 'app.php': 'a\nb\n', 'logo.png': Buffer.from([0, 1, 2, 3]) }, async (dir) => {
+      await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+      await writeFile(path.join(dir, 'logo.png'), Buffer.from([0, 9, 2, 3]));
+
+      const map = await collectChangedLineMap(ctxFor({ touched: ['reported.php'] }), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+      expect(map?.get('logo.png')).toEqual({ whole: true, ranges: [] });
+      expect(map?.get('reported.php')).toEqual({ whole: true, ranges: [] });
+      const dag = await collectChangedLineMap(ctxFor({ dag: ['dag-reported.php'] }), dir);
+      expect(dag?.get('dag-reported.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
+  it('counts whole a committed binary change, which the diff prints no header for', async () => {
+    await inRepo({ 'my blob.php': Buffer.from([0, 1, 2, 3]), 'app.php': 'a\nb\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'my blob.php'), Buffer.from([0, 9, 2, 3]));
+      await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('my blob.php')).toEqual({ whole: true, ranges: [] });
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+    });
+  });
+
+  it('counts whole a committed mode-only change, which the diff prints no hunk for', async () => {
+    await inRepo({ 'app.php': 'a\nb\n' }, async (dir) => {
+      await chmod(path.join(dir, 'app.php'), 0o755);
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: make it executable']);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
+  it('counts whole a binary change still in the working tree', async () => {
+    await inRepo({ 'blob.php': Buffer.from([0, 1, 2, 3]) }, async (dir) => {
+      await writeFile(path.join(dir, 'blob.php'), Buffer.from([0, 9, 2, 3]));
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('blob.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
+  it('leaves a deleted file out and keeps the files around it', async () => {
+    await inRepo({ 'gone.php': 'x\n', 'kept.php': 'a\nb\n' }, async (dir) => {
+      await rm(path.join(dir, 'gone.php'));
+      await writeFile(path.join(dir, 'kept.php'), 'a\nB\n');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.has('gone.php')).toBe(false);
+      expect(map?.get('kept.php')?.ranges).toEqual([[2, 2]]);
+    });
+  });
+
+  it('leaves a committed deletion out, binary or text, and keeps the files around it', async () => {
+    await inRepo(
+      { 'gone.php': 'x\n', 'gone-blob.php': Buffer.from([0, 1, 2, 3]), 'kept.php': 'a\nb\n' },
+      async (dir) => {
+        await rm(path.join(dir, 'gone.php'));
+        await rm(path.join(dir, 'gone-blob.php'));
+        await writeFile(path.join(dir, 'kept.php'), 'a\nB\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.has('gone.php')).toBe(false);
+        expect(map?.has('gone-blob.php')).toBe(false);
+        expect(map?.get('kept.php')?.ranges).toEqual([[2, 2]]);
+      },
+    );
+  });
+
+  it('keeps the real file and its hunks when a removed `-- x` or added `++ x` line reads like a header', async () => {
+    const before = 'select 1;\nselect 2;\n-- sql comment\nselect 3;\nselect 4;\n';
+    await inRepo({ 'q.sql': before }, async (dir) => {
+      await writeFile(
+        path.join(dir, 'q.sql'),
+        'select 1;\nselect 2;\nselect 3;\nselect 4;\n++ x\n',
+      );
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect([...(map?.keys() ?? [])]).toEqual(['q.sql']);
+      expect(map?.get('q.sql')).toEqual({
+        whole: false,
+        ranges: [
+          [2, 3],
+          [5, 5],
+        ],
+      });
+    });
+  });
+
+  it('is null when nothing names a changed file', async () => {
+    await inRepo({ 'app.php': 'a\n' }, async (dir) => {
+      expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    });
+  });
+
+  it('is null when git status cannot run, whatever the agents reported', async () => {
+    const map = await collectChangedLineMap(
+      ctxFor({ touched: ['app.php'] }),
+      '/nonexistent-worktree',
+    );
+    expect(map).toBeNull();
+  });
+
+  it('is null when no diff base resolves, since no committed file could be named', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-map-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(dir, 'brand-new.php'), 'fresh\n');
+
+      expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads the diff when the base falls back to HEAD and a root file is named HEAD', async () => {
+    await inRepo({ 'app.php': 'a\nb\n', HEAD: 'x\n' }, async (dir) => {
+      await git(dir, ['branch', '-D', 'main']);
+      await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+    });
+  });
+
+  it('is null when git quotes a path, which would never match a tool report', async () => {
+    await inRepo({ 'app.php': 'a\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'has space.php'), 'x\n');
+
+      expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    });
   });
 });

@@ -1,6 +1,9 @@
 import { execFile } from 'node:child_process';
-import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { randomBytes } from 'node:crypto';
+import path from 'node:path';
+import { ensureDirNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import {
@@ -12,7 +15,11 @@ import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { ddevExec, type DdevRunnerHandle } from '../../../sandbox/ddev-runner.js';
+import {
+  DDEV_PROJECT_MOUNT,
+  ddevExec,
+  type DdevRunnerHandle,
+} from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
 import { ensureAppServing, withDdevProgress, type ServingRuntime } from './_app-runtime.js';
 import {
@@ -22,6 +29,15 @@ import {
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import type { TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
+import { collectChangedLineMap, type ChangedLineMap } from './_impl-changes.js';
+import {
+  parsePhpcsJsonReport,
+  phpcsReportFlags,
+  preExistingFact,
+  renderBlockingList,
+  scopePhpcsReport,
+  type ScopedReport,
+} from './_lint-scope.js';
 
 // Phase 5 verify: runs the project's test / lint / typecheck checks and records
 // the outcome for gate 2. Each of the three slots is framework-aware — a JS
@@ -64,6 +80,10 @@ interface CheckResult {
   passed: boolean;
   command: string | null;
   output: string;
+  /** Set only when the verdict was limited to the lines this change wrote. */
+  scope?: { blocking: number; preExisting: number };
+  /** Why the verdict is qualified: not limited to the change, or the check could not run. */
+  note?: string;
 }
 
 /** Mandatory post-implementation HTTP smoke: boots the app once and records what
@@ -101,6 +121,7 @@ interface VerifyApply {
 export function buildVerifyDegradedNote(
   blocker: { reason: string; repair: string } | null,
   unverified: string,
+  slotNotes = '',
 ): string {
   return [
     blocker
@@ -108,6 +129,7 @@ export function buildVerifyDegradedNote(
         `green, and no fix round can repair this. Repair with: ${blocker.repair}`
       : '',
     unverified,
+    slotNotes,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -132,6 +154,7 @@ export function buildUnverifiedNote(
   const undetected: string[] = [];
   const unticked: string[] = [];
   for (const name of ['test', 'lint', 'typecheck'] as const) {
+    if (results[name].note) continue;
     (slots[name] === null ? undetected : unticked).push(name);
   }
   const parts = [
@@ -292,63 +315,187 @@ async function resolveSlots(
   return { test, lint, typecheck };
 }
 
-async function runSlot(
+interface SlotRun {
+  ran: boolean;
+  exitCode: number;
+  output: string;
+}
+
+/** A shell reports a missing command as 127; a host binary that cannot start reads the same. */
+const NOT_FOUND_EXIT = 127;
+
+const SLOT_TIMEOUT_MS = 600_000;
+
+async function execSlot(
   cmd: SlotCommand,
   ctx: StepContext,
   workspace: string,
   handle: DdevRunnerHandle | null,
-): Promise<CheckResult> {
+  extraArgs: string[] = [],
+): Promise<SlotRun> {
   if (cmd.kind === 'ddev') {
-    if (!handle) {
-      return {
-        ran: false,
-        passed: false,
-        command: cmd.label,
-        output: 'DDEV runner unavailable — skipped',
-      };
-    }
+    if (!handle) return { ran: false, exitCode: 1, output: 'DDEV runner unavailable — skipped' };
     // A full suite is minutes of silence, and a fixed status line is indistinguishable from a
     // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
     // counter that ticks through silent phases.
     const res = await withDdevProgress(
       ctx,
       `Running ${cmd.label}`,
-      (onLine) => ddevExec(handle, cmd.argv.join(' '), { timeoutMs: 600_000, onLine }),
+      (onLine) =>
+        ddevExec(handle, [...cmd.argv, ...extraArgs].join(' '), {
+          timeoutMs: SLOT_TIMEOUT_MS,
+          onLine,
+        }),
       { initialLine: cmd.argv.join(' ') },
     );
-    return {
-      ran: true,
-      passed: res.exitCode === 0,
-      command: cmd.label,
-      output: res.output.slice(-4000),
-    };
+    return { ran: true, exitCode: res.exitCode, output: res.output.slice(-4000) };
   }
   try {
     const [bin, ...rest] = cmd.argv;
     // execFile buffers, so there is no line to stream — the elapsed counter is the half that
     // matters here, and withDdevProgress ticks it for an op with no output of its own.
     const { stdout, stderr } = await withDdevProgress(ctx, `Running ${cmd.label}`, () =>
-      exec(bin!, rest, {
+      exec(bin!, [...rest, ...extraArgs], {
         cwd: workspace,
-        timeout: 600_000,
+        timeout: SLOT_TIMEOUT_MS,
         maxBuffer: 10 * 1024 * 1024,
       }),
     );
-    return {
-      ran: true,
-      passed: true,
-      command: cmd.label,
-      output: `${stdout}${stderr}`.slice(0, 4000),
-    };
+    return { ran: true, exitCode: 0, output: `${stdout}${stderr}`.slice(-4000) };
   } catch (err) {
-    const e = err as { stdout?: string; stderr?: string };
-    return {
-      ran: true,
-      passed: false,
-      command: cmd.label,
-      output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 4000),
-    };
+    const e = err as { stdout?: string; stderr?: string; code?: unknown };
+    const exitCode = typeof e.code === 'number' ? e.code : e.code === 'ENOENT' ? NOT_FOUND_EXIT : 1;
+    return { ran: true, exitCode, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-4000) };
   }
+}
+
+async function runSlot(
+  slot: 'test' | 'lint' | 'typecheck',
+  cmd: SlotCommand,
+  ctx: StepContext,
+  workspace: string,
+  handle: DdevRunnerHandle | null,
+): Promise<CheckResult> {
+  const run = await execSlot(cmd, ctx, workspace, handle);
+  return {
+    ran: run.ran,
+    passed: run.ran && run.exitCode === 0,
+    command: cmd.label,
+    output: run.output,
+    ...(run.ran ? {} : { note: `DDEV runner unavailable — ${slot} not run` }),
+  };
+}
+
+const REPORT_DIR = '.haive/verify';
+const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+const PHPCS_NOT_FOUND = 'vendor/bin/phpcs not found — lint not run';
+const PHPCS_TIMED_OUT = 'phpcs reached its time limit — lint not verified';
+/** A kill timer can fire a little before the clock this step reads agrees. */
+const TIME_LIMIT_SLACK_MS = 5_000;
+
+const isDirectPhpcs = (cmd: SlotCommand): boolean => cmd.argv.at(-1) === 'vendor/bin/phpcs';
+
+const unscoped = (check: CheckResult, reason: string): CheckResult =>
+  check.ran && !check.passed ? { ...check, note: `lint verdict unscoped: ${reason}` } : check;
+
+function scopedCheck(command: string, { blocking, preExisting }: ScopedReport): CheckResult {
+  const passed = blocking.length === 0;
+  const output = !passed
+    ? renderBlockingList(blocking, preExisting)
+    : preExisting > 0
+      ? `${preExistingFact(preExisting)} — not blocking.`
+      : '';
+  return {
+    ran: true,
+    passed,
+    command,
+    output,
+    scope: { blocking: blocking.length, preExisting },
+  };
+}
+
+type ScopedRun = { check: CheckResult } | { reason: string };
+
+/** A reason instead of a check means the verdict could not be scoped. */
+async function runScopedPhpcs(
+  cmd: SlotCommand,
+  ctx: StepContext,
+  workspace: string,
+  handle: DdevRunnerHandle | null,
+  changed: ChangedLineMap,
+): Promise<ScopedRun> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const dirRel = `${prefix}${REPORT_DIR}`;
+  const name = `phpcs-${randomBytes(8).toString('hex')}.json`;
+  const reportRel = `${dirRel}/${name}`;
+  const ddev = cmd.kind === 'ddev';
+  const root = ddev ? DDEV_PROJECT_MOUNT : path.resolve(workspace);
+  let flags: string[];
+  try {
+    flags = phpcsReportFlags(`${root}/${REPORT_DIR}/${name}`, root);
+    await ensureDirNoFollow(anchor, dirRel);
+    // Only the DDEV user is a different uid from this worker, which writes the host report itself.
+    if (ddev) await ensureSandboxWritableTree(anchor, dirRel);
+  } catch (err) {
+    ctx.logger.warn({ err }, 'phpcs report directory could not be prepared');
+    return { reason: 'the report directory could not be prepared' };
+  }
+  try {
+    const startedAt = performance.now();
+    const run = await execSlot(cmd, ctx, workspace, handle, flags);
+    const elapsedMs = performance.now() - startedAt;
+    if (run.exitCode === NOT_FOUND_EXIT) {
+      const check = {
+        ran: false,
+        passed: false,
+        command: cmd.label,
+        output: PHPCS_NOT_FOUND,
+        note: PHPCS_NOT_FOUND,
+      };
+      return { check };
+    }
+    // ignore_errors_on_exit and ignore_warnings_on_exit hide violations from the exit code.
+    const text = await readTextNoFollow(anchor, reportRel, { maxBytes: MAX_REPORT_BYTES });
+    const report = text === null ? null : parsePhpcsJsonReport(text);
+    if (report === null) {
+      if (run.exitCode === 0) {
+        return { check: { ran: true, passed: true, command: cmd.label, output: run.output } };
+      }
+      // Only the clock tells a kill from another exit 1. A re-run would spend the limit again, and a
+      // fix round cannot repair a timeout, so it is reported as not run rather than as a failure.
+      if (elapsedMs >= SLOT_TIMEOUT_MS - TIME_LIMIT_SLACK_MS) {
+        const output = run.output;
+        return {
+          check: { ran: false, passed: false, command: cmd.label, output, note: PHPCS_TIMED_OUT },
+        };
+      }
+      return { reason: text === null ? 'phpcs wrote no report' : 'the report is malformed' };
+    }
+    return { check: scopedCheck(cmd.label, scopePhpcsReport(report, changed)) };
+  } finally {
+    await removeNoFollow(anchor, reportRel).catch((err: unknown) =>
+      ctx.logger.warn({ err }, 'phpcs report could not be removed'),
+    );
+  }
+}
+
+async function runLint(
+  cmd: SlotCommand,
+  ctx: StepContext,
+  workspace: string,
+  handle: DdevRunnerHandle | null,
+): Promise<CheckResult> {
+  if (!isDirectPhpcs(cmd)) {
+    return unscoped(await runSlot('lint', cmd, ctx, workspace, handle), 'project script');
+  }
+  if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, workspace, handle);
+  const changed = await collectChangedLineMap(ctx, workspace);
+  const scoped = changed
+    ? await runScopedPhpcs(cmd, ctx, workspace, handle, changed)
+    : { reason: 'the change could not be measured' };
+  return 'check' in scoped
+    ? scoped.check
+    : unscoped(await runSlot('lint', cmd, ctx, workspace, handle), scoped.reason);
 }
 
 const skippedResult = (): CheckResult => ({
@@ -508,8 +655,9 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         ['typecheck', out.typecheck],
       ] as const) {
         if (check.ran && !check.passed) {
+          const shown = check.scope ? check.output : check.output.slice(-2000);
           parts.push(
-            `### ${name} failed${check.command ? ` (\`${check.command}\`)` : ''}\n${check.output.slice(-2000)}`,
+            `### ${name} failed${check.command ? ` (\`${check.command}\`)` : ''}\n${shown}`,
           );
         }
       }
@@ -606,7 +754,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     }
     let test =
       values.runTest && testCmd
-        ? await runSlot(testCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlot('test', testCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
     // routes ANY failing check back to implementation — so without this a missing browser
@@ -615,14 +763,20 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // is kept out, and the note below says so rather than letting it read as green.
     const testEnvBlocker =
       test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, test.output) : null;
-    if (testEnvBlocker) test = { ...test, ran: false };
+    if (testEnvBlocker) {
+      test = {
+        ...test,
+        ran: false,
+        note: 'test run stopped by its environment, not a test failure',
+      };
+    }
     const lint =
       values.runLint && lintCmd
-        ? await runSlot(lintCmd, ctx, workspacePath, ddevHandle)
+        ? await runLint(lintCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await runSlot(typeCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlot('typecheck', typeCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
 
     const passed =
@@ -653,12 +807,21 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // This step has no agent — the facts it establishes are the COMMANDS that exist in
     // this workspace and whether they pass. Every later agent otherwise re-derives the
     // same thing by probing for a test runner that may not be there.
+    const verdict = (r: CheckResult): string => {
+      if (!r.scope) return r.passed ? 'passes' : 'FAILS';
+      if (!r.passed) return 'FAILS on lines this change wrote';
+      return r.scope.preExisting > 0
+        ? `passes on changed lines (${r.scope.preExisting} pre-existing)`
+        : 'passes';
+    };
     const slotFact = (name: string, r: CheckResult): string =>
       r.ran
-        ? `${name}: \`${r.command}\` ${r.passed ? 'passes' : 'FAILS'}`
-        : r.command
-          ? `${name}: \`${r.command}\` exists but was not run this pass`
-          : `${name}: no runner detected in this workspace`;
+        ? `${name}: \`${r.command}\` ${verdict(r)}`
+        : r.note
+          ? `${name}: ${r.note}`
+          : r.command
+            ? `${name}: \`${r.command}\` exists but was not run this pass`
+            : `${name}: no runner detected in this workspace`;
     await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
       stepId: '08-phase-5-verify',
       round: ctx.round,
@@ -675,7 +838,8 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       { test: testCmd, lint: lintCmd, typecheck: typeCmd },
       { test, lint, typecheck },
     );
-    const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified);
+    const slotNotes = [test.note, lint.note, typecheck.note].filter(Boolean).join('\n');
+    const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, slotNotes);
     return {
       test,
       lint,

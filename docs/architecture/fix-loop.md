@@ -46,6 +46,26 @@ for a framework whose output has not been measured. It applies from pass 0, unli
 enumerate guard — a browser missing from the container is never something the tester's own
 first pass could have caused.
 
+`08-phase-5-verify`'s lint follows the same rule. A missing `vendor/bin/phpcs` (exit 127, as on a
+site with no composer.json) and a phpcs run that used its whole 600 s cap read as NOT RUN with a
+note, never as a failing check: no fix round can install a linter or speed one up. Gate 2 still
+shows such a check as a NOT RUN row with its note and does not pre-select Approve, and the learning
+step names it beside "passed": 08's own verdict counts only what ran. Only the clock tells a DDEV
+kill from an exit 1, so the step times the flagged run rather than reading its exit.
+And the verdict itself is scoped to the change: phpcs keeps its own file scope and also writes its
+JSON report (`--report=full` first, since the first `--report*` flag replaces the console report,
+then `--report-json` and `--basepath`) under `.haive/verify/`, which gate 3 never stages, and only
+an ERROR or WARNING at a line the change wrote blocks (`_lint-scope.ts`, over the uncapped
+`collectChangedLineMap`). MEASURED on a Drupal 7 clone: a change adding only clean code had blocked
+on 35 violations already in the module. The diagnosis lists one `path:line` per blocking violation
+and the count of pre-existing ones, telling the fixer not to clear them. The report is read whatever
+phpcs exits with: a project's `ignore_errors_on_exit` or `ignore_warnings_on_exit` makes it exit 0
+over violations. When the report cannot be written or read, the exit code decides as before: exit
+0 passes as it is, and any other exit runs the original command again and keeps its verdict, marked
+"lint verdict unscoped". A project lint script (composer or package.json), whose arguments and
+output Haive does not control, is always unscoped, so those two settings decide its verdict. The trade-off: a change that makes an UNCHANGED line violate (an
+import it stopped using) counts as pre-existing and does not block.
+
 **Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
 explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPriorFixContext`
 (`_fix-loop.ts`) does it across rounds; both dedupe with the ledger's `contentFingerprint` and

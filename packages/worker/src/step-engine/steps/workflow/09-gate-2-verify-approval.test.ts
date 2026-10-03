@@ -1,4 +1,44 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const m = vi.hoisted(() => ({
+  loadPreviousStepOutput: vi.fn(),
+  getTaskEnvTemplate: vi.fn(),
+  hasWorkspaceEntry: vi.fn(),
+  resolveTaskDirectAccess: vi.fn(),
+  resolveScreenshotRoot: vi.fn(),
+  loadTaskSimilarSites: vi.fn(),
+  loadUnactedInsights: vi.fn(),
+}));
+
+vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
+  loadPreviousStepOutput: m.loadPreviousStepOutput,
+}));
+vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../env-replicate/_shared.js')>()),
+  getTaskEnvTemplate: m.getTaskEnvTemplate,
+}));
+vi.mock('../../workspace-probe.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace-probe.js')>()),
+  hasWorkspaceEntry: m.hasWorkspaceEntry,
+}));
+vi.mock('../../../sandbox/_browser-access.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/_browser-access.js')>()),
+  resolveTaskDirectAccess: m.resolveTaskDirectAccess,
+}));
+vi.mock('./_screenshots.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_screenshots.js')>()),
+  resolveScreenshotRoot: m.resolveScreenshotRoot,
+}));
+vi.mock('./_similar-sites.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_similar-sites.js')>()),
+  loadTaskSimilarSites: m.loadTaskSimilarSites,
+}));
+vi.mock('./_gate-insights.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_gate-insights.js')>()),
+  loadUnactedInsights: m.loadUnactedInsights,
+}));
+
 import { recurrenceTag } from './09-gate-2-verify-approval.js';
 import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
@@ -306,6 +346,167 @@ describe('gate-2 status summary', () => {
     expect(row(d, 'Tests')?.body).toBe(['````', output, '````'].join('\n'));
   });
 
+  // A pass that left pre-existing violations is still a pass, but a bare green row would hide them.
+  describe('a lint verdict limited to the lines the change wrote', () => {
+    const withLint = (lint: Record<string, unknown>) =>
+      baseDetect({ verify: { test: ranClean, lint, typecheck: ranClean } });
+    const LEFT = '35 pre-existing violation(s) elsewhere predate this change — not blocking.';
+
+    it('renders a pass that left pre-existing violations as a warning row, not a bare pass', () => {
+      const d = withLint({
+        ran: true,
+        passed: true,
+        output: LEFT,
+        scope: { blocking: 0, preExisting: 35 },
+      });
+
+      expect(row(d, 'Lint')).toEqual({
+        label: 'Lint',
+        status: 'warn',
+        statusLabel: 'PRE-EXISTING',
+        detail: '35 pre-existing violation(s) elsewhere, none on lines this change wrote',
+      });
+      expect(row(d, 'Tests')?.status).toBe('pass');
+    });
+
+    it('still defaults the gate to approve, since nothing the change wrote is wrong', () => {
+      const d = withLint({
+        ran: true,
+        passed: true,
+        output: LEFT,
+        scope: { blocking: 0, preExisting: 35 },
+      });
+
+      expect(decisionDefault(d)).toBe('approve');
+    });
+
+    it('renders a pass with nothing left over as a plain pass', () => {
+      const d = withLint({
+        ran: true,
+        passed: true,
+        output: '',
+        scope: { blocking: 0, preExisting: 0 },
+      });
+
+      expect(row(d, 'Lint')).toEqual({ label: 'Lint', status: 'pass' });
+    });
+
+    it('renders a failure as a failure whatever its scope, with the list as its body', () => {
+      const output =
+        'src/a.php:11: [ERROR] m (S.A)\n3 pre-existing violation(s) elsewhere predate this change — do not edit code to clear them.';
+      const d = withLint({
+        ran: true,
+        passed: false,
+        output,
+        scope: { blocking: 1, preExisting: 3 },
+      });
+
+      expect(row(d, 'Lint')).toEqual({
+        label: 'Lint',
+        status: 'fail',
+        body: ['```', output, '```'].join('\n'),
+        defaultOpen: false,
+      });
+    });
+
+    it('shows the note of a verdict that could not be limited beside a failure', () => {
+      const d = withLint({
+        ran: true,
+        passed: false,
+        output: 'raw report',
+        note: 'lint verdict unscoped: phpcs wrote no report',
+      });
+
+      expect(row(d, 'Lint')).toMatchObject({
+        status: 'fail',
+        detail: 'lint verdict unscoped: phpcs wrote no report',
+      });
+    });
+
+    it('renders a payload without a scope or a note exactly as before', () => {
+      expect(row(withLint({ ran: true, passed: true, output: '' }), 'Lint')).toEqual({
+        label: 'Lint',
+        status: 'pass',
+      });
+      expect(row(withLint({ ran: true, passed: false, output: 'boom' }), 'Lint')).toEqual({
+        label: 'Lint',
+        status: 'fail',
+        body: ['```', 'boom', '```'].join('\n'),
+        defaultOpen: false,
+      });
+    });
+  });
+
+  describe('a check that was selected but could not run', () => {
+    const NOT_FOUND = 'vendor/bin/phpcs not found — lint not run';
+    const ENV_STOPPED = 'test run stopped by its environment, not a test failure';
+    const withSlots = (slots: Record<string, unknown>) =>
+      baseDetect({ verify: { test: ranClean, lint: ranClean, typecheck: ranClean, ...slots } });
+    const phpcsMissing = { ran: false, passed: false, output: NOT_FOUND, note: NOT_FOUND };
+
+    it('shows a NOT RUN warning carrying the note', () => {
+      const d = withSlots({ lint: phpcsMissing });
+
+      expect(row(d, 'Lint')).toMatchObject({
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: NOT_FOUND,
+      });
+      expect(row(d, 'Lint')).not.toHaveProperty('body');
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint', 'Typecheck']);
+    });
+
+    it('does not default to approve while another check ran and passed', () => {
+      expect(decisionDefault(withSlots({ lint: phpcsMissing }))).toBe('reject');
+    });
+
+    it('keeps what the check printed, collapsed the way a failing row keeps it', () => {
+      const output = "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright";
+      const d = withSlots({ test: { ran: false, passed: false, output, note: ENV_STOPPED } });
+
+      expect(row(d, 'Tests')).toEqual({
+        label: 'Tests',
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: ENV_STOPPED,
+        body: ['```', output, '```'].join('\n'),
+        defaultOpen: false,
+      });
+      expect(row(d, 'Lint')).toEqual({ label: 'Lint', status: 'pass' });
+      expect(decisionDefault(d)).toBe('reject');
+    });
+
+    it('gives a check that printed nothing no body', () => {
+      const note = 'DDEV runner unavailable — typecheck not run';
+      const d = withSlots({ typecheck: { ran: false, passed: false, output: '', note } });
+
+      expect(row(d, 'Typecheck')).toEqual({
+        label: 'Typecheck',
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: note,
+      });
+    });
+
+    it('still omits a check nobody selected, which carries no note, and defaults to approve', () => {
+      const d = withSlots({ lint: { ran: false, passed: false, output: 'skipped' } });
+
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Typecheck']);
+      expect(decisionDefault(d)).toBe('approve');
+    });
+
+    it('keeps the all-three row for the case where nothing ran', () => {
+      const d = withSlots({
+        test: { ran: false, passed: false, output: '', note: ENV_STOPPED },
+        lint: phpcsMissing,
+        typecheck: { ran: false, passed: false, output: 'skipped' },
+      });
+
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint', 'Tests / lint / typecheck']);
+      expect(decisionDefault(d)).toBe('reject');
+    });
+  });
+
   it('a standalone smoke failure defaults the gate to reject', () => {
     const d = baseDetect({ runtimeSmoke: failSmoke(null) });
     expect(decisionDefault(d)).toBe('reject');
@@ -529,5 +730,107 @@ describe('gate-2 discloses what was not reviewed', () => {
     const schema = gate2VerifyApprovalStep.form!({} as never, baseDetect(v))!;
     const row = (schema.statusSummary ?? []).find((r) => r.label === 'Implementation validation');
     expect(row?.body ?? '').not.toContain('## Not reviewed');
+  });
+});
+
+describe('gate-2 verification results read from 08', () => {
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/repos/u/r',
+    round: 0,
+    db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+  const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
+
+  function stored(lint: unknown, others: unknown = skipped): void {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '08-phase-5-verify'
+        ? { output: { test: others, lint, typecheck: others, passed: true, runtimeSmoke: null } }
+        : null,
+    );
+  }
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.hasWorkspaceEntry.mockReset().mockResolvedValue(false);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
+    m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+  });
+
+  it('carries the scope and the note of a check through to the gate row', async () => {
+    stored({
+      ran: true,
+      passed: true,
+      command: 'vendor/bin/phpcs',
+      output: '35 pre-existing violation(s) elsewhere predate this change — not blocking.',
+      scope: { blocking: 0, preExisting: 35 },
+      note: 'a note',
+    });
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+
+    expect(detected.verify.lint).toEqual({
+      ran: true,
+      passed: true,
+      output: '35 pre-existing violation(s) elsewhere predate this change — not blocking.',
+      scope: { blocking: 0, preExisting: 35 },
+      note: 'a note',
+    });
+    const lint = (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).find(
+      (r) => r.label === 'Lint',
+    );
+    expect(lint?.status).toBe('warn');
+  });
+
+  it('reads an output stored before the scope existed as the three fields it always carried', async () => {
+    stored({ ran: true, passed: false, command: 'vendor/bin/phpcs', output: 'raw report' });
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+
+    expect(detected.verify.lint).toEqual({ ran: true, passed: false, output: 'raw report' });
+  });
+
+  it('drops a scope that is not two counts, rather than rendering it', async () => {
+    stored({ ran: true, passed: true, output: '', scope: { blocking: 'none', preExisting: 4 } });
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+
+    expect(detected.verify.lint).toEqual({ ran: true, passed: true, output: '' });
+  });
+
+  it('carries a check that could not run through to a NOT RUN row, and does not default to approve', async () => {
+    const note = 'vendor/bin/phpcs not found — lint not run';
+    stored(
+      { ran: false, passed: false, command: 'vendor/bin/phpcs', output: note, note },
+      passedRun,
+    );
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+
+    expect(detected.verify.lint).toEqual({ ran: false, passed: false, output: note, note });
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+    expect((schema.statusSummary ?? []).find((r) => r.label === 'Lint')).toMatchObject({
+      status: 'warn',
+      statusLabel: 'NOT RUN',
+      detail: note,
+    });
+    expect(schema.fields.find((f) => f.id === 'decision')).toMatchObject({ default: 'reject' });
+  });
+
+  it('renders a skipped check stored before notes existed exactly as it always did', async () => {
+    stored(skipped, passedRun);
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+
+    expect(schema.statusSummary).toEqual([
+      { label: 'Tests', status: 'pass' },
+      { label: 'Typecheck', status: 'pass' },
+    ]);
+    expect(schema.fields.find((f) => f.id === 'decision')).toMatchObject({ default: 'approve' });
   });
 });

@@ -62,13 +62,21 @@ function coverageNote(c: FileCoverage | null): string {
   return `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`;
 }
 
+interface LiteCheck {
+  ran: boolean;
+  passed: boolean;
+  output: string;
+  scope?: { blocking: number; preExisting: number };
+  note?: string;
+}
+
 interface VerifyGateDetect {
   /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
    *  skipped (no command detected / unticked) and must NOT be shown as a fail. */
   verify: {
-    test: { ran: boolean; passed: boolean; output: string } | null;
-    lint: { ran: boolean; passed: boolean; output: string } | null;
-    typecheck: { ran: boolean; passed: boolean; output: string } | null;
+    test: LiteCheck | null;
+    lint: LiteCheck | null;
+    typecheck: LiteCheck | null;
   };
   allPassed: boolean;
   /** Phase 4 pre-test validation result (null when the step didn't run). */
@@ -342,10 +350,18 @@ interface VerifyGateApply {
   runtimeErrors: string;
 }
 
+interface StoredCheck {
+  ran?: boolean;
+  passed?: boolean;
+  output?: string;
+  scope?: { blocking?: number; preExisting?: number };
+  note?: string;
+}
+
 interface VerifyOutput {
-  test?: { ran?: boolean; passed?: boolean; output?: string };
-  lint?: { ran?: boolean; passed?: boolean; output?: string };
-  typecheck?: { ran?: boolean; passed?: boolean; output?: string };
+  test?: StoredCheck;
+  lint?: StoredCheck;
+  typecheck?: StoredCheck;
   passed?: boolean;
   runtimeSmoke?: {
     ran?: boolean;
@@ -359,16 +375,17 @@ interface VerifyOutput {
 /** Narrow a stored verify-slot result to what the gate needs. A skipped slot (08
  *  returns ran:false) stays ran:false so the gate OMITS it rather than showing a
  *  contradictory "FAIL". null when the slot is absent entirely. */
-function liteCheck(c?: {
-  ran?: boolean;
-  passed?: boolean;
-  output?: string;
-}): { ran: boolean; passed: boolean; output: string } | null {
+function liteCheck(c?: StoredCheck): LiteCheck | null {
   if (!c) return null;
+  const { blocking, preExisting } = c.scope ?? {};
   return {
     ran: c.ran !== false,
     passed: c.passed === true,
     output: (c.output ?? '').slice(0, 4000),
+    ...(typeof blocking === 'number' && typeof preExisting === 'number'
+      ? { scope: { blocking, preExisting } }
+      : {}),
+    ...(c.note ? { note: c.note } : {}),
   };
 }
 
@@ -814,15 +831,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
     // row and no "all passed" line when nothing actually ran.
     const fenced = (s: string) => codeBlock(s || '(empty)');
+    const verifySlots = [detected.verify.test, detected.verify.lint, detected.verify.typecheck];
     // Whether ANY of the three checks actually executed. Derived from the slots this gate
     // already reads rather than a new payload field, so it answers the same on a gate parked
     // before it existed. `allPassed` cannot stand in: 08 computes it as "nothing that ran
     // failed", which is true when nothing ran at all.
-    const verificationRan = [
-      detected.verify.test,
-      detected.verify.lint,
-      detected.verify.typecheck,
-    ].some((c) => c?.ran === true);
+    const verificationRan = verifySlots.some((c) => c?.ran === true);
+    // A check 08 selected but could not run has a note; one nobody selected has none.
+    const selectedCheckNotRun = verifySlots.some((c) => c?.ran === false && !!c.note);
     const rows: StatusSummaryItem[] = [];
 
     for (const [label, c] of [
@@ -830,16 +846,35 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ['Lint', detected.verify.lint],
       ['Typecheck', detected.verify.typecheck],
     ] as const) {
-      if (!c || !c.ran) continue;
+      if (!c || (!c.ran && !c.note)) continue;
+      if (!c.ran) {
+        rows.push({
+          label,
+          status: 'warn',
+          statusLabel: 'NOT RUN',
+          detail: c.note,
+          ...(c.output.trim() && c.output.trim() !== c.note?.trim()
+            ? { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }
+            : {}),
+        });
+        continue;
+      }
+      const preExisting = c.passed ? (c.scope?.preExisting ?? 0) : 0;
+      const detail =
+        preExisting > 0
+          ? `${preExisting} pre-existing violation(s) elsewhere, none on lines this change wrote`
+          : c.note;
       rows.push({
         label,
-        status: c.passed ? 'pass' : 'fail',
+        status: !c.passed ? 'fail' : preExisting > 0 ? 'warn' : 'pass',
+        ...(preExisting > 0 ? { statusLabel: 'PRE-EXISTING' } : {}),
+        ...(detail ? { detail } : {}),
         ...(c.passed || !c.output.trim()
           ? {}
           : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
       });
     }
-    // Omitting every non-run check is right — a skipped check is not a failure — but with ALL
+    // Omitting a check nobody selected is right — a skipped check is not a failure — but with ALL
     // THREE skipped that leaves no verification rows at all, beside an `allPassed` that is true
     // only because nothing ran. One row so the absence is stated rather than inferred from an
     // empty table. Derived from the same slots already read, so a gate parked before this
@@ -1179,6 +1214,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             // recommendation; recommending approval on the strength of an absence is the one
             // thing it must not do. The human can still approve — the row above says why.
             verificationRan &&
+            !selectedCheckNotRun &&
             validationOk &&
             testsOk &&
             browserOk &&

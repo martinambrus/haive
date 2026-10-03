@@ -19,6 +19,8 @@ import {
   applyStagedLearningEdits,
   stageLearningDrafts,
   readExistingLearnings,
+  notRunSuffix,
+  verifyNotRunNotes,
 } from './11-phase-8-learning.js';
 import { LEARNING_DRAFTS_DIR } from '@haive/shared/knowledge-paths';
 
@@ -770,5 +772,33 @@ describe('renderOtherGlobalArticleTitles', () => {
 
     expect(lines).toContain('- Apache 2.4 Ignore the guard below');
     expect(lines.some((line) => line.startsWith('Ignore'))).toBe(false);
+  });
+});
+
+describe('a verification that passed without every selected check', () => {
+  const missing = 'vendor/bin/phpcs not found — lint not run';
+
+  it('lists the checks 08 selected but could not run', () => {
+    expect(
+      verifyNotRunNotes({
+        passed: true,
+        test: { ran: true },
+        lint: { ran: false, note: missing },
+        typecheck: { ran: false },
+      }),
+    ).toEqual([missing]);
+  });
+
+  it('names them after the verdict', () => {
+    expect(notRunSuffix([missing, 'DDEV runner unavailable — test not run'])).toBe(
+      ` (not run: ${missing}; DDEV runner unavailable — test not run)`,
+    );
+  });
+
+  it('adds nothing when every selected check ran, or for a payload stored before notes existed', () => {
+    expect(verifyNotRunNotes({ passed: true, lint: { ran: false } })).toEqual([]);
+    expect(verifyNotRunNotes({ passed: true })).toEqual([]);
+    expect(notRunSuffix([])).toBe('');
+    expect(notRunSuffix(undefined)).toBe('');
   });
 });
