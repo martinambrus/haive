@@ -56,10 +56,12 @@ then `--report-json` and `--basepath`) under `.haive/verify/`, which gate 3 neve
 an ERROR or WARNING at a line the change wrote blocks (`_lint-scope.ts`, over the uncapped
 `collectChangedLineMap`). MEASURED on a Drupal 7 clone: a change adding only clean code had blocked
 on 35 violations already in the module. The diagnosis lists one `path:line` per blocking violation
-and the count of pre-existing ones, telling the fixer not to clear them. When the report cannot be
-written or read, the original command runs again and keeps the old verdict, marked "lint verdict
-unscoped"; a project lint script (composer or package.json), whose arguments and output Haive does
-not control, is always unscoped. The trade-off: a change that makes an UNCHANGED line violate (an
+and the count of pre-existing ones, telling the fixer not to clear them. The report is read whatever
+phpcs exits with: a project's `ignore_errors_on_exit` or `ignore_warnings_on_exit` makes it exit 0
+over violations. When the report cannot be written or read, the exit code decides as before: exit
+0 passes as it is, and any other exit runs the original command again and keeps its verdict, marked
+"lint verdict unscoped". A project lint script (composer or package.json), whose arguments and
+output Haive does not control, is always unscoped, so those two settings decide its verdict. The trade-off: a change that makes an UNCHANGED line violate (an
 import it stopped using) counts as pre-existing and does not block.
 
 **Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
