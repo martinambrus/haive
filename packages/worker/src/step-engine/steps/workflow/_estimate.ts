@@ -12,6 +12,8 @@ import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 export const MAX_ANCHORS = 30;
 /** Per-anchor description budget when an anchor is rendered into a prompt / panel. */
 export const ANCHOR_DESC_CAP = 240;
+/** Require several measured runs before replacing the broader-history baseline. */
+export const MIN_PATH_ANCHORS = 3;
 
 /** Multiplier applied to the median anchor effort per triage path in the heuristic
  *  fallback: a quick bugfix is lighter than the median task, the full workflow heavier. */
@@ -84,14 +86,30 @@ export function median(nums: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1]! + hi) / 2 : hi;
 }
 
-/** Deterministic baseline estimate: the median measured effort of the anchors scaled by
- *  the triage path, or a per-path cold-start constant when there are no anchors. */
+/** Prefer local same-path effort, then same-path cold-start anchors, when sufficiently
+ *  sampled. With sparse/unknown path history, retain the broader-history fallback. */
+function effortAnchors(
+  anchors: EstimateAnchor[],
+  path: string | null,
+  minimum = MIN_PATH_ANCHORS,
+): { anchors: EstimateAnchor[]; samePath: boolean } {
+  const usable = anchors.filter((a) => a.effortHours > 0);
+  const matching = path ? usable.filter((a) => a.executionPath === path) : [];
+  const local = matching.filter((a) => !a.crossRepo);
+  if (local.length >= minimum) return { anchors: local, samePath: true };
+  if (matching.length >= minimum) return { anchors: matching, samePath: true };
+  return { anchors: usable, samePath: false };
+}
+
+/** Same-path measured effort needs no path multiplier: it already includes that path's
+ *  planning/review work. Scale only the broader-history fallback. */
 export function heuristicEstimate(
   anchors: EstimateAnchor[],
   path: string | null,
 ): { hours: number; reason: string } {
-  const scale = PATH_SCALE[path ?? ''] ?? 1.0;
-  const efforts = anchors.map((a) => a.effortHours).filter((h) => h > 0);
+  const selected = effortAnchors(anchors, path);
+  const scale = selected.samePath ? 1 : (PATH_SCALE[path ?? ''] ?? 1.0);
+  const efforts = selected.anchors.map((a) => a.effortHours);
   if (efforts.length === 0) {
     const hours = FALLBACK_HOURS[path ?? ''] ?? 2;
     return {
@@ -104,9 +122,9 @@ export function heuristicEstimate(
   const hours = clampHours(round2(median(efforts) * scale));
   return {
     hours,
-    reason: `Median effort of ${efforts.length} prior task(s) (${round2(
-      median(efforts),
-    )}h) scaled ${scale}x for the ${path ?? 'default'} path.`,
+    reason: selected.samePath
+      ? `Median effort of ${efforts.length} prior ${path} task(s) (${round2(median(efforts))}h); no path scaling needed.`
+      : `Sparse or unknown same-path history — median effort of ${efforts.length} broader prior task(s) (${round2(median(efforts))}h) scaled ${scale}x for the ${path ?? 'default'} path.`,
   };
 }
 
@@ -359,11 +377,13 @@ export async function fileOverlapTaskIds(
   taskId: string,
   repositoryId: string,
   paths: string[],
+  executionPath: string | null = null,
 ): Promise<string[]> {
   if (paths.length === 0) return [];
   const rows = await db
     .select({
       id: schema.tasks.id,
+      executionPath: schema.tasks.executionPath,
       changedPaths: schema.tasks.changedPaths,
       completedAt: schema.tasks.completedAt,
     })
@@ -381,11 +401,12 @@ export async function fileOverlapTaskIds(
   return rows
     .map((r) => ({
       id: r.id,
+      samePath: executionPath != null && r.executionPath === executionPath,
       overlap: (r.changedPaths ?? []).filter((p) => wanted.has(p)).length,
       at: r.completedAt ? r.completedAt.getTime() : 0,
     }))
     .filter((r) => r.overlap > 0)
-    .sort((a, b) => b.overlap - a.overlap || b.at - a.at)
+    .sort((a, b) => Number(b.samePath) - Number(a.samePath) || b.overlap - a.overlap || b.at - a.at)
     .map((r) => r.id);
 }
 
@@ -397,14 +418,39 @@ export async function fileOverlapTaskIds(
  *  newest-first when the vector store is empty/partial/unavailable (preferredTaskIds = [], the
  *  default and 06b's path). When the repo has fewer than COLD_START_MIN_ANCHORS local anchors,
  *  it is supplemented with cross-repo cold-start anchors from the same user's other
- *  same-framework repos. */
+ *  same-framework repos. With an execution path, prefer same-path plan/semantic matches,
+ *  then newest same-path runs (queried separately so older matches remain reachable).
+ *  Once MIN_PATH_ANCHORS usable local matches exist, other paths are unnecessary;
+ *  otherwise top up from broader history. A caller without a path keeps its original order. */
 export async function buildAnchors(
   db: Database,
   taskId: string,
   repositoryId: string,
   preferredTaskIds: string[] = [],
+  executionPath: string | null = null,
 ): Promise<EstimateAnchor[]> {
   const preferred = await fetchPreferredTaskRows(db, taskId, repositoryId, preferredTaskIds);
+
+  let matching: EstimateAnchor[] = [];
+  if (executionPath) {
+    const matchingPreferred = preferred.filter((p) => p.executionPath === executionPath);
+    const recentMatching = await db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+        ne(schema.tasks.id, taskId),
+        eq(schema.tasks.executionPath, executionPath),
+      ),
+      orderBy: desc(schema.tasks.completedAt),
+      limit: MAX_ANCHORS,
+      columns: PRIOR_TASK_COLUMNS,
+    });
+    const seen = new Set(matchingPreferred.map((p) => p.id));
+    const matchingRows = [...matchingPreferred, ...recentMatching.filter((p) => !seen.has(p.id))];
+    matching = (await hydrateAnchors(db, matchingRows, false)).slice(0, MAX_ANCHORS);
+    if (matching.length >= MIN_PATH_ANCHORS) return matching;
+  }
 
   const selected: PriorTaskRow[] = preferred.slice(0, MAX_ANCHORS);
   if (selected.length < MAX_ANCHORS) {
@@ -431,9 +477,22 @@ export async function buildAnchors(
     }
   }
 
-  const local = await hydrateAnchors(db, selected, false);
+  const hydrated = await hydrateAnchors(db, selected, false);
+  // Matching rows can predate both preferred and recent broader rows. Keep them first
+  // without duplicating any that also appeared in the broader candidate set.
+  const local = executionPath
+    ? [...matching, ...hydrated.filter((a) => a.executionPath !== executionPath)].slice(
+        0,
+        MAX_ANCHORS,
+      )
+    : hydrated;
   if (local.length >= COLD_START_MIN_ANCHORS) return local;
-  const cross = await buildColdStartAnchors(db, repositoryId, MAX_ANCHORS - local.length);
+  const cross = await buildColdStartAnchors(
+    db,
+    repositoryId,
+    MAX_ANCHORS - local.length,
+    executionPath,
+  );
   return [...local, ...cross];
 }
 
@@ -445,6 +504,7 @@ async function buildColdStartAnchors(
   db: Database,
   repositoryId: string,
   limit: number,
+  executionPath: string | null,
 ): Promise<EstimateAnchor[]> {
   if (limit <= 0) return [];
   const repo = await db.query.repositories.findFirst({
@@ -468,7 +528,12 @@ async function buildColdStartAnchors(
       eq(schema.tasks.type, 'workflow'),
       eq(schema.tasks.status, 'completed'),
     ),
-    orderBy: desc(schema.tasks.completedAt),
+    orderBy: executionPath
+      ? [
+          sql`case when ${schema.tasks.executionPath} = ${executionPath} then 0 else 1 end`,
+          desc(schema.tasks.completedAt),
+        ]
+      : desc(schema.tasks.completedAt),
     limit,
     columns: PRIOR_TASK_COLUMNS,
   });
@@ -485,6 +550,7 @@ export const MIN_OVERLAP_ANCHORS = 2;
 export function overlapRefinedEstimate(
   anchors: EstimateAnchor[],
   predictedFiles: string[],
+  executionPath: string | null = null,
 ): { hours: number; overlapAnchors: number; matchedFiles: number } | null {
   if (predictedFiles.length === 0) return null;
   const predicted = new Set(predictedFiles);
@@ -499,11 +565,16 @@ export function overlapRefinedEstimate(
     .filter((s) => s.overlap > 0 && s.a.effortHours > 0)
     .sort((x, y) => y.overlap - x.overlap);
   if (scored.length < MIN_OVERLAP_ANCHORS) return null;
-  const hours = clampHours(round2(median(scored.map((s) => s.a.effortHours))));
+  const selected = effortAnchors(
+    scored.map((s) => s.a),
+    executionPath,
+    MIN_OVERLAP_ANCHORS,
+  );
+  const hours = clampHours(round2(median(selected.anchors.map((a) => a.effortHours))));
   const matchedFiles = new Set(
-    scored.flatMap((s) => s.a.changedPaths.filter((p) => predicted.has(p))),
+    selected.anchors.flatMap((a) => a.changedPaths.filter((p) => predicted.has(p))),
   ).size;
-  return { hours, overlapAnchors: scored.length, matchedFiles };
+  return { hours, overlapAnchors: selected.anchors.length, matchedFiles };
 }
 
 /** Minimum anchors carrying BOTH a prior AI estimate and a measured actual before a
@@ -517,13 +588,20 @@ export const MIN_BIAS_ANCHORS = 2;
  *  least MIN_BIAS_ANCHORS tasks have an (estimate, actual) pair. Fed to the estimator as
  *  an explicit correction hint rather than post-multiplied, so the LLM (which also sees
  *  the raw pairs) does not double-correct. */
-export function computeBiasFactor(anchors: EstimateAnchor[]): number | null {
+export function computeBiasFactor(
+  anchors: EstimateAnchor[],
+  executionPath: string | null = null,
+): number | null {
   const ratios = anchors
     // Local anchors only — bias is THIS repo's estimator calibration; another repo's
     // (estimate, actual) pair is a different context and must not skew it.
     .filter(
       (a) =>
-        !a.crossRepo && a.aiEstimateHours != null && a.aiEstimateHours > 0 && a.effortHours > 0,
+        !a.crossRepo &&
+        a.aiEstimateHours != null &&
+        a.aiEstimateHours > 0 &&
+        a.effortHours > 0 &&
+        (!executionPath || a.executionPath === executionPath),
     )
     .map((a) => a.effortHours / (a.aiEstimateHours as number));
   if (ratios.length < MIN_BIAS_ANCHORS) return null;
@@ -536,8 +614,13 @@ export const MIN_RANGE_ANCHORS = 3;
 /** A p20/p80 effort band from the anchor tasks' ACTUAL effort — "tasks like this ran
  *  low..high". A confidence range around the point estimate, not a re-derivation of it.
  *  null until at least MIN_RANGE_ANCHORS anchors exist or when the band would collapse. */
-export function estimateRange(anchors: EstimateAnchor[]): { low: number; high: number } | null {
-  const efforts = anchors
+export function estimateRange(
+  anchors: EstimateAnchor[],
+  executionPath: string | null = null,
+): { low: number; high: number } | null {
+  const selected = effortAnchors(anchors, executionPath, MIN_RANGE_ANCHORS);
+  const scale = selected.samePath ? 1 : (PATH_SCALE[executionPath ?? ''] ?? 1);
+  const efforts = selected.anchors
     .map((a) => a.effortHours)
     .filter((h) => h > 0)
     .sort((a, b) => a - b);
@@ -549,7 +632,7 @@ export function estimateRange(anchors: EstimateAnchor[]): { low: number; high: n
     );
     return efforts[idx]!;
   };
-  const low = clampHours(round2(pct(20)));
-  const high = clampHours(round2(pct(80)));
+  const low = clampHours(round2(pct(20) * scale));
+  const high = clampHours(round2(pct(80) * scale));
   return high > low ? { low, high } : null;
 }

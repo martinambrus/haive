@@ -264,7 +264,7 @@ async function refineEstimateFromPlan(ctx: StepContext, plan: SprintPlan): Promi
     if (predictedFiles.length === 0) return;
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true, aiEstimatedTimeHours: true },
+      columns: { repositoryId: true, aiEstimatedTimeHours: true, executionPath: true },
     });
     if (!task?.repositoryId) return;
     // Pick the candidates by the files themselves. Without this the pool is the newest
@@ -276,9 +276,10 @@ async function refineEstimateFromPlan(ctx: StepContext, plan: SprintPlan): Promi
       ctx.taskId,
       task.repositoryId,
       predictedFiles,
+      task.executionPath,
     );
     const anchors = await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, overlapping);
-    const refined = overlapRefinedEstimate(anchors, predictedFiles);
+    const refined = overlapRefinedEstimate(anchors, predictedFiles, task.executionPath);
     if (!refined) return;
     const previous = task.aiEstimatedTimeHours ?? null;
     await ctx.db

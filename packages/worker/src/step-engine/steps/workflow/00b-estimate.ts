@@ -14,6 +14,7 @@ import {
   estimateRange,
   heuristicEstimate,
   MAX_ANCHORS,
+  MIN_PATH_ANCHORS,
   MAX_HOURS,
   MIN_HOURS,
   round2,
@@ -76,11 +77,16 @@ const ESTIMATE_RULES = [
   '',
   'You are given prior COMPLETED tasks from THIS repository with their MEASURED actual',
   'effort and the files they changed. Anchor your estimate on them:',
+  '- Prefer tasks on the SAME execution path with similar scope. Different paths include',
+  '  different planning and review work; do not treat a full workflow as a typical bugfix.',
+  `- With fewer than ${MIN_PATH_ANCHORS} measured same-path tasks, use other paths only as a`,
+  '  weaker fallback and explain that limitation. Unknown-path anchors are also weaker.',
   '- Weight most heavily the prior tasks whose changed files or description overlap the',
   '  area THIS task will touch (infer that area from the task text and a repo glance).',
   '- More fix-loop rounds on a prior task means it was harder than its size suggested.',
-  '- If a prior task shows a previous AI estimate AND its actual effort, and the AI',
-  '  consistently under- or over-estimated, correct your number in that direction.',
+  '- Correct estimation bias from prior AI-estimate/actual pairs in THIS repository.',
+  '  For a known execution path, use only same-path pairs, with at least two measurements;',
+  '  do not infer its calibration from other paths or other repositories.',
   '- With no relevant anchors, fall back to the task size implied by the triage path.',
   '- Anchors marked "(other repo — same stack)" come from your other repositories on the',
   '  same framework and appear only when this repository has little history of its own —',
@@ -135,10 +141,11 @@ export function resolveEstimate(
       confidence: parsed.confidence,
     };
   }
+  const baseline = heuristicEstimate(detected.anchors, detected.executionPath);
   return {
-    hours: detected.heuristicHours,
+    hours: baseline.hours,
     source: 'heuristic',
-    rationale: detected.heuristicReason,
+    rationale: baseline.reason,
     confidence: 'low',
   };
 }
@@ -166,7 +173,7 @@ function renderAnchor(a: EstimateAnchor): string {
 
 /** Ask the repo's RAG vector store for the prior tasks most semantically similar to this one
  *  (most-similar first), for buildAnchors to prefer as effort anchors. Returns [] when RAG is
- *  not configured or anything fails — buildAnchors then keeps its newest-first selection.
+ *  not configured or anything fails — buildAnchors then uses recency within each path tier.
  *  Requests MAX_ANCHORS ids so a well-populated store can fill the whole anchor set from
  *  semantic matches, with newest-first top-up when the store is empty/partial. */
 async function resolvePreferredAnchorIds(
@@ -197,12 +204,12 @@ async function resolvePreferredAnchorIds(
  *
  * Plan-first is a JUDGEMENT, not a measurement. Plan proximity is a relationship someone
  * asserted about the project's structure; the semantic order is inferred from the task's own
- * prose. What keeps the risk small is that ordering only decides anything once a repository
- * has more than MAX_ANCHORS completed workflow tasks — below that every candidate lands in
- * the anchor set either way, and the order is a prompt-ordering tie-break rather than a gate.
- * `CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED` off restores the previous ordering exactly.
+ * prose. This order decides which candidates fit once a path tier has more than MAX_ANCHORS
+ * completed workflow tasks. Below that it is a prompt-ordering tie-break rather than a gate.
+ * `CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED` off restores semantic-first ordering within
+ * each execution-path tier.
  *
- * Both halves degrade to [] independently, and `buildAnchors` then keeps newest-first.
+ * Both halves degrade to [] independently, and `buildAnchors` then uses recency within tiers.
  */
 async function resolveAnchorOrder(
   ctx: StepContext,
@@ -257,7 +264,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
       ? await resolveAnchorOrder(ctx, task.repositoryId, `${title}\n${description}`.trim())
       : [];
     const anchors = task?.repositoryId
-      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, preferredTaskIds)
+      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, preferredTaskIds, executionPath)
       : [];
     const h = heuristicEstimate(anchors, executionPath);
     return {
@@ -266,7 +273,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
       executionPath,
       manualEstimateHours,
       anchors,
-      biasFactor: computeBiasFactor(anchors),
+      biasFactor: computeBiasFactor(anchors, executionPath),
       heuristicHours: h.hours,
       heuristicReason: h.reason,
     };
@@ -284,6 +291,10 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     timeoutMs: 10 * 60 * 1000,
     buildPrompt: (args) => {
       const d = args.detected as EstimateDetect;
+      // Recompute from the anchors at prompt-build time: a persisted detect_output may
+      // predate path-aware calibration and carry the old mixed-path factor/baseline.
+      const biasFactor = computeBiasFactor(d.anchors, d.executionPath);
+      const baseline = heuristicEstimate(d.anchors, d.executionPath);
       const anchorBlock =
         d.anchors.length > 0
           ? d.anchors.map(renderAnchor).join('\n')
@@ -298,21 +309,21 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
         '',
         '=== Prior completed tasks in this repository (measured effort) ===',
         anchorBlock,
-        ...(d.biasFactor != null && (d.biasFactor >= 1.15 || d.biasFactor <= 0.85)
+        ...(biasFactor != null && (biasFactor >= 1.15 || biasFactor <= 0.85)
           ? [
               '',
-              `Calibration: across prior tasks with an AI estimate, ACTUAL effort was about ${d.biasFactor}x the estimate — bias your number in that direction.`,
+              `Calibration: across prior ${d.executionPath ?? 'workflow'} tasks in this repository with an AI estimate, ACTUAL effort was about ${biasFactor}x the estimate — bias your number in that direction.`,
             ]
           : []),
         '',
-        `A deterministic baseline suggests ${d.heuristicHours}h (${d.heuristicReason}). Use`,
+        `A deterministic baseline suggests ${baseline.hours}h (${baseline.reason}). Use`,
         'your own judgment anchored on the tasks above.',
       ].join('\n');
     },
     // Test-bypass: return the heuristic estimate so HAIVE_TEST_BYPASS_LLM smoke runs
     // exercise the full step (and auto-submit its default) without a real CLI provider.
     bypassStub: (args) => ({
-      estimatedHours: (args.detected as EstimateDetect).heuristicHours,
+      estimatedHours: resolveEstimate(null, args.detected as EstimateDetect).hours,
       confidence: 'low',
       rationale: 'test bypass',
     }),
@@ -396,7 +407,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
       Number.isFinite(submitted) && submitted > 0
         ? clampHours(round2(submitted))
         : clampHours(detected.manualEstimateHours ?? aiHours);
-    const range = estimateRange(detected.anchors);
+    const range = estimateRange(detected.anchors, detected.executionPath);
 
     await ctx.db
       .update(schema.tasks)
