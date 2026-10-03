@@ -282,6 +282,7 @@ export async function planProximityTaskIds(
   db: Database,
   taskId: string,
   repositoryId: string,
+  executionPath: string | null = null,
 ): Promise<string[]> {
   const origins = await db
     .select({ nodeId: schema.planNodeTasks.nodeId, path: schema.planNodes.path })
@@ -310,6 +311,7 @@ export async function planProximityTaskIds(
       nodeId: schema.planNodeTasks.nodeId,
       path: schema.planNodes.path,
       completedAt: schema.tasks.completedAt,
+      executionPath: schema.tasks.executionPath,
     })
     .from(schema.planNodeTasks)
     .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeTasks.nodeId))
@@ -331,7 +333,7 @@ export async function planProximityTaskIds(
       ),
     );
 
-  return rankPlanProximity(rows, nodeIds);
+  return rankPlanProximity(rows, nodeIds, executionPath);
 }
 
 /** One (task, node) row as the proximity query returns it. */
@@ -339,10 +341,12 @@ export interface PlanProximityRow {
   taskId: string;
   nodeId: string;
   completedAt: Date | null;
+  executionPath?: string | null;
 }
 
 /**
- * Rank proximity rows: same-node tier first, newest-completed within a tier.
+ * Rank proximity rows: current execution path first when known, then same-node tier
+ * and newest-completed within a tier. Partition before applying the result budget.
  *
  * Split out as a pure function because the query around it can only be exercised against a
  * live database, while this is where the ordering rules actually live.
@@ -352,19 +356,30 @@ export interface PlanProximityRow {
  * which would let a task linked to a dozen distant nodes outrank one that implements exactly
  * the node in hand.
  */
-export function rankPlanProximity(rows: PlanProximityRow[], sameNodeIds: string[]): string[] {
+export function rankPlanProximity(
+  rows: PlanProximityRow[],
+  sameNodeIds: string[],
+  executionPath: string | null = null,
+): string[] {
   const sameNode = new Set(sameNodeIds);
-  const best = new Map<string, { tier: number; at: number }>();
+  const best = new Map<string, { tier: number; at: number; samePath: boolean }>();
   for (const r of rows) {
     const tier = sameNode.has(r.nodeId) ? 0 : 1;
     const at = r.completedAt ? r.completedAt.getTime() : 0;
     const prev = best.get(r.taskId);
     if (!prev || tier < prev.tier || (tier === prev.tier && at > prev.at)) {
-      best.set(r.taskId, { tier, at });
+      best.set(r.taskId, {
+        tier,
+        at,
+        samePath: executionPath != null && r.executionPath === executionPath,
+      });
     }
   }
   return [...best.entries()]
-    .sort((a, b) => a[1].tier - b[1].tier || b[1].at - a[1].at)
+    .sort(
+      (a, b) =>
+        Number(b[1].samePath) - Number(a[1].samePath) || a[1].tier - b[1].tier || b[1].at - a[1].at,
+    )
     .slice(0, MAX_ANCHORS)
     .map(([id]) => id);
 }

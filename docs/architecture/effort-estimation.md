@@ -13,6 +13,11 @@ For a known path, `buildAnchors` takes same-path plan/semantic matches first, th
 same-path completed runs. It queries those runs separately: sorting only a mixed set of the
 latest 30 tasks would leave older bugfixes unreachable. Within the path, plan proximity and
 semantic ordering remain useful scope signals. Anchors with no measurable effort do not count.
+Plan and semantic retrieval prioritize the current path before applying their own result
+caps, so older relevant matches cannot be crowded out by other paths. Semantic retrieval
+resolves eligible completed same-path task ids from Postgres and binds that set into the
+vector query, then tops up with other paths when needed. This also works with external RAG
+stores and existing task embeddings, which contain no execution-path metadata.
 The same-path query pages past unmeasured rows until three usable runs are found or history
 is exhausted; a full page of completed tasks must not force a mixed-path fallback. Each page
 has a stable completion-time/id order and deduplicates tasks already supplied by retrieval.
@@ -56,4 +61,4 @@ The sample thresholds are conservative implementation choices, not measured accu
 Historical evaluation must use only runs completed before the task's estimate, report error by
 path and disclose sample counts. Replaying deterministic baselines does not measure the AI's
 response to the changed prompt. Regression coverage lives in `_estimate.test.ts` and
-`00b-estimate.test.ts`.
+`00b-estimate.test.ts`, with semantic retrieval covered in `_task-embedding.test.ts`.

@@ -1,4 +1,6 @@
 import { ollamaEmbed, probeOllama, vectorLiteral, TASK_SOURCE_TYPE } from '@haive/shared/rag';
+import { and, eq, ne } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import {
   RAG_TABLE,
@@ -75,7 +77,9 @@ export async function indexTaskEmbedding(
 
 /** Best-effort semantic retrieval: embed the new task's text, cosine-rank the repo's stored
  *  source_type='task' rows, and return up to `limit` most-similar PRIOR task ids (most-similar
- *  first, current task excluded). Returns [] when ollama is unreachable, the store is jsonb-only
+ *  first within each execution-path tier, current task excluded). A known path is filtered
+ *  before its vector result limit, with broader semantic matches filling sparse history.
+ *  Returns [] when ollama is unreachable, the store is jsonb-only
  *  (the vector cast throws → caught), or anything else fails — the estimator then keeps its
  *  deterministic newest-first anchor selection. Prefs + projectName come from the caller (which
  *  already resolved them) so this stays a leaf module. The dims are a trusted number from prefs,
@@ -88,6 +92,7 @@ export async function retrieveSimilarTaskIds(
   repositoryId: string,
   queryText: string,
   limit: number,
+  executionPath: string | null = null,
 ): Promise<string[]> {
   if (!queryText || limit <= 0) return [];
   if (!prefs.ollamaUrl || !prefs.embeddingModel) return [];
@@ -101,15 +106,45 @@ export async function retrieveSimilarTaskIds(
     conn = await resolveRagConnection(prefs, ctx.db, projectName);
     if (!conn) return [];
     const dims = conn.embeddingDimensions;
-    const rows = (await conn.pg.unsafe(
-      `SELECT task_id
+    // The RAG store may be external and has no tasks table to join. Resolve eligibility
+    // from our source-of-truth DB, then bind those ids into the vector query BEFORE its
+    // limit. Existing task embeddings need no path metadata or reindexing.
+    const matchingTasks = executionPath
+      ? await ctx.db.query.tasks.findMany({
+          where: and(
+            eq(schema.tasks.repositoryId, repositoryId),
+            eq(schema.tasks.type, 'workflow'),
+            eq(schema.tasks.status, 'completed'),
+            ne(schema.tasks.id, ctx.taskId),
+            eq(schema.tasks.executionPath, executionPath),
+          ),
+          columns: { id: true },
+        })
+      : [];
+    const matchingIds = matchingTasks.map((t) => t.id);
+    const params = [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec), limit];
+    const query = (pathFilter: string) => `SELECT task_id
        FROM ${RAG_TABLE}
        WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
+       ${pathFilter}
        ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims})
-       LIMIT $5`,
-      [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec), limit],
+       LIMIT $5`;
+    let matching: Array<{ task_id: string | null }> = [];
+    if (matchingIds.length > 0) {
+      matching = await conn.pg.unsafe(query('AND task_id = ANY($6::uuid[])'), [
+        ...params,
+        matchingIds,
+      ]);
+      if (matching.length >= limit)
+        return matching.map((r) => r.task_id).filter((id): id is string => !!id);
+    }
+    const rows = (await conn.pg.unsafe(
+      query(matchingIds.length > 0 ? 'AND NOT (task_id = ANY($6::uuid[]))' : ''),
+      matchingIds.length > 0
+        ? [...params.slice(0, 4), limit - matching.length, matchingIds]
+        : params,
     )) as Array<{ task_id: string | null }>;
-    return rows.map((r) => r.task_id).filter((id): id is string => !!id);
+    return [...matching, ...rows].map((r) => r.task_id).filter((id): id is string => !!id);
   } catch (err) {
     ctx.logger.warn({ err }, 'semantic task retrieval failed (falling back to newest-first)');
     return [];

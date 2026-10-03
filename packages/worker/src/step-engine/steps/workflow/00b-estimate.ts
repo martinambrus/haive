@@ -180,6 +180,7 @@ async function resolvePreferredAnchorIds(
   ctx: StepContext,
   repositoryId: string,
   queryText: string,
+  executionPath: string | null,
 ): Promise<string[]> {
   if (!queryText) return [];
   try {
@@ -192,6 +193,7 @@ async function resolvePreferredAnchorIds(
       repositoryId,
       queryText,
       MAX_ANCHORS,
+      executionPath,
     );
   } catch (err) {
     ctx.logger.warn({ err }, 'preferred anchor retrieval failed (falling back to newest-first)');
@@ -215,16 +217,17 @@ async function resolveAnchorOrder(
   ctx: StepContext,
   repositoryId: string,
   queryText: string,
+  executionPath: string | null,
 ): Promise<string[]> {
   let planIds: string[] = [];
   try {
     if (await configService.getBoolean(CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED, true)) {
-      planIds = await planProximityTaskIds(ctx.db, ctx.taskId, repositoryId);
+      planIds = await planProximityTaskIds(ctx.db, ctx.taskId, repositoryId, executionPath);
     }
   } catch (err) {
     ctx.logger.warn({ err }, 'plan-proximity anchors unavailable (non-fatal)');
   }
-  const semanticIds = await resolvePreferredAnchorIds(ctx, repositoryId, queryText);
+  const semanticIds = await resolvePreferredAnchorIds(ctx, repositoryId, queryText, executionPath);
   return [...new Set([...planIds, ...semanticIds])];
 }
 
@@ -261,7 +264,12 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     const executionPath = task?.executionPath ?? null;
     const manualEstimateHours = task?.estimatedTimeHours ?? null;
     const preferredTaskIds = task?.repositoryId
-      ? await resolveAnchorOrder(ctx, task.repositoryId, `${title}\n${description}`.trim())
+      ? await resolveAnchorOrder(
+          ctx,
+          task.repositoryId,
+          `${title}\n${description}`.trim(),
+          executionPath,
+        )
       : [];
     const anchors = task?.repositoryId
       ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, preferredTaskIds, executionPath)

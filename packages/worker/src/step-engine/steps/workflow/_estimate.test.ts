@@ -484,6 +484,27 @@ describe('rankPlanProximity', () => {
   const at = (iso: string) => new Date(iso);
   const NODE = 'node-self';
 
+  it('keeps an older same-path plan match ahead of a full mixed-path result budget', () => {
+    const rows = [
+      ...Array.from({ length: MAX_ANCHORS }, (_, i) => ({
+        taskId: `full-${i}`,
+        nodeId: NODE,
+        completedAt: at('2026-06-01'),
+        executionPath: 'full_workflow',
+      })),
+      {
+        taskId: 'older-fix',
+        nodeId: 'sibling',
+        completedAt: at('2026-01-01'),
+        executionPath: 'quick_bugfix',
+      },
+    ];
+    const ids = rankPlanProximity(rows, [NODE], 'quick_bugfix');
+    expect(ids[0]).toBe('older-fix');
+    expect(ids).toHaveLength(MAX_ANCHORS);
+    expect(rankPlanProximity(rows, [NODE])).not.toContain('older-fix');
+  });
+
   it('puts a same-node task ahead of a nearer-in-time sibling task', () => {
     // Tier beats recency: implementing the very node in hand is a stronger signal than
     // having recently implemented something next to it.
