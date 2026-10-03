@@ -304,6 +304,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Web UI
 
+- [Diff viewer](docs/architecture/diff-viewer.md): text highlights, change maps and pane scrolling.
+  `CommitDiffViewer`, `buildDiffRows`, `buildChangeMarkers`.
 - [Markdown rendering](docs/architecture/markdown-rendering.md): one renderer, images as links,
   the CSP, mermaid, line breaks, option labels. `markdown.ts`, `mermaid-loader.ts`.
 
