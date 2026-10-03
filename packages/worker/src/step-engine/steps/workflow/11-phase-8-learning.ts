@@ -1490,7 +1490,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         // Promote as a draft to the cross-repo KB instead of writing it into this
         // repo's knowledge_base/investigations/ (which the local RAG indexes), so
         // the local store stays clean. Facets are left empty — the user scopes the
-        // draft in Settings -> Global KB before activating it.
+        // draft in Settings -> Global KB before activating it. With no scope, nothing could tell
+        // its subject from a project named after it, so the project name is not scrubbed either.
         const promo = await promoteToGlobalKbDraft(
           ctx.db,
           {
@@ -1502,7 +1503,6 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               : `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
             category: 'anti_pattern',
             facets: {},
-            projectName: args.detected.repoStack?.projectName ?? undefined,
           },
           ctx.logger,
         );

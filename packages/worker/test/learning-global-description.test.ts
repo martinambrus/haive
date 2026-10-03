@@ -121,7 +121,8 @@ describe('step 11 promotions and descriptions', () => {
     scope: 'global',
   };
 
-  it('promotes a bug investigation with no description, and now with the project name', async () => {
+  // An investigation has no scope that could tell its subject from a project named after it.
+  it('promotes a bug investigation with no description and no project name to scrub', async () => {
     await apply({
       llmOutput: { investigation },
       formValues: { writeInvestigation: true },
@@ -131,7 +132,7 @@ describe('step 11 promotions and descriptions', () => {
     expect(h.promote).toHaveBeenCalledTimes(1);
     const promotion = h.promote.mock.calls[0]![1];
     expect(promotion.title).toBe('Null deref');
-    expect(promotion.projectName).toBe('siteray');
+    expect(promotion.projectName).toBeUndefined();
     expect(promotion).not.toHaveProperty('description');
   });
 
