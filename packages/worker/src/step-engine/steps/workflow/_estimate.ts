@@ -10,8 +10,8 @@ import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 
 /** Ceiling on how many prior tasks to gather as anchors. */
 export const MAX_ANCHORS = 30;
-/** Bound task-id IN clauses well below PostgreSQL's bind-parameter ceiling. */
-const TASK_LOOKUP_BATCH_SIZE = 500;
+/** Bound history lookup and hydration queries independently of the output anchor cap. */
+const HISTORY_BATCH_SIZE = 500;
 /** Per-anchor description budget when an anchor is rendered into a prompt / panel. */
 export const ANCHOR_DESC_CAP = 240;
 /** Require several measured runs before replacing the broader-history baseline. */
@@ -234,9 +234,13 @@ async function hydrateAnchorBudget(
   limit: number,
 ): Promise<EstimateAnchor[]> {
   const anchors: EstimateAnchor[] = [];
-  for (let offset = 0; anchors.length < limit && offset < priors.length; offset += MAX_ANCHORS) {
+  for (
+    let offset = 0;
+    anchors.length < limit && offset < priors.length;
+    offset += HISTORY_BATCH_SIZE
+  ) {
     anchors.push(
-      ...(await hydrateAnchors(db, priors.slice(offset, offset + MAX_ANCHORS), crossRepo)),
+      ...(await hydrateAnchors(db, priors.slice(offset, offset + HISTORY_BATCH_SIZE), crossRepo)),
     );
   }
   return anchors.slice(0, limit);
@@ -254,10 +258,10 @@ async function fetchPreferredTaskRows(
 ): Promise<PriorTaskRow[]> {
   if (ids.length === 0) return [];
   const byId = new Map<string, PriorTaskRow>();
-  for (let offset = 0; offset < ids.length; offset += TASK_LOOKUP_BATCH_SIZE) {
+  for (let offset = 0; offset < ids.length; offset += HISTORY_BATCH_SIZE) {
     const rows = await db.query.tasks.findMany({
       where: and(
-        inArray(schema.tasks.id, ids.slice(offset, offset + TASK_LOOKUP_BATCH_SIZE)),
+        inArray(schema.tasks.id, ids.slice(offset, offset + HISTORY_BATCH_SIZE)),
         eq(schema.tasks.repositoryId, repositoryId),
         eq(schema.tasks.type, 'workflow'),
         eq(schema.tasks.status, 'completed'),

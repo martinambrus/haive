@@ -167,7 +167,12 @@ describe('buildAnchors', () => {
         },
       },
     };
-    return { db: db as unknown as Database, findMany, repositories: db.query.repositories };
+    return {
+      db: db as unknown as Database,
+      findMany,
+      timingFindMany: db.query.taskSteps.findMany,
+      repositories: db.query.repositories,
+    };
   };
 
   it('finds older same-path runs beyond a full budget of preferred other-path runs', async () => {
@@ -368,10 +373,10 @@ describe('buildAnchors', () => {
     expect(anchors.slice(0, 2).map((a) => a.title)).toEqual(['old-plan-1', 'old-plan-2']);
   });
 
-  it('bounds task lookup parameters for plan histories larger than PostgreSQL permits', async () => {
+  it('bounds query parameters and round trips for large mostly unmeasured plan histories', async () => {
     const ids = Array.from({ length: 65_536 }, (_, i) => `plan-${i}`);
     const measured = [ids[0]!, ids[32_768]!, ids[65_535]!].map((id) => prior(id, 'quick_bugfix'));
-    const { db, findMany } = mockDb(
+    const { db, findMany, timingFindMany } = mockDb(
       [],
       measured.map((p) => p.id),
     );
@@ -380,9 +385,11 @@ describe('buildAnchors', () => {
     findMany.mockImplementation(async ({ where }) => {
       const { params } = dialect.sqlToQuery(where);
       parameterCounts.push(params.length);
-      const wanted = new Set(params);
       // SQL result order differs from the plan ranking, even across lookup batches.
-      return measured.filter((p) => wanted.has(p.id)).reverse();
+      return params
+        .filter((id): id is string => typeof id === 'string' && id.startsWith('plan-'))
+        .map((id) => prior(id, 'quick_bugfix'))
+        .reverse();
     });
 
     const anchors = await buildAnchors(db, 'current', 'repo', ids, 'quick_bugfix');
@@ -390,6 +397,11 @@ describe('buildAnchors', () => {
     expect(anchors.map((a) => a.title)).toEqual(measured.map((p) => p.id));
     expect(parameterCounts.length).toBeGreaterThan(1);
     expect(Math.max(...parameterCounts)).toBeLessThan(1000);
+    const timingQueries = timingFindMany.mock.calls;
+    expect(timingQueries.length).toBeLessThan(200);
+    expect(
+      Math.max(...timingQueries.map(([query]) => dialect.sqlToQuery(query.where).params.length)),
+    ).toBeLessThan(1000);
   });
 
   it('pages broader recent history past unmeasured rows even without preferred ids', async () => {
