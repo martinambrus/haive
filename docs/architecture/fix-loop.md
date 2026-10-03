@@ -92,3 +92,16 @@ bounded only because each producer fences the machine part it joins to it: gate 
 does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
 07's prompt before, 8,806 after). The fingerprints are untouched (`FINGERPRINT_TAIL_LIMIT`,
 `task-ledger.ts`), so dedupe and the oscillation guard compare exactly as before.
+
+**A fix round is told when the same check sent the previous round back.** `loadSameCheckRepeat`
+(`_fix-loop.ts`) compares the newest `fix_loop.requested` row of this round with the newest of the
+round before, escalation-gate directives (`fix-loop-gate`) left out, and calls it a repeat only when
+both name the same source. It reads events, never text, because fingerprints split on rewording. On
+a repeat 07's prompt states the fact, the check and the two rounds, and quotes what that check
+reported then through `excerptDiagnosis` at 2,000 characters: fenced under a line that calls it data
+when an agent wrote it, never fenced for a person. It then asks the fixer to say why the earlier fix
+did not hold and change approach if the defect is the same, or to say it is a different one, and
+never says the earlier fix failed, since a check can fail again on a new defect. A blank previous
+report is not quoted, and 07's form names the repeat in one line. Every fix round also asks for the
+root cause before the edit; round 0 is unchanged. MEASURED on the dev install: 3 of 7 real fix
+rounds were repeats (681f0f99 rounds 3 and 4 from 08b, ef954a3d round 5 from gate 2).

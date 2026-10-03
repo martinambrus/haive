@@ -219,8 +219,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### Step engine
 
 - [Fix loop](docs/architecture/fix-loop.md): `loop_back` rounds, DAG-mode fix rounds, failures no
-  agent can repair, a long diagnosis kept by both ends. `_fix-loop.ts`, `_test-env-guard.ts`,
-  `loadPriorFixContext`, `excerptDiagnosis`.
+  agent can repair, a long diagnosis kept by both ends, a repeat from the same check. `_fix-loop.ts`,
+  `_test-env-guard.ts`, `loadPriorFixContext`, `excerptDiagnosis`, `loadSameCheckRepeat`.
 - [Step summaries](docs/architecture/step-summaries.md): the "What the agent did" panel,
   remembered and per-task CLI choices. `_step-summary.ts`, `task_step_cli_choices`.
 - [Staged agent bodies](docs/architecture/staged-agent-bodies.md): document bodies written to
