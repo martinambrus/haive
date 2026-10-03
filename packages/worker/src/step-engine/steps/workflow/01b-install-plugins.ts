@@ -3,7 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
+import { DRUPAL_LSP_FILES, wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { LspLanguage, PluginInstallCommand } from '../../../cli-adapters/types.js';
@@ -46,9 +46,14 @@ interface InstallPluginsDetect {
   skipReason: string | null;
 }
 
-async function drupalLspTreeInWorktree(ctx: StepContext, rel: string): Promise<boolean> {
+async function drupalLspTreeInWorktree(ctx: StepContext, base: string): Promise<boolean> {
   const workspace = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-  return workspace !== null && (await hasWorkspaceEntry(workspace.workspace, rel));
+  if (workspace === null) return false;
+  const files = DRUPAL_LSP_FILES.filter((file) => file.rel.startsWith(`${base}/`));
+  const present = await Promise.all(
+    files.map((file) => hasWorkspaceEntry(workspace.workspace, file.rel)),
+  );
+  return files.length > 0 && present.every(Boolean);
 }
 
 interface InstallPluginsApply {
@@ -145,7 +150,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       ? (DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null)
       : null;
     // Only onboarding step 07 writes this tree and the sandbox mounts just the task worktree:
-    // without it `plugin marketplace add` fails on the path and takes the whole task down.
+    // a missing or partial tree makes the plugin commands fail and takes the whole task down.
     const drupalLspPath =
       drupalRelBase !== null && (await drupalLspTreeInWorktree(ctx, drupalRelBase))
         ? `${sandboxWorkdir}/${drupalRelBase}`
@@ -172,7 +177,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       skip,
       skipReason: skip
         ? missingDrupalLsp
-          ? `${missingDrupalLsp} is not in this task's worktree, so the PHP LSP plugin is not installed`
+          ? `${missingDrupalLsp} is missing or incomplete in this task's worktree, so the PHP LSP plugin is not installed`
           : 'No plugins to install'
         : null,
     };
@@ -190,7 +195,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
           : 'No LSP languages selected',
         detected.drupalLspPath ? `Drupal-LSP local marketplace: ${detected.drupalLspPath}` : null,
         detected.missingDrupalLsp
-          ? `PHP LSP plugin not installed: ${detected.missingDrupalLsp} is not in this task's worktree`
+          ? `PHP LSP plugin not installed: ${detected.missingDrupalLsp} is missing or incomplete in this task's worktree`
           : null,
         '',
         `Will run ${detected.commands.length} command(s):`,

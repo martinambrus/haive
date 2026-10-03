@@ -43,6 +43,8 @@ type Ctx = StepContext;
 const REPO = '/var/lib/haive/repos/u/r';
 const WORKTREE = `${REPO}/.haive/worktrees/feature-x`;
 const TREE_REL = '.claude/plugins/drupal-php-lsp';
+const MARKETPLACE_JSON = `${TREE_REL}/.claude-plugin/marketplace.json`;
+const PLUGIN_JSON = `${TREE_REL}/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json`;
 
 function ctx(): Ctx {
   return {
@@ -89,11 +91,37 @@ describe('01b-install-plugins detect: the local drupal-php-lsp tree', () => {
 
     const detected = await installPluginsStep.detect!(ctx());
 
-    expect(hasWorkspaceEntry).toHaveBeenCalledWith(WORKTREE, TREE_REL);
+    expect(hasWorkspaceEntry).toHaveBeenCalledWith(WORKTREE, MARKETPLACE_JSON);
     expect(detected.drupalLspPath).toBeNull();
     expect(detected.commands).toEqual([]);
     expect(detected.skip).toBe(true);
     expect(detected.skipReason).toContain(TREE_REL);
+  });
+
+  it('skips when only part of the tree is there', async () => {
+    loadConfiguredLspLanguages.mockResolvedValue(['php-extended']);
+    hasWorkspaceEntry.mockImplementation(
+      async (_workspace: string, rel: string) => rel !== PLUGIN_JSON,
+    );
+
+    const detected = await installPluginsStep.detect!(ctx());
+
+    expect(detected.drupalLspPath).toBeNull();
+    expect(detected.commands).toEqual([]);
+    expect(detected.skip).toBe(true);
+    expect(detected.skipReason).toContain(TREE_REL);
+  });
+
+  it('does not take a bare base path for the tree', async () => {
+    loadConfiguredLspLanguages.mockResolvedValue(['php-extended']);
+    hasWorkspaceEntry.mockImplementation(
+      async (_workspace: string, rel: string) => rel === TREE_REL,
+    );
+
+    const detected = await installPluginsStep.detect!(ctx());
+
+    expect(detected.drupalLspPath).toBeNull();
+    expect(detected.skip).toBe(true);
   });
 
   it('keeps the marketplace plugins for the other languages when the tree is missing', async () => {
