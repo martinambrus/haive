@@ -53,6 +53,8 @@ interface LearningDetect {
   implementSummary: string;
   filesTouched: string[];
   verifyPassed: boolean;
+  /** Absent on a payload persisted before verify recorded why a selected check did not run. */
+  verifyNotRun?: string[];
   commitSha: string | null;
   commitMessage: string;
   isBugFix: boolean;
@@ -431,8 +433,25 @@ interface ImplementOutput {
   notes?: string;
 }
 
+interface VerifySlot {
+  ran?: boolean;
+  note?: string;
+}
+
 interface VerifyOutput {
   passed?: boolean;
+  test?: VerifySlot;
+  lint?: VerifySlot;
+  typecheck?: VerifySlot;
+}
+
+/** 08 passes when nothing that ran failed, so a check it selected but could not run needs naming. */
+export function verifyNotRunNotes(v: VerifyOutput): string[] {
+  return [v.test, v.lint, v.typecheck].flatMap((c) => (c?.ran === false && c.note ? [c.note] : []));
+}
+
+export function notRunSuffix(notes: string[] | undefined): string {
+  return notes && notes.length > 0 ? ` (not run: ${notes.join('; ')})` : '';
 }
 
 interface CommitOutput {
@@ -521,7 +540,7 @@ function stubLearning(detect: LearningDetect): LearningEntry[] {
       `Files touched: ${detect.filesTouched.length}`,
       detect.filesTouched.map((f) => `- ${f}`).join('\n') || '- (none)',
       '',
-      `Verification: ${detect.verifyPassed ? 'passed' : 'did not pass'}`,
+      `Verification: ${detect.verifyPassed ? 'passed' : 'did not pass'}${notRunSuffix(detect.verifyNotRun)}`,
       detect.commitSha ? `Commit: ${detect.commitSha}` : 'No commit recorded.',
       '',
       'LLM synthesis skipped — stub learning entry written from deterministic context.',
@@ -974,6 +993,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       implementSummary: implementOutput.summary ?? '',
       filesTouched: Array.isArray(implementOutput.filesTouched) ? implementOutput.filesTouched : [],
       verifyPassed: verifyOutput.passed === true,
+      verifyNotRun: verifyNotRunNotes(verifyOutput),
       commitSha: commitOutput.commitSha ?? null,
       commitMessage: commitOutput.message ?? '',
       isBugFix: await detectBugFix(ctx, meta.title, meta.description),
@@ -1097,7 +1117,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         `Task description: ${detected.taskDescription || '(none)'}`,
         `Feature/area: ${detected.feature ?? '(unspecified)'}`,
         `Implementation summary: ${detected.implementSummary || '(none)'}`,
-        `Verification passed: ${detected.verifyPassed}`,
+        `Verification passed: ${detected.verifyPassed}${notRunSuffix(detected.verifyNotRun)}`,
         `Commit sha: ${detected.commitSha ?? '(none)'}`,
         `Files touched: ${detected.filesTouched.join(', ') || '(none)'}`,
         '',
@@ -1271,7 +1291,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       title: 'Phase 8: Learning capture',
       description: [
         `Task: ${detected.taskTitle || '(untitled)'}`,
-        `Verification: ${detected.verifyPassed ? 'passed' : 'did not pass'}`,
+        `Verification: ${detected.verifyPassed ? 'passed' : 'did not pass'}${notRunSuffix(detected.verifyNotRun)}`,
         detected.isBugFix ? 'Bug fix — a knowledge-base investigation was drafted below.' : '',
         kbChanged
           ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
