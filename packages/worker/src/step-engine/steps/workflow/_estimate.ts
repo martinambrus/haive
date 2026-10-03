@@ -213,6 +213,23 @@ async function hydrateAnchors(
   return anchors;
 }
 
+/** Apply an anchor budget after measurement, walking preferred rows in bounded batches.
+ *  Unmeasured rows must not consume the budget and hide useful later candidates. */
+async function hydrateAnchorBudget(
+  db: Database,
+  priors: PriorTaskRow[],
+  crossRepo: boolean,
+  limit: number,
+): Promise<EstimateAnchor[]> {
+  const anchors: EstimateAnchor[] = [];
+  for (let offset = 0; anchors.length < limit && offset < priors.length; offset += MAX_ANCHORS) {
+    anchors.push(
+      ...(await hydrateAnchors(db, priors.slice(offset, offset + MAX_ANCHORS), crossRepo)),
+    );
+  }
+  return anchors.slice(0, limit);
+}
+
 /** Fetch the given prior task rows (validated: same repo, completed workflow, not the current
  *  task) and return them in the SAME order as `ids` — the semantic ranking order that
  *  retrieveSimilarTaskIds produced. Ids that don't resolve to a valid anchor (a non-completed
@@ -430,12 +447,12 @@ export async function buildAnchors(
   executionPath: string | null = null,
 ): Promise<EstimateAnchor[]> {
   const preferred = await fetchPreferredTaskRows(db, taskId, repositoryId, preferredTaskIds);
+  const seen = new Set(preferred.map((p) => p.id));
 
   let matching: EstimateAnchor[] = [];
   if (executionPath) {
     const matchingPreferred = preferred.filter((p) => p.executionPath === executionPath);
-    const seen = new Set(matchingPreferred.map((p) => p.id));
-    matching = (await hydrateAnchors(db, matchingPreferred, false)).slice(0, MAX_ANCHORS);
+    matching = await hydrateAnchorBudget(db, matchingPreferred, false, MAX_ANCHORS);
     // A page of completed rows is not a page of measured runs. Keep looking past
     // unmeasured rows until the same-path sample is sufficient or history is exhausted.
     for (let offset = 0; matching.length < MAX_ANCHORS; offset += MAX_ANCHORS) {
@@ -461,11 +478,18 @@ export async function buildAnchors(
     if (matching.length >= MIN_PATH_ANCHORS) return matching;
   }
 
-  const selected: PriorTaskRow[] = preferred.slice(0, MAX_ANCHORS);
-  if (selected.length < MAX_ANCHORS) {
-    // Top up (or, with no semantic ids, wholly fill) from the newest completed tasks not
-    // already chosen — the deterministic baseline and the graceful fallback.
-    const have = new Set(selected.map((r) => r.id));
+  const local = [...matching];
+  local.push(
+    ...(await hydrateAnchorBudget(
+      db,
+      executionPath ? preferred.filter((p) => p.executionPath !== executionPath) : preferred,
+      false,
+      MAX_ANCHORS - local.length,
+    )),
+  );
+  // Fill the MEASURED budget from broader local history before considering cross-repo
+  // fallback, even if retrieval returned a full page of unmeasured completed rows.
+  for (let offset = 0; local.length < MAX_ANCHORS; offset += MAX_ANCHORS) {
     const newest = await db.query.tasks.findMany({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
@@ -473,36 +497,25 @@ export async function buildAnchors(
         eq(schema.tasks.status, 'completed'),
         ne(schema.tasks.id, taskId),
       ),
-      orderBy: desc(schema.tasks.completedAt),
+      orderBy: [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
       limit: MAX_ANCHORS,
+      offset,
       columns: PRIOR_TASK_COLUMNS,
     });
-    for (const r of newest) {
-      if (selected.length >= MAX_ANCHORS) break;
-      if (!have.has(r.id)) {
-        selected.push(r);
-        have.add(r.id);
-      }
-    }
+    const unseen = newest.filter((p) => !seen.has(p.id));
+    for (const p of unseen) seen.add(p.id);
+    local.push(...(await hydrateAnchors(db, unseen, false)));
+    if (newest.length < MAX_ANCHORS) break;
   }
-
-  const hydrated = await hydrateAnchors(db, selected, false);
-  // Matching rows can predate both preferred and recent broader rows. Keep them first
-  // without duplicating any that also appeared in the broader candidate set.
-  const local = executionPath
-    ? [...matching, ...hydrated.filter((a) => a.executionPath !== executionPath)].slice(
-        0,
-        MAX_ANCHORS,
-      )
-    : hydrated;
-  if (local.length >= COLD_START_MIN_ANCHORS) return local;
+  const budgeted = local.slice(0, MAX_ANCHORS);
+  if (budgeted.length >= COLD_START_MIN_ANCHORS) return budgeted;
   const cross = await buildColdStartAnchors(
     db,
     repositoryId,
-    MAX_ANCHORS - local.length,
+    MAX_ANCHORS - budgeted.length,
     executionPath,
   );
-  return [...local, ...cross];
+  return [...budgeted, ...cross];
 }
 
 /** Cold-start fallback: anchors from the SAME user's OTHER repositories that share this
@@ -531,22 +544,32 @@ async function buildColdStartAnchors(
   });
   if (siblings.length === 0) return [];
   const repoIds = siblings.map((r) => r.id);
-  const priors = await db.query.tasks.findMany({
-    where: and(
-      inArray(schema.tasks.repositoryId, repoIds),
-      eq(schema.tasks.type, 'workflow'),
-      eq(schema.tasks.status, 'completed'),
-    ),
-    orderBy: executionPath
-      ? [
-          sql`case when ${schema.tasks.executionPath} = ${executionPath} then 0 else 1 end`,
-          desc(schema.tasks.completedAt),
-        ]
-      : desc(schema.tasks.completedAt),
-    limit,
-    columns: PRIOR_TASK_COLUMNS,
-  });
-  return hydrateAnchors(db, priors, true);
+  const anchors: EstimateAnchor[] = [];
+  const seen = new Set<string>();
+  for (let offset = 0; anchors.length < limit; offset += MAX_ANCHORS) {
+    const priors = await db.query.tasks.findMany({
+      where: and(
+        inArray(schema.tasks.repositoryId, repoIds),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+      orderBy: executionPath
+        ? [
+            sql`case when ${schema.tasks.executionPath} = ${executionPath} then 0 else 1 end`,
+            desc(schema.tasks.completedAt),
+            desc(schema.tasks.id),
+          ]
+        : [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
+      limit: MAX_ANCHORS,
+      offset,
+      columns: PRIOR_TASK_COLUMNS,
+    });
+    const unseen = priors.filter((p) => !seen.has(p.id));
+    for (const p of unseen) seen.add(p.id);
+    anchors.push(...(await hydrateAnchors(db, unseen, true)));
+    if (priors.length < MAX_ANCHORS) break;
+  }
+  return anchors.slice(0, limit);
 }
 
 /** Post-planning refinement: once the task's likely files are known (the sprint plan's

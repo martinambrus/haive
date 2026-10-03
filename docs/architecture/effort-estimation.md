@@ -19,6 +19,11 @@ has a stable completion-time/id order and deduplicates tasks already supplied by
 With at least `MIN_PATH_ANCHORS` (3) local measurements, the anchor set uses that path alone;
 with fewer, matching runs lead the broader-history fallback. The total budget remains 30.
 An unknown path retains the previous plan/semantic/newest selection.
+Every anchor budget is applied to measured runs, including preferred file-overlap candidates,
+broader local fallback, and cross-repository history. Preferred candidates are hydrated in
+batches and database queries page until their usable budget is filled or history is exhausted;
+unmeasured rows never hide later usable history. Broader local history is exhausted before
+falling back to other repositories.
 
 **Do not scale a same-path baseline twice.** The heuristic and p20/p80 band use the local
 same-path measurements when there are at least three; otherwise they use three or more

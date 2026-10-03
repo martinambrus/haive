@@ -158,10 +158,15 @@ describe('buildAnchors', () => {
             })),
           ),
         },
-        repositories: { findFirst: vi.fn().mockResolvedValue(null) },
+        repositories: {
+          findFirst: vi
+            .fn<() => Promise<{ userId: string; detectedFramework: string } | null>>()
+            .mockResolvedValue(null),
+          findMany: vi.fn().mockResolvedValue([]),
+        },
       },
     };
-    return { db: db as unknown as Database, findMany };
+    return { db: db as unknown as Database, findMany, repositories: db.query.repositories };
   };
 
   it('finds older same-path runs beyond a full budget of preferred other-path runs', async () => {
@@ -285,6 +290,106 @@ describe('buildAnchors', () => {
     const { db } = mockDb([preferred, newest], ['full', 'fix']);
     const anchors = await buildAnchors(db, 'current', 'repo', ['full']);
     expect(anchors.map((a) => a.title)).toEqual(['full', 'fix']);
+  });
+
+  it('fills broader local fallback after a full retrieval budget of unmeasured same-path rows', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, repositories } = mockDb(
+      [unmeasured, unmeasured, [], unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      unmeasured.map((p) => p.id),
+      'quick_bugfix',
+    );
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(repositories.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('hydrates older measured preferred file overlaps before applying the budget', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [prior('fix-1', 'quick_bugfix'), prior('fix-2', 'quick_bugfix')];
+    const preferred = [...unmeasured, ...measured];
+    const { db } = mockDb(
+      [preferred, []],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      preferred.map((p) => p.id),
+    );
+    const overlapping = anchors.map((a) => ({ ...a, changedPaths: ['a'] }));
+    expect(overlapRefinedEstimate(overlapping, ['a'], 'quick_bugfix')).toEqual({
+      hours: 1,
+      overlapAnchors: 2,
+      matchedFiles: 1,
+    });
+  });
+
+  it('pages broader recent history past unmeasured rows even without preferred ids', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'full_workflow'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, findMany } = mockDb(
+      [unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo');
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([0, MAX_ANCHORS]);
+  });
+
+  it('pages cold-start history past unmeasured same-path rows to measured broader siblings', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, findMany, repositories } = mockDb(
+      [[], [], unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    repositories.findFirst.mockResolvedValue({
+      userId: 'owner',
+      detectedFramework: 'nextjs',
+    });
+    repositories.findMany.mockResolvedValue([{ id: 'sibling' }]);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(anchors.every((a) => a.crossRepo)).toBe(true);
+    expect(findMany.mock.calls.slice(2).map(([args]) => args.offset)).toEqual([0, MAX_ANCHORS]);
+    const query = new PgDialect().sqlToQuery(findMany.mock.calls[2]![0].where);
+    expect(query.params).toEqual(['sibling', 'workflow', 'completed']);
+  });
+
+  it('caps measured cold-start anchors at the remaining budget', async () => {
+    const local = [prior('local', 'quick_bugfix')];
+    const cross = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`cross-${i}`, 'quick_bugfix'),
+    );
+    const { db, repositories } = mockDb(
+      [local, local, cross],
+      [...local, ...cross].map((p) => p.id),
+    );
+    repositories.findFirst.mockResolvedValue({
+      userId: 'owner',
+      detectedFramework: 'nextjs',
+    });
+    repositories.findMany.mockResolvedValue([{ id: 'sibling' }]);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors).toHaveLength(MAX_ANCHORS);
+    expect(anchors.filter((a) => !a.crossRepo)).toHaveLength(1);
+    expect(anchors.filter((a) => a.crossRepo)).toHaveLength(MAX_ANCHORS - 1);
   });
 });
 
