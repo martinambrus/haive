@@ -1,9 +1,17 @@
 'use client';
 
-import { diffLines } from 'diff';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
+import {
+  buildDiffRows,
+  buildChangeMarkers,
+  inlineMarkerRows,
+  type ChangeMarker,
+  type DiffCell,
+  type InlineRow,
+  type SplitRow,
+} from '@/components/commit-diff';
 
 // Mirrors the worker artifact shape written by _commit-diff.ts.
 type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
@@ -58,87 +66,69 @@ const STATUS_META: Record<CommitDiffStatus, { label: string; cls: string }> = {
   renamed: { label: 'R', cls: 'border-blue-800 bg-blue-950 text-blue-300' },
 };
 
-/** Splits a diff segment into lines, dropping the trailing '' that diffLines
- *  emits when the segment ends with a newline (mirrors DiffDisclosure). */
-function splitNoTrail(value: string): string[] {
-  const lines = value.split('\n');
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  return lines;
+function DiffText({ cell, side }: { cell: DiffCell; side: 'add' | 'remove' | 'context' }) {
+  if (!cell.spans) return cell.text || ' ';
+  return cell.spans.length
+    ? cell.spans.map((span, i) => (
+        <span
+          key={i}
+          data-diff-highlight={span.changed ? side : undefined}
+          className={
+            span.changed
+              ? side === 'add'
+                ? 'rounded-sm bg-green-700/60'
+                : 'rounded-sm bg-red-700/60'
+              : undefined
+          }
+        >
+          {span.text}
+        </span>
+      ))
+    : ' ';
 }
 
-interface InlineRow {
-  kind: 'add' | 'remove' | 'context';
-  text: string;
-  oldNo: number | null;
-  newNo: number | null;
+function ChangeMap({
+  markers,
+  rowCount,
+  onJump,
+}: {
+  markers: ChangeMarker[];
+  rowCount: number;
+  onJump: (row: number) => void;
+}) {
+  return (
+    <nav
+      aria-label="File changes"
+      className="relative w-6 shrink-0 border-l border-neutral-800 bg-neutral-900/60"
+    >
+      {markers.map((marker) => {
+        const label = `${marker.kind === 'add' ? 'Added' : 'Removed'} ${marker.firstLine === marker.lastLine ? `line ${marker.firstLine}` : `lines ${marker.firstLine}–${marker.lastLine}`} (${marker.kind === 'add' ? 'new' : 'old'} file)`;
+        return (
+          <button
+            key={`${marker.kind}-${marker.start}`}
+            type="button"
+            aria-label={`Jump to ${label.toLowerCase()}`}
+            title={label}
+            onClick={() => onJump(marker.start)}
+            className={`absolute w-2.5 min-h-[3px] rounded-[1px] hover:brightness-150 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-white ${marker.kind === 'add' ? 'right-0.5 bg-green-400' : 'left-0.5 bg-red-400'}`}
+            style={{
+              top: `min(${(marker.start / rowCount) * 100}%, calc(100% - 3px))`,
+              height: `${((marker.end - marker.start + 1) / rowCount) * 100}%`,
+            }}
+          />
+        );
+      })}
+    </nav>
+  );
 }
 
-function toInlineRows(oldContent: string, newContent: string): InlineRow[] {
-  const parts = diffLines(oldContent, newContent);
-  const rows: InlineRow[] = [];
-  let oldNo = 1;
-  let newNo = 1;
-  for (const part of parts) {
-    const lines = splitNoTrail(part.value);
-    if (part.added) {
-      for (const text of lines) rows.push({ kind: 'add', text, oldNo: null, newNo: newNo++ });
-    } else if (part.removed) {
-      for (const text of lines) rows.push({ kind: 'remove', text, oldNo: oldNo++, newNo: null });
-    } else {
-      for (const text of lines)
-        rows.push({ kind: 'context', text, oldNo: oldNo++, newNo: newNo++ });
-    }
-  }
-  return rows;
-}
-
-interface SplitCell {
-  no: number;
-  text: string;
-}
-interface SplitRow {
-  left: SplitCell | null;
-  right: SplitCell | null;
-  changed: boolean;
-}
-
-function toSplitRows(oldContent: string, newContent: string): SplitRow[] {
-  const parts = diffLines(oldContent, newContent);
-  const rows: SplitRow[] = [];
-  let oldNo = 1;
-  let newNo = 1;
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (!part) continue;
-    const lines = splitNoTrail(part.value);
-    if (!part.added && !part.removed) {
-      for (const text of lines) {
-        rows.push({ left: { no: oldNo++, text }, right: { no: newNo++, text }, changed: false });
-      }
-      continue;
-    }
-    if (part.removed) {
-      const next = parts[i + 1];
-      if (next?.added) {
-        // Pair a removed run with the following added run, line by line.
-        const adds = splitNoTrail(next.value);
-        const max = Math.max(lines.length, adds.length);
-        for (let j = 0; j < max; j++) {
-          const left = j < lines.length ? { no: oldNo++, text: lines[j] ?? '' } : null;
-          const right = j < adds.length ? { no: newNo++, text: adds[j] ?? '' } : null;
-          rows.push({ left, right, changed: true });
-        }
-        i++; // consumed the added part
-      } else {
-        for (const text of lines)
-          rows.push({ left: { no: oldNo++, text }, right: null, changed: true });
-      }
-    } else if (part.added) {
-      for (const text of lines)
-        rows.push({ left: null, right: { no: newNo++, text }, changed: true });
-    }
-  }
-  return rows;
+// Scroll only the diff pane, preserving horizontal position and the task page's scroll.
+function jumpToRow(pane: HTMLDivElement | null, row: number): void {
+  const line = pane?.firstElementChild?.children.item(row);
+  if (!pane || !line) return;
+  const box = line.getBoundingClientRect();
+  pane.scrollTop +=
+    box.top - pane.getBoundingClientRect().top - (pane.clientHeight - box.height) / 2;
 }
 
 function Gutter({ no }: { no: number | null }) {
@@ -150,30 +140,42 @@ function Gutter({ no }: { no: number | null }) {
 }
 
 function InlineDiff({ rows }: { rows: InlineRow[] }) {
+  const paneRef = useRef<HTMLDivElement>(null);
+  const markers = useMemo(() => buildChangeMarkers(inlineMarkerRows(rows)), [rows]);
   return (
-    <div className="min-h-0 flex-1 overflow-auto font-mono text-[11px] leading-tight">
-      {/* w-max sizes the inner block to the widest line so a line's full-width
+    <div className="flex min-h-0 flex-1 font-mono text-[11px] leading-tight">
+      <div ref={paneRef} data-diff-pane="inline" className="min-w-0 flex-1 overflow-auto">
+        {/* w-max sizes the inner block to the widest line so a line's full-width
           background (min-w-full) spans the whole horizontal scroll extent, not
           just the container's visible width — otherwise the add/remove tint
           clips at the right edge when the line overflows. Mirrors SplitDiff. */}
-      <div className="w-max min-w-full">
-        {rows.map((row, i) => {
-          const cls =
-            row.kind === 'add'
-              ? 'bg-green-950/60 text-green-200'
-              : row.kind === 'remove'
-                ? 'bg-red-950/60 text-red-200'
-                : 'text-neutral-400';
-          const prefix = row.kind === 'add' ? '+' : row.kind === 'remove' ? '-' : ' ';
-          return (
-            <div key={i} className={`flex min-w-full ${cls}`}>
-              <Gutter no={row.oldNo} />
-              <Gutter no={row.newNo} />
-              <span className="whitespace-pre px-2">{`${prefix} ${row.text}`}</span>
-            </div>
-          );
-        })}
+        <div className="w-max min-w-full">
+          {rows.map((row, i) => {
+            const cls =
+              row.kind === 'add'
+                ? 'bg-green-950/60 text-green-200'
+                : row.kind === 'remove'
+                  ? 'bg-red-950/60 text-red-200'
+                  : 'text-neutral-400';
+            const prefix = row.kind === 'add' ? '+' : row.kind === 'remove' ? '-' : ' ';
+            return (
+              <div key={i} className={`flex min-w-full ${cls}`}>
+                <Gutter no={row.oldNo} />
+                <Gutter no={row.newNo} />
+                <span className="whitespace-pre px-2">
+                  {`${prefix} `}
+                  <DiffText cell={row.cell} side={row.kind} />
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
+      <ChangeMap
+        markers={markers}
+        rowCount={rows.length}
+        onJump={(row) => jumpToRow(paneRef.current, row)}
+      />
     </div>
   );
 }
@@ -183,7 +185,7 @@ function SplitLine({
   changed,
   side,
 }: {
-  cell: SplitCell | null;
+  cell: DiffCell | null;
   changed: boolean;
   side: 'left' | 'right';
 }) {
@@ -203,12 +205,15 @@ function SplitLine({
       </span>
       {/* ' ' keeps blank/absent lines at one line-height so the two panes
           stay vertically aligned row-for-row. */}
-      <span className="whitespace-pre px-2">{(cell?.text ?? '') || ' '}</span>
+      <span className="whitespace-pre px-2">
+        {cell ? <DiffText cell={cell} side={side === 'left' ? 'remove' : 'add'} /> : ' '}
+      </span>
     </div>
   );
 }
 
 function SplitDiff({ rows }: { rows: SplitRow[] }) {
+  const markers = useMemo(() => buildChangeMarkers(rows), [rows]);
   // Two independent 50/50 panes (old | new) that always both stay visible:
   // grid-cols-2 (minmax(0,1fr) each) locks each side to half the container
   // regardless of content, and grid-rows-1 bounds their height. A long line
@@ -233,25 +238,41 @@ function SplitDiff({ rows }: { rows: SplitRow[] }) {
     });
   };
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-1 font-mono text-[11px] leading-tight">
-      <div ref={leftRef} onScroll={sync('l')} className="min-w-0 overflow-auto">
-        <div className="w-max min-w-full">
-          {rows.map((row, i) => (
-            <SplitLine key={i} cell={row.left} changed={row.changed} side="left" />
-          ))}
+    <div className="flex min-h-0 flex-1 font-mono text-[11px] leading-tight">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-2 grid-rows-1">
+        <div
+          ref={leftRef}
+          data-diff-pane="left"
+          onScroll={sync('l')}
+          className="min-w-0 overflow-auto"
+        >
+          <div className="w-max min-w-full">
+            {rows.map((row, i) => (
+              <SplitLine key={i} cell={row.left} changed={row.changed} side="left" />
+            ))}
+          </div>
+        </div>
+        <div
+          ref={rightRef}
+          data-diff-pane="right"
+          onScroll={sync('r')}
+          className="min-w-0 overflow-auto border-l border-neutral-800"
+        >
+          <div className="w-max min-w-full">
+            {rows.map((row, i) => (
+              <SplitLine key={i} cell={row.right} changed={row.changed} side="right" />
+            ))}
+          </div>
         </div>
       </div>
-      <div
-        ref={rightRef}
-        onScroll={sync('r')}
-        className="min-w-0 overflow-auto border-l border-neutral-800"
-      >
-        <div className="w-max min-w-full">
-          {rows.map((row, i) => (
-            <SplitLine key={i} cell={row.right} changed={row.changed} side="right" />
-          ))}
-        </div>
-      </div>
+      <ChangeMap
+        markers={markers}
+        rowCount={rows.length}
+        onJump={(row) => {
+          jumpToRow(leftRef.current, row);
+          jumpToRow(rightRef.current, row);
+        }}
+      />
     </div>
   );
 }
@@ -375,13 +396,12 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     (selectedFile?.editPath ? live[selectedFile.path]?.text : undefined) ??
     selectedFile?.newContent ??
     '';
-  const inlineRows = useMemo(
-    () => (renderable ? toInlineRows(selectedFile.oldContent, currentNew) : []),
+  const { inlineRows, splitRows } = useMemo(
+    () =>
+      renderable
+        ? buildDiffRows(selectedFile.oldContent, currentNew)
+        : { inlineRows: [], splitRows: [] },
     [renderable, selectedFile, currentNew],
-  );
-  const splitRows = useMemo(
-    () => (renderable && view === 'split' ? toSplitRows(selectedFile.oldContent, currentNew) : []),
-    [renderable, view, selectedFile, currentNew],
   );
   // Pull the selected editable file's current bytes once. A failure disables
   // editing for that file rather than falling back to the artifact copy: saving
@@ -703,9 +723,9 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                           : 'No content changes.'}
                     </div>
                   ) : view === 'inline' ? (
-                    <InlineDiff rows={inlineRows} />
+                    <InlineDiff key={selectedFile.path} rows={inlineRows} />
                   ) : (
-                    <SplitDiff rows={splitRows} />
+                    <SplitDiff key={selectedFile.path} rows={splitRows} />
                   )}
                 </div>
               </>
