@@ -111,6 +111,28 @@ describe('promoteToGlobalKbDraft and the description', () => {
     expect(stored()[0]!.description).toBe('Mock @example-app/database in Vitest.');
   });
 
+  it('keeps a project name that is a value the draft is scoped to', async () => {
+    const { db, stored } = setup();
+    await promoteToGlobalKbDraft(
+      db,
+      {
+        ...promotion,
+        title: 'Elmont routing',
+        body: '# Elmont\n\nuse the elmont router',
+        description: 'How Elmont routes.',
+        facets: { framework: ['elmont'] },
+        projectName: 'elmont',
+      },
+      log,
+    );
+
+    expect(stored()[0]).toMatchObject({
+      title: 'Elmont routing',
+      body: '# Elmont\n\nuse the elmont router\n',
+      description: 'How Elmont routes.',
+    });
+  });
+
   describe('an identical body under the same topic', () => {
     const entry = (description: string | null) => ({
       id: 'e1',

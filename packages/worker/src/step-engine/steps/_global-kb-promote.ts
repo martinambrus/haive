@@ -12,7 +12,12 @@ import {
   normalizeFacets,
   normalizeGlobalKbDescription,
 } from '@haive/shared/global-kb';
-import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
+import {
+  embedQuery,
+  FACET_FILTER_DIMENSIONS,
+  ragHybridSearch,
+  type RagConnection,
+} from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
 import { confirmSupersedeByEmbedding, SUPERSEDE_CANDIDATE_LIMIT } from './_global-kb-similarity.js';
 
@@ -71,17 +76,180 @@ const GENERIC_PROJECT_NAMES = new Set([
   'monorepo',
 ]);
 
+/** Public technology names, grouped as frameworks, CMSs, languages, runtimes, databases, servers. */
+const PUBLIC_TECHNOLOGY_NAMES = new Set([
+  'angular',
+  'astro',
+  'bootstrap',
+  'cakephp',
+  'codeigniter',
+  'django',
+  'electron',
+  'ember',
+  'ember.js',
+  'express',
+  'fastapi',
+  'fastify',
+  'flask',
+  'flutter',
+  'gatsby',
+  'hono',
+  'jquery',
+  'laravel',
+  'livewire',
+  'nestjs',
+  'next',
+  'next.js',
+  'nextjs',
+  'nuxt',
+  'phoenix',
+  'preact',
+  'quarkus',
+  'rails',
+  'react',
+  'remix',
+  'spring',
+  'springboot',
+  'svelte',
+  'sveltekit',
+  'symfony',
+  'tailwind',
+  'tailwindcss',
+  'vue.js',
+  'vuejs',
+
+  'backdrop',
+  'craftcms',
+  'directus',
+  'drupal',
+  'drupal7',
+  'ghost',
+  'joomla',
+  'magento',
+  'opencart',
+  'prestashop',
+  'silverstripe',
+  'statamic',
+  'strapi',
+  'typo3',
+  'umbraco',
+  'wagtail',
+  'woocommerce',
+  'wordpress',
+
+  'clojure',
+  'csharp',
+  'dart',
+  'elixir',
+  'erlang',
+  'fsharp',
+  'golang',
+  'groovy',
+  'haskell',
+  'java',
+  'javascript',
+  'julia',
+  'kotlin',
+  'ocaml',
+  'perl',
+  'python',
+  'ruby',
+  'rust',
+  'scala',
+  'swift',
+  'typescript',
+
+  'cpython',
+  'deno',
+  'docker',
+  'dotnet',
+  'node',
+  'node.js',
+  'nodejs',
+  'openjdk',
+  'pypy',
+
+  'cassandra',
+  'clickhouse',
+  'cockroachdb',
+  'couchbase',
+  'couchdb',
+  'duckdb',
+  'dynamodb',
+  'elasticsearch',
+  'etcd',
+  'influxdb',
+  'mariadb',
+  'memcached',
+  'mongo',
+  'mongodb',
+  'mssql',
+  'mysql',
+  'neo4j',
+  'opensearch',
+  'oracle',
+  'postgres',
+  'postgresql',
+  'redis',
+  'solr',
+  'sqlite',
+  'sqlserver',
+  'timescaledb',
+  'valkey',
+
+  'apache',
+  'caddy',
+  'dovecot',
+  'envoy',
+  'gunicorn',
+  'haproxy',
+  'httpd',
+  'jetty',
+  'lighttpd',
+  'nginx',
+  'openresty',
+  'passenger',
+  'php-fpm',
+  'postfix',
+  'puma',
+  'tomcat',
+  'traefik',
+  'unicorn',
+  'uvicorn',
+  'uwsgi',
+  'varnish',
+  'wildfly',
+]);
+
+/** The scope values a promotion names, lowercased, a package's `@major` dropped too; free-text tags are not scope. */
+function scopeTokens(facets: GlobalKbFacets | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  for (const dimension of FACET_FILTER_DIMENSIONS) {
+    const values: unknown = (facets as Record<string, unknown> | null | undefined)?.[dimension];
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      const token = value.trim().toLowerCase();
+      tokens.add(token);
+      tokens.add(token.replace(/@[^@/]*$/, ''));
+    }
+  }
+  return tokens;
+}
+
 /** Make a promoted article portable for ANY repo on the same stack: always strip
  *  the trailing `## Source files` footer (a repo file list), and when the project
  *  name is distinctive, remove it from the title and replace it (plus its `@name/`
  *  package scope) in the body with an obvious placeholder so a future reader knows
- *  to rename it. A generic name (e.g. "app", "test") is left untouched to avoid
- *  corrupting unrelated text. Pure + deterministic; exported for unit testing. */
+ *  to rename it. Only a whole token is replaced. A name that is generic (e.g. "app"), a
+ *  public technology (e.g. "laravel") or a value in `facets` is not demonstrably the
+ *  repository's own and is left untouched. Pure + deterministic; exported for unit testing. */
 export function sanitizeGlobalArticle(input: {
   title: string;
   body: string;
   description?: string | null;
   projectName?: string | null;
+  facets?: GlobalKbFacets | null;
 }): { title: string; body: string; description: string | null } {
   // 1. Drop a trailing "## Source files" section regardless of the project name —
   //    a portable article must never list a specific repo's files.
@@ -90,16 +258,23 @@ export function sanitizeGlobalArticle(input: {
   let description = input.description ?? null;
 
   const name = (input.projectName ?? '').trim();
-  if (name.length >= 4 && !GENERIC_PROJECT_NAMES.has(name.toLowerCase())) {
+  const lowerName = name.toLowerCase();
+  if (
+    name.length >= 4 &&
+    !GENERIC_PROJECT_NAMES.has(lowerName) &&
+    !PUBLIC_TECHNOLOGY_NAMES.has(lowerName) &&
+    !scopeTokens(input.facets).has(lowerName)
+  ) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const nameRe = new RegExp(esc, 'gi');
+    const token = `(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`;
+    const nameRe = new RegExp(token, 'giu');
     // Body: `@name/...` scope and bare name -> placeholder.
     body = body.replace(nameRe, GLOBAL_PLACEHOLDER);
     description = description?.replace(nameRe, GLOBAL_PLACEHOLDER) ?? null;
     // Title: drop the name plus a leading/trailing connector ("for/in/of", "-", ":"),
     // then tidy. Keep the original if scrubbing would empty it.
     const scrubbed = title
-      .replace(new RegExp(`\\s*(?:[-—–:]|\\b(?:for|in|of)\\b)\\s*${esc}\\b`, 'i'), '')
+      .replace(new RegExp(`\\s*(?:[-—–:]|\\b(?:for|in|of)\\b)\\s*${token}`, 'iu'), '')
       .replace(nameRe, '')
       .replace(/\s{2,}/g, ' ')
       .replace(/^[\s\-—–:]+|[\s\-—–:]+$/g, '')
@@ -399,6 +574,7 @@ export async function promoteToGlobalKbDraft(
         body: promotion.body,
         description: promotion.description,
         projectName: promotion.projectName,
+        facets: promotion.facets,
       });
       // Cross-repo reconcile: when another entry already covers this topic
       // (category:tech[:major]), DON'T discard the new knowledge — unless it is
