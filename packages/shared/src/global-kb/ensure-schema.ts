@@ -111,6 +111,7 @@ export async function ensureGlobalKbSchema(
   await exec(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_supersedes ON ${ENTRIES_TABLE} (supersedes_entry_id)`,
   );
+  await exec(`ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS description TEXT`);
   // Widen the status CHECK to allow 'failed' on pre-existing DBs — a kb_author
   // enrich task that fails leaves its entry in a terminal 'failed' state. Idempotent:
   // drop the inline-named constraint and re-add it with the full value set.

@@ -113,6 +113,25 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain('trg_global_content_tsv');
   });
 
+  // An older install gets the column on its next ensure. No CHECK: Postgres counts code points
+  // where the api and the render count UTF-16 units, so a constraint would refuse what they accept.
+  it('adds the description column in a statement of its own, and constrains nothing', async () => {
+    const { conn, queries, transactions } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const statement = 'ALTER TABLE global_kb_entries ADD COLUMN IF NOT EXISTS description TEXT';
+
+    expect(queries()).toContain(statement);
+    expect(
+      transactions()
+        .filter((tx) => tx.includes(statement))
+        .map((tx) => tx.length),
+    ).toEqual([2]);
+    const mentioning = transactions()
+      .flat()
+      .filter((q) => /\bdescription\b/.test(q));
+    expect(mentioning).toEqual([statement]);
+  });
+
   it('never lets the facet backfill store a JSON null', async () => {
     const { conn, queries } = fakeConn();
     await ensureGlobalKbSchema(conn);

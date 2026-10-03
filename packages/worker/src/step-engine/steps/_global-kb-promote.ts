@@ -10,6 +10,7 @@ import {
   type GlobalKbFacets,
   type ProjectFacetSet,
   normalizeFacets,
+  normalizeGlobalKbDescription,
 } from '@haive/shared/global-kb';
 import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
@@ -23,6 +24,8 @@ export interface GlobalKbPromotion {
   body: string;
   category: GlobalKbCategory;
   facets: GlobalKbFacets;
+  /** One line saying what the rule states and when it applies. Normalised when stored. */
+  description?: string | null;
   /** Cross-repo dedup key (`category:tech`). When set and a matching entry
    *  already exists, the promotion is skipped instead of inserting a duplicate. */
   topicKey?: string;
@@ -77,12 +80,14 @@ const GENERIC_PROJECT_NAMES = new Set([
 export function sanitizeGlobalArticle(input: {
   title: string;
   body: string;
+  description?: string | null;
   projectName?: string | null;
-}): { title: string; body: string } {
+}): { title: string; body: string; description: string | null } {
   // 1. Drop a trailing "## Source files" section regardless of the project name —
   //    a portable article must never list a specific repo's files.
   let body = input.body.replace(/\n#{1,6}[ \t]+source files\b[\s\S]*$/i, '').trimEnd() + '\n';
   let title = input.title;
+  let description = input.description ?? null;
 
   const name = (input.projectName ?? '').trim();
   if (name.length >= 4 && !GENERIC_PROJECT_NAMES.has(name.toLowerCase())) {
@@ -90,6 +95,7 @@ export function sanitizeGlobalArticle(input: {
     const nameRe = new RegExp(esc, 'gi');
     // Body: `@name/...` scope and bare name -> placeholder.
     body = body.replace(nameRe, GLOBAL_PLACEHOLDER);
+    description = description?.replace(nameRe, GLOBAL_PLACEHOLDER) ?? null;
     // Title: drop the name plus a leading/trailing connector ("for/in/of", "-", ":"),
     // then tidy. Keep the original if scrubbing would empty it.
     const scrubbed = title
@@ -100,7 +106,7 @@ export function sanitizeGlobalArticle(input: {
       .trim();
     if (scrubbed) title = scrubbed;
   }
-  return { title, body };
+  return { title, body, description };
 }
 
 /** Entries scanned (titles + facets only) before facet filtering and ranking.
@@ -150,6 +156,9 @@ export interface GlobalArticleSelection {
   articles: { title: string; body: string }[];
   /** Every OTHER applicable article, by title. Reachable with `rag_search`. */
   otherTitles: string[];
+  /** The normalised description of each `otherTitles` entry, index for index; null where it
+   *  has none. */
+  otherDescriptions: Array<string | null>;
   /** Applicable articles that did not fit even the title list. Reported, not hidden. */
   omittedTitleCount: number;
 }
@@ -160,7 +169,12 @@ export async function loadActiveGlobalArticlesForTask(
   relevanceQuery = '',
   limit = 15,
 ): Promise<GlobalArticleSelection> {
-  const empty: GlobalArticleSelection = { articles: [], otherTitles: [], omittedTitleCount: 0 };
+  const empty: GlobalArticleSelection = {
+    articles: [],
+    otherTitles: [],
+    otherDescriptions: [],
+    omittedTitleCount: 0,
+  };
   try {
     const projectFacets = await resolveTaskFacets(db, taskId);
     return await withGlobalKb(db, async ({ conn, db: gdb, settings }) => {
@@ -172,6 +186,7 @@ export async function loadActiveGlobalArticlesForTask(
           id: globalKbEntries.id,
           title: globalKbEntries.title,
           facets: globalKbEntries.facets,
+          description: globalKbEntries.description,
         })
         .from(globalKbEntries)
         .where(
@@ -224,10 +239,12 @@ export async function loadActiveGlobalArticlesForTask(
       // ordering only decides which bodies ride along — whichever article the
       // agent actually needs must still be nameable, and `rag_search` returns any
       // title in full.
-      const rest = compatible.filter((r) => !ids.includes(r.id)).map((r) => r.title);
+      const rest = compatible.filter((r) => !ids.includes(r.id));
+      const listed = rest.slice(0, OTHER_TITLE_LIMIT);
       return {
         articles,
-        otherTitles: rest.slice(0, OTHER_TITLE_LIMIT),
+        otherTitles: listed.map((r) => r.title),
+        otherDescriptions: listed.map((r) => normalizeGlobalKbDescription(r.description)),
         omittedTitleCount: Math.max(0, rest.length - OTHER_TITLE_LIMIT),
       };
     });
@@ -348,6 +365,7 @@ export async function promoteToGlobalKbDraft(
       const clean = sanitizeGlobalArticle({
         title: promotion.title,
         body: promotion.body,
+        description: promotion.description,
         projectName: promotion.projectName,
       });
       // Cross-repo reconcile: when another entry already covers this topic
@@ -437,6 +455,7 @@ export async function promoteToGlobalKbDraft(
             // VERBATIM while a project's own set is lowercased, so a capitalised package name
             // would be stored unmatchable by the exact jsonb `?|` the search uses.
             facets: normalizeFacets(promotion.facets),
+            description: normalizeGlobalKbDescription(clean.description),
             status: 'draft',
             source: 'promoted',
             sourceTaskId: promotion.taskId,

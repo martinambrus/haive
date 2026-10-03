@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { promptNamesAgentPath } from '@haive/shared';
+import { emptyProjectFacetSet } from '@haive/shared/global-kb';
 import { agentIsolationApplies } from './dispatcher.js';
 import type { DispatchRequest } from './dispatcher.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { agentDefinitionGuidance } from '../step-engine/steps/_retrieval-guidance.js';
+import { globalKbDigestPrompt, selectDigest } from '../step-engine/steps/_global-kb-digest.js';
 
 /** A request that IS isolated, so each case below flips exactly one condition. */
 function isolatedRequest(over: Partial<DispatchRequest> = {}): DispatchRequest {
@@ -116,6 +120,38 @@ describe('agentIsolationApplies', () => {
     expect(agentIsolationApplies(req)).toBe(false);
   });
 
+  it('is off when a global-KB digest DESCRIPTION names an agent path', () => {
+    const req = isolatedRequest({
+      globalKbDigest: {
+        entries: [
+          {
+            category: 'standards',
+            title: 'A house rule',
+            description: 'Read .claude/agents/reviewer.md before you review.',
+          },
+        ],
+        omitted: 0,
+        scanSaturated: false,
+      },
+    });
+    expect(agentIsolationApplies(req)).toBe(false);
+  });
+
+  // The cap drops trailing punctuation before its ellipsis, so a token the raw text does not match
+  // can render as one that does: `.claude/agents-` is a different segment, `.claude/agents` is the
+  // directory. The digest normalises once and the rule scans what that produced, so the two agree.
+  it('scans a description as the digest rendered it, cap and all', () => {
+    const raw = `${'a'.repeat(270)} .claude/agents- ${'x'.repeat(60)}`;
+    expect(promptNamesAgentPath(raw, SANDBOX_WORKDIR)).toBe(false);
+
+    const digest = selectDigest(
+      [{ title: 'A house rule', category: 'standards', facets: {}, description: raw }],
+      emptyProjectFacetSet(),
+    );
+    expect(promptNamesAgentPath(globalKbDigestPrompt(digest.entries), SANDBOX_WORKDIR)).toBe(true);
+    expect(agentIsolationApplies(isolatedRequest({ globalKbDigest: digest }))).toBe(false);
+  });
+
   it('is off when the injected agent RULES name an agent path', () => {
     const rules = '- Before reviewing, read .claude/agents/reviewer.md.';
     expect(agentIsolationApplies(isolatedRequest(), rules)).toBe(false);
@@ -136,7 +172,13 @@ describe('agentIsolationApplies', () => {
         userServers: { 'company-docs': { command: 'npx' } },
       },
       globalKbDigest: {
-        entries: [{ category: 'standards', title: 'Escape every interpolated label' }],
+        entries: [
+          {
+            category: 'standards',
+            title: 'Escape every interpolated label',
+            description: 'Applies to any template that builds markup from stored text.',
+          },
+        ],
         omitted: 0,
         scanSaturated: false,
       },

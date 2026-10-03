@@ -25,6 +25,9 @@ interface MergePair {
   draftBody: string;
   existingId: string;
   existingBody: string;
+  /** Absent on a payload persisted before descriptions existed. */
+  draftDescription?: string | null;
+  existingDescription?: string | null;
 }
 
 interface MergeDetect {
@@ -83,6 +86,7 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
           id: globalKbEntries.id,
           title: globalKbEntries.title,
           body: globalKbEntries.body,
+          description: globalKbEntries.description,
           supersedesEntryId: globalKbEntries.supersedesEntryId,
         })
         .from(globalKbEntries)
@@ -97,7 +101,7 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
       for (const d of drafts) {
         if (!d.supersedesEntryId) continue;
         const [existing] = await gdb
-          .select({ body: globalKbEntries.body })
+          .select({ body: globalKbEntries.body, description: globalKbEntries.description })
           .from(globalKbEntries)
           .where(eq(globalKbEntries.id, d.supersedesEntryId))
           .limit(1);
@@ -108,6 +112,8 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
             draftBody: d.body,
             existingId: d.supersedesEntryId,
             existingBody: existing.body,
+            draftDescription: d.description,
+            existingDescription: existing.description,
           });
         }
       }
@@ -184,9 +190,17 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
             const body = r.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
             // Guard against an empty / truncated merge clobbering real content.
             if (body.length < 40) continue;
+            // Activation archives the superseded entry, so a description it carried would otherwise be
+            // lost; the draft's own, when it has one, stays.
+            const inherited = p.draftDescription ? null : (p.existingDescription ?? null);
             await gdb
               .update(globalKbEntries)
-              .set({ body, embedStatus: 'pending', updatedAt: new Date() })
+              .set({
+                body,
+                embedStatus: 'pending',
+                updatedAt: new Date(),
+                ...(inherited ? { description: inherited } : {}),
+              })
               .where(eq(globalKbEntries.id, p.draftId));
             mergedDrafts.add(p.draftId);
             merged += 1;

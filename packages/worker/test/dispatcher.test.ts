@@ -544,6 +544,32 @@ describe('global KB digest', () => {
     expect(plan.effectivePrompt).toContain('rag_search');
   });
 
+  const described = {
+    entries: [
+      {
+        title: 'DDEV post-start hooks cannot inject settings',
+        category: 'tech_pattern',
+        description:
+          'Settings written from a hook are lost when the installer regenerates the file.',
+      },
+    ],
+    omitted: 0,
+    scanSaturated: false,
+  };
+
+  it('advertises a description beside its title when the rag server is wired', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+      mcpSurface: surface(true),
+      globalKbDigest: described,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toContain(
+      '- DDEV post-start hooks cannot inject settings — Settings written from a hook are lost when the installer regenerates the file.',
+    );
+  });
+
   it('advertises nothing when the rag server is not wired', () => {
     const plan = resolveDispatch({
       providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
@@ -555,6 +581,17 @@ describe('global KB digest', () => {
     expect(plan.effectivePrompt).not.toContain('DDEV post-start hooks cannot inject settings');
   });
 
+  it('withholds the description with the rest of the block when no rag server is wired', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+      mcpSurface: surface(false),
+      globalKbDigest: described,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).not.toContain('Settings written from a hook');
+  });
+
   it('advertises nothing to an adapter that gets no MCP config at all', () => {
     const plan = resolveDispatch({
       providers: [makeProvider({ id: 'prov-amp', name: 'amp' })],
@@ -564,6 +601,17 @@ describe('global KB digest', () => {
       invokeOpts: {},
     });
     expect(plan.effectivePrompt).not.toContain('DDEV post-start hooks cannot inject settings');
+  });
+
+  it('withholds the description from an adapter that gets no MCP config at all', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-amp', name: 'amp' })],
+      mcpSurface: surface(true),
+      globalKbDigest: described,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).not.toContain('Settings written from a hook');
   });
 
   it('leaves the prompt untouched when the digest is empty', () => {

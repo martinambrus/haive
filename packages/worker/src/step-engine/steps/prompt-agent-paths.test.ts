@@ -502,6 +502,20 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
       ]),
   },
   {
+    // The same shape in a DESCRIPTION, which an author or a model writes as freely as a title and which
+    // the digest renders beside it. Appended after the isolation decision for the same reason.
+    label: 'globalKbDigestPrompt (agent-path-shaped description)',
+    exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
+    build: () =>
+      globalKbDigestPrompt([
+        {
+          category: 'standards',
+          title: 'Escape every interpolated label',
+          description: 'Follow .claude/agents/foo before you render a label.',
+        },
+      ]),
+  },
+  {
     // CONCRETE entries, two categories. A proxy is an empty ITERABLE, so `for (const e of entries)`
     // ran zero times and the category/title loop — the body of this block — never rendered. Production
     // cannot dispatch the scanned shape at all: `withGlobalKbDigest` skips the block when the list is
@@ -510,7 +524,11 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
     build: () =>
       globalKbDigestPrompt([
-        { category: 'standards', title: 'Escape every interpolated label' },
+        {
+          category: 'standards',
+          title: 'Escape every interpolated label',
+          description: 'Every interpolated label is escaped before it reaches markup.',
+        },
         { category: 'standards', title: 'One writer per durable table' },
         { category: 'testing', title: 'Assert the invariant, not the rendering' },
       ]),
@@ -1435,7 +1453,8 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       // when onboarding produced no agent files, which is why the other variant is clean.
       '11-final-review, no agents produced',
       // Both post-decision appends that carry NON-HAIVE text and can therefore hold a path a repository
-      // or a KB author wrote. Sorted, so the digest entry precedes the MCP one.
+      // or a KB author wrote. Sorted, so the digest entries precede the MCP one.
+      'globalKbDigestPrompt (agent-path-shaped description)',
       'globalKbDigestPrompt (agent-path-shaped title)',
       'mcpSurfacePrompt (agent-path-shaped server name)',
     ]);
@@ -1811,7 +1830,10 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // being scanned was the one that never reaches a model.
     const digest = await textFor('globalKbDigestPrompt');
     expect(digest).toContain('standards:');
-    expect(digest).toContain('- Escape every interpolated label');
+    expect(digest).toContain(
+      '- Escape every interpolated label — Every interpolated label is escaped before it reaches markup.',
+    );
+    expect(digest).toContain('- One writer per durable table');
     expect(digest).toContain('testing:');
     expect(digest).toContain('(5 more house standards for this stack not listed');
 
@@ -1918,6 +1940,18 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(promptNamesAgentPath(digestWithPath, SANDBOX_WORKDIR)).toBe(true);
     const digestBenign = globalKbDigestPrompt([{ category: 'standards', title: 'Escaping rules' }]);
     expect(promptNamesAgentPath(digestBenign, SANDBOX_WORKDIR)).toBe(false);
+    const digestDescriptionWithPath = globalKbDigestPrompt([
+      { category: 'standards', title: 'Escaping rules', description: 'See .claude/agents/foo.' },
+    ]);
+    expect(promptNamesAgentPath(digestDescriptionWithPath, SANDBOX_WORKDIR)).toBe(true);
+    const digestDescriptionBenign = globalKbDigestPrompt([
+      {
+        category: 'standards',
+        title: 'Escaping rules',
+        description: 'Escape labels before markup.',
+      },
+    ]);
+    expect(promptNamesAgentPath(digestDescriptionBenign, SANDBOX_WORKDIR)).toBe(false);
   });
 
   it('RENDERS all three 08c review-lens personas', async () => {

@@ -79,4 +79,34 @@ describe('sanitizeGlobalArticle', () => {
       sanitizeGlobalArticle({ title: 'Siteray', body: '', projectName: 'siteray' }).title,
     ).toBe('Siteray');
   });
+
+  // A description is the most-exposed text an entry has: it rides in front of every matching project.
+  it('replaces the project name in a description, as it does in the body', () => {
+    const out = sanitizeGlobalArticle({
+      title: 'Vitest Quick Reference',
+      body: 'b',
+      description: 'How Siteray mocks @siteray/database in Vitest.',
+      projectName: 'siteray',
+    });
+    expect(out.description).toBe('How example-app mocks @example-app/database in Vitest.');
+  });
+
+  it('leaves a generic project name in a description alone', () => {
+    const out = sanitizeGlobalArticle({
+      title: 'Foo',
+      body: 'b',
+      description: 'Use app here.',
+      projectName: 'app',
+    });
+    expect(out.description).toBe('Use app here.');
+  });
+
+  it('has no description when it was given none', () => {
+    expect(
+      sanitizeGlobalArticle({ title: 'X', body: 'b', projectName: 'siteray' }).description,
+    ).toBe(null);
+    expect(sanitizeGlobalArticle({ title: 'X', body: 'b', description: null }).description).toBe(
+      null,
+    );
+  });
 });

@@ -139,6 +139,9 @@ interface KbEntry {
   /** Version/variant facets for a `global` entry (defaulted from the detected
    *  stack when the LLM omits them). Ignored for `local` entries. */
   facets?: GlobalKbFacets;
+  /** One line saying what a `global` entry states and when it applies. Ignored for `local`
+   *  entries, and when it is not a string. */
+  description?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -439,6 +442,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '      "tech": "<required when category is tech_pattern, anti_pattern, best_practice, or quick_reference — e.g. node-pty, gradle, lwjgl2>",',
     '      "scope": "local | global",',
     '      "facets": { "framework": ["<token>"], "language": ["<lang>"], "phpMajor": ["<n>"], "nodeMajor": ["<n>"] },',
+    '      "description": "<scope=global only: ONE line, at most 300 characters — what the rule says and when it applies>",',
     `      "bodyPath": "${KB_DRAFT_DIR}/<id>.md"`,
     '    }',
     '  ],',
@@ -468,6 +472,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '- tech: required when category is tech_pattern, anti_pattern, best_practice, or quick_reference. kebab-case (e.g. node-pty, drupal-form-api, rails-ar, gradle, lwjgl2).',
     `- scope: choose "global" ONLY for a self-contained house standard about a PUBLIC subject — the framework core, a contrib/community module, a public package (the framework itself or one appearing in the installed dependencies above), the LANGUAGE itself (e.g. PHP), or the DATASTORE engine (e.g. MySQL/MariaDB). Explain it from that subject's OWN public API/docs/spec so the article stands alone WITHOUT this repo. A subject can be global even when it is specific (a single contrib module, or a single PHP/DB version); "global" means the subject is PUBLIC, not that it is framework- or language-agnostic. Even a fully custom, frameworkless project still yields global knowledge: generic PHP-only or MySQL/MariaDB-only practices that hold for ANY project on that PHP/DB version. Choose "local" (the DEFAULT) if the entry does ANY of: (a) names a function, class, hook, route, table, env var or config key defined in THIS repo's own custom code (as opposed to a documented part of a public API); (b) relies on a custom/project helper or sanitizer that is not part of a public API; (c) cites a file path under this repo's own custom code; (d) lists this repo's source files, or describes how THIS app is wired, its architecture or its business logic; (e) mixes portable advice with repo-specific detail (e.g. generic MySQL guidance entangled with THIS project's schema/queries) — keep the whole entry local unless the portable part stands fully on its own (pure generic PHP/SQL knowledge is NOT "mixed"). Anchor every global entry to an installed MAJOR version from the context above: a module/package entry sets facets.packages=["name@major"] (and is NOT filed as generic framework/language); a framework-general entry sets framework[+frameworkMajor]; a pure PHP entry sets language=["php"] + phpMajor; a pure datastore entry sets database (e.g. ["mysql"], or ["mysql","mariadb"] for engine-agnostic SQL) + dbMajor. If you cannot anchor it to an installed major (framework, package, PHP, or DB), choose "local". tech_pattern and general/canonical entries are ALWAYS "local". Rule of thumb: if deleting this repo would make the article wrong or meaningless, it is "local". When genuinely torn, choose "local".`,
     `- facets: ONLY for scope="global"; they scope which projects later retrieve the entry. MODULE/PACKAGE entry → facets.packages=["name@major"] from the installed dependencies above (do NOT also set framework/language). FRAMEWORK-general entry → framework=["${detected.framework ?? ''}"]${detected.frameworkMajor ? `, frameworkMajor=["${detected.frameworkMajor}"]` : ''}. PURE PHP entry → language=["php"]${detected.phpMajor ? `, phpMajor=["${detected.phpMajor}"]` : ''}. PURE DATASTORE entry → database=["${detected.database ?? 'mysql'}"]${detected.dbMajor ? `, dbMajor=["${detected.dbMajor}"]` : ''} (list multiple engines for engine-agnostic SQL). Every global entry MUST carry at least one installed major-version anchor (package@major, frameworkMajor, phpMajor, nodeMajor, or dbMajor) — if none applies, make the entry "local". Omitted dimensions apply to all.`,
+    '- description: ONLY for scope="global" entries. ONE line, at most 300 characters, saying what the rule states and when it applies — it is shown beside the title to every project on the same stack, so it follows the same rule as the body: the public subject\'s own terms, never this repo\'s file paths, names, symbols or counts. Omit it when you cannot say it in one portable line.',
     '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
     '  - Write section bodies DENSELY to keep the KB token-light: lead with the fact, drop filler, and do not restate the heading. Preserve EXACTLY (never compress): code, file paths, commands, version numbers, and identifiers/API names — but escape any double-quote inside that code as \\" so the JSON string stays valid.',
     '  - For LOCAL entries: include actual code patterns, specific config values, and real repo file paths with line ranges (e.g. `build.gradle:13-41`).',
@@ -2298,7 +2303,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         const facets = techBucket
           ? techAnchorFacets(e.tech, e.facets ?? {}, detected)
           : defaultGlobalFacets(e, detected);
-        const sectionsText = e.sections.map((s) => s.body).join('\n');
+        const description = typeof e.description === 'string' ? e.description : undefined;
+        const sectionsText = [
+          ...(description ? [description] : []),
+          ...e.sections.map((s) => s.body),
+        ].join('\n');
         const ownRef = await repoOwnRef(sectionsText, e.sourceFiles, detected, ctx.repoPath);
         const symRef = ownRef ? null : bodyUsesRepoSymbol(sectionsText, await getRepoSymbols());
         if (ownRef || symRef) {
@@ -2334,6 +2343,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             body: entryToMarkdown(e, { includeSourceFiles: false }),
             category,
             facets,
+            description: typeof e.description === 'string' ? e.description : undefined,
             topicKey: globalKbTopicKey(category, facets, e.tech) ?? undefined,
             projectName: detected.projectName ?? undefined,
           },
