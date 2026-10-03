@@ -20,6 +20,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
 });
 
 import {
+  identicalPromotionTarget,
   loadActiveGlobalArticlesForTask,
   promoteToGlobalKbDraft,
 } from '../src/step-engine/steps/_global-kb-promote.js';
@@ -74,6 +75,34 @@ describe('promoteToGlobalKbDraft and the description', () => {
     );
 
     expect(stored()[0]!.description).toBe('Mock @example-app/database in Vitest.');
+  });
+
+  describe('an identical body under the same topic', () => {
+    const entry = (description: string | null) => ({
+      id: 'e1',
+      body: `${promotion.body}\n`,
+      description,
+    });
+
+    it('is new when it brings a description the entry lacks', () => {
+      expect(
+        identicalPromotionTarget([entry(null)], promotion.body, 'Mock at the boundary.'),
+      ).toBeUndefined();
+    });
+
+    it('is a duplicate when the entry already has a description, whatever the new one says', () => {
+      expect(identicalPromotionTarget([entry('Mock it.')], promotion.body, 'Reworded.')?.id).toBe(
+        'e1',
+      );
+    });
+
+    it('is a duplicate when the promotion carries no description', () => {
+      expect(identicalPromotionTarget([entry(null)], promotion.body, null)?.id).toBe('e1');
+    });
+
+    it('is new when the body differs', () => {
+      expect(identicalPromotionTarget([entry('Mock it.')], '# Other', null)).toBeUndefined();
+    });
   });
 
   it('stores null when there is none, or when it is blank', async () => {

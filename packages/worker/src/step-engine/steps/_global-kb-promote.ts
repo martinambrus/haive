@@ -345,6 +345,18 @@ async function rankArticleIdsByRelevance(
   }
 }
 
+/** The same-topic entry a promotion would add nothing to. An identical body still adds a description
+ *  the entry lacks; a reworded one is not worth a draft, since a model rewords it every run. */
+export function identicalPromotionTarget<T extends { body: string; description: string | null }>(
+  candidates: T[],
+  body: string,
+  description: string | null,
+): T | undefined {
+  return candidates.find(
+    (c) => c.body.trim() === body.trim() && (c.description !== null || description === null),
+  );
+}
+
 /** Promote a generalizable knowledge item to the cross-repo global KB as a DRAFT
  *  (`source='promoted'`). Drafts hold no vectors and are not retrievable until an
  *  admin activates them in Settings → Global KB, so this NEVER touches the
@@ -393,6 +405,7 @@ export async function promoteToGlobalKbDraft(
               status: globalKbEntries.status,
               title: globalKbEntries.title,
               body: globalKbEntries.body,
+              description: globalKbEntries.description,
             })
             .from(globalKbEntries)
             .where(
@@ -411,7 +424,11 @@ export async function promoteToGlobalKbDraft(
             )
             .limit(SUPERSEDE_CANDIDATE_LIMIT);
           // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
-          const identical = candidates.find((c) => c.body.trim() === clean.body.trim());
+          const identical = identicalPromotionTarget(
+            candidates,
+            clean.body,
+            normalizeGlobalKbDescription(clean.description),
+          );
           if (identical) {
             log.info(
               { topicKey: promotion.topicKey, existingId: identical.id },
