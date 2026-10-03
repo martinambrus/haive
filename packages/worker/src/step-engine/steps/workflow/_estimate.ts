@@ -158,14 +158,9 @@ interface PriorTaskRow {
   completedAt: Date | null;
 }
 
-/** Turn prior task rows into anchors: join their step timing, compute MEASURED effort via
- *  computeTaskTiming, and drop any with no measurable effort. `crossRepo` tags the origin. */
-async function hydrateAnchors(
-  db: Database,
-  priors: PriorTaskRow[],
-  crossRepo: boolean,
-): Promise<EstimateAnchor[]> {
-  if (priors.length === 0) return [];
+/** One measurement path for hydration and semantic-result eligibility. */
+async function measuredEfforts(db: Database, priors: PriorTaskRow[]): Promise<Map<string, number>> {
+  if (priors.length === 0) return new Map();
   const priorIds = priors.map((p) => p.id);
   const stepRows = await db.query.taskSteps.findMany({
     where: inArray(schema.taskSteps.taskId, priorIds),
@@ -190,14 +185,29 @@ async function hydrateAnchors(
   }
 
   const nowMs = Date.now();
-  const anchors: EstimateAnchor[] = [];
+  const efforts = new Map<string, number>();
   for (const p of priors) {
     // Cap at THIS anchor's completion instant, not the shared wall clock.
     const effortHours = effortHoursFromSteps(
       stepsByTask.get(p.id) ?? [],
       p.completedAt ? p.completedAt.getTime() : nowMs,
     );
-    if (effortHours <= 0) continue; // no measurable effort — not a useful anchor
+    if (effortHours > 0) efforts.set(p.id, effortHours);
+  }
+  return efforts;
+}
+
+/** Turn prior task rows into anchors, dropping any with no measurable effort. */
+async function hydrateAnchors(
+  db: Database,
+  priors: PriorTaskRow[],
+  crossRepo: boolean,
+): Promise<EstimateAnchor[]> {
+  const efforts = await measuredEfforts(db, priors);
+  const anchors: EstimateAnchor[] = [];
+  for (const p of priors) {
+    const effortHours = efforts.get(p.id);
+    if (effortHours == null) continue;
     anchors.push({
       title: p.title,
       description: (p.description ?? '').trim().slice(0, ANCHOR_DESC_CAP),
@@ -253,6 +263,19 @@ async function fetchPreferredTaskRows(
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   return ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
+}
+
+/** Validate and measure a bounded semantic-result page against the application DB.
+ *  Return ids in retrieval order, excluding stale, foreign or unmeasured rows. */
+export async function measuredPriorTaskIds(
+  db: Database,
+  taskId: string,
+  repositoryId: string,
+  ids: string[],
+): Promise<string[]> {
+  const priors = await fetchPreferredTaskRows(db, taskId, repositoryId, ids);
+  const efforts = await measuredEfforts(db, priors);
+  return [...new Set(ids)].filter((id) => efforts.has(id));
 }
 
 /**
@@ -333,7 +356,9 @@ export async function planProximityTaskIds(
       ),
     );
 
-  return rankPlanProximity(rows, nodeIds, executionPath);
+  // The anchor builder applies its budget after timing hydration. Returning the whole
+  // ordered candidate set prevents unmeasured plan rows from hiding measured matches.
+  return rankPlanProximity(rows, nodeIds, executionPath, rows.length);
 }
 
 /** One (task, node) row as the proximity query returns it. */
@@ -360,6 +385,7 @@ export function rankPlanProximity(
   rows: PlanProximityRow[],
   sameNodeIds: string[],
   executionPath: string | null = null,
+  limit = MAX_ANCHORS,
 ): string[] {
   const sameNode = new Set(sameNodeIds);
   const best = new Map<string, { tier: number; at: number; samePath: boolean }>();
@@ -380,7 +406,7 @@ export function rankPlanProximity(
       (a, b) =>
         Number(b[1].samePath) - Number(a[1].samePath) || a[1].tier - b[1].tier || b[1].at - a[1].at,
     )
-    .slice(0, MAX_ANCHORS)
+    .slice(0, limit)
     .map(([id]) => id);
 }
 

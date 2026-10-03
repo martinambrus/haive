@@ -8,6 +8,7 @@ import {
   computeBiasFactor,
   effortHoursFromSteps,
   fileOverlapTaskIds,
+  planProximityTaskIds,
   estimateRange,
   heuristicEstimate,
   overlapRefinedEstimate,
@@ -334,6 +335,37 @@ describe('buildAnchors', () => {
       overlapAnchors: 2,
       matchedFiles: 1,
     });
+  });
+
+  it('retains measured plan matches behind a full page of unmeasured same-path candidates', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [prior('old-plan-1', 'quick_bugfix'), prior('old-plan-2', 'quick_bugfix')];
+    const candidates = [...unmeasured, ...measured];
+    const planRows = candidates.map((p, i) => ({
+      taskId: p.id,
+      nodeId: 'node',
+      executionPath: p.executionPath,
+      completedAt: new Date(1000 - i),
+    }));
+    let selects = 0;
+    const planDb = {
+      select: () => {
+        const rows = selects++ === 0 ? [{ nodeId: 'node', path: '/root/node/' }] : planRows;
+        const chain = { from: () => chain, innerJoin: () => chain, where: async () => rows };
+        return chain;
+      },
+    } as unknown as Database;
+    const ids = await planProximityTaskIds(planDb, 'current', 'repo', 'quick_bugfix');
+    expect(ids).toHaveLength(MAX_ANCHORS + 2);
+    const recent = [1, 2, 3].map((i) => prior(`unrelated-${i}`, 'quick_bugfix'));
+    const { db } = mockDb(
+      [candidates, recent],
+      [...measured, ...recent].map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo', ids, 'quick_bugfix');
+    expect(anchors.slice(0, 2).map((a) => a.title)).toEqual(['old-plan-1', 'old-plan-2']);
   });
 
   it('pages broader recent history past unmeasured rows even without preferred ids', async () => {

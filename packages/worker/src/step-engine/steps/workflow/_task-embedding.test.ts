@@ -20,15 +20,21 @@ const prefs = { ollamaUrl: 'http://embedding', embeddingModel: 'model' } as RagT
 
 /** Pool order represents cosine rank. The mock executes the eligibility and limit parts
  *  of the captured vector query so a filter applied after LIMIT cannot pass these tests. */
-function fixture(pool: string[], matchingIds: string[]) {
+function fixture(
+  pool: string[],
+  matchingIds: string[],
+  unmeasured: string[] = [],
+  missing: string[] = [],
+) {
   const unsafe = vi.fn(async (query: string, params: unknown[]) => {
-    const eligible = new Set((params[5] ?? []) as string[]);
+    const eligible = new Set((query.includes('ANY') ? params[5] : []) as string[]);
     const candidates = query.includes('AND NOT (task_id = ANY')
       ? pool.filter((id) => !eligible.has(id))
       : query.includes('AND task_id = ANY')
         ? pool.filter((id) => eligible.has(id))
         : pool;
-    return candidates.slice(0, params[4] as number).map((task_id) => ({ task_id }));
+    const offset = params.at(-1) as number;
+    return candidates.slice(offset, offset + (params[4] as number)).map((task_id) => ({ task_id }));
   });
   const close = vi.fn().mockResolvedValue(undefined);
   vi.mocked(resolveRagConnection).mockResolvedValue({
@@ -36,10 +42,50 @@ function fixture(pool: string[], matchingIds: string[]) {
     embeddingDimensions: 2,
     close,
   } as never);
-  const findMany = vi.fn().mockResolvedValue(matchingIds.map((id) => ({ id })));
+  const findMany = vi.fn(
+    async (args: {
+      columns: Record<string, boolean>;
+      where: Parameters<PgDialect['sqlToQuery']>[0];
+    }) => {
+      if (!args.columns.title) return matchingIds.map((id) => ({ id }));
+      const requested = new Set(new PgDialect().sqlToQuery(args.where).params);
+      return pool
+        .filter((id) => requested.has(id) && !missing.includes(id))
+        .map((id) => ({
+          id,
+          title: id,
+          description: '',
+          executionPath: matchingIds.includes(id) ? 'quick_bugfix' : 'full_workflow',
+          currentRound: 0,
+          changedPaths: [],
+          aiEstimatedTimeHours: null,
+          estimatedTimeHours: null,
+          completedAt: new Date(3_600_000),
+        }));
+    },
+  );
   const ctx = {
     taskId: 'current',
-    db: { query: { tasks: { findMany } } },
+    db: {
+      query: {
+        tasks: { findMany },
+        taskSteps: {
+          findMany: vi.fn().mockResolvedValue(
+            pool
+              .filter((id) => !unmeasured.includes(id))
+              .map((taskId) => ({
+                taskId,
+                startedAt: new Date(0),
+                endedAt: new Date(3_600_000),
+                idleMs: 0,
+                userActiveMs: 0,
+                waitingStartedAt: null,
+                status: 'done',
+              })),
+          ),
+        },
+      },
+    },
     logger: { warn: vi.fn() },
   } as unknown as StepContext;
   return { ctx, unsafe, close, findMany };
@@ -106,7 +152,7 @@ describe('retrieveSimilarTaskIds', () => {
       'full',
       'fix',
     ]);
-    expect(findMany).not.toHaveBeenCalled();
+    expect(findMany).toHaveBeenCalledTimes(1); // measured-result validation, no path eligibility query
     expect(unsafe).toHaveBeenCalledTimes(1);
     expect(unsafe.mock.calls[0]![0]).not.toContain('ANY');
   });
@@ -118,6 +164,36 @@ describe('retrieveSimilarTaskIds', () => {
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual([]);
     expect(unsafe).not.toHaveBeenCalled();
+  });
+
+  it('pages past unmeasured same-path embeddings to older measured semantic matches', async () => {
+    const unmeasured = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}`);
+    const fixes = ['older-fix-1', 'older-fix-2', 'older-fix-3'];
+    const { ctx, unsafe } = fixture(
+      [...unmeasured, ...fixes],
+      [...unmeasured, ...fixes],
+      unmeasured,
+    );
+    expect(
+      await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
+    ).toEqual(fixes);
+    expect(unsafe.mock.calls.slice(0, 2).map(([, params]) => params.at(-1))).toEqual([0, 30]);
+  });
+
+  it('fills sparse history with measured broader matches after exhausting unmeasured same-path embeddings', async () => {
+    const unmeasured = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}`);
+    const { ctx, unsafe } = fixture([...unmeasured, 'full-1', 'full-2'], unmeasured, unmeasured);
+    expect(
+      await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
+    ).toEqual(['full-1', 'full-2']);
+    expect(unsafe.mock.calls[2]![0]).toContain('AND NOT (task_id = ANY');
+  });
+
+  it('does not count stale task ids as measured anchors even when their timing rows remain', async () => {
+    const { ctx } = fixture(['stale', 'fix'], ['stale', 'fix'], [], ['stale']);
+    expect(
+      await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 2, 'quick_bugfix'),
+    ).toEqual(['fix']);
   });
 
   it('closes the store and degrades to recency if the path-aware query fails', async () => {

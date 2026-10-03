@@ -13,10 +13,12 @@ For a known path, `buildAnchors` takes same-path plan/semantic matches first, th
 same-path completed runs. It queries those runs separately: sorting only a mixed set of the
 latest 30 tasks would leave older bugfixes unreachable. Within the path, plan proximity and
 semantic ordering remain useful scope signals. Anchors with no measurable effort do not count.
-Plan and semantic retrieval prioritize the current path before applying their own result
-caps, so older relevant matches cannot be crowded out by other paths. Semantic retrieval
+Plan and semantic retrieval prioritize the current path before applying measured-anchor
+budgets, so older relevant matches cannot be crowded out by other paths. Plan retrieval
+returns the full ordered candidate set for batched timing hydration. Semantic retrieval
 resolves eligible completed same-path task ids from Postgres and binds that set into the
-vector query, then tops up with other paths when needed. This also works with external RAG
+vector query, pages past unmeasured results using the same timing calculation as hydration,
+then tops up with measured matches on other paths when needed. This also works with external RAG
 stores and existing task embeddings, which contain no execution-path metadata.
 The same-path query pages past unmeasured rows until three usable runs are found or history
 is exhausted; a full page of completed tasks must not force a mixed-path fallback. Each page

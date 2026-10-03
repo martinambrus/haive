@@ -1,6 +1,7 @@
 import { ollamaEmbed, probeOllama, vectorLiteral, TASK_SOURCE_TYPE } from '@haive/shared/rag';
 import { and, eq, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { measuredPriorTaskIds } from './_estimate.js';
 import type { StepContext } from '../../step-definition.js';
 import {
   RAG_TABLE,
@@ -122,29 +123,36 @@ export async function retrieveSimilarTaskIds(
         })
       : [];
     const matchingIds = matchingTasks.map((t) => t.id);
-    const params = [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec), limit];
-    const query = (pathFilter: string) => `SELECT task_id
-       FROM ${RAG_TABLE}
-       WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
-       ${pathFilter}
-       ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims})
-       LIMIT $5`;
-    let matching: Array<{ task_id: string | null }> = [];
-    if (matchingIds.length > 0) {
-      matching = await conn.pg.unsafe(query('AND task_id = ANY($6::uuid[])'), [
-        ...params,
-        matchingIds,
-      ]);
-      if (matching.length >= limit)
-        return matching.map((r) => r.task_id).filter((id): id is string => !!id);
-    }
-    const rows = (await conn.pg.unsafe(
-      query(matchingIds.length > 0 ? 'AND NOT (task_id = ANY($6::uuid[]))' : ''),
-      matchingIds.length > 0
-        ? [...params.slice(0, 4), limit - matching.length, matchingIds]
-        : params,
-    )) as Array<{ task_id: string | null }>;
-    return [...matching, ...rows].map((r) => r.task_id).filter((id): id is string => !!id);
+    const params = [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec)];
+    const readMeasured = async (pathFilter: string, budget: number): Promise<string[]> => {
+      const selected: string[] = [];
+      const seen = new Set<string>();
+      const useIds = pathFilter !== '';
+      for (let offset = 0; selected.length < budget; offset += budget) {
+        const rows = (await conn!.pg.unsafe(
+          `SELECT task_id
+           FROM ${RAG_TABLE}
+           WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
+           ${pathFilter}
+           ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims}), task_id
+           LIMIT $5 OFFSET $${useIds ? 7 : 6}`,
+          [...params, budget, ...(useIds ? [matchingIds] : []), offset],
+        )) as Array<{ task_id: string | null }>;
+        const ids = rows.map((r) => r.task_id).filter((id): id is string => !!id && !seen.has(id));
+        for (const id of ids) seen.add(id);
+        selected.push(...(await measuredPriorTaskIds(ctx.db, ctx.taskId, repositoryId, ids)));
+        if (rows.length < budget) break;
+      }
+      return selected.slice(0, budget);
+    };
+    const matching =
+      matchingIds.length > 0 ? await readMeasured('AND task_id = ANY($6::uuid[])', limit) : [];
+    if (matching.length >= limit) return matching;
+    const broader = await readMeasured(
+      matchingIds.length > 0 ? 'AND NOT (task_id = ANY($6::uuid[]))' : '',
+      limit - matching.length,
+    );
+    return [...matching, ...broader];
   } catch (err) {
     ctx.logger.warn({ err }, 'semantic task retrieval failed (falling back to newest-first)');
     return [];
