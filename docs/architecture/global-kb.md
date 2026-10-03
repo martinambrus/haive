@@ -35,7 +35,9 @@ promotions in `08-knowledge-acquisition` and `11-phase-8-learning` (the project 
 project's name to `example-app` as a whole token (letters and digits bound it; `_`, `-` and `/` do not),
 and only when the name is the repository's own: a generic name, a public technology (`laravel`,
 `drupal`, `redis`) or a value of the promotion's scope is left alone, since a repository named
-laravel still writes articles about Laravel. Activating a draft that supersedes an entry
+laravel still writes articles about Laravel. A promoted investigation has no scope to tell its
+subject from the project's name, so it is not scrubbed; the person scopes it before activating.
+Activating a draft that supersedes an entry
 archives that entry, so a draft that states no description of its own takes the entry's when it is
 written, by the enrich task or a promotion, and `09_6_4` gives it again whether or not its merge
 succeeded, never over one written since and never to a draft activated meanwhile. A promotion whose
