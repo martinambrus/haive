@@ -62,13 +62,21 @@ function coverageNote(c: FileCoverage | null): string {
   return `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`;
 }
 
+interface LiteCheck {
+  ran: boolean;
+  passed: boolean;
+  output: string;
+  scope?: { blocking: number; preExisting: number };
+  note?: string;
+}
+
 interface VerifyGateDetect {
   /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
    *  skipped (no command detected / unticked) and must NOT be shown as a fail. */
   verify: {
-    test: { ran: boolean; passed: boolean; output: string } | null;
-    lint: { ran: boolean; passed: boolean; output: string } | null;
-    typecheck: { ran: boolean; passed: boolean; output: string } | null;
+    test: LiteCheck | null;
+    lint: LiteCheck | null;
+    typecheck: LiteCheck | null;
   };
   allPassed: boolean;
   /** Phase 4 pre-test validation result (null when the step didn't run). */
@@ -342,10 +350,18 @@ interface VerifyGateApply {
   runtimeErrors: string;
 }
 
+interface StoredCheck {
+  ran?: boolean;
+  passed?: boolean;
+  output?: string;
+  scope?: { blocking?: number; preExisting?: number };
+  note?: string;
+}
+
 interface VerifyOutput {
-  test?: { ran?: boolean; passed?: boolean; output?: string };
-  lint?: { ran?: boolean; passed?: boolean; output?: string };
-  typecheck?: { ran?: boolean; passed?: boolean; output?: string };
+  test?: StoredCheck;
+  lint?: StoredCheck;
+  typecheck?: StoredCheck;
   passed?: boolean;
   runtimeSmoke?: {
     ran?: boolean;
@@ -359,16 +375,17 @@ interface VerifyOutput {
 /** Narrow a stored verify-slot result to what the gate needs. A skipped slot (08
  *  returns ran:false) stays ran:false so the gate OMITS it rather than showing a
  *  contradictory "FAIL". null when the slot is absent entirely. */
-function liteCheck(c?: {
-  ran?: boolean;
-  passed?: boolean;
-  output?: string;
-}): { ran: boolean; passed: boolean; output: string } | null {
+function liteCheck(c?: StoredCheck): LiteCheck | null {
   if (!c) return null;
+  const { blocking, preExisting } = c.scope ?? {};
   return {
     ran: c.ran !== false,
     passed: c.passed === true,
     output: (c.output ?? '').slice(0, 4000),
+    ...(typeof blocking === 'number' && typeof preExisting === 'number'
+      ? { scope: { blocking, preExisting } }
+      : {}),
+    ...(c.note ? { note: c.note } : {}),
   };
 }
 
@@ -831,9 +848,16 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ['Typecheck', detected.verify.typecheck],
     ] as const) {
       if (!c || !c.ran) continue;
+      const preExisting = c.passed ? (c.scope?.preExisting ?? 0) : 0;
+      const detail =
+        preExisting > 0
+          ? `${preExisting} pre-existing violation(s) elsewhere, none on lines this change wrote`
+          : c.note;
       rows.push({
         label,
-        status: c.passed ? 'pass' : 'fail',
+        status: !c.passed ? 'fail' : preExisting > 0 ? 'warn' : 'pass',
+        ...(preExisting > 0 ? { statusLabel: 'PRE-EXISTING' } : {}),
+        ...(detail ? { detail } : {}),
         ...(c.passed || !c.output.trim()
           ? {}
           : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
