@@ -163,10 +163,9 @@ export const advisoryDecisionStep: StepDefinition<DecisionDetect, DecisionApply>
     const body = parts.filter(Boolean).join('\n\n');
     const bodyWritten = body !== d.nodeBody.trim();
 
-    // Re-read the version rather than trusting detect's: this step parks on a
-    // form, so an unbounded amount of time — and any number of plan chats — can
-    // pass between the two.
-    const fresh = await loadPlanNode(ctx.db, d.repositoryId, d.nodeId);
+    // The body and question came from detect, so the version must too. A direct
+    // human resolution or plan chat can land while this form is parked; using
+    // its newer version with the old body would silently overwrite that edit.
     await applyPlanPatch(
       ctx.db,
       {
@@ -176,7 +175,7 @@ export const advisoryDecisionStep: StepDefinition<DecisionDetect, DecisionApply>
             nodeRef: d.nodeId,
             status,
             ...(bodyWritten ? { body } : {}),
-            ...(fresh ? { expectedVersion: fresh.version } : {}),
+            expectedVersion: d.nodeVersion,
           },
         ],
       },

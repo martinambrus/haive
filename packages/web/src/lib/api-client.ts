@@ -1794,6 +1794,7 @@ export interface PlanTreeNode {
 }
 
 export interface PlanNodeDetail {
+  advisoryTask?: PlanNodeTask | null;
   node: PlanNode;
   ancestry: PlanCrumb[];
   children: PlanNode[];

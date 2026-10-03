@@ -81,6 +81,17 @@ is a separate optional advisory run; research still ends at a human decision gat
 `@haive/shared/plan-resolution` subpath holds the shared UI/API policy and form without pulling
 the database or host filesystem into the browser.
 
+**An advisory holds its question.** Open advisories are linked by `tasks.metadata.planNodeId`,
+not by `plan_node_tasks`: they neither implement a node nor touch its code. Readiness includes
+those metadata links in its open-task exclusion. The node detail names an open advisory so
+the panel offers **Continue research**. Advisory starts lock the plan node, reuse an existing
+open advisory, or insert the new task in that transaction through `spawnPlanTask`'s injected
+writer with `enqueue: false`; `enqueuePlanTask` delivers START only after commit. Two tabs
+therefore continue one run. The advisory's final form writes with its detect-time node version,
+matching the question and body it actually showed: a direct answer or plan chat landing while
+it is parked must conflict rather than be overwritten with stale text or status. A freshly read
+version with a detect-time body used to bypass that protection.
+
 **Impact answers "if I change this, what else must change?"** (`shared/plan/impact.ts`): an explicit BFS with a visited set, because the edge graph has cycles by construction and a recursive CTE without dedup would not terminate while one with dedup could not say where it stopped. Both caps are REPORTED, never applied silently. The mermaid source encodes nodes as a `pnode<32 hex>` token; the browser recovers the uuid from THAT, unanchored — mermaid prefixes rendered ids with its own render id, so a `^flowchart-` anchor binds zero handlers and fails silently.
 
 The walk takes a SET of origins, because gate 1 asks the question of every component a spec named rather than of one of them. Two consequences. `depth` is then the distance to the NEAREST origin, which is the honest number — the per-origin walks it replaced recorded whichever origin reached a node first in list order, and MEASURED on a real task that reported 1 node at one hop where the multi-origin walk finds 72. And every origin is seeded as visited, so the walk never discovers an edge BETWEEN two origins: `renderImpactMermaid`'s `edges` option exists to draw those, and without it a multi-origin picture is a row of disconnected boxes. The diagram's `maxNodes` bounds HOPS only — origins are always drawn, so a caller with more origins than a picture can hold must decide not to draw one. **Code links** have one writer (the applier; the builder only links files it actually opened, with `evidence`) and rot is flagged, not guessed away: `11c-rag-reindex` marks links stale for the paths in `tasks.changedPaths`, and only re-assertion by an agent clears the flag — the difference between an impact view that is wrong and one that is merely old.

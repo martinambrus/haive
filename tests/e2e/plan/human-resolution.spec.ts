@@ -112,4 +112,40 @@ test.describe('human plan resolutions', () => {
       await sql.end({ timeout: 5 });
     }
   });
+
+  test('withholds a decision under research and continues the existing advisory', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    let repo: Awaited<ReturnType<typeof seedRepoFixture>> | null = null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'human-plan-advisory' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'human-advisory');
+      const plan = await seedPlan(sql, repo.repoId, 'human-advisory');
+      await sql`update plan_nodes set kind = 'decision', taskable = false where id = ${plan.todoId}`;
+      const taskId = randomUUID();
+      await sql`insert into tasks (id, user_id, repository_id, type, title, status, metadata)
+        values (${taskId}, ${userId}, ${repo.repoId}, 'advisory', 'Evaluate revision meanings', 'waiting_user', ${sql.json({ planNodeId: plan.todoId })})`;
+      const ready = await page.request.get(`${API_BASE}/repositories/${repo.repoId}/plan/ready`);
+      expect(await ready.json()).toMatchObject({ matches: [], total: 0 });
+      const url = `${API_BASE}/repositories/${repo.repoId}/plan/nodes/${plan.todoId}/advisory`;
+      const replies = await Promise.all([
+        page.request.post(url, { data: {} }),
+        page.request.post(url, { data: {} }),
+      ]);
+      for (const reply of replies) {
+        expect(reply.ok()).toBe(true);
+        expect(await reply.json()).toEqual({ taskId });
+      }
+      const rows = await sql<
+        { id: string }[]
+      >`select id from tasks where repository_id = ${repo.repoId} and type = 'advisory'`;
+      expect(rows).toEqual([{ id: taskId }]);
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
 });

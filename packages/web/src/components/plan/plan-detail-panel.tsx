@@ -580,7 +580,7 @@ export function PlanDetailPanel({
                 disabled={saving}
                 onClick={() => void researchOptions()}
               >
-                Help me evaluate the options
+                {detail.advisoryTask ? 'Continue research' : 'Help me evaluate the options'}
               </Button>
             </div>
           )}
