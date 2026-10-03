@@ -444,9 +444,6 @@ async function runScopedPhpcs(
     const startedAt = performance.now();
     const run = await execSlot(cmd, ctx, workspace, handle, flags);
     const elapsedMs = performance.now() - startedAt;
-    if (run.exitCode === 0) {
-      return { check: { ran: true, passed: true, command: cmd.label, output: run.output } };
-    }
     if (run.exitCode === NOT_FOUND_EXIT) {
       const check = {
         ran: false,
@@ -457,9 +454,13 @@ async function runScopedPhpcs(
       };
       return { check };
     }
+    // ignore_errors_on_exit and ignore_warnings_on_exit hide violations from the exit code.
     const text = await readTextNoFollow(anchor, reportRel, { maxBytes: MAX_REPORT_BYTES });
     const report = text === null ? null : parsePhpcsJsonReport(text);
     if (report === null) {
+      if (run.exitCode === 0) {
+        return { check: { ran: true, passed: true, command: cmd.label, output: run.output } };
+      }
       // Only the clock tells a kill from another exit 1. A re-run would spend the limit again, and a
       // fix round cannot repair a timeout, so it is reported as not run rather than as a failure.
       if (elapsedMs >= SLOT_TIMEOUT_MS - TIME_LIMIT_SLACK_MS) {

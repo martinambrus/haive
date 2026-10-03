@@ -826,21 +826,24 @@ describe('phase5VerifyStep.apply', () => {
       new Map(Object.entries(entries));
     const rangesIn = (file: string, ...r: [number, number][]) =>
       changed({ [file]: { whole: false, ranges: r } });
-    const reportJson = (files: Record<string, number[]>): string =>
+    const reportJson = (
+      files: Record<string, number[]>,
+      type: 'ERROR' | 'WARNING' = 'ERROR',
+    ): string =>
       JSON.stringify({
         totals: { errors: 0, warnings: 0 },
         files: Object.fromEntries(
           Object.entries(files).map(([file, lines]) => [
             file,
             {
-              errors: lines.length,
-              warnings: 0,
+              errors: type === 'ERROR' ? lines.length : 0,
+              warnings: type === 'WARNING' ? lines.length : 0,
               messages: lines.map((line) => ({
                 message: `Problem on line ${line}`,
                 source: 'Drupal.Test.Sniff',
                 severity: 5,
                 fixable: false,
-                type: 'ERROR',
+                type,
                 line,
                 column: 1,
               })),
@@ -1014,7 +1017,7 @@ process.exitCode = run.exit;
         expect(out.lint.output).not.toContain('pre-existing');
       });
 
-      it('passes a phpcs that exits 0 without reading any report', async () => {
+      it('passes a phpcs that exits 0 and wrote no report, without running it again', async () => {
         await installPhpcs({ flagged: { exit: 0 } });
 
         const out = await lintApply(rangesIn('src/a.php', [10, 12]));
@@ -1027,6 +1030,110 @@ process.exitCode = run.exit;
         });
         expect(await calls()).toHaveLength(1);
         expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` passes;');
+      });
+
+      it('passes a phpcs that exits 0 and left a report cut off, without running it again', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: '{"files":{"src/a.php":{"messages":[{"message":"x"' },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '',
+        });
+        expect(await calls()).toHaveLength(1);
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it('fails on an error on a line the change wrote even though phpcs exits 0', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: reportJson({ 'src/a.php': [11, 90] }) },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: false,
+          command: 'vendor/bin/phpcs',
+          output: [
+            'src/a.php:11: [ERROR] Problem on line 11 (Drupal.Test.Sniff)',
+            '1 pre-existing violation(s) elsewhere predate this change — do not edit code to clear them.',
+          ].join('\n'),
+          scope: { blocking: 1, preExisting: 1 },
+        });
+        expect(out.passed).toBe(false);
+        expect(evaluate(out)).toEqual({
+          blocking: true,
+          diagnosis: `### lint failed (\`vendor/bin/phpcs\`)\n${out.lint.output}`,
+        });
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` FAILS on lines this change wrote');
+        expect(await calls()).toHaveLength(1);
+        expect(await reportsLeft()).toEqual([]);
+      });
+
+      it.each([0, 1, 2])(
+        'fails on a warning on a line the change wrote, whatever phpcs exits with (%i)',
+        async (exit) => {
+          await installPhpcs({
+            flagged: { exit, report: reportJson({ 'src/a.php': [11] }, 'WARNING') },
+          });
+
+          const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+          expect(out.lint).toEqual({
+            ran: true,
+            passed: false,
+            command: 'vendor/bin/phpcs',
+            output: 'src/a.php:11: [WARNING] Problem on line 11 (Drupal.Test.Sniff)',
+            scope: { blocking: 1, preExisting: 0 },
+          });
+          expect(out.passed).toBe(false);
+          expect(await calls()).toHaveLength(1);
+        },
+      );
+
+      it('passes, counting what predates the change, when phpcs exits 0 and none of it is on a line the change wrote', async () => {
+        await installPhpcs({
+          flagged: { exit: 0, report: reportJson({ 'src/legacy.php': [3, 4, 90] }) },
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '3 pre-existing violation(s) elsewhere predate this change — not blocking.',
+          scope: { blocking: 0, preExisting: 3 },
+        });
+        expect(out.passed).toBe(true);
+        expect(evaluate(out)).toBeNull();
+        expect(ledgerText()).toContain(
+          'lint: `vendor/bin/phpcs` passes on changed lines (3 pre-existing)',
+        );
+        expect(await calls()).toHaveLength(1);
+      });
+
+      it('passes a phpcs that exits 0 with a clean report', async () => {
+        await installPhpcs({ flagged: { exit: 0, report: reportJson({ 'src/a.php': [] }) } });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toEqual({
+          ran: true,
+          passed: true,
+          command: 'vendor/bin/phpcs',
+          output: '',
+          scope: { blocking: 0, preExisting: 0 },
+        });
+        expect(out.passed).toBe(true);
+        expect(ledgerText()).toContain('lint: `vendor/bin/phpcs` passes;');
+        expect(await calls()).toHaveLength(1);
       });
 
       it('re-runs the original command and keeps its verdict when phpcs wrote no report', async () => {
@@ -1317,6 +1424,24 @@ process.exitCode = run.exit;
           scope: { blocking: 0, preExisting: 2 },
         });
         expect(out.passed).toBe(true);
+      });
+
+      it('fails on a violation on a line the change wrote even though the container exits 0', async () => {
+        runnerAnswers({
+          flagged: [0, reportJson({ 'src/a.php': [11], 'src/legacy.php': [3, 4] })],
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([expect.stringMatching(FLAGGED)]);
+        expect(out.lint).toMatchObject({
+          ran: true,
+          passed: false,
+          command: 'ddev exec vendor/bin/phpcs',
+          scope: { blocking: 1, preExisting: 2 },
+        });
+        expect(out.lint.output).toContain('src/a.php:11: [ERROR] Problem on line 11');
+        expect(out.passed).toBe(false);
       });
 
       it('does not block, and says the lint did not run, on exit 127', async () => {
