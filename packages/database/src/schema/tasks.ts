@@ -410,8 +410,8 @@ export const tasks = pgTable(
      *  dispatch moves a codex run onto app-server only while its entry is `supported` and still
      *  current (`providerCliVersion` equals the provider's cli_version). On the task row because
      *  a verdict must survive step resets, the same reason as modelIdentity. NULL = never
-     *  probed, which runs `codex exec`. Declared last so drizzle-kit push and the migration agree
-     *  on column order. Keep in sync with `CodexAppServerVerdict` in the worker's
+     *  probed, which runs `codex exec`. Declared after the older columns so drizzle-kit push and the
+     *  migration agree on column order. Keep in sync with `CodexAppServerVerdict` in the worker's
      *  cli-adapters/codex-app-server-verdict.ts — this package cannot import the worker.
      *  Migration 0157. */
     codexAppServer: jsonb('codex_app_server').$type<
@@ -1085,8 +1085,8 @@ export const cliInvocations = pgTable(
      *  Keep in sync with `InvocationToolUsage` in @haive/shared — this package cannot import
      *  shared (circular; same note as tokenUsage above). Migration 0159.
      *
-     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
-     *  the table in declaration order; anywhere else and schema-parity goes red. */
+     *  Declared after the older columns because ALTER TABLE ADD COLUMN appends while drizzle-kit
+     *  push builds the table in declaration order; anywhere else and schema-parity goes red. */
     toolUsage: jsonb('tool_usage').$type<{
       source: 'stream' | 'backfill';
       coverage: 'full' | 'partial' | 'none';
@@ -1107,13 +1107,13 @@ export const cliInvocations = pgTable(
     }>(),
     /** Which agent rules the run was given: the hash of its provider's effective rules, whether
      *  they were injected at the top of the prompt, and why not when they were not. Written at exec
-     *  start from the spec, so a run that never started stays NULL. Migration 0166; declared LAST
-     *  for schema-parity. */
+     *  start from the spec, so a run that never started stays NULL. Migration 0166. */
     agentRules: jsonb('agent_rules').$type<{
       hash: string | null;
       injected: boolean;
       reason?: 'disabled' | 'opt-out' | 'prompt-too-large';
     }>(),
+    haiveBuild: text('haive_build'),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

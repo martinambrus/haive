@@ -1,6 +1,7 @@
 import { and, eq, notInArray } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
+import { currentBuildStamp } from '../build-stamp.js';
 
 type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -103,7 +104,10 @@ export async function insertOwnedRun(
   values: typeof schema.cliInvocations.$inferInsert,
 ): Promise<typeof schema.cliInvocations.$inferSelect> {
   return db.transaction(async (tx) => {
-    const [run] = await tx.insert(schema.cliInvocations).values(values).returning();
+    const [run] = await tx
+      .insert(schema.cliInvocations)
+      .values({ ...values, haiveBuild: currentBuildStamp() })
+      .returning();
     if (!run) throw new Error(`failed to insert a cli_invocations row for task step ${stepRowId}`);
     await assertOwnsStep(tx, stepRowId);
     return run;
