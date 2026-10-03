@@ -21,10 +21,12 @@ limit; lookup batches preserve the candidate order. Preferred timing hydration u
 500-candidate batch size independently of the 30-anchor output cap, so mostly unmeasured large
 plans do not require a database round trip per 30 candidates. Semantic retrieval
 resolves eligible completed same-path task ids from Postgres and binds that set into the
-vector query, scans fixed 500-candidate pages independently of the remaining anchor budget,
+vector query, streams fixed 500-candidate cursor batches independently of the remaining anchor budget,
 and measures results using the same timing calculation as hydration. Ranking uses the exact
 `cosine_distance` function rather than an HNSW distance-operator scan: an approximate index scan
-can return a short page before history is exhausted ([pgvector troubleshooting](https://github.com/pgvector/pgvector#why-are-there-less-results-for-a-query-after-adding-an-hnsw-index)). It truncates measured
+can return a short page before history is exhausted ([pgvector troubleshooting](https://github.com/pgvector/pgvector#why-are-there-less-results-for-a-query-after-adding-an-hnsw-index)).
+The cursor sorts once for each execution-path tier and closes early when the measured output
+budget is filled, avoiding repeated exact scans and sorts for OFFSET pages. It truncates measured
 results to the requested budget while preserving cosine order,
 then tops up with measured matches on other paths when needed. This also works with external RAG
 stores and existing task embeddings, which contain no execution-path metadata.
@@ -38,7 +40,7 @@ Every anchor budget is applied to measured runs, including preferred file-overla
 broader local fallback, and cross-repository history. Preferred candidates are hydrated in
 batches and database queries scan 500-candidate pages until their usable budget is filled or
 history is exhausted; this also applies to same-path recency, broader local, and cold-start scans.
-unmeasured rows never hide later usable history. Broader local history is exhausted before
+Unmeasured rows never hide later usable history. Broader local history is exhausted before
 falling back to other repositories.
 
 **Do not scale a same-path baseline twice.** The heuristic and p20/p80 band use the local

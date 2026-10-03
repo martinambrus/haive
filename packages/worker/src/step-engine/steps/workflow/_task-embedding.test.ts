@@ -19,23 +19,32 @@ vi.mock('../onboarding/_rag-connection.js', () => ({
 
 const prefs = { ollamaUrl: 'http://embedding', embeddingModel: 'model' } as RagToolingPrefs;
 
-/** Pool order represents cosine rank. The mock executes the eligibility and limit parts
- *  of the captured vector query so a filter applied after LIMIT cannot pass these tests. */
+/** Pool order represents cosine rank. Filter before streaming cursor batches,
+ *  recording each batch so early close and single-query retrieval can be checked. */
 function fixture(
   pool: string[],
   matchingIds: string[],
   unmeasured: string[] = [],
   missing: string[] = [],
 ) {
-  const unsafe = vi.fn(async (query: string, params: unknown[]) => {
-    const eligible = new Set((query.includes('ANY') ? params[5] : []) as string[]);
+  const cursorBatches = vi.fn();
+  const unsafe = vi.fn((query: string, params: unknown[]) => {
+    const eligible = new Set((query.includes('ANY') ? params[4] : []) as string[]);
     const candidates = query.includes('AND NOT (task_id = ANY')
       ? pool.filter((id) => !eligible.has(id))
       : query.includes('AND task_id = ANY')
         ? pool.filter((id) => eligible.has(id))
         : pool;
-    const offset = params.at(-1) as number;
-    return candidates.slice(offset, offset + (params[4] as number)).map((task_id) => ({ task_id }));
+    return {
+      cursor: (size: number) =>
+        (async function* () {
+          for (let offset = 0; offset < candidates.length; offset += size) {
+            const rows = candidates.slice(offset, offset + size).map((task_id) => ({ task_id }));
+            cursorBatches(rows);
+            yield rows;
+          }
+        })(),
+    };
   });
   const close = vi.fn().mockResolvedValue(undefined);
   vi.mocked(resolveRagConnection).mockResolvedValue({
@@ -89,7 +98,7 @@ function fixture(
     },
     logger: { warn: vi.fn() },
   } as unknown as StepContext;
-  return { ctx, unsafe, close, findMany };
+  return { ctx, unsafe, close, findMany, cursorBatches };
 }
 
 beforeEach(() => {
@@ -101,8 +110,8 @@ beforeEach(() => {
 describe('retrieveSimilarTaskIds', () => {
   it('ranks same-path embeddings before a full mixed-path result budget', async () => {
     const full = Array.from({ length: 30 }, (_, i) => `full-${i}`);
-    const fixes = Array.from({ length: 35 }, (_, i) => `fix-${i}`);
-    const { ctx, unsafe, findMany, close } = fixture([...full, ...fixes], fixes);
+    const fixes = Array.from({ length: 1035 }, (_, i) => `fix-${i}`);
+    const { ctx, unsafe, findMany, close, cursorBatches } = fixture([...full, ...fixes], fixes);
     const ids = await retrieveSimilarTaskIds(
       ctx,
       prefs,
@@ -115,8 +124,9 @@ describe('retrieveSimilarTaskIds', () => {
     expect(ids).toEqual(fixes.slice(0, 30));
     expect(unsafe).toHaveBeenCalledTimes(1);
     const [query, params] = unsafe.mock.calls[0]!;
-    expect(query).toContain('AND task_id = ANY($6::uuid[])');
-    expect(params[5]).toHaveLength(35);
+    expect(query).toContain('AND task_id = ANY($5::uuid[])');
+    expect(params[4]).toHaveLength(1035);
+    expect(cursorBatches.mock.calls.map(([rows]) => rows.length)).toEqual([HISTORY_BATCH_SIZE]);
     const eligibility = new PgDialect().sqlToQuery(findMany.mock.calls[0]![0].where);
     expect(eligibility.params).toEqual([
       'repo',
@@ -143,8 +153,7 @@ describe('retrieveSimilarTaskIds', () => {
       'quick_bugfix',
     );
     expect(ids).toEqual(['fix-1', 'fix-2', 'full-1', 'full-2']);
-    expect(unsafe.mock.calls[1]![0]).toContain('AND NOT (task_id = ANY($6::uuid[]))');
-    expect(unsafe.mock.calls[1]![1][4]).toBe(HISTORY_BATCH_SIZE);
+    expect(unsafe.mock.calls[1]![0]).toContain('AND NOT (task_id = ANY($5::uuid[]))');
   });
 
   it('preserves cosine ranking when the current path is unknown', async () => {
@@ -170,7 +179,7 @@ describe('retrieveSimilarTaskIds', () => {
   it('pages past unmeasured same-path embeddings to older measured semantic matches', async () => {
     const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) => `unmeasured-${i}`);
     const fixes = ['older-fix-1', 'older-fix-2', 'older-fix-3'];
-    const { ctx, unsafe } = fixture(
+    const { ctx, unsafe, cursorBatches } = fixture(
       [...unmeasured, ...fixes],
       [...unmeasured, ...fixes],
       unmeasured,
@@ -178,10 +187,10 @@ describe('retrieveSimilarTaskIds', () => {
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual(fixes);
-    expect(unsafe.mock.calls.slice(0, 2).map(([, params]) => params.at(-1))).toEqual([
-      0,
-      HISTORY_BATCH_SIZE,
-    ]);
+    expect(unsafe.mock.calls.filter(([query]) => query.includes('AND task_id = ANY'))).toHaveLength(
+      1,
+    );
+    expect(cursorBatches.mock.calls.map(([rows]) => rows.length)).toEqual([HISTORY_BATCH_SIZE, 3]);
   });
 
   it('fills sparse history with measured broader matches after exhausting unmeasured same-path embeddings', async () => {
@@ -190,13 +199,13 @@ describe('retrieveSimilarTaskIds', () => {
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual(['full-1', 'full-2']);
-    expect(unsafe.mock.calls[2]![0]).toContain('AND NOT (task_id = ANY');
+    expect(unsafe.mock.calls[1]![0]).toContain('AND NOT (task_id = ANY');
   });
 
   it('scans broader history in full pages when only one measured anchor remains', async () => {
     const fixes = Array.from({ length: 29 }, (_, i) => `fix-${i}`);
     const unmeasured = Array.from({ length: 1000 }, (_, i) => `unmeasured-${i}`);
-    const { ctx, unsafe, findMany } = fixture(
+    const { ctx, unsafe, findMany, cursorBatches } = fixture(
       [...fixes, ...unmeasured, 'broader-measured', 'broader-extra'],
       fixes,
       unmeasured,
@@ -205,10 +214,9 @@ describe('retrieveSimilarTaskIds', () => {
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual([...fixes, 'broader-measured']);
-    expect(unsafe.mock.calls.length).toBeLessThan(10);
+    expect(unsafe).toHaveBeenCalledTimes(2);
     expect(findMany.mock.calls.length).toBeLessThan(10);
-    expect(unsafe.mock.calls.slice(1).map(([, params]) => params.at(-1))).toEqual([0, 500, 1000]);
-    expect(unsafe.mock.calls.every(([, params]) => params[4] === HISTORY_BATCH_SIZE)).toBe(true);
+    expect(cursorBatches.mock.calls.map(([rows]) => rows.length)).toEqual([29, 500, 500, 2]);
   });
 
   it('does not count stale task ids as measured anchors even when their timing rows remain', async () => {
@@ -220,7 +228,9 @@ describe('retrieveSimilarTaskIds', () => {
 
   it('closes the store and degrades to recency if the path-aware query fails', async () => {
     const { ctx, unsafe, close } = fixture(['fix'], ['fix']);
-    unsafe.mockRejectedValueOnce(new Error('store unavailable'));
+    unsafe.mockImplementationOnce(() => {
+      throw new Error('store unavailable');
+    });
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual([]);

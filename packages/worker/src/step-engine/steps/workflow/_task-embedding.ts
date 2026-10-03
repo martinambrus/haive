@@ -130,28 +130,31 @@ export async function retrieveSimilarTaskIds(
       const useIds = pathFilter !== '';
       // Order by the distance function to force exact ranking. An HNSW operator scan
       // can return a short approximate page even when usable rows remain below it.
-      for (let offset = 0; selected.length < budget; offset += HISTORY_BATCH_SIZE) {
-        const rows = (await conn!.pg.unsafe(
+      const cursor = conn!.pg
+        .unsafe<Array<{ task_id: string | null }>>(
           `SELECT task_id
            FROM ${RAG_TABLE}
            WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
            ${pathFilter}
-           ORDER BY cosine_distance(vector::halfvec(${dims}), ($4::vector)::halfvec(${dims})), task_id
-           LIMIT $5 OFFSET $${useIds ? 7 : 6}`,
-          [...params, HISTORY_BATCH_SIZE, ...(useIds ? [matchingIds] : []), offset],
-        )) as Array<{ task_id: string | null }>;
+           ORDER BY cosine_distance(vector::halfvec(${dims}), ($4::vector)::halfvec(${dims})), task_id`,
+          [...params, ...(useIds ? [matchingIds] : [])],
+        )
+        .cursor(HISTORY_BATCH_SIZE);
+      // Execute the exact ordering once, then stream bounded result batches.
+      // Breaking closes the cursor as soon as the measured output budget is filled.
+      for await (const rows of cursor) {
         const ids = rows.map((r) => r.task_id).filter((id): id is string => !!id && !seen.has(id));
         for (const id of ids) seen.add(id);
         selected.push(...(await measuredPriorTaskIds(ctx.db, ctx.taskId, repositoryId, ids)));
-        if (rows.length < HISTORY_BATCH_SIZE) break;
+        if (selected.length >= budget) break;
       }
       return selected.slice(0, budget);
     };
     const matching =
-      matchingIds.length > 0 ? await readMeasured('AND task_id = ANY($6::uuid[])', limit) : [];
+      matchingIds.length > 0 ? await readMeasured('AND task_id = ANY($5::uuid[])', limit) : [];
     if (matching.length >= limit) return matching;
     const broader = await readMeasured(
-      matchingIds.length > 0 ? 'AND NOT (task_id = ANY($6::uuid[]))' : '',
+      matchingIds.length > 0 ? 'AND NOT (task_id = ANY($5::uuid[]))' : '',
       limit - matching.length,
     );
     return [...matching, ...broader];
