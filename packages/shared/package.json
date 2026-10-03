@@ -71,6 +71,10 @@
       "types": "./dist/plan/describe.d.ts",
       "import": "./dist/plan/describe.js"
     },
+    "./plan-resolution": {
+      "types": "./dist/plan/human-resolution.d.ts",
+      "import": "./dist/plan/human-resolution.js"
+    },
     "./timing": {
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"

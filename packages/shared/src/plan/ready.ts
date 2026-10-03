@@ -111,10 +111,12 @@ function ancestorIds(path: string): string[] {
  *     task starts — `completePlanNodesForTask` is the only status writer and it
  *     runs at completion — so a node with a task already running still reads
  *     `todo`, and without this it would be offered again forever.
- *  5. It is a unit of work. `component`/`decision` say so with `taskable`;
- *     `research` and `external` ARE the unit of work by their kind, and carry
- *     `taskable` only sometimes (MEASURED: 10 of 16 research nodes, 4 of 12
- *     external), so for those the leaf test is what a plan actually records.
+ *  5. It is a unit of work. `component` says so with `taskable`; a taskable
+ *     `decision` can run as a task, while a non-taskable leaf is a human choice
+ *     to surface rather than omit. `research` and `external` ARE the unit of work
+ *     by their kind, and carry `taskable` only sometimes (MEASURED: 10 of 16
+ *     research nodes, 4 of 12 external), so for those the leaf test is what a
+ *     plan actually records.
  *
  * Rules 2 and 3 also exclude every node inside a `depends_on` cycle and
  * everything beneath one — a cycle can never be satisfied, so its members never
@@ -133,7 +135,11 @@ export function computePlanReady(
     if (openTaskNodeIds.has(node.id)) continue;
     if (ancestorIds(node.path).some((id) => derived.blockedById.has(id))) continue;
 
-    if (node.kind === 'research' || node.kind === 'external') {
+    if (
+      node.kind === 'research' ||
+      node.kind === 'external' ||
+      (node.kind === 'decision' && !node.taskable)
+    ) {
       if ((derived.statsById.get(node.id)?.directChildren ?? 0) > 0) continue;
     } else if (!node.taskable) {
       continue;

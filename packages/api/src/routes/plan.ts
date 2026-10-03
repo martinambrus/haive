@@ -23,6 +23,7 @@ import {
   planSnapshotSaveRequestSchema,
   logger,
   updatePlanNodeRequestSchema,
+  resolvePlanNodeRequestSchema,
   type PlanPatch,
 } from '@haive/shared';
 import {
@@ -48,6 +49,7 @@ import {
   toNodeViews,
 } from '@haive/shared/plan';
 import { getDb } from '../db.js';
+import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution';
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -273,6 +275,7 @@ planRoutes.get('/:id/plan', async (c) => {
             id: next.id,
             title: next.title,
             kind: next.kind,
+            taskable: next.taskable,
             sequence: derived.sequenceById.get(next.id) ?? 0,
           }
         : null,
@@ -842,6 +845,41 @@ planRoutes.patch('/:id/plan/nodes/:nodeId', async (c) => {
             ...(body.taskable !== undefined ? { taskable: body.taskable } : {}),
             ...(body.parentId !== undefined ? { parentRef: body.parentId } : {}),
             ...(body.ordinal !== undefined ? { ordinal: body.ordinal } : {}),
+          },
+        ],
+      },
+      { repositoryId, origin: 'user' },
+    );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
+    return c.json({ node: await loadPlanNode(db, repositoryId, nodeId) });
+  } catch (err) {
+    planError(err);
+  }
+});
+
+planRoutes.post('/:id/plan/nodes/:nodeId/resolution', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  const nodeId = c.req.param('nodeId');
+  const request = resolvePlanNodeRequestSchema.parse(await c.req.json());
+  const node = await requireNode(repositoryId, nodeId);
+  const action = humanPlanAction(node);
+  if (!action) throw new HttpError(400, 'This plan item does not need a human resolution');
+  const body = appendPlanAnswer(node.body, action, request.answer);
+  if (body.length > 200_000)
+    throw new HttpError(400, 'The description and answer together exceed 200,000 characters');
+  const db = getDb();
+  try {
+    await applyPlanPatch(
+      db,
+      {
+        ops: [
+          {
+            op: 'upsert',
+            nodeRef: nodeId,
+            expectedVersion: request.expectedVersion,
+            body,
+            status: request.status,
           },
         ],
       },

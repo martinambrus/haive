@@ -421,6 +421,14 @@ export const updatePlanNodeRequestSchema = z.object({
 });
 export type UpdatePlanNodeRequest = z.infer<typeof updatePlanNodeRequestSchema>;
 
+/** Recording a human answer changes the body and status in one versioned write. */
+export const resolvePlanNodeRequestSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  answer: z.string().trim().min(1).max(200_000),
+  status: z.enum(['done', 'blocked_human', 'not_applicable']),
+});
+export type ResolvePlanNodeRequest = z.infer<typeof resolvePlanNodeRequestSchema>;
+
 export const createPlanEdgeRequestSchema = z.object({
   fromNodeId: z.string().uuid(),
   toNodeId: z.string().uuid(),

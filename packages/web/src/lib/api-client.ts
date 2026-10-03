@@ -1668,7 +1668,14 @@ export interface PlanOverview {
 export interface PlanNextUp {
   /** The lowest-numbered startable node, or null when nothing is startable —
    *  either the plan is finished or everything left is waiting on something. */
-  node: { id: string; title: string; kind: PlanNodeKind; sequence: number } | null;
+  node: {
+    id: string;
+    title: string;
+    kind: PlanNodeKind;
+    /** Absent on an older API. False on a decision means a human choice to open. */
+    taskable?: boolean;
+    sequence: number;
+  } | null;
   /** How many nodes are startable in total. Unclamped, unlike the list served by
    *  `getPlanReady`. */
   readyCount: number;
@@ -1942,6 +1949,18 @@ export function updatePlanNode(
   },
 ): Promise<{ node: PlanNode }> {
   return api.patch<{ node: PlanNode }>(`${planBase(repositoryId)}/nodes/${nodeId}`, body);
+}
+
+export function resolvePlanNode(
+  repositoryId: string,
+  nodeId: string,
+  body: {
+    expectedVersion: number;
+    answer: string;
+    status: 'done' | 'blocked_human' | 'not_applicable';
+  },
+): Promise<{ node: PlanNode }> {
+  return api.post<{ node: PlanNode }>(`${planBase(repositoryId)}/nodes/${nodeId}/resolution`, body);
 }
 
 /** Open plan task blocking a delete, as named by the 409. */

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
@@ -11,6 +11,7 @@ import {
   deletePlanNode,
   getPlanImpact,
   getPlanNode,
+  resolvePlanNode,
   startPlanAdvisory,
   updatePlanNode,
   type PlanEdgeKind,
@@ -20,6 +21,8 @@ import {
   type PlanTreeNode,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
+import { FormRenderer } from '@/components/form-renderer';
+import { humanPlanAction, planResolutionForm } from '@haive/shared/plan-resolution';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { CodePreviewDialog } from '@/components/code-preview-dialog';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
@@ -99,6 +102,13 @@ export function PlanDetailPanel({
   const [editingBody, setEditingBody] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
+  // Freeze both the question and version when the form opens. A concurrent
+  // chat must cause a visible conflict rather than silently changing the question.
+  const [resolutionNode, setResolutionNode] = useState<PlanNodeDetail['node'] | null>(null);
+  const resolutionSchema = useMemo(
+    () => (resolutionNode ? planResolutionForm(resolutionNode) : null),
+    [resolutionNode],
+  );
   // Add-a-child, available from the panel in BOTH views — the tiles
   // breadcrumb can only add under the node it ends on, so a node reached by
   // clicking a tile or a tree row has no other way to gain a child.
@@ -142,6 +152,7 @@ export function PlanDetailPanel({
     setEditingBody(false);
     setEditingTitle(false);
     setEditingMeta(false);
+    setResolutionNode(null);
     setAddingChild(false);
     setAddingLinkTo(null);
     setGroupOpen({});
@@ -211,6 +222,7 @@ export function PlanDetailPanel({
   }
 
   const node = detail.node;
+  const humanAction = humanPlanAction(node);
   const rolled = isRolledUp(node.status, node.rolledStatus);
 
   // The inline title editor's commit path: Enter blurs the input, and the blur
@@ -276,6 +288,17 @@ export function PlanDetailPanel({
     if (ok) {
       setChildTitle('');
       setAddingChild(false);
+    }
+  }
+
+  async function researchOptions(): Promise<void> {
+    let taskId: string | null = null;
+    const ok = await write(async () => {
+      ({ taskId } = await startPlanAdvisory(repositoryId, nodeId, {}));
+    });
+    if (ok && taskId) {
+      rememberTaskOrigin(`/tasks/${taskId}`, planOrigin(repositoryId, nodeId));
+      router.push(`/tasks/${taskId}`);
     }
   }
 
@@ -387,7 +410,7 @@ export function PlanDetailPanel({
       ) : (
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant={statusBadge(node.rolledStatus)}>{statusLabel(node.rolledStatus)}</Badge>
-          {node.kind !== 'decision' && <Badge>{kindLabel(node.kind)}</Badge>}
+          <Badge>{kindLabel(node.kind)}</Badge>
           <button
             type="button"
             title="Change status or kind"
@@ -522,7 +545,77 @@ export function PlanDetailPanel({
 
       <FormError message={conflict ? null : error} />
 
-      {tab === 'details' && (
+      {humanAction && (
+        <div className="flex flex-col gap-2 rounded border border-indigo-900 bg-indigo-950/20 p-3">
+          <strong className="text-sm text-indigo-200">
+            {node.status === 'done' || node.status === 'not_applicable'
+              ? 'Human item settled'
+              : humanAction === 'decision'
+                ? 'Needs your decision'
+                : 'Needs action outside Haive'}
+          </strong>
+          <MarkdownView
+            body={
+              humanAction === 'decision'
+                ? 'Record your answer and choose whether this decision is resolved or still waiting. An implementation task cannot supply this business answer for you.'
+                : 'Complete the outside action, then record the outcome and whether anything remains outstanding. Choosing an option alone may not finish the action.'
+            }
+          />
+          {!resolutionNode && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={saving}
+                onClick={() => {
+                  setResolutionNode(node);
+                  setEditingBody(false);
+                  onTabChange('details');
+                }}
+              >
+                {humanAction === 'decision' ? 'Record decision' : 'Record outcome'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={saving}
+                onClick={() => void researchOptions()}
+              >
+                Help me evaluate the options
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {resolutionNode && resolutionSchema && (
+        <div className="flex flex-col gap-2 rounded border border-neutral-800 p-3">
+          <FormRenderer
+            key={`${resolutionNode.id}:${resolutionNode.version}`}
+            schema={resolutionSchema}
+            submitting={saving}
+            onSubmit={async (values) => {
+              const ok = await write(() =>
+                resolvePlanNode(repositoryId, resolutionNode.id, {
+                  expectedVersion: resolutionNode.version,
+                  answer: String(values.answer ?? ''),
+                  status: values.status as 'done' | 'blocked_human' | 'not_applicable',
+                }),
+              );
+              if (ok) setResolutionNode(null);
+            }}
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={saving}
+            onClick={() => setResolutionNode(null)}
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+
+      {tab === 'details' && !resolutionNode && (
         <div className="flex flex-col gap-3">
           {editingBody ? (
             <div className="flex flex-col gap-2">
@@ -601,6 +694,7 @@ export function PlanDetailPanel({
                 chat tab) is for. */}
             {node.kind !== 'external' &&
               node.kind !== 'research' &&
+              !humanAction &&
               // Blocked SHOWS the button disabled rather than hiding it, unlike
               // the kind test above. Hiding reads as "this feature does not
               // exist here"; the point is that it exists and is not available
@@ -621,25 +715,7 @@ export function PlanDetailPanel({
                 </Link>
               ))}
             {node.kind === 'research' && (
-              <Button
-                size="sm"
-                disabled={saving}
-                onClick={() => {
-                  // Spawn, then go watch it — the advisory task's decision gate
-                  // is where the user's input is needed, and staying on the
-                  // panel made the click look like a no-op.
-                  void (async () => {
-                    let taskId: string | null = null;
-                    const ok = await write(async () => {
-                      ({ taskId } = await startPlanAdvisory(repositoryId, nodeId, {}));
-                    });
-                    if (ok && taskId) {
-                      rememberTaskOrigin(`/tasks/${taskId}`, planOrigin(repositoryId, nodeId));
-                      router.push(`/tasks/${taskId}`);
-                    }
-                  })();
-                }}
-              >
+              <Button size="sm" disabled={saving} onClick={() => void researchOptions()}>
                 Research it
               </Button>
             )}
