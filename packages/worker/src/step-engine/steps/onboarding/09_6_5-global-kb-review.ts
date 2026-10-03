@@ -2,6 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { globalKbEntries, resolveGlobalKbSettings, withGlobalKb } from '@haive/shared/global-kb';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { collapseToLine } from '../_untrusted-repo.js';
 
 // Onboarding-only review gate for global KB drafts. Step 08 promotes any
 // global-scoped knowledge (framework / library / plugin house standards) to the
@@ -17,6 +18,8 @@ interface GlobalKbDraftRow {
   id: string;
   title: string;
   category: string;
+  /** Absent from a detect payload stored before descriptions existed. */
+  description?: string | null;
 }
 
 interface GlobalKbReviewDetect {
@@ -38,13 +41,19 @@ async function fetchTaskDrafts(ctx: StepContext): Promise<GlobalKbDraftRow[]> {
           id: globalKbEntries.id,
           title: globalKbEntries.title,
           category: globalKbEntries.category,
+          description: globalKbEntries.description,
         })
         .from(globalKbEntries)
         .where(
           and(eq(globalKbEntries.sourceTaskId, ctx.taskId), eq(globalKbEntries.status, 'draft')),
         )
         .orderBy(desc(globalKbEntries.createdAt));
-      return rows.map((r) => ({ id: r.id, title: r.title, category: r.category }));
+      return rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        category: r.category,
+        description: r.description,
+      }));
     });
   } catch (err) {
     ctx.logger.warn({ err }, 'global KB draft lookup failed (treating as no drafts)');
@@ -74,7 +83,12 @@ export const globalKbReviewStep: StepDefinition<GlobalKbReviewDetect, { acknowle
 
   form(_ctx, detected): FormSchema {
     const n = detected.drafts.length;
-    const list = detected.drafts.map((d) => `- **${d.title}** _(${d.category})_`).join('\n');
+    const list = detected.drafts
+      .map((d) => {
+        const description = collapseToLine(d.description);
+        return `- **${d.title}** _(${d.category})_${description ? ` — ${description}` : ''}`;
+      })
+      .join('\n');
     return {
       title: 'Review global knowledge base drafts',
       description: `Onboarding identified ${n} reusable house-standard ${
