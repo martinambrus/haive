@@ -26,8 +26,17 @@ adds, and a patch holds `PLAN_PATCH_MAX_OPS` (500) ops, so a run past `SEQUENCE_
 (half of that) keeps its stored order and the finished step names it (`degradedNote`), and the
 prompt states the op budget its reply has. `tooWideToSequence` is the one rule the fan-out and the
 plan page's Order count (`computeSequenceProgress`) share, so the count never promises a pass that
-would skip a group. At the cap the child list stays under `PLAN_EXPANSION_CONTEXT_MAX_CHARS`, since
-`safeTitle` caps a title at 200 characters. MEASURED: no stored run came near it (widest 33).
+would skip a group. Each agent sees its node's neighbourhood, never the whole plan:
+`buildPlanExpansionContext`, the helper 01 and 02 use, with the build-order number `#N` on every line
+and no dependency information, and the context and the child list share one bound,
+`SEQUENCE_CONTEXT_BUDGET` (96,000, as `PLAN_EXPANSION_CONTEXT_MAX_CHARS`). A child list at the cap
+stays under it since `safeTitle` caps a title at 200 characters (MEASURED: no stored run came near the
+cap, widest 33), and the helper keeps its own cap on a deep ancestor chain by dropping the most distant
+ancestors behind one line that counts them. MEASURED on committed plan snapshots: the prompt p50 went
+from 148,443 to 106,629 characters on a 7,983-node plan (870 agents) and from 119,003 to 106,622 on a
+4,106-node one, while a 1,044-node plan grew slightly (103,099 to 106,909) as the sampled outline fills
+the budget. Of the 9,312 `depends_on` ops sequence agents ever wrote, 9,288 joined two nodes of the
+agent's own section and 24 were malformed, so the bounded view cuts no link an agent made.
 
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
 (`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet

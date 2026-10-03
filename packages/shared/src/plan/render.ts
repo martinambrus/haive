@@ -52,18 +52,6 @@ export interface RenderPlanOptions {
   /** Mark one node as the conversation's focus, so a plan_chat prompt can say
    *  "you are here" without a second copy of the tree. */
   focusNodeId?: string;
-  /** Omit the typed cross-links entirely, and everything DERIVED from them.
-   *
-   *  For the sequencing step, whose agents are asked to decide a build order
-   *  that is then COMPARED against the `depends_on` edges already recorded. An
-   *  agent shown those edges is not a second opinion, it is an echo — and the
-   *  whole point of the comparison is to catch an edge pointing the wrong way,
-   *  which is exactly the claim the agent would be reading.
-   *
-   *  "Derived" is the half that is easy to miss: the `blocked by #N` attribute is
-   *  computed from those same `depends_on` edges, so dropping the link lines while
-   *  keeping it still told the agent the recorded order. */
-  omitLinks?: boolean;
   /** Show each node's `version` beside its ref, for an agent that may change any node it
    *  is shown and must send that version back. Off for the committed mirror, whose every
    *  line would otherwise change on every edit. */
@@ -126,15 +114,14 @@ export function renderPlanMarkdownFrom(
       node.kind,
       node.status,
       ...(node.taskable ? ['taskable'] : []),
-      ...(blockers.length > 0 && !opts.omitLinks
+      ...(blockers.length > 0
         ? [`blocked by ${blockers.map((b) => `#${b.sequence}`).join(', ')}`]
         : []),
       ...(depth >= 6 ? [`depth ${depth}`] : []),
     ];
     lines.push(`\`${attrs.join('\` · \`')}\``);
 
-    const links = opts.omitLinks ? [] : (outgoing.get(node.id) ?? []);
-    for (const link of links) {
+    for (const link of outgoing.get(node.id) ?? []) {
       const target = titleById.get(link.toNodeId);
       if (!target) continue;
       const note = link.note ? ` — ${oneLine(link.note)}` : '';

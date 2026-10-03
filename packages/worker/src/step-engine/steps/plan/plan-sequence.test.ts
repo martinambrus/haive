@@ -4,12 +4,16 @@ import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   SEQUENCE_AGENTS_PER_PASS,
   SEQUENCE_MAX_RUN_CHILDREN,
+  computePlanSequence,
   loadPlanEdges,
   loadPlanSkeletons,
+  parsePlanNodeRefs,
+  planNodePath,
 } from '@haive/shared/plan';
 import { PLAN_PATCH_MAX_OPS } from '@haive/shared';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import {
+  SEQUENCE_CONTEXT_BUDGET,
   agentOrdinals,
   buildSequencePrompt,
   collectDisagreements,
@@ -23,8 +27,8 @@ import {
   type PlanSequenceDetect,
 } from './03-plan-sequence.js';
 import { applyAgentPatch } from './_plan-prompt.js';
-import { PLAN_EXPANSION_CONTEXT_MAX_CHARS } from './_plan-expansion-context.js';
-import { SAFE_TITLE_CHARS } from '../_untrusted-repo.js';
+import { buildPlanExpansionContext } from './_plan-expansion-context.js';
+import { SAFE_TITLE_CHARS, UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
 vi.mock('./_plan-prompt.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
@@ -33,7 +37,12 @@ vi.mock('./_plan-prompt.js', async (importOriginal) => {
 
 vi.mock('@haive/shared/plan', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/plan')>();
-  return { ...actual, loadPlanSkeletons: vi.fn(), loadPlanEdges: vi.fn() };
+  return {
+    ...actual,
+    computePlanSequence: vi.fn(actual.computePlanSequence),
+    loadPlanSkeletons: vi.fn(),
+    loadPlanEdges: vi.fn(),
+  };
 });
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
@@ -94,6 +103,16 @@ function reply(ordinals: Record<string, number>, over: Partial<MiningRow> = {}):
 }
 
 const NODES = [node(PARENT, null), node(A, PARENT, 'Alpha'), node(B, PARENT, 'Beta')];
+
+function variablePart(prompt: string): { context: string; children: string[] } {
+  const lines = prompt.split('\n');
+  const open = lines.indexOf(UNTRUSTED_OPEN);
+  const close = lines.indexOf(UNTRUSTED_CLOSE, open + 1);
+  return {
+    context: lines.slice(open + 1, close).join('\n'),
+    children: lines.filter((line) => /^\d+\. #\d+ .* \(`node:[0-9a-f-]{36}`\)$/.test(line)),
+  };
+}
 
 describe('agentOrdinals', () => {
   it('reads the order each agent actually stated', () => {
@@ -493,29 +512,71 @@ describe('a sibling run too wide for one reply', () => {
   });
 
   it('tells the agent how many link ops its reply has room for', () => {
-    const children = run('p', 7).slice(1);
+    const nodes = run('p', 7);
     const prompt = buildSequencePrompt(
       { parentId: 'p', parentTitle: 'P', childCount: 7 },
-      children,
-      '',
+      nodes,
+      computePlanSequence(nodes, []).sequenceById,
     );
     expect(prompt).toContain(
-      `these 7 upserts leave room for at most ${PLAN_PATCH_MAX_OPS - 7} \`link\` and \`unlink\` ops`,
+      `these 7 upserts leave room for at most ${PLAN_PATCH_MAX_OPS - 7} \`link\` ops`,
     );
   });
 
   it('keeps the widest run it sends inside the provider-neutral budget, every title at its cap', () => {
-    const children = Array.from({ length: SEQUENCE_MAX_RUN_CHILDREN }, (_, i) =>
-      node(uuid(i), PARENT, 'x'.repeat(SAFE_TITLE_CHARS * 2)),
-    );
+    const nodes = [
+      node(PARENT, null, 'P'),
+      ...Array.from({ length: SEQUENCE_MAX_RUN_CHILDREN }, (_, i) =>
+        node(uuid(i), PARENT, 'x'.repeat(SAFE_TITLE_CHARS)),
+      ),
+    ];
+    const buildOrder = computePlanSequence(nodes, []).sequenceById;
     const prompt = buildSequencePrompt(
-      { parentId: PARENT, parentTitle: 'P', childCount: children.length },
-      children,
-      '',
+      { parentId: PARENT, parentTitle: 'P', childCount: SEQUENCE_MAX_RUN_CHILDREN },
+      nodes,
+      buildOrder,
     );
-    const list = prompt.slice(prompt.indexOf('Its children'), prompt.indexOf('Decide the order'));
-    expect(list.split('\n').filter((l) => l.includes('`node:'))).toHaveLength(children.length);
-    expect(list.length).toBeLessThanOrEqual(PLAN_EXPANSION_CONTEXT_MAX_CHARS);
+    const { context, children } = variablePart(prompt);
+    const childrenChars = children.join('\n').length;
+    expect(children).toHaveLength(SEQUENCE_MAX_RUN_CHILDREN);
+    expect(context.length + childrenChars).toBeLessThanOrEqual(SEQUENCE_CONTEXT_BUDGET);
+    // What keeps it inside is the subtraction: the same context given the whole budget overflows it.
+    const whole = buildPlanExpansionContext(nodes, nodes[0]!, SEQUENCE_CONTEXT_BUDGET, {
+      buildOrder,
+    });
+    expect(whole.length + childrenChars).toBeGreaterThan(SEQUENCE_CONTEXT_BUDGET);
+  });
+
+  it('keeps the widest run inside the budget under a chain of ancestors deeper than it', () => {
+    const title = 'x'.repeat(512);
+    const chainId = (i: number) => `eeeeeeee-0000-4000-8000-${String(i).padStart(12, '0')}`;
+    const chain: PlanNodeSkeleton[] = [];
+    for (let i = 0; i <= 200; i += 1) {
+      const parentPath = i === 0 ? null : chain[i - 1]!.path;
+      chain.push({
+        ...node(chainId(i), i === 0 ? null : chainId(i - 1), title),
+        path: planNodePath(parentPath, chainId(i)),
+      });
+    }
+    const parent = chain[200]!;
+    const nodes = [
+      ...chain,
+      ...Array.from({ length: SEQUENCE_MAX_RUN_CHILDREN }, (_, i) => ({
+        ...node(uuid(i), parent.id, title),
+        path: planNodePath(parent.path, uuid(i)),
+      })),
+    ];
+    const prompt = buildSequencePrompt(
+      { parentId: parent.id, parentTitle: title, childCount: SEQUENCE_MAX_RUN_CHILDREN },
+      nodes,
+      computePlanSequence(nodes, []).sequenceById,
+    );
+    const { context, children } = variablePart(prompt);
+
+    expect(children).toHaveLength(SEQUENCE_MAX_RUN_CHILDREN);
+    expect(context.length + children.join('\n').length).toBeLessThanOrEqual(
+      SEQUENCE_CONTEXT_BUDGET,
+    );
   });
 
   it('names at most five of them in the note and counts the rest', () => {
@@ -530,6 +591,128 @@ describe('a sibling run too wide for one reply', () => {
     expect(note).toContain(`(${SEQUENCE_MAX_RUN_CHILDREN + 5} children), and 2 more.`);
     expect(note).not.toContain('Group 5');
     expect(note).not.toContain('\n');
+  });
+});
+
+describe('the neighbourhood a sequencing agent is shown', () => {
+  const id = (n: number): string =>
+    `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const SPECS: [n: number, parent: number | null, title: string][] = [
+    [1, null, 'Product'],
+    [2, 1, 'Catalogue'],
+    [3, 2, 'Search'],
+    [4, 3, 'Index'],
+    [5, 2, 'Pricing'],
+    [6, 1, 'Checkout'],
+    [7, 6, 'Cart'],
+    [8, 6, 'Payment'],
+    [9, 6, 'Receipt'],
+    [10, 1, 'Accounts'],
+    [11, 10, 'Profile'],
+  ];
+  const paths = new Map<number, string>();
+  const nodes = SPECS.map(([n, parent, title], ordinal) => {
+    const path = planNodePath(parent === null ? null : paths.get(parent)!, id(n));
+    paths.set(n, path);
+    return { ...node(id(n), parent === null ? null : id(parent), title), path, ordinal };
+  });
+  // Numbers no tree walk would produce, so a builder numbering the nodes itself would show.
+  const buildOrder = new Map(nodes.map((n, i) => [n.id, 100 + i * 7]));
+  const promptForCheckout = () =>
+    buildSequencePrompt(
+      { parentId: id(6), parentTitle: 'Checkout', childCount: 3 },
+      nodes,
+      buildOrder,
+    );
+
+  it('gives every node it shows the build-order number it was handed', () => {
+    const lines = promptForCheckout().split('\n');
+    const open = lines.indexOf(UNTRUSTED_OPEN);
+    const close = lines.indexOf(UNTRUSTED_CLOSE, open + 1);
+    const shown = [
+      ...lines.slice(open + 1, close).filter((line) => /^\s*- /.test(line)),
+      ...lines.slice(close + 1).filter((line) => line.includes('(`node:')),
+    ];
+    // 7 with an id in the neighbourhood, 11 in the outline, the node itself and its 3 children.
+    expect(shown).toHaveLength(7 + 11 + 1 + 3);
+    const byTitle = new Map(nodes.map((n) => [n.title, n]));
+    for (const line of shown) {
+      const m = /#(\d+) (\w+) (?:\(`node:|\[)/.exec(line);
+      expect(m, line).not.toBeNull();
+      expect(Number(m![1]), line).toBe(buildOrder.get(byTitle.get(m![2]!)!.id));
+    }
+  });
+
+  it('names an id only for the node, its ancestors, its siblings and its children', () => {
+    expect(parsePlanNodeRefs(promptForCheckout()).sort()).toEqual(
+      [1, 2, 6, 7, 8, 9, 10].map(id).sort(),
+    );
+  });
+});
+
+describe('a sequencing wave', () => {
+  const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const nodes = [
+    node(PARENT, null, 'Root'),
+    node(A, PARENT, 'Alpha'),
+    node(B, PARENT, 'Beta'),
+    node(OTHER_PARENT, null, 'Other'),
+    node(C, OTHER_PARENT, 'Gamma'),
+    node(D, OTHER_PARENT, 'Delta'),
+  ];
+
+  function select(targets: PlanSequenceDetect['targets']) {
+    vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
+    vi.mocked(loadPlanEdges).mockClear();
+    vi.mocked(loadPlanEdges).mockResolvedValue([]);
+    vi.mocked(computePlanSequence).mockClear();
+    const detected: PlanSequenceDetect = {
+      repositoryId: '33333333-3333-4333-8333-333333333333',
+      nodeCount: nodes.length,
+      decidedRuns: 0,
+      targets,
+      tooWide: [],
+      contradictoryRuns: 0,
+      cycles: 0,
+      ancestorDeps: 0,
+      agentsUsed: 0,
+      wave: 0,
+      disagreements: [],
+    };
+    return planSequenceStep.agentMining!.selectAgents({
+      ctx: { db: {} },
+      detected,
+      formValues: {},
+    } as never);
+  }
+
+  it('numbers every agent from one build order, computed once for the wave', async () => {
+    const dispatches = await select(computeTargets(nodes, [], new Set()).targets);
+
+    expect(dispatches).toHaveLength(2);
+    expect(vi.mocked(loadPlanEdges)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(computePlanSequence)).toHaveBeenCalledTimes(1);
+    // Post-order over the whole plan: Alpha, Beta, Root, then Gamma, Delta, Other.
+    expect(variablePart(dispatches[0]!.prompt).children).toEqual([
+      `0. #1 Alpha (\`node:${A}\`)`,
+      `1. #2 Beta (\`node:${B}\`)`,
+    ]);
+    expect(variablePart(dispatches[1]!.prompt).children).toEqual([
+      `0. #4 Gamma (\`node:${C}\`)`,
+      `1. #5 Delta (\`node:${D}\`)`,
+    ]);
+  });
+
+  it('sends nothing for a group the plan has lost since it was detected', async () => {
+    const gone = {
+      parentId: '44444444-4444-4444-8444-444444444444',
+      parentTitle: 'Gone',
+      childCount: 2,
+    };
+
+    const dispatches = await select([gone, ...computeTargets(nodes, [], new Set()).targets]);
+
+    expect(dispatches.map((d) => d.agentTitle)).toEqual(['Order: Root', 'Order: Other']);
   });
 });
 

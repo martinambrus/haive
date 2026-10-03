@@ -272,6 +272,14 @@ const DAG_ISSUE = {
   concerns: '',
 };
 const DAG_SPEC = '## Admin route\nThe admin route must reject unauthenticated callers.';
+const SEQUENCE_PLAN = [
+  ['node-0', null, '/node-0/', 'Admin'],
+  ['node-1', 'node-0', '/node-0/node-1/', 'Admin route'],
+  ['node-2', 'node-1', '/node-0/node-1/node-2/', 'Session middleware'],
+  ['node-3', 'node-1', '/node-0/node-1/node-3/', 'Admin page'],
+].map(([id, parentId, path, title]) =>
+  permissive({ id, parentId, path, title, kind: 'component', status: 'todo', taskable: false }),
+);
 
 const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   {
@@ -636,16 +644,19 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   {
     label: '03-plan-sequence buildSequencePrompt (wave)',
     exportKey: 'step-engine/steps/plan/03-plan-sequence.ts#buildSequencePrompt',
-    // `children.map(...)` is [] through a proxy, so the numbered child list — the thing being
-    // ORDERED, and the only place a node title reaches the model — never rendered.
+    // The builder reads the tree itself, so the nodes are concrete: through a proxy the numbered
+    // child list — the thing being ORDERED, and the only place a node title reaches the model —
+    // never rendered.
     build: () =>
       buildSequencePrompt(
-        permissive({ id: 'node-1', title: 'Admin route' }),
-        [
-          permissive({ id: 'node-2', title: 'Session middleware', path: 'root/admin/mw/' }),
-          permissive({ id: 'node-3', title: 'Admin page', path: 'root/admin/page/' }),
-        ],
-        '- root\n  - Admin route (`node:node-1`)',
+        { parentId: 'node-1', parentTitle: 'Admin route', childCount: 2 },
+        SEQUENCE_PLAN,
+        new Map([
+          ['node-2', 1],
+          ['node-3', 2],
+          ['node-1', 3],
+          ['node-0', 4],
+        ]),
       ),
   },
   // 02-plan-coverage's re-decomposition wave. Its template was inline in `apply()` and is now a pure
@@ -1817,7 +1828,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
 
     // The sequencer's numbered child list: the thing being ORDERED.
     expect(await textFor('03-plan-sequence buildSequencePrompt')).toContain(
-      '0. Session middleware (`node:node-2`)',
+      '0. #1 Session middleware (`node:node-2`)',
     );
 
     // Both arms of the merge-fix prompt's two optional arguments.

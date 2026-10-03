@@ -104,9 +104,11 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   subscription this is notional; the usage window it spends is not). The prompt also breaks the
   project's own provider-neutral bound: `PLAN_EXPANSION_CONTEXT_MAX_CHARS` is 96k because the smallest
   supported model fallback is 128k tokens, and 161k characters is already past it. → P1.
-- **F2. The sequence agents barely use the rest of the plan.** Of the 5,322 `depends_on` link ops
-  parsed from 887 agents' replies, 5,305 (99.7%) join ids listed in that agent's own `## Your node`
-  section and 17 reach elsewhere. They were classified against each agent's own prompt, because the
+- **F2. The sequence agents barely use the rest of the plan.** Of the 9,312 `depends_on` link and
+  unlink ops in 886 agents' replies, 9,288 join two ids listed in that agent's own `## Your node`
+  section, 24 are malformed (20 mistyped ids of its own children, 4 not ids at all), and none names a
+  node outside it (re-measured 2026-10-03; an earlier count put the typos "elsewhere"). They were
+  classified against each agent's own prompt, because the
   plans have since been rebuilt and `plan_nodes` no longer holds those ids. Whether seeing the whole
   plan improves the ORDER an agent chooses cannot be read from stored data. → P1.
 - **F3. The same fix already worked for `01-plan-build` and `02-plan-coverage`.**
@@ -255,9 +257,9 @@ Two invariants, which both arms keep:
   whole: it is ordered in bounded slices or left to a person, and the step says which (D10).
 - **The same fields everywhere.** Every node shown carries its build-order number, which
   `buildSequencePrompt` tells the agent each node has, and none carries dependency information: no
-  links, and none of the `blocked by` hints derived from them. Today's render leaks those hints past
-  `omitLinks` (F15), so the baseline is corrected first. Otherwise the comparison would set agents that
-  can echo existing edges against agents that cannot.
+  links, and none of the `blocked by` hints derived from them. The render leaked those hints past
+  `omitLinks` (F15, fixed by #370) until P1 removed the whole-plan render from 03 altogether. Otherwise
+  the comparison would set agents that can echo existing edges against agents that cannot.
 
 Two arms, in order:
 
@@ -286,6 +288,12 @@ cache-write tokens per agent, the step's `disagreements` count, order agreement 
 parent, and a person's spot check of the parents where the arms differ. The step has no ground truth
 by design (a disagreement is "two independent judgements … only a person can say which is right"), so
 that check is the grade. D1 picks the arm. Rollback: revert the builder call; no schema change.
+
+**Status: the parity arm shipped in #397**, zero-token verified on three committed plan snapshots and
+synthetic 250-child runs (docs/architecture/plan-canvas.md has the sizes). **As built:** context and
+child list share one bound, `SEQUENCE_CONTEXT_BUDGET`, and the helper drops its most distant ancestors
+when a deep chain would break it; `omitLinks` is gone with its last caller. The role-sized arm and the
+live waves that choose between the arms (D1) are open.
 
 ### P2. Tell the fixer what the same check said last round (prompt only)
 

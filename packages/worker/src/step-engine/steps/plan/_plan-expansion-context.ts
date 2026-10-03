@@ -20,16 +20,25 @@ function compactTitle(title: string): string {
   return oneLine.length <= TITLE_MAX_CHARS ? oneLine : `${oneLine.slice(0, TITLE_MAX_CHARS - 1)}…`;
 }
 
-function exactLine(node: PlanNodeSkeleton, role: string): string {
-  const flags = [node.kind, node.status, ...(node.taskable ? ['taskable'] : [])].join(', ');
-  return `- ${role}: ${compactTitle(node.title)} (\`node:${node.id}\`, ${flags})`;
+function orderPrefix(node: PlanNodeSkeleton, buildOrder?: ReadonlyMap<string, number>): string {
+  const order = buildOrder?.get(node.id);
+  return order === undefined ? '' : `#${order} `;
 }
 
-function outlineLine(node: PlanNodeSkeleton): string {
+function exactLine(
+  node: PlanNodeSkeleton,
+  role: string,
+  buildOrder?: ReadonlyMap<string, number>,
+): string {
+  const flags = [node.kind, node.status, ...(node.taskable ? ['taskable'] : [])].join(', ');
+  return `- ${role}: ${orderPrefix(node, buildOrder)}${compactTitle(node.title)} (\`node:${node.id}\`, ${flags})`;
+}
+
+function outlineLine(node: PlanNodeSkeleton, buildOrder?: ReadonlyMap<string, number>): string {
   const depth = planNodeDepth(node.path);
   const indent = '  '.repeat(Math.min(depth, 8));
   const depthSuffix = depth > 8 ? `, depth ${depth}` : '';
-  return `${indent}- ${compactTitle(node.title)} [${node.kind}, ${node.status}${depthSuffix}]`;
+  return `${indent}- ${orderPrefix(node, buildOrder)}${compactTitle(node.title)} [${node.kind}, ${node.status}${depthSuffix}]`;
 }
 
 function treeOrder(nodes: PlanNodeSkeleton[]): PlanNodeSkeleton[] {
@@ -74,9 +83,10 @@ function evenlySample(lines: string[], available: number): string[] {
 /**
  * Compact decomposition context with two guarantees:
  *
- * 1. The target and its ancestors retain exact node refs. Siblings and direct
- *    children retain exact refs when they fit and are evenly sampled for an
- *    abnormally wide neighborhood.
+ * 1. The target and its nearest ancestors retain exact node refs; when that path
+ *    alone would overflow `maxChars`, the most distant ancestors are replaced by
+ *    one line that counts them. Siblings and direct children retain exact refs
+ *    when they fit and are evenly sampled for an abnormally wide neighborhood.
  * 2. Dependency edges and bodies are omitted. Repeating thousands of verbose
  *    edge lines made the measured prompt grow from 863k to 1.19m characters,
  *    while titles and hierarchy are the evidence an expansion agent actually
@@ -86,6 +96,7 @@ export function buildPlanExpansionContext(
   nodes: PlanNodeSkeleton[],
   focus: PlanNodeSkeleton,
   maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
+  { buildOrder }: { buildOrder?: ReadonlyMap<string, number> } = {},
 ): string {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const byParent = indexChildren(nodes);
@@ -102,15 +113,15 @@ export function buildPlanExpansionContext(
     parentId = parent.parentId;
   }
 
-  const exactPathLines = [
-    ...ancestors.map((ancestor) => exactLine(ancestor, 'Ancestor')),
-    exactLine(focus, 'Target'),
-  ];
+  const ancestorLines = ancestors.map((ancestor) => exactLine(ancestor, 'Ancestor', buildOrder));
+  const targetLine = exactLine(focus, 'Target', buildOrder);
   const neighborLines = [
     ...(byParent.get(focus.parentId) ?? [])
       .filter((sibling) => sibling.id !== focus.id)
-      .map((sibling) => exactLine(sibling, 'Sibling')),
-    ...(byParent.get(focus.id) ?? []).map((child) => exactLine(child, 'Existing child')),
+      .map((sibling) => exactLine(sibling, 'Sibling', buildOrder)),
+    ...(byParent.get(focus.id) ?? []).map((child) =>
+      exactLine(child, 'Existing child', buildOrder),
+    ),
   ];
 
   const localHeader = '## Target neighborhood (exact refs)';
@@ -118,32 +129,59 @@ export function buildPlanExpansionContext(
   // wider. Reserve most of the provider-neutral budget for whole-plan context
   // instead of allowing one pathological sibling set to consume it all.
   const localBudget = Math.min(24_000, Math.max(4_000, Math.floor(maxChars / 3)));
-  const localFixedChars = localHeader.length + exactPathLines.join('\n').length + 2 + 120;
-  const sampledNeighbors = evenlySample(neighborLines, Math.max(0, localBudget - localFixedChars));
-  const localSamplingNote =
-    sampledNeighbors.length === neighborLines.length
-      ? `Showing all ${neighborLines.length} sibling/direct-child ref(s).`
-      : `Showing ${sampledNeighbors.length} evenly sampled sibling/direct-child ref(s) from ${neighborLines.length}.`;
-  const local = [localHeader, ...exactPathLines, localSamplingNote, ...sampledNeighbors, ''].join(
-    '\n',
-  );
+  const localOmitting = (omitted: number): string => {
+    const exactPathLines = [
+      ...(omitted > 0 ? [`- ${omitted} more distant ancestor(s) not shown`] : []),
+      ...ancestorLines.slice(omitted),
+      targetLine,
+    ];
+    const localFixedChars = localHeader.length + exactPathLines.join('\n').length + 2 + 120;
+    const sampledNeighbors = evenlySample(
+      neighborLines,
+      Math.max(0, localBudget - localFixedChars),
+    );
+    const localSamplingNote =
+      sampledNeighbors.length === neighborLines.length
+        ? `Showing all ${neighborLines.length} sibling/direct-child ref(s).`
+        : `Showing ${sampledNeighbors.length} evenly sampled sibling/direct-child ref(s) from ${neighborLines.length}.`;
+    return [localHeader, ...exactPathLines, localSamplingNote, ...sampledNeighbors, ''].join('\n');
+  };
   const ordered = treeOrder(nodes);
-  const allOutlineLines = ordered.map(outlineLine);
+  const allOutlineLines = ordered.map((node) => outlineLine(node, buildOrder));
   const outlineHeader =
     '## Whole-plan title index (bodies and dependency edges omitted for prompt safety)';
-  let sampled = evenlySample(
-    allOutlineLines,
-    Math.max(0, maxChars - local.length - outlineHeader.length - 160),
-  );
-  // The note contains the selected count, so calculate the exact fixed size
-  // after the first estimate and trim complete lines until the hard cap holds.
-  while (true) {
-    const samplingNote =
-      sampled.length === allOutlineLines.length
-        ? `Showing all ${allOutlineLines.length} nodes.`
-        : `Showing ${sampled.length} evenly sampled title(s) from ${allOutlineLines.length} nodes; the target neighborhood above may also be sampled.`;
-    const result = [local, outlineHeader, samplingNote, ...sampled].join('\n');
-    if (result.length <= maxChars || sampled.length === 0) return result;
-    sampled.pop();
+  const outlineNote = (shown: number): string =>
+    shown === allOutlineLines.length
+      ? `Showing all ${allOutlineLines.length} nodes.`
+      : `Showing ${shown} evenly sampled title(s) from ${allOutlineLines.length} nodes; the target neighborhood above may also be sampled.`;
+  const withOutline = (local: string): string => {
+    let sampled = evenlySample(
+      allOutlineLines,
+      Math.max(0, maxChars - local.length - outlineHeader.length - 160),
+    );
+    // The note contains the selected count, so calculate the exact fixed size
+    // after the first estimate and trim complete lines until the hard cap holds.
+    while (true) {
+      const result = [local, outlineHeader, outlineNote(sampled.length), ...sampled].join('\n');
+      if (result.length <= maxChars || sampled.length === 0) return result;
+      sampled.pop();
+    }
+  };
+
+  const untrimmed = withOutline(localOmitting(0));
+  if (untrimmed.length <= maxChars || ancestors.length === 0) return untrimmed;
+  let omitted = 1;
+  // Below this count the kept ancestor lines alone reach the budget, so no such count can fit.
+  let kept = ancestorLines.slice(1).join('\n').length;
+  while (omitted < ancestors.length && kept >= maxChars) {
+    kept -= ancestorLines[omitted]!.length + 1;
+    omitted += 1;
   }
+  while (
+    omitted < ancestors.length &&
+    [localOmitting(omitted), outlineHeader, outlineNote(0)].join('\n').length > maxChars
+  ) {
+    omitted += 1;
+  }
+  return withOutline(localOmitting(omitted));
 }
