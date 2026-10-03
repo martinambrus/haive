@@ -1,9 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { type Database } from '@haive/database';
 import {
+  buildAnchors,
   MAX_ANCHORS,
+  HISTORY_BATCH_SIZE,
   rankPlanProximity,
   computeBiasFactor,
   effortHoursFromSteps,
+  fileOverlapTaskIds,
+  planProximityTaskIds,
   estimateRange,
   heuristicEstimate,
   overlapRefinedEstimate,
@@ -82,9 +88,430 @@ describe('heuristicEstimate', () => {
     const anchors = [anchor(2, { crossRepo: true }), anchor(4, { crossRepo: true })];
     expect(heuristicEstimate(anchors, 'plan_tasklist').hours).toBe(3);
   });
+
+  it.each(['quick_bugfix', 'full_workflow'])(
+    'uses measured %s effort without applying the multiplier again',
+    (path) => {
+      const anchors = [1, 2, 3].map((h) => anchor(h, { executionPath: path }));
+      anchors.push(anchor(100, { executionPath: 'plan_tasklist' }));
+      expect(heuristicEstimate(anchors, path).hours).toBe(2);
+      expect(heuristicEstimate(anchors, path).reason).toContain('no path scaling needed');
+    },
+  );
+
+  it('discloses broader-history fallback when same-path measurements are sparse', () => {
+    const anchors = [
+      anchor(1, { executionPath: 'quick_bugfix' }),
+      anchor(0, { executionPath: 'quick_bugfix' }),
+      anchor(0, { executionPath: 'quick_bugfix' }),
+      anchor(8, { executionPath: 'full_workflow' }),
+      anchor(12, { executionPath: 'full_workflow' }),
+    ];
+    expect(heuristicEstimate(anchors, 'quick_bugfix').hours).toBe(4);
+    expect(heuristicEstimate(anchors, 'quick_bugfix').reason).toContain('broader');
+  });
+
+  it('prefers adequate local same-path history over same-path cross-repo history', () => {
+    const anchors = [1, 2, 3].map((h) => anchor(h, { executionPath: 'quick_bugfix' }));
+    anchors.push(
+      ...[50, 60, 70, 80].map((h) => anchor(h, { executionPath: 'quick_bugfix', crossRepo: true })),
+    );
+    expect(heuristicEstimate(anchors, 'quick_bugfix').hours).toBe(2);
+  });
+
+  it('uses same-path cross-repo history for a cold start without double scaling', () => {
+    const anchors = [1, 2, 3].map((h) =>
+      anchor(h, { executionPath: 'quick_bugfix', crossRepo: true }),
+    );
+    anchors.push(anchor(50, { executionPath: 'full_workflow', crossRepo: true }));
+    expect(heuristicEstimate(anchors, 'quick_bugfix').hours).toBe(2);
+  });
+});
+
+describe('buildAnchors', () => {
+  const prior = (id: string, executionPath: string | null) => ({
+    id,
+    executionPath,
+    title: id,
+    description: '',
+    currentRound: 0,
+    changedPaths: [],
+    aiEstimatedTimeHours: null,
+    estimatedTimeHours: null,
+    completedAt: new Date(3_600_000),
+  });
+  type Prior = ReturnType<typeof prior>;
+  const mockDb = (batches: Prior[][], measured: string[]) => {
+    const findMany = vi.fn();
+    for (const batch of batches) findMany.mockResolvedValueOnce(batch);
+    const db = {
+      query: {
+        tasks: { findMany },
+        taskSteps: {
+          findMany: vi.fn().mockResolvedValue(
+            measured.map((taskId) => ({
+              taskId,
+              startedAt: new Date(0),
+              endedAt: new Date(3_600_000),
+              idleMs: 0,
+              userActiveMs: 0,
+              waitingStartedAt: null,
+              status: 'done',
+            })),
+          ),
+        },
+        repositories: {
+          findFirst: vi
+            .fn<() => Promise<{ userId: string; detectedFramework: string } | null>>()
+            .mockResolvedValue(null),
+          findMany: vi.fn().mockResolvedValue([]),
+        },
+      },
+    };
+    return {
+      db: db as unknown as Database,
+      findMany,
+      timingFindMany: db.query.taskSteps.findMany,
+      repositories: db.query.repositories,
+    };
+  };
+
+  it('finds older same-path runs beyond a full budget of preferred other-path runs', async () => {
+    const preferred = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`full-${i}`, 'full_workflow'),
+    );
+    const matching = [
+      prior('fix-1', 'quick_bugfix'),
+      prior('fix-2', 'quick_bugfix'),
+      prior('fix-3', 'quick_bugfix'),
+    ];
+    const { db, findMany } = mockDb(
+      [preferred, matching],
+      [...preferred, ...matching].map((p) => p.id),
+    );
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      preferred.map((p) => p.id),
+      'quick_bugfix',
+    );
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
+    // The separate database query must constrain the path, repository and completed
+    // workflow state; sorting just the existing 30 candidates cannot recover old fixes.
+    const query = new PgDialect().sqlToQuery(findMany.mock.calls[1]![0].where);
+    expect(query.sql).toContain('"tasks"."execution_path"');
+    expect(query.params).toEqual(['repo', 'workflow', 'completed', 'current', 'quick_bugfix']);
+  });
+
+  it('retains semantic order within the same path and deduplicates recent matches', async () => {
+    const preferred = [
+      prior('fix-2', 'quick_bugfix'),
+      prior('full', 'full_workflow'),
+      prior('fix-1', 'quick_bugfix'),
+    ];
+    const matching = [
+      prior('fix-3', 'quick_bugfix'),
+      prior('fix-2', 'quick_bugfix'),
+      prior('fix-1', 'quick_bugfix'),
+    ];
+    const { db } = mockDb([preferred, matching], ['fix-1', 'fix-2', 'fix-3', 'full']);
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      preferred.map((p) => p.id),
+      'quick_bugfix',
+    );
+    expect(anchors.map((a) => a.title)).toEqual(['fix-2', 'fix-1', 'fix-3']);
+  });
+
+  it('searches past multiple unmeasured pages before falling back to other paths', async () => {
+    const firstPage = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const secondPage = [
+      prior('fix-1', 'quick_bugfix'),
+      ...firstPage.slice(1).map((p) => ({ ...p, id: `older-${p.id}` })),
+    ];
+    const lastPage = [prior('fix-2', 'quick_bugfix'), prior('fix-3', 'quick_bugfix')];
+    const { db, findMany } = mockDb([firstPage, secondPage, lastPage], ['fix-1', 'fix-2', 'fix-3']);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
+    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([
+      0,
+      HISTORY_BATCH_SIZE,
+      HISTORY_BATCH_SIZE * 2,
+    ]);
+  });
+
+  it('does not count preferred runs twice while paging past unmeasured rows', async () => {
+    const preferred = [prior('fix-1', 'quick_bugfix')];
+    const firstPage = [
+      ...preferred,
+      ...Array.from({ length: HISTORY_BATCH_SIZE - 1 }, (_, i) =>
+        prior(`unmeasured-${i}`, 'quick_bugfix'),
+      ),
+    ];
+    const lastPage = [prior('fix-2', 'quick_bugfix'), prior('fix-3', 'quick_bugfix')];
+    const { db } = mockDb([preferred, firstPage, lastPage], ['fix-1', 'fix-2', 'fix-3']);
+    const anchors = await buildAnchors(db, 'current', 'repo', ['fix-1'], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
+  });
+
+  it('stops paging once the measured sample is sufficient and keeps the anchor budget', async () => {
+    const preferred = [prior('fix-preferred', 'quick_bugfix')];
+    const recent = Array.from({ length: MAX_ANCHORS }, (_, i) => prior(`fix-${i}`, 'quick_bugfix'));
+    const { db, findMany } = mockDb(
+      [preferred, recent],
+      [...preferred, ...recent].map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo', ['fix-preferred'], 'quick_bugfix');
+    expect(anchors).toHaveLength(MAX_ANCHORS);
+    expect(anchors[0]?.title).toBe('fix-preferred');
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it('tops up sparse measured same-path history with broader runs, without duplicates', async () => {
+    const preferred = [prior('full', 'full_workflow'), prior('fix-1', 'quick_bugfix')];
+    const matching = [
+      prior('fix-1', 'quick_bugfix'),
+      prior('unmeasured-1', 'quick_bugfix'),
+      prior('unmeasured-2', 'quick_bugfix'),
+    ];
+    const newest = [...matching, prior('plan', 'plan_tasklist'), prior('full', 'full_workflow')];
+    const { db } = mockDb([preferred, matching, newest], ['fix-1', 'full', 'plan']);
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      preferred.map((p) => p.id),
+      'quick_bugfix',
+    );
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'full', 'plan']);
+  });
+
+  it('keeps the original preferred/newest ordering when the path is unknown', async () => {
+    const preferred = [prior('full', 'full_workflow')];
+    const newest = [prior('fix', 'quick_bugfix'), ...preferred];
+    const { db } = mockDb([preferred, newest], ['full', 'fix']);
+    const anchors = await buildAnchors(db, 'current', 'repo', ['full']);
+    expect(anchors.map((a) => a.title)).toEqual(['full', 'fix']);
+  });
+
+  it('fills broader local fallback after a full retrieval budget of unmeasured same-path rows', async () => {
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, repositories } = mockDb(
+      [unmeasured, unmeasured, [], unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      unmeasured.map((p) => p.id),
+      'quick_bugfix',
+    );
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(repositories.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('hydrates older measured preferred file overlaps before applying the budget', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [prior('fix-1', 'quick_bugfix'), prior('fix-2', 'quick_bugfix')];
+    const preferred = [...unmeasured, ...measured];
+    const { db } = mockDb(
+      [preferred, []],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(
+      db,
+      'current',
+      'repo',
+      preferred.map((p) => p.id),
+    );
+    const overlapping = anchors.map((a) => ({ ...a, changedPaths: ['a'] }));
+    expect(overlapRefinedEstimate(overlapping, ['a'], 'quick_bugfix')).toEqual({
+      hours: 1,
+      overlapAnchors: 2,
+      matchedFiles: 1,
+    });
+  });
+
+  it('retains measured plan matches behind a full page of unmeasured same-path candidates', async () => {
+    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [prior('old-plan-1', 'quick_bugfix'), prior('old-plan-2', 'quick_bugfix')];
+    const candidates = [...unmeasured, ...measured];
+    const planRows = candidates.map((p, i) => ({
+      taskId: p.id,
+      nodeId: 'node',
+      executionPath: p.executionPath,
+      completedAt: new Date(1000 - i),
+    }));
+    let selects = 0;
+    const planDb = {
+      select: () => {
+        const rows = selects++ === 0 ? [{ nodeId: 'node', path: '/root/node/' }] : planRows;
+        const chain = { from: () => chain, innerJoin: () => chain, where: async () => rows };
+        return chain;
+      },
+    } as unknown as Database;
+    const ids = await planProximityTaskIds(planDb, 'current', 'repo', 'quick_bugfix');
+    expect(ids).toHaveLength(MAX_ANCHORS + 2);
+    const recent = [1, 2, 3].map((i) => prior(`unrelated-${i}`, 'quick_bugfix'));
+    const { db } = mockDb(
+      [candidates, recent],
+      [...measured, ...recent].map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo', ids, 'quick_bugfix');
+    expect(anchors.slice(0, 2).map((a) => a.title)).toEqual(['old-plan-1', 'old-plan-2']);
+  });
+
+  it('bounds query parameters and round trips for large mostly unmeasured plan histories', async () => {
+    const ids = Array.from({ length: 65_536 }, (_, i) => `plan-${i}`);
+    const measured = [ids[0]!, ids[32_768]!, ids[65_535]!].map((id) => prior(id, 'quick_bugfix'));
+    const { db, findMany, timingFindMany } = mockDb(
+      [],
+      measured.map((p) => p.id),
+    );
+    const dialect = new PgDialect();
+    const parameterCounts: number[] = [];
+    findMany.mockImplementation(async ({ where }) => {
+      const { params } = dialect.sqlToQuery(where);
+      parameterCounts.push(params.length);
+      // SQL result order differs from the plan ranking, even across lookup batches.
+      return params
+        .filter((id): id is string => typeof id === 'string' && id.startsWith('plan-'))
+        .map((id) => prior(id, 'quick_bugfix'))
+        .reverse();
+    });
+
+    const anchors = await buildAnchors(db, 'current', 'repo', ids, 'quick_bugfix');
+
+    expect(anchors.map((a) => a.title)).toEqual(measured.map((p) => p.id));
+    expect(parameterCounts.length).toBeGreaterThan(1);
+    expect(Math.max(...parameterCounts)).toBeLessThan(1000);
+    const timingQueries = timingFindMany.mock.calls;
+    expect(timingQueries.length).toBeLessThan(200);
+    expect(
+      Math.max(...timingQueries.map(([query]) => dialect.sqlToQuery(query.where).params.length)),
+    ).toBeLessThan(1000);
+  });
+
+  it('pages broader recent history past unmeasured rows even without preferred ids', async () => {
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
+      prior(`unmeasured-${i}`, 'full_workflow'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, findMany } = mockDb(
+      [unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo');
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([0, HISTORY_BATCH_SIZE]);
+    expect(findMany.mock.calls.every(([args]) => args.limit === HISTORY_BATCH_SIZE)).toBe(true);
+  });
+
+  it('pages cold-start history past unmeasured same-path rows to measured broader siblings', async () => {
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
+    const { db, findMany, repositories } = mockDb(
+      [[], [], unmeasured, measured],
+      measured.map((p) => p.id),
+    );
+    repositories.findFirst.mockResolvedValue({
+      userId: 'owner',
+      detectedFramework: 'nextjs',
+    });
+    repositories.findMany.mockResolvedValue([{ id: 'sibling' }]);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
+    expect(anchors.every((a) => a.crossRepo)).toBe(true);
+    expect(findMany.mock.calls.slice(2).map(([args]) => args.offset)).toEqual([
+      0,
+      HISTORY_BATCH_SIZE,
+    ]);
+    expect(findMany.mock.calls.every(([args]) => args.limit === HISTORY_BATCH_SIZE)).toBe(true);
+    const query = new PgDialect().sqlToQuery(findMany.mock.calls[2]![0].where);
+    expect(query.params).toEqual(['sibling', 'workflow', 'completed']);
+  });
+
+  it('caps measured cold-start anchors at the remaining budget', async () => {
+    const local = [prior('local', 'quick_bugfix')];
+    const cross = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`cross-${i}`, 'quick_bugfix'),
+    );
+    const { db, repositories } = mockDb(
+      [local, local, cross],
+      [...local, ...cross].map((p) => p.id),
+    );
+    repositories.findFirst.mockResolvedValue({
+      userId: 'owner',
+      detectedFramework: 'nextjs',
+    });
+    repositories.findMany.mockResolvedValue([{ id: 'sibling' }]);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors).toHaveLength(MAX_ANCHORS);
+    expect(anchors.filter((a) => !a.crossRepo)).toHaveLength(1);
+    expect(anchors.filter((a) => a.crossRepo)).toHaveLength(MAX_ANCHORS - 1);
+  });
+});
+
+describe('fileOverlapTaskIds', () => {
+  it('keeps same-path overlapping tasks ahead of a full budget of other-path matches', async () => {
+    const rows = [
+      ...Array.from({ length: MAX_ANCHORS }, (_, i) => ({
+        id: `full-${i}`,
+        executionPath: 'full_workflow',
+        changedPaths: ['a', 'b'],
+        completedAt: new Date(10_000),
+      })),
+      {
+        id: 'fix-old',
+        executionPath: 'quick_bugfix',
+        changedPaths: ['a'],
+        completedAt: new Date(0),
+      },
+      {
+        id: 'fix-new',
+        executionPath: 'quick_bugfix',
+        changedPaths: ['a'],
+        completedAt: new Date(1000),
+      },
+    ];
+    const db = {
+      select: () => ({ from: () => ({ where: async () => rows }) }),
+    } as unknown as Database;
+    const ids = await fileOverlapTaskIds(db, 'current', 'repo', ['a', 'b'], 'quick_bugfix');
+    expect(ids.slice(0, 2)).toEqual(['fix-new', 'fix-old']);
+    expect(ids).toHaveLength(MAX_ANCHORS + 2);
+  });
 });
 
 describe('overlapRefinedEstimate', () => {
+  it('prefers same-path file overlaps so refinement does not restore mixed-path bias', () => {
+    const anchors = [
+      anchor(2, { executionPath: 'plan_tasklist', changedPaths: ['a'] }),
+      anchor(4, { executionPath: 'plan_tasklist', changedPaths: ['a'] }),
+      anchor(90, { executionPath: 'full_workflow', changedPaths: ['a', 'b'] }),
+    ];
+    expect(overlapRefinedEstimate(anchors, ['a', 'b'], 'plan_tasklist')).toEqual({
+      hours: 3,
+      overlapAnchors: 2,
+      matchedFiles: 1,
+    });
+    expect(overlapRefinedEstimate(anchors, ['a', 'b'], 'full_workflow')?.overlapAnchors).toBe(3);
+  });
   it('returns null when no files are predicted', () => {
     expect(overlapRefinedEstimate([anchor(2, { changedPaths: ['a'] })], [])).toBeNull();
   });
@@ -130,6 +557,27 @@ describe('overlapRefinedEstimate', () => {
 describe('rankPlanProximity', () => {
   const at = (iso: string) => new Date(iso);
   const NODE = 'node-self';
+
+  it('keeps an older same-path plan match ahead of a full mixed-path result budget', () => {
+    const rows = [
+      ...Array.from({ length: MAX_ANCHORS }, (_, i) => ({
+        taskId: `full-${i}`,
+        nodeId: NODE,
+        completedAt: at('2026-06-01'),
+        executionPath: 'full_workflow',
+      })),
+      {
+        taskId: 'older-fix',
+        nodeId: 'sibling',
+        completedAt: at('2026-01-01'),
+        executionPath: 'quick_bugfix',
+      },
+    ];
+    const ids = rankPlanProximity(rows, [NODE], 'quick_bugfix');
+    expect(ids[0]).toBe('older-fix');
+    expect(ids).toHaveLength(MAX_ANCHORS);
+    expect(rankPlanProximity(rows, [NODE])).not.toContain('older-fix');
+  });
 
   it('puts a same-node task ahead of a nearer-in-time sibling task', () => {
     // Tier beats recency: implementing the very node in hand is a stronger signal than
@@ -206,6 +654,25 @@ describe('rankPlanProximity', () => {
 });
 
 describe('computeBiasFactor', () => {
+  it('calibrates only from local same-path estimate/actual pairs', () => {
+    const anchors = [
+      anchor(2, { executionPath: 'quick_bugfix', aiEstimateHours: 4 }),
+      anchor(4, { executionPath: 'quick_bugfix', aiEstimateHours: 4 }),
+      anchor(90, { executionPath: 'full_workflow', aiEstimateHours: 1 }),
+      anchor(90, { executionPath: 'full_workflow', aiEstimateHours: 1 }),
+      anchor(90, { executionPath: 'quick_bugfix', aiEstimateHours: 1, crossRepo: true }),
+    ];
+    expect(computeBiasFactor(anchors, 'quick_bugfix')).toBe(0.75);
+  });
+
+  it('withholds calibration when same-path pairs are sparse, even with ample other-path history', () => {
+    const anchors = [
+      anchor(2, { executionPath: 'quick_bugfix', aiEstimateHours: 4 }),
+      anchor(90, { executionPath: 'full_workflow', aiEstimateHours: 1 }),
+      anchor(90, { executionPath: null, aiEstimateHours: 1 }),
+    ];
+    expect(computeBiasFactor(anchors, 'quick_bugfix')).toBeNull();
+  });
   it('null with fewer than 2 anchors carrying both estimate and actual', () => {
     expect(computeBiasFactor([anchor(4, { aiEstimateHours: 2 })])).toBeNull();
     expect(computeBiasFactor([anchor(4), anchor(6)])).toBeNull(); // no aiEstimateHours
@@ -234,6 +701,16 @@ describe('computeBiasFactor', () => {
 });
 
 describe('estimateRange', () => {
+  it('uses same-path measurements without scaling the band twice', () => {
+    const anchors = [1, 2, 3, 4, 5].map((h) => anchor(h, { executionPath: 'quick_bugfix' }));
+    anchors.push(anchor(100, { executionPath: 'full_workflow' }));
+    expect(estimateRange(anchors, 'quick_bugfix')).toEqual({ low: 2, high: 4 });
+  });
+
+  it('scales the broader-history fallback band consistently with the baseline', () => {
+    const anchors = [1, 2, 3, 4, 5].map((h) => anchor(h, { executionPath: 'full_workflow' }));
+    expect(estimateRange(anchors, 'quick_bugfix')).toEqual({ low: 1, high: 2 });
+  });
   it('null with fewer than 3 usable anchors', () => {
     expect(estimateRange([anchor(2), anchor(4)])).toBeNull();
   });

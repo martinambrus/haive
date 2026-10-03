@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { parseEstimateOutput, resolveEstimate, estimateStep } from './00b-estimate.js';
+import type { EstimateAnchor } from './_estimate.js';
+
+const history: EstimateAnchor[] = [1, 2, 3].map((effortHours) => ({
+  title: `fix-${effortHours}`,
+  description: '',
+  executionPath: 'quick_bugfix',
+  fixRounds: 0,
+  effortHours,
+  aiEstimateHours: effortHours * 2,
+  confirmedEstimateHours: null,
+  changedPaths: [],
+  crossRepo: false,
+}));
 
 describe('parseEstimateOutput', () => {
   it('parses a fenced JSON object', () => {
@@ -34,10 +47,16 @@ describe('parseEstimateOutput', () => {
 });
 
 describe('resolveEstimate', () => {
-  const detected = {
+  const detected: Parameters<typeof resolveEstimate>[1] = {
+    title: 'Task',
+    description: '',
+    manualEstimateHours: null,
+    biasFactor: null,
+    anchors: [],
+    executionPath: 'plan_tasklist',
     heuristicHours: 2,
     heuristicReason: 'because',
-  } as Parameters<typeof resolveEstimate>[1];
+  };
 
   it('uses the LLM estimate when valid', () => {
     const r = resolveEstimate({ estimatedHours: 5, confidence: 'high' }, detected);
@@ -49,6 +68,71 @@ describe('resolveEstimate', () => {
     const r = resolveEstimate(null, detected);
     expect(r.hours).toBe(2);
     expect(r.source).toBe('heuristic');
+  });
+
+  it('recomputes a persisted fallback rather than reusing its old path-scaled baseline', () => {
+    const r = resolveEstimate(null, {
+      ...detected,
+      anchors: history,
+      executionPath: 'quick_bugfix',
+      heuristicHours: 1,
+    });
+    expect(r.hours).toBe(2);
+    expect(r.rationale).toContain('no path scaling needed');
+  });
+
+  it('recomputes the explanation when valid AI output omits its rationale', () => {
+    const r = resolveEstimate(
+      { estimatedHours: 5 },
+      {
+        ...detected,
+        anchors: history,
+        executionPath: 'quick_bugfix',
+        heuristicReason: 'old mixed-path explanation',
+      },
+    );
+    expect(r.hours).toBe(5);
+    expect(r.source).toBe('llm');
+    expect(r.rationale).toContain('prior quick_bugfix task(s)');
+    expect(r.rationale).toContain('no path scaling needed');
+    expect(r.rationale).not.toContain('old mixed-path explanation');
+  });
+});
+
+describe('estimateStep.llm', () => {
+  it('instructs same-path comparison and recomputes calibration on persisted detect output', () => {
+    const detected = {
+      title: 'Fix a bug',
+      description: '',
+      executionPath: 'quick_bugfix',
+      anchors: history,
+      biasFactor: 4,
+      heuristicHours: 1,
+      heuristicReason: 'old mixed baseline',
+    };
+    const prompt = estimateStep.llm!.buildPrompt({ detected, formValues: {} });
+    expect(prompt).toContain('SAME execution path with similar scope');
+    expect(prompt).toContain('weaker fallback');
+    expect(prompt).toContain('prior quick_bugfix tasks in this repository');
+    expect(prompt).toContain('about 0.5x');
+    expect(prompt).toContain('baseline suggests 2h');
+    expect(prompt).not.toContain('about 4x');
+  });
+
+  it('does not advertise mixed-path calibration when same-path pairs are insufficient', () => {
+    const anchors = history.map((a) => ({ ...a, executionPath: 'full_workflow' }));
+    const prompt = estimateStep.llm!.buildPrompt({
+      detected: {
+        title: 'Fix',
+        description: '',
+        executionPath: 'quick_bugfix',
+        anchors,
+        biasFactor: 0.5,
+      },
+      formValues: {},
+    });
+    expect(prompt).not.toContain('Calibration:');
+    expect(prompt).toContain('broader prior task(s)');
   });
 });
 

@@ -1,4 +1,7 @@
 import { ollamaEmbed, probeOllama, vectorLiteral, TASK_SOURCE_TYPE } from '@haive/shared/rag';
+import { and, eq, ne } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { HISTORY_BATCH_SIZE, measuredPriorTaskIds } from './_estimate.js';
 import type { StepContext } from '../../step-definition.js';
 import {
   RAG_TABLE,
@@ -75,7 +78,9 @@ export async function indexTaskEmbedding(
 
 /** Best-effort semantic retrieval: embed the new task's text, cosine-rank the repo's stored
  *  source_type='task' rows, and return up to `limit` most-similar PRIOR task ids (most-similar
- *  first, current task excluded). Returns [] when ollama is unreachable, the store is jsonb-only
+ *  first within each execution-path tier, current task excluded). A known path is filtered
+ *  before its vector result limit, with broader semantic matches filling sparse history.
+ *  Returns [] when ollama is unreachable, the store is jsonb-only
  *  (the vector cast throws → caught), or anything else fails — the estimator then keeps its
  *  deterministic newest-first anchor selection. Prefs + projectName come from the caller (which
  *  already resolved them) so this stays a leaf module. The dims are a trusted number from prefs,
@@ -88,6 +93,7 @@ export async function retrieveSimilarTaskIds(
   repositoryId: string,
   queryText: string,
   limit: number,
+  executionPath: string | null = null,
 ): Promise<string[]> {
   if (!queryText || limit <= 0) return [];
   if (!prefs.ollamaUrl || !prefs.embeddingModel) return [];
@@ -101,15 +107,57 @@ export async function retrieveSimilarTaskIds(
     conn = await resolveRagConnection(prefs, ctx.db, projectName);
     if (!conn) return [];
     const dims = conn.embeddingDimensions;
-    const rows = (await conn.pg.unsafe(
-      `SELECT task_id
-       FROM ${RAG_TABLE}
-       WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
-       ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims})
-       LIMIT $5`,
-      [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec), limit],
-    )) as Array<{ task_id: string | null }>;
-    return rows.map((r) => r.task_id).filter((id): id is string => !!id);
+    // The RAG store may be external and has no tasks table to join. Resolve eligibility
+    // from our source-of-truth DB, then bind those ids into the vector query BEFORE its
+    // limit. Existing task embeddings need no path metadata or reindexing.
+    const matchingTasks = executionPath
+      ? await ctx.db.query.tasks.findMany({
+          where: and(
+            eq(schema.tasks.repositoryId, repositoryId),
+            eq(schema.tasks.type, 'workflow'),
+            eq(schema.tasks.status, 'completed'),
+            ne(schema.tasks.id, ctx.taskId),
+            eq(schema.tasks.executionPath, executionPath),
+          ),
+          columns: { id: true },
+        })
+      : [];
+    const matchingIds = matchingTasks.map((t) => t.id);
+    const params = [TASK_EMBED_SOURCE_TYPE, repositoryId, ctx.taskId, vectorLiteral(qvec)];
+    const readMeasured = async (pathFilter: string, budget: number): Promise<string[]> => {
+      const selected: string[] = [];
+      const seen = new Set<string>();
+      const useIds = pathFilter !== '';
+      // Order by the distance function to force exact ranking. An HNSW operator scan
+      // can return a short approximate page even when usable rows remain below it.
+      const cursor = conn!.pg
+        .unsafe<Array<{ task_id: string | null }>>(
+          `SELECT task_id
+           FROM ${RAG_TABLE}
+           WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
+           ${pathFilter}
+           ORDER BY cosine_distance(vector::halfvec(${dims}), ($4::vector)::halfvec(${dims})), task_id`,
+          [...params, ...(useIds ? [matchingIds] : [])],
+        )
+        .cursor(HISTORY_BATCH_SIZE);
+      // Execute the exact ordering once, then stream bounded result batches.
+      // Breaking closes the cursor as soon as the measured output budget is filled.
+      for await (const rows of cursor) {
+        const ids = rows.map((r) => r.task_id).filter((id): id is string => !!id && !seen.has(id));
+        for (const id of ids) seen.add(id);
+        selected.push(...(await measuredPriorTaskIds(ctx.db, ctx.taskId, repositoryId, ids)));
+        if (selected.length >= budget) break;
+      }
+      return selected.slice(0, budget);
+    };
+    const matching =
+      matchingIds.length > 0 ? await readMeasured('AND task_id = ANY($5::uuid[])', limit) : [];
+    if (matching.length >= limit) return matching;
+    const broader = await readMeasured(
+      matchingIds.length > 0 ? 'AND NOT (task_id = ANY($5::uuid[]))' : '',
+      limit - matching.length,
+    );
+    return [...matching, ...broader];
   } catch (err) {
     ctx.logger.warn({ err }, 'semantic task retrieval failed (falling back to newest-first)');
     return [];

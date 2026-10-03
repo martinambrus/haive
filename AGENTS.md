@@ -218,6 +218,9 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Step engine
 
+- [Effort estimation](docs/architecture/effort-estimation.md): same-path history, sparse
+  fallback, calibration and post-planning refinement. `00b-estimate`, `_estimate.ts`,
+  `_task-embedding.ts`, `06b-sprint-planning`.
 - [Fix loop](docs/architecture/fix-loop.md): `loop_back` rounds, DAG-mode fix rounds, failures no
   agent can repair, a long diagnosis kept by both ends, a repeat from the same check. `_fix-loop.ts`,
   `_test-env-guard.ts`, `loadPriorFixContext`, `excerptDiagnosis`, `loadSameCheckRepeat`.
