@@ -1,5 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { FACET_DIMENSIONS, FACET_MAJOR_PARENTS } from '@haive/shared/global-kb';
+import {
+  FACET_DIMENSIONS,
+  FACET_MAJOR_PARENTS,
+  GLOBAL_KB_DESCRIPTION_MAX,
+} from '@haive/shared/global-kb';
 import { describe, expect, it } from 'vitest';
 import {
   enrichmentBlocksEdit,
@@ -265,6 +269,23 @@ describe('web mirrors the major/parent pairing', () => {
     );
     expect(webPairs.length).toBeGreaterThan(0);
     expect(Object.fromEntries(webPairs)).toEqual({ ...FACET_MAJOR_PARENTS });
+  });
+});
+
+// The description cap is spelled twice (shared and web's api client) for the reason above; drift
+// means the form counts against a limit the api no longer enforces.
+describe('web mirrors the description cap', () => {
+  it('declares the same limit as GLOBAL_KB_DESCRIPTION_MAX', () => {
+    const webSrc = readFileSync(
+      new URL('../../web/src/lib/api-client.ts', import.meta.url),
+      'utf8',
+    );
+    const declared = webSrc.match(/export const GLOBAL_KB_DESCRIPTION_MAX = (\d+);/)?.[1];
+    expect(
+      declared,
+      'could not locate GLOBAL_KB_DESCRIPTION_MAX in web/src/lib/api-client.ts',
+    ).toBeTruthy();
+    expect(Number(declared)).toBe(GLOBAL_KB_DESCRIPTION_MAX);
   });
 });
 

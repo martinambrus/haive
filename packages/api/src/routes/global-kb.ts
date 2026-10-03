@@ -6,13 +6,16 @@ import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
   SECRET_KEYS,
+  collapseToLine,
   configService,
   secretsService,
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
 import {
+  GLOBAL_KB_DESCRIPTION_MAX,
   globalKbEntries,
   globalKbTopicKey,
+  normalizeGlobalKbDescription,
   orphanFacetMajors,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
@@ -71,6 +74,7 @@ const createSchema = z.object({
   namespace: z.string().min(1).max(120).optional(),
   status: z.enum(['draft', 'active']).optional(),
   seedText: z.string().optional(),
+  description: z.string().nullable().optional(),
 });
 
 /** Exported for the test that pins the strict-schema regression: a facet dimension missing from
@@ -82,6 +86,7 @@ export const updateSchema = z
     category: z.enum(CATEGORIES),
     facets: facetsSchema,
     status: z.enum(['draft', 'active', 'archived']),
+    description: z.string().nullable(),
   })
   .partial();
 
@@ -119,6 +124,9 @@ export const enrichSchema = z.object({
    *  because asking the prompt was already tried and produced a Drupal-8+ rule scoped to
    *  `frameworkMajor: ['7']`. Dimensions left out stay the model's to fill. */
   facets: facetsSchema.optional(),
+  /** A one-line description the author is sure of. Authoritative, like the title: the worker keeps
+   *  it over whatever the model proposes. */
+  description: z.string().nullable().optional(),
   // Per-article egress for the enrichment run (plan §5.3): none = repo + the
   // CLI's own model only; allowlist = + the listed domains; full = open internet.
   egress: z
@@ -321,6 +329,7 @@ globalKbRoutes.post('/enrich', async (c) => {
   if (!parsed.success) throw new HttpError(400, 'invalid enrich request', 'invalid_body');
   const data = parsed.data;
   assertFacetsNameTheirTechnology(data.facets);
+  const description = authoredDescription(data.description) ?? null;
   const userId = c.get('userId');
   const db = getDb();
 
@@ -359,6 +368,7 @@ globalKbRoutes.post('/enrich', async (c) => {
         // back as authoritative. `{}` when they stated nothing, which leaves every dimension
         // to the model exactly as before.
         facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+        description,
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
@@ -389,6 +399,7 @@ globalKbRoutes.post('/enrich', async (c) => {
         // the model's inferred scope as though the author had stated it — and forcing those
         // values back over the new answer makes "retry to correct a wrong scope" impossible.
         authorFacets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+        authorDescription: description,
         ...(data.egress
           ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
           : {}),
@@ -546,6 +557,7 @@ globalKbRoutes.post('/entries', async (c) => {
   if (!parsed.success) throw new HttpError(400, 'invalid global KB entry', 'invalid_body');
   const data = parsed.data;
   assertFacetsNameTheirTechnology(data.facets);
+  const description = authoredDescription(data.description) ?? null;
   const userId = c.get('userId');
 
   const entry = await withGlobalKb(getDb(), async ({ db, settings }) => {
@@ -559,6 +571,7 @@ globalKbRoutes.post('/entries', async (c) => {
         body: data.body,
         category: data.category,
         facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+        description,
         status: data.status ?? 'draft',
         source: 'user',
         embedStatus: 'pending',
@@ -592,6 +605,21 @@ function assertFacetsNameTheirTechnology(facets: unknown): void {
   );
 }
 
+/** A description a PERSON typed, ready to store: one line, null when blank, `undefined` when not sent.
+ *  Refused over the cap rather than cut, as a silently shortened summary is not what they typed. */
+function authoredDescription(raw: string | null | undefined): string | null | undefined {
+  if (raw === undefined) return undefined;
+  const line = collapseToLine(raw);
+  if (line.length > GLOBAL_KB_DESCRIPTION_MAX) {
+    throw new HttpError(
+      400,
+      `description is ${line.length} characters; the limit is ${GLOBAL_KB_DESCRIPTION_MAX}`,
+      'description_too_long',
+    );
+  }
+  return normalizeGlobalKbDescription(line);
+}
+
 /** Whether a facet edit changed the entry's SCOPE, ignoring `tags`.
  *
  *  `tags` is carried by an entry but does not restrict retrieval (see FACET_FILTER_DIMENSIONS),
@@ -616,7 +644,7 @@ export function scopeChanged(
 
 /** Why an entry cannot be edited right now, or null when it can.
  *
- *  Enrichment rewrites an entry's title, category, facets, body and status when it lands
+ *  Enrichment rewrites an entry's title, category, facets, description, body and status when it lands
  *  (`01-enrich`'s apply) from the task's own metadata and the model's answer, never from this row,
  *  so an edit accepted while that can still happen reports success and is then silently lost.
  *  `failed` counts too: recovering one is a step retry, which runs the same apply, and the retry
@@ -682,6 +710,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   const data = parsed.data;
   assertFacetsNameTheirTechnology(data.facets);
   if (Object.keys(data).length === 0) throw new HttpError(400, 'no fields to update');
+  const description = authoredDescription(data.description);
 
   // ONE transaction for read-decide-write-archive. Without it two clients racing the same
   // draft interleave: activation reads `supersedesEntryId` after a concurrent scope edit has
@@ -705,6 +734,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       if (data.category !== undefined) set.category = data.category;
       if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
       if (data.status !== undefined) set.status = data.status;
+      if (description !== undefined) set.description = description;
       // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
       // success. `supersededAt` means "archived because something replaced it", and the digest
       // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
@@ -861,7 +891,10 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
 
   const entry = result.row;
   if (!entry) throw new HttpError(404, 'global KB entry not found');
-  await enqueueSync(entry.id, entry.namespace, 'upsert');
+  // Shown beside the title and never embedded, so changing it alone leaves nothing to sync.
+  if (!Object.keys(data).every((key) => key === 'description')) {
+    await enqueueSync(entry.id, entry.namespace, 'upsert');
+  }
   if (result.supersededId) await enqueueSync(result.supersededId, entry.namespace, 'delete');
   return c.json({ entry });
 });

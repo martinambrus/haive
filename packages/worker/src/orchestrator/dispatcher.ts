@@ -154,7 +154,7 @@ export interface DispatchRequest {
    *  address. Computed by resolveTaskDispatch; exposed on the pure resolver only for
    *  deterministic unit tests. Null means say nothing about the app. */
   appReach?: AppReach | null;
-  /** Stack-matching global KB titles to advertise. Computed by
+  /** Stack-matching global KB titles, with their descriptions, to advertise. Computed by
    *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
    *  unit tests. Empty means there is nothing to advertise. */
   globalKbDigest?: GlobalKbDigest;
@@ -215,9 +215,9 @@ export interface DispatchRequest {
  *   the repository's instruction chain names an agent directory or a file inside one;
  * - the step did not declare `agentPool: '*'`;
  * - nothing the dispatcher adds after this decision names one either: the MCP surface's user server
- *   keys, the global-KB digest's titles, and `injectedRules`, the provider's rules block. The rules
- *   are passed only once the provider is known, so the async pre-check runs without them and can
- *   only be more permissive than the final pass.
+ *   keys, the global-KB digest's titles and descriptions, and `injectedRules`, the provider's rules
+ *   block. The rules are passed only once the provider is known, so the async pre-check runs without
+ *   them and can only be more permissive than the final pass.
  */
 export function agentIsolationApplies(req: DispatchRequest, injectedRules?: string): boolean {
   if (req.agentIsolation !== true) return false;
@@ -244,9 +244,10 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   // EXTERNAL text the dispatcher appends AFTER this decision, which the prompt argument cannot answer
   // for. `adaptPrompt` splices in the MCP surface and the global-KB digest once this has returned, and
   // both carry strings Haive did not write: a repository's own `mcpServers` keys, taken verbatim from
-  // its `.claude/mcp_settings.json` by `loadUserMcpServers`, and author-written KB titles. So a
-  // repository could name a server `.claude/agents/foo`, or an author title an entry that way, and reach
-  // an isolated invocation's final prompt with a path whose directory the mask then hides.
+  // its `.claude/mcp_settings.json` by `loadUserMcpServers`, and author-written KB titles and
+  // descriptions. So a repository could name a server `.claude/agents/foo`, or an author title an
+  // entry that way, and reach an isolated invocation's final prompt with a path whose directory the
+  // mask then hides.
   //
   // Scanned here rather than after the appends because the decision has to be ONE boolean for the
   // prompt and the mounts alike; `resolveTaskDispatch` resolves both fields before `resolveDispatch`,
@@ -260,7 +261,11 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   // saving; the alternative is a scan that disagrees with what renders.
   const externalText = [
     ...Object.keys(req.mcpSurface?.userServers ?? {}),
-    ...(req.globalKbDigest?.entries ?? []).flatMap((entry) => [entry.title, entry.category]),
+    ...(req.globalKbDigest?.entries ?? []).flatMap((entry) => [
+      entry.title,
+      entry.category,
+      ...(entry.description ? [entry.description] : []),
+    ]),
     ...(injectedRules ? [injectedRules] : []),
   ].join('\n');
   if (externalText.length > 0 && promptNamesAgentPath(externalText, SANDBOX_WORKDIR)) return false;

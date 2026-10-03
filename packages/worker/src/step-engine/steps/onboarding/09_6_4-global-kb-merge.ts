@@ -1,4 +1,4 @@
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { globalKbEntries, resolveGlobalKbSettings, withGlobalKb } from '@haive/shared/global-kb';
 import type { FormSchema } from '@haive/shared';
 import type {
@@ -25,6 +25,9 @@ interface MergePair {
   draftBody: string;
   existingId: string;
   existingBody: string;
+  /** Absent on a payload persisted before descriptions existed. */
+  draftDescription?: string | null;
+  existingDescription?: string | null;
 }
 
 interface MergeDetect {
@@ -50,6 +53,11 @@ export function extractMergedArticle(raw: string | null | undefined): string {
   const e = raw.lastIndexOf(MERGE_END);
   if (b >= 0 && e > b) return raw.slice(b + MERGE_BEGIN.length, e).trim();
   return raw.trim();
+}
+
+/** A pair whose bodies already match has nothing to merge, so no agent is spent on it. */
+function nothingToMerge(p: MergePair): boolean {
+  return p.draftBody.trim() === p.existingBody.trim();
 }
 
 function buildMergePrompt(p: MergePair): string {
@@ -83,6 +91,7 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
           id: globalKbEntries.id,
           title: globalKbEntries.title,
           body: globalKbEntries.body,
+          description: globalKbEntries.description,
           supersedesEntryId: globalKbEntries.supersedesEntryId,
         })
         .from(globalKbEntries)
@@ -97,7 +106,7 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
       for (const d of drafts) {
         if (!d.supersedesEntryId) continue;
         const [existing] = await gdb
-          .select({ body: globalKbEntries.body })
+          .select({ body: globalKbEntries.body, description: globalKbEntries.description })
           .from(globalKbEntries)
           .where(eq(globalKbEntries.id, d.supersedesEntryId))
           .limit(1);
@@ -108,6 +117,8 @@ async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
             draftBody: d.body,
             existingId: d.supersedesEntryId,
             existingBody: existing.body,
+            draftDescription: d.description,
+            existingDescription: existing.description,
           });
         }
       }
@@ -160,36 +171,60 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
       // runs without a real CLI provider (the drafts stay linked, unmerged).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const { pairs } = detected as MergeDetect;
-      return pairs.map((p) => ({
-        agentId: `merge:${p.draftId}`,
-        agentTitle: `KB merge: ${p.draftTitle}`,
-        prompt: buildMergePrompt(p),
-      }));
+      return pairs
+        .filter((p) => !nothingToMerge(p))
+        .map((p) => ({
+          agentId: `merge:${p.draftId}`,
+          agentTitle: `KB merge: ${p.draftTitle}`,
+          prompt: buildMergePrompt(p),
+        }));
     },
   },
 
   async apply(ctx, args): Promise<MergeApply> {
     const { pairs } = args.detected as MergeDetect;
     const results = (args.agentMiningResults ?? []) as AgentMiningResult[];
-    const byDraft = new Map<string, MergePair>(pairs.map((p) => [`merge:${p.draftId}`, p]));
     const mergedDrafts = new Set<string>();
+    const leftDraft = new Set<string>();
     let merged = 0;
     try {
       const settings = await resolveGlobalKbSettings();
       if (settings.enabled) {
         await withGlobalKb(ctx.db, async ({ db: gdb }) => {
-          for (const r of results) {
-            const p = byDraft.get(r.agentId);
-            if (!p) continue;
-            const body = r.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
+          for (const p of pairs) {
+            const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
+            const body = r?.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
             // Guard against an empty / truncated merge clobbering real content.
-            if (body.length < 40) continue;
-            await gdb
-              .update(globalKbEntries)
-              .set({ body, embedStatus: 'pending', updatedAt: new Date() })
-              .where(eq(globalKbEntries.id, p.draftId));
-            mergedDrafts.add(p.draftId);
-            merged += 1;
+            const usable = body.length >= 40;
+            // Agents run up to an hour; a draft activated meanwhile is no longer ours to write.
+            const stillDraft = and(
+              eq(globalKbEntries.id, p.draftId),
+              eq(globalKbEntries.status, 'draft'),
+            );
+            if (nothingToMerge(p)) {
+              merged += 1;
+            } else if (usable) {
+              const [hit] = await gdb
+                .update(globalKbEntries)
+                .set({ body, embedStatus: 'pending', updatedAt: new Date() })
+                .where(stillDraft)
+                .returning({ id: globalKbEntries.id });
+              if (hit) {
+                mergedDrafts.add(p.draftId);
+                merged += 1;
+              } else {
+                leftDraft.add(p.draftId);
+              }
+            }
+            // Activation archives the superseded entry, so a description it carried would otherwise be
+            // lost; the draft's own, when it has one, stays.
+            const inherited = p.draftDescription ? null : (p.existingDescription ?? null);
+            if (inherited) {
+              await gdb
+                .update(globalKbEntries)
+                .set({ description: inherited, updatedAt: new Date() })
+                .where(and(stillDraft, isNull(globalKbEntries.description)));
+            }
           }
         });
       }
@@ -202,9 +237,10 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     // Per-draft view for the loss note. A draft is lost whether its agent DIED, returned no
     // article, or returned one too short to trust — all three leave the pair unmerged, and
     // `skipped` is a bare count on an output nobody reads back.
+    const attempted = pairs.filter((p) => !nothingToMerge(p));
     const degradedNote = miningLossNote(
       'knowledge-base merge',
-      pairs.map((p) => {
+      attempted.map((p) => {
         const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
         if (mergedDrafts.has(p.draftId)) {
           return {
@@ -218,8 +254,9 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
           agentId: p.draftTitle,
           agentTitle: null,
           status: 'failed' as const,
-          errorMessage:
-            r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged'),
+          errorMessage: leftDraft.has(p.draftId)
+            ? 'no longer a draft when the merge finished'
+            : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
         };
       }),
     );

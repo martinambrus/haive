@@ -3,6 +3,7 @@ import { type Database } from '@haive/database';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import {
   globalKbEntries,
+  normalizeGlobalKbDescription,
   resolveTaskFacets,
   withGlobalKb,
   type GlobalKbFacets,
@@ -28,8 +29,9 @@ import { collapseToLine } from './_untrusted-repo.js';
 // near-verbatim, weeks after those entries were written. An agent that does not
 // know an entry exists greps instead.
 //
-// So this lists TITLES ONLY and points at rag_search for the body. Titles are
-// cheap, and they turn a blind cold start into a targeted lookup.
+// So this lists titles, each with its one-line description when it has one, and points
+// at rag_search for the body. Titles are cheap, and they turn a blind cold start into
+// a targeted lookup.
 
 /** Upper bound on titles in one digest. A cap, not a target: the block rides
  *  every rag-wired dispatch, so it is bounded prompt cost. Not a config key —
@@ -46,6 +48,8 @@ const DIGEST_MARKER = '<haive_global_kb_index>';
 export interface GlobalKbDigestEntry {
   title: string;
   category: string;
+  /** Normalised once, in `selectDigest`: the render and the isolation scan both read this value. */
+  description?: string;
 }
 
 export interface GlobalKbDigest {
@@ -83,13 +87,21 @@ export function facetsMatchProject(
 }
 
 export function selectDigest(
-  rows: Array<GlobalKbDigestEntry & { facets: GlobalKbFacets | null | undefined }>,
+  rows: Array<
+    Pick<GlobalKbDigestEntry, 'title' | 'category'> & {
+      description?: string | null;
+      facets: GlobalKbFacets | null | undefined;
+    }
+  >,
   projectFacets: ProjectFacetSet,
 ): GlobalKbDigest {
   const matches = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
-  const entries = matches
-    .slice(0, GLOBAL_KB_DIGEST_MAX_TITLES)
-    .map((r) => ({ title: r.title, category: r.category }));
+  const entries = matches.slice(0, GLOBAL_KB_DIGEST_MAX_TITLES).map((r): GlobalKbDigestEntry => {
+    const description = normalizeGlobalKbDescription(r.description);
+    return description === null
+      ? { title: r.title, category: r.category }
+      : { title: r.title, category: r.category, description };
+  });
   return {
     entries,
     omitted: matches.length - entries.length,
@@ -122,6 +134,7 @@ export async function resolveGlobalKbDigest(db: Database, taskId: string): Promi
           title: globalKbEntries.title,
           category: globalKbEntries.category,
           facets: globalKbEntries.facets,
+          description: globalKbEntries.description,
         })
         .from(globalKbEntries)
         .where(
@@ -151,20 +164,22 @@ export function globalKbDigestPrompt(
   for (const e of entries) {
     const category = collapseToLine(e.category);
     const list = byCategory.get(category) ?? [];
-    list.push(collapseToLine(e.title));
+    const title = collapseToLine(e.title);
+    const description = collapseToLine(e.description);
+    list.push(description ? `${title} — ${description}` : title);
     byCategory.set(category, list);
   }
   const lines = [
     DIGEST_MARKER,
     'House standards already on record for this stack, from work on other projects.',
-    'These are TITLES ONLY. Call `rag_search` with a title to read the entry behind it —',
+    'These are TITLES, some with a one-line description — not the entries. Call `rag_search` with a title to read the entry behind it —',
     'it is the only way to reach them; they are not files in this repo and grep cannot',
     'find them. Read the ones relevant to what you are about to do BEFORE you do it.',
     '',
   ];
-  for (const [category, titles] of byCategory) {
+  for (const [category, items] of byCategory) {
     lines.push(`${category}:`);
-    for (const title of titles) lines.push(`- ${title}`);
+    for (const item of items) lines.push(`- ${item}`);
   }
   const omitted = omission?.omitted ?? 0;
   const count = omissionCount(omitted, omission?.scanSaturated ?? false);

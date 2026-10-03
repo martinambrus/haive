@@ -10,6 +10,7 @@ import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { normalizeGlobalKbDescription } from '@haive/shared/global-kb';
 import {
   INVESTIGATIONS_DIR,
   KB_DIR,
@@ -83,6 +84,9 @@ interface LearningDetect {
    *  a count of any that did not fit even that. Bodies are budgeted; awareness is
    *  not — the agent can `rag_search` any title to read it in full. */
   otherGlobalArticleTitles: string[];
+  /** The description of each `otherGlobalArticleTitles` entry, index for index. Absent on a payload
+   *  persisted before descriptions existed, which lists titles only. */
+  otherGlobalArticleDescriptions?: Array<string | null>;
   omittedGlobalArticleCount: number;
   /** A reviewer's outstanding refinement instruction (from the prior form submit),
    *  or '' on a first/accepted pass. When set, buildPrompt steers the agent with it
@@ -180,6 +184,8 @@ interface GlobalCandidate {
   category: 'tech_pattern' | 'best_practice' | 'anti_pattern' | 'quick_reference' | 'general';
   /** Public tech slug the article is about — drives deterministic version anchoring. */
   tech: string;
+  /** One normalised line saying what the rule states and when it applies. Optional. */
+  description?: string;
 }
 
 const GLOBAL_CANDIDATE_CATEGORIES = new Set([
@@ -244,12 +250,23 @@ export function renderExistingGlobalArticle(a: { title: string; body: string }):
  *  the rest costs a dozen words each and turns "it was not shown" into "it was
  *  shown as a title I can fetch". Returns '' when there is no tail, so the block
  *  is unchanged for a small corpus. */
-export function renderOtherGlobalArticleTitles(titles: string[], omitted: number): string {
+export function renderOtherGlobalArticleTitles(
+  titles: string[],
+  omitted: number,
+  descriptions: ReadonlyArray<string | null> = [],
+): string {
   if (titles.length === 0 && omitted === 0) return '';
+  const items = titles.map((t, i) => {
+    const description = collapseToLine(descriptions[i]);
+    return description ? `${collapseToLine(t)} — ${description}` : collapseToLine(t);
+  });
+  const kind = titles.some((_, i) => collapseToLine(descriptions[i]) !== '')
+    ? 'TITLES, some with a one-line description'
+    : 'TITLES ONLY';
   const lines = [
     '',
-    'Other applicable house-standard articles — TITLES ONLY. Call `rag_search` with a title to read that entry in full; do it before you write a candidate that overlaps one of them:',
-    ...titles.map((t) => `- ${collapseToLine(t)}`),
+    `Other applicable house-standard articles — ${kind}. Call \`rag_search\` with a title to read that entry in full; do it before you write a candidate that overlaps one of them:`,
+    ...items.map((item) => `- ${item}`),
   ];
   if (omitted > 0) {
     lines.push(
@@ -419,10 +436,11 @@ export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
       typeof c.category === 'string' && GLOBAL_CANDIDATE_CATEGORIES.has(c.category)
         ? (c.category as GlobalCandidate['category'])
         : 'tech_pattern';
+    const description = normalizeGlobalKbDescription(c.description);
     let id = slugify(title) || 'candidate';
     for (let n = 2; taken.has(id); n++) id = `${slugify(title) || 'candidate'}-${n}`;
     taken.add(id);
-    out.push({ id, title, body, category, tech });
+    out.push({ id, title, body, category, tech, ...(description === null ? {} : { description }) });
   }
   return out;
 }
@@ -1005,6 +1023,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       repoStack,
       existingGlobalArticles: globalArticleSelection.articles,
       otherGlobalArticleTitles: globalArticleSelection.otherTitles,
+      otherGlobalArticleDescriptions: globalArticleSelection.otherDescriptions,
       omittedGlobalArticleCount: globalArticleSelection.omittedTitleCount,
       refineInstruction,
       priorDrafts,
@@ -1111,7 +1130,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation, citing the `path/to/file.ext:LINE` the bug lived on) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo) AND it clears the ADMISSION BAR above — a lesson CI would catch, or one you already knew, stays "local" at most; otherwise "local".'
           : '',
         '',
-        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. `evidence` is checked and then discarded: it stays OUT of `body`, which must remain portable, and a candidate without it is dropped. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn. An article shown below marked TRUNCATED is an EXCERPT: call `rag_search` with its exact title to read it in full before you merge, or you will delete the part you never saw.',
+        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "description": "<optional: ONE line, at most 300 characters, saying what the rule states and when it applies>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. `evidence` is checked and then discarded: it stays OUT of `body`, which must remain portable, and a candidate without it is dropped. \`description\` is shown beside the title to every repo the article applies to, so it carries the same portability rule as \`body\`: no repo-specific names/paths. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn. An article shown below marked TRUNCATED is an EXCERPT: call `rag_search` with its exact title to read it in full before you merge, or you will delete the part you never saw.',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
@@ -1140,6 +1159,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         renderOtherGlobalArticleTitles(
           detected.otherGlobalArticleTitles,
           detected.omittedGlobalArticleCount,
+          detected.otherGlobalArticleDescriptions,
         ),
         '',
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',
@@ -1370,7 +1390,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
                 options: globalCandidates.map((c) => ({
                   value: c.id,
                   label: c.title,
-                  description: `${c.category} · ${c.tech}`,
+                  description: c.description
+                    ? `${c.category} · ${c.tech} — ${c.description}`
+                    : `${c.category} · ${c.tech}`,
                 })),
                 defaults: [] as string[],
               },
@@ -1488,7 +1510,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         // Promote as a draft to the cross-repo KB instead of writing it into this
         // repo's knowledge_base/investigations/ (which the local RAG indexes), so
         // the local store stays clean. Facets are left empty — the user scopes the
-        // draft in Settings -> Global KB before activating it.
+        // draft in Settings -> Global KB before activating it. With no scope, nothing could tell
+        // its subject from a project named after it, so the project name is not scrubbed either.
         const promo = await promoteToGlobalKbDraft(
           ctx.db,
           {
@@ -1537,6 +1560,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
             body: c.body,
             category: c.category,
             facets,
+            description: c.description,
             topicKey: globalKbTopicKey(c.category, facets, c.tech) ?? undefined,
             projectName: projectName ?? undefined,
           },

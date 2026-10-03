@@ -1,6 +1,7 @@
 import { pgTable, uuid, text, jsonb, timestamp } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type postgres from 'postgres';
+import { collapseToLine } from '../utils/collapse-line.js';
 
 // Global cross-task KB schema. Lives in a SEPARATE database (internal
 // haive_kb_global or an external/central Postgres), NOT the main Haive DB, so it
@@ -237,6 +238,26 @@ export function normalizeFacets(facets: GlobalKbFacets | null | undefined): Glob
   return out;
 }
 
+/** The longest description an entry may carry, counted in UTF-16 units like zod's `.max`. */
+export const GLOBAL_KB_DESCRIPTION_MAX = 300;
+
+/** One line within `GLOBAL_KB_DESCRIPTION_MAX`, cut at a word and marked with `…` when longer, null
+ *  when empty. Idempotent, so the write and the render can both apply it. */
+export function normalizeGlobalKbDescription(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const line = collapseToLine(raw);
+  if (line.length <= GLOBAL_KB_DESCRIPTION_MAX) return line === '' ? null : line;
+  const room = GLOBAL_KB_DESCRIPTION_MAX - 1;
+  let end = line.lastIndexOf(' ', room);
+  if (end < 0) {
+    end = room;
+    const last = line.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  }
+  const kept = line.slice(0, end).replace(/[\s\p{P}]+$/u, '');
+  return kept === '' ? null : `${kept}…`;
+}
+
 export type GlobalKbCategory =
   'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 
@@ -282,6 +303,8 @@ export const globalKbEntries = pgTable('global_kb_entries', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
   // Soft-delete, matches repo conventions.
   supersededAt: timestamp('superseded_at'),
+  // One-line summary shown beside the title in agent title lists. Not embedded.
+  description: text('description'),
 });
 
 export type GlobalKbEntry = typeof globalKbEntries.$inferSelect;

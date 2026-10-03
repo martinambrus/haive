@@ -10,8 +10,14 @@ import {
   type GlobalKbFacets,
   type ProjectFacetSet,
   normalizeFacets,
+  normalizeGlobalKbDescription,
 } from '@haive/shared/global-kb';
-import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
+import {
+  embedQuery,
+  FACET_FILTER_DIMENSIONS,
+  ragHybridSearch,
+  type RagConnection,
+} from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
 import { confirmSupersedeByEmbedding, SUPERSEDE_CANDIDATE_LIMIT } from './_global-kb-similarity.js';
 
@@ -23,6 +29,8 @@ export interface GlobalKbPromotion {
   body: string;
   category: GlobalKbCategory;
   facets: GlobalKbFacets;
+  /** One line saying what the rule states and when it applies. Normalised when stored. */
+  description?: string | null;
   /** Cross-repo dedup key (`category:tech`). When set and a matching entry
    *  already exists, the promotion is skipped instead of inserting a duplicate. */
   topicKey?: string;
@@ -68,39 +76,212 @@ const GENERIC_PROJECT_NAMES = new Set([
   'monorepo',
 ]);
 
+/** Public technology names, grouped as frameworks, CMSs, languages, runtimes, databases, servers. */
+const PUBLIC_TECHNOLOGY_NAMES = new Set([
+  'angular',
+  'astro',
+  'bootstrap',
+  'cakephp',
+  'codeigniter',
+  'django',
+  'electron',
+  'ember',
+  'ember.js',
+  'express',
+  'fastapi',
+  'fastify',
+  'flask',
+  'flutter',
+  'gatsby',
+  'hono',
+  'jquery',
+  'laravel',
+  'livewire',
+  'nestjs',
+  'next',
+  'next.js',
+  'nextjs',
+  'nuxt',
+  'phoenix',
+  'preact',
+  'quarkus',
+  'rails',
+  'react',
+  'remix',
+  'spring',
+  'springboot',
+  'svelte',
+  'sveltekit',
+  'symfony',
+  'tailwind',
+  'tailwindcss',
+  'vue.js',
+  'vuejs',
+
+  'backdrop',
+  'craftcms',
+  'directus',
+  'drupal',
+  'drupal7',
+  'ghost',
+  'joomla',
+  'magento',
+  'opencart',
+  'prestashop',
+  'silverstripe',
+  'statamic',
+  'strapi',
+  'typo3',
+  'umbraco',
+  'wagtail',
+  'woocommerce',
+  'wordpress',
+
+  'clojure',
+  'csharp',
+  'dart',
+  'elixir',
+  'erlang',
+  'fsharp',
+  'golang',
+  'groovy',
+  'haskell',
+  'java',
+  'javascript',
+  'julia',
+  'kotlin',
+  'ocaml',
+  'perl',
+  'python',
+  'ruby',
+  'rust',
+  'scala',
+  'swift',
+  'typescript',
+
+  'cpython',
+  'deno',
+  'docker',
+  'dotnet',
+  'node',
+  'node.js',
+  'nodejs',
+  'openjdk',
+  'pypy',
+
+  'cassandra',
+  'clickhouse',
+  'cockroachdb',
+  'couchbase',
+  'couchdb',
+  'duckdb',
+  'dynamodb',
+  'elasticsearch',
+  'etcd',
+  'influxdb',
+  'mariadb',
+  'memcached',
+  'mongo',
+  'mongodb',
+  'mssql',
+  'mysql',
+  'neo4j',
+  'opensearch',
+  'oracle',
+  'postgres',
+  'postgresql',
+  'redis',
+  'solr',
+  'sqlite',
+  'sqlserver',
+  'timescaledb',
+  'valkey',
+
+  'apache',
+  'caddy',
+  'dovecot',
+  'envoy',
+  'gunicorn',
+  'haproxy',
+  'httpd',
+  'jetty',
+  'lighttpd',
+  'nginx',
+  'openresty',
+  'passenger',
+  'php-fpm',
+  'postfix',
+  'puma',
+  'tomcat',
+  'traefik',
+  'unicorn',
+  'uvicorn',
+  'uwsgi',
+  'varnish',
+  'wildfly',
+]);
+
+/** The scope values a promotion names, lowercased, a package's `@major` dropped too; free-text tags are not scope. */
+function scopeTokens(facets: GlobalKbFacets | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  for (const dimension of FACET_FILTER_DIMENSIONS) {
+    const values: unknown = (facets as Record<string, unknown> | null | undefined)?.[dimension];
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      const token = value.trim().toLowerCase();
+      tokens.add(token);
+      tokens.add(token.replace(/@[^@/]*$/, ''));
+    }
+  }
+  return tokens;
+}
+
 /** Make a promoted article portable for ANY repo on the same stack: always strip
  *  the trailing `## Source files` footer (a repo file list), and when the project
  *  name is distinctive, remove it from the title and replace it (plus its `@name/`
  *  package scope) in the body with an obvious placeholder so a future reader knows
- *  to rename it. A generic name (e.g. "app", "test") is left untouched to avoid
- *  corrupting unrelated text. Pure + deterministic; exported for unit testing. */
+ *  to rename it. Only a whole token is replaced. A name that is generic (e.g. "app"), a
+ *  public technology (e.g. "laravel") or a value in `facets` is not demonstrably the
+ *  repository's own and is left untouched. Pure + deterministic; exported for unit testing. */
 export function sanitizeGlobalArticle(input: {
   title: string;
   body: string;
+  description?: string | null;
   projectName?: string | null;
-}): { title: string; body: string } {
+  facets?: GlobalKbFacets | null;
+}): { title: string; body: string; description: string | null } {
   // 1. Drop a trailing "## Source files" section regardless of the project name —
   //    a portable article must never list a specific repo's files.
   let body = input.body.replace(/\n#{1,6}[ \t]+source files\b[\s\S]*$/i, '').trimEnd() + '\n';
   let title = input.title;
+  let description = input.description ?? null;
 
   const name = (input.projectName ?? '').trim();
-  if (name.length >= 4 && !GENERIC_PROJECT_NAMES.has(name.toLowerCase())) {
+  const lowerName = name.toLowerCase();
+  if (
+    name.length >= 4 &&
+    !GENERIC_PROJECT_NAMES.has(lowerName) &&
+    !PUBLIC_TECHNOLOGY_NAMES.has(lowerName) &&
+    !scopeTokens(input.facets).has(lowerName)
+  ) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const nameRe = new RegExp(esc, 'gi');
+    const token = `(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`;
+    const nameRe = new RegExp(token, 'giu');
     // Body: `@name/...` scope and bare name -> placeholder.
     body = body.replace(nameRe, GLOBAL_PLACEHOLDER);
+    description = description?.replace(nameRe, GLOBAL_PLACEHOLDER) ?? null;
     // Title: drop the name plus a leading/trailing connector ("for/in/of", "-", ":"),
     // then tidy. Keep the original if scrubbing would empty it.
     const scrubbed = title
-      .replace(new RegExp(`\\s*(?:[-—–:]|\\b(?:for|in|of)\\b)\\s*${esc}\\b`, 'i'), '')
+      .replace(new RegExp(`\\s*(?:[-—–:]|\\b(?:for|in|of)\\b)\\s*${token}`, 'iu'), '')
       .replace(nameRe, '')
       .replace(/\s{2,}/g, ' ')
       .replace(/^[\s\-—–:]+|[\s\-—–:]+$/g, '')
       .trim();
     if (scrubbed) title = scrubbed;
   }
-  return { title, body };
+  return { title, body, description };
 }
 
 /** Entries scanned (titles + facets only) before facet filtering and ranking.
@@ -150,6 +331,9 @@ export interface GlobalArticleSelection {
   articles: { title: string; body: string }[];
   /** Every OTHER applicable article, by title. Reachable with `rag_search`. */
   otherTitles: string[];
+  /** The normalised description of each `otherTitles` entry, index for index; null where it
+   *  has none. */
+  otherDescriptions: Array<string | null>;
   /** Applicable articles that did not fit even the title list. Reported, not hidden. */
   omittedTitleCount: number;
 }
@@ -160,7 +344,12 @@ export async function loadActiveGlobalArticlesForTask(
   relevanceQuery = '',
   limit = 15,
 ): Promise<GlobalArticleSelection> {
-  const empty: GlobalArticleSelection = { articles: [], otherTitles: [], omittedTitleCount: 0 };
+  const empty: GlobalArticleSelection = {
+    articles: [],
+    otherTitles: [],
+    otherDescriptions: [],
+    omittedTitleCount: 0,
+  };
   try {
     const projectFacets = await resolveTaskFacets(db, taskId);
     return await withGlobalKb(db, async ({ conn, db: gdb, settings }) => {
@@ -172,6 +361,7 @@ export async function loadActiveGlobalArticlesForTask(
           id: globalKbEntries.id,
           title: globalKbEntries.title,
           facets: globalKbEntries.facets,
+          description: globalKbEntries.description,
         })
         .from(globalKbEntries)
         .where(
@@ -224,10 +414,12 @@ export async function loadActiveGlobalArticlesForTask(
       // ordering only decides which bodies ride along — whichever article the
       // agent actually needs must still be nameable, and `rag_search` returns any
       // title in full.
-      const rest = compatible.filter((r) => !ids.includes(r.id)).map((r) => r.title);
+      const rest = compatible.filter((r) => !ids.includes(r.id));
+      const listed = rest.slice(0, OTHER_TITLE_LIMIT);
       return {
         articles,
-        otherTitles: rest.slice(0, OTHER_TITLE_LIMIT),
+        otherTitles: listed.map((r) => r.title),
+        otherDescriptions: listed.map((r) => normalizeGlobalKbDescription(r.description)),
         omittedTitleCount: Math.max(0, rest.length - OTHER_TITLE_LIMIT),
       };
     });
@@ -328,6 +520,38 @@ async function rankArticleIdsByRelevance(
   }
 }
 
+/** The same-topic entry a promotion would add nothing to. An identical body still adds a description
+ *  the entry lacks; a reworded one is not worth a draft, since a model rewords it every run. */
+export function identicalPromotionTarget<T extends { body: string; description: string | null }>(
+  candidates: T[],
+  body: string,
+  description: string | null,
+): T | undefined {
+  return candidates.find(
+    (c) => c.body.trim() === body.trim() && (c.description !== null || description === null),
+  );
+}
+
+/** An identical body is the same article: a copy adding a description links to it, no embedding. */
+export function resolveIdenticalPromotion<T extends { body: string; description: string | null }>(
+  candidates: T[],
+  body: string,
+  description: string | null,
+): { kind: 'duplicate' | 'link'; target: T } | null {
+  const duplicate = identicalPromotionTarget(candidates, body, description);
+  if (duplicate) return { kind: 'duplicate', target: duplicate };
+  const same = candidates.find((c) => c.body.trim() === body.trim());
+  return same ? { kind: 'link', target: same } : null;
+}
+
+/** A draft's own description wins, else the replaced entry's, which activation archives. */
+export function inheritDescription(
+  own: string | null | undefined,
+  replaced: string | null | undefined,
+): string | null {
+  return normalizeGlobalKbDescription(own) ?? normalizeGlobalKbDescription(replaced);
+}
+
 /** Promote a generalizable knowledge item to the cross-repo global KB as a DRAFT
  *  (`source='promoted'`). Drafts hold no vectors and are not retrievable until an
  *  admin activates them in Settings → Global KB, so this NEVER touches the
@@ -348,7 +572,9 @@ export async function promoteToGlobalKbDraft(
       const clean = sanitizeGlobalArticle({
         title: promotion.title,
         body: promotion.body,
+        description: promotion.description,
         projectName: promotion.projectName,
+        facets: promotion.facets,
       });
       // Cross-repo reconcile: when another entry already covers this topic
       // (category:tech[:major]), DON'T discard the new knowledge — unless it is
@@ -364,6 +590,7 @@ export async function promoteToGlobalKbDraft(
       // duplicate. Distinct topics never contend; the xact lock auto-releases on end.
       return await gdb.transaction(async (tx) => {
         let supersedesEntryId: string | null = null;
+        let supersededDescription: string | null | undefined;
         if (promotion.topicKey) {
           const lockKey = `${settings.namespace}:${promotion.topicKey}`;
           await tx.execute(
@@ -375,6 +602,7 @@ export async function promoteToGlobalKbDraft(
               status: globalKbEntries.status,
               title: globalKbEntries.title,
               body: globalKbEntries.body,
+              description: globalKbEntries.description,
             })
             .from(globalKbEntries)
             .where(
@@ -393,20 +621,30 @@ export async function promoteToGlobalKbDraft(
             )
             .limit(SUPERSEDE_CANDIDATE_LIMIT);
           // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
-          const identical = candidates.find((c) => c.body.trim() === clean.body.trim());
-          if (identical) {
+          const same = resolveIdenticalPromotion(
+            candidates,
+            clean.body,
+            normalizeGlobalKbDescription(clean.description),
+          );
+          if (same?.kind === 'duplicate') {
             log.info(
-              { topicKey: promotion.topicKey, existingId: identical.id },
+              { topicKey: promotion.topicKey, existingId: same.target.id },
               'global KB promotion skipped (identical content already present)',
             );
-            return { id: identical.id, deduped: true, supersedesEntryId: null };
+            return { id: same.target.id, deduped: true, supersedesEntryId: null };
           }
-          // Supersede an existing entry ONLY when embeddings confirm it is the SAME
-          // article — the coarse topicKey (category:tech) groups unrelated articles on
-          // one tech, so it can't decide identity. No confirmed match (or ollama
+          // Supersede an existing entry ONLY when its body is identical or embeddings confirm
+          // it is the SAME article — the coarse topicKey (category:tech) groups unrelated
+          // articles on one tech, so it can't decide identity. No confirmed match (or ollama
           // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
           // article that merely shares the key.
-          if (candidates.length > 0) {
+          if (same) {
+            supersedesEntryId = same.target.id;
+            log.info(
+              { topicKey: promotion.topicKey, supersedesEntryId },
+              'global KB promotion linked to existing topic (identical body)',
+            );
+          } else if (candidates.length > 0) {
             supersedesEntryId = await confirmSupersedeByEmbedding(
               { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
               `${clean.title}\n\n${clean.body}`,
@@ -423,6 +661,7 @@ export async function promoteToGlobalKbDraft(
                 : 'global KB promotion kept independent (no same-article match)',
             );
           }
+          supersededDescription = candidates.find((c) => c.id === supersedesEntryId)?.description;
         }
         const [row] = await tx
           .insert(globalKbEntries)
@@ -437,6 +676,7 @@ export async function promoteToGlobalKbDraft(
             // VERBATIM while a project's own set is lowercased, so a capitalised package name
             // would be stored unmatchable by the exact jsonb `?|` the search uses.
             facets: normalizeFacets(promotion.facets),
+            description: inheritDescription(clean.description, supersededDescription),
             status: 'draft',
             source: 'promoted',
             sourceTaskId: promotion.taskId,

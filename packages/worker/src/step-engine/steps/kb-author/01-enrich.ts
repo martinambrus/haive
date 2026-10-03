@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import {
   FACET_DIMENSIONS,
   normalizeFacets,
+  normalizeGlobalKbDescription,
   globalKbEntries,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -16,7 +17,7 @@ import {
   confirmSupersedeByEmbedding,
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
-import { globalKbTopicKey } from '../_global-kb-promote.js';
+import { globalKbTopicKey, inheritDescription } from '../_global-kb-promote.js';
 import {
   bodyUsesRepoSymbol,
   collectRepoBasenames,
@@ -84,6 +85,9 @@ export interface KbAuthorDetect {
    *  merged over whatever the model returns, because asking a prompt nicely is exactly what
    *  produced a Drupal-8+ rule scoped to `frameworkMajor: ["7"]`. */
   authorFacets: GlobalKbFacets;
+  /** The one-line description the AUTHOR stated, which wins over the model's. Absent on a payload
+   *  persisted before descriptions existed, which reads as none stated. */
+  authorDescription?: string | null;
 }
 
 interface KbAuthorApply {
@@ -103,17 +107,25 @@ interface Enrichment {
   title?: string;
   category?: string;
   facets?: GlobalKbFacets;
+  description?: unknown;
   body?: string;
 }
 
-async function loadTaskAnchor(
-  ctx: StepContext,
-): Promise<{ entryId: string | null; hasRepo: boolean; authorFacets: GlobalKbFacets | null }> {
+async function loadTaskAnchor(ctx: StepContext): Promise<{
+  entryId: string | null;
+  hasRepo: boolean;
+  authorFacets: GlobalKbFacets | null;
+  authorDescription: string | null;
+}> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
     columns: { metadata: true, repositoryId: true },
   });
-  const md = task?.metadata as { globalKbEntryId?: string; authorFacets?: GlobalKbFacets } | null;
+  const md = task?.metadata as {
+    globalKbEntryId?: string;
+    authorFacets?: GlobalKbFacets;
+    authorDescription?: string | null;
+  } | null;
   // ANCHORED vs repo-less is the task's own repositoryId, not `ctx.repoPath`: a repo-less task
   // still has a repoPath — an empty scratch workspace — so the path cannot answer this.
   // The author's OWN scope, recorded at creation. Read from the task and NOT from the entry,
@@ -129,6 +141,7 @@ async function loadTaskAnchor(
     entryId: md?.globalKbEntryId ?? null,
     hasRepo: task?.repositoryId != null,
     authorFacets: md?.authorFacets ?? null,
+    authorDescription: md?.authorDescription ?? null,
   };
 }
 
@@ -210,6 +223,10 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '  The wrong way is what a reader must recognise in their own code before the rule means',
     '  anything, so put a `// ANTI-PATTERN — do not copy` comment INSIDE its code fence.',
     '  Ending on the right way leaves the correct form as the last thing read.',
+    '- The one-line DESCRIPTION says what the rule states and when it applies, so a model can',
+    '  decide from a list of titles whether to read the article. It is shown to every project the',
+    '  rule matches, so the same ban holds: no file path, file name, symbol, line number, project',
+    '  name or count taken from a real codebase.',
     '',
     '## Your task',
     ...(detected.hasRepo
@@ -238,8 +255,9 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '4. Decide whether this rule already exists above. If it is the SAME rule (same topic / module /',
     '   scope) as one listed, set mode="update" and targetId to that id — you will REPLACE it with a',
     '   complete, improved article that incorporates the new notes. Otherwise set mode="new".',
-    `5. Pick the best CATEGORY (one of: ${CATEGORIES.join(', ')}) and the FACETS, then`,
-    '   write the full, self-contained markdown article BODY under the user-set title above.',
+    `5. Pick the best CATEGORY (one of: ${CATEGORIES.join(', ')}), the FACETS and a one-line`,
+    '   DESCRIPTION, then write the full, self-contained markdown article BODY under the user-set',
+    '   title above.',
     '',
     '## Output — emit EXACTLY ONE fenced ```json block and nothing else:',
     '```json',
@@ -258,6 +276,7 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '    "packages": ["<name@major, e.g. drupal/paragraphs@8>"],',
     '    "tags": ["<free-form, e.g. performance>"]',
     '  },',
+    '  "description": "<ONE line, at most 300 characters: what the rule says and when it applies>",',
     '  "body": "<the full markdown article>"',
     '}',
     '```',
@@ -343,6 +362,21 @@ export function normCategory(c?: string): Category {
   return (CATEGORIES as readonly string[]).includes(c ?? '') ? (c as Category) : 'general';
 }
 
+/** What the author stated, else the model's proposal, which gets the body's citation scrub and is
+ *  removed whole when it fails: a one-line block has nothing to keep. */
+export async function resolveEnrichDescription(
+  authored: string | null | undefined,
+  proposed: unknown,
+  scrubOptions: Parameters<typeof scrubCitations>[1],
+): Promise<{ description: string | null; removed: ScrubbedBlock[] }> {
+  const stated = normalizeGlobalKbDescription(authored);
+  if (stated !== null) return { description: stated, removed: [] };
+  const line = normalizeGlobalKbDescription(proposed);
+  if (line === null) return { description: null, removed: [] };
+  const { removed } = await scrubCitations(line, scrubOptions);
+  return removed.length > 0 ? { description: null, removed } : { description: line, removed };
+}
+
 /** Decide where the article is written: an existing entry the model matched
  *  (honored only when its targetId is one we actually showed it) or the fresh
  *  skeleton. */
@@ -363,12 +397,12 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     index: 0,
     title: 'Knowledge base enrichment',
     description:
-      'Reads the chosen repository to turn free-text house-rule notes into a version-scoped global KB entry — deriving the title, category and facets, then inserting a new entry or updating a matching one and activating it.',
+      'Reads the chosen repository to turn free-text house-rule notes into a version-scoped global KB entry — deriving the title, category, facets and description, then inserting a new entry or updating a matching one and activating it.',
     requiresCli: true,
   },
 
   async detect(ctx): Promise<KbAuthorDetect> {
-    const { entryId, hasRepo, authorFacets } = await loadTaskAnchor(ctx);
+    const { entryId, hasRepo, authorFacets, authorDescription } = await loadTaskAnchor(ctx);
     if (!entryId) throw new Error('kb_author task is missing metadata.globalKbEntryId');
     return withGlobalKb(ctx.db, async ({ db }) => {
       const entry = await db.query.globalKbEntries.findFirst({
@@ -390,6 +424,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         .from(globalKbEntries)
         .where(
           and(
+            eq(globalKbEntries.namespace, entry.namespace),
             inArray(globalKbEntries.status, ['active', 'draft']),
             ne(globalKbEntries.id, entryId),
           ),
@@ -421,6 +456,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         // decides every dimension. Taken from the TASK, which never changes; the entry's own
         // column is rewritten by apply() and so reports the model's scope on a retry.
         authorFacets: authorFacets ?? entry.facets ?? {},
+        authorDescription,
       };
     });
   },
@@ -476,12 +512,13 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     const repoBasenames = detected.hasRepo
       ? await collectRepoBasenames(ctx.repoPath).catch(() => new Set<string>())
       : new Set<string>();
-    const scrub = await scrubCitations(body, {
+    const scrubOptions = {
       repoPath: detected.hasRepo ? ctx.repoPath : null,
       repoSymbols,
       findSymbol: bodyUsesRepoSymbol,
       repoBasenames,
-    });
+    };
+    const scrub = await scrubCitations(body, scrubOptions);
     if (scrub.removed.length > 0) {
       ctx.logger.warn(
         {
@@ -514,6 +551,12 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       );
     }
     const finalBody = scrub.body;
+    const described = await resolveEnrichDescription(
+      detected.authorDescription,
+      parsed?.description,
+      scrubOptions,
+    );
+    const scrubbed = [...scrub.removed, ...described.removed];
 
     // The model may flag this as an update of an existing rule; only honor a
     // targetId we actually showed it (else treat it as a new entry).
@@ -547,6 +590,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             status: globalKbEntries.status,
             title: globalKbEntries.title,
             body: globalKbEntries.body,
+            description: globalKbEntries.description,
           })
           .from(globalKbEntries)
           .where(
@@ -568,9 +612,15 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
               status: globalKbEntries.status,
               title: globalKbEntries.title,
               body: globalKbEntries.body,
+              description: globalKbEntries.description,
             })
             .from(globalKbEntries)
-            .where(eq(globalKbEntries.id, intent.targetId))
+            .where(
+              and(
+                eq(globalKbEntries.id, intent.targetId),
+                eq(globalKbEntries.namespace, detected.namespace),
+              ),
+            )
             .limit(1);
           if (tgt) candidates.push(tgt);
         }
@@ -602,6 +652,10 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             title,
             category,
             facets,
+            description: inheritDescription(
+              described.description,
+              candidates.find((c) => c.id === matchId)?.description,
+            ),
             body: finalBody,
             // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
             // shared by every project, and it used to be the one case that skipped review
@@ -657,7 +711,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       status: 'draft',
       mode: confirmedUpdate ? 'update' : 'new',
       sections: (finalBody.match(/^##\s/gm) ?? []).length,
-      ...(scrub.removed.length > 0 ? { scrubbed: scrub.removed } : {}),
+      ...(scrubbed.length > 0 ? { scrubbed } : {}),
     };
   },
 };

@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import { diffLines } from 'diff';
 import {
   api,
+  GLOBAL_KB_DESCRIPTION_MAX,
   GLOBAL_KB_FACET_DIMENSIONS,
   facetScopeError,
   releaseGlobalKbEmbedModel,
@@ -26,6 +27,7 @@ import {
   Label,
 } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { IN_STACK_OLLAMA_URL, DEFAULT_EXTERNAL_OLLAMA_URL } from '@haive/shared/constants';
 
@@ -85,6 +87,46 @@ function FacetFields({
       ))}
     </div>
   );
+}
+
+/** The one description input, used by the enrich form and by the entry detail modal. It only
+ *  counts: the api measures after collapsing whitespace, and it is the api that refuses a long one. */
+function DescriptionField({
+  id,
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  placeholder?: string;
+}) {
+  const length = value.replace(/\s+/g, ' ').trim().length;
+  return (
+    <div className="flex flex-col gap-1">
+      <Input
+        id={id}
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <span
+        className={`self-end text-[11px] ${length > GLOBAL_KB_DESCRIPTION_MAX ? 'text-red-400' : 'text-neutral-500'}`}
+      >
+        {length} / {GLOBAL_KB_DESCRIPTION_MAX}
+      </span>
+    </div>
+  );
+}
+
+/** A click or Enter on a link in a description follows the link, and is not taken for a click on
+ *  the card around it. */
+function stopAtLinks(ev: SyntheticEvent) {
+  if (ev.target instanceof Element && ev.target.closest('a')) ev.stopPropagation();
 }
 
 function facetsSummary(f: GlobalKbFacets): string {
@@ -213,14 +255,17 @@ export default function GlobalKbPage() {
   const [selected, setSelected] = useState<GlobalKbEntry | null>(null);
   // For an update-draft (supersedesEntryId set): the existing article it replaces,
   // fetched on open so the modal can diff the draft against it.
-  const [supersededEntry, setSupersededEntry] = useState<{ title: string; body: string } | null>(
-    null,
-  );
+  const [supersededEntry, setSupersededEntry] = useState<{
+    title: string;
+    body: string;
+    description: string | null;
+  } | null>(null);
   const [draftView, setDraftView] = useState<'diff' | 'full'>('diff');
   const [repos, setRepos] = useState<Repository[]>([]);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   const [enrich, setEnrich] = useState({
     title: '',
+    description: '',
     notes: '',
     repoId: '',
     cliProviderId: '',
@@ -235,13 +280,19 @@ export default function GlobalKbPage() {
   const [scopeEdit, setScopeEdit] = useState<Record<string, string> | null>(null);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
-  // Drop a half-finished scope edit whenever the modal moves to another entry or closes. Keyed
-  // on the entry id and not wired into each close path on purpose: the dialog closes on Escape,
-  // on the backdrop and on the X as well as on Cancel, and a leftover editor would show the
-  // PREVIOUS entry's facets and write them over this one on Save.
+  // The same for the description: null = not editing, and the entry's own text is loaded on open.
+  const [descEdit, setDescEdit] = useState<string | null>(null);
+  const [descBusy, setDescBusy] = useState(false);
+  const [descError, setDescError] = useState<string | null>(null);
+  // Drop a half-finished scope or description edit whenever the modal moves to another entry or
+  // closes. Keyed on the entry id and not wired into each close path on purpose: the dialog closes
+  // on Escape, on the backdrop and on the X as well as on Cancel, and a leftover editor would show
+  // the PREVIOUS entry's values and write them over this one on Save.
   useEffect(() => {
     setScopeEdit(null);
     setScopeError(null);
+    setDescEdit(null);
+    setDescError(null);
   }, [selected?.id]);
   // The LIVE entry that replaced this one, asked of the SERVER rather than read out of
   // `entries`. That list is filtered and paginated, so a reviewer who filtered to `archived`
@@ -408,7 +459,7 @@ export default function GlobalKbPage() {
       setCfgSet(cc.connectionStringSet);
       setCfgLoaded(true);
     } catch {
-      /* admin-only or unavailable */
+      /* unavailable: the card shows its defaults */
     }
   }
 
@@ -598,7 +649,13 @@ export default function GlobalKbPage() {
     void api
       .get<{ entry: GlobalKbEntry }>(`/global-kb/entries/${supersedesId}`)
       .then((r) => {
-        if (!cancelled) setSupersededEntry({ title: r.entry.title, body: r.entry.body });
+        if (!cancelled) {
+          setSupersededEntry({
+            title: r.entry.title,
+            body: r.entry.body,
+            description: r.entry.description ?? null,
+          });
+        }
       })
       .catch(() => {
         if (!cancelled) setSupersededEntry(null);
@@ -683,6 +740,27 @@ export default function GlobalKbPage() {
       setScopeError((err as ApiError).message ?? 'Failed to save the scope');
     } finally {
       setScopeBusy(false);
+    }
+  }
+
+  /** Bound to what the server STORED, not what was typed: it collapses the text to one line and
+   *  clears a blank one. */
+  async function saveDescription(e: GlobalKbEntry) {
+    if (descEdit === null) return;
+    setDescBusy(true);
+    setDescError(null);
+    try {
+      const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
+        description: descEdit,
+      });
+      const saved = res.entry;
+      setSelected((cur) => (cur && cur.id === e.id ? saved : cur));
+      setEntries((rows) => rows?.map((r) => (r.id === e.id ? saved : r)) ?? rows);
+      setDescEdit(null);
+    } catch (err) {
+      setDescError((err as ApiError).message ?? 'Failed to save the description');
+    } finally {
+      setDescBusy(false);
     }
   }
 
@@ -778,6 +856,7 @@ export default function GlobalKbPage() {
     try {
       await api.post('/global-kb/enrich', {
         title: enrich.title,
+        ...(enrich.description.trim() ? { description: enrich.description } : {}),
         seedText: enrich.notes,
         ...(enrich.repoId ? { repositoryId: enrich.repoId } : {}),
         cliProviderId: enrich.cliProviderId,
@@ -789,7 +868,7 @@ export default function GlobalKbPage() {
             : {}),
         },
       });
-      setEnrich({ ...enrich, title: '', notes: '' });
+      setEnrich({ ...enrich, title: '', description: '', notes: '' });
       setEnrichFacets({});
       await load();
     } catch (err) {
@@ -806,6 +885,20 @@ export default function GlobalKbPage() {
     statusFilter !== 'all' ||
     categoryFilter !== 'all' ||
     frameworkFilter !== 'all';
+  const editOpen = scopeEdit !== null || descEdit !== null;
+  const editOpenHint = editOpen ? 'Save or cancel the open edit first' : undefined;
+
+  /** Escape and the backdrop close an open edit before they close the dialog, so one stray press
+   *  does not throw away what was typed. A save in flight is left to finish. */
+  function dismiss() {
+    if (!editOpen) {
+      setSelected(null);
+      return;
+    }
+    if (scopeBusy || descBusy) return;
+    setScopeEdit(null);
+    setDescEdit(null);
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1057,6 +1150,19 @@ export default function GlobalKbPage() {
               maxLength={300}
               placeholder="A title you'll recognize, e.g. Drupal 11 paragraphs nesting limit"
             />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enrich-description">Description (optional)</Label>
+            <DescriptionField
+              id="enrich-description"
+              value={enrich.description}
+              onChange={(description) => setEnrich({ ...enrich, description })}
+              placeholder="One line: what the rule says and when it applies"
+            />
+            <span className="text-[11px] text-neutral-500">
+              Leave it empty and the AI writes one. Once the rule is active, this line is listed
+              beside its title in the prompt of every agent the rule applies to.
+            </span>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="enrich-notes">House rules / notes</Label>
@@ -1376,6 +1482,14 @@ export default function GlobalKbPage() {
                       )}
                     </div>
                   </div>
+                  {e.description && (
+                    <div onClick={stopAtLinks} onKeyDown={stopAtLinks}>
+                      <InlineMarkdown
+                        body={e.description}
+                        className="break-words text-sm text-neutral-300"
+                      />
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
                     {e.sourceTaskId && (
@@ -1434,7 +1548,7 @@ export default function GlobalKbPage() {
 
       <Dialog
         open={!!selected}
-        onOpenChange={(o) => !o && setSelected(null)}
+        onOpenChange={(o) => !o && dismiss()}
         className="w-[95vw] max-w-6xl"
       >
         <DialogContent className="flex max-h-[90vh] flex-col">
@@ -1468,6 +1582,62 @@ export default function GlobalKbPage() {
                   </a>
                 )}
               </div>
+              {descEdit !== null ? (
+                <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
+                  <Label
+                    htmlFor="description-edit"
+                    className="text-[11px] font-normal text-neutral-500"
+                  >
+                    One line: what the rule says and when it applies. Once the entry is active it is
+                    listed beside the title in the prompt of every agent the rule applies to.
+                  </Label>
+                  <DescriptionField
+                    id="description-edit"
+                    value={descEdit}
+                    disabled={descBusy}
+                    onChange={setDescEdit}
+                  />
+                  {descError && <FormError message={descError} />}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={descBusy}
+                      onClick={() => void saveDescription(selected)}
+                    >
+                      {descBusy ? 'Saving…' : 'Save description'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={descBusy}
+                      onClick={() => setDescEdit(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 flex items-start gap-2">
+                  {selected.description ? (
+                    <InlineMarkdown
+                      body={selected.description}
+                      className="min-w-0 break-words text-sm text-neutral-300"
+                    />
+                  ) : (
+                    <p className="min-w-0 text-xs text-neutral-500">No description.</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDescError(null);
+                      setDescEdit(selected.description ?? '');
+                    }}
+                    className="shrink-0 text-xs text-indigo-400 hover:text-indigo-300"
+                  >
+                    Edit description
+                  </button>
+                </div>
+              )}
               {scopeEdit ? (
                 <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
                   <span className="text-[11px] text-neutral-500">
@@ -1542,6 +1712,19 @@ export default function GlobalKbPage() {
                       </button>
                     </div>
                   </div>
+                  <div className="mt-2 flex items-start gap-1.5 text-xs text-neutral-400">
+                    <span className="shrink-0 font-medium text-neutral-300">
+                      Existing description:
+                    </span>
+                    {supersededEntry.description ? (
+                      <InlineMarkdown
+                        body={supersededEntry.description}
+                        className="min-w-0 flex-1 break-words"
+                      />
+                    ) : (
+                      <span>none</span>
+                    )}
+                  </div>
                   <div className="mt-2 min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] rounded-md border border-neutral-800">
                     {draftView === 'diff' ? (
                       <GlobalKbDiff baseline={supersededEntry.body} current={selected.body} />
@@ -1570,14 +1753,14 @@ export default function GlobalKbPage() {
                     still replaces this one. Reactivating leaves both live for the same scope —
                     re-scope or archive that entry if only one should apply.
                   </p>
-                  {/* Opening another entry resets an open scope edit, so it waits for that edit to
-                      be saved or cancelled rather than discarding it silently. */}
+                  {/* Opening another entry resets an open edit, so it waits for that edit to be
+                      saved or cancelled rather than discarding it silently. */}
                   <Button
                     size="sm"
                     variant="ghost"
                     className="mt-1"
-                    disabled={busy || scopeBusy || scopeEdit !== null}
-                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    disabled={busy || scopeBusy || descBusy || editOpen}
+                    title={editOpenHint}
                     onClick={() => void openEntry(activeSuccessor.id)}
                   >
                     Open that entry
@@ -1592,17 +1775,18 @@ export default function GlobalKbPage() {
                     that matters most: with the editor open there is no request yet, so nothing
                     server-side can serialise it, and the reviewer's unsaved re-scope is exactly
                     the judgement the activation would be ignoring. Saving afterwards re-scopes
-                    the now-active entry and does NOT bring the predecessor back. */}
+                    the now-active entry and does NOT bring the predecessor back. An open
+                    description edit blocks it too: activating publishes the stored description
+                    into every matching prompt, not the one being typed. */}
                 {(selected.status === 'draft' || selected.status === 'archived') && (
                   <Button
                     size="sm"
-                    disabled={busy || scopeBusy || scopeEdit !== null || successorLoading}
+                    disabled={busy || scopeBusy || descBusy || editOpen || successorLoading}
                     title={
-                      scopeEdit !== null
-                        ? 'Save or cancel the scope edit first'
-                        : successorLoading
-                          ? 'Checking whether an active entry already replaces this one…'
-                          : undefined
+                      editOpenHint ??
+                      (successorLoading
+                        ? 'Checking whether an active entry already replaces this one…'
+                        : undefined)
                     }
                     onClick={() => void activate(selected)}
                   >
@@ -1615,8 +1799,8 @@ export default function GlobalKbPage() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={busy || scopeBusy || scopeEdit !== null}
-                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    disabled={busy || scopeBusy || descBusy || editOpen}
+                    title={editOpenHint}
                     onClick={() => void archive(selected)}
                   >
                     Archive

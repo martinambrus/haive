@@ -1237,7 +1237,11 @@ export interface GlobalKbFacets {
   tags?: string[];
 }
 
-/** A global (cross-repository) knowledge base entry. Admin-managed; retrieved by
+/** Mirrors `GLOBAL_KB_DESCRIPTION_MAX` in @haive/shared/global-kb, which web must not import; the
+ *  api test pins the two together. */
+export const GLOBAL_KB_DESCRIPTION_MAX = 300;
+
+/** A global (cross-repository) knowledge base entry. Managed by any signed-in user; retrieved by
  *  tasks via rag_search, version-scoped by `facets`. */
 export interface GlobalKbEntry {
   id: string;
@@ -1246,6 +1250,7 @@ export interface GlobalKbEntry {
   title: string;
   seedText: string | null;
   body: string;
+  description: string | null;
   category: 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
   facets: GlobalKbFacets;
   status: 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived' | 'failed';

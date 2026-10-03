@@ -353,7 +353,12 @@ export const promptGuidanceStep: StepDefinition<GuidanceDetect, GuidanceApply> =
       // rename-me placeholder. Mitigation, not elimination: the real control is that
       // a human ticked this box for this line.
       const guidance = wantGlobal
-        ? sanitizeGlobalArticle({ title: 'guidance', body: c.guidance, projectName: d.projectName })
+        ? sanitizeGlobalArticle({
+            title: 'guidance',
+            body: c.guidance,
+            projectName: d.projectName,
+            facets: d.stackFacets,
+          })
             .body.trim()
             .slice(0, MAX_GUIDANCE_CHARS)
         : c.guidance;

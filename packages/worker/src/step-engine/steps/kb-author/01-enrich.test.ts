@@ -6,6 +6,7 @@ import {
   mergeAuthorFacets,
   normCategory,
   parseEnrichment,
+  resolveEnrichDescription,
   resolveWriteTarget,
 } from './01-enrich.js';
 
@@ -33,6 +34,12 @@ describe('parseEnrichment', () => {
   it('returns null for unparseable input', () => {
     expect(parseEnrichment('no json here')).toBeNull();
     expect(parseEnrichment(42)).toBeNull();
+  });
+
+  it('carries the description the model wrote', () => {
+    const text =
+      '```json\n{"mode":"new","description":"Escape labels before markup.","body":"# T"}\n```';
+    expect(parseEnrichment(text)?.description).toBe('Escape labels before markup.');
   });
 });
 
@@ -168,6 +175,16 @@ describe('buildEnrichPrompt', () => {
     expect(p).not.toMatch(/Cite real file paths/);
   });
 
+  it('asks for a one-line description, under the same ban on citations as the body', () => {
+    const p = buildEnrichPrompt(baseDetect);
+    const flat = p.replace(/\s+/g, ' ');
+    expect(p).toMatch(/"description": "<ONE line, at most 300 characters/);
+    expect(flat).toMatch(/a one-line DESCRIPTION, then/);
+    expect(flat).toMatch(
+      /The one-line DESCRIPTION[\s\S]*?no file path, file name, symbol, line number, project name or count/,
+    );
+  });
+
   it('tells an anchored run the repo is to read, not to quote', () => {
     const p = buildEnrichPrompt(baseDetect);
     expect(p).toMatch(/NOT the subject of the article/);
@@ -228,6 +245,57 @@ describe('mergeAuthorFacets and version dimensions', () => {
     expect(mergeAuthorFacets({ database: ['postgres'] }, { dbMajor: ['17'] })).toEqual({
       database: ['postgres'],
     });
+  });
+});
+
+// The description is shown in every matching project's title list, so it gets the body's scrub, and
+// a description the author typed is theirs and wins over whatever the model proposes.
+describe('resolveEnrichDescription', () => {
+  const scrubOptions = { repoPath: null };
+
+  it('takes the model description as one capped line', async () => {
+    const out = await resolveEnrichDescription(
+      null,
+      `  Escape\nlabels. ${'word '.repeat(100)}`,
+      scrubOptions,
+    );
+    expect(out.removed).toEqual([]);
+    expect(out.description!.startsWith('Escape labels. word word')).toBe(true);
+    expect(out.description!.length).toBeLessThanOrEqual(300);
+    expect(out.description!.endsWith('…')).toBe(true);
+  });
+
+  it('takes nothing from the model that is not a string', async () => {
+    for (const proposed of [42, true, {}, ['Escape labels.'], null, undefined]) {
+      expect(await resolveEnrichDescription(null, proposed, scrubOptions)).toEqual({
+        description: null,
+        removed: [],
+      });
+    }
+  });
+
+  it('removes a description that cites a codebase, and lists what it cited', async () => {
+    const proposed = 'See web/modules/custom/acme/acme.module:9 for the hook.';
+    expect(await resolveEnrichDescription(null, proposed, scrubOptions)).toEqual({
+      description: null,
+      removed: [{ reason: 'web/modules/custom/acme/acme.module:9', excerpt: proposed }],
+    });
+  });
+
+  it('prefers what the author stated over what the model proposed', async () => {
+    const out = await resolveEnrichDescription(
+      '  Never inline\nSVG. ',
+      'Escape labels before markup.',
+      scrubOptions,
+    );
+    expect(out).toEqual({ description: 'Never inline SVG.', removed: [] });
+  });
+
+  it('falls back to the model when the author stated nothing usable', async () => {
+    for (const authored of [null, undefined, '', ' \n ']) {
+      const out = await resolveEnrichDescription(authored, 'Escape labels.', scrubOptions);
+      expect(out).toEqual({ description: 'Escape labels.', removed: [] });
+    }
   });
 });
 

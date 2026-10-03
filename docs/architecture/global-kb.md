@@ -23,6 +23,32 @@ one line (`collapseToLine`), as step 11's article headers and title list are, so
 agent-authored title cannot open a line of its own; the isolation scan still reads the raw values,
 and its verdict is the same for either.
 
+**Each entry may carry a one-line description** — what the rule says and when it applies, like a
+skill's frontmatter description — shown beside its title as `- title — description`, so a model
+can judge relevance without fetching the body. `normalizeGlobalKbDescription` (`schema.ts`) is the
+one rule for every writer and for the render: collapsed to one line, capped at 300 characters at a
+word with an ellipsis, empty is null, and idempotent, so the isolation scan reads exactly the value
+the render shows. A person's text over the cap is refused, never cut; a model's is cut. It is
+written by the enrich task (a description the author stated wins over the model's), by the global
+promotions in `08-knowledge-acquisition` and `11-phase-8-learning` (the project name scrubbed, and
+08's repo-own backstop scanning it like the body). A promotion's title, body and description lose the
+project's name to `example-app` as a whole token (letters and digits bound it; `_`, `-` and `/` do not),
+and only when the name is the repository's own: a generic name, a public technology (`laravel`,
+`drupal`, `redis`) or a value of the promotion's scope is left alone, since a repository named
+laravel still writes articles about Laravel. A promoted investigation has no scope to tell its
+subject from the project's name, so it is not scrubbed; the person scopes it before activating.
+Activating a draft that supersedes an entry
+archives that entry, so a draft that states no description of its own takes the entry's when it is
+written, by the enrich task or a promotion, and `09_6_4` gives it again whether or not its merge
+succeeded, never over one written since and never to a draft activated meanwhile. A promotion whose
+body is identical to a same-topic entry's that lacks a description links to that entry directly,
+with no embedding check, and `09_6_4` spends no merge agent on a pair whose bodies already match.
+It is never embedded, so a description-only edit queues no re-embed. A person sees it wherever an
+entry can be activated: on its card and in its dialog in Settings → Global KB, where Edit
+description sets it, beside the existing entry's in a superseding draft's "Updates existing" view,
+and in 09_6_5's draft list. The page renders it as markdown like every prose body; its editor and
+the prompt carry the stored text.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a
