@@ -34,7 +34,11 @@ finding against a three-line edit; MEASURED across 102 runs of one task, ~450 bl
 sat on legacy code the task never touched, each costing a capped fix round whose fixer then
 REWROTE that legacy code (one worktree: 71 dirty files against a plan of 23). Out-of-scope
 findings are never dropped, only re-dispositioned — `## INSIGHTS` for the peer/lens reviewers,
-`in_scope: "no"` for security, the markdown report for 07b.
+`in_scope: "no"` for security, the markdown report for 07b. Verify's phpcs verdict is held to the
+same lines (see [Fix loop](fix-loop.md)), through `collectChangedLineMap`: the prompt collector's
+caps (20 ranges per file, 100 files) must never decide a verdict, so that map is uncapped, and
+every diff file header is read only before that file's first `@@`, since a removed `-- x` line
+shows as `--- x`.
 
 An EMPTY change set fails the step (`assertReviewableChange`), at the prompt-build boundary
 rather than in detect() so a replayed `detect_output` is guarded too, and always before
