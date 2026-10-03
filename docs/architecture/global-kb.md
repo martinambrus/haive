@@ -31,9 +31,13 @@ word with an ellipsis, empty is null, and idempotent, so the isolation scan read
 the render shows. A person's text over the cap is refused, never cut; a model's is cut. It is
 written by the enrich task (a description the author stated wins over the model's), by the global
 promotions in `08-knowledge-acquisition` and `11-phase-8-learning` (the project name scrubbed, and
-08's repo-own backstop scanning it like the body), and kept through `09_6_4`'s merge, inheriting the
-superseded entry's when the draft has none. It is never embedded, so a description-only edit queues
-no re-embed.
+08's repo-own backstop scanning it like the body). Activating a draft that supersedes an entry
+archives that entry, so a draft that states no description of its own takes the entry's when it is
+written, by the enrich task or a promotion, and `09_6_4` gives it again whether or not its merge
+succeeded, never over one written since and never to a draft activated meanwhile. A promotion whose
+body is identical to a same-topic entry's that lacks a description links to that entry directly,
+with no embedding check, and `09_6_4` spends no merge agent on a pair whose bodies already match.
+It is never embedded, so a description-only edit queues no re-embed.
 
 ## Facets
 
