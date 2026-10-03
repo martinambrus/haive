@@ -500,6 +500,47 @@ export async function loadFixLoopDiagnosis(
   return null;
 }
 
+export interface SameCheckRepeat {
+  sourceStepId: string;
+  round: number;
+  previousRound: number;
+  report: string;
+  person: boolean;
+}
+
+// Bounded where it is loaded: detect() persists it, and the task page polls the step rows.
+const REPEAT_REPORT_LIMIT = 2000;
+
+export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRepeat | null> {
+  if (ctx.round <= 0) return null;
+  const rows = await ctx.db
+    .select()
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+      ),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt));
+  type Payload = { diagnosis?: string; round?: number; sourceStepId?: string };
+  // A gate directive is a person's instruction laid over a check, never a check itself.
+  const checks = rows
+    .map((r) => r.payload as Payload | null)
+    .filter((p): p is Payload => !!p && p.sourceStepId !== FIX_LOOP_GATE_SOURCE);
+  const current = checks.find((p) => p.round === ctx.round);
+  const previous = checks.find((p) => p.round === ctx.round - 1);
+  if (!current?.sourceStepId || current.sourceStepId !== previous?.sourceStepId) return null;
+  if (!previous?.diagnosis?.trim()) return null;
+  return {
+    sourceStepId: current.sourceStepId,
+    round: ctx.round,
+    previousRound: ctx.round - 1,
+    report: excerptDiagnosis(previous.diagnosis.trim(), REPEAT_REPORT_LIMIT, false),
+    person: HUMAN_REJECT_SOURCES.has(current.sourceStepId),
+  };
+}
+
 /** Was THIS round entered by the fix loop?
  *
  *  `ctx.round` alone cannot answer it: the counter is shared with the revise loop, which forks a

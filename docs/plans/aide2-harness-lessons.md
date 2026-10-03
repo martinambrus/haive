@@ -244,8 +244,10 @@ restores the first. Rollback: stop writing it; the column is additive and nullab
 drops it.
 
 **Status: shipped in #396** as `cli_invocations.haive_build` (docs/architecture/cli-adapters.md), checked
-on 40 fixture cases against an independent `write-tree`, `.git` unchanged in each; the live check on the
-dev stack follows the merge. **As built:** the stamp is taken once at worker boot and names the build
+on 45 fixture cases against an independent `write-tree`, `.git` unchanged in each, and live-checked on
+the dev stack on 2026-10-03: the 3,509 earlier rows stay NULL, a clean boot and a real ollama run both
+stamped `commit:<HEAD>`, an uncommitted worker edit gave `tree:<id>` equal to the stamp computed on the
+host, and reverting it gave the commit again. **As built:** the stamp is taken once at worker boot and names the build
 that inserted the row; the dist of `@haive/shared` and `@haive/database` is not covered.
 
 ### P1. Bound the sequence agents' plan context (recommended first change)
@@ -309,6 +311,9 @@ it (AGENTS.md, "Review findings and waivers"). 08c keeps its own `buildRecurring
 prompt-builder unit tests (a repeat adds the block; a first occurrence, or a different source, does
 not); in the field, rounds-to-green and gate-2 rejections on tasks with a repeat, before and after by
 P0's stamp. Rollback: prompt only; revert.
+
+**Status: shipped in #401.** **As built:** the quote is `excerptDiagnosis` at 2,000 characters, head
+and tail; a line above an agent's quote calls it data; a blank previous report is not quoted.
 
 ### P3. Run the next fix round on another CLI, for this task only
 
