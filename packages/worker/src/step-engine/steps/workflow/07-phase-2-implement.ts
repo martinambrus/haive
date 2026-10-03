@@ -224,7 +224,6 @@ export function salvageImplementOutput(raw: unknown): {
 }
 
 function repeatBlockLines(repeat: SameCheckRepeat): string[] {
-  const quote = excerptDiagnosis(repeat.report, 2000, false);
   return [
     ...(repeat.person
       ? []
@@ -233,7 +232,7 @@ function repeatBlockLines(repeat: SameCheckRepeat): string[] {
         ]),
     `${repeat.sourceStepId} also sent round ${repeat.previousRound} back to this step; this is round ${repeat.round}.`,
     '=== Previous report from the same check ===',
-    repeat.person ? quote : fencedAgentBlock(quote),
+    repeat.person ? repeat.report : fencedAgentBlock(repeat.report),
     'If this is the same defect as the report above, say why the earlier fix did not hold and change your approach; if it is a different defect, say so.',
     '',
   ];

@@ -11,7 +11,7 @@ vi.mock('./_app-runtime.js', async (importOriginal) => ({
 
 import { schema } from '@haive/database';
 import { TaskCancelledError, type StepContext } from '../../step-definition.js';
-import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fencedAgentBlock } from '../_untrusted-repo.js';
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 import {
   salvageImplementOutput,
   parseImplementOutput,
@@ -340,31 +340,16 @@ describe('phase2ImplementStep same-check repeat', () => {
     expect(ls[ls.indexOf(HEADING) + 1]).toBe(UNTRUSTED_OPEN);
   });
 
-  it('quotes a long report as its head and tail around one omission line', () => {
-    const report = Array.from(
-      { length: 300 },
-      (_, i) => `finding ${String(i).padStart(3, '0')} ${'.'.repeat(40)}`,
-    ).join('\n');
+  it('renders the stored excerpt as it is, never cutting it a second time', () => {
+    const report = 'head of the report\n[… 1,234 characters omitted …]\ntail of the report';
     const ls = linesOf({ sameCheckRepeat: repeat({ report }) });
     const at = ls.indexOf(HEADING);
-    const quote = ls.slice(at + 2, ls.indexOf(UNTRUSTED_CLOSE, at + 2));
-    expect(quote.filter((l) => omission.test(l))).toHaveLength(1);
-    expect(quote[0]).toBe(`finding 000 ${'.'.repeat(40)}`);
-    expect(quote.at(-1)).toBe(`finding 299 ${'.'.repeat(40)}`);
-    expect(quote.join('\n').length).toBeLessThanOrEqual(2100);
-  });
-
-  it('keeps the fences inside a long report of a person balanced when it cuts it', () => {
-    const report = [
-      'Findings to fix:',
-      'the button does nothing',
-      '',
-      fencedAgentBlock('runtime '.repeat(1000)),
-    ].join('\n');
-    const p = prompt({ fixContext: 'x', fixIsHuman: true, sameCheckRepeat: person(report) });
-    expect(p).toContain('Findings to fix:\nthe button does nothing');
-    expect(p).toMatch(omission);
-    expect(p.split(UNTRUSTED_OPEN)).toHaveLength(p.split(UNTRUSTED_CLOSE).length);
+    expect(ls.slice(at + 2, at + 5)).toEqual([
+      'head of the report',
+      '[… 1,234 characters omitted …]',
+      'tail of the report',
+    ]);
+    expect(ls.filter((l) => omission.test(l))).toHaveLength(1);
   });
 
   it('asks whether it is the same defect, without claiming the earlier fix failed', () => {

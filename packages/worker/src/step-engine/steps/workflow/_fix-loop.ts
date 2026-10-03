@@ -508,6 +508,9 @@ export interface SameCheckRepeat {
   person: boolean;
 }
 
+// Bounded where it is loaded: detect() persists it, and the task page polls the step rows.
+const REPEAT_REPORT_LIMIT = 2000;
+
 export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRepeat | null> {
   if (ctx.round <= 0) return null;
   const rows = await ctx.db
@@ -533,7 +536,7 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
     sourceStepId: current.sourceStepId,
     round: ctx.round,
     previousRound: ctx.round - 1,
-    report: previous.diagnosis ?? '',
+    report: excerptDiagnosis(previous.diagnosis.trim(), REPEAT_REPORT_LIMIT, false),
     person: HUMAN_REJECT_SOURCES.has(current.sourceStepId),
   };
 }

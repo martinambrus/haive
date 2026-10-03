@@ -661,6 +661,35 @@ describe('loadSameCheckRepeat', () => {
     expect(await loadSameCheckRepeat(ctxWith([ev(A, 5, 'x'), ev(A, 3, 'y')], 3))).toBeNull();
   });
 
+  const omission = /\[… [\d,]+ characters omitted …\]/;
+
+  it('bounds a long report before detect stores it: head and tail around one omission line', async () => {
+    const report = Array.from(
+      { length: 300 },
+      (_, i) => `finding ${String(i).padStart(3, '0')} ${'.'.repeat(40)}`,
+    ).join('\n');
+    const r = await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(A, 2, report)], 3));
+    const lines = r!.report.split('\n');
+    expect(lines.filter((l) => omission.test(l))).toHaveLength(1);
+    expect(lines[0]).toBe(`finding 000 ${'.'.repeat(40)}`);
+    expect(lines.at(-1)).toBe(`finding 299 ${'.'.repeat(40)}`);
+    expect(r!.report.length).toBeLessThanOrEqual(2100);
+  });
+
+  it('keeps the fences inside a long report of a person balanced when it cuts it', async () => {
+    const gate = '09-gate-2-verify-approval';
+    const report = [
+      'Findings to fix:',
+      'the button does nothing',
+      '',
+      fencedAgentBlock('runtime '.repeat(1000)),
+    ].join('\n');
+    const r = await loadSameCheckRepeat(ctxWith([ev(gate, 3, 'x'), ev(gate, 2, report)], 3));
+    expect(r!.report).toContain('Findings to fix:\nthe button does nothing');
+    expect(r!.report).toMatch(omission);
+    expect(r!.report.split(UNTRUSTED_OPEN)).toHaveLength(r!.report.split(UNTRUSTED_CLOSE).length);
+  });
+
   it('is not a repeat when another check sent the previous round back', async () => {
     expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(B, 2, 'y')], 3))).toBeNull();
   });
