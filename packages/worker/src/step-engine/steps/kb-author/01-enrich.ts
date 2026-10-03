@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   FACET_DIMENSIONS,
@@ -409,10 +409,17 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         where: eq(globalKbEntries.id, entryId),
       });
       if (!entry) throw new Error(`global KB entry ${entryId} not found`);
-      await db
+      // An approval stops this: a retry would demote the entry, and a cancel would then delete it.
+      const [demoted] = await db
         .update(globalKbEntries)
         .set({ status: 'enriching', updatedAt: new Date() })
-        .where(eq(globalKbEntries.id, entryId));
+        .where(and(eq(globalKbEntries.id, entryId), isNull(globalKbEntries.enforcedHash)))
+        .returning({ id: globalKbEntries.id });
+      if (!demoted) {
+        throw new Error(
+          `global KB entry ${entryId} is an enforced house rule; enriching it again would demote it, so an admin has to remove its enforcement first`,
+        );
+      }
       const rows = await db
         .select({
           id: globalKbEntries.id,

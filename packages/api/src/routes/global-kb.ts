@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, inArray, ne, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -13,18 +13,30 @@ import {
 } from '@haive/shared';
 import {
   GLOBAL_KB_DESCRIPTION_MAX,
+  HOUSE_RULES_ALWAYS_CAP_BYTES,
+  enforcementState,
   globalKbEntries,
   globalKbTopicKey,
+  houseRuleApprovalHash,
+  houseRuleBytes,
+  houseRuleContentToken,
   normalizeGlobalKbDescription,
   orphanFacetMajors,
+  refusedHouseRuleText,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
+  resolveHouseRulesEnabled,
+  validateHouseRuleGlobs,
   withGlobalKb,
+  type EnforceSpec,
   type GlobalKbCategory,
   FACET_DIMENSIONS,
   normalizeFacets,
+  type GlobalKbDb,
+  type GlobalKbEntry,
   type GlobalKbFacets,
   type GlobalKbStatus,
+  type HouseRuleRow,
 } from '@haive/shared/global-kb';
 import {
   FACET_FILTER_DIMENSIONS,
@@ -35,15 +47,16 @@ import {
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 // Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
 // single-operator — every signed-in user manages their own repos, tasks and
 // settings — so the shared global KB is managed by any authenticated user too
-// (requireAuth only, no admin role). The corpus lives in a SEPARATE database
-// reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the
-// dedicated DB in internal mode.
+// (requireAuth only), except what puts an entry's text into agent prompts as an
+// instruction: enforcement and the store settings are admin-only. The corpus lives in a
+// SEPARATE database reached via withGlobalKb; getDb() is the main DB, needed only to
+// CREATE the dedicated DB in internal mode.
 const CATEGORIES = [
   'general',
   'tech_pattern',
@@ -106,6 +119,66 @@ async function enqueueSync(
   );
 }
 
+type GlobalKbTx = Parameters<Parameters<GlobalKbDb['transaction']>[0]>[0];
+
+// The corpus's advisory lock before the row's, always: writers that cross rows (an activation
+// archiving its predecessor, a delete re-linking successors) can then never wait on each other.
+async function lockEntry(db: GlobalKbTx, id: string): Promise<GlobalKbEntry | undefined> {
+  const [named] = await db
+    .select({ namespace: globalKbEntries.namespace })
+    .from(globalKbEntries)
+    .where(eq(globalKbEntries.id, id));
+  if (!named) return undefined;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`gkb-entries:${named.namespace}`}, 0))`,
+  );
+  const [row] = await db
+    .select()
+    .from(globalKbEntries)
+    .where(eq(globalKbEntries.id, id))
+    .for('update');
+  return row;
+}
+
+interface HouseRuleContext {
+  namespace: string;
+  houseRulesEnabled: boolean;
+}
+
+async function houseRuleContext(namespace: string): Promise<HouseRuleContext> {
+  return { namespace, houseRulesEnabled: await resolveHouseRulesEnabled(configService) };
+}
+
+function presentEntry<T extends HouseRuleRow>(entry: T, ctx: HouseRuleContext) {
+  return {
+    ...entry,
+    contentToken: houseRuleContentToken(entry),
+    enforcementState: enforcementState(entry, ctx),
+  };
+}
+
+// Counted as if house rules were on, so switching them on cannot overrun the cap.
+async function alwaysBytesUsed(
+  db: Pick<GlobalKbDb, 'select'>,
+  namespace: string,
+  exceptId: string,
+): Promise<number> {
+  const rows = await db
+    .select()
+    .from(globalKbEntries)
+    .where(
+      and(
+        eq(globalKbEntries.namespace, namespace),
+        isNotNull(globalKbEntries.enforcedHash),
+        ne(globalKbEntries.id, exceptId),
+      ),
+    );
+  return rows.reduce((sum, row) => {
+    const state = enforcementState(row, { namespace, houseRulesEnabled: true });
+    return state.state === 'enforced' && state.mode === 'always' ? sum + houseRuleBytes(row) : sum;
+  }, 0);
+}
+
 export const enrichSchema = z.object({
   // User-set title — used verbatim for the entry and the task title (so the user
   // recognizes their own articles). Max matches the canonical title length (300).
@@ -145,7 +218,10 @@ globalKbRoutes.use('*', requireAuth);
 // connection string, namespace, pinned embed model). Backed by ConfigService +
 // SecretsService; resolveGlobalKbSettings is the same resolver the worker sync +
 // query path use, so the UI edits exactly what they read. ---
-function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
+async function configResponse(
+  s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>,
+  role: 'admin' | 'user',
+) {
   return {
     enabled: s.enabled,
     digestEnabled: s.digestEnabled,
@@ -156,6 +232,8 @@ function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) 
     embedDimensions: s.embeddingDimensions,
     archiveRetentionDays: s.archiveRetentionDays,
     connectionStringSet: !!s.connectionString,
+    canEnforce: role === 'admin',
+    houseRulesEnabled: await resolveHouseRulesEnabled(configService),
   };
 }
 
@@ -174,13 +252,36 @@ const configSchema = z
   .strict();
 
 globalKbRoutes.get('/config', async (c) => {
-  return c.json(configResponse(await resolveGlobalKbSettings()));
+  return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 });
 
 globalKbRoutes.put('/config', async (c) => {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
+  const saved = await resolveGlobalKbSettings();
+  const given = d.connectionString?.trim() ?? '';
+  // The page sends every field on every save, so only a CHANGED value is refused.
+  if (c.get('userRole') !== 'admin') {
+    const changed = Object.entries({
+      enabled: d.enabled !== undefined && d.enabled !== saved.enabled,
+      namespace: d.namespace !== undefined && d.namespace !== saved.namespace,
+      mode: d.mode !== undefined && d.mode !== saved.mode,
+      connectionString: given !== '' && given !== saved.connectionString,
+    })
+      .filter(([, differs]) => differs)
+      .map(([field]) => field);
+    if (changed.length > 0) {
+      throw new HttpError(403, `only an admin can change ${changed.join(', ')}`, 'admin_required');
+    }
+  }
+  if ((d.mode ?? saved.mode) === 'external' && given === '' && !saved.connectionString) {
+    throw new HttpError(
+      400,
+      'external mode needs a connection string, stored already or sent with it',
+      'connection_string_required',
+    );
+  }
   if (d.enabled !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
   if (d.digestEnabled !== undefined)
@@ -206,7 +307,7 @@ globalKbRoutes.put('/config', async (c) => {
       'Global KB external connection string',
     );
   }
-  return c.json(configResponse(await resolveGlobalKbSettings()));
+  return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 });
 
 // --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
@@ -374,7 +475,7 @@ globalKbRoutes.post('/enrich', async (c) => {
         embedStatus: 'pending',
       })
       .returning();
-    return row!;
+    return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
   const [task] = await db
@@ -461,7 +562,7 @@ globalKbRoutes.get('/entries', async (c) => {
     Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '12')) || 12),
   );
 
-  const result = await withGlobalKb(getDb(), async ({ db }) => {
+  const result = await withGlobalKb(getDb(), async ({ db, settings }) => {
     const conds: SQL[] = [];
     if (status) conds.push(eq(globalKbEntries.status, status as GlobalKbStatus));
     if (category) conds.push(eq(globalKbEntries.category, category as GlobalKbCategory));
@@ -497,7 +598,8 @@ globalKbRoutes.get('/entries', async (c) => {
       new Set(facetRows.flatMap((r) => r.facets?.framework ?? [])),
     ).sort();
 
-    return { entries, total, frameworks };
+    const ctx = await houseRuleContext(settings.namespace);
+    return { entries: entries.map((entry) => presentEntry(entry, ctx)), total, frameworks };
   });
 
   return c.json({
@@ -511,7 +613,7 @@ globalKbRoutes.get('/entries', async (c) => {
 
 globalKbRoutes.get('/entries/:id', async (c) => {
   const id = c.req.param('id');
-  const found = await withGlobalKb(getDb(), async ({ db }) => {
+  const found = await withGlobalKb(getDb(), async ({ db, settings }) => {
     const entry = await db.query.globalKbEntries.findFirst({
       where: eq(globalKbEntries.id, id),
     });
@@ -546,7 +648,13 @@ globalKbRoutes.get('/entries/:id', async (c) => {
             SELECT id, title FROM chain WHERE status = 'active' LIMIT 1
           `)) as unknown as Array<{ id: string; title: string }>)
         : [];
-    return { entry, activeSuccessor: successors[0] ?? null };
+    return {
+      entry: presentEntry(entry, await houseRuleContext(settings.namespace)),
+      activeSuccessor: successors[0] ?? null,
+      usedBytes: await alwaysBytesUsed(db, settings.namespace, entry.id),
+      capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
+      entryBytes: houseRuleBytes(entry),
+    };
   });
   if (!found) throw new HttpError(404, 'global KB entry not found');
   return c.json(found);
@@ -577,7 +685,7 @@ globalKbRoutes.post('/entries', async (c) => {
         embedStatus: 'pending',
       })
       .returning();
-    return row!;
+    return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
   await enqueueSync(entry.id, entry.namespace, 'upsert');
@@ -717,16 +825,20 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   // decided to clear it but before the clear lands, and archives a predecessor the reviewer
   // had just detached. The UI's button guard cannot prevent that — it only serialises one tab,
   // while a second tab or an API client goes straight at the route.
-  const result = await withGlobalKb(getDb(), async ({ db: conn }) =>
+  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
     conn.transaction(async (db) => {
       // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
       // instead of flipping the status between the check and the write.
-      const [current] = await db
-        .select({ status: globalKbEntries.status })
-        .from(globalKbEntries)
-        .where(eq(globalKbEntries.id, id))
-        .for('update');
-      const blocked = current ? enrichmentBlocksEdit(current.status) : null;
+      const current = await lockEntry(db, id);
+      if (!current) {
+        return {
+          row: undefined,
+          supersededId: null,
+          reembed: false,
+          namespace: settings.namespace,
+        };
+      }
+      const blocked = enrichmentBlocksEdit(current.status);
       if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
       const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
       if (data.title !== undefined) set.title = data.title;
@@ -745,16 +857,14 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
       // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
       if (data.status === 'active') set.supersededAt = null;
-      // Title/content/scope/status edits need a re-embed — the title heads every chunk — and marking
-      // them pending is what lets the worker re-queue a sync whose enqueue below is lost.
-      if (
-        data.title !== undefined ||
-        data.body !== undefined ||
-        data.facets !== undefined ||
-        data.status !== undefined
-      ) {
-        set.embedStatus = 'pending';
-      }
+      // Only a changed title or body, or an entry becoming active, has anything to embed; pending
+      // is what lets the worker re-queue a sync whose enqueue below is lost.
+      const becomesActive = data.status === 'active' && current.status !== 'active';
+      const reembed =
+        becomesActive ||
+        (data.title !== undefined && data.title !== current.title) ||
+        (data.body !== undefined && data.body !== current.body);
+      if (reembed) set.embedStatus = 'pending';
       // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
       // draft's article against the entry it would replace; re-scoping it to another technology
       // makes it a different rule, and activating it would then archive an entry it no longer has
@@ -762,36 +872,6 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
       // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
       // (tags do not scope retrieval) leaves a valid link alone.
-      // The locked read serves TWO decisions — the supersede link below and the topic key
-      // after it — so it runs for a category edit as well as a facet one.
-      let existing:
-        | {
-            facets: GlobalKbFacets;
-            supersedesEntryId: string | null;
-            status: GlobalKbStatus;
-            category: GlobalKbCategory;
-            topicKey: string | null;
-          }
-        | undefined;
-      if (data.facets !== undefined || data.category !== undefined) {
-        // LOCKED, not merely read inside a transaction. Postgres defaults to READ COMMITTED,
-        // where atomicity is not isolation: an unlocked read can see the draft's old
-        // `supersedesEntryId`, a concurrent activation can commit and archive that predecessor,
-        // and this request then clears the link too late to have prevented anything. The row
-        // lock makes the two PATCHes take turns, which is what the UI's button guard could
-        // never do across tabs or API clients.
-        [existing] = await db
-          .select({
-            facets: globalKbEntries.facets,
-            supersedesEntryId: globalKbEntries.supersedesEntryId,
-            status: globalKbEntries.status,
-            category: globalKbEntries.category,
-            topicKey: globalKbEntries.topicKey,
-          })
-          .from(globalKbEntries)
-          .where(eq(globalKbEntries.id, id))
-          .for('update');
-      }
       if (data.facets !== undefined) {
         // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
         // activation reads it — reactivation included — and archives the entry it names. So an
@@ -805,7 +885,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
         // true when its scope moved. The predecessor's "an active entry still replaces this one"
         // warning follows this link too, so it stops claiming a replacement that is gone.
-        if (existing?.supersedesEntryId && scopeChanged(existing.facets, set.facets)) {
+        if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
           set.supersedesEntryId = null;
         }
         // The same holds for a link POINTING AT this entry: it was decided against the old scope
@@ -813,17 +893,15 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         // this entry although the two rules no longer share a scope, and the successor lookup
         // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
         // list-order reason the activation's predecessor archive gives.
-        if (existing && scopeChanged(existing.facets, set.facets)) {
+        if (scopeChanged(current.facets, set.facets)) {
           await db
             .update(globalKbEntries)
             .set({ supersedesEntryId: null })
             .where(eq(globalKbEntries.supersedesEntryId, id));
         }
       }
-      if (existing) {
-        const rekeyed = rescopedTopicKey(existing, { category: set.category, facets: set.facets });
-        if (rekeyed !== undefined) set.topicKey = rekeyed;
-      }
+      const rekeyed = rescopedTopicKey(current, { category: set.category, facets: set.facets });
+      if (rekeyed !== undefined) set.topicKey = rekeyed;
       const [row] = await db
         .update(globalKbEntries)
         .set(set)
@@ -863,7 +941,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // the topic keeps a single live article. Its vectors go in this transaction too, for the
       // reason above.
       let supersededId: string | null = null;
-      if (row && set.status === 'active' && row.supersedesEntryId) {
+      if (row && becomesActive && row.supersedesEntryId) {
         const [archived] = await db
           .update(globalKbEntries)
           // Record the archive time via supersededAt, but DON'T bump updatedAt: the
@@ -885,18 +963,15 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         }
         supersededId = archived?.id ?? null;
       }
-      return { row, supersededId };
+      return { row, supersededId, reembed, namespace: settings.namespace };
     }),
   );
 
   const entry = result.row;
   if (!entry) throw new HttpError(404, 'global KB entry not found');
-  // Shown beside the title and never embedded, so changing it alone leaves nothing to sync.
-  if (!Object.keys(data).every((key) => key === 'description')) {
-    await enqueueSync(entry.id, entry.namespace, 'upsert');
-  }
+  if (result.reembed) await enqueueSync(entry.id, entry.namespace, 'upsert');
   if (result.supersededId) await enqueueSync(result.supersededId, entry.namespace, 'delete');
-  return c.json({ entry });
+  return c.json({ entry: presentEntry(entry, await houseRuleContext(result.namespace)) });
 });
 
 // Hard delete (single-operator instance; no shared-corpus concern). The UI guards this with a
@@ -908,6 +983,7 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = c.req.param('id');
   const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
     conn.transaction(async (db) => {
+      if (!(await lockEntry(db, id))) return undefined;
       const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
       if (row) {
         await db.execute(
@@ -930,4 +1006,119 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'delete');
   return c.json({ ok: true });
+});
+
+const enforcementSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('always'), expectedHash: z.string().min(1) }).strict(),
+  z
+    .object({
+      mode: z.literal('files'),
+      globs: z.array(z.string()),
+      expectedHash: z.string().min(1),
+    })
+    .strict(),
+]);
+
+// Enforcing puts the entry's full text into agent prompts as an instruction, so it is an admin's
+// call on exactly the text they saw: `expectedHash` is the content token of the entry they read.
+globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
+  const id = c.req.param('id');
+  const parsed = enforcementSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'invalid enforcement request', 'invalid_body');
+  const { expectedHash } = parsed.data;
+  const spec: EnforceSpec =
+    parsed.data.mode === 'always'
+      ? { mode: 'always' }
+      : { mode: 'files', globs: parsed.data.globs };
+  if (spec.mode === 'files') {
+    const problem = validateHouseRuleGlobs(spec.globs);
+    if (problem !== null) throw new HttpError(400, problem, 'invalid_globs');
+  }
+  const userId = c.get('userId');
+
+  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
+    conn.transaction(async (db) => {
+      const row = await lockEntry(db, id);
+      if (!row) throw new HttpError(404, 'global KB entry not found');
+      if (row.status !== 'active') {
+        throw new HttpError(409, 'only an active entry can be enforced', 'not_active');
+      }
+      if (row.namespace !== settings.namespace) {
+        throw new HttpError(
+          409,
+          `this entry belongs to the namespace "${row.namespace}", not to the one this instance uses`,
+          'other_namespace',
+        );
+      }
+      if (houseRuleContentToken(row) !== expectedHash) {
+        throw new HttpError(
+          409,
+          'the entry changed after it was read; read it again before enforcing it',
+          'token_mismatch',
+        );
+      }
+      if (!row.description) {
+        throw new HttpError(
+          400,
+          'an enforced rule is listed by its description, so the entry needs one',
+          'description_required',
+        );
+      }
+      for (const field of ['title', 'description', 'body'] as const) {
+        const reason = refusedHouseRuleText(row[field] ?? '');
+        if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
+      }
+      if (spec.mode === 'always') {
+        const usedBytes = await alwaysBytesUsed(db, settings.namespace, row.id);
+        const entryBytes = houseRuleBytes(row);
+        if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
+          return { capExceeded: { usedBytes, capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES, entryBytes } };
+        }
+      }
+      const [updated] = await db
+        .update(globalKbEntries)
+        .set({
+          enforce: spec,
+          enforcedHash: houseRuleApprovalHash(row, spec),
+          enforcedAt: new Date(),
+          enforcedBy: userId,
+        })
+        .where(eq(globalKbEntries.id, id))
+        .returning();
+      return { row: updated!, namespace: settings.namespace };
+    }),
+  );
+
+  if ('capExceeded' in result) {
+    return c.json(
+      {
+        error: 'the always-on rules would pass their size cap',
+        code: 'always_cap',
+        ...result.capExceeded,
+      },
+      409,
+    );
+  }
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
+});
+
+// Removes the approval and keeps the settings, as the last ones given.
+globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
+  const id = c.req.param('id');
+  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
+    conn.transaction(async (db) => {
+      const row = await lockEntry(db, id);
+      if (!row) throw new HttpError(404, 'global KB entry not found');
+      if (row.enforce === null) {
+        throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
+      }
+      const [updated] = await db
+        .update(globalKbEntries)
+        .set({ enforcedHash: null })
+        .where(eq(globalKbEntries.id, id))
+        .returning();
+      return { row: updated!, namespace: settings.namespace };
+    }),
+  );
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
 });

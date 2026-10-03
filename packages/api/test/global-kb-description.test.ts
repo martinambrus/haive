@@ -23,6 +23,10 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
+vi.mock('@haive/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared')>()),
+  configService: { getBoolean: async () => true },
+}));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
   withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) =>
@@ -205,12 +209,13 @@ describe('PATCH /entries/:id and the description', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps syncing an edit that has nothing to do with the description', async () => {
+  it('does not sync a category edit either, since the category is not embedded', async () => {
     const res = await send('PATCH', `/entries/${ENTRY}`, { category: 'best_practice' });
 
     expect(res.status).toBe(200);
     expect(stored().description).toBe('Before.');
-    expect(h.add).toHaveBeenCalledTimes(1);
+    expect(stored().embedStatus).toBe('embedded');
+    expect(h.add).not.toHaveBeenCalled();
   });
 });
 

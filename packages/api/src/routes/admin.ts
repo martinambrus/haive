@@ -34,6 +34,7 @@ import {
   readHostResources,
   secretsService,
 } from '@haive/shared';
+import { resolveHouseRulesEnabled } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
@@ -781,6 +782,21 @@ adminRoutes.put('/config/agent-rules-injection', async (c) => {
   const { enabled } = agentRulesInjectionSchema.parse(await c.req.json());
   await configService.set(CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, enabled ? 'true' : 'false');
   log.info({ enabled }, 'agent-rules-injection switch updated');
+  return c.json({ enabled });
+});
+
+const houseRulesSchema = z.object({ enabled: z.boolean() });
+
+// The kill switch for house rules: off, every enforced rule reads as switched off. Read within the
+// ~30s config cache, so a flip needs no redeploy.
+adminRoutes.get('/config/house-rules', async (c) => {
+  return c.json({ enabled: await resolveHouseRulesEnabled(configService) });
+});
+
+adminRoutes.put('/config/house-rules', async (c) => {
+  const { enabled } = houseRulesSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'house-rules switch updated');
   return c.json({ enabled });
 });
 
