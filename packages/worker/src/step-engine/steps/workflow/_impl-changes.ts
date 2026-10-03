@@ -196,6 +196,8 @@ function parseDiffHunks(diff: string): Map<string, DiffFile> {
   let path: string | null = null;
   let deleted = false;
   let hunks: DiffHunk[] = [];
+  // A removed `-- x` reads `--- x`, so only the lines before a file's first `@@` are header.
+  let inHeader = false;
 
   const flush = (): void => {
     if (path) files.set(path, { deleted, hunks });
@@ -210,22 +212,24 @@ function parseDiffHunks(diff: string): Map<string, DiffFile> {
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       flush();
+      inHeader = true;
       continue;
     }
     // `---` always precedes `+++`, so the old side is recorded first and used only when the
     // new side turns out to be /dev/null — a deleted file names its path nowhere else.
-    if (line.startsWith('--- ')) {
+    if (inHeader && line.startsWith('--- ')) {
       const source = line.slice(4).trim();
       if (source !== '/dev/null') path = strip(source, 'a/');
       continue;
     }
-    if (line.startsWith('+++ ')) {
+    if (inHeader && line.startsWith('+++ ')) {
       const target = line.slice(4).trim();
       if (target === '/dev/null') deleted = true;
       else path = strip(target, 'b/');
       continue;
     }
     if (!line.startsWith('@@')) continue;
+    inHeader = false;
     const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (!m) continue;
     const start = Number.parseInt(m[1]!, 10);

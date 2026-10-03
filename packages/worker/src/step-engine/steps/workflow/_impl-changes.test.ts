@@ -454,6 +454,52 @@ describe('parseChangedLineRanges', () => {
     expect(notes['x']).toBe('no line changes (mode or rename only)');
   });
 
+  // A removed `-- x` reads `--- x` in a diff, and an added `++ x` reads `+++ x`.
+  it('reads a removed `-- x` line as hunk content, not as the old-side header', () => {
+    const notes = parseChangedLineRanges(
+      diff(
+        'diff --git a/q.sql b/q.sql',
+        '--- a/q.sql',
+        '+++ b/q.sql',
+        '@@ -3 +2,0 @@ select 2;',
+        '--- sql comment',
+        '@@ -9,0 +9,2 @@',
+        '+a',
+        '+b',
+        'diff --git a/other.sql b/other.sql',
+        '--- a/other.sql',
+        '+++ b/other.sql',
+        '@@ -1 +1 @@',
+        '+x',
+      ),
+    );
+    expect(notes).toEqual({ 'q.sql': 'lines 2, 9-10', 'other.sql': 'lines 1' });
+  });
+
+  it.each([
+    ['text', '+++ added'],
+    ['text that reads like the null device', '+++ /dev/null'],
+  ])(
+    'reads an added `++ x` line (%s) as hunk content, not as the new-side header',
+    (_name, line) => {
+      const notes = parseChangedLineRanges(
+        diff(
+          'diff --git a/q.sql b/q.sql',
+          '--- a/q.sql',
+          '+++ b/q.sql',
+          '@@ -5,0 +5 @@ select 4;',
+          line,
+          'diff --git a/other.sql b/other.sql',
+          '--- a/other.sql',
+          '+++ b/other.sql',
+          '@@ -1 +1 @@',
+          '+x',
+        ),
+      );
+      expect(notes).toEqual({ 'q.sql': 'lines 5', 'other.sql': 'lines 1' });
+    },
+  );
+
   it('returns nothing for output it cannot read', () => {
     expect(parseChangedLineRanges('')).toEqual({});
     expect(parseChangedLineRanges('fatal: bad revision')).toEqual({});
@@ -727,6 +773,29 @@ describe('collectChangedLineMap', () => {
 
       expect(map?.has('gone.php')).toBe(false);
       expect(map?.get('kept.php')?.ranges).toEqual([[2, 2]]);
+    });
+  });
+
+  it('keeps the real file and its hunks when a removed `-- x` or added `++ x` line reads like a header', async () => {
+    const before = 'select 1;\nselect 2;\n-- sql comment\nselect 3;\nselect 4;\n';
+    await inRepo({ 'q.sql': before }, async (dir) => {
+      await writeFile(
+        path.join(dir, 'q.sql'),
+        'select 1;\nselect 2;\nselect 3;\nselect 4;\n++ x\n',
+      );
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect([...(map?.keys() ?? [])]).toEqual(['q.sql']);
+      expect(map?.get('q.sql')).toEqual({
+        whole: false,
+        ranges: [
+          [2, 3],
+          [5, 5],
+        ],
+      });
     });
   });
 
