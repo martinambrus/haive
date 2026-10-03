@@ -2,7 +2,9 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
+import { resolveDdevWorkspace } from './_task-meta.js';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { LspLanguage, PluginInstallCommand } from '../../../cli-adapters/types.js';
 import { loadConfiguredLspLanguages } from '../../../lsp/configured-lsp.js';
@@ -38,9 +40,15 @@ interface InstallPluginsDetect {
   providerSupportsPlugins: boolean;
   lspLanguages: LspLanguage[];
   drupalLspPath: string | null;
+  missingDrupalLsp?: string | null;
   commands: PluginInstallCommand[];
   skip: boolean;
   skipReason: string | null;
+}
+
+async function drupalLspTreeInWorktree(ctx: StepContext, rel: string): Promise<boolean> {
+  const workspace = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+  return workspace !== null && (await hasWorkspaceEntry(workspace.workspace, rel));
 }
 
 interface InstallPluginsApply {
@@ -132,9 +140,17 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     const lspLanguages = await loadConfiguredLspLanguages(ctx.db, ctx.taskId);
 
     const sandboxWorkdir = SANDBOX_WORKDIR;
-    const drupalRelBase = DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null;
+    const drupalRelBase = wantsLocalPhpLsp(lspLanguages)
+      ? (DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null)
+      : null;
+    // Only onboarding step 07 writes this tree and the sandbox mounts just the task worktree:
+    // without it `plugin marketplace add` fails on the path and takes the whole task down.
     const drupalLspPath =
-      wantsLocalPhpLsp(lspLanguages) && drupalRelBase ? `${sandboxWorkdir}/${drupalRelBase}` : null;
+      drupalRelBase !== null && (await drupalLspTreeInWorktree(ctx, drupalRelBase))
+        ? `${sandboxWorkdir}/${drupalRelBase}`
+        : null;
+    const missingDrupalLsp =
+      drupalRelBase !== null && drupalLspPath === null ? drupalRelBase : null;
 
     const pluginOpts: Parameters<NonNullable<typeof adapter.buildPluginInstallCommands>>[1] = {
       repoRoot: sandboxWorkdir,
@@ -150,9 +166,14 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       providerSupportsPlugins: true,
       lspLanguages,
       drupalLspPath,
+      missingDrupalLsp,
       commands,
       skip,
-      skipReason: skip ? 'No plugins to install' : null,
+      skipReason: skip
+        ? missingDrupalLsp
+          ? `${missingDrupalLsp} is not in this task's worktree, so the PHP LSP plugin is not installed`
+          : 'No plugins to install'
+        : null,
     };
   },
 
@@ -167,6 +188,9 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
           ? `LSP languages: ${detected.lspLanguages.join(', ')}`
           : 'No LSP languages selected',
         detected.drupalLspPath ? `Drupal-LSP local marketplace: ${detected.drupalLspPath}` : null,
+        detected.missingDrupalLsp
+          ? `PHP LSP plugin not installed: ${detected.missingDrupalLsp} is not in this task's worktree`
+          : null,
         '',
         `Will run ${detected.commands.length} command(s):`,
         summary,
