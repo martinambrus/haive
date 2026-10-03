@@ -422,7 +422,7 @@ async function main(): Promise<void> {
       'mixed history cannot cover for abandoned onboarding',
       !resolveOnboardingVerdict({
         source: 'blank',
-        missing: [KB_DIR],
+        missing: [],
         onboardedAt: null,
         facts: mixedFacts,
       }).onboarded,

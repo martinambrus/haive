@@ -257,7 +257,7 @@ export interface OnboardingVerdict {
  *               AND (onboarded_at set OR a completed run OR no run was ever started here)
  *
  * A repository created blank with no onboarding history or reset can instead use a completed
- * workflow or its stamp, with no marker requirement. A setup-only task can generate none of
+ * workflow, with no marker requirement. A setup-only task can generate none of
  * those artifacts; its completion still admits the next workflow.
  *
  * The last clause is what keeps a repository cloned in already onboarded — and every repo
@@ -308,12 +308,10 @@ export function resolveOnboardingVerdict(input: {
 
   // A setup-only workflow (including quick_bugfix) can finish without writing KB, agents or
   // skills. Neither an explicit reset nor an actual onboarding run can be answered by this
-  // shortcut. Read the task as well as the stamp so a lost bookkeeping write — and a workflow
-  // completed before this fix — gets the same verdict.
+  // shortcut. Workflow evidence lives only in task history: onboardedAt remains an onboarding
+  // stamp, so it cannot cover for a later onboarding run that failed after writing its markers.
   const greenfieldCompleted =
-    input.source === 'blank' &&
-    neverStarted &&
-    (onboardedAt !== null || facts.newestCompletedWorkflowAt != null);
+    input.source === 'blank' && neverStarted && facts.newestCompletedWorkflowAt != null;
 
   const onboarded =
     inProgressTaskId === null &&

@@ -80,21 +80,19 @@ export const repositories = pgTable(
      *  @haive/shared OnboardingToolingMirror. NULL = fall back to the onboarding-task
      *  04-tooling output lookup. */
     onboardingTooling: jsonb('onboarding_tooling').$type<Record<string, unknown>>(),
-    /** When onboarding finished for this repository, as opposed to when its
-     *  artifacts appeared on disk. Includes a completed workflow on a blank repository
-     *  with no onboarding history or reset (see onboarding-completion.md).
+    /** When an onboarding RUN finished for this repository, as opposed to when its
+     *  artifacts appeared on disk. NULL = no onboarding run has completed here.
      *
      *  The four on-disk markers the API checks (.claude/agents, .claude/skills,
      *  workflow-config.json, the knowledge base) are all written by step 07 of 27, so
      *  they say "a run got a third of the way in", not "a run finished" — a cancelled
      *  run and a LIVE one both left them. Stamped by the worker's markTaskCompleted for
-     *  an `onboarding` task or that first greenfield workflow (cancel and fail never
+     *  an `onboarding` task (cancel and fail write through their own functions and never
      *  stamp), set by hand via POST /repos/:id/mark-onboarded when a run failed at a late
      *  step with everything already built, and cleared by the artifact reset.
      *
-     *  The regular onboarding verdict still requires all markers. Only greenfield completion
-     *  with no onboarding history or reset is independent of artifacts: its first task may
-     *  be setup-only and generate no knowledge, agents or skills. */
+     *  Not sufficient on its own: the verdict still requires the markers to be present,
+     *  so a hand-deleted `.claude/` reads as not onboarded however this column is set. */
     onboardedAt: timestamp('onboarded_at'),
     /** The last commit whose code has been folded into this repository's KNOWLEDGE BASE,
      *  and the same for its PLAN. NULL means the repository has never been tracked — the

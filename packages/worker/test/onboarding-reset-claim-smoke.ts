@@ -298,50 +298,20 @@ async function main(): Promise<void> {
     await stampRepositoryOnboarded(db, await seedTask(upgrade, { type: 'onboarding_upgrade' }));
     check('an upgrade run never stamps', (await repoRow(upgrade)).onboardedAt === null);
 
+    // Workflow completion is evidence in task history, never an onboarding stamp. Otherwise a
+    // later onboarding run that writes its markers and then fails inherits that old stamp.
     const blankWorkflow = await newRepo();
     await stampRepositoryOnboarded(
       db,
-      await seedTask(blankWorkflow, { type: 'workflow', executionPath: 'quick_bugfix' }),
+      await seedTask(blankWorkflow, {
+        type: 'workflow',
+        executionPath: 'quick_bugfix',
+      }),
     );
     check(
-      'a setup-only workflow stamps a blank repo',
-      (await repoRow(blankWorkflow)).onboardedAt !== null,
+      'a blank workflow leaves onboarding stamps untouched',
+      (await repoRow(blankWorkflow)).onboardedAt === null,
     );
-
-    for (const status of ['running', 'failed', 'cancelled'] as const) {
-      const unfinished = await newRepo();
-      await stampRepositoryOnboarded(db, await seedTask(unfinished, { type: 'workflow', status }));
-      check(`a ${status} workflow never stamps`, (await repoRow(unfinished)).onboardedAt === null);
-    }
-
-    const existingCode = await newRepo({ source: 'git_https' });
-    await stampRepositoryOnboarded(db, await seedTask(existingCode, { type: 'workflow' }));
-    check(
-      'a workflow on an imported repo never stamps',
-      (await repoRow(existingCode)).onboardedAt === null,
-    );
-
-    const blankReset = await newRepo({ onboardingResetAt: RESET_AT });
-    await stampRepositoryOnboarded(
-      db,
-      await seedTask(blankReset, { type: 'workflow', completedAt: AFTER_RESET }),
-    );
-    check(
-      'a newer workflow cannot answer a blank repo reset',
-      (await repoRow(blankReset)).onboardedAt === null,
-    );
-
-    const abandonedOnboarding = await newRepo();
-    await seedTask(abandonedOnboarding, { status: 'cancelled' });
-    await stampRepositoryOnboarded(db, await seedTask(abandonedOnboarding, { type: 'workflow' }));
-    check(
-      'a workflow cannot cover for abandoned onboarding',
-      (await repoRow(abandonedOnboarding)).onboardedAt === null,
-    );
-
-    const planOnly = await newRepo();
-    await stampRepositoryOnboarded(db, await seedTask(planOnly, { type: 'plan_build' }));
-    check('a greenfield plan build does not stamp', (await repoRow(planOnly)).onboardedAt === null);
 
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');

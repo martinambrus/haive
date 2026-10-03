@@ -1,10 +1,9 @@
-import { and, eq, exists, isNull, lt, notExists, or, sql } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
+import { and, eq, exists, isNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
 /**
- * A completed onboarding run, or the first workflow on a blank repository, stamps it onboarded.
+ * A completed onboarding run stamps its repository as onboarded.
  *
  * "Is this repo onboarded" used to be answered by stat-ing four paths — `.claude/agents`,
  * `.claude/skills`, `.claude/workflow-config.json` and the knowledge base — every one of
@@ -23,7 +22,6 @@ import { logger } from '@haive/shared';
 export async function stampRepositoryOnboarded(db: Database, taskId: string): Promise<void> {
   try {
     const now = new Date();
-    const onboardingTasks = alias(schema.tasks, 'onboarding_tasks');
     // ONE statement, deliberately. Reading the task and then updating the repository leaves a
     // read->write gap, and that gap is wide here rather than theoretical: `markTaskCompleted`
     // commits `completed` and then runs container teardown and two Ollama unloads before it gets
@@ -42,27 +40,7 @@ export async function stampRepositoryOnboarded(db: Database, taskId: string): Pr
                 eq(schema.tasks.repositoryId, schema.repositories.id),
                 // `onboarding_upgrade` reconciles template artifacts on an already-onboarded
                 // repo and says nothing about whether onboarding itself ever ran.
-                or(
-                  eq(schema.tasks.type, 'onboarding'),
-                  and(
-                    eq(schema.tasks.type, 'workflow'),
-                    eq(schema.repositories.source, 'blank'),
-                    // An explicit reset requires onboarding again. A workflow cannot cover
-                    // for a failed/cancelled onboarding run either.
-                    isNull(schema.repositories.onboardingResetAt),
-                    notExists(
-                      db
-                        .select({ one: sql`1` })
-                        .from(onboardingTasks)
-                        .where(
-                          and(
-                            eq(onboardingTasks.repositoryId, schema.repositories.id),
-                            eq(onboardingTasks.type, 'onboarding'),
-                          ),
-                        ),
-                    ),
-                  ),
-                ),
+                eq(schema.tasks.type, 'onboarding'),
                 // Checked here, not just by the caller: a cancel landing in the window above
                 // flips the row terminal while this is still in flight, and the old code would
                 // have stamped anyway because it never looked at the status at all.
@@ -83,7 +61,10 @@ export async function stampRepositoryOnboarded(db: Database, taskId: string): Pr
 
     const repositoryId = stamped[0]?.repositoryId;
     if (repositoryId) {
-      logger.info({ taskId, repositoryId }, 'repository marked onboarded by completed task');
+      logger.info(
+        { taskId, repositoryId },
+        'repository marked onboarded by completed onboarding run',
+      );
     }
   } catch (err) {
     logger.warn({ err, taskId }, 'failed to stamp repository onboarded_at');

@@ -104,13 +104,13 @@ describe('greenfield workflow completion', () => {
     });
   });
 
-  it('also accepts the completion stamp without task history', () => {
+  it('does not use an onboarding stamp as workflow completion evidence', () => {
     expect(
       resolveOnboardingVerdict({ ...input, onboardedAt: completedAt, facts: facts() }).onboarded,
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it('requires a completed workflow or stamp, rather than blank source alone', () => {
+  it('requires a completed workflow, rather than blank source alone', () => {
     expect(resolveOnboardingVerdict({ ...input, facts: facts() }).onboarded).toBe(false);
   });
 
@@ -149,6 +149,16 @@ describe('greenfield workflow completion', () => {
         facts: facts({ hasAny: true, newestCompletedWorkflowAt: completedAt }),
       }).onboarded,
     ).toBe(false);
+  });
+
+  it('restores the full gate when later onboarding writes every marker and then fails', () => {
+    expect(
+      resolveOnboardingVerdict({
+        ...input,
+        missing: [],
+        facts: facts({ hasAny: true, newestCompletedWorkflowAt: completedAt }),
+      }),
+    ).toEqual({ onboarded: false, inProgressTaskId: null, canMarkOnboarded: true });
   });
 
   it('cannot cover for onboarding still in progress', () => {
