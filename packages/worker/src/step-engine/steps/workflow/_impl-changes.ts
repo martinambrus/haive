@@ -316,10 +316,41 @@ async function readChangeDiff(
       // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
       // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
       // under the name it now has on disk.
-      ['-c', 'core.quotePath=false', 'diff', '--unified=0', '--no-color', '--no-renames', base],
+      [
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--unified=0',
+        '--no-color',
+        '--no-renames',
+        base,
+        '--',
+      ],
       { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES },
     );
     return stdout.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** A binary or mode-only change prints no ---/+++ line, so only this list names its path. */
+async function readChangedPaths(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<string[] | null> {
+  const base = await resolveDiffBase(worktreePath, baseBranch);
+  if (!base) return null;
+  try {
+    const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
+      cwd: worktreePath,
+    });
+    const fields = stdout.split('\0');
+    const paths: string[] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      if (fields[i] !== 'D') paths.push(fields[i + 1]!);
+    }
+    return paths;
   } catch {
     return null;
   }
@@ -421,17 +452,23 @@ export async function collectChangedLineMap(
   const scan = await dirtyWorktreeFiles(worktreePath);
   // Without the scan an untracked file is invisible, and a file nothing names reads as untouched.
   if (scan.error !== null) return null;
-  const diff = await readChangeDiff(worktreePath, await taskBaseBranch(ctx));
+  const baseBranch = await taskBaseBranch(ctx);
+  const diff = await readChangeDiff(worktreePath, baseBranch);
+  const named = await readChangedPaths(worktreePath, baseBranch);
+  // Without the list a binary or mode-only change is absent, and absent reads as untouched.
+  if (named === null) return null;
   const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);
   // A path git quoted never matches a tool's report, so it would read as untouched.
   if ([...diffed.keys(), ...scan.files].some((p) => p.startsWith('"'))) return null;
 
   const map: ChangedLineMap = new Map();
   for (const [path, file] of diffed) {
-    if (!file.deleted) map.set(path, { whole: false, ranges: file.hunks.map(hunkLines) });
+    if (!file.deleted) {
+      map.set(path, { whole: file.hunks.length === 0, ranges: file.hunks.map(hunkLines) });
+    }
   }
-  // Named by git status or an agent but not by the diff: nothing says which lines, so all count.
-  for (const path of [...scan.files, ...reported]) {
+  // Named by git status, an agent or the path list, but no hunk says which lines: all count.
+  for (const path of [...scan.files, ...reported, ...named]) {
     if (!diffed.has(path)) map.set(path, { whole: true, ranges: [] });
   }
   return map.size > 0 ? map : null;

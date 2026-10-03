@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -764,6 +764,44 @@ describe('collectChangedLineMap', () => {
     });
   });
 
+  it('counts whole a committed binary change, which the diff prints no header for', async () => {
+    await inRepo({ 'my blob.php': Buffer.from([0, 1, 2, 3]), 'app.php': 'a\nb\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'my blob.php'), Buffer.from([0, 9, 2, 3]));
+      await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('my blob.php')).toEqual({ whole: true, ranges: [] });
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+    });
+  });
+
+  it('counts whole a committed mode-only change, which the diff prints no hunk for', async () => {
+    await inRepo({ 'app.php': 'a\nb\n' }, async (dir) => {
+      await chmod(path.join(dir, 'app.php'), 0o755);
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: make it executable']);
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
+  it('counts whole a binary change still in the working tree', async () => {
+    await inRepo({ 'blob.php': Buffer.from([0, 1, 2, 3]) }, async (dir) => {
+      await writeFile(path.join(dir, 'blob.php'), Buffer.from([0, 9, 2, 3]));
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('blob.php')).toEqual({ whole: true, ranges: [] });
+    });
+  });
+
   it('leaves a deleted file out and keeps the files around it', async () => {
     await inRepo({ 'gone.php': 'x\n', 'kept.php': 'a\nb\n' }, async (dir) => {
       await rm(path.join(dir, 'gone.php'));
@@ -774,6 +812,25 @@ describe('collectChangedLineMap', () => {
       expect(map?.has('gone.php')).toBe(false);
       expect(map?.get('kept.php')?.ranges).toEqual([[2, 2]]);
     });
+  });
+
+  it('leaves a committed deletion out, binary or text, and keeps the files around it', async () => {
+    await inRepo(
+      { 'gone.php': 'x\n', 'gone-blob.php': Buffer.from([0, 1, 2, 3]), 'kept.php': 'a\nb\n' },
+      async (dir) => {
+        await rm(path.join(dir, 'gone.php'));
+        await rm(path.join(dir, 'gone-blob.php'));
+        await writeFile(path.join(dir, 'kept.php'), 'a\nB\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.has('gone.php')).toBe(false);
+        expect(map?.has('gone-blob.php')).toBe(false);
+        expect(map?.get('kept.php')?.ranges).toEqual([[2, 2]]);
+      },
+    );
   });
 
   it('keeps the real file and its hunks when a removed `-- x` or added `++ x` line reads like a header', async () => {
@@ -811,6 +868,30 @@ describe('collectChangedLineMap', () => {
       '/nonexistent-worktree',
     );
     expect(map).toBeNull();
+  });
+
+  it('is null when no diff base resolves, since no committed file could be named', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-map-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(dir, 'brand-new.php'), 'fresh\n');
+
+      expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads the diff when the base falls back to HEAD and a root file is named HEAD', async () => {
+    await inRepo({ 'app.php': 'a\nb\n', HEAD: 'x\n' }, async (dir) => {
+      await git(dir, ['branch', '-D', 'main']);
+      await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+
+      const map = await collectChangedLineMap(ctxFor(), dir);
+
+      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+    });
   });
 
   it('is null when git quotes a path, which would never match a tool report', async () => {
