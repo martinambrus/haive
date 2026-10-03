@@ -767,7 +767,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       test = {
         ...test,
         ran: false,
-        note: 'test run stopped by its environment (above), not a test failure',
+        note: 'test run stopped by its environment, not a test failure',
       };
     }
     const lint =

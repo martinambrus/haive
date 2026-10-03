@@ -831,15 +831,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
     // row and no "all passed" line when nothing actually ran.
     const fenced = (s: string) => codeBlock(s || '(empty)');
+    const verifySlots = [detected.verify.test, detected.verify.lint, detected.verify.typecheck];
     // Whether ANY of the three checks actually executed. Derived from the slots this gate
     // already reads rather than a new payload field, so it answers the same on a gate parked
     // before it existed. `allPassed` cannot stand in: 08 computes it as "nothing that ran
     // failed", which is true when nothing ran at all.
-    const verificationRan = [
-      detected.verify.test,
-      detected.verify.lint,
-      detected.verify.typecheck,
-    ].some((c) => c?.ran === true);
+    const verificationRan = verifySlots.some((c) => c?.ran === true);
+    // A check 08 selected but could not run has a note; one nobody selected has none.
+    const selectedCheckNotRun = verifySlots.some((c) => c?.ran === false && !!c.note);
     const rows: StatusSummaryItem[] = [];
 
     for (const [label, c] of [
@@ -847,7 +846,19 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ['Lint', detected.verify.lint],
       ['Typecheck', detected.verify.typecheck],
     ] as const) {
-      if (!c || !c.ran) continue;
+      if (!c || (!c.ran && !c.note)) continue;
+      if (!c.ran) {
+        rows.push({
+          label,
+          status: 'warn',
+          statusLabel: 'NOT RUN',
+          detail: c.note,
+          ...(c.output.trim() && c.output.trim() !== c.note?.trim()
+            ? { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }
+            : {}),
+        });
+        continue;
+      }
       const preExisting = c.passed ? (c.scope?.preExisting ?? 0) : 0;
       const detail =
         preExisting > 0
@@ -863,7 +874,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
       });
     }
-    // Omitting every non-run check is right — a skipped check is not a failure — but with ALL
+    // Omitting a check nobody selected is right — a skipped check is not a failure — but with ALL
     // THREE skipped that leaves no verification rows at all, beside an `allPassed` that is true
     // only because nothing ran. One row so the absence is stated rather than inferred from an
     // empty table. Derived from the same slots already read, so a gate parked before this
@@ -1203,6 +1214,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             // recommendation; recommending approval on the strength of an absence is the one
             // thing it must not do. The human can still approve — the row above says why.
             verificationRan &&
+            !selectedCheckNotRun &&
             validationOk &&
             testsOk &&
             browserOk &&

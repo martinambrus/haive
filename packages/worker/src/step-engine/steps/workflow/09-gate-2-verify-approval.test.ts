@@ -435,12 +435,75 @@ describe('gate-2 status summary', () => {
         defaultOpen: false,
       });
     });
+  });
 
-    it('does not show a check that did not run, whatever note it carries', () => {
-      const note = 'vendor/bin/phpcs not found — lint not run';
-      const d = withLint({ ran: false, passed: false, output: note, note });
+  describe('a check that was selected but could not run', () => {
+    const NOT_FOUND = 'vendor/bin/phpcs not found — lint not run';
+    const ENV_STOPPED = 'test run stopped by its environment, not a test failure';
+    const withSlots = (slots: Record<string, unknown>) =>
+      baseDetect({ verify: { test: ranClean, lint: ranClean, typecheck: ranClean, ...slots } });
+    const phpcsMissing = { ran: false, passed: false, output: NOT_FOUND, note: NOT_FOUND };
 
-      expect(row(d, 'Lint')).toBeUndefined();
+    it('shows a NOT RUN warning carrying the note', () => {
+      const d = withSlots({ lint: phpcsMissing });
+
+      expect(row(d, 'Lint')).toMatchObject({
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: NOT_FOUND,
+      });
+      expect(row(d, 'Lint')).not.toHaveProperty('body');
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint', 'Typecheck']);
+    });
+
+    it('does not default to approve while another check ran and passed', () => {
+      expect(decisionDefault(withSlots({ lint: phpcsMissing }))).toBe('reject');
+    });
+
+    it('keeps what the check printed, collapsed the way a failing row keeps it', () => {
+      const output = "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright";
+      const d = withSlots({ test: { ran: false, passed: false, output, note: ENV_STOPPED } });
+
+      expect(row(d, 'Tests')).toEqual({
+        label: 'Tests',
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: ENV_STOPPED,
+        body: ['```', output, '```'].join('\n'),
+        defaultOpen: false,
+      });
+      expect(row(d, 'Lint')).toEqual({ label: 'Lint', status: 'pass' });
+      expect(decisionDefault(d)).toBe('reject');
+    });
+
+    it('gives a check that printed nothing no body', () => {
+      const note = 'DDEV runner unavailable — typecheck not run';
+      const d = withSlots({ typecheck: { ran: false, passed: false, output: '', note } });
+
+      expect(row(d, 'Typecheck')).toEqual({
+        label: 'Typecheck',
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: note,
+      });
+    });
+
+    it('still omits a check nobody selected, which carries no note, and defaults to approve', () => {
+      const d = withSlots({ lint: { ran: false, passed: false, output: 'skipped' } });
+
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Typecheck']);
+      expect(decisionDefault(d)).toBe('approve');
+    });
+
+    it('keeps the all-three row for the case where nothing ran', () => {
+      const d = withSlots({
+        test: { ran: false, passed: false, output: '', note: ENV_STOPPED },
+        lint: phpcsMissing,
+        typecheck: { ran: false, passed: false, output: 'skipped' },
+      });
+
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint', 'Tests / lint / typecheck']);
+      expect(decisionDefault(d)).toBe('reject');
     });
   });
 
@@ -679,11 +742,12 @@ describe('gate-2 verification results read from 08', () => {
     logger: { info: vi.fn(), warn: vi.fn() },
   } as never;
   const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+  const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
 
-  function stored(lint: unknown): void {
+  function stored(lint: unknown, others: unknown = skipped): void {
     m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
       id === '08-phase-5-verify'
-        ? { output: { test: skipped, lint, typecheck: skipped, passed: true, runtimeSmoke: null } }
+        ? { output: { test: others, lint, typecheck: others, passed: true, runtimeSmoke: null } }
         : null,
     );
   }
@@ -736,5 +800,37 @@ describe('gate-2 verification results read from 08', () => {
     const detected = await gate2VerifyApprovalStep.detect!(ctx);
 
     expect(detected.verify.lint).toEqual({ ran: true, passed: true, output: '' });
+  });
+
+  it('carries a check that could not run through to a NOT RUN row, and does not default to approve', async () => {
+    const note = 'vendor/bin/phpcs not found — lint not run';
+    stored(
+      { ran: false, passed: false, command: 'vendor/bin/phpcs', output: note, note },
+      passedRun,
+    );
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+
+    expect(detected.verify.lint).toEqual({ ran: false, passed: false, output: note, note });
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+    expect((schema.statusSummary ?? []).find((r) => r.label === 'Lint')).toMatchObject({
+      status: 'warn',
+      statusLabel: 'NOT RUN',
+      detail: note,
+    });
+    expect(schema.fields.find((f) => f.id === 'decision')).toMatchObject({ default: 'reject' });
+  });
+
+  it('renders a skipped check stored before notes existed exactly as it always did', async () => {
+    stored(skipped, passedRun);
+
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+
+    expect(schema.statusSummary).toEqual([
+      { label: 'Tests', status: 'pass' },
+      { label: 'Typecheck', status: 'pass' },
+    ]);
+    expect(schema.fields.find((f) => f.id === 'decision')).toMatchObject({ default: 'approve' });
   });
 });
