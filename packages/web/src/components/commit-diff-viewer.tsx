@@ -695,7 +695,13 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                       File too large to diff here. Use the Editor tab to view it.
                     </div>
                   ) : inlineRows.length === 0 ? (
-                    <div className="p-4 text-xs text-neutral-500">No content changes.</div>
+                    <div className="p-4 text-xs text-neutral-500">
+                      {selectedFile.status === 'added'
+                        ? 'Empty file added.'
+                        : selectedFile.status === 'deleted'
+                          ? 'Empty file deleted.'
+                          : 'No content changes.'}
+                    </div>
                   ) : view === 'inline' ? (
                     <InlineDiff rows={inlineRows} />
                   ) : (
