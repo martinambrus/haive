@@ -505,7 +505,7 @@ export async function buildAnchors(
     matching = await hydrateAnchorBudget(db, matchingPreferred, false, MAX_ANCHORS);
     // A page of completed rows is not a page of measured runs. Keep looking past
     // unmeasured rows until the same-path sample is sufficient or history is exhausted.
-    for (let offset = 0; matching.length < MAX_ANCHORS; offset += MAX_ANCHORS) {
+    for (let offset = 0; matching.length < MAX_ANCHORS; offset += HISTORY_BATCH_SIZE) {
       const recentMatching = await db.query.tasks.findMany({
         where: and(
           eq(schema.tasks.repositoryId, repositoryId),
@@ -515,7 +515,7 @@ export async function buildAnchors(
           eq(schema.tasks.executionPath, executionPath),
         ),
         orderBy: [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
-        limit: MAX_ANCHORS,
+        limit: HISTORY_BATCH_SIZE,
         offset,
         columns: PRIOR_TASK_COLUMNS,
       });
@@ -523,7 +523,7 @@ export async function buildAnchors(
       for (const p of unseen) seen.add(p.id);
       matching.push(...(await hydrateAnchors(db, unseen, false)));
       matching = matching.slice(0, MAX_ANCHORS);
-      if (matching.length >= MIN_PATH_ANCHORS || recentMatching.length < MAX_ANCHORS) break;
+      if (matching.length >= MIN_PATH_ANCHORS || recentMatching.length < HISTORY_BATCH_SIZE) break;
     }
     if (matching.length >= MIN_PATH_ANCHORS) return matching;
   }
@@ -539,7 +539,7 @@ export async function buildAnchors(
   );
   // Fill the MEASURED budget from broader local history before considering cross-repo
   // fallback, even if retrieval returned a full page of unmeasured completed rows.
-  for (let offset = 0; local.length < MAX_ANCHORS; offset += MAX_ANCHORS) {
+  for (let offset = 0; local.length < MAX_ANCHORS; offset += HISTORY_BATCH_SIZE) {
     const newest = await db.query.tasks.findMany({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
@@ -548,14 +548,14 @@ export async function buildAnchors(
         ne(schema.tasks.id, taskId),
       ),
       orderBy: [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
-      limit: MAX_ANCHORS,
+      limit: HISTORY_BATCH_SIZE,
       offset,
       columns: PRIOR_TASK_COLUMNS,
     });
     const unseen = newest.filter((p) => !seen.has(p.id));
     for (const p of unseen) seen.add(p.id);
     local.push(...(await hydrateAnchors(db, unseen, false)));
-    if (newest.length < MAX_ANCHORS) break;
+    if (newest.length < HISTORY_BATCH_SIZE) break;
   }
   const budgeted = local.slice(0, MAX_ANCHORS);
   if (budgeted.length >= COLD_START_MIN_ANCHORS) return budgeted;
@@ -596,7 +596,7 @@ async function buildColdStartAnchors(
   const repoIds = siblings.map((r) => r.id);
   const anchors: EstimateAnchor[] = [];
   const seen = new Set<string>();
-  for (let offset = 0; anchors.length < limit; offset += MAX_ANCHORS) {
+  for (let offset = 0; anchors.length < limit; offset += HISTORY_BATCH_SIZE) {
     const priors = await db.query.tasks.findMany({
       where: and(
         inArray(schema.tasks.repositoryId, repoIds),
@@ -610,14 +610,14 @@ async function buildColdStartAnchors(
             desc(schema.tasks.id),
           ]
         : [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
-      limit: MAX_ANCHORS,
+      limit: HISTORY_BATCH_SIZE,
       offset,
       columns: PRIOR_TASK_COLUMNS,
     });
     const unseen = priors.filter((p) => !seen.has(p.id));
     for (const p of unseen) seen.add(p.id);
     anchors.push(...(await hydrateAnchors(db, unseen, true)));
-    if (priors.length < MAX_ANCHORS) break;
+    if (priors.length < HISTORY_BATCH_SIZE) break;
   }
   return anchors.slice(0, limit);
 }

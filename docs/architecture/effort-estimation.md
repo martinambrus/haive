@@ -22,7 +22,9 @@ limit; lookup batches preserve the candidate order. Preferred timing hydration u
 plans do not require a database round trip per 30 candidates. Semantic retrieval
 resolves eligible completed same-path task ids from Postgres and binds that set into the
 vector query, scans fixed 500-candidate pages independently of the remaining anchor budget,
-and measures results using the same timing calculation as hydration. It truncates measured
+and measures results using the same timing calculation as hydration. Ranking uses the exact
+`cosine_distance` function rather than an HNSW distance-operator scan: an approximate index scan
+can return a short page before history is exhausted ([pgvector troubleshooting](https://github.com/pgvector/pgvector#why-are-there-less-results-for-a-query-after-adding-an-hnsw-index)). It truncates measured
 results to the requested budget while preserving cosine order,
 then tops up with measured matches on other paths when needed. This also works with external RAG
 stores and existing task embeddings, which contain no execution-path metadata.
@@ -34,7 +36,8 @@ with fewer, matching runs lead the broader-history fallback. The total budget re
 An unknown path retains the previous plan/semantic/newest selection.
 Every anchor budget is applied to measured runs, including preferred file-overlap candidates,
 broader local fallback, and cross-repository history. Preferred candidates are hydrated in
-batches and database queries page until their usable budget is filled or history is exhausted;
+batches and database queries scan 500-candidate pages until their usable budget is filled or
+history is exhausted; this also applies to same-path recency, broader local, and cold-start scans.
 unmeasured rows never hide later usable history. Broader local history is exhausted before
 falling back to other repositories.
 

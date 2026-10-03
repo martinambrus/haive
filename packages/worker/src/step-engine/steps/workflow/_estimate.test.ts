@@ -4,6 +4,7 @@ import { type Database } from '@haive/database';
 import {
   buildAnchors,
   MAX_ANCHORS,
+  HISTORY_BATCH_SIZE,
   rankPlanProximity,
   computeBiasFactor,
   effortHoursFromSteps,
@@ -226,7 +227,7 @@ describe('buildAnchors', () => {
   });
 
   it('searches past multiple unmeasured pages before falling back to other paths', async () => {
-    const firstPage = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+    const firstPage = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
       prior(`unmeasured-${i}`, 'quick_bugfix'),
     );
     const secondPage = [
@@ -239,8 +240,8 @@ describe('buildAnchors', () => {
     expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
     expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([
       0,
-      MAX_ANCHORS,
-      MAX_ANCHORS * 2,
+      HISTORY_BATCH_SIZE,
+      HISTORY_BATCH_SIZE * 2,
     ]);
   });
 
@@ -248,7 +249,7 @@ describe('buildAnchors', () => {
     const preferred = [prior('fix-1', 'quick_bugfix')];
     const firstPage = [
       ...preferred,
-      ...Array.from({ length: MAX_ANCHORS - 1 }, (_, i) =>
+      ...Array.from({ length: HISTORY_BATCH_SIZE - 1 }, (_, i) =>
         prior(`unmeasured-${i}`, 'quick_bugfix'),
       ),
     ];
@@ -299,7 +300,7 @@ describe('buildAnchors', () => {
   });
 
   it('fills broader local fallback after a full retrieval budget of unmeasured same-path rows', async () => {
-    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
       prior(`unmeasured-${i}`, 'quick_bugfix'),
     );
     const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
@@ -405,7 +406,7 @@ describe('buildAnchors', () => {
   });
 
   it('pages broader recent history past unmeasured rows even without preferred ids', async () => {
-    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
       prior(`unmeasured-${i}`, 'full_workflow'),
     );
     const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
@@ -415,11 +416,12 @@ describe('buildAnchors', () => {
     );
     const anchors = await buildAnchors(db, 'current', 'repo');
     expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
-    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([0, MAX_ANCHORS]);
+    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([0, HISTORY_BATCH_SIZE]);
+    expect(findMany.mock.calls.every(([args]) => args.limit === HISTORY_BATCH_SIZE)).toBe(true);
   });
 
   it('pages cold-start history past unmeasured same-path rows to measured broader siblings', async () => {
-    const unmeasured = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) =>
       prior(`unmeasured-${i}`, 'quick_bugfix'),
     );
     const measured = [1, 2, 3].map((i) => prior(`full-${i}`, 'full_workflow'));
@@ -435,7 +437,11 @@ describe('buildAnchors', () => {
     const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
     expect(anchors.map((a) => a.title)).toEqual(['full-1', 'full-2', 'full-3']);
     expect(anchors.every((a) => a.crossRepo)).toBe(true);
-    expect(findMany.mock.calls.slice(2).map(([args]) => args.offset)).toEqual([0, MAX_ANCHORS]);
+    expect(findMany.mock.calls.slice(2).map(([args]) => args.offset)).toEqual([
+      0,
+      HISTORY_BATCH_SIZE,
+    ]);
+    expect(findMany.mock.calls.every(([args]) => args.limit === HISTORY_BATCH_SIZE)).toBe(true);
     const query = new PgDialect().sqlToQuery(findMany.mock.calls[2]![0].where);
     expect(query.params).toEqual(['sibling', 'workflow', 'completed']);
   });

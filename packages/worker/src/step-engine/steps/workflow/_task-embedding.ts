@@ -128,13 +128,15 @@ export async function retrieveSimilarTaskIds(
       const selected: string[] = [];
       const seen = new Set<string>();
       const useIds = pathFilter !== '';
+      // Order by the distance function to force exact ranking. An HNSW operator scan
+      // can return a short approximate page even when usable rows remain below it.
       for (let offset = 0; selected.length < budget; offset += HISTORY_BATCH_SIZE) {
         const rows = (await conn!.pg.unsafe(
           `SELECT task_id
            FROM ${RAG_TABLE}
            WHERE source_type = $1 AND repository_id = $2 AND task_id IS NOT NULL AND task_id <> $3
            ${pathFilter}
-           ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims}), task_id
+           ORDER BY cosine_distance(vector::halfvec(${dims}), ($4::vector)::halfvec(${dims})), task_id
            LIMIT $5 OFFSET $${useIds ? 7 : 6}`,
           [...params, HISTORY_BATCH_SIZE, ...(useIds ? [matchingIds] : []), offset],
         )) as Array<{ task_id: string | null }>;
