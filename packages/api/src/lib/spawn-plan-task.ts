@@ -1,4 +1,4 @@
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
 import { enqueueStart, markQueuedForStart } from './task-start.js';
@@ -6,6 +6,9 @@ import { enqueueStart, markQueuedForStart } from './task-start.js';
 /** Insert the task row and enqueue it. Mirrors global-kb's enrich endpoint —
  *  the established "UI button -> LLM work" path. */
 export async function spawnPlanTask(args: {
+  /** For a caller-owned transaction, use enqueue: false and call enqueuePlanTask
+   *  after commit. Allows creation to serialize with a node's other starts. */
+  db?: Pick<Database, 'insert'>;
   userId: string;
   repositoryId: string;
   type: 'plan_build' | 'plan_chat' | 'advisory' | 'plan_sequence' | 'plan_merge';
@@ -29,7 +32,7 @@ export async function spawnPlanTask(args: {
    *  what that action claims. */
   enqueue?: boolean;
 }): Promise<string> {
-  const db = getDb();
+  const db = args.db ?? getDb();
   const [task] = await db
     .insert(schema.tasks)
     .values({
@@ -51,6 +54,12 @@ export async function spawnPlanTask(args: {
 
   if (args.enqueue === false) return task.id;
 
-  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, args.userId);
+  await enqueuePlanTask(task.id, args.userId);
   return task.id;
+}
+
+/** Called after a caller-owned transaction commits; never expose a queued job
+ * whose task row is still invisible to the worker. The START claim is idempotent. */
+export async function enqueuePlanTask(taskId: string, userId: string): Promise<void> {
+  if (await markQueuedForStart(getDb(), taskId)) await enqueueStart(taskId, userId);
 }

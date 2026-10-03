@@ -3,6 +3,7 @@
 import type { PlanNode } from '@/lib/api-client';
 import { Badge } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { humanPlanAction } from '@haive/shared/plan-resolution';
 import {
   BLOCKED_GLYPH,
   DRIFT_GLYPH,
@@ -85,7 +86,7 @@ export function PlanCardGrid({
             }`}
           >
             <div className="flex items-start gap-2">
-              {onPick && (
+              {onPick && !humanPlanAction(node) && (
                 // Its own click target, stopping propagation: the card body
                 // selects, and a tick that also moved the detail panel would
                 // make building a set of five nodes scroll the panel five times.
@@ -136,9 +137,16 @@ export function PlanCardGrid({
               <Badge variant={statusBadge(node.rolledStatus)}>
                 {statusLabel(node.rolledStatus)}
               </Badge>
-              {node.kind !== 'component' && node.kind !== 'decision' && (
-                <Badge>{kindLabel(node.kind)}</Badge>
-              )}
+              {node.kind !== 'component' && <Badge>{kindLabel(node.kind)}</Badge>}
+              {humanPlanAction(node) &&
+                node.status !== 'done' &&
+                node.status !== 'not_applicable' && (
+                  <Badge>
+                    {node.kind === 'decision'
+                      ? 'Needs your decision'
+                      : 'Needs action outside Haive'}
+                  </Badge>
+                )}
               {(unread?.[node.id] ?? 0) > 0 && (
                 <span
                   title={`${unread?.[node.id]} unread chat repl${unread?.[node.id] === 1 ? 'y' : 'ies'}`}

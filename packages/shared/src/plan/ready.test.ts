@@ -164,6 +164,42 @@ describe('computePlanReady', () => {
     expect(ready(t.nodes).titles).toEqual(['sub-question']);
   });
 
+  it('offers a human decision before the work waiting on it, then unlocks that work', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const decision = t.add(root, 'domain decision', { kind: 'decision', taskable: false });
+    const catalogue = t.add(root, 'catalogue', { taskable: false });
+    const category = t.add(catalogue, 'categories');
+    const edges = [dep(catalogue, decision)];
+
+    // The leaf has no direct lock, but its section is waiting on a human choice.
+    expect(computePlanSequence(t.nodes, edges).blockedById.has(category.id)).toBe(false);
+    expect(ready(t.nodes, edges)).toEqual({
+      titles: ['domain decision'],
+      nextTitle: 'domain decision',
+    });
+    decision.status = 'done';
+    expect(ready(t.nodes, edges)).toEqual({ titles: ['categories'], nextTitle: 'categories' });
+  });
+
+  it('does not offer a non-taskable decision container before its children', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const decision = t.add(root, 'choices', { kind: 'decision', taskable: false });
+    t.add(decision, 'choice', { kind: 'decision', taskable: false });
+
+    expect(ready(t.nodes).titles).toEqual(['choice']);
+  });
+
+  it('keeps blocked and already-running human decisions out of the ready set', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const first = t.add(root, 'first choice', { kind: 'decision', taskable: false });
+    const second = t.add(root, 'second choice', { kind: 'decision', taskable: false });
+
+    expect(ready(t.nodes, [dep(second, first)], [first.id]).titles).toEqual([]);
+  });
+
   it('drops every node in a dependency cycle and everything under it', () => {
     // A cycle can never be satisfied, so its members never lose their blockers —
     // which is what keeps them and their subtrees out with no defect test here.

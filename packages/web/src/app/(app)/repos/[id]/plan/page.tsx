@@ -691,6 +691,7 @@ export default function PlanPage() {
   // that frontier, which is the whole reason the dependency edges exist and is
   // invisible anywhere else in this UI.
   const nextNode = nextUp?.node ?? null;
+  const nextIsHumanDecision = nextNode?.kind === 'decision' && nextNode.taskable === false;
   const readyCount = nextUp?.readyCount ?? 0;
   // The build-order number rides the LABEL, not the segment beside it: that
   // segment counts how many nodes are startable, which reads as a number in the
@@ -702,7 +703,9 @@ export default function PlanPage() {
           ? 'Research next'
           : nextNode.kind === 'external'
             ? 'Next is yours to clear'
-            : 'Start next'
+            : nextIsHumanDecision
+              ? 'Decide next'
+              : 'Start next'
       } (${sequenceLabel(nextNode.sequence)})`;
   // `readyFilter` only describes something while a filter is actually showing:
   // the clear control and both descend paths null `matches` without touching the
@@ -714,7 +717,9 @@ export default function PlanPage() {
         ? ' — needs investigating first, so this starts an advisory run'
         : nextNode.kind === 'external'
           ? ' — a blocker outside the codebase; opens it, nothing to run'
-          : ' — opens the new-task form for this node')
+          : nextIsHumanDecision
+            ? ' — opens the decision; use Record decision to save your answer and status'
+            : ' — opens the new-task form for this node')
     : // Three causes, one sentence: this button knows only that the ready set is
       // empty, and naming a cause it has not established would be a guess.
       'Nothing is startable: everything left is finished, already has a task open, or is ' +
@@ -799,9 +804,10 @@ export default function PlanPage() {
                   title={nextTitle}
                   onClick={() => {
                     if (!nextNode) return;
-                    // An external node is somebody's phone call, not a run:
-                    // open it and let the person read what it is waiting for.
-                    if (nextNode.kind === 'external') {
+                    // Human choices and external work open the panel so the
+                    // person can record the outcome and settle the node.
+                    if (nextNode.kind === 'external' || nextIsHumanDecision) {
+                      setPanelTab('details');
                       void descend(nextNode.id);
                       return;
                     }

@@ -23,6 +23,7 @@ import {
   planSnapshotSaveRequestSchema,
   logger,
   updatePlanNodeRequestSchema,
+  resolvePlanNodeRequestSchema,
   type PlanPatch,
 } from '@haive/shared';
 import {
@@ -48,11 +49,13 @@ import {
   toNodeViews,
 } from '@haive/shared/plan';
 import { getDb } from '../db.js';
+import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution';
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { getTaskQueue } from '../queues.js';
 
@@ -122,7 +125,7 @@ async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdo
 /** Task states that mean a task is still the user's to finish — not terminal, and
  *  not something a second run should start alongside. Shared by the merge
  *  conversation and the ordering pass, which both refuse to double up. */
-const OPEN_TASK_STATES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
+const OPEN_TASK_STATES = OPEN_PLAN_TASK_STATES;
 
 /** Both ids the one sequencing step is registered under — plan_build's and the
  *  standalone plan_sequence workflow's. Naming only one would silently count a
@@ -207,7 +210,8 @@ async function loadOpenTaskNodeIds(repositoryId: string): Promise<Set<string>> {
         inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
       ),
     );
-  return new Set(rows.map((r) => r.nodeId));
+  const advisories = await loadOpenPlanAdvisories(getDb(), repositoryId);
+  return new Set([...rows.map((r) => r.nodeId), ...advisories.map((r) => r.nodeId)]);
 }
 
 /** How many ready nodes the list endpoint will render. A plan whose nodes
@@ -273,6 +277,7 @@ planRoutes.get('/:id/plan', async (c) => {
             id: next.id,
             title: next.title,
             kind: next.kind,
+            taskable: next.taskable,
             sequence: derived.sequenceById.get(next.id) ?? 0,
           }
         : null,
@@ -640,6 +645,8 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
 
   return c.json({
     node: toNodeViews([node], derived, new Map([[node.id, node.body]]))[0],
+    advisoryTask:
+      (await loadOpenPlanAdvisories(db, repositoryId)).find((t) => t.nodeId === nodeId) ?? null,
     ancestry: ancestryOf(skeletons, nodeId).map((a) => ({ id: a.id, title: a.title })),
     ancestorBlockers,
     children: toNodeViews(children, derived),
@@ -842,6 +849,41 @@ planRoutes.patch('/:id/plan/nodes/:nodeId', async (c) => {
             ...(body.taskable !== undefined ? { taskable: body.taskable } : {}),
             ...(body.parentId !== undefined ? { parentRef: body.parentId } : {}),
             ...(body.ordinal !== undefined ? { ordinal: body.ordinal } : {}),
+          },
+        ],
+      },
+      { repositoryId, origin: 'user' },
+    );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
+    return c.json({ node: await loadPlanNode(db, repositoryId, nodeId) });
+  } catch (err) {
+    planError(err);
+  }
+});
+
+planRoutes.post('/:id/plan/nodes/:nodeId/resolution', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  const nodeId = c.req.param('nodeId');
+  const request = resolvePlanNodeRequestSchema.parse(await c.req.json());
+  const node = await requireNode(repositoryId, nodeId);
+  const action = humanPlanAction(node);
+  if (!action) throw new HttpError(400, 'This plan item does not need a human resolution');
+  const body = appendPlanAnswer(node.body, action, request.answer);
+  if (body.length > 200_000)
+    throw new HttpError(400, 'The description and answer together exceed 200,000 characters');
+  const db = getDb();
+  try {
+    await applyPlanPatch(
+      db,
+      {
+        ops: [
+          {
+            op: 'upsert',
+            nodeRef: nodeId,
+            expectedVersion: request.expectedVersion,
+            body,
+            status: request.status,
           },
         ],
       },
@@ -1244,15 +1286,32 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', async (c) => {
   const body = planAdvisoryRequestSchema.parse(await c.req.json().catch(() => ({})));
   const node = await requireNode(repositoryId, nodeId);
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
-  const taskId = await spawnPlanTask({
-    userId,
-    repositoryId,
-    type: 'advisory',
-    title: `Research: ${node.title}`,
-    description: body.question,
-    metadata: { planNodeId: nodeId },
-    cliProviderId,
-    ignoreSavedStepClis: Boolean(body.cliProviderId),
+  const taskId = await getDb().transaction(async (tx) => {
+    // Two clicks (including from two tabs) serialize on the node, so both
+    // continue the same advisory. Its row commits before any queue delivery.
+    const [locked] = await tx
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(and(eq(schema.planNodes.id, nodeId), eq(schema.planNodes.repositoryId, repositoryId)))
+      .for('update');
+    if (!locked) throw new HttpError(404, 'Plan node not found');
+    const existing = (await loadOpenPlanAdvisories(tx, repositoryId)).find(
+      (t) => t.nodeId === nodeId,
+    );
+    if (existing) return existing.taskId;
+    return spawnPlanTask({
+      db: tx,
+      enqueue: false,
+      userId,
+      repositoryId,
+      type: 'advisory',
+      title: `Research: ${node.title}`,
+      description: body.question,
+      metadata: { planNodeId: nodeId },
+      cliProviderId,
+      ignoreSavedStepClis: Boolean(body.cliProviderId),
+    });
   });
+  await enqueuePlanTask(taskId, userId);
   return c.json({ taskId }, 201);
 });

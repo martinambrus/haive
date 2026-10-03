@@ -41,10 +41,17 @@ agent's own section and 24 were malformed, so the bounded view cuts no link an a
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
 (`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet
 `depends_on` of its own, **no ANCESTOR with one**, no open task on it, and a unit of work
-(`taskable` for component/decision; a leaf for research/external, which carry `taskable` only
-sometimes — MEASURED 10 of 16 and 4 of 12). The ancestor half is the point, and it is the half
-`blockedById` deliberately omits: MEASURED, 1,286 of 7,079 taskable nodes in one plan carry no
-prerequisite of their own and 23 also have a clean ancestor chain, and on another plan the
+(`taskable` for components and developer-task decisions; a leaf for human decisions,
+research and external work, which carry `taskable` only sometimes — MEASURED 10 of 16 research
+and 4 of 12 external nodes). A non-taskable leaf decision is still something a person can
+resolve: MEASURED on the 20-node elmont_novy plan, the four foundation tasks and hosting were
+done, but the unanswered domain decision was not taskable, leaving the ready set empty while
+both catalogue and revisions waited on it. Such decisions now appear as **Decide next**, which
+opens their panel to record the answer and mark Done; `taskable` decisions still open the
+new-task form. `nextUp.node.taskable` tells the browser which action to offer. The ancestor
+half is the point, and it is the half `blockedById` deliberately omits: MEASURED, 1,286 of
+7,079 taskable nodes in one plan carry no prerequisite of their own and 23 also have a clean
+ancestor chain, and on another plan the
 lowest-numbered node the DIRECT rule calls ready (#28) sits under two containers that are
 themselves waiting, while the strict rule picks #65. Do NOT reconcile the two readings: a rule
 strict enough to CHOOSE must not REFUSE, because choosing badly wastes a click while refusing
@@ -56,6 +63,34 @@ everything beneath them. `nextUp` rides the plan overview (a property of the PLA
 `ordering` and `defects`); the SET behind the count is `GET /plan/ready`, served in the exact
 shape `/plan/search` returns so the page filters it with the machinery it already has, capped
 at 200 and REPORTING the cap.
+
+**Human resolutions have a direct form.** A non-taskable decision is labelled **Needs your
+decision**, and an external item **Needs action outside Haive**, with **Record decision** /
+**Record outcome** actions. Neither offers a developer task or the grid's task checkbox;
+taskable decisions still do. Decision kind badges are visible even though the creation picker
+does not offer that kind. The form uses `FormSchema` / `FormRenderer`, shows the existing
+question, requires an answer, and offers **Resolved**, **Still waiting**, and **Not applicable**.
+Unresolved items default to Still waiting so recording partial progress does not green them.
+The endpoint `POST /plan/nodes/:nodeId/resolution` checks repository ownership and the item's
+kind, then passes one versioned body-and-status upsert through `applyPlanPatch`. The question
+and prior answers remain verbatim, with a new `## Decision` / `## Outcome` section appended;
+an unclosed top-level fence is closed through `scanFences` before that section. The form holds
+the question and version it opened on, so a concurrent edit returns 409 and keeps the draft.
+No migration or CLI invocation is needed to record an answer. **Help me evaluate the options**
+is a separate optional advisory run; research still ends at a human decision gate. The pure
+`@haive/shared/plan-resolution` subpath holds the shared UI/API policy and form without pulling
+the database or host filesystem into the browser.
+
+**An advisory holds its question.** Open advisories are linked by `tasks.metadata.planNodeId`,
+not by `plan_node_tasks`: they neither implement a node nor touch its code. Readiness includes
+those metadata links in its open-task exclusion. The node detail names an open advisory so
+the panel offers **Continue research**. Advisory starts lock the plan node, reuse an existing
+open advisory, or insert the new task in that transaction through `spawnPlanTask`'s injected
+writer with `enqueue: false`; `enqueuePlanTask` delivers START only after commit. Two tabs
+therefore continue one run. The advisory's final form writes with its detect-time node version,
+matching the question and body it actually showed: a direct answer or plan chat landing while
+it is parked must conflict rather than be overwritten with stale text or status. A freshly read
+version with a detect-time body used to bypass that protection.
 
 **Impact answers "if I change this, what else must change?"** (`shared/plan/impact.ts`): an explicit BFS with a visited set, because the edge graph has cycles by construction and a recursive CTE without dedup would not terminate while one with dedup could not say where it stopped. Both caps are REPORTED, never applied silently. The mermaid source encodes nodes as a `pnode<32 hex>` token; the browser recovers the uuid from THAT, unanchored — mermaid prefixes rendered ids with its own render id, so a `^flowchart-` anchor binds zero handlers and fails silently.
 
