@@ -214,6 +214,52 @@ describe('buildAnchors', () => {
     expect(anchors.map((a) => a.title)).toEqual(['fix-2', 'fix-1', 'fix-3']);
   });
 
+  it('searches past multiple unmeasured pages before falling back to other paths', async () => {
+    const firstPage = Array.from({ length: MAX_ANCHORS }, (_, i) =>
+      prior(`unmeasured-${i}`, 'quick_bugfix'),
+    );
+    const secondPage = [
+      prior('fix-1', 'quick_bugfix'),
+      ...firstPage.slice(1).map((p) => ({ ...p, id: `older-${p.id}` })),
+    ];
+    const lastPage = [prior('fix-2', 'quick_bugfix'), prior('fix-3', 'quick_bugfix')];
+    const { db, findMany } = mockDb([firstPage, secondPage, lastPage], ['fix-1', 'fix-2', 'fix-3']);
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
+    expect(findMany.mock.calls.map(([args]) => args.offset)).toEqual([
+      0,
+      MAX_ANCHORS,
+      MAX_ANCHORS * 2,
+    ]);
+  });
+
+  it('does not count preferred runs twice while paging past unmeasured rows', async () => {
+    const preferred = [prior('fix-1', 'quick_bugfix')];
+    const firstPage = [
+      ...preferred,
+      ...Array.from({ length: MAX_ANCHORS - 1 }, (_, i) =>
+        prior(`unmeasured-${i}`, 'quick_bugfix'),
+      ),
+    ];
+    const lastPage = [prior('fix-2', 'quick_bugfix'), prior('fix-3', 'quick_bugfix')];
+    const { db } = mockDb([preferred, firstPage, lastPage], ['fix-1', 'fix-2', 'fix-3']);
+    const anchors = await buildAnchors(db, 'current', 'repo', ['fix-1'], 'quick_bugfix');
+    expect(anchors.map((a) => a.title)).toEqual(['fix-1', 'fix-2', 'fix-3']);
+  });
+
+  it('stops paging once the measured sample is sufficient and keeps the anchor budget', async () => {
+    const preferred = [prior('fix-preferred', 'quick_bugfix')];
+    const recent = Array.from({ length: MAX_ANCHORS }, (_, i) => prior(`fix-${i}`, 'quick_bugfix'));
+    const { db, findMany } = mockDb(
+      [preferred, recent],
+      [...preferred, ...recent].map((p) => p.id),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo', ['fix-preferred'], 'quick_bugfix');
+    expect(anchors).toHaveLength(MAX_ANCHORS);
+    expect(anchors[0]?.title).toBe('fix-preferred');
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+
   it('tops up sparse measured same-path history with broader runs, without duplicates', async () => {
     const preferred = [prior('full', 'full_workflow'), prior('fix-1', 'quick_bugfix')];
     const matching = [

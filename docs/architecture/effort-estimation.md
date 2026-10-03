@@ -13,6 +13,9 @@ For a known path, `buildAnchors` takes same-path plan/semantic matches first, th
 same-path completed runs. It queries those runs separately: sorting only a mixed set of the
 latest 30 tasks would leave older bugfixes unreachable. Within the path, plan proximity and
 semantic ordering remain useful scope signals. Anchors with no measurable effort do not count.
+The same-path query pages past unmeasured rows until three usable runs are found or history
+is exhausted; a full page of completed tasks must not force a mixed-path fallback. Each page
+has a stable completion-time/id order and deduplicates tasks already supplied by retrieval.
 With at least `MIN_PATH_ANCHORS` (3) local measurements, the anchor set uses that path alone;
 with fewer, matching runs lead the broader-history fallback. The total budget remains 30.
 An unknown path retains the previous plan/semantic/newest selection.

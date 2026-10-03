@@ -434,21 +434,30 @@ export async function buildAnchors(
   let matching: EstimateAnchor[] = [];
   if (executionPath) {
     const matchingPreferred = preferred.filter((p) => p.executionPath === executionPath);
-    const recentMatching = await db.query.tasks.findMany({
-      where: and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'workflow'),
-        eq(schema.tasks.status, 'completed'),
-        ne(schema.tasks.id, taskId),
-        eq(schema.tasks.executionPath, executionPath),
-      ),
-      orderBy: desc(schema.tasks.completedAt),
-      limit: MAX_ANCHORS,
-      columns: PRIOR_TASK_COLUMNS,
-    });
     const seen = new Set(matchingPreferred.map((p) => p.id));
-    const matchingRows = [...matchingPreferred, ...recentMatching.filter((p) => !seen.has(p.id))];
-    matching = (await hydrateAnchors(db, matchingRows, false)).slice(0, MAX_ANCHORS);
+    matching = (await hydrateAnchors(db, matchingPreferred, false)).slice(0, MAX_ANCHORS);
+    // A page of completed rows is not a page of measured runs. Keep looking past
+    // unmeasured rows until the same-path sample is sufficient or history is exhausted.
+    for (let offset = 0; matching.length < MAX_ANCHORS; offset += MAX_ANCHORS) {
+      const recentMatching = await db.query.tasks.findMany({
+        where: and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'workflow'),
+          eq(schema.tasks.status, 'completed'),
+          ne(schema.tasks.id, taskId),
+          eq(schema.tasks.executionPath, executionPath),
+        ),
+        orderBy: [desc(schema.tasks.completedAt), desc(schema.tasks.id)],
+        limit: MAX_ANCHORS,
+        offset,
+        columns: PRIOR_TASK_COLUMNS,
+      });
+      const unseen = recentMatching.filter((p) => !seen.has(p.id));
+      for (const p of unseen) seen.add(p.id);
+      matching.push(...(await hydrateAnchors(db, unseen, false)));
+      matching = matching.slice(0, MAX_ANCHORS);
+      if (matching.length >= MIN_PATH_ANCHORS || recentMatching.length < MAX_ANCHORS) break;
+    }
     if (matching.length >= MIN_PATH_ANCHORS) return matching;
   }
 
