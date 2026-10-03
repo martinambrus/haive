@@ -14,6 +14,7 @@ import {
   loadHonoredConstraints,
   loadPriorFixContext,
   loadFixLoopDiagnosis,
+  loadSameCheckRepeat,
   buildGateDirectiveDiagnosis,
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
@@ -619,6 +620,107 @@ describe('loadHonoredConstraints', () => {
     expect(block.indexOf('07c-ddev-reconcile')).toBeLessThan(
       block.indexOf('09-gate-2-verify-approval'),
     );
+  });
+});
+
+describe('loadSameCheckRepeat', () => {
+  const A = '08c-code-review';
+  const B = '07c-ddev-reconcile';
+  const GATE = FIX_LOOP_GATE_SOURCE;
+
+  it('reports an agent check that also sent the previous round back, with the report of that round', async () => {
+    const r = await loadSameCheckRepeat(
+      ctxWith([ev(A, 3, 'guard still missing'), ev(A, 2, 'guard missing in auth.ts')], 3),
+    );
+    expect(r).toEqual({
+      sourceStepId: A,
+      round: 3,
+      previousRound: 2,
+      report: 'guard missing in auth.ts',
+      person: false,
+    });
+  });
+
+  it.each(['09-gate-2-verify-approval', '08d2-adversarial-qa-review'])(
+    'marks %s, a human review, as a person',
+    async (source) => {
+      const r = await loadSameCheckRepeat(
+        ctxWith(
+          [ev(source, 4, 'still broken'), ev(source, 3, 'The logout button does nothing.')],
+          4,
+        ),
+      );
+      expect(r).toMatchObject({ sourceStepId: source, previousRound: 3, person: true });
+      expect(r?.report).toBe('The logout button does nothing.');
+    },
+  );
+
+  it('is not a repeat on the first occurrence, or when the previous round has no request', async () => {
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x')], 3))).toBeNull();
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(A, 1, 'y')], 3))).toBeNull();
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 5, 'x'), ev(A, 3, 'y')], 3))).toBeNull();
+  });
+
+  it('is not a repeat when another check sent the previous round back', async () => {
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(B, 2, 'y')], 3))).toBeNull();
+  });
+
+  it('is not a repeat when the previous round sent a blank report: there is nothing to quote', async () => {
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(A, 2, '  \n ')], 3))).toBeNull();
+  });
+
+  it('does not count A, B, A as a repeat: the round before the previous one is not compared', async () => {
+    expect(
+      await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(B, 2, 'y'), ev(A, 1, 'z')], 3)),
+    ).toBeNull();
+  });
+
+  it('lets the newest request of round R decide when the round has two', async () => {
+    const newestMatches = await loadSameCheckRepeat(
+      ctxWith([ev(B, 3, 'newest'), ev(A, 3, 'older'), ev(B, 2, 'prev')], 3),
+    );
+    expect(newestMatches).toMatchObject({ sourceStepId: B, report: 'prev' });
+    expect(
+      await loadSameCheckRepeat(
+        ctxWith([ev(B, 3, 'newest'), ev(A, 3, 'older'), ev(A, 2, 'prev')], 3),
+      ),
+    ).toBeNull();
+  });
+
+  it('quotes the newest request of round R - 1 when the round has two', async () => {
+    const r = await loadSameCheckRepeat(
+      ctxWith([ev(A, 3, 'x'), ev(A, 2, 'newer report'), ev(A, 2, 'older report')], 3),
+    );
+    expect(r?.report).toBe('newer report');
+    expect(
+      await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(B, 2, 'newer'), ev(A, 2, 'older')], 3)),
+    ).toBeNull();
+  });
+
+  it('ignores the escalation gate directive, so the check under it still counts', async () => {
+    const atR = await loadSameCheckRepeat(
+      ctxWith([ev(GATE, 3, 'do X'), ev(A, 3, 'check at 3'), ev(A, 2, 'check at 2')], 3),
+    );
+    expect(atR).toMatchObject({ sourceStepId: A, report: 'check at 2', person: false });
+    const atPrevious = await loadSameCheckRepeat(
+      ctxWith([ev(A, 3, 'check at 3'), ev(GATE, 2, 'do Y'), ev(A, 2, 'check at 2')], 3),
+    );
+    expect(atPrevious).toMatchObject({ sourceStepId: A, report: 'check at 2' });
+  });
+
+  it('never reports the gate itself: a directive is not a check', async () => {
+    expect(await loadSameCheckRepeat(ctxWith([ev(GATE, 3, 'x'), ev(A, 2, 'y')], 3))).toBeNull();
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 3, 'x'), ev(GATE, 2, 'y')], 3))).toBeNull();
+    expect(await loadSameCheckRepeat(ctxWith([ev(GATE, 3, 'x'), ev(GATE, 2, 'y')], 3))).toBeNull();
+  });
+
+  it('never reports a request that names no source', async () => {
+    const unnamed = (round: number) => ({ payload: { round, diagnosis: 'x' } });
+    expect(await loadSameCheckRepeat(ctxWith([unnamed(3), unnamed(2)], 3))).toBeNull();
+  });
+
+  it('is null on the original pass', async () => {
+    expect(await loadSameCheckRepeat(ctxWith([ev(A, 0, 'x'), ev(A, -1, 'y')], 0))).toBeNull();
   });
 });
 
