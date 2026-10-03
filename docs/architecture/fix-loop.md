@@ -48,8 +48,10 @@ first pass could have caused.
 
 `08-phase-5-verify`'s lint follows the same rule. A missing `vendor/bin/phpcs` (exit 127, as on a
 site with no composer.json) and a phpcs run that used its whole 600 s cap read as NOT RUN with a
-note, never as a failing check: no fix round can install a linter or speed one up. Only the clock
-tells a DDEV kill from an exit 1, so the step times the flagged run rather than reading its exit.
+note, never as a failing check: no fix round can install a linter or speed one up. Gate 2 still
+shows such a check as a NOT RUN row with its note and does not pre-select Approve, and the learning
+step names it beside "passed": 08's own verdict counts only what ran. Only the clock tells a DDEV
+kill from an exit 1, so the step times the flagged run rather than reading its exit.
 And the verdict itself is scoped to the change: phpcs keeps its own file scope and also writes its
 JSON report (`--report=full` first, since the first `--report*` flag replaces the console report,
 then `--report-json` and `--basepath`) under `.haive/verify/`, which gate 3 never stages, and only
