@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import {
   chmod,
   lstat,
@@ -231,6 +231,40 @@ describe('computeBuildStamp in a checkout', { timeout: 30_000 }, () => {
     expect(await git(dir, 'ls-tree', 'HEAD', 'bin/run.sh')).toMatch(/^100755 /);
     expect(edited).toBe(`tree:${await git(dir, 'rev-parse', 'HEAD^{tree}')}`);
   });
+
+  it('names a commit by its own tree when a replace ref swaps it', async () => {
+    const dir = await bornRepo();
+    const original = await git(dir, 'rev-parse', 'HEAD');
+    await put(dir, { 'a.txt': 'alpha in the replacement\n' });
+    await commit(dir);
+    const replacement = await git(dir, 'rev-parse', 'HEAD');
+    await git(dir, 'checkout', '-q', '--detach', original);
+    await git(dir, 'replace', original, replacement);
+    expect(await stamp(dir)).toBe(`commit:${original}`);
+    await git(dir, 'reset', '-q', '--hard');
+    expect(await stamp(dir)).toMatch(/^tree:/);
+  });
+
+  it.skipIf(spawnSync('git', ['lfs', 'version']).status !== 0)(
+    'writes nothing under .git when a git-lfs file changes',
+    async () => {
+      const dir = await unbornRepo();
+      for (const [key, value] of [
+        ['filter.lfs.clean', 'git-lfs clean -- %f'],
+        ['filter.lfs.smudge', 'git-lfs smudge -- %f'],
+        ['filter.lfs.process', 'git-lfs filter-process'],
+        ['filter.lfs.required', 'true'],
+      ] as const) {
+        await git(dir, 'config', key, value);
+      }
+      await put(dir, { '.gitattributes': '*.bin filter=lfs -text\n', 'big.bin': 'x'.repeat(4096) });
+      await commit(dir);
+      await put(dir, { 'big.bin': 'y'.repeat(4096) });
+      const before = await snapshot(join(dir, '.git'));
+      expect(await stamp(dir)).toMatch(/^tree:/);
+      expect(await snapshot(join(dir, '.git'))).toEqual(before);
+    },
+  );
 
   it('names the commit of a clean SHA-256 checkout', async () => {
     const dir = await unbornRepo('--object-format=sha256');

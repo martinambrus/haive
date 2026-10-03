@@ -32,7 +32,9 @@ async function checkoutTop(startDir: string): Promise<string | null> {
 }
 
 async function gitStamp(top: string, env: NodeJS.ProcessEnv, deadline: number): Promise<string> {
-  const git = async (args: string[], gitEnv: NodeJS.ProcessEnv = env): Promise<string> => {
+  // Replace refs off: a commit id must name its own tree, never a replacement's.
+  const base = { ...env, GIT_NO_REPLACE_OBJECTS: '1' };
+  const git = async (args: string[], gitEnv: NodeJS.ProcessEnv = base): Promise<string> => {
     const timeout = deadline - Date.now();
     if (timeout <= 0) throw new Error('build stamp timed out');
     return (await gitExec(args, { cwd: top, env: gitEnv, timeout })).stdout;
@@ -52,13 +54,17 @@ async function gitStamp(top: string, env: NodeJS.ProcessEnv, deadline: number): 
     await mkdir(path.join(tmp, 'objects'));
     // Alternates serve only the seed read: a write through them touches the real object files.
     const scratch = {
-      ...env,
+      ...base,
       GIT_INDEX_FILE: path.join(tmp, 'index'),
       GIT_OBJECT_DIRECTORY: path.join(tmp, 'objects'),
     };
     // Split index off: a repository that enables it would get a sharedindex file in its .git.
+    // LFS storage in the scratch dir: the clean filter would store a file's content under .git/lfs.
     const index = (args: string[], indexEnv: NodeJS.ProcessEnv = scratch): Promise<string> =>
-      git(['-c', 'core.splitIndex=false', ...args], indexEnv);
+      git(
+        ['-c', 'core.splitIndex=false', '-c', `lfs.storage=${path.join(tmp, 'lfs')}`, ...args],
+        indexEnv,
+      );
 
     // Seeded from HEAD: with core.fileMode or core.symlinks off, add keeps the mode of an entry.
     if (head !== null) {
