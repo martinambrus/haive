@@ -5,7 +5,10 @@ import { hasReadyLspBridge, loadConfiguredLspLanguages } from '../src/lsp/config
 
 function environmentDb(
   envTemplate: { declaredDeps: Record<string, unknown> | null; status: string } | undefined,
-  pluginStep: { output: { skipped: boolean }; status: string } | null = {
+  pluginStep: {
+    output: { skipped: boolean; missingDrupalLsp?: string | null };
+    status: string;
+  } | null = {
     output: { skipped: false },
     status: 'done',
   },
@@ -160,6 +163,31 @@ describe('parseConfiguredLspLanguages', () => {
     await expect(hasReadyLspBridge(environmentDb(readyEnvironment, null), 'task-1')).resolves.toBe(
       false,
     );
+  });
+
+  it('does not advertise a bridge the plugin step installed only in part', async () => {
+    const readyEnvironment = {
+      declaredDeps: { lspServers: ['intelephense-extended', 'vtsls'] },
+      status: 'ready',
+    };
+    await expect(
+      hasReadyLspBridge(
+        environmentDb(readyEnvironment, {
+          output: { skipped: false, missingDrupalLsp: '.claude/plugins/drupal-php-lsp' },
+          status: 'done',
+        }),
+        'task-1',
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      hasReadyLspBridge(
+        environmentDb(readyEnvironment, {
+          output: { skipped: false, missingDrupalLsp: null },
+          status: 'done',
+        }),
+        'task-1',
+      ),
+    ).resolves.toBe(true);
   });
 
   it('requires current successful smoke evidence for every configured bridged server', async () => {

@@ -54,6 +54,7 @@ async function drupalLspTreeInWorktree(ctx: StepContext, rel: string): Promise<b
 interface InstallPluginsApply {
   skipped: boolean;
   skipReason: string | null;
+  missingDrupalLsp?: string | null;
   executed: { description: string; exitCode: number; stdoutTail: string; stderrTail: string }[];
 }
 
@@ -283,6 +284,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       }
     }
 
-    return { skipped: false, skipReason: null, executed };
+    return {
+      skipped: false,
+      skipReason: null,
+      missingDrupalLsp: detected.missingDrupalLsp ?? null,
+      executed,
+    };
   },
 };

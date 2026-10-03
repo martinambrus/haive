@@ -4,6 +4,26 @@ import type { StepContext } from '../../step-definition.js';
 const hasWorkspaceEntry = vi.fn();
 const resolveDdevWorkspace = vi.fn();
 const loadConfiguredLspLanguages = vi.fn();
+const runInSandbox = vi.fn();
+
+vi.mock('../../../sandbox/sandbox-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/sandbox-runner.js')>()),
+  runInSandbox: (...args: unknown[]) => runInSandbox(...args),
+}));
+vi.mock('../../../queues/cli-exec-queue.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../queues/cli-exec-queue.js')>()),
+  resolveAuthMounts: async () => [],
+  resolveSandboxImageTag: async () => null,
+  resolveInvocationRepoMount: async () => ({ repoMount: null, hasWorktree: false, hasRepo: false }),
+}));
+vi.mock('../../../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../queues/cli-exec/secret-mask.js')>()),
+  resolveSecretMasks: async () => [],
+}));
+vi.mock('../../../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../queues/cli-exec/gitfile-mask.js')>()),
+  repoGitDataBoundary: async () => ({ mounts: [], masks: [] }),
+}));
 
 vi.mock('../../workspace-probe.js', () => ({
   hasWorkspaceEntry: (...args: unknown[]) => hasWorkspaceEntry(...args),
@@ -37,6 +57,7 @@ function ctx(): Ctx {
     cliProviderId: 'provider-1',
     repoPath: REPO,
     logger: { warn: vi.fn(), info: vi.fn() },
+    emitProgress: vi.fn(),
   } as unknown as Ctx;
 }
 
@@ -107,5 +128,46 @@ describe('01b-install-plugins detect: the local drupal-php-lsp tree', () => {
     expect(hasWorkspaceEntry).not.toHaveBeenCalled();
     expect(detected.drupalLspPath).toBeNull();
     expect(detected.skip).toBe(false);
+  });
+});
+
+describe('01b-install-plugins apply: what the step records', () => {
+  type ApplyArgs = Parameters<typeof installPluginsStep.apply>[1];
+
+  function detectedWith(missingDrupalLsp: string | null): ApplyArgs {
+    return {
+      detected: {
+        providerName: 'claude-code',
+        providerSupportsPlugins: true,
+        lspLanguages: ['php-extended', 'typescript'],
+        drupalLspPath: null,
+        missingDrupalLsp,
+        commands: [
+          {
+            description: 'Add marketplace',
+            command: 'claude',
+            args: ['plugin', 'marketplace', 'add', 'x'],
+          },
+        ],
+        skip: false,
+        skipReason: null,
+      },
+    } as unknown as ApplyArgs;
+  }
+
+  it('records the PHP plugin it left out, so a partial install is not read as a ready bridge', async () => {
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+
+    const out = await installPluginsStep.apply(ctx(), detectedWith(TREE_REL));
+
+    expect(out).toMatchObject({ skipped: false, missingDrupalLsp: TREE_REL });
+  });
+
+  it('records nothing missing after a full install', async () => {
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+
+    const out = await installPluginsStep.apply(ctx(), detectedWith(null));
+
+    expect(out).toMatchObject({ skipped: false, missingDrupalLsp: null });
   });
 });
