@@ -11,7 +11,7 @@ import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 /** Ceiling on how many prior tasks to gather as anchors. */
 export const MAX_ANCHORS = 30;
 /** Bound history lookup and hydration queries independently of the output anchor cap. */
-const HISTORY_BATCH_SIZE = 500;
+export const HISTORY_BATCH_SIZE = 500;
 /** Per-anchor description budget when an anchor is rendered into a prompt / panel. */
 export const ANCHOR_DESC_CAP = 240;
 /** Require several measured runs before replacing the broader-history baseline. */

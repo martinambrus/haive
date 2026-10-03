@@ -4,6 +4,7 @@ import { ollamaEmbed, probeOllama } from '@haive/shared/rag';
 import { resolveRagConnection, type RagToolingPrefs } from '../onboarding/_rag-connection.js';
 import type { StepContext } from '../../step-definition.js';
 import { retrieveSimilarTaskIds } from './_task-embedding.js';
+import { HISTORY_BATCH_SIZE } from './_estimate.js';
 
 vi.mock('@haive/shared/rag', () => ({
   TASK_SOURCE_TYPE: 'task',
@@ -143,7 +144,7 @@ describe('retrieveSimilarTaskIds', () => {
     );
     expect(ids).toEqual(['fix-1', 'fix-2', 'full-1', 'full-2']);
     expect(unsafe.mock.calls[1]![0]).toContain('AND NOT (task_id = ANY($6::uuid[]))');
-    expect(unsafe.mock.calls[1]![1][4]).toBe(2);
+    expect(unsafe.mock.calls[1]![1][4]).toBe(HISTORY_BATCH_SIZE);
   });
 
   it('preserves cosine ranking when the current path is unknown', async () => {
@@ -167,7 +168,7 @@ describe('retrieveSimilarTaskIds', () => {
   });
 
   it('pages past unmeasured same-path embeddings to older measured semantic matches', async () => {
-    const unmeasured = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}`);
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) => `unmeasured-${i}`);
     const fixes = ['older-fix-1', 'older-fix-2', 'older-fix-3'];
     const { ctx, unsafe } = fixture(
       [...unmeasured, ...fixes],
@@ -177,16 +178,37 @@ describe('retrieveSimilarTaskIds', () => {
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual(fixes);
-    expect(unsafe.mock.calls.slice(0, 2).map(([, params]) => params.at(-1))).toEqual([0, 30]);
+    expect(unsafe.mock.calls.slice(0, 2).map(([, params]) => params.at(-1))).toEqual([
+      0,
+      HISTORY_BATCH_SIZE,
+    ]);
   });
 
   it('fills sparse history with measured broader matches after exhausting unmeasured same-path embeddings', async () => {
-    const unmeasured = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}`);
+    const unmeasured = Array.from({ length: HISTORY_BATCH_SIZE }, (_, i) => `unmeasured-${i}`);
     const { ctx, unsafe } = fixture([...unmeasured, 'full-1', 'full-2'], unmeasured, unmeasured);
     expect(
       await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
     ).toEqual(['full-1', 'full-2']);
     expect(unsafe.mock.calls[2]![0]).toContain('AND NOT (task_id = ANY');
+  });
+
+  it('scans broader history in full pages when only one measured anchor remains', async () => {
+    const fixes = Array.from({ length: 29 }, (_, i) => `fix-${i}`);
+    const unmeasured = Array.from({ length: 1000 }, (_, i) => `unmeasured-${i}`);
+    const { ctx, unsafe, findMany } = fixture(
+      [...fixes, ...unmeasured, 'broader-measured', 'broader-extra'],
+      fixes,
+      unmeasured,
+    );
+
+    expect(
+      await retrieveSimilarTaskIds(ctx, prefs, 'project', 'repo', 'fix', 30, 'quick_bugfix'),
+    ).toEqual([...fixes, 'broader-measured']);
+    expect(unsafe.mock.calls.length).toBeLessThan(10);
+    expect(findMany.mock.calls.length).toBeLessThan(10);
+    expect(unsafe.mock.calls.slice(1).map(([, params]) => params.at(-1))).toEqual([0, 500, 1000]);
+    expect(unsafe.mock.calls.every(([, params]) => params[4] === HISTORY_BATCH_SIZE)).toBe(true);
   });
 
   it('does not count stale task ids as measured anchors even when their timing rows remain', async () => {

@@ -1,7 +1,7 @@
 import { ollamaEmbed, probeOllama, vectorLiteral, TASK_SOURCE_TYPE } from '@haive/shared/rag';
 import { and, eq, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { measuredPriorTaskIds } from './_estimate.js';
+import { HISTORY_BATCH_SIZE, measuredPriorTaskIds } from './_estimate.js';
 import type { StepContext } from '../../step-definition.js';
 import {
   RAG_TABLE,
@@ -128,7 +128,7 @@ export async function retrieveSimilarTaskIds(
       const selected: string[] = [];
       const seen = new Set<string>();
       const useIds = pathFilter !== '';
-      for (let offset = 0; selected.length < budget; offset += budget) {
+      for (let offset = 0; selected.length < budget; offset += HISTORY_BATCH_SIZE) {
         const rows = (await conn!.pg.unsafe(
           `SELECT task_id
            FROM ${RAG_TABLE}
@@ -136,12 +136,12 @@ export async function retrieveSimilarTaskIds(
            ${pathFilter}
            ORDER BY (vector::halfvec(${dims})) <=> ($4::vector)::halfvec(${dims}), task_id
            LIMIT $5 OFFSET $${useIds ? 7 : 6}`,
-          [...params, budget, ...(useIds ? [matchingIds] : []), offset],
+          [...params, HISTORY_BATCH_SIZE, ...(useIds ? [matchingIds] : []), offset],
         )) as Array<{ task_id: string | null }>;
         const ids = rows.map((r) => r.task_id).filter((id): id is string => !!id && !seen.has(id));
         for (const id of ids) seen.add(id);
         selected.push(...(await measuredPriorTaskIds(ctx.db, ctx.taskId, repositoryId, ids)));
-        if (rows.length < budget) break;
+        if (rows.length < HISTORY_BATCH_SIZE) break;
       }
       return selected.slice(0, budget);
     };
