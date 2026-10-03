@@ -206,7 +206,8 @@ export async function hasReadyLspBridge(db: Database, taskId: string): Promise<b
   // Current LSP-capable adapters obtain their callable bridge through the
   // provider-sensitive plugin step. A ready server binary alone is not enough:
   // run_app tasks omit this step, users can skip it, and legacy rows may say
-  // done while their old detector skipped installation.
+  // done while their old detector skipped installation. A step that left one bridge out
+  // (`missingDrupalLsp`) installed only part of the configuration.
   const pluginStep = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
@@ -214,8 +215,11 @@ export async function hasReadyLspBridge(db: Database, taskId: string): Promise<b
     ),
     columns: { output: true, status: true },
   });
+  const pluginOutput = pluginStep?.output as
+    { skipped?: unknown; missingDrupalLsp?: unknown } | null | undefined;
   return (
     pluginStep?.status === 'done' &&
-    (pluginStep.output as { skipped?: unknown } | null)?.skipped === false
+    pluginOutput?.skipped === false &&
+    !pluginOutput.missingDrupalLsp
   );
 }
