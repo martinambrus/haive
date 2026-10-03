@@ -589,9 +589,12 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  returns `loop_back` instead of `done`, re-entering at the implementation step for
    *  a new round (the whole post-implementation chain re-runs). `evaluate` inspects the
    *  apply output and returns the diagnosis to hand the implementation agent, or null
-   *  (or blocking=false) when the step passed. */
+   *  (or blocking=false) when the step passed. `guidance` is Haive's own text, never an agent
+   *  value: 07 renders it outside the fence the diagnosis sits in. */
   fixLoop?: {
-    evaluate(applyOutput: TApply): { blocking: boolean; diagnosis: string } | null;
+    evaluate(
+      applyOutput: TApply,
+    ): { blocking: boolean; diagnosis: string; guidance?: string } | null;
   };
   /** Deterministic steps (e.g. 07c-ddev-reconcile) that THROW on a fixable failure set
    *  this so the runner routes the thrown error into the fix loop (diagnosis = error

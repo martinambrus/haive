@@ -677,15 +677,19 @@ export function priorPassNotes(previous: StepLoopPassRecord[]): string {
   return block.length > PRIOR_PASS_BLOCK_LIMIT ? block.slice(0, PRIOR_PASS_BLOCK_LIMIT) : block;
 }
 
+/** The three-way framing the tester agent was given, so the implementer does not treat the
+ *  failing assertion as gospel. */
+const DECIDE_PER_FAILURE = [
+  'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
+  'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
+].join('\n');
+
 /** The fix-loop diagnosis handed to the implementer once the tester's own passes are
- *  spent. Carries the same three-way framing the tester agent was given, so the
- *  implementer does not treat the failing assertion as gospel. */
+ *  spent. */
 function buildTestFailureDiagnosis(out: TestManagementApply): string {
   const touched = [...out.testsCreated, ...out.testsUpdated];
   return [
     `The related tests still fail after ${out.fixPasses} fix pass(es) by the test-management step.`,
-    'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
-    'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
     touched.length > 0 ? `\nTests written or updated by that step:\n- ${touched.join('\n- ')}` : '',
     out.notes ? `\nWhat the tester agent concluded on its last pass:\n${out.notes}` : '',
     out.testRun?.command ? `\nCommand: ${out.testRun.command}` : '',
@@ -734,7 +738,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
   fixLoop: {
     evaluate: (out) =>
       out.testsPassed === false
-        ? { blocking: true, diagnosis: buildTestFailureDiagnosis(out) }
+        ? {
+            blocking: true,
+            diagnosis: buildTestFailureDiagnosis(out),
+            guidance: DECIDE_PER_FAILURE,
+          }
         : null,
   },
 
