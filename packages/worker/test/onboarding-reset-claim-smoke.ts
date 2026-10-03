@@ -298,6 +298,21 @@ async function main(): Promise<void> {
     await stampRepositoryOnboarded(db, await seedTask(upgrade, { type: 'onboarding_upgrade' }));
     check('an upgrade run never stamps', (await repoRow(upgrade)).onboardedAt === null);
 
+    // Workflow completion is evidence in task history, never an onboarding stamp. Otherwise a
+    // later onboarding run that writes its markers and then fails inherits that old stamp.
+    const blankWorkflow = await newRepo();
+    await stampRepositoryOnboarded(
+      db,
+      await seedTask(blankWorkflow, {
+        type: 'workflow',
+        executionPath: 'quick_bugfix',
+      }),
+    );
+    check(
+      'a blank workflow leaves onboarding stamps untouched',
+      (await repoRow(blankWorkflow)).onboardedAt === null,
+    );
+
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');
       process.exitCode = 1;

@@ -237,6 +237,7 @@ repoRoutes.get('/', async (c) => {
     db,
     userId,
     rows.map((r) => r.id),
+    rows.filter((r) => r.source === 'blank').map((r) => r.id),
   );
   // Which repositories still hold live artifact rows, so a reset repo whose re-run failed at a
   // late step offers the manual button here too. Without it the list and the detail page would
@@ -269,6 +270,7 @@ repoRoutes.get('/', async (c) => {
       const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
       const verdict = markers
         ? resolveOnboardingVerdict({
+            source: repo.source,
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
             onboardingResetAt: repo.onboardingResetAt,
@@ -2449,6 +2451,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: {
       id: true,
+      source: true,
       storagePath: true,
       localPath: true,
       onboardedAt: true,
@@ -2460,8 +2463,12 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   if (!root) throw new HttpError(409, 'Repository has no resolvable path');
 
   const { present, missing } = await checkOnboardingMarkers(root);
-  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  const facts =
+    (await loadOnboardingTaskFacts(db, userId, [id], repo.source === 'blank' ? [id] : [])).get(
+      id,
+    ) ?? NO_ONBOARDING_TASKS;
   const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
+    source: repo.source,
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,

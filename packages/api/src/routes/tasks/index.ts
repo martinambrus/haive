@@ -471,6 +471,7 @@ taskRoutes.post('/', async (c) => {
         columns: {
           id: true,
           renderContext: true,
+          source: true,
           status: true,
           storagePath: true,
           localPath: true,

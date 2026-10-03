@@ -26,7 +26,8 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { LEGACY_RTK_MD_PATHS, RTK_SLIM, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { loadOnboardingTaskFacts } from '../src/lib/onboarding-state.js';
+import { loadOnboardingTaskFacts, resolveOnboardingVerdict } from '../src/lib/onboarding-state.js';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
   collectWrittenCliContent,
   loadLiveRootWriters,
@@ -351,6 +352,117 @@ async function main(): Promise<void> {
       'completed runs alone leave nothing live, so the reset may proceed',
       afterLive?.liveTaskId === null && afterLive?.hasCompleted === true,
       afterLive,
+    );
+
+    // The first greenfield workflow can finish without a KB. Exercise the actual SQL reader:
+    // failed/parked workflows and plan builds must not become completion evidence, and adding
+    // a workflow must not set the onboarding-history fields used by the reset guards.
+    const blankId = randomUUID();
+    await db
+      .insert(schema.repositories)
+      .values({ id: blankId, userId, name: 'greenfield', source: 'blank' });
+    for (const status of ['failed', 'cancelled', 'waiting_user'] as const) {
+      await db.insert(schema.tasks).values({
+        userId,
+        repositoryId: blankId,
+        type: 'workflow',
+        title: `setup ${status}`,
+        status,
+        completedAt: AFTER_RESET,
+      });
+    }
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: blankId,
+      type: 'plan_build',
+      title: 'greenfield plan',
+      status: 'completed',
+      completedAt: AFTER_RESET,
+    });
+    check(
+      'unfinished workflows and plan builds supply no onboarding evidence',
+      !(await loadOnboardingTaskFacts(db, userId, [blankId], [blankId])).has(blankId),
+    );
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: blankId,
+      type: 'workflow',
+      title: 'DDEV setup',
+      executionPath: 'quick_bugfix',
+      status: 'completed',
+      completedAt: AFTER_RESET,
+    });
+    // Created later but completed earlier: SQL must choose by completion date, not row order.
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: blankId,
+      type: 'workflow',
+      title: 'older completion',
+      status: 'completed',
+      completedAt: BEFORE_RESET,
+      createdAt: new Date(),
+    });
+    const importedId = randomUUID();
+    await db.insert(schema.repositories).values({
+      id: importedId,
+      userId,
+      name: 'imported',
+      source: 'git_https',
+    });
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: importedId,
+      type: 'workflow',
+      title: 'imported workflow',
+      status: 'completed',
+      completedAt: AFTER_RESET,
+    });
+    const completionFacts = await loadOnboardingTaskFacts(
+      db,
+      userId,
+      [blankId, importedId],
+      [blankId, importedId],
+    );
+    check(
+      'the workflow aggregate excludes imported repositories even if requested',
+      !completionFacts.has(importedId),
+    );
+    const blankFacts = completionFacts.get(blankId)!;
+    check(
+      'a setup-only completion is read without becoming an onboarding run',
+      blankFacts.newestCompletedWorkflowAt?.getTime() === AFTER_RESET.getTime() &&
+        !blankFacts.hasAny &&
+        !blankFacts.hasCompleted &&
+        blankFacts.liveTaskId === null,
+      blankFacts,
+    );
+    check(
+      'the next task is admitted without a KB, skills, agents or completion stamp',
+      resolveOnboardingVerdict({
+        source: 'blank',
+        missing: [KB_DIR, '.claude/skills', '.claude/agents', '.claude/workflow-config.json'],
+        onboardedAt: null,
+        facts: blankFacts,
+      }).onboarded,
+    );
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId: blankId,
+      type: 'onboarding',
+      title: 'abandoned onboarding',
+      status: 'cancelled',
+    });
+    const mixedFacts = (await loadOnboardingTaskFacts(db, userId, [blankId], [blankId])).get(
+      blankId,
+    )!;
+    check(
+      'mixed history cannot cover for abandoned onboarding',
+      !resolveOnboardingVerdict({
+        source: 'blank',
+        missing: [],
+        onboardedAt: null,
+        facts: mixedFacts,
+      }).onboarded,
     );
 
     check(
