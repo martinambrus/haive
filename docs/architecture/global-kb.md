@@ -37,7 +37,11 @@ written, by the enrich task or a promotion, and `09_6_4` gives it again whether 
 succeeded, never over one written since and never to a draft activated meanwhile. A promotion whose
 body is identical to a same-topic entry's that lacks a description links to that entry directly,
 with no embedding check, and `09_6_4` spends no merge agent on a pair whose bodies already match.
-It is never embedded, so a description-only edit queues no re-embed.
+It is never embedded, so a description-only edit queues no re-embed. A person sees it wherever an
+entry can be activated: on its card and in its dialog in Settings → Global KB, where Edit
+description sets it, beside the existing entry's in a superseding draft's "Updates existing" view,
+and in 09_6_5's draft list. The page renders it as markdown like every prose body; its editor and
+the prompt carry the stored text.
 
 ## Facets
 
