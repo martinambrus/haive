@@ -591,11 +591,53 @@ describe('phase5VerifyStep.apply', () => {
         passed: false,
         command: PHPUNIT.label,
         output: UNAVAILABLE,
+        note: 'DDEV runner unavailable — test not run',
       });
       expect(
         ddevExec,
         'a slot exec went through a handle no ensure returned',
       ).not.toHaveBeenCalled();
+    });
+
+    // A suite its environment stopped did run as selected; "not selected" would say otherwise.
+    it('does not call a test suite its environment blocked "not selected"', async () => {
+      ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+        args.includes('curl')
+          ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+          : {
+              exitCode: 1,
+              output:
+                "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium-1/chrome-linux/chrome",
+            },
+      );
+
+      const out = await runApply(
+        { test: PHPUNIT, testFramework: 'playwright' },
+        { runTest: true, runLint: false, runTypecheck: false },
+      );
+
+      expect(out.test.ran).toBe(false);
+      expect(out.degradedNote).toContain('NOT known to be green');
+      expect(out.degradedNote).not.toContain('not selected');
+    });
+
+    // The user ticked these slots; "not selected" would say the opposite of what happened.
+    it('names every slot whose runner was unavailable in the card note, and calls none of them unselected', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
+
+      const out = await runApply(
+        { test: PHPUNIT, lint: PHPCS, typecheck: PHPSTAN },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+
+      expect(out.degradedNote).toContain('No verification check ran this pass');
+      for (const slot of ['test', 'lint', 'typecheck']) {
+        expect(out.degradedNote).toContain(`DDEV runner unavailable — ${slot} not run`);
+        expect(recordLedgerEntry.mock.calls[0]![3].text).toContain(
+          `${slot}: DDEV runner unavailable — ${slot} not run`,
+        );
+      }
+      expect(out.degradedNote).not.toContain('not selected');
     });
   });
 
@@ -699,6 +741,7 @@ describe('phase5VerifyStep.apply', () => {
         passed: false,
         command: PHPUNIT.label,
         output: UNAVAILABLE,
+        note: 'DDEV runner unavailable — test not run',
       });
       expect(ddevExec).not.toHaveBeenCalled();
     });
@@ -811,11 +854,28 @@ describe('phase5VerifyStep.apply', () => {
     const REPORT_FLAG = '--report-json=';
     const FLAGGED_ARGV_LENGTH = 3;
 
+    /** The first slot run lasts `ms` on the clock the step times its runs with. */
+    function firstRunTakes(ms: number): void {
+      vi.useFakeTimers({ toFake: ['performance'] });
+      withDdevProgress.mockImplementationOnce((async (
+        _ctx: unknown,
+        _label: string,
+        run: (onLine: () => void) => Promise<unknown>,
+      ) => {
+        try {
+          return await run(() => {});
+        } finally {
+          vi.advanceTimersByTime(ms);
+        }
+      }) as never);
+    }
+
     let workspace: string;
     beforeEach(async () => {
       workspace = await mkdtemp(path.join(tmpdir(), 'verify-lint-'));
     });
     afterEach(async () => {
+      vi.useRealTimers();
       await rm(workspace, { recursive: true, force: true });
     });
 
@@ -1011,6 +1071,48 @@ process.exitCode = run.exit;
         });
         expect(out.lint.scope).toBeUndefined();
         expect(await reportsLeft()).toEqual([]);
+      });
+
+      it.each([
+        ['wrote no report', undefined],
+        ['left a report cut off', '{"files":{"src/a.php":{"messages":[{"message":"x"'],
+      ])(
+        'does not re-run a flagged run that used the whole time limit and %s',
+        async (_name, report) => {
+          await installPhpcs({
+            flagged: { exit: 1, console: 'partial console', report },
+            plain: { exit: 2, console: 'raw report' },
+          });
+          firstRunTakes(600_000);
+
+          const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+          expect(await calls()).toHaveLength(1);
+          expect(out.lint).toEqual({
+            ran: false,
+            passed: false,
+            command: 'vendor/bin/phpcs',
+            output: 'partial console',
+            note: 'phpcs reached its time limit — lint not verified',
+          });
+          expect(out.passed).toBe(true);
+          expect(out.degradedNote).toContain('phpcs reached its time limit — lint not verified');
+          expect(evaluate(out)).toBeNull();
+          expect(await reportsLeft()).toEqual([]);
+        },
+      );
+
+      it('still re-runs a flagged run that failed far inside the time limit', async () => {
+        await installPhpcs({
+          flagged: { exit: 255 },
+          plain: { exit: 2, console: 'raw report' },
+        });
+        firstRunTakes(60_000);
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(await calls()).toHaveLength(2);
+        expect(out.lint.note).toBe('lint verdict unscoped: phpcs wrote no report');
       });
 
       it('runs the original command once, unflagged, when the change could not be measured', async () => {
@@ -1246,6 +1348,22 @@ process.exitCode = run.exit;
         });
       });
 
+      it('does not re-run a flagged run that used the whole time limit', async () => {
+        runnerAnswers({ flagged: [1, null], plain: [2, 'raw report'] });
+        firstRunTakes(600_000);
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(slotExecs().map((c) => c[1])).toEqual([expect.stringMatching(FLAGGED)]);
+        expect(out.lint).toEqual({
+          ran: false,
+          passed: false,
+          command: 'ddev exec vendor/bin/phpcs',
+          output: 'console report',
+          note: 'phpcs reached its time limit — lint not verified',
+        });
+      });
+
       it('reports the runner as unavailable without measuring the change or making a directory', async () => {
         ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
 
@@ -1256,6 +1374,7 @@ process.exitCode = run.exit;
           passed: false,
           command: PHPCS.label,
           output: UNAVAILABLE,
+          note: 'DDEV runner unavailable — lint not run',
         });
         expect(collectChangedLineMap).not.toHaveBeenCalled();
         expect(await readdir(workspace)).toEqual([]);

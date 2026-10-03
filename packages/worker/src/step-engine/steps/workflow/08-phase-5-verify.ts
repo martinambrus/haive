@@ -121,7 +121,7 @@ interface VerifyApply {
 export function buildVerifyDegradedNote(
   blocker: { reason: string; repair: string } | null,
   unverified: string,
-  lintNote = '',
+  slotNotes = '',
 ): string {
   return [
     blocker
@@ -129,7 +129,7 @@ export function buildVerifyDegradedNote(
         `green, and no fix round can repair this. Repair with: ${blocker.repair}`
       : '',
     unverified,
-    lintNote,
+    slotNotes,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -324,6 +324,8 @@ interface SlotRun {
 /** A shell reports a missing command as 127; a host binary that cannot start reads the same. */
 const NOT_FOUND_EXIT = 127;
 
+const SLOT_TIMEOUT_MS = 600_000;
+
 async function execSlot(
   cmd: SlotCommand,
   ctx: StepContext,
@@ -340,7 +342,10 @@ async function execSlot(
       ctx,
       `Running ${cmd.label}`,
       (onLine) =>
-        ddevExec(handle, [...cmd.argv, ...extraArgs].join(' '), { timeoutMs: 600_000, onLine }),
+        ddevExec(handle, [...cmd.argv, ...extraArgs].join(' '), {
+          timeoutMs: SLOT_TIMEOUT_MS,
+          onLine,
+        }),
       { initialLine: cmd.argv.join(' ') },
     );
     return { ran: true, exitCode: res.exitCode, output: res.output.slice(-4000) };
@@ -352,7 +357,7 @@ async function execSlot(
     const { stdout, stderr } = await withDdevProgress(ctx, `Running ${cmd.label}`, () =>
       exec(bin!, [...rest, ...extraArgs], {
         cwd: workspace,
-        timeout: 600_000,
+        timeout: SLOT_TIMEOUT_MS,
         maxBuffer: 10 * 1024 * 1024,
       }),
     );
@@ -365,6 +370,7 @@ async function execSlot(
 }
 
 async function runSlot(
+  slot: 'test' | 'lint' | 'typecheck',
   cmd: SlotCommand,
   ctx: StepContext,
   workspace: string,
@@ -376,12 +382,16 @@ async function runSlot(
     passed: run.ran && run.exitCode === 0,
     command: cmd.label,
     output: run.output,
+    ...(run.ran ? {} : { note: `DDEV runner unavailable — ${slot} not run` }),
   };
 }
 
 const REPORT_DIR = '.haive/verify';
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
 const PHPCS_NOT_FOUND = 'vendor/bin/phpcs not found — lint not run';
+const PHPCS_TIMED_OUT = 'phpcs reached its time limit — lint not verified';
+/** A kill timer can fire a little before the clock this step reads agrees. */
+const TIME_LIMIT_SLACK_MS = 5_000;
 
 const isDirectPhpcs = (cmd: SlotCommand): boolean => cmd.argv.at(-1) === 'vendor/bin/phpcs';
 
@@ -431,7 +441,9 @@ async function runScopedPhpcs(
     return { reason: 'the report directory could not be prepared' };
   }
   try {
+    const startedAt = performance.now();
     const run = await execSlot(cmd, ctx, workspace, handle, flags);
+    const elapsedMs = performance.now() - startedAt;
     if (run.exitCode === 0) {
       return { check: { ran: true, passed: true, command: cmd.label, output: run.output } };
     }
@@ -448,6 +460,14 @@ async function runScopedPhpcs(
     const text = await readTextNoFollow(anchor, reportRel, { maxBytes: MAX_REPORT_BYTES });
     const report = text === null ? null : parsePhpcsJsonReport(text);
     if (report === null) {
+      // Only the clock tells a kill from another exit 1. A re-run would spend the limit again, and a
+      // fix round cannot repair a timeout, so it is reported as not run rather than as a failure.
+      if (elapsedMs >= SLOT_TIMEOUT_MS - TIME_LIMIT_SLACK_MS) {
+        const output = run.output;
+        return {
+          check: { ran: false, passed: false, command: cmd.label, output, note: PHPCS_TIMED_OUT },
+        };
+      }
       return { reason: text === null ? 'phpcs wrote no report' : 'the report is malformed' };
     }
     return { check: scopedCheck(cmd.label, scopePhpcsReport(report, changed)) };
@@ -465,16 +485,16 @@ async function runLint(
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
   if (!isDirectPhpcs(cmd)) {
-    return unscoped(await runSlot(cmd, ctx, workspace, handle), 'project script');
+    return unscoped(await runSlot('lint', cmd, ctx, workspace, handle), 'project script');
   }
-  if (cmd.kind === 'ddev' && !handle) return runSlot(cmd, ctx, workspace, handle);
+  if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, workspace, handle);
   const changed = await collectChangedLineMap(ctx, workspace);
   const scoped = changed
     ? await runScopedPhpcs(cmd, ctx, workspace, handle, changed)
     : { reason: 'the change could not be measured' };
   return 'check' in scoped
     ? scoped.check
-    : unscoped(await runSlot(cmd, ctx, workspace, handle), scoped.reason);
+    : unscoped(await runSlot('lint', cmd, ctx, workspace, handle), scoped.reason);
 }
 
 const skippedResult = (): CheckResult => ({
@@ -733,7 +753,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     }
     let test =
       values.runTest && testCmd
-        ? await runSlot(testCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlot('test', testCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
     // routes ANY failing check back to implementation — so without this a missing browser
@@ -742,14 +762,20 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // is kept out, and the note below says so rather than letting it read as green.
     const testEnvBlocker =
       test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, test.output) : null;
-    if (testEnvBlocker) test = { ...test, ran: false };
+    if (testEnvBlocker) {
+      test = {
+        ...test,
+        ran: false,
+        note: 'test run stopped by its environment (above), not a test failure',
+      };
+    }
     const lint =
       values.runLint && lintCmd
         ? await runLint(lintCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await runSlot(typeCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlot('typecheck', typeCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
 
     const passed =
@@ -811,7 +837,8 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       { test: testCmd, lint: lintCmd, typecheck: typeCmd },
       { test, lint, typecheck },
     );
-    const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, lint.note);
+    const slotNotes = [test.note, lint.note, typecheck.note].filter(Boolean).join('\n');
+    const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, slotNotes);
     return {
       test,
       lint,
