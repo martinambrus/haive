@@ -79,6 +79,7 @@ const makeFake = () =>
   createFakeDb({ tasks: schema.tasks, cliProviders: schema.cliProviders, globalKbEntries });
 let fake: ReturnType<typeof makeFake>;
 let vectorStatements: string[];
+let rawStatements: string[];
 
 const statementText = (query: unknown): string =>
   is(query, SQL)
@@ -92,6 +93,7 @@ function lenient<T extends { execute: (query: unknown) => Promise<unknown> }>(ha
   return {
     ...handle,
     execute: async (query: unknown) => {
+      rawStatements.push(statementText(query));
       try {
         return await handle.execute(query);
       } catch (err) {
@@ -149,6 +151,7 @@ beforeEach(() => {
   h.houseRules = true;
   h.successors = [];
   vectorStatements = [];
+  rawStatements = [];
   fake = makeFake();
   h.db = fake.db;
   h.gdb = {
@@ -701,5 +704,96 @@ describe('the writers of one corpus take its lock before they write', () => {
     expect((await patch({ title: 'x' }, MISSING)).status).toBe(404);
     expect((await send('DELETE', `/entries/${MISSING}`)).status).toBe(404);
     expect(events).toEqual([]);
+  });
+});
+
+const lockingRoutes: [string, () => Response | Promise<Response>][] = [
+  ['PATCH', () => patch({ title: 'Never inline any SVG' })],
+  ['DELETE of an entry', () => send('DELETE', `/entries/${ENTRY}`)],
+  ['PUT enforcement', () => enforce(FILES)],
+  ['DELETE enforcement', () => unenforce()],
+];
+
+describe('the writers of one corpus bound their wait for its lock, then take it', () => {
+  it.each(lockingRoutes)('on %s, in the same transaction', async (_route, run) => {
+    approve(ENTRY, FILES);
+
+    expect((await run()).status).toBe(200);
+
+    const lockStatements = rawStatements.filter((text) =>
+      /lock_timeout|pg_advisory_xact_lock/.test(text),
+    );
+    expect(lockStatements).toEqual([
+      "SET LOCAL lock_timeout = '30000ms'",
+      'select pg_advisory_xact_lock(hashtextextended(?, 0))',
+    ]);
+    expect(vectorStatements.some((text) => text.includes('lock_timeout'))).toBe(false);
+  });
+});
+
+describe('a wait for the corpus lock that runs out', () => {
+  const timedOut = () =>
+    new Error('Failed query: select pg_advisory_xact_lock(hashtextextended($1, 0))', {
+      cause: Object.assign(new Error('canceling statement due to lock timeout'), {
+        code: '55P03',
+      }),
+    });
+
+  it.each(lockingRoutes)('answers 503 on %s, and changes nothing', async (_route, run) => {
+    approve(ENTRY, FILES);
+    const before = stored();
+    fake.hooks.beforeLock = () => {
+      throw timedOut();
+    };
+
+    const res = await run();
+
+    expect(res.status).toBe(503);
+    expect((await asJson(res)).error).toBe(
+      'Another change to this knowledge base is in progress; try again',
+    );
+    expect(stored()).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each(lockingRoutes)(
+    'stays a 500 on %s when the lock fails for another reason',
+    async (_route, run) => {
+      fake.hooks.beforeLock = () => {
+        throw new Error('terminating connection due to administrator command');
+      };
+
+      expect((await run()).status).toBe(500);
+    },
+  );
+});
+
+describe('an id that is not a uuid names no entry', () => {
+  const BAD = 'not-a-uuid';
+  const requests: [string, () => Response | Promise<Response>][] = [
+    ['GET', () => send('GET', `/entries/${BAD}`)],
+    ['PATCH', () => send('PATCH', `/entries/${BAD}`, { title: 'Never inline any SVG' })],
+    ['DELETE', () => send('DELETE', `/entries/${BAD}`)],
+    [
+      'PUT enforcement',
+      () => send('PUT', `/entries/${BAD}/enforcement`, { ...ALWAYS, expectedHash: tokenOf() }),
+    ],
+    ['DELETE enforcement', () => send('DELETE', `/entries/${BAD}/enforcement`)],
+  ];
+
+  it.each(requests)('answers 404 on %s, before any query', async (_route, run) => {
+    h.gdb = new Proxy(
+      {},
+      {
+        get: (_target, name) => {
+          throw new Error(`a query ran: ${String(name)}`);
+        },
+      },
+    );
+
+    const res = await run();
+
+    expect(res.status).toBe(404);
+    expect((await asJson(res)).error).toBe('global KB entry not found');
   });
 });

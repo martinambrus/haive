@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isLockNotAvailable, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
@@ -121,6 +121,9 @@ async function enqueueSync(
 
 type GlobalKbTx = Parameters<Parameters<GlobalKbDb['transaction']>[0]>[0];
 
+// A wait this long is a stuck holder, and every waiter holds a connection and a request meanwhile.
+const GLOBAL_KB_LOCK_TIMEOUT_MS = 30_000;
+
 // The corpus's advisory lock before the row's, always: writers that cross rows (an activation
 // archiving its predecessor, a delete re-linking successors) can then never wait on each other.
 async function lockEntry(db: GlobalKbTx, id: string): Promise<GlobalKbEntry | undefined> {
@@ -129,6 +132,7 @@ async function lockEntry(db: GlobalKbTx, id: string): Promise<GlobalKbEntry | un
     .from(globalKbEntries)
     .where(eq(globalKbEntries.id, id));
   if (!named) return undefined;
+  await db.execute(sql.raw(`SET LOCAL lock_timeout = '${GLOBAL_KB_LOCK_TIMEOUT_MS}ms'`));
   await db.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`gkb-entries:${named.namespace}`}, 0))`,
   );
@@ -138,6 +142,21 @@ async function lockEntry(db: GlobalKbTx, id: string): Promise<GlobalKbEntry | un
     .where(eq(globalKbEntries.id, id))
     .for('update');
   return row;
+}
+
+function lockBusyError(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    throw new HttpError(503, 'Another change to this knowledge base is in progress; try again');
+  }
+  throw err;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Postgres refuses a non-uuid in a uuid comparison, and that error would answer 500.
+function entryIdParam(raw: string): string {
+  if (!UUID_RE.test(raw)) throw new HttpError(404, 'global KB entry not found');
+  return raw;
 }
 
 interface HouseRuleContext {
@@ -364,7 +383,7 @@ const testDbSchema = z
   })
   .strict();
 
-globalKbRoutes.post('/test-db', async (c) => {
+globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
   const parsed = testDbSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
   const saved = await resolveGlobalKbSettings();
@@ -612,7 +631,7 @@ globalKbRoutes.get('/entries', async (c) => {
 });
 
 globalKbRoutes.get('/entries/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = entryIdParam(c.req.param('id'));
   const found = await withGlobalKb(getDb(), async ({ db, settings }) => {
     const entry = await db.query.globalKbEntries.findFirst({
       where: eq(globalKbEntries.id, id),
@@ -812,7 +831,7 @@ export function rescopedTopicKey(
 }
 
 globalKbRoutes.patch('/entries/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = entryIdParam(c.req.param('id'));
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid update', 'invalid_body');
   const data = parsed.data;
@@ -965,7 +984,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       }
       return { row, supersededId, reembed, namespace: settings.namespace };
     }),
-  );
+  ).catch(lockBusyError);
 
   const entry = result.row;
   if (!entry) throw new HttpError(404, 'global KB entry not found');
@@ -980,7 +999,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
 // unchanged — so leaving the vectors to the enqueued sync kept a deleted rule retrievable whenever
 // that enqueue failed. The sync is still enqueued, and finds nothing left to remove.
 globalKbRoutes.delete('/entries/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = entryIdParam(c.req.param('id'));
   const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
     conn.transaction(async (db) => {
       if (!(await lockEntry(db, id))) return undefined;
@@ -1002,7 +1021,7 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
       }
       return row;
     }),
-  );
+  ).catch(lockBusyError);
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'delete');
   return c.json({ ok: true });
@@ -1022,7 +1041,7 @@ const enforcementSchema = z.discriminatedUnion('mode', [
 // Enforcing puts the entry's full text into agent prompts as an instruction, so it is an admin's
 // call on exactly the text they saw: `expectedHash` is the content token of the entry they read.
 globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
-  const id = c.req.param('id');
+  const id = entryIdParam(c.req.param('id'));
   const parsed = enforcementSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid enforcement request', 'invalid_body');
   const { expectedHash } = parsed.data;
@@ -1087,7 +1106,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
         .returning();
       return { row: updated!, namespace: settings.namespace };
     }),
-  );
+  ).catch(lockBusyError);
 
   if ('capExceeded' in result) {
     return c.json(
@@ -1104,7 +1123,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
 
 // Removes the approval and keeps the settings, as the last ones given.
 globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
-  const id = c.req.param('id');
+  const id = entryIdParam(c.req.param('id'));
   const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
     conn.transaction(async (db) => {
       const row = await lockEntry(db, id);
@@ -1119,6 +1138,6 @@ globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
         .returning();
       return { row: updated!, namespace: settings.namespace };
     }),
-  );
+  ).catch(lockBusyError);
   return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
 });

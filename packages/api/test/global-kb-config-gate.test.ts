@@ -6,6 +6,10 @@ const h = vi.hoisted(() => ({
   settings: {} as Record<string, unknown>,
   set: vi.fn(async (_key: string, _value: string) => {}),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
+    pg: async () => [],
+    close: async () => {},
+  })),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
@@ -33,6 +37,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
   resolveGlobalKbSettings: async () => h.settings,
+  resolveGlobalKbConnection: (settings: unknown, db: unknown) => h.connect(settings, db),
 }));
 
 import { Hono } from 'hono';
@@ -84,6 +89,7 @@ const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
 beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
+  h.connect.mockClear();
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
@@ -229,6 +235,39 @@ describe('PUT /global-kb/config by an admin', () => {
       h.role = 'user';
 
       expect((await put({ mode: 'external' })).status).toBe(403);
+    });
+  });
+});
+
+describe('POST /global-kb/test-db', () => {
+  const CONNECTION = 'postgres://probe:pw@169.254.169.254:5432/kb';
+  const probe = () =>
+    send('POST', '/global-kb/test-db', { mode: 'external', connectionString: CONNECTION });
+
+  it('is refused to a regular user, and opens no connection', async () => {
+    h.role = 'user';
+
+    expect((await probe()).status).toBe(403);
+    expect(h.connect).not.toHaveBeenCalled();
+  });
+
+  it('tests the connection an admin names, and reports what it found', async () => {
+    const reached = await probe();
+
+    expect(reached.status).toBe(200);
+    expect(await reached.json()).toEqual({ ok: true, message: 'External DB reachable' });
+    expect(h.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'external', connectionString: CONNECTION }),
+      undefined,
+    );
+
+    h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED 169.254.169.254:5432'));
+    const refused = await probe();
+
+    expect(refused.status).toBe(200);
+    expect(await refused.json()).toEqual({
+      ok: false,
+      message: 'connect ECONNREFUSED 169.254.169.254:5432',
     });
   });
 });
