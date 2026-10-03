@@ -1,3 +1,5 @@
+import { collapseToLine } from '@haive/shared';
+
 // Every agent that reads the repository is reading text somebody wrote, and a
 // reviewer has no way to tell an honest comment from one placed to steer it. The
 // official claude-security plugin gives each of its agents a "the repository is not
@@ -279,19 +281,11 @@ export const REPO_IS_DATA_AUTHORING_LINES = [
 /* Unicode control — C0, DEL and C1 — plus the two line separators,     */
 /* with TAB (U+0009) the one carve-out: it is the only control a real   */
 /* value carries and it cannot start a line.                            */
-/*                                                                     */
-/* `@haive/shared/plan/render.ts` keeps its own copy of the collapse,   */
-/* since web and the api may not import from the worker.               */
 /* ------------------------------------------------------------------ */
 
-const LINE_WHITESPACE = /[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 
-/** Collapse a value onto ONE line, losslessly apart from the whitespace itself. For a
- *  field that is a single line by nature and already bounded by its column, where a cap
- *  would be the only lossy part — a task title, `varchar(512)`. */
-export const collapseToLine = (s: string | null | undefined): string =>
-  (s ?? '').replace(LINE_WHITESPACE, ' ').trim();
+export { collapseToLine };
 
 /** Repair a fence a SLICE cut in half.
  *
