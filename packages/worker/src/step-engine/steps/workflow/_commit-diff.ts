@@ -185,7 +185,7 @@ export async function buildFileEntry(
 
 /** Builds the gate-3 commit-diff artifact for the worktree and writes it to
  *  `<workspacePath>/.haive/gate3-diff.json`. The changed-file set comes from
- *  `git status --porcelain -z` (the exact set `git add -A` will commit,
+ *  `git status --porcelain -z --untracked-files=all` (the exact set `git add -A` will commit,
  *  including untracked files that `git diff HEAD` omits). Old content is read
  *  from the HEAD blob, new content from the working tree. */
 export async function buildCommitDiffArtifact(
@@ -197,6 +197,9 @@ export async function buildCommitDiffArtifact(
     'status',
     '--porcelain',
     '-z',
+    // Otherwise git groups an untracked directory into one entry ("?? dir/"),
+    // which is not a readable file and would leave its entire diff empty.
+    '--untracked-files=all',
   ]);
   const entries = parsePorcelainZ(statusRes.stdout);
 

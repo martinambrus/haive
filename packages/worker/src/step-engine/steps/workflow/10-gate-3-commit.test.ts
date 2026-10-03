@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import type { StepContext } from '../../step-definition.js';
 
@@ -87,6 +88,67 @@ describe('10-gate-3-commit detect', () => {
     const detected = await gate3CommitStep.detect!(mkCtx(repo));
     expect(detected.hasGit).toBe(true);
     expect(detected.dirtyFiles).toBe(1);
+  });
+
+  it.each([false, true])(
+    'includes full added and deleted files in the diff (staged: %s)',
+    async (staged) => {
+      const repo = await seedRepo();
+      await mkdir(path.join(repo, 'new directory', 'nested'), { recursive: true });
+      await writeFile(path.join(repo, 'new directory', 'first.txt'), 'first\nsecond\n');
+      await writeFile(path.join(repo, 'new directory', 'nested', 'second.txt'), 'third');
+      await rm(path.join(repo, 'a.txt'));
+      if (staged) await git(repo, ['add', '-A']);
+      // The gate must include untracked files even when repository config hides them.
+      await git(repo, ['config', 'status.showUntrackedFiles', 'no']);
+
+      const detected = await gate3CommitStep.detect!(mkCtx(repo));
+      expect(detected.dirtyFiles).toBe(3);
+      expect(detected.changedFileCount).toBe(3);
+      expect(detected.diffArtifactPath).toBe(path.join(repo, '.haive', 'gate3-diff.json'));
+      const read = await readFileNoFollow(repo, '.haive/gate3-diff.json');
+      const artifact = JSON.parse(read!.data.toString('utf8'));
+      expect(artifact.files).toEqual([
+        {
+          path: 'a.txt',
+          status: 'deleted',
+          binary: false,
+          truncated: false,
+          oldContent: '1\n',
+          newContent: '',
+        },
+        {
+          path: 'new directory/first.txt',
+          status: 'added',
+          binary: false,
+          truncated: false,
+          oldContent: '',
+          newContent: 'first\nsecond\n',
+        },
+        {
+          path: 'new directory/nested/second.txt',
+          status: 'added',
+          binary: false,
+          truncated: false,
+          oldContent: '',
+          newContent: 'third',
+        },
+      ]);
+    },
+  );
+
+  it('counts each new file and reports pending changes when only untracked files exist', async () => {
+    const repo = await seedRepo();
+    await mkdir(path.join(repo, 'new'), { recursive: true });
+    await writeFile(path.join(repo, 'new', 'a.txt'), 'a\n');
+    await writeFile(path.join(repo, 'new', 'b.txt'), 'b\n');
+    await writeFile(path.join(repo, 'new', 'ignored.txt'), 'ignored\n');
+    await writeFile(path.join(repo, '.git', 'info', 'exclude'), 'new/ignored.txt\n');
+
+    const detected = await gate3CommitStep.detect!(mkCtx(repo));
+    expect(detected.dirtyFiles).toBe(2);
+    expect(detected.changedFileCount).toBe(2);
+    expect(detected.diffSummary).not.toContain('No pending changes');
   });
 
   // The task-82949225 failure: an agent inside the sandbox rewrote the worktree's

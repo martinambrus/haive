@@ -3,7 +3,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
-import { buildCommitDiffArtifact } from './_commit-diff.js';
+import { buildCommitDiffArtifact, parsePorcelainZ } from './_commit-diff.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import type { Insight } from './08e-insights-triage.js';
@@ -126,18 +126,26 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         outOfScopeInsightsOmitted: insights.omitted,
       };
     }
-    const status = await gitRun(workspacePath, ['--no-optional-locks', 'status', '--porcelain']);
+    const status = await gitRun(workspacePath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '--untracked-files=all',
+    ]);
     if (status.code !== 0) {
       throw new Error(
         `git status failed in ${workspacePath}: ${status.stderr.trim() || status.stdout.trim()}`,
       );
     }
-    const dirtyFiles = status.stdout.split('\n').filter((line) => line.trim().length > 0).length;
+    const dirtyFiles = parsePorcelainZ(status.stdout).length;
     const diffStat = await gitRun(workspacePath, ['diff', '--stat', 'HEAD']);
     const summary =
       diffStat.stdout.trim().length > 0
         ? diffStat.stdout.trim().slice(0, 3000)
-        : 'No pending changes detected against HEAD.';
+        : dirtyFiles > 0
+          ? `Pending changes in ${dirtyFiles} file${dirtyFiles === 1 ? '' : 's'}.`
+          : 'No pending changes detected against HEAD.';
 
     // Build the interactive commit-diff artifact for the web viewer. Never fail
     // the gate on a diff-build error — the viewer is simply hidden.
