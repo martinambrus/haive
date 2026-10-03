@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
@@ -83,6 +84,85 @@ describe('resolveOnboardingVerdict', () => {
     expect(v.onboarded).toBe(false);
     // Nothing to vouch for, so the manual override is not offered either.
     expect(v.canMarkOnboarded).toBe(false);
+  });
+});
+
+describe('greenfield workflow completion', () => {
+  const completedAt = new Date('2026-10-03T19:25:59Z');
+  const input = {
+    source: 'blank',
+    missing: [KB_DIR],
+    onboardedAt: null,
+    facts: facts({ newestCompletedWorkflowAt: completedAt }),
+  };
+
+  it('admits the next workflow after a setup-only task without any KB or stamp', () => {
+    expect(resolveOnboardingVerdict(input)).toEqual({
+      onboarded: true,
+      inProgressTaskId: null,
+      canMarkOnboarded: false,
+    });
+  });
+
+  it('also accepts the completion stamp without task history', () => {
+    expect(
+      resolveOnboardingVerdict({ ...input, onboardedAt: completedAt, facts: facts() }).onboarded,
+    ).toBe(true);
+  });
+
+  it('requires a completed workflow or stamp, rather than blank source alone', () => {
+    expect(resolveOnboardingVerdict({ ...input, facts: facts() }).onboarded).toBe(false);
+  });
+
+  it.each(['git_https', 'local_path', 'upload'])('keeps the KB required for %s', (source) => {
+    expect(resolveOnboardingVerdict({ ...input, source }).onboarded).toBe(false);
+  });
+
+  it.each(['.claude/agents', '.claude/skills', '.claude/workflow-config.json'])(
+    'admits a completed first workflow without the marker %s',
+    (marker) => {
+      expect(resolveOnboardingVerdict({ ...input, missing: [KB_DIR, marker] }).onboarded).toBe(
+        true,
+      );
+    },
+  );
+
+  it('admits a completed first workflow with no onboarding artifacts at all', () => {
+    expect(
+      resolveOnboardingVerdict({
+        ...input,
+        missing: [KB_DIR, '.claude/agents', '.claude/skills', '.claude/workflow-config.json'],
+      }).onboarded,
+    ).toBe(true);
+  });
+
+  it('cannot answer an explicit reset, even with a newer workflow', () => {
+    expect(
+      resolveOnboardingVerdict({ ...input, onboardingResetAt: new Date('2026-10-01') }).onboarded,
+    ).toBe(false);
+  });
+
+  it('cannot cover for failed or cancelled onboarding', () => {
+    expect(
+      resolveOnboardingVerdict({
+        ...input,
+        facts: facts({ hasAny: true, newestCompletedWorkflowAt: completedAt }),
+      }).onboarded,
+    ).toBe(false);
+  });
+
+  it('cannot cover for onboarding still in progress', () => {
+    expect(
+      resolveOnboardingVerdict({
+        ...input,
+        onboardedAt: completedAt,
+        facts: facts({
+          hasAny: true,
+          liveTaskId: 'onboarding-1',
+          newestCompletedWorkflowAt: completedAt,
+        }),
+      }),
+    ).toEqual({ onboarded: false, inProgressTaskId: 'onboarding-1', canMarkOnboarded: false });
   });
 });
 

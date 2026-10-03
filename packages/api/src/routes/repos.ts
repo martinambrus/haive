@@ -269,6 +269,7 @@ repoRoutes.get('/', async (c) => {
       const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
       const verdict = markers
         ? resolveOnboardingVerdict({
+            source: repo.source,
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
             onboardingResetAt: repo.onboardingResetAt,
@@ -2449,6 +2450,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: {
       id: true,
+      source: true,
       storagePath: true,
       localPath: true,
       onboardedAt: true,
@@ -2462,6 +2464,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const { present, missing } = await checkOnboardingMarkers(root);
   const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
   const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
+    source: repo.source,
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,

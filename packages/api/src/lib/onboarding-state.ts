@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -92,6 +92,9 @@ export function hasArtifactsSinceReset(
 
 /** What the tasks table knows about onboarding for one repository. */
 export interface OnboardingTaskFacts {
+  /** Successful workflow completion, for a repository created blank. This is separate from
+   *  onboarding history: a workflow must never cover for an abandoned onboarding run. */
+  newestCompletedWorkflowAt?: Date | null;
   /** The newest onboarding task still in flight, or null. */
   liveTaskId: string | null;
   /** An onboarding run has finished successfully at some point. */
@@ -115,12 +118,10 @@ export const NO_ONBOARDING_TASKS: OnboardingTaskFacts = {
 };
 
 /**
- * Onboarding task facts for a set of repositories, in one query.
+ * Onboarding history and successful workflow completions for a set of repositories, in one query.
  *
- * Rows are selected and folded in JS rather than aggregated in SQL: a repository holds one
- * or two onboarding tasks in practice, and the fold also has to pick the newest LIVE id,
- * which a count aggregate cannot carry. Mirrors the repos list route's existing task-count
- * fold.
+ * Rows are folded in JS to pick the newest live onboarding id and maximum completion dates.
+ * Workflow rows contribute only their completion date, leaving onboarding history untouched.
  */
 export async function loadOnboardingTaskFacts(
   db: Database,
@@ -135,13 +136,17 @@ export async function loadOnboardingTaskFacts(
       id: schema.tasks.id,
       repositoryId: schema.tasks.repositoryId,
       status: schema.tasks.status,
+      type: schema.tasks.type,
       completedAt: schema.tasks.completedAt,
     })
     .from(schema.tasks)
     .where(
       and(
         eq(schema.tasks.userId, userId),
-        eq(schema.tasks.type, 'onboarding'),
+        or(
+          eq(schema.tasks.type, 'onboarding'),
+          and(eq(schema.tasks.type, 'workflow'), eq(schema.tasks.status, 'completed')),
+        ),
         inArray(schema.tasks.repositoryId, repositoryIds),
       ),
     )
@@ -150,6 +155,17 @@ export async function loadOnboardingTaskFacts(
   for (const row of rows) {
     if (!row.repositoryId) continue;
     const entry = byRepo.get(row.repositoryId) ?? { ...NO_ONBOARDING_TASKS };
+    if (row.type === 'workflow') {
+      if (
+        row.completedAt !== null &&
+        (entry.newestCompletedWorkflowAt == null ||
+          row.completedAt > entry.newestCompletedWorkflowAt)
+      ) {
+        entry.newestCompletedWorkflowAt = row.completedAt;
+      }
+      byRepo.set(row.repositoryId, entry);
+      continue;
+    }
     entry.hasAny = true;
     if (row.status === 'completed') {
       entry.hasCompleted = true;
@@ -240,6 +256,10 @@ export interface OnboardingVerdict {
  *               AND no live onboarding run
  *               AND (onboarded_at set OR a completed run OR no run was ever started here)
  *
+ * A repository created blank with no onboarding history or reset can instead use a completed
+ * workflow or its stamp, with no marker requirement. A setup-only task can generate none of
+ * those artifacts; its completion still admits the next workflow.
+ *
  * The last clause is what keeps a repository cloned in already onboarded — and every repo
  * onboarded before this column existed — reading exactly as it did, so nothing needs a
  * backfill and no boot-time migration can re-stamp a repo whose artifacts were just reset.
@@ -253,6 +273,8 @@ export interface OnboardingVerdict {
  * Pure, so the table above is unit-testable without a database or a filesystem.
  */
 export function resolveOnboardingVerdict(input: {
+  /** Only repositories created blank can complete onboarding through their first workflow. */
+  source?: string;
   /** Markers absent from disk; empty means all four are present. */
   missing: string[];
   onboardedAt: Date | null;
@@ -284,10 +306,19 @@ export function resolveOnboardingVerdict(input: {
   // having been started and then taken back.
   const neverStarted = !facts.hasAny && onboardingResetAt === null;
 
+  // A setup-only workflow (including quick_bugfix) can finish without writing KB, agents or
+  // skills. Neither an explicit reset nor an actual onboarding run can be answered by this
+  // shortcut. Read the task as well as the stamp so a lost bookkeeping write — and a workflow
+  // completed before this fix — gets the same verdict.
+  const greenfieldCompleted =
+    input.source === 'blank' &&
+    neverStarted &&
+    (onboardedAt !== null || facts.newestCompletedWorkflowAt != null);
+
   const onboarded =
-    markersPresent &&
     inProgressTaskId === null &&
-    (onboardedAt !== null || completedSinceReset || neverStarted);
+    (greenfieldCompleted ||
+      (markersPresent && (onboardedAt !== null || completedSinceReset || neverStarted)));
 
   // Marking by hand must not undo a reset — but it must still WORK for the case it exists for.
   //
@@ -318,6 +349,7 @@ export async function renderContextAdmitsUpgrade(
   userId: string,
   repo: {
     id: string;
+    source?: string;
     renderContext: unknown;
     status: string;
     storagePath: string | null;
@@ -333,6 +365,7 @@ export async function renderContextAdmitsUpgrade(
   const facts =
     (await loadOnboardingTaskFacts(db, userId, [repo.id])).get(repo.id) ?? NO_ONBOARDING_TASKS;
   return resolveOnboardingVerdict({
+    source: repo.source,
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,

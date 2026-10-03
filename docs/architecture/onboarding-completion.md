@@ -30,8 +30,21 @@ onboarded, and every repo onboarded before the column existed, keeps the verdict
 also why nothing re-derives the stamp at boot — a data migration that re-stamped from task
 history would resurrect a repo whose artifacts were just reset.
 
+**A repository created blank can finish onboarding through its first workflow.** INIT seeds the
+deterministic templates but has no code to mine for a KB or generate skills from.
+A completed `workflow`, including `quick_bugfix`, counts as onboarding completion for a `blank`
+repository with no onboarding task history and no reset. This path requires no on-disk markers:
+setting up DDEV alone writes no KB, agents or skills, and scaffold seeding is best-effort.
+The next task must remain a workflow after those first files appear. `loadOnboardingTaskFacts` reads
+completed workflows separately from onboarding history, so an earlier setup task also receives
+the corrected verdict without a backfill and a lost stamp is harmless. A plan build, a failed
+or cancelled workflow, and a workflow on an imported repository provide no such evidence.
+Starting an actual onboarding run or explicitly resetting artifacts restores the full onboarding
+gate; a later workflow cannot cover for an abandoned onboarding run or answer a reset.
+
 `onboarded_at` is stamped by `stampRepositoryOnboarded` from the worker's `markTaskCompleted`
-(`onboarding` type only), the same hook and the same reason as `completePlanNodesForTask`:
+(`onboarding`, or `workflow` on the blank repositories described above), the same hook and the
+same reason as `completePlanNodesForTask`:
 cancel and fail write through their own functions, so an abandoned run can never stamp a repo.
 Cleared by `DELETE /repos/:id/onboarding-artifacts`, since the stamp must not outlive the files
 it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run that did all
