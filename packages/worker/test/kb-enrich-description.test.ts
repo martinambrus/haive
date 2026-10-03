@@ -149,6 +149,87 @@ describe('kb enrich apply and the description', () => {
   });
 });
 
+// Activation archives the replaced entry, so its description is lost unless the draft carries it.
+describe('kb enrich apply and the description of the entry it replaces', () => {
+  const target = (description: string | null) =>
+    entry(SAME_NAMESPACE, { title: 'Existing', description });
+  const shown = {
+    id: SAME_NAMESPACE,
+    title: 'Existing',
+    category: 'best_practice',
+    facets: {},
+    excerpt: 'x',
+  };
+  const update = { mode: 'update', targetId: SAME_NAMESPACE };
+
+  beforeEach(() => {
+    h.confirm.mockReset();
+    h.confirm.mockResolvedValue(SAME_NAMESPACE);
+  });
+
+  it('carries the description of the entry the model updates when the enrichment yields none', async () => {
+    const { ctx, stored } = setup([skeleton(), target('Escape every interpolated label.')]);
+    await kbAuthorEnrichStep.apply!(ctx, {
+      detected: detected({ existing: [shown] }),
+      llmOutput: llm(update),
+      isFinalLlmAttempt: true,
+    } as never);
+
+    expect(stored(SKELETON).supersedesEntryId).toBe(SAME_NAMESPACE);
+    expect(stored(SKELETON).description).toBe('Escape every interpolated label.');
+  });
+
+  it('carries it from an entry that appeared after detect, which the model never named', async () => {
+    const { ctx, stored } = setup([skeleton(), target('Escape every interpolated label.')]);
+    await kbAuthorEnrichStep.apply!(ctx, {
+      detected: detected(),
+      llmOutput: llm(),
+      isFinalLlmAttempt: true,
+    } as never);
+
+    expect(stored(SKELETON).supersedesEntryId).toBe(SAME_NAMESPACE);
+    expect(stored(SKELETON).description).toBe('Escape every interpolated label.');
+  });
+
+  it('keeps the description the model wrote over the one it replaces', async () => {
+    const { ctx, stored } = setup([skeleton(), target('Escape every interpolated label.')]);
+    await kbAuthorEnrichStep.apply!(ctx, {
+      detected: detected({ existing: [shown] }),
+      llmOutput: llm({ ...update, description: 'The model one-liner.' }),
+      isFinalLlmAttempt: true,
+    } as never);
+
+    expect(stored(SKELETON).description).toBe('The model one-liner.');
+  });
+
+  it('keeps the description the author stated over the one it replaces', async () => {
+    const { ctx, stored } = setup([skeleton(), target('Escape every interpolated label.')]);
+    await kbAuthorEnrichStep.apply!(ctx, {
+      detected: detected({
+        existing: [shown],
+        authorDescription: 'Never inline SVG; reference a file.',
+      }),
+      llmOutput: llm(update),
+      isFinalLlmAttempt: true,
+    } as never);
+
+    expect(stored(SKELETON).description).toBe('Never inline SVG; reference a file.');
+  });
+
+  it('takes nothing from an entry it does not replace', async () => {
+    h.confirm.mockResolvedValue(null);
+    const { ctx, stored } = setup([skeleton(), target('Escape every interpolated label.')]);
+    await kbAuthorEnrichStep.apply!(ctx, {
+      detected: detected({ existing: [shown] }),
+      llmOutput: llm(update),
+      isFinalLlmAttempt: true,
+    } as never);
+
+    expect(stored(SKELETON).supersedesEntryId).toBeNull();
+    expect(stored(SKELETON).description).toBeNull();
+  });
+});
+
 // Neither the candidate query nor the proposed-target fetch filtered by namespace, so on a store that
 // hosts several a draft could be recorded as superseding another namespace's entry, and activating it
 // then archives that entry by id.

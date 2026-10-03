@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
-import { createFakeDb } from '@haive/database/testing';
+import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import { globalKbEntries } from '@haive/shared/global-kb';
 
-const h = vi.hoisted(() => ({ gdb: undefined as unknown }));
+const h = vi.hoisted(() => ({ gdb: undefined as unknown, confirm: vi.fn() }));
 
 vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/global-kb')>();
@@ -18,11 +18,18 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
       }),
   };
 });
+vi.mock('../src/step-engine/steps/_global-kb-similarity.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/step-engine/steps/_global-kb-similarity.js')>();
+  return { ...actual, confirmSupersedeByEmbedding: h.confirm };
+});
 
 import {
   identicalPromotionTarget,
+  inheritDescription,
   loadActiveGlobalArticlesForTask,
   promoteToGlobalKbDraft,
+  resolveIdenticalPromotion,
 } from '../src/step-engine/steps/_global-kb-promote.js';
 
 const log = { warn: vi.fn(), info: vi.fn() };
@@ -35,6 +42,33 @@ function setup(rows: Array<Record<string, unknown>> = []) {
   for (const row of rows) fake.insert(globalKbEntries, row);
   fake.insert(schema.tasks, { id: TASK, repositoryId: null });
   return { db: fake.db as never, stored: () => fake.rows(globalKbEntries) };
+}
+
+type Query = ReturnType<ReturnType<FakeDbHandle['select']>['from']>;
+
+// The fake db runs neither the candidates' `case when` order nor the advisory lock: insert in order.
+function setupLinkable(rows: Array<Record<string, unknown>>) {
+  const state = setup(rows);
+  const base = h.gdb as FakeDbHandle;
+  const unordered = (query: Query): Query => ({
+    where: (cond) => unordered(query.where(cond)),
+    orderBy: () => unordered(query),
+    limit: (n) => unordered(query.limit(n)),
+    for: () => unordered(query),
+    then: (ok, bad) => query.then(ok, bad),
+  });
+  h.gdb = {
+    ...base,
+    transaction: (fn) =>
+      base.transaction((tx) =>
+        fn({
+          ...tx,
+          execute: async () => {},
+          select: (fields) => ({ from: (table) => unordered(tx.select(fields).from(table)) }),
+        }),
+      ),
+  } as FakeDbHandle;
+  return state;
 }
 
 describe('promoteToGlobalKbDraft and the description', () => {
@@ -102,6 +136,141 @@ describe('promoteToGlobalKbDraft and the description', () => {
 
     it('is new when the body differs', () => {
       expect(identicalPromotionTarget([entry('Mock it.')], '# Other', null)).toBeUndefined();
+    });
+  });
+
+  describe('an identical body under the same topic, settled before any embedding is asked', () => {
+    const entry = (id: string, description: string | null) => ({
+      id,
+      body: `${promotion.body}\n`,
+      description,
+    });
+    const unrelated = { id: 'unrelated', body: '# Other', description: null };
+
+    it('links a promotion that brings a description to the first identical entry lacking one', () => {
+      const first = entry('first', null);
+
+      expect(
+        resolveIdenticalPromotion(
+          [unrelated, first, entry('second', null)],
+          promotion.body,
+          'Mock at the boundary.',
+        ),
+      ).toEqual({ kind: 'link', target: first });
+    });
+
+    it('is a duplicate when the identical entry already has a description', () => {
+      expect(
+        resolveIdenticalPromotion([entry('e1', 'Mock it.')], promotion.body, 'Reworded.'),
+      ).toMatchObject({ kind: 'duplicate', target: { id: 'e1' } });
+    });
+
+    it('is a duplicate when the promotion brings no description', () => {
+      expect(resolveIdenticalPromotion([entry('e1', null)], promotion.body, null)).toMatchObject({
+        kind: 'duplicate',
+        target: { id: 'e1' },
+      });
+    });
+
+    it('settles nothing when no body is identical', () => {
+      expect(
+        resolveIdenticalPromotion([unrelated, entry('e1', null)], '# Other topic', 'Mock it.'),
+      ).toBeNull();
+    });
+  });
+
+  describe('a draft that replaces an entry, and the description', () => {
+    it('keeps its own, whatever the entry says', () => {
+      expect(inheritDescription('Own one-liner.', 'Entry one-liner.')).toBe('Own one-liner.');
+    });
+
+    it("takes the entry's, as one line, when it has none", () => {
+      for (const own of [undefined, null, '', ' \n ']) {
+        expect(inheritDescription(own, ' Entry\none-liner. ')).toBe('Entry one-liner.');
+      }
+    });
+
+    it('has none when neither does', () => {
+      expect(inheritDescription(null, null)).toBeNull();
+      expect(inheritDescription('', undefined)).toBeNull();
+    });
+  });
+
+  describe('linking a same-topic entry', () => {
+    const TOPIC = 'quick_reference:vitest';
+    const ENTRY = '00000000-0000-4000-8000-0000000000a1';
+    const live = (over: Record<string, unknown> = {}) => ({
+      id: ENTRY,
+      namespace: 'default',
+      topicKey: TOPIC,
+      status: 'active',
+      category: 'quick_reference',
+      facets: {},
+      title: promotion.title,
+      body: promotion.body,
+      description: null,
+      ...over,
+    });
+    const draftOf = (rows: Array<Record<string, unknown>>) => rows.find((r) => r.id !== ENTRY);
+
+    beforeEach(() => {
+      h.confirm.mockReset();
+      h.confirm.mockResolvedValue(null);
+    });
+
+    it('links an identical body that only adds a description, without asking an embedding', async () => {
+      const { db, stored } = setupLinkable([live()]);
+
+      const out = await promoteToGlobalKbDraft(
+        db,
+        { ...promotion, topicKey: TOPIC, description: 'Mock at the boundary.' },
+        log,
+      );
+
+      expect(out).toMatchObject({ deduped: false, supersedesEntryId: ENTRY });
+      expect(h.confirm).not.toHaveBeenCalled();
+      expect(draftOf(stored())).toMatchObject({
+        status: 'draft',
+        supersedesEntryId: ENTRY,
+        description: 'Mock at the boundary.',
+      });
+    });
+
+    it('still skips an identical body whose entry already has a description', async () => {
+      const { db, stored } = setupLinkable([live({ description: 'Entry one-liner.' })]);
+
+      const out = await promoteToGlobalKbDraft(
+        db,
+        { ...promotion, topicKey: TOPIC, description: 'Mock at the boundary.' },
+        log,
+      );
+
+      expect(out).toEqual({ id: ENTRY, deduped: true, supersedesEntryId: null });
+      expect(stored()).toHaveLength(1);
+    });
+
+    it('carries the description of the entry an embedding match replaces', async () => {
+      h.confirm.mockResolvedValue(ENTRY);
+      const { db, stored } = setupLinkable([
+        live({ body: '# Vitest\n\nuse vi.mock and vi.hoisted', description: 'Entry one-liner.' }),
+      ]);
+
+      await promoteToGlobalKbDraft(db, { ...promotion, topicKey: TOPIC }, log);
+
+      expect(draftOf(stored())).toMatchObject({
+        supersedesEntryId: ENTRY,
+        description: 'Entry one-liner.',
+      });
+    });
+
+    it('takes nothing from an entry it does not replace', async () => {
+      const { db, stored } = setupLinkable([
+        live({ body: '# Vitest\n\nuse vi.mock and vi.hoisted', description: 'Entry one-liner.' }),
+      ]);
+
+      await promoteToGlobalKbDraft(db, { ...promotion, topicKey: TOPIC }, log);
+
+      expect(draftOf(stored())).toMatchObject({ supersedesEntryId: null, description: null });
     });
   });
 

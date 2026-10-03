@@ -357,6 +357,26 @@ export function identicalPromotionTarget<T extends { body: string; description: 
   );
 }
 
+/** An identical body is the same article: a copy adding a description links to it, no embedding. */
+export function resolveIdenticalPromotion<T extends { body: string; description: string | null }>(
+  candidates: T[],
+  body: string,
+  description: string | null,
+): { kind: 'duplicate' | 'link'; target: T } | null {
+  const duplicate = identicalPromotionTarget(candidates, body, description);
+  if (duplicate) return { kind: 'duplicate', target: duplicate };
+  const same = candidates.find((c) => c.body.trim() === body.trim());
+  return same ? { kind: 'link', target: same } : null;
+}
+
+/** A draft's own description wins, else the replaced entry's, which activation archives. */
+export function inheritDescription(
+  own: string | null | undefined,
+  replaced: string | null | undefined,
+): string | null {
+  return normalizeGlobalKbDescription(own) ?? normalizeGlobalKbDescription(replaced);
+}
+
 /** Promote a generalizable knowledge item to the cross-repo global KB as a DRAFT
  *  (`source='promoted'`). Drafts hold no vectors and are not retrievable until an
  *  admin activates them in Settings → Global KB, so this NEVER touches the
@@ -394,6 +414,7 @@ export async function promoteToGlobalKbDraft(
       // duplicate. Distinct topics never contend; the xact lock auto-releases on end.
       return await gdb.transaction(async (tx) => {
         let supersedesEntryId: string | null = null;
+        let supersededDescription: string | null | undefined;
         if (promotion.topicKey) {
           const lockKey = `${settings.namespace}:${promotion.topicKey}`;
           await tx.execute(
@@ -424,24 +445,30 @@ export async function promoteToGlobalKbDraft(
             )
             .limit(SUPERSEDE_CANDIDATE_LIMIT);
           // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
-          const identical = identicalPromotionTarget(
+          const same = resolveIdenticalPromotion(
             candidates,
             clean.body,
             normalizeGlobalKbDescription(clean.description),
           );
-          if (identical) {
+          if (same?.kind === 'duplicate') {
             log.info(
-              { topicKey: promotion.topicKey, existingId: identical.id },
+              { topicKey: promotion.topicKey, existingId: same.target.id },
               'global KB promotion skipped (identical content already present)',
             );
-            return { id: identical.id, deduped: true, supersedesEntryId: null };
+            return { id: same.target.id, deduped: true, supersedesEntryId: null };
           }
-          // Supersede an existing entry ONLY when embeddings confirm it is the SAME
-          // article — the coarse topicKey (category:tech) groups unrelated articles on
-          // one tech, so it can't decide identity. No confirmed match (or ollama
+          // Supersede an existing entry ONLY when its body is identical or embeddings confirm
+          // it is the SAME article — the coarse topicKey (category:tech) groups unrelated
+          // articles on one tech, so it can't decide identity. No confirmed match (or ollama
           // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
           // article that merely shares the key.
-          if (candidates.length > 0) {
+          if (same) {
+            supersedesEntryId = same.target.id;
+            log.info(
+              { topicKey: promotion.topicKey, supersedesEntryId },
+              'global KB promotion linked to existing topic (identical body)',
+            );
+          } else if (candidates.length > 0) {
             supersedesEntryId = await confirmSupersedeByEmbedding(
               { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
               `${clean.title}\n\n${clean.body}`,
@@ -458,6 +485,7 @@ export async function promoteToGlobalKbDraft(
                 : 'global KB promotion kept independent (no same-article match)',
             );
           }
+          supersededDescription = candidates.find((c) => c.id === supersedesEntryId)?.description;
         }
         const [row] = await tx
           .insert(globalKbEntries)
@@ -472,7 +500,7 @@ export async function promoteToGlobalKbDraft(
             // VERBATIM while a project's own set is lowercased, so a capitalised package name
             // would be stored unmatchable by the exact jsonb `?|` the search uses.
             facets: normalizeFacets(promotion.facets),
-            description: normalizeGlobalKbDescription(clean.description),
+            description: inheritDescription(clean.description, supersededDescription),
             status: 'draft',
             source: 'promoted',
             sourceTaskId: promotion.taskId,

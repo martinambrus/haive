@@ -17,7 +17,7 @@ import {
   confirmSupersedeByEmbedding,
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
-import { globalKbTopicKey } from '../_global-kb-promote.js';
+import { globalKbTopicKey, inheritDescription } from '../_global-kb-promote.js';
 import {
   bodyUsesRepoSymbol,
   collectRepoBasenames,
@@ -590,6 +590,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             status: globalKbEntries.status,
             title: globalKbEntries.title,
             body: globalKbEntries.body,
+            description: globalKbEntries.description,
           })
           .from(globalKbEntries)
           .where(
@@ -611,6 +612,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
               status: globalKbEntries.status,
               title: globalKbEntries.title,
               body: globalKbEntries.body,
+              description: globalKbEntries.description,
             })
             .from(globalKbEntries)
             .where(
@@ -650,7 +652,10 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             title,
             category,
             facets,
-            description: described.description,
+            description: inheritDescription(
+              described.description,
+              candidates.find((c) => c.id === matchId)?.description,
+            ),
             body: finalBody,
             // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
             // shared by every project, and it used to be the one case that skipped review
