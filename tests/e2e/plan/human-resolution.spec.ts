@@ -173,6 +173,22 @@ test.describe('human plan resolutions', () => {
         await expect(instructions).toBeVisible();
         await expect(research).toBeVisible();
       }
+
+      for (const status of ['done', 'not_applicable']) {
+        await record.click();
+        await page.getByRole('textbox', { name: /What is the outcome/ }).fill('Unsaved outcome.');
+        await page.getByRole('button', { name: 'Change status or kind' }).click();
+        await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption(status);
+        await page.getByRole('button', { name: 'OK', exact: true }).click();
+        await expect(page.getByText('Human item settled', { exact: true })).toBeVisible();
+        await expect(page.getByRole('textbox', { name: /What is the outcome/ })).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Save answer and status' })).toHaveCount(0);
+
+        await page.getByRole('button', { name: 'Change status or kind' }).click();
+        await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption('todo');
+        await page.getByRole('button', { name: 'OK', exact: true }).click();
+        await expect(record).toBeVisible();
+      }
     } finally {
       if (repo) await cleanupRepoFixture(sql, repo.repoId);
       if (userId) await cleanupUser(sql, userId);

@@ -136,6 +136,9 @@ export function PlanDetailPanel({
   const reload = async (): Promise<void> => {
     const d = await getPlanNode(repositoryId, nodeId);
     setDetail(d);
+    if (d.node.status === 'done' || d.node.status === 'not_applicable') {
+      setResolutionNode(null);
+    }
     setTitleDraft(d.node.title);
     setBodyDraft(d.node.body ?? '');
   };

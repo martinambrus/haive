@@ -74,7 +74,8 @@ Unresolved items default to Still waiting so recording partial progress does not
 An item's own `done` or `not_applicable` status changes the panel to **Human item settled**,
 with guidance for reopening it instead of instructions to act. Resolution and advisory buttons
 are hidden until its status is reopened; Still waiting keeps both available. The description
-and recorded answers remain visible.
+and recorded answers remain visible. A successful write that reloads a settled status also
+closes an open resolution form, including when the status editor settled the item.
 The endpoint `POST /plan/nodes/:nodeId/resolution` checks repository ownership and the item's
 kind, then passes one versioned body-and-status upsert through `applyPlanPatch`. The question
 and prior answers remain verbatim, with a new `## Decision` / `## Outcome` section appended;
