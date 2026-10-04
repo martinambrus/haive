@@ -714,6 +714,7 @@ async function dispatchMergeFixAgent(
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
+      assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
       mode: 'cli',
       agentTitle: issueAgentTitle(issue, 'Merge fix'),
       prompt: plan.effectivePrompt ?? prompt,
@@ -1083,6 +1084,7 @@ async function spawnReviewAgent(
     taskStepId: ra.current.id,
     cliProviderId: plan.providerId,
     effort: plan.effort ?? null,
+    assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
     // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
     // concurrent invocations on the ONE 06c step, so it must be exempt from the
     // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
@@ -1847,6 +1849,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
       taskStepId: ea.current.id,
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
+      assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
       mode: 'cli',
       prompt: plan.effectivePrompt ?? prompt,
     }));
@@ -2292,6 +2295,7 @@ export async function resolveDagPhase(
           taskStepId: current.id,
           cliProviderId: planDispatch.providerId,
           effort: planDispatch.effort ?? null,
+          assignedAgentIds: planDispatch.invocation?.spec.assignedAgentIds ?? [],
           // 'dag_parallel', not 'cli': N coders dispatch concurrently on the ONE
           // 06c step, so they must be exempt from the one-live-per-step index (the
           // per-issue barrier is task_dag_issues, not the singleton index).

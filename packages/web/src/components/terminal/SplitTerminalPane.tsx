@@ -9,6 +9,7 @@ import {
 } from '@/lib/api-client';
 import type { PaneSide } from '@/lib/split-pane';
 import { CliStreamViewer } from './CliStreamViewer';
+import { AgentPersonaBadges } from './AgentPersonaBadges';
 
 interface SplitTerminalPaneProps {
   taskId: string;
@@ -114,6 +115,11 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
         </button>
       </div>
       {error && <div className="pb-1 text-xs text-red-400">{error}</div>}
+      {invocation && (
+        <div className="flex flex-wrap gap-2 pb-1 text-[11px]">
+          <AgentPersonaBadges ids={invocation.assignedAgentIds} />
+        </div>
+      )}
       {invocation === null ? (
         <div className="text-xs text-neutral-500">
           {invocations === null ? 'Loading…' : 'No CLI output for this step yet.'}

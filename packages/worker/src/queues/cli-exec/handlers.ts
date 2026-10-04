@@ -230,6 +230,8 @@ export async function handleCliExecJob(
   // Decided with the prompt at dispatch, recorded when the run starts: a job that never starts was
   // given nothing.
   const agentRules = agentRulesOf(payload.spec);
+  // Also covers jobs queued before dispatch-side assignment recording was deployed.
+  const assignedAgentIds = assignedAgentIdsOf(payload.spec);
   const [started] = await db
     .update(schema.cliInvocations)
     // Run truly begins here. Overwrite any waiting copy a gate wrote while this was held
@@ -239,6 +241,7 @@ export async function handleCliExecJob(
     .set({
       startedAt: new Date(),
       statusMessage: STATUS_DEFAULT_MESSAGE,
+      assignedAgentIds,
       ...(agentRules ? { agentRules } : {}),
     })
     .where(
@@ -274,10 +277,6 @@ export async function handleCliExecJob(
     : {};
   const gitEnv = await resolveGitEnv(db, { userId: payload.userId, taskId: payload.taskId });
   const secrets: Record<string, string> = { ...gitEnv, ...providerSecrets };
-  // Decided at dispatch and carried on the spec, so it is known before the run and written on
-  // the success and the failure path alike: an assignment is a dispatch fact, not a run fact.
-  const assignedAgentIds = assignedAgentIdsOf(payload.spec);
-
   const startedAt = Date.now();
   let outcome: { exitCode: number | null; errorMessage: string | null; rawOutput: string | null };
   try {

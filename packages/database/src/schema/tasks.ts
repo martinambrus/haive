@@ -1114,6 +1114,10 @@ export const cliInvocations = pgTable(
       reason?: 'disabled' | 'opt-out' | 'prompt-too-large';
     }>(),
     haiveBuild: text('haive_build'),
+    /** Persona assignments captured at dispatch, so queued/running terminals can name
+     *  their agent before toolUsage is written at completion. NULL means unrecorded;
+     *  an empty array means no persona assigned. Migration 0173. */
+    assignedAgentIds: text('assigned_agent_ids').array(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

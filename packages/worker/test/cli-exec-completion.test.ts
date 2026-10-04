@@ -148,6 +148,18 @@ beforeEach(() => {
 });
 
 describe('a cli run start', () => {
+  it('records personality names before the executor starts or usage capture finishes', async () => {
+    const { db, writes } = fakeDb({});
+    stubs.executeByKind.mockImplementation(async () => {
+      const started = runWrites(writes).find((w) => 'startedAt' in w.set);
+      expect(started?.set.assignedAgentIds).toEqual(['knowledge-miner']);
+      expect(started?.set.toolUsage).toBeUndefined();
+      return ok;
+    });
+    await handleCliExecJob(db, { ...base, spec: { assignedAgentIds: ['knowledge-miner'] } });
+    expect(stubs.executeByKind).toHaveBeenCalledOnce();
+  });
+
   it('runs nothing once the run was superseded after the job read it', async () => {
     const { db, writes } = fakeDb({ supersededBeforeStart: true });
     await handleCliExecJob(db, base);

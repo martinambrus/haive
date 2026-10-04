@@ -9,6 +9,7 @@ import {
 } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
+import { AgentPersonaBadges } from './AgentPersonaBadges';
 import { describeInvocationStatus } from './cli-stream-status';
 import {
   INVOCATION_HISTORY_PAGE,
@@ -432,6 +433,7 @@ function InvocationPanel({
       >
         <span className="text-neutral-500">{expanded ? '▼' : '▶'}</span>
         {label && <span className="font-medium text-neutral-200">{label}</span>}
+        <AgentPersonaBadges ids={invocation.assignedAgentIds} />
         {/* Fan-out titles name the specific finding an agent works ("Refuter 2/4
             [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
             push the badges and the runtime onto their own line. Capped and ellipsized; the

@@ -561,6 +561,7 @@ async function dispatchFixAgent(
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
+      assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
       mode: 'cli',
       prompt: plan.effectivePrompt ?? prompt,
     }));

@@ -1508,6 +1508,15 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
     agentTitle: sql<
       string | null
     >`coalesce(${schema.cliInvocations.agentTitle}, ${schema.taskStepAgentMinings.agentTitle})`,
+    // Dispatch fact, available before completion. Only the recorded usage assignments
+    // can recover legacy rows; a mining title may name a work item rather than a persona.
+    assignedAgentIds: sql<string[] | null>`coalesce(
+      ${schema.cliInvocations.assignedAgentIds},
+      CASE WHEN jsonb_typeof(${schema.cliInvocations.toolUsage} #> '{agents,assigned}') = 'array'
+        THEN ARRAY(SELECT jsonb_array_elements_text(${schema.cliInvocations.toolUsage} #> '{agents,assigned}'))
+        ELSE NULL
+      END
+    )`,
     // This terminal's own latest activity line (per-invocation, not the shared
     // step status), so each terminal shows what it is actually doing.
     statusMessage: schema.cliInvocations.statusMessage,
