@@ -1116,7 +1116,7 @@ async function ddevExecOnce(
   // buffered path below returns nothing until a multi-minute op completes).
   if (opts.onLine)
     return ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
-  const cmd = `cd ${handle.projectDir} && ddev ${ddevArgs}`;
+  const cmd = buildDdevShellCommand(handle.projectDir, ddevArgs, opts.timeoutMs ?? 600_000);
   try {
     const { stdout, stderr } = await exec(
       'docker',
@@ -1132,6 +1132,22 @@ async function ddevExecOnce(
     const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-8000);
     return { exitCode: e.code ?? 1, output: `${output}${await staleHandleNote(handle)}` };
   }
+}
+
+/** Docker exec outlives its host client. Keep startup/restart exclusion inside the runner
+ * so a worker hot reload cannot overlap an orphaned DDEV compose operation. The lock lives
+ * outside the repository and expires its wait before the host command times out. */
+export function buildDdevShellCommand(
+  projectDir: string,
+  ddevArgs: string,
+  timeoutMs: number,
+): string {
+  const lifecycle = /^(?:start|restart)(?:\s|$)/.test(ddevArgs);
+  const waitSeconds = Math.max(1, Math.floor(timeoutMs / 1000) - 5);
+  const prefix = lifecycle
+    ? `flock --exclusive --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock `
+    : '';
+  return `cd ${projectDir} && ${prefix}ddev ${ddevArgs}`;
 }
 
 /** `runnerHandleForTask` and `startDdevRunner` both build `projectDir` this way, so the repo
@@ -1869,7 +1885,7 @@ export async function ensureDdevStarted(
     withDdevBootCancellation(
       opts.signal,
       async (id) => {
-        opts.onProgress?.('Stopping the interrupted DDEV startup…');
+        opts.onProgress?.('Removing the incomplete DDEV startup…');
         await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
       },
       async (scope) => {
@@ -1971,12 +1987,13 @@ async function ensureDdevStartedInner(
       // a worker hot-reload SIGKILLed an in-flight `ddev` op mid-restart). Restart
       // the project IN PLACE — the base images are still cached in the surviving
       // anon /var/lib/docker, so this pulls nothing (only a genuinely-changed
-      // php/db image would). One ~300s attempt: with images cached there is no
-      // multi-GB pull to wait on, so a wedged warm start fails fast into the cold
-      // rebuild below rather than blocking for the cold path's 900s.
+      // php/db image would). Allow the cold-boot budget here too: the runner-local
+      // lifecycle lock may first wait for an orphaned cold start to finish after a
+      // worker reload. A 300s total budget could destroy that boot while it still
+      // makes progress, discarding its newly cached images and starting over.
       const warm = await ddevExec(existing, 'start', {
         onLine: opts.onProgress,
-        timeoutMs: 300_000,
+        timeoutMs: 900_000,
       });
       scope.throwIfAborted();
       if (warm.exitCode === 0) {
@@ -2039,7 +2056,7 @@ async function ensureDdevStartedInner(
         }
         const retry = await ddevExec(existing, 'start', {
           onLine: opts.onProgress,
-          timeoutMs: 300_000,
+          timeoutMs: 900_000,
         });
         if (retry.exitCode === 0) return existing;
         if (isDdevVersionConstraintFailure(retry.output)) {
@@ -2291,7 +2308,7 @@ function ddevExecStreaming(
 ): Promise<{ exitCode: number; output: string }> {
   return runnerShellStreaming(
     handle,
-    `cd ${handle.projectDir} && ddev ${ddevArgs}`,
+    buildDdevShellCommand(handle.projectDir, ddevArgs, timeoutMs),
     onLine,
     timeoutMs,
   );

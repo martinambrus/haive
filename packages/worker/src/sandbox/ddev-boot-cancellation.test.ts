@@ -130,6 +130,49 @@ describe('DDEV cold-boot cancellation', () => {
     expect(retryBoot).not.toHaveBeenCalled();
   });
 
+  it('removes a runner after restore failure before Retry can reuse its empty database', async () => {
+    const failure = new Error('access snapshot restore failed');
+    const restore = deferred();
+    const teardown = deferred();
+    const removing = deferred();
+    const remove = vi.fn(async () => {
+      removing.resolve();
+      await teardown.promise;
+    });
+    const boots = new DdevBoots<string>();
+    const old = boots.ensure('task', undefined, () =>
+      withDdevBootCancellation(undefined, remove, async (scope) => {
+        scope.created('empty-db-runner');
+        await restore.promise;
+        throw failure;
+      }),
+    );
+    const error = old.catch((err: unknown) => err);
+    restore.resolve();
+    await removing.promise;
+    expect(remove).toHaveBeenCalledExactlyOnceWith('empty-db-runner');
+    const replacement = vi.fn(async () => 'restored-db-runner');
+    const waiting = boots.ensure('task', undefined, replacement);
+    const waitingError = waiting.catch((err: unknown) => err);
+    expect(replacement).not.toHaveBeenCalled();
+    teardown.resolve();
+    expect(await error).toBe(failure);
+    expect(await waitingError).toBe(failure);
+    await expect(boots.ensure('task', undefined, replacement)).resolves.toBe('restored-db-runner');
+    expect(replacement).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a pre-existing runtime when bring-up fails', async () => {
+    const failure = new Error('live database snapshot failed');
+    const remove = vi.fn(async () => {});
+    await expect(
+      withDdevBootCancellation(undefined, remove, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it('coalesces successful boots without restarting the runner', async () => {
     const finish = deferred<string>();
     const boots = new DdevBoots<string>();

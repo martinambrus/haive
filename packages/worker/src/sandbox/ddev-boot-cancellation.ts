@@ -46,7 +46,9 @@ export class DdevBoots<T> {
 /** An interrupted cold boot owns its new runner until bring-up (including wiring) ends.
  * Remove it on abort to terminate nested builds too: killing the docker exec client alone
  * leaves its process running inside the container. A pre-existing runtime is not owned here,
- * since Stop must preserve its imported database. Await teardown before releasing the boot. */
+ * since Stop must preserve its imported database. Failed bring-up also removes its new
+ * runner so Retry cannot reuse a serving runtime whose database restore failed.
+ * Await teardown before releasing the boot. */
 export async function withDdevBootCancellation<T>(
   signal: AbortSignal | undefined,
   remove: (containerId: string) => Promise<void>,
@@ -54,7 +56,7 @@ export async function withDdevBootCancellation<T>(
 ): Promise<T> {
   let containerId: string | null = null;
   let teardown: Promise<void> | null = null;
-  const onAbort = (): void => {
+  const removeOwnedRunner = (): void => {
     if (!containerId || teardown) return;
     teardown = remove(containerId);
     // The operation unwinds when removal closes docker exec. Observe this promise now,
@@ -67,21 +69,21 @@ export async function withDdevBootCancellation<T>(
     },
     created(id) {
       containerId = id;
-      if (signal?.aborted) onAbort();
+      if (signal?.aborted) removeOwnedRunner();
     },
   };
-  signal?.addEventListener('abort', onAbort, { once: true });
+  signal?.addEventListener('abort', removeOwnedRunner, { once: true });
   try {
     scope.throwIfAborted();
     const result = await run(scope);
     scope.throwIfAborted();
     return result;
   } catch (err) {
-    if (!signal?.aborted) throw err;
-    onAbort();
+    removeOwnedRunner();
     if (teardown) await teardown;
-    throw new DdevBootAbortedError();
+    if (signal?.aborted) throw new DdevBootAbortedError();
+    throw err;
   } finally {
-    signal?.removeEventListener('abort', onAbort);
+    signal?.removeEventListener('abort', removeOwnedRunner);
   }
 }

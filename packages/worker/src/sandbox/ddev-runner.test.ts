@@ -17,7 +17,34 @@ import {
   parseDdevTableCount,
   warmStartRecoveryVerdict,
   selectLatestAccessSnapshot,
+  buildDdevShellCommand,
 } from './ddev-runner.js';
+
+describe('DDEV lifecycle commands across worker restarts', () => {
+  it('locks startup and restart in the runner for both buffered and streaming execution', () => {
+    for (const command of ['start', 'restart', 'start --skip-hooks']) {
+      expect(buildDdevShellCommand('/repos/project', command, 900_000)).toBe(
+        `cd /repos/project && flock --exclusive --timeout 895 /tmp/haive-ddev-lifecycle.lock ddev ${command}`,
+      );
+    }
+  });
+
+  it('lets probes and database commands run without taking the startup lock', () => {
+    for (const command of [
+      'describe -j',
+      'snapshot restore saved',
+      'import-db --file=/tmp/db.sql',
+    ]) {
+      expect(buildDdevShellCommand('/repos/project', command, 30_000)).toBe(
+        `cd /repos/project && ddev ${command}`,
+      );
+    }
+  });
+
+  it('bounds lock waiting before the host docker-exec timeout', () => {
+    expect(buildDdevShellCommand('/repos/project', 'start', 300_000)).toContain('--timeout 295');
+  });
+});
 
 describe('database snapshots after changing browser access', () => {
   const access = { name: 'haive-access-task-100-postgres_17.zst', modified: 200 };
