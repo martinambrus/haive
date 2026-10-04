@@ -1,5 +1,65 @@
 # DDEV runtime
 
+**Stop and Retry abort a cold DDEV startup, including its debug/database wiring.**
+The step's abort signal used to reach only runtime admission. Task `987e2eb2` stopped
+`01c-ddev-env`, retried `98-choose-view` from VNC to direct access, and spent five minutes
+with a pending step while the superseded startup still built images. `withDdevBootCancellation`
+owns the immutable container ID returned by `docker run` until bring-up and wiring finish.
+Aborting removes that runner and its anonymous Docker volume; killing the host's `docker exec`
+client alone cannot stop the nested process. Creation that finishes after the abort is removed
+too. `DdevBoots` keeps the old boot held until teardown settles, then a surviving caller boots
+with the current settings. Every coalesced caller's signal reaches the shared boot, including
+a step that joins a signal-less runtime-ensure job. The shared signal also cancels runner-image
+inspection/build and stale-image pruning before a container exists. A completed runtime is
+no longer owned by that startup, so an
+ordinary Stop keeps its imported database as before.
+
+**A changed browser choice must reconcile the runner's immutable published ports.**
+An existing VNC runner cannot gain direct browser ports by changing `tasks.direct_access`.
+Every DDEV ensure compares that choice (including the global switch) with the published-port
+labels. A mismatch first snapshots the live database, then replaces the runner.
+Access snapshots alternate between `haive-access-<task>-0` and `-1`: clean the inactive
+slot before creation, retain the latest backup until the replacement runner has restored
+the new snapshot successfully, then prune
+the superseded backup. Legacy timestamped access snapshots are pruned too. Repeated mode
+changes retain one backup, with at most two during replacement, rather than multiplying
+the database on the shared repository volume. Port inspection failures fail reconciliation; they never
+mean that direct ports were absent. Projects whose effective merged DDEV configuration
+explicitly omits the DB container (including SQLite projects) can recreate without a DB
+snapshot and skip restoration. Later cold recovery checks the effective configuration too,
+so old snapshots retained after conversion to SQLite cannot target an omitted database.
+An unreachable or empty configured database cannot waive preservation.
+Snapshot failure leaves the existing runner intact. Cold recovery
+restores that access snapshot and refuses a failed restore rather than serving an empty database.
+Failed bring-up removes the newly created runner before releasing the boot, so Retry must
+attempt the cold restore again instead of reusing a serving runner with an empty database.
+A later import or migration snapshot takes precedence by modification time, retaining the
+winning name even when both ordinary snapshots exist. A known snapshot that fails to restore
+does not fall back to an older database. Subsequent cold recovery cannot undo database work
+done after the access change or a later re-import. Snapshot paths use the same
+anchored filesystem primitives as other DDEV inputs. Snapshot listings iterate the held
+directory with a 1,024-entry cap and stat candidates sequentially. Exceeding the cap fails
+recovery instead of choosing from a partial listing or allocating work for every entry.
+
+**A worker reload cannot rely on its in-memory boot map to serialize DDEV.** On task
+`70b9dc50`, repeated source reloads re-drove `01c` while the old `docker exec`'s
+`ddev start` still ran inside the surviving runner. Two compose operations then collided
+on `ddev-elmont-novy-codex-web`, and warm recovery discarded the runner's image cache.
+Both buffered and streaming `start`/`restart` and snapshot/restore/cleanup commands hold the same runner-local
+`flock` outside the repository. The lock survives loss of the worker/client and is
+released when the nested command exits. Lock acquisition allows 900 seconds for an
+orphaned cold boot, then a runner-local `timeout` gives the new command its full execution
+budget (300 seconds for warm startup, 900 for cold startup/restart), plus ten seconds
+before KILL. The host exec timeout includes both budgets and that grace, so a late lock
+acquisition cannot launch a command with only seconds remaining before its client dies.
+A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
+runner: the earlier operation may still be restoring its live database. Snapshot locking
+also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
+Selection, stale cleanup, creation and promotion run in one non-root runner process under
+that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
+slot only after creation succeeds; interrupted partial copies never count as recovery points.
+The replacement restores that exact committed slot, without re-selecting by file times.
+
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
 records `runtimeSmoke.passed: null` for a 4xx without a runtime-error signature; an explicit

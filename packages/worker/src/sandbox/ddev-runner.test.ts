@@ -16,7 +16,135 @@ import {
   buildDdevTableCountCommand,
   parseDdevTableCount,
   warmStartRecoveryVerdict,
+  selectLatestDurabilitySnapshot,
+  buildDdevCommand,
+  ddevConfigOmitsDatabase,
 } from './ddev-runner.js';
+
+describe('DDEV lifecycle commands across worker restarts', () => {
+  it('locks startup and restart in the runner for both buffered and streaming execution', () => {
+    for (const command of [
+      'start',
+      'restart',
+      'start --skip-hooks',
+      'snapshot restore saved',
+      'snapshot --cleanup --name=old --yes',
+    ]) {
+      expect(buildDdevCommand('/repos/project', command, 900_000)).toEqual({
+        shell: `cd /repos/project && flock --exclusive --conflict-exit-code 75 --timeout 900 /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s 900s ddev ${command}`,
+        hostTimeoutMs: 1_815_000,
+      });
+    }
+  });
+
+  it('lets probes and database commands run without taking the startup lock', () => {
+    for (const command of ['describe -j', 'import-db --file=/tmp/db.sql']) {
+      expect(buildDdevCommand('/repos/project', command, 30_000)).toEqual({
+        shell: `cd /repos/project && ddev ${command}`,
+        hostTimeoutMs: 30_000,
+      });
+    }
+  });
+
+  it('reserves the full warm-start execution time after a nearly exhausted lock wait', () => {
+    const command = buildDdevCommand('/repos/project', 'start', 300_000);
+    expect(command.shell).toContain('--timeout 900');
+    expect(command.shell).toContain('--conflict-exit-code 75');
+    expect(command.shell).toContain('timeout --kill-after=10s 300s ddev start');
+    const acquiredAtMs = 899_000;
+    expect(command.hostTimeoutMs - acquiredAtMs).toBeGreaterThan(300_000 + 10_000);
+  });
+});
+
+describe('database preservation when changing browser access', () => {
+  const config = (yaml: string) =>
+    `These config files were loaded\n# Complete processed project configuration:\n${yaml}`;
+
+  it('waives a database snapshot only when the merged config explicitly omits db', () => {
+    expect(ddevConfigOmitsDatabase(config('name: sqlite-site\nomit_containers: [db]\n'))).toBe(
+      true,
+    );
+    expect(
+      ddevConfigOmitsDatabase(config('name: app\nomit_containers:\n  - ddev-ssh-agent\n  - db\n')),
+    ).toBe(true);
+  });
+
+  it('preserves a configured database even when the project has no tables or the service is unreachable', () => {
+    expect(ddevConfigOmitsDatabase(config('name: app\ndatabase:\n  type: postgres\n'))).toBe(false);
+    expect(ddevConfigOmitsDatabase(config('name: app\nomit_containers: [ddev-ssh-agent]\n'))).toBe(
+      false,
+    );
+  });
+
+  it('never waives preservation for failed, truncated or malformed configuration output', () => {
+    expect(ddevConfigOmitsDatabase('omit_containers: [db]\n')).toBeNull();
+    expect(ddevConfigOmitsDatabase(config('omit_containers: db\n'))).toBeNull();
+    expect(ddevConfigOmitsDatabase(config('omit_containers: [\n'))).toBeNull();
+  });
+});
+
+describe('database snapshots after changing browser access', () => {
+  const access = { name: 'haive-access-task-100-postgres_17.zst', modified: 200 };
+
+  it('restores the database saved for the access change ahead of an older import', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-import-task-postgres_17.zst', modified: 100 },
+        access,
+      ]),
+    ).toBe('haive-access-task-100');
+  });
+
+  it('does not roll back a later migration or re-import to an older access snapshot', () => {
+    for (const kind of ['migrated', 'import']) {
+      expect(
+        selectLatestDurabilitySnapshot('task', [
+          access,
+          { name: `haive-${kind}-task-postgres_17.zst`, modified: 300 },
+        ]),
+      ).toBe(`haive-${kind}-task`);
+    }
+  });
+
+  it('uses the most recent completed snapshot when access was changed twice', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        access,
+        { name: 'haive-access-task-150-mariadb_10.11', modified: 400 },
+      ]),
+    ).toBe('haive-access-task-150');
+  });
+
+  it('ignores snapshots from other tasks and malformed access names', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-access-other-200-postgres_17.zst', modified: 500 },
+        { name: 'haive-access-task-incomplete', modified: 600 },
+        access,
+      ]),
+    ).toBe('haive-access-task-100');
+  });
+
+  it('restores a later import rather than falling back to an older migration snapshot', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-migrated-task-postgres_17.zst', modified: 100 },
+        access,
+        { name: 'haive-import-task-postgres_17.zst', modified: 300 },
+      ]),
+    ).toBe('haive-import-task');
+  });
+
+  it('selects the newest ordinary snapshot even when browser access never changed', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-migrated-task-postgres_17.zst', modified: 100 },
+        { name: 'haive-import-task-postgres_17.zst', modified: 300 },
+      ]),
+    ).toBe('haive-import-task');
+    expect(selectLatestDurabilitySnapshot('task', [])).toBeNull();
+  });
+});
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
 // the three booleans by shelling out (ddev describe / docker info) and then routes

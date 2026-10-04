@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { parse as parseYaml } from 'yaml';
 import {
   CONFIG_KEYS,
   RUNNER_SUBPATH_LABEL,
@@ -62,6 +63,13 @@ import { buildMountArgs, type DockerVolumeMount } from './docker-runner.js';
 import { runnerSubpathVerdict } from './app-runner.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
+import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
+import {
+  DdevBootAbortedError,
+  DdevBoots,
+  withDdevBootCancellation,
+  type DdevBootScope,
+} from './ddev-boot-cancellation.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
 // shared host daemon here (repos live in the haive_repos NAMED VOLUME, which the
@@ -160,27 +168,32 @@ async function resolveImageTag(): Promise<string> {
   return cachedTag;
 }
 
-async function imageExists(tag: string): Promise<boolean> {
+async function imageExists(tag: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    await exec('docker', ['image', 'inspect', tag], { timeout: 15_000 });
+    await exec('docker', ['image', 'inspect', tag], { timeout: 15_000, signal });
     return true;
   } catch {
+    signal?.throwIfAborted();
     return false;
   }
 }
 
 /** Build the runner image if not already present. Idempotent + process-cached. */
-export async function ensureDdevRunnerImage(): Promise<string> {
+export async function ensureDdevRunnerImage(signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const tag = await resolveImageTag();
-  if (await imageExists(tag)) return tag;
+  if (await imageExists(tag, signal)) return tag;
+  signal?.throwIfAborted();
   const dir = runnerContextDir();
   log.info({ tag, dir }, 'building haive-ddev-runner image');
   await exec('docker', ['build', '-t', tag, dir], {
     timeout: 900_000,
     maxBuffer: 50 * 1024 * 1024,
+    signal,
   });
+  signal?.throwIfAborted();
   log.info({ tag }, 'ddev runner image built');
-  await pruneOldRunnerImages(tag);
+  await pruneOldRunnerImages(tag, signal);
   return tag;
 }
 
@@ -188,18 +201,20 @@ export async function ensureDdevRunnerImage(): Promise<string> {
  *  The tag is a content hash of the build context, so old tags are dead weight
  *  (~2GB each) once the context changes. Best-effort — a tag still referenced by a
  *  stopped container is logged and skipped. */
-async function pruneOldRunnerImages(currentTag: string): Promise<void> {
+async function pruneOldRunnerImages(currentTag: string, signal?: AbortSignal): Promise<void> {
   try {
     const { stdout } = await exec(
       'docker',
       ['images', DDEV_RUNNER_IMAGE, '--format', '{{.Repository}}:{{.Tag}}'],
-      { timeout: 15_000 },
+      { timeout: 15_000, signal },
     );
     const stale = stdout
       .split(/\s+/)
       .filter((t) => t.length > 0 && t !== currentTag && t.startsWith(`${DDEV_RUNNER_IMAGE}:`));
     for (const t of stale) {
-      await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000 }).catch((err) => {
+      signal?.throwIfAborted();
+      await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000, signal }).catch((err) => {
+        signal?.throwIfAborted();
         log.warn(
           { tag: t, err: err instanceof Error ? err.message : String(err) },
           'prune stale runner image failed',
@@ -208,6 +223,7 @@ async function pruneOldRunnerImages(currentTag: string): Promise<void> {
     }
     if (stale.length > 0) log.info({ removed: stale.length }, 'pruned stale runner images');
   } catch (err) {
+    signal?.throwIfAborted();
     log.warn(
       { err: err instanceof Error ? err.message : String(err) },
       'runner image prune failed',
@@ -285,8 +301,11 @@ export async function startDdevRunner(params: {
   taskId: string;
   /** Repo subpath within the haive_repos volume, e.g. `<userId>/<repoId>`. */
   repoSubpath: string;
+  bootScope?: DdevBootScope;
 }): Promise<DdevRunnerHandle> {
-  const tag = await ensureDdevRunnerImage();
+  params.bootScope?.throwIfAborted();
+  const tag = await ensureDdevRunnerImage(params.bootScope?.signal);
+  params.bootScope?.throwIfAborted();
   const name = runnerName(params.taskId);
   const dumpMounts = await resolveDumpMounts(params.taskId);
   // Drop any stale runner from a prior attempt (with its anon volume). A DinD
@@ -433,15 +452,18 @@ export async function startDdevRunner(params: {
     };
   };
 
+  params.bootScope?.throwIfAborted();
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
   let chosenPorts: DdevPublishedPorts | null = null;
   let chosenMailpitPorts: DdevPublishedPorts | null = null;
   let started = false;
   const maxAttempts = directAccess || dbAccess ? 5 : 1;
   for (let attempt = 0; attempt < maxAttempts && !started; attempt++) {
+    params.bootScope?.throwIfAborted();
     const { args, ports, mailpitPorts } = buildRunArgs(attempt);
     try {
-      await exec('docker', args, { timeout: 60_000 });
+      const { stdout } = await exec('docker', args, { timeout: 60_000 });
+      params.bootScope?.created(stdout.trim());
       chosenPorts = ports;
       chosenMailpitPorts = mailpitPorts;
       started = true;
@@ -450,9 +472,12 @@ export async function startDdevRunner(params: {
       // Name conflict: a stale runner survived the rm timeout — force-remove and
       // retry the SAME ports once.
       if (/already in use/i.test(msg)) {
+        params.bootScope?.throwIfAborted();
         await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
         try {
-          await exec('docker', args, { timeout: 60_000 });
+          params.bootScope?.throwIfAborted();
+          const { stdout } = await exec('docker', args, { timeout: 60_000 });
+          params.bootScope?.created(stdout.trim());
           chosenPorts = ports;
           chosenMailpitPorts = mailpitPorts;
           started = true;
@@ -471,6 +496,7 @@ export async function startDdevRunner(params: {
   if (!started) {
     throw new Error('ddev runner failed to start (host-port allocation exhausted)');
   }
+  params.bootScope?.throwIfAborted();
 
   // Second NIC on the internal sandbox network (same one sandboxes + the api
   // join), so the api's VNC bridge and sandboxed CLIs reach the runner by DNS
@@ -490,6 +516,7 @@ export async function startDdevRunner(params: {
 
   let up = false;
   for (let i = 0; i < 60; i++) {
+    params.bootScope?.throwIfAborted();
     try {
       await exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 });
       up = true;
@@ -502,6 +529,7 @@ export async function startDdevRunner(params: {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
     throw new Error('ddev runner nested dockerd did not start');
   }
+  params.bootScope?.throwIfAborted();
 
   // Router config, applied BEFORE the first `ddev start` so the router is created with the
   // right binding (no recreate needed). Global config = per-runner here (one project per
@@ -997,6 +1025,7 @@ async function readPortPairLabels(
   name: string,
   httpsLabel: string,
   httpLabel: string,
+  strict = false,
 ): Promise<DdevPublishedPorts | null> {
   try {
     const { stdout } = await exec(
@@ -1010,19 +1039,28 @@ async function readPortPairLabels(
       { timeout: 8_000 },
     );
     const [hs, ht] = stdout.trim().split(',');
+    const absent = (value: string | undefined): boolean => value === '' || value === '<no value>';
+    if (absent(hs) && absent(ht)) return null;
     const https = Number(hs);
     const http = Number(ht);
-    if (!Number.isFinite(https) || !Number.isFinite(http) || !https || !http) return null;
+    if (![https, http].every((port) => Number.isInteger(port) && port > 0 && port <= 65535)) {
+      if (strict) throw new Error('Published-port labels are incomplete or invalid');
+      return null;
+    }
     return { https, http };
-  } catch {
+  } catch (cause) {
+    if (strict) throw new Error(`Cannot inspect DDEV published ports for ${name}`, { cause });
     return null;
   }
 }
 
 /** Read a DDEV runner's published host ports from its labels, or null when direct
  *  access was off at start (no labels stamped). */
-async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts | null> {
-  return readPortPairLabels(name, DDEV_HTTPS_PORT_LABEL, DDEV_HTTP_PORT_LABEL);
+export async function readDdevPublishedPorts(
+  name: string,
+  opts: { strict?: boolean } = {},
+): Promise<DdevPublishedPorts | null> {
+  return readPortPairLabels(name, DDEV_HTTPS_PORT_LABEL, DDEV_HTTP_PORT_LABEL, opts.strict);
 }
 
 /** Read a DDEV runner's published Mailpit host ports from its labels, or null when they
@@ -1098,12 +1136,12 @@ async function ddevExecOnce(
   // buffered path below returns nothing until a multi-minute op completes).
   if (opts.onLine)
     return ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
-  const cmd = `cd ${handle.projectDir} && ddev ${ddevArgs}`;
+  const command = buildDdevCommand(handle.projectDir, ddevArgs, opts.timeoutMs ?? 600_000);
   try {
     const { stdout, stderr } = await exec(
       'docker',
-      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd],
-      { timeout: opts.timeoutMs ?? 600_000, maxBuffer: 10 * 1024 * 1024 },
+      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', command.shell],
+      { timeout: command.hostTimeoutMs, maxBuffer: 10 * 1024 * 1024 },
     );
     // Keep the TAIL: ddev's result/error lands at the END, after verbose
     // image-pull progress. Slicing the head drops the actual failure line (e.g.
@@ -1114,6 +1152,34 @@ async function ddevExecOnce(
     const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-8000);
     return { exitCode: e.code ?? 1, output: `${output}${await staleHandleNote(handle)}` };
   }
+}
+
+/** Docker exec outlives its host client. Keep startup/restart exclusion inside the runner
+ * so a worker hot reload cannot overlap an orphaned DDEV compose operation. The lock lives
+ * outside the repository. Lock acquisition and command execution have separate budgets,
+ * enforced inside the runner; the host allows both plus TERM/KILL and transport grace. */
+export function buildDdevCommand(
+  projectDir: string,
+  ddevArgs: string,
+  timeoutMs: number,
+): { shell: string; hostTimeoutMs: number } {
+  const lifecycle = /^(?:start|restart|snapshot)(?:\s|$)/.test(ddevArgs);
+  if (!lifecycle)
+    return { shell: `cd ${projectDir} && ddev ${ddevArgs}`, hostTimeoutMs: timeoutMs };
+  return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);
+}
+
+function buildDdevLockedCommand(
+  projectDir: string,
+  command: string,
+  timeoutMs: number,
+): { shell: string; hostTimeoutMs: number } {
+  const waitSeconds = 900;
+  const runSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  return {
+    shell: `cd ${projectDir} && flock --exclusive --conflict-exit-code 75 --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s ${runSeconds}s ${command}`,
+    hostTimeoutMs: (waitSeconds + runSeconds + 15) * 1000,
+  };
 }
 
 /** `runnerHandleForTask` and `startDdevRunner` both build `projectDir` this way, so the repo
@@ -1831,33 +1897,60 @@ async function runnerDockerdUp(name: string): Promise<boolean> {
  *  failure — e.g. a task that just implemented `.ddev` (01c skipped early), where
  *  the browser-verify step boots the new config and a boot failure routes back
  *  to the dev. */
-const inFlightDdevBoots = new Map<string, Promise<DdevRunnerHandle>>();
+const ddevBoots = new DdevBoots<DdevRunnerHandle>();
 
 export async function ensureDdevStarted(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void; signal?: AbortSignal } = {},
+  opts: {
+    onProgress?: (line: string) => void;
+    signal?: AbortSignal;
+    onReady?: (handle: DdevRunnerHandle) => Promise<void>;
+  } = {},
 ): Promise<DdevRunnerHandle> {
   // Coalesce concurrent boots of the SAME task into one. An interactive 08a apply
   // and the VNC runtime-ensure job can both call this at once; two startDdevRunner
   // calls would then collide on the fixed container name (`docker run --name`
   // conflict) and fail the loser. The first call's in-flight promise serves both.
-  const inFlight = inFlightDdevBoots.get(taskId);
-  if (inFlight) return inFlight;
-  const boot = ensureDdevStartedInner(taskId, repoSubpath, opts);
-  inFlightDdevBoots.set(taskId, boot);
-  try {
-    return await boot;
-  } finally {
-    inFlightDdevBoots.delete(taskId);
-  }
+  let configured = false;
+  const handle = await ddevBoots.ensure(taskId, opts.signal, (signal) =>
+    withDdevBootCancellation(
+      signal,
+      async (id) => {
+        opts.onProgress?.('Removing the incomplete DDEV startup…');
+        await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
+      },
+      async (scope) => {
+        const bootOpts = { ...opts, signal };
+        let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
+        scope.throwIfAborted();
+        handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
+        scope.throwIfAborted();
+        // Keep cancellation armed through debugging/database wiring, including its restart.
+        await opts.onReady?.(handle);
+        configured = true;
+        scope.throwIfAborted();
+        return handle;
+      },
+    ),
+  );
+  // A successful coalesced caller still performs its own optional wiring.
+  if (!configured) await opts.onReady?.(handle);
+  if (opts.signal?.aborted) throw new DdevBootAbortedError();
+  return handle;
 }
 
 async function ensureDdevStartedInner(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void; signal?: AbortSignal },
+  opts: {
+    onProgress?: (line: string) => void;
+    signal?: AbortSignal;
+    restoreSnapshot?: string | null;
+  },
+  scope: DdevBootScope,
 ): Promise<DdevRunnerHandle> {
+  scope.throwIfAborted();
   // DDEV serves the real linked worktree directly. A legacy installer (or any
   // other app code with chmod access) can therefore make the mount root
   // unreadable between steps. Repair it before even probing `ddev describe`:
@@ -1907,6 +2000,7 @@ async function ensureDdevStartedInner(
     );
   }
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
+  scope.throwIfAborted();
   const describeOk = describe.exitCode === 0;
   // A STOPPED project still describes cleanly and still reports its primary_url, so the
   // presence of that URL never meant the project was serving — it only meant DDEV could read
@@ -1930,13 +2024,15 @@ async function ensureDdevStartedInner(
       // a worker hot-reload SIGKILLed an in-flight `ddev` op mid-restart). Restart
       // the project IN PLACE — the base images are still cached in the surviving
       // anon /var/lib/docker, so this pulls nothing (only a genuinely-changed
-      // php/db image would). One ~300s attempt: with images cached there is no
-      // multi-GB pull to wait on, so a wedged warm start fails fast into the cold
-      // rebuild below rather than blocking for the cold path's 900s.
+      // php/db image would). Its 300s execution budget starts AFTER taking the
+      // runner-local lifecycle lock, which separately allows an orphaned cold boot
+      // up to 900s to finish. Waiting must not consume this command's execution time.
       const warm = await ddevExec(existing, 'start', {
         onLine: opts.onProgress,
         timeoutMs: 300_000,
       });
+      scope.throwIfAborted();
+      if (warm.exitCode === 75) throw ddevLifecycleBusyError();
       if (warm.exitCode === 0) {
         // Normally NO restoreLatestSnapshot here: the container survived, so its
         // nested DB volume survived and holds the live (possibly newer) DB, and a
@@ -1999,6 +2095,8 @@ async function ensureDdevStartedInner(
           onLine: opts.onProgress,
           timeoutMs: 300_000,
         });
+        scope.throwIfAborted();
+        if (retry.exitCode === 75) throw ddevLifecycleBusyError();
         if (retry.exitCode === 0) return existing;
         if (isDdevVersionConstraintFailure(retry.output)) {
           throw ddevVersionConstraintError(retry.output);
@@ -2026,8 +2124,11 @@ async function ensureDdevStartedInner(
     opts.signal,
   );
   try {
-    const handle = await startDdevRunner({ taskId, repoSubpath });
+    scope.throwIfAborted();
+    const handle = await startDdevRunner({ taskId, repoSubpath, bootScope: scope });
+    scope.throwIfAborted();
     let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+    scope.throwIfAborted();
     // An unsatisfiable ddev_version_constraint cannot be fixed by a second IDENTICAL start,
     // so only retry once the config itself has changed — i.e. after relaxing the pin/ceiling.
     if (start.exitCode !== 0 && isDdevVersionConstraintFailure(start.output)) {
@@ -2035,6 +2136,7 @@ async function ensureDdevStartedInner(
         throw ddevVersionConstraintError(start.output);
       }
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+      scope.throwIfAborted();
       if (start.exitCode !== 0 && isDdevVersionConstraintFailure(start.output)) {
         throw ddevVersionConstraintError(start.output);
       }
@@ -2045,6 +2147,7 @@ async function ensureDdevStartedInner(
       // transiently. The images are built now, so one retry usually clears it.
       log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+      scope.throwIfAborted();
     }
     if (start.exitCode !== 0) {
       throw new Error(await ddevFailureMessage(handle, 'ddev start failed', start.output));
@@ -2054,18 +2157,207 @@ async function ensureDdevStartedInner(
     // DB is empty. A durability snapshot may survive on the repo volume; restore it
     // so downstream verify/browser testing runs against a populated DB. No-op (and
     // not an error) when none exists.
-    await restoreLatestSnapshot(handle, taskId);
+    await restoreLatestSnapshot(handle, taskId, opts.restoreSnapshot);
     return handle;
   } finally {
     releaseSlot();
   }
 }
 
-/** Restore the most recent Haive durability snapshot after a cold boot: a
- *  post-migration snapshot wins over the raw import. Both absent (first boot, or a
- *  project with no imported DB) is the normal no-op case. Tolerant by design —
- *  keyed only on exit codes, never on snapshot-list output formatting. */
-async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
+function ddevLifecycleBusyError(): Error {
+  return new Error(
+    'An earlier DDEV operation is still running. The existing runner and database were kept; retry after it finishes.',
+  );
+}
+
+/** Port publishing is immutable. A retried viewing choice must replace a runner whose
+ * ports describe the old choice, but only after saving its LIVE database successfully. */
+async function reconcileDdevAccess(
+  taskId: string,
+  repoSubpath: string,
+  handle: DdevRunnerHandle,
+  opts: { onProgress?: (line: string) => void; signal?: AbortSignal },
+  scope: DdevBootScope,
+): Promise<DdevRunnerHandle> {
+  const directAccess = await resolveTaskDirectAccess(taskId);
+  const ports = await readDdevPublishedPorts(handle.container, { strict: true });
+  scope.throwIfAborted();
+  if (directAccess === (ports !== null)) return handle;
+  // Ask DDEV for its merged configuration, including config.*.yaml overrides. Absence
+  // of a reachable DB is not proof that none is configured: only explicit omission
+  // can waive the snapshot, including SQLite projects configured with omit_containers.
+  const config = await ddevExec(handle, 'utility configyaml --full-yaml', { timeoutMs: 30_000 });
+  scope.throwIfAborted();
+  let accessSnapshot: { next: string; previous: string | null } | null = null;
+  if (config.exitCode !== 0 || ddevConfigOmitsDatabase(config.output) !== true) {
+    opts.onProgress?.('Saving the database before changing browser access…');
+    // The complete transaction outlives the worker/client and selects its slot only
+    // after taking the runner lock, so a re-drive cannot erase an orphan's result.
+    const program = Buffer.from(accessSnapshotProgram(taskId)).toString('base64');
+    const command = buildDdevLockedCommand(
+      handle.projectDir,
+      `node -e "eval(Buffer.from('${program}','base64').toString('utf8'))"`,
+      600_000,
+    );
+    const snapshot = await runnerShellStreaming(
+      handle,
+      command.shell,
+      opts.onProgress,
+      command.hostTimeoutMs,
+    );
+    scope.throwIfAborted();
+    if (snapshot.exitCode !== 0) {
+      throw new Error(
+        `Cannot change DDEV browser access: database snapshot failed. ${snapshot.output.slice(-1500)}`,
+      );
+    }
+    accessSnapshot = parseAccessSnapshotResult(taskId, snapshot.output);
+  }
+  const { stdout: id } = await exec('docker', ['inspect', '-f', '{{.Id}}', handle.container], {
+    timeout: 8000,
+  });
+  scope.throwIfAborted();
+  opts.onProgress?.('Recreating DDEV with the selected browser access…');
+  await exec('docker', ['rm', '-f', '-v', id.trim()], { timeout: 90_000 });
+  scope.throwIfAborted();
+  const replacement = await ensureDdevStartedInner(
+    taskId,
+    repoSubpath,
+    { ...opts, restoreSnapshot: accessSnapshot?.next ?? null },
+    scope,
+  );
+  scope.throwIfAborted();
+  // Keep the previous recovery point until the replacement restored the new slot.
+  // A failed restore throws above and retains both copies for recovery.
+  if (accessSnapshot?.previous) {
+    await cleanupAccessSnapshot(replacement, accessSnapshot.previous, opts);
+    scope.throwIfAborted();
+  }
+  return replacement;
+}
+
+/** DDEV's processed configuration explicitly omits the DB; unknown output never waives
+ * preservation. Read the merged configuration, not a repo file that overrides can change. */
+export function ddevConfigOmitsDatabase(output: string): boolean | null {
+  const marker = '# Complete processed project configuration:\n';
+  const start = output.indexOf(marker);
+  if (start < 0) return null;
+  try {
+    const config = parseYaml(output.slice(start + marker.length), { maxAliasCount: 0 }) as unknown;
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+    const omitted = (config as { omit_containers?: unknown }).omit_containers;
+    if (omitted === undefined) return false;
+    return Array.isArray(omitted) ? omitted.includes('db') : null;
+  } catch {
+    return null;
+  }
+}
+
+const DDEV_SNAPSHOT_ENTRY_LIMIT = 1024;
+
+async function cleanupAccessSnapshot(
+  handle: DdevRunnerHandle,
+  name: string,
+  opts: { onProgress?: (line: string) => void },
+): Promise<void> {
+  const result = await ddevExec(handle, `snapshot --cleanup --name=${name} --yes`, {
+    timeoutMs: 120_000,
+    onLine: opts.onProgress,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Cannot remove superseded DDEV access snapshot ${name}: ${result.output.slice(-1500)}`,
+    );
+  }
+}
+
+function accessSnapshotName(taskId: string, fileName: string): string | null {
+  const prefix = `haive-access-${taskId}-`;
+  const stamp = fileName.startsWith(prefix)
+    ? /^(\d+)-/.exec(fileName.slice(prefix.length))?.[1]
+    : null;
+  return stamp ? `${prefix}${stamp}` : null;
+}
+
+async function durabilitySnapshotEntries(
+  taskId: string,
+  repoSubpath: string,
+): Promise<{ name: string; modified: number }[]> {
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
+  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'), {
+    maxEntries: DDEV_SNAPSHOT_ENTRY_LIMIT,
+    strict: true,
+  });
+  const candidates: { name: string; modified: number }[] = [];
+  // Repository-controlled entries must not create unbounded concurrent descriptor walks.
+  for (const entry of entries ?? []) {
+    if (
+      !entry.name.startsWith(`haive-access-${taskId}-`) &&
+      !entry.name.startsWith(`${ddevMigratedSnapshotName(taskId)}-`) &&
+      !entry.name.startsWith(`${ddevImportSnapshotName(taskId)}-`)
+    )
+      continue;
+    const stat = await lstatNoFollow(anchor, joinRel(rel, `.ddev/db_snapshots/${entry.name}`));
+    if (!stat || (stat.kind !== 'file' && stat.kind !== 'directory')) continue;
+    candidates.push({ name: entry.name, modified: stat.stats.mtimeMs });
+  }
+  return candidates;
+}
+
+async function latestDurabilitySnapshot(
+  taskId: string,
+  repoSubpath: string,
+): Promise<string | null> {
+  return selectLatestDurabilitySnapshot(
+    taskId,
+    await durabilitySnapshotEntries(taskId, repoSubpath),
+  );
+}
+
+/** The engine suffix is written by DDEV; restore takes the original name. Newer ordinary
+ * snapshots must win, or a browser change would undo every later migration at a cold boot. */
+export function selectLatestDurabilitySnapshot(
+  taskId: string,
+  entries: { name: string; modified: number }[],
+): string | null {
+  const candidates = entries.flatMap((entry) => {
+    const access = accessSnapshotName(taskId, entry.name);
+    const ordinary = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)].find(
+      (name) => entry.name.startsWith(`${name}-`),
+    );
+    return access || ordinary ? [{ name: access ?? ordinary!, modified: entry.modified }] : [];
+  });
+  // A later import/migration snapshot wins over an older access-change snapshot.
+  return candidates.sort((a, b) => b.modified - a.modified)[0]?.name ?? null;
+}
+
+/** Restore the newest known durability snapshot, including a later re-import. Refuse
+ * a failed restore of a known snapshot rather than silently rolling back to an older DB.
+ * If the directory is absent, preserve legacy probing by name; absent snapshots
+ * (first boot or a project with no imported DB) remain a normal no-op. */
+export async function restoreLatestSnapshot(
+  handle: DdevRunnerHandle,
+  taskId: string,
+  requested?: string | null,
+): Promise<void> {
+  // null is the explicit no-DB access-replacement state. Ordinary later cold boots
+  // must check the current merged configuration too: old backups may outlive a
+  // conversion to SQLite and must not recreate or target an obsolete database.
+  if (requested === null) return;
+  const config = await ddevExec(handle, 'utility configyaml --full-yaml', { timeoutMs: 30_000 });
+  if (config.exitCode === 0 && ddevConfigOmitsDatabase(config.output) === true) return;
+  const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
+  const snapshot = requested ?? (await latestDurabilitySnapshot(taskId, repoSubpath));
+  if (snapshot) {
+    const restored = await ddevSnapshotRestore(handle, snapshot);
+    if (restored.exitCode !== 0) {
+      throw new Error(
+        `DDEV database snapshot ${snapshot} could not be restored: ${restored.output.slice(-1500)}`,
+      );
+    }
+    log.info({ taskId, snapshot }, 'restored DDEV DB snapshot after cold boot');
+    return;
+  }
   const failures: string[] = [];
   for (const name of [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)]) {
     const res = await ddevSnapshotRestore(handle, name);
@@ -2120,10 +2412,17 @@ export function warmStartRecoveryVerdict(args: {
  *  prefix on a filename, not a column in human-facing output. */
 async function hasDurabilitySnapshot(taskId: string, repoSubpath: string): Promise<boolean> {
   const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
-  const names = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)];
-  // Lenient: `null` is an absent directory (the common case — no snapshot was ever taken), an
-  // unreadable one, and a refused one alike, and none of the three is a snapshot this task left.
-  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'));
+  const names = [
+    ddevMigratedSnapshotName(taskId),
+    ddevImportSnapshotName(taskId),
+    `haive-access-${taskId}-`,
+  ];
+  // An absent directory is the common case — no snapshot was ever taken. Refused, unreadable
+  // or oversized directories fail recovery rather than being treated as an empty listing.
+  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'), {
+    maxEntries: DDEV_SNAPSHOT_ENTRY_LIMIT,
+    strict: true,
+  });
   if (entries === null) return false;
   return entries.some((entry) => names.some((name) => entry.name.startsWith(name)));
 }
@@ -2150,12 +2449,8 @@ function ddevExecStreaming(
   onLine?: (line: string) => void,
   timeoutMs = 900_000,
 ): Promise<{ exitCode: number; output: string }> {
-  return runnerShellStreaming(
-    handle,
-    `cd ${handle.projectDir} && ddev ${ddevArgs}`,
-    onLine,
-    timeoutMs,
-  );
+  const command = buildDdevCommand(handle.projectDir, ddevArgs, timeoutMs);
+  return runnerShellStreaming(handle, command.shell, onLine, command.hostTimeoutMs);
 }
 
 /** Streaming counterpart of runnerExec: an arbitrary shell command in the runner

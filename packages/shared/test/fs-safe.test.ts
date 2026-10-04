@@ -166,6 +166,30 @@ describe('fs-safe reads', () => {
   });
 
   describe('readdirNoFollow', () => {
+    it('bounds a listing without returning a partial directory as complete', async () => {
+      expect(
+        (await readdirNoFollow(root, '', { maxEntries: 2, strict: true }))
+          ?.map((e) => e.name)
+          .sort(),
+      ).toEqual(['a', 'linkdir']);
+      await expect(readdirNoFollow(root, '', { maxEntries: 1, strict: true })).rejects.toThrow(
+        'exceeds the 1-entry limit',
+      );
+      expect(await readdirNoFollow(root, '', { maxEntries: 1 })).toBeNull();
+      await mkdir(path.join(root, 'empty'));
+      expect(await readdirNoFollow(root, 'empty', { maxEntries: 0, strict: true })).toEqual([]);
+    });
+
+    it('keeps no-follow containment and validation on a bounded listing', async () => {
+      expect(await readdirNoFollow(root, 'linkdir', { maxEntries: 2 })).toBeNull();
+      await expect(
+        readdirNoFollow(root, 'linkdir', { maxEntries: 2, strict: true }),
+      ).rejects.toMatchObject({ reason: 'link' });
+      for (const maxEntries of [-1, 0.5, Number.POSITIVE_INFINITY]) {
+        await expect(readdirNoFollow(root, '', { maxEntries })).rejects.toThrow(RangeError);
+      }
+    });
+
     it('lists a real directory and the anchor itself', async () => {
       const top = await readdirNoFollow(root, '');
       expect(top?.map((e) => e.name).sort()).toEqual(['a', 'linkdir']);

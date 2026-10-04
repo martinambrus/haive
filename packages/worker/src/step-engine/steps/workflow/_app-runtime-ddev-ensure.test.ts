@@ -17,6 +17,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
 }));
 
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
+import { DdevBootAbortedError } from '../../../sandbox/ddev-boot-cancellation.js';
 import { TaskCancelledError } from '../../step-definition.js';
 import { ensureAppServing, ensureDdevWithProgress } from './_app-runtime.js';
 
@@ -55,6 +56,11 @@ describe('ensureDdevWithProgress', () => {
     await expect(ensureDdevWithProgress(ctx, SUBPATH)).rejects.toBe(boom);
   });
 
+  it('maps an interrupted cold boot to a cancel rather than a step failure', async () => {
+    ensureDdevStarted.mockRejectedValueOnce(new DdevBootAbortedError());
+    await expect(ensureDdevWithProgress(ctx, SUBPATH)).rejects.toBeInstanceOf(TaskCancelledError);
+  });
+
   it('passes a cancel the ensure itself raised through unchanged', async () => {
     const cancel = new TaskCancelledError();
     ensureDdevStarted.mockRejectedValueOnce(cancel);
@@ -81,7 +87,10 @@ describe('ensureDdevWithProgress', () => {
         throw cancel;
       },
     } as never;
-    ensureDdevStarted.mockResolvedValueOnce(HANDLE);
+    ensureDdevStarted.mockImplementationOnce(async (_task, _subpath, opts) => {
+      await opts.onReady(HANDLE);
+      return HANDLE;
+    });
 
     await expect(ensureDdevWithProgress(stopped, SUBPATH)).rejects.toBe(cancel);
   });
@@ -102,7 +111,10 @@ describe('ensureDdevWithProgress', () => {
         if (stopPressed) throw cancel;
       },
     } as never;
-    ensureDdevStarted.mockResolvedValueOnce(HANDLE);
+    ensureDdevStarted.mockImplementationOnce(async (_task, _subpath, opts) => {
+      await opts.onReady(HANDLE);
+      return HANDLE;
+    });
 
     await expect(ensureDdevWithProgress(stoppedMidWiring, SUBPATH)).rejects.toBe(cancel);
     expect(
