@@ -515,6 +515,63 @@ describe('gate-2 status summary', () => {
     expect(row(d, 'Runtime smoke')?.detail).toContain('did not respond');
   });
 
+  it.each([400, 401, 403, 404, 429, 499])(
+    'renders HTTP %i as UNSURE with its evidence',
+    (status) => {
+      const d = baseDetect({ runtimeSmoke: { ...failSmoke(status), passed: null } });
+      expect(row(d, 'Runtime smoke')).toMatchObject({
+        status: 'warn',
+        statusLabel: 'UNSURE',
+        detail: `HTTP ${status} — runtime health could not be verified`,
+        defaultOpen: true,
+      });
+      expect(row(d, 'Runtime smoke')?.body).toContain('login or access wall');
+      expect(row(d, 'Runtime smoke')?.body).toContain('<html><body>installer</body></html>');
+      expect(row(d, 'Runtime smoke')?.body).not.toContain('body contains a runtime-error');
+      expect(decisionDefault(d)).toBe('reject');
+    },
+  );
+
+  it('reclassifies a saved 403 pass without rebuilding the detect payload', () => {
+    const d = baseDetect({ runtimeSmoke: { ...failSmoke(403), passed: true } });
+    expect(row(d, 'Runtime smoke')?.statusLabel).toBe('UNSURE');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
+  it('keeps a 4xx with a detected runtime error as FAIL', () => {
+    const d = baseDetect({
+      runtimeSmoke: { ...failSmoke(403), errorExcerpt: 'Fatal error: SQLSTATE' },
+    });
+    expect(row(d, 'Runtime smoke')?.status).toBe('fail');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
+  it('keeps UNSURE visible when an authoritative browser pass allows approval', () => {
+    const d = baseDetect({
+      runtimeSmoke: { ...failSmoke(403), passed: null },
+      browser: mcpPass,
+    });
+    expect(row(d, 'Runtime smoke')).toMatchObject({ status: 'warn', statusLabel: 'UNSURE' });
+    expect(row(d, 'Runtime smoke')?.body).toContain('Browser testing already passed');
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it.each([
+    { ...mcpPass, method: 'manual' },
+    { ...mcpPass, verificationIncomplete: true },
+    { ...mcpPass, skipped: true },
+    { ...mcpPass, passed: false },
+  ])('does not let an unverified browser result override UNSURE: %j', (browser) => {
+    expect(
+      decisionDefault(
+        baseDetect({
+          runtimeSmoke: { ...failSmoke(403), passed: null },
+          browser,
+        }),
+      ),
+    ).toBe('reject');
+  });
+
   it('marks a body-error 200 distinctly from a no-response failure', () => {
     const d = baseDetect({ runtimeSmoke: failSmoke(200) });
     expect(row(d, 'Runtime smoke')?.detail).toContain('responded HTTP 200');
@@ -793,6 +850,37 @@ describe('gate-2 verification results read from 08', () => {
 
     expect(detected.verify.lint).toEqual({ ran: true, passed: false, output: 'raw report' });
   });
+
+  it.each([null, true])(
+    'reads a stored 403 with passed:%s as an uncertain gate row',
+    async (passed) => {
+      m.loadPreviousStepOutput.mockImplementation(
+        async (_db: unknown, _task: unknown, id: string) =>
+          id === '08-phase-5-verify'
+            ? {
+                output: {
+                  test: passedRun,
+                  passed: true,
+                  runtimeSmoke: {
+                    ran: true,
+                    passed,
+                    httpStatus: 403,
+                    url: 'https://app.ddev.site',
+                    errorExcerpt: 'Access denied',
+                  },
+                },
+              }
+            : null,
+      );
+      const detected = await gate2VerifyApprovalStep.detect!(ctx);
+      expect(detected.runtimeSmoke?.passed).toBe(passed);
+      const form = gate2VerifyApprovalStep.form!(ctx, detected)!;
+      expect(form.statusSummary?.find((r) => r.label === 'Runtime smoke')).toMatchObject({
+        status: 'warn',
+        statusLabel: 'UNSURE',
+      });
+    },
+  );
 
   it('drops a scope that is not two counts, rather than rendering it', async () => {
     stored({ ran: true, passed: true, output: '', scope: { blocking: 'none', preExisting: 4 } });

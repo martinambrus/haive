@@ -157,6 +157,29 @@ describe('parseRuntimeSmokeOutput', () => {
     ).toBe(false);
   });
 
+  it.each([400, 401, 403, 404, 429, 499])('reports a clean HTTP %i as uncertain', (status) => {
+    expect(parseRuntimeSmokeOutput(`HTTP/1.1 ${status}\r\n\r\nAccess denied`)).toEqual({
+      ran: true,
+      passed: null,
+      httpStatus: status,
+      errorExcerpt: expect.stringContaining('Access denied'),
+    });
+  });
+
+  it('keeps a runtime-error signature on a 4xx response as a failure', () => {
+    expect(parseRuntimeSmokeOutput('HTTP/1.1 403 Forbidden\n\nFatal error: SQLSTATE').passed).toBe(
+      false,
+    );
+  });
+
+  it('reports a tail-marked 4xx as uncertain after the header was truncated', () => {
+    expect(parseRuntimeSmokeOutput('Login required HAIVE_HTTP_CODE=403')).toMatchObject({
+      passed: null,
+      httpStatus: 403,
+      errorExcerpt: 'Login required',
+    });
+  });
+
   it('fails on a PHP fatal error in the body', () => {
     const r = parseRuntimeSmokeOutput(
       'HTTP/1.1 200 OK\n\nFatal error: Uncaught Error: Call to undefined function mysql_pconnect()',

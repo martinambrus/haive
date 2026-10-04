@@ -39,6 +39,7 @@ import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import type { Insight } from './08e-insights-triage.js';
 import { codeBlock } from './_plan-ops.js';
+import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 
 /** Coverage as a step wrote it into `task_steps.output`. */
 interface CoverageOutput {
@@ -180,10 +181,11 @@ interface VerifyGateDetect {
    *  reports whether it is there. */
   screenshotsArtifactPath: string | null;
   /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
-   *  A failure defaults this gate to reject but never auto-reroutes to implement. */
+   *  A failure or uncertain response defaults to reject unless browser testing passed,
+   *  but never auto-reroutes to implement. */
   runtimeSmoke: {
     ran: boolean;
-    passed: boolean;
+    passed: boolean | null;
     httpStatus: number | null;
     url: string | null;
     errorExcerpt: string;
@@ -365,7 +367,7 @@ interface VerifyOutput {
   passed?: boolean;
   runtimeSmoke?: {
     ran?: boolean;
-    passed?: boolean;
+    passed?: boolean | null;
     httpStatus?: number | null;
     url?: string | null;
     errorExcerpt?: string;
@@ -416,7 +418,7 @@ function buildRuntimeErrorsBlock(detected: VerifyGateDetect): string {
     lines.push('Browser network errors:', ...lb.networkErrors.slice(0, 20).map((e) => `- ${e}`));
   }
   const rs = detected.runtimeSmoke;
-  if (rs?.ran && !rs.passed && rs.errorExcerpt) {
+  if (rs?.ran && runtimeSmokeVerdict(rs) !== 'pass' && rs.errorExcerpt) {
     lines.push(
       `Runtime HTTP smoke${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} at ${rs.url ?? 'the app'} — response excerpt:`,
       rs.errorExcerpt.slice(0, 1200),
@@ -723,7 +725,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const runtimeSmoke = rsOut
       ? {
           ran: rsOut.ran === true,
-          passed: rsOut.passed === true,
+          passed: rsOut.passed === null ? null : rsOut.passed === true,
           httpStatus: rsOut.httpStatus ?? null,
           url: rsOut.url ?? null,
           errorExcerpt: rsOut.errorExcerpt ?? '',
@@ -809,7 +811,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const adversarialOk =
       aq === null || (!aq.blocking && !aq.incomplete && !aq.coverage?.truncated);
     const rs = detected.runtimeSmoke;
-    const smokeFailed = rs != null && rs.ran && !rs.passed;
+    const smokeVerdict = rs ? runtimeSmokeVerdict(rs) : 'skip';
+    const smokeFailed = smokeVerdict === 'fail';
+    const smokeUnsure = smokeVerdict === 'unsure';
     // A real-browser agent/interactive test that PASSED is a stronger runtime signal
     // than the crude HTTP smoke, so when present the smoke is ADVISORY: still shown,
     // but it no longer flips the gate default to reject. Manual checklists aren't
@@ -825,7 +829,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       !b.verificationIncomplete &&
       (b.method === 'mcp' || b.method === 'interactive');
     const smokeAdvisory = smokeFailed && browserRuntimeAuthoritative;
-    const runtimeSmokeOk = !smokeFailed || smokeAdvisory;
+    const runtimeSmokeOk = (!smokeFailed && !smokeUnsure) || browserRuntimeAuthoritative;
     // The verification roll-up is a coloured status table (label + pill), each row
     // carrying its evidence as an inline disclosure. Skipped checks are OMITTED (a
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
@@ -1146,37 +1150,56 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     }
 
     if (rs && rs.ran) {
-      const detail = rs.passed
-        ? rs.httpStatus !== null
-          ? `HTTP ${rs.httpStatus}`
-          : undefined
-        : smokeAdvisory
-          ? 'browser testing passed; advisory only'
-          : rs.httpStatus !== null
-            ? `responded HTTP ${rs.httpStatus} but the page shows a runtime error`
-            : 'the app did not respond';
-      const body = rs.passed
-        ? undefined
-        : [
-            smokeAdvisory
-              ? 'Browser testing already passed, so this HTTP smoke is advisory only and did not affect the gate default. Review it only if the browser test might have missed a server-side error.'
-              : '',
-            rs.httpStatus !== null
-              ? `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}, but the response body contains a runtime-error signature (e.g. a PHP fatal or a database-connection error rendered into the page).`
-              : `The app was probed at ${rs.url ?? 'its runtime URL'} but returned no readable HTTP response.`,
+      const smokePassed = smokeVerdict === 'pass';
+      const detail = smokeUnsure
+        ? `HTTP ${rs.httpStatus} — runtime health could not be verified`
+        : smokePassed
+          ? rs.httpStatus !== null
+            ? `HTTP ${rs.httpStatus}`
+            : undefined
+          : smokeAdvisory
+            ? 'browser testing passed; advisory only'
+            : rs.httpStatus !== null
+              ? `responded HTTP ${rs.httpStatus} but the page shows a runtime error`
+              : 'the app did not respond';
+      const body = smokeUnsure
+        ? [
+            `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}. A 4xx response may be a login or access wall, or a broken route; this smoke cannot determine whether the app works. Verify the intended page in a browser before approving.`,
+            browserRuntimeAuthoritative
+              ? 'Browser testing already passed, so this warning did not affect the gate default.'
+              : 'This uncertain result does not pre-select Approve and does not trigger an automatic fix round.',
             '',
             '## Response excerpt',
             fenced(rs.errorExcerpt),
-          ]
-            .filter(Boolean)
-            .join('\n');
+          ].join('\n')
+        : smokePassed
+          ? undefined
+          : [
+              smokeAdvisory
+                ? 'Browser testing already passed, so this HTTP smoke is advisory only and did not affect the gate default. Review it only if the browser test might have missed a server-side error.'
+                : '',
+              rs.httpStatus !== null
+                ? `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}, but the response body contains a runtime-error signature (e.g. a PHP fatal or a database-connection error rendered into the page).`
+                : `The app was probed at ${rs.url ?? 'its runtime URL'} but returned no readable HTTP response.`,
+              '',
+              '## Response excerpt',
+              fenced(rs.errorExcerpt),
+            ]
+              .filter(Boolean)
+              .join('\n');
       rows.push({
         label: 'Runtime smoke',
-        status: rs.passed ? 'pass' : smokeAdvisory ? 'warn' : 'fail',
-        statusLabel: rs.passed ? 'PASS' : smokeAdvisory ? 'ADVISORY' : 'FAIL',
+        status: smokePassed ? 'pass' : smokeUnsure || smokeAdvisory ? 'warn' : 'fail',
+        statusLabel: smokePassed
+          ? 'PASS'
+          : smokeUnsure
+            ? 'UNSURE'
+            : smokeAdvisory
+              ? 'ADVISORY'
+              : 'FAIL',
         detail,
         body,
-        defaultOpen: smokeFailed && !smokeAdvisory,
+        defaultOpen: (smokeFailed || smokeUnsure) && !browserRuntimeAuthoritative,
       });
     }
 
