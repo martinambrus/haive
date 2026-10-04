@@ -61,6 +61,10 @@ old section/chunk keys until every replacement batch for that file succeeds, so 
 headings and changed chunk boundaries keep their prior searchable rows through an outage.
 A partial batch failure retains those old keys until a healthy retry; a deletion-only edit
 can remove stale keys immediately because it has no replacements to embed.
+If any replacement batch fails, orphan cleanup also retains missing source paths until
+a healthy sync: a disappeared path may have been renamed to the failed replacement.
+Paths excluded by the saved scope and files still present but outside indexing limits
+are removed even during an outage, so an explicit exclusion does not wait for recovery.
 
 **Two timeouts, because one call serves both jobs.** `ollamaEmbed` is used by bulk ingestion
 AND by the interactive `rag_search` query embed, so a single budget is simultaneously too

@@ -17,7 +17,7 @@ import type { StepContext } from '../../step-definition.js';
 import { gitRun } from '../../../repo/git-push.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
 import {
   resolveRagConnection,
@@ -779,6 +779,16 @@ export async function runRagIndexSync(
     for (const row of orphanRows) {
       if (sweepProtectedPaths?.has(row.source_path)) continue;
       if (!processedPaths.has(row.source_path)) {
+        // Missing paths may be files moved to a new path whose embeddings failed.
+        // Without a reliable rename mapping, retain them until a healthy run.
+        // Existing files excluded by scope/limits still need to leave the index.
+        if (
+          embedSkippedChunks > 0 &&
+          !isDeniedFile(row.source_path, false, codeCollect.exclude ?? []) &&
+          (await lstatNoFollow(wa.anchor, `${wa.prefix}${row.source_path}`)) === null
+        ) {
+          continue;
+        }
         const result = await conn.pg.unsafe(
           `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
           [repositoryId, row.source_path],

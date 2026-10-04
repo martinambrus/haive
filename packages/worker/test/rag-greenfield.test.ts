@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -131,7 +131,9 @@ beforeEach(async () => {
           return Object.assign([], { count });
         }
         if (query.includes('SELECT DISTINCT source_path'))
-          return stalePaths.map((source_path) => ({ source_path }));
+          return [...new Set([...stalePaths, ...indexedChunks.keys()])].map((source_path) => ({
+            source_path,
+          }));
         if (
           query.startsWith('DELETE FROM') &&
           query.includes('WHERE repository_id = $1 AND source_path = $2')
@@ -457,6 +459,81 @@ describe('greenfield RAG initialization at 11c', () => {
     expect(result.deleted).toBe(1);
     expect(indexedChunks.get(kbPath)).toHaveLength(1);
     expect(indexedChunks.get(kbPath)![0]!.content).toContain('stores its documents');
+  });
+
+  it.each(['failed', 'partial'])(
+    'retains moved-file rows until replacements succeed while removing excluded files (%s outage)',
+    async (outage) => {
+      const oldPath = '.haive-data/knowledge_base/architecture.md';
+      const newPath = '.haive-data/knowledge_base/moved.md';
+      await writeSource(
+        oldPath,
+        Array.from({ length: 12 }, (_, i) => `# Section ${i}\n\nArchitecture detail ${i}.\n`).join(
+          '\n',
+        ),
+      );
+      await writeSource('core/library.php');
+      await writeSource('core/removed.php');
+      const sync = async () =>
+        ragReindexStep.apply(ctx, {
+          detected: await ragReindexStep.detect!(ctx),
+          formValues: { runReindex: true },
+          iteration: 0,
+          previousIterations: [],
+        });
+      await sync();
+      const previous = indexedChunks.get(oldPath)!.map((row) => ({ ...row }));
+      expect(previous).toHaveLength(12);
+      expect(indexedChunks.get('core/library.php')!.length).toBeGreaterThan(0);
+      await rename(join(worktree, oldPath), join(worktree, newPath));
+      await rm(join(worktree, 'core/removed.php'));
+      repo.scopeExcludeGlobs = ['core'];
+      deletedPaths = [];
+      mocks.embed.mockClear();
+      if (outage === 'failed') {
+        mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+      } else {
+        mocks.embed.mockResolvedValueOnce({ kind: 'failed', reason: 'Ollama timed out' });
+      }
+      const failed = await sync();
+      expect(mocks.embed.mock.calls.length).toBeGreaterThan(1);
+      expect(failed.embedSkippedChunks).toBeGreaterThan(0);
+      expect(indexedChunks.get(oldPath)).toEqual(previous);
+      expect(deletedPaths).not.toContain(oldPath);
+      expect(indexedChunks.get('core/library.php')).toEqual([]);
+      expect(deletedPaths).toContain('core/library.php');
+      expect(indexedChunks.get('core/removed.php')).toEqual([]);
+      expect(deletedPaths).toContain('core/removed.php');
+      if (outage === 'partial') expect(failed.inserted).toBeGreaterThan(0);
+
+      mocks.embed.mockImplementation(async ({ texts }) => ({
+        kind: 'embedded',
+        embeddings: texts.map(() => [0.1, 0.2]),
+      }));
+      const recovered = await sync();
+      expect(recovered.embedSkippedChunks).toBe(0);
+      expect(recovered.deleted).toBe(12);
+      expect(indexedChunks.get(oldPath)).toEqual([]);
+      expect(indexedChunks.get(newPath)).toHaveLength(12);
+      expect(repo.ragEmbedDegradedAt).toBeNull();
+    },
+  );
+
+  it('cleans up a deleted file when no replacement embedding fails', async () => {
+    const sync = async () =>
+      ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+    await sync();
+    await rm(join(worktree, 'app.ts'));
+    mocks.embed.mockClear();
+    const result = await sync();
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(result.deleted).toBeGreaterThan(0);
+    expect(indexedChunks.get('app.ts')).toEqual([]);
   });
 
   it('does not initialize when the user declines', async () => {
