@@ -131,6 +131,8 @@ export const fileUploadFieldSchema = baseField.extend({
 
 export const numberFieldSchema = baseField.extend({
   type: z.literal('number'),
+  /** An hours quantity is edited as hours + minutes, but submitted as decimal hours. */
+  unit: z.literal('hours').optional(),
   default: z.number().optional(),
   min: z.number().optional(),
   max: z.number().optional(),
