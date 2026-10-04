@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '@haive/shared';
@@ -51,6 +53,7 @@ const { resolveRagSyncPrefs, runRagIndexSync } =
   await import('../src/step-engine/steps/workflow/_rag-index.js');
 
 const dialect = new PgDialect();
+const exec = promisify(execFile);
 let root: string;
 let worktree: string;
 let repo: Record<string, unknown>;
@@ -242,6 +245,99 @@ afterEach(async () => {
 });
 
 describe('greenfield RAG initialization at 11c', () => {
+  it.each(['root', 'worktree'])(
+    'filters secret code and KB, including custom denies, and purges protected missing secrets during an outage (%s)',
+    async (scan) => {
+      const base = scan === 'root' ? root : worktree;
+      const secretCode = 'web/sites/default/settings.local.php';
+      const secretKb = '.haive-data/knowledge_base/private.md';
+      const missingSecret = 'old/settings.local.php';
+      repo.secretMaskDenyExtend = [secretKb];
+      await writeSource(secretCode, '<?php $password = "database-secret";\n', base);
+      await writeSource(secretKb, '# Private\n\nNever send this private token.\n', base);
+      for (const path of [secretCode, secretKb, missingSecret]) {
+        indexedChunks.set(path, [
+          { section_id: 'old', chunk_index: 0, chunk_hash: 'old', content: 'old secret' },
+        ]);
+      }
+      const detected = await ragReindexStep.detect!(ctx);
+      mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+      const result = await runRagIndexSync(ctx, {
+        repoPath: base,
+        prefs: detected.ragToolingPrefs!,
+        projectName: detected.projectName,
+        ollamaReachable: false,
+        codeCollect: detected.codeCollect,
+        sweepProtectedPaths: new Set([secretCode, secretKb, missingSecret]),
+      });
+      expect(result.deleted).toBe(3);
+      for (const path of [secretCode, secretKb, missingSecret])
+        expect(indexedChunks.get(path)).toEqual([]);
+      expect(inserts).toEqual([]);
+      expect(JSON.stringify(mocks.embed.mock.calls)).not.toContain('database-secret');
+      expect(JSON.stringify(mocks.embed.mock.calls)).not.toContain('private token');
+    },
+  );
+
+  it('keeps tracked files and custom allow carveouts using the scan worktree tracking', async () => {
+    const path = 'settings.local.php';
+    for (const base of [root, worktree]) {
+      await writeSource(path, '<?php function settings() { return "tracked fixture"; }\n', base);
+      await exec('git', ['init', '-b', 'main'], { cwd: base });
+    }
+    // The main checkout does not track this file; this worktree does.
+    await exec('git', ['add', path], { cwd: worktree });
+    const allowedKb = '.haive-data/knowledge_base/private.md';
+    const allowedCode = 'allowed/settings.local.php';
+    repo.secretMaskDenyExtend = [allowedKb];
+    repo.secretMaskAllow = [allowedKb, allowedCode];
+    await writeSource(allowedKb, '# Allowed\n\nPublic project conventions.\n');
+    await writeSource(allowedCode);
+    const detected = await ragReindexStep.detect!(ctx);
+    await runRagIndexSync(ctx, {
+      repoPath: worktree,
+      prefs: detected.ragToolingPrefs!,
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+    expect(inserts.map((row) => row[3])).toEqual(
+      expect.arrayContaining([path, allowedKb, allowedCode]),
+    );
+    // Root scan applies its own untracked verdict and removes the prior row.
+    inserts = [];
+    await runRagIndexSync(ctx, {
+      repoPath: root,
+      prefs: detected.ragToolingPrefs!,
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+    expect(inserts.map((row) => row[3])).not.toContain(path);
+    expect(indexedChunks.get(path)).toEqual([]);
+  });
+
+  it('fails closed before connecting or embedding when the secret policy cannot resolve the repo', async () => {
+    const detected = await ragReindexStep.detect!(ctx);
+    const query = ctx.db.query.repositories as unknown as {
+      findFirst: (args?: { columns?: { secretMaskEnabled?: boolean } }) => Promise<unknown>;
+    };
+    vi.spyOn(query, 'findFirst').mockImplementation(async (args) => {
+      return args?.columns?.secretMaskEnabled ? undefined : (repo as never);
+    });
+    await expect(
+      runRagIndexSync(ctx, {
+        repoPath: worktree,
+        prefs: detected.ragToolingPrefs!,
+        projectName: detected.projectName,
+        ollamaReachable: false,
+        codeCollect: detected.codeCollect,
+      }),
+    ).rejects.toThrow('secret-mask: repository');
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.embed).not.toHaveBeenCalled();
+  });
+
   it('offers initialization and counts the worktree knowledge without writing during detect', async () => {
     expect((await resolveRagSyncPrefs(ctx)).ragConfigured).toBe(false);
     const detected = await ragReindexStep.detect!(ctx);

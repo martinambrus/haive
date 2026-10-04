@@ -25,6 +25,12 @@ its folder is visible and explicitly re-enabled.
 Both sync steps re-read the current repository deny list at apply time, so a cached form
 cannot re-ingest code excluded after its file count was detected. Scope exclusions also
 take precedence over worktree orphan protections when removing old indexed library rows.
+Both code and managed KB ingestion also apply `taskSecretMaskPolicy`: untracked secret
+paths stay out of the index, using the scan root's own tracked set and the repository's
+custom allow/deny rules. An unavailable git listing treats all matches as untracked;
+an unresolved task/repository policy fails closed before connecting or embedding.
+Previously indexed denied paths are purged within the repository's scope before embedding,
+even when missing, protected by a worktree scan, or an embedding endpoint is down.
 An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
 covers blank repos already initialized by 11c before scope selection was added. The step
 parks for a decision even under auto-continue, and appears in every path that includes 11c.
