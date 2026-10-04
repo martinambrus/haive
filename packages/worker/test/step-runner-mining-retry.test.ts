@@ -1814,6 +1814,8 @@ describe('a wave agent recovered from the prompt its step wrote', () => {
     await run(makeMockDb(state), recoveringStep(), enqueued);
     const spec = enqueued[0]?.spec as { assignedAgentIds?: string[] } | undefined;
     expect(spec?.assignedAgentIds).toContain('code-reviewer');
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(sent?.row.assignedAgentIds).toEqual(spec?.assignedAgentIds);
   });
 
   it('records the prompt it recovered from again, so the next retry has it too', async () => {
@@ -2079,6 +2081,7 @@ describe('a fan-out reserved before any agent is sent', () => {
     const spec = enqueued[0]?.spec as { assignedAgentIds?: string[] } | undefined;
     expect(spec?.assignedAgentIds).toContain('security-auditor');
     const sent = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(sent?.row.assignedAgentIds).toEqual(['security-auditor']);
     expect(String(sent?.row.prompt)).toContain('the prompt the step offers now');
   });
 

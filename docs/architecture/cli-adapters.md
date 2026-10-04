@@ -28,4 +28,18 @@ codex, gemini, amp and antigravity do not, so the dispatcher tries another provi
 eligible, an optional LLM phase degrades to manual/default output; a required phase still fails.
 An invocation that sets only `disableTools` retains its prior best-effort behavior.
 
+Persona assignment is also recorded at DISPATCH in `cli_invocations.assigned_agent_ids`
+(migration 0173), before a queued run starts or completion writes `tool_usage`. The terminal
+header and split browser/terminal pane show one badge per assigned id. The run's `agentTitle`
+stays separate: it can name a work item or pass (Validator / Fixer), which is not evidence of
+a personality assignment. When that title repeats an assigned id (case, whitespace and
+hyphen/underscore differences ignored), the header keeps the personality badge and hides the
+redundant title. Legacy assignments are recovered only from recorded
+`tool_usage.agents.assigned`, never from prompt prose, file paths or today's repository files.
+Exec stamps the assignment again at start for jobs queued before this recording shipped.
+The badge means ASSIGNED, not that the CLI spawned a native sub-agent or opened its definition.
+Ordinary step prompts use inline protocols; eligible isolated calls paste the provider's
+repository definition as described in [Per-call agent isolation](agent-isolation.md). Workflow
+discovery miners carry their selected persona's title, description and field in the prompt.
+
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)

@@ -167,6 +167,30 @@ describe('resolveDispatch', () => {
     expect('assignedAgentIds' in (spec ?? {})).toBe(false);
   });
 
+  it('delivers an isolated repository personality in a normal CLI prompt', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'claude', name: 'claude-code', supportsSubagents: true })],
+      input: {
+        kind: 'prompt',
+        prompt: `${agentDefinitionGuidance('peer-reviewer', 'Read .claude/agents/peer-reviewer.md.')}\nReview the changes.`,
+        capabilities: ['tool_use'],
+      },
+      invokeOpts: {},
+      agentIsolation: true,
+      lspConfigured: true,
+      agentBodies: { 'peer-reviewer': 'Custom personality: challenge assumptions with evidence.' },
+    });
+    expect(plan.mode).toBe('cli');
+    expect(plan.invocation?.kind).toBe('cli');
+    expect(plan.effectivePrompt).toContain(
+      'Custom personality: challenge assumptions with evidence.',
+    );
+    expect(plan.effectivePrompt).not.toContain('.claude/agents/peer-reviewer.md');
+    const spec = plan.invocation?.kind === 'cli' ? plan.invocation.spec : null;
+    expect(spec?.assignedAgentIds).toEqual(['peer-reviewer']);
+    expect(spec?.maskAgentDefinitions).toBe(true);
+  });
+
   it('carries the union of every sub-agent prompt on a sub-agent invocation', () => {
     const provider = makeProvider({
       id: 'prov-claude',

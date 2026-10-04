@@ -9,6 +9,7 @@ import {
 } from '@/lib/api-client';
 import type { PaneSide } from '@/lib/split-pane';
 import { CliStreamViewer } from './CliStreamViewer';
+import { AgentPersonaBadges, distinctAgentTitle } from './AgentPersonaBadges';
 
 interface SplitTerminalPaneProps {
   taskId: string;
@@ -99,6 +100,9 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
   }, [taskId, invocationId, isActive]);
 
   const cleanSupported = invocation?.mode !== 'subagent_sequential';
+  const agentTitle = invocation
+    ? distinctAgentTitle(invocation.agentTitle, invocation.assignedAgentIds)
+    : null;
 
   return (
     <div className="group relative flex h-full min-h-0 flex-col overflow-hidden rounded border border-neutral-800 bg-neutral-950 p-2">
@@ -114,6 +118,16 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
         </button>
       </div>
       {error && <div className="pb-1 text-xs text-red-400">{error}</div>}
+      {invocation && (
+        <div className="flex flex-wrap gap-2 pb-1 text-[11px]">
+          <AgentPersonaBadges ids={invocation.assignedAgentIds} />
+          {agentTitle && (
+            <span className="max-w-[24rem] truncate font-medium text-indigo-300" title={agentTitle}>
+              {agentTitle}
+            </span>
+          )}
+        </div>
+      )}
       {invocation === null ? (
         <div className="text-xs text-neutral-500">
           {invocations === null ? 'Loading…' : 'No CLI output for this step yet.'}
