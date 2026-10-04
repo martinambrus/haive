@@ -19,7 +19,8 @@ An existing VNC runner cannot gain direct browser ports by changing `tasks.direc
 Every DDEV ensure compares that choice (including the global switch) with the published-port
 labels. A mismatch first snapshots the live database, then replaces the runner.
 Access snapshots alternate between `haive-access-<task>-0` and `-1`: clean the inactive
-slot before creation, retain the latest backup until the replacement succeeds, then prune
+slot before creation, retain the latest backup until the replacement runner has restored
+the new snapshot successfully, then prune
 the superseded backup. Legacy timestamped access snapshots are pruned too. Repeated mode
 changes retain one backup, with at most two during replacement, rather than multiplying
 the database on the shared repository volume. Port inspection failures fail reconciliation; they never
@@ -52,6 +53,10 @@ acquisition cannot launch a command with only seconds remaining before its clien
 A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
 runner: the earlier operation may still be restoring its live database. Snapshot locking
 also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
+Selection, stale cleanup, creation and promotion run in one non-root runner process under
+that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
+slot only after creation succeeds; interrupted partial copies never count as recovery points.
+The replacement restores that exact committed slot, without re-selecting by file times.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`

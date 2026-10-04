@@ -63,6 +63,7 @@ import { buildMountArgs, type DockerVolumeMount } from './docker-runner.js';
 import { runnerSubpathVerdict } from './app-runner.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
+import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
 import {
   DdevBootAbortedError,
   DdevBoots,
@@ -1165,10 +1166,18 @@ export function buildDdevCommand(
   const lifecycle = /^(?:start|restart|snapshot)(?:\s|$)/.test(ddevArgs);
   if (!lifecycle)
     return { shell: `cd ${projectDir} && ddev ${ddevArgs}`, hostTimeoutMs: timeoutMs };
+  return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);
+}
+
+function buildDdevLockedCommand(
+  projectDir: string,
+  command: string,
+  timeoutMs: number,
+): { shell: string; hostTimeoutMs: number } {
   const waitSeconds = 900;
   const runSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   return {
-    shell: `cd ${projectDir} && flock --exclusive --conflict-exit-code 75 --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s ${runSeconds}s ddev ${ddevArgs}`,
+    shell: `cd ${projectDir} && flock --exclusive --conflict-exit-code 75 --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s ${runSeconds}s ${command}`,
     hostTimeoutMs: (waitSeconds + runSeconds + 15) * 1000,
   };
 }
@@ -1934,7 +1943,7 @@ export async function ensureDdevStarted(
 async function ensureDdevStartedInner(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void; signal?: AbortSignal },
+  opts: { onProgress?: (line: string) => void; signal?: AbortSignal; restoreSnapshot?: string },
   scope: DdevBootScope,
 ): Promise<DdevRunnerHandle> {
   scope.throwIfAborted();
@@ -2144,7 +2153,16 @@ async function ensureDdevStartedInner(
     // DB is empty. A durability snapshot may survive on the repo volume; restore it
     // so downstream verify/browser testing runs against a populated DB. No-op (and
     // not an error) when none exists.
-    await restoreLatestSnapshot(handle, taskId);
+    if (opts.restoreSnapshot) {
+      const restored = await ddevSnapshotRestore(handle, opts.restoreSnapshot);
+      if (restored.exitCode !== 0) {
+        throw new Error(
+          `DDEV access snapshot ${opts.restoreSnapshot} could not be restored: ${restored.output.slice(-1500)}`,
+        );
+      }
+    } else {
+      await restoreLatestSnapshot(handle, taskId);
+    }
     return handle;
   } finally {
     releaseSlot();
@@ -2175,32 +2193,30 @@ async function reconcileDdevAccess(
   // can waive the snapshot, including SQLite projects configured with omit_containers.
   const config = await ddevExec(handle, 'utility configyaml --full-yaml', { timeoutMs: 30_000 });
   scope.throwIfAborted();
+  let accessSnapshot: { next: string; previous: string | null } | null = null;
   if (config.exitCode !== 0 || ddevConfigOmitsDatabase(config.output) !== true) {
     opts.onProgress?.('Saving the database before changing browser access…');
-    const retention = selectAccessSnapshotRetention(
-      taskId,
-      await durabilitySnapshotEntries(taskId, repoSubpath),
+    // The complete transaction outlives the worker/client and selects its slot only
+    // after taking the runner lock, so a re-drive cannot erase an orphan's result.
+    const program = Buffer.from(accessSnapshotProgram(taskId)).toString('base64');
+    const command = buildDdevLockedCommand(
+      handle.projectDir,
+      `node -e "eval(Buffer.from('${program}','base64').toString('utf8'))"`,
+      600_000,
+    );
+    const snapshot = await runnerShellStreaming(
+      handle,
+      command.shell,
+      opts.onProgress,
+      command.hostTimeoutMs,
     );
     scope.throwIfAborted();
-    for (const stale of retention.prune) {
-      await cleanupAccessSnapshot(handle, stale, opts);
-      scope.throwIfAborted();
-    }
-    // The inactive slot was cleaned before creation; its prior file cannot masquerade
-    // as the live database being preserved now. Keep the active backup until success.
-    const snapshotName = retention.next;
-    const snapshot = await ddevSnapshot(handle, snapshotName, { onLine: opts.onProgress });
-    scope.throwIfAborted();
     if (snapshot.exitCode !== 0) {
-      await cleanupAccessSnapshot(handle, snapshotName, opts);
       throw new Error(
         `Cannot change DDEV browser access: database snapshot failed. ${snapshot.output.slice(-1500)}`,
       );
     }
-    if (retention.keep) {
-      await cleanupAccessSnapshot(handle, retention.keep, opts);
-      scope.throwIfAborted();
-    }
+    accessSnapshot = parseAccessSnapshotResult(taskId, snapshot.output);
   }
   const { stdout: id } = await exec('docker', ['inspect', '-f', '{{.Id}}', handle.container], {
     timeout: 8000,
@@ -2209,7 +2225,20 @@ async function reconcileDdevAccess(
   opts.onProgress?.('Recreating DDEV with the selected browser access…');
   await exec('docker', ['rm', '-f', '-v', id.trim()], { timeout: 90_000 });
   scope.throwIfAborted();
-  return ensureDdevStartedInner(taskId, repoSubpath, opts, scope);
+  const replacement = await ensureDdevStartedInner(
+    taskId,
+    repoSubpath,
+    { ...opts, restoreSnapshot: accessSnapshot?.next },
+    scope,
+  );
+  scope.throwIfAborted();
+  // Keep the previous recovery point until the replacement restored the new slot.
+  // A failed restore throws above and retains both copies for recovery.
+  if (accessSnapshot?.previous) {
+    await cleanupAccessSnapshot(replacement, accessSnapshot.previous, opts);
+    scope.throwIfAborted();
+  }
+  return replacement;
 }
 
 /** DDEV's processed configuration explicitly omits the DB; unknown output never waives
@@ -2253,23 +2282,6 @@ function accessSnapshotName(taskId: string, fileName: string): string | null {
     ? /^(\d+)-/.exec(fileName.slice(prefix.length))?.[1]
     : null;
   return stamp ? `${prefix}${stamp}` : null;
-}
-
-/** Reuse two names: preserve one completed backup while replacing the inactive slot.
- * Prune legacy timestamped names too, without touching import/migration or other tasks. */
-export function selectAccessSnapshotRetention(
-  taskId: string,
-  entries: { name: string; modified: number }[],
-): { next: string; keep: string | null; prune: string[] } {
-  const byName = new Map<string, number>();
-  for (const entry of entries) {
-    const name = accessSnapshotName(taskId, entry.name);
-    if (name) byName.set(name, Math.max(byName.get(name) ?? 0, entry.modified));
-  }
-  const names = [...byName.keys()].sort((a, b) => byName.get(b)! - byName.get(a)!);
-  const keep = names[0] ?? null;
-  const first = `haive-access-${taskId}-0`;
-  return { next: keep === first ? `haive-access-${taskId}-1` : first, keep, prune: names.slice(1) };
 }
 
 async function durabilitySnapshotEntries(

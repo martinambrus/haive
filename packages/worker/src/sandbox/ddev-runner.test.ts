@@ -19,7 +19,6 @@ import {
   selectLatestDurabilitySnapshot,
   buildDdevCommand,
   ddevConfigOmitsDatabase,
-  selectAccessSnapshotRetention,
 } from './ddev-runner.js';
 
 describe('DDEV lifecycle commands across worker restarts', () => {
@@ -144,41 +143,6 @@ describe('database snapshots after changing browser access', () => {
       ]),
     ).toBe('haive-import-task');
     expect(selectLatestDurabilitySnapshot('task', [])).toBeNull();
-  });
-});
-
-describe('access snapshot retention', () => {
-  it('keeps the newest backup while cleaning the inactive slot and legacy snapshots', () => {
-    expect(
-      selectAccessSnapshotRetention('task', [
-        { name: 'haive-access-task-0-postgres_17.zst', modified: 300 },
-        { name: 'haive-access-task-1-postgres_17.zst', modified: 100 },
-        { name: 'haive-access-task-150-postgres_17.zst', modified: 200 },
-        { name: 'haive-migrated-task-postgres_17.zst', modified: 400 },
-      ]),
-    ).toEqual({
-      next: 'haive-access-task-1',
-      keep: 'haive-access-task-0',
-      prune: ['haive-access-task-150', 'haive-access-task-1'],
-    });
-  });
-
-  it('alternates back to the first slot after a successful second-slot backup', () => {
-    expect(
-      selectAccessSnapshotRetention('task', [
-        { name: 'haive-access-task-1-mariadb_10.11', modified: 500 },
-      ]),
-    ).toEqual({ next: 'haive-access-task-0', keep: 'haive-access-task-1', prune: [] });
-  });
-
-  it('starts with a clean first slot and never prunes other tasks or unrelated backups', () => {
-    expect(
-      selectAccessSnapshotRetention('task', [
-        { name: 'haive-access-other-0-postgres_17.zst', modified: 600 },
-        { name: 'haive-import-task-postgres_17.zst', modified: 500 },
-        { name: 'haive-access-task-malformed', modified: 400 },
-      ]),
-    ).toEqual({ next: 'haive-access-task-0', keep: null, prune: [] });
   });
 });
 
