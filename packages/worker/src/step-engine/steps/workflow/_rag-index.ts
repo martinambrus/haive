@@ -379,9 +379,8 @@ export interface RunRagIndexOpts {
   /** Probe result for warmup/display only. A configured endpoint is always
    *  attempted through embedBatch, even when its earlier probe failed. */
   ollamaReachable: boolean;
-  /** From `resolveRagSyncPrefs`. Must be the same value the caller's detect
-   *  counted with — a narrower set here than at detect time means the orphan
-   *  sweep below deletes the difference. */
+  /** Collector inputs counted by detect. Apply refreshes the repository deny
+   *  list so a later scope edit is authoritative, including its orphan cleanup. */
   codeCollect: CodeCollectOptions;
   /** Indexed paths this scan root cannot see, from `resolveSweepProtectedPaths`.
    *  The orphan sweep skips them instead of reading their absence as a deletion.
@@ -424,7 +423,14 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
-  const { repoPath, prefs, projectName, ollamaReachable, codeCollect, sweepProtectedPaths } = opts;
+  const {
+    repoPath,
+    prefs,
+    projectName,
+    ollamaReachable,
+    codeCollect: detectedCodeCollect,
+    sweepProtectedPaths,
+  } = opts;
   const wa = workspaceAnchor(repoPath);
 
   const refusal = await scanRootRefusal(repoPath);
@@ -439,6 +445,9 @@ export async function runRagIndexSync(
       'RAG index scope must be selected at 11b1-rag-source-selection before indexing',
     );
   }
+  // A form's detect output can predate a repository scope edit. Use the current
+  // deny list at apply time so cached forms cannot re-ingest newly excluded code.
+  const codeCollect = { ...detectedCodeCollect, exclude: scope.codeCollect.exclude };
 
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -779,7 +788,11 @@ export async function runRagIndexSync(
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
     )) as Array<{ source_path: string }>;
     for (const row of orphanRows) {
-      if (sweepProtectedPaths?.has(row.source_path)) continue;
+      if (
+        sweepProtectedPaths?.has(row.source_path) &&
+        !isDeniedFile(row.source_path, false, codeCollect.exclude ?? [])
+      )
+        continue;
       if (!processedPaths.has(row.source_path)) {
         // Missing paths may be files moved to a new path whose embeddings failed.
         // Without a reliable rename mapping, retain them until a healthy run.

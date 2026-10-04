@@ -16,7 +16,10 @@ import { resolveRagWorkspace } from './11c-rag-reindex.js';
 /** No onboarding detector has run on a blank repo. Probe the existing framework
  * markers without walking dependency trees, then use the usual scoring rule.
  * Composer installer paths and .gitignore cover custom docroots in the shared picker. */
-async function probeFramework(wa: { anchor: string; prefix: string }): Promise<string | null> {
+async function probeFramework(wa: { anchor: string; prefix: string }): Promise<{
+  framework: string | null;
+  base: string;
+}> {
   const indicators = [
     ...new Set(Object.values(FRAMEWORK_PATTERNS).flatMap((p) => [...p.indicators])),
   ];
@@ -32,14 +35,14 @@ async function probeFramework(wa: { anchor: string; prefix: string }): Promise<s
           return info?.kind === expectedKind ? indicator : null;
         }),
       );
-      return detectFrameworkMatch(present.filter((p) => p !== null));
+      const match = detectFrameworkMatch(present.filter((p) => p !== null));
+      return match ? { ...match, base } : null;
     }),
   );
-  return (
-    candidates
-      .filter((candidate) => candidate !== null)
-      .sort((a, b) => b.score - a.score || b.ratio - a.ratio)[0]?.framework ?? null
-  );
+  const best = candidates
+    .filter((candidate) => candidate !== null)
+    .sort((a, b) => b.score - a.score || b.ratio - a.ratio)[0];
+  return { framework: best?.framework ?? null, base: best?.base ?? '' };
 }
 
 export const workflowRagSourceSelectionStep: StepDefinition<
@@ -64,9 +67,11 @@ export const workflowRagSourceSelectionStep: StepDefinition<
   async detect(ctx) {
     const repoPath = await resolveRagWorkspace(ctx);
     const workspace = workspaceAnchor(repoPath);
+    const match = await probeFramework(workspace);
     return detectRagSourceSelection(ctx, {
       workspace,
-      framework: await probeFramework(workspace),
+      framework: match.framework,
+      frameworkBase: match.base,
       // Workflow sync has no 09_7 output to restrict extensions. Count exactly
       // the collector's default set so the picker and ingestion cover the same files.
       extensionSet: Object.keys(CODE_EXTENSIONS),

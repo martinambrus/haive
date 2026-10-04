@@ -29,6 +29,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
+import { preserveUnseenScopeExclusions } from '@/lib/repo-scope';
 
 /** Every route into the new-task form from this page comes back here, and the
  *  task the form creates inherits it. Shared by the three buttons on a repo card. */
@@ -134,6 +135,7 @@ function fileCountsFromIncluded(
 interface ScopeTreeState {
   tree: TreeNode[];
   included: Set<string>;
+  savedExclusions: string[];
 }
 
 export default function ReposPage() {
@@ -200,6 +202,7 @@ export default function ReposPage() {
       setScope({
         tree: data.tree,
         included: new Set(includedFromDeny(data.tree, data.scopeExcludeGlobs ?? [])),
+        savedExclusions: data.scopeExcludeGlobs ?? [],
       });
     } catch (err) {
       setScopeError((err as Error).message ?? 'Failed to load directory tree');
@@ -209,15 +212,17 @@ export default function ReposPage() {
   }
 
   async function handleChangeIncluded(repoId: string, includedPaths: string[]) {
-    const tree = scope?.tree;
-    if (!tree) return;
+    if (!scope) return;
+    const tree = scope.tree;
     const included = new Set(includedPaths);
     setScope((s) => (s ? { ...s, included } : s));
     const deny: string[] = [];
     denyFromIncluded(tree, included, deny);
     // The knowledge dirs are never excludable, so never send a glob covering
     // one. The api strips them again as a backstop.
-    const sendable = stripManagedKnowledgeGlobs(deny).sort();
+    const sendable = stripManagedKnowledgeGlobs(
+      preserveUnseenScopeExclusions(tree, deny, scope.savedExclusions),
+    ).sort();
     try {
       await api.patch(`/repos/${repoId}/exclusions`, { scopeExcludeGlobs: sendable });
       await reload();

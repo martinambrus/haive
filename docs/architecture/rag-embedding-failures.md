@@ -14,6 +14,17 @@ parent is refused rather than enumerated, and the displayed paths remain worktre
 Framework markers at the root and `web/` are compared using the same match score and
 completeness ratio as repository detection, so frontend tooling cannot hide a stronger
 backend match in either location.
+The winning base also prefixes framework exclusions: a Laravel app in `web/` excludes
+`web/storage` and `web/bootstrap/cache`, while already-prefixed Drupal exclusions stay
+unchanged. Repository scope edits retain saved exclusions for paths absent from their
+current tree. MEASURED on a blank Drupal repo: the picker excluded `web/core` and `vendor`
+in the worktree, the main checkout lacked both when the repo editor was opened, and editing
+other checkboxes dropped those exclusions. Both folders appeared after installation and
+the next 02 sync then counted 10,026 code files. An unseen exclusion remains in force until
+its folder is visible and explicitly re-enabled.
+Both sync steps re-read the current repository deny list at apply time, so a cached form
+cannot re-ingest code excluded after its file count was detected. Scope exclusions also
+take precedence over worktree orphan protections when removing old indexed library rows.
 An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
 covers blank repos already initialized by 11c before scope selection was added. The step
 parks for a decision even under auto-continue, and appears in every path that includes 11c.

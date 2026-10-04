@@ -832,6 +832,73 @@ describe('first workflow RAG source scope', () => {
     expect(defaults).not.toContain('bootstrap/cache');
   });
 
+  it('rebases framework exclusions for a Laravel project inside web/', async () => {
+    await writeSource('web/artisan', '<?php');
+    await writeSource('web/composer.json', '{}');
+    await writeSource('web/app/Service.php');
+    await writeSource('web/routes/web.php');
+    await writeSource('web/storage/logs/debug.php');
+    await writeSource('web/bootstrap/cache/services.php');
+    await writeSource('web/.gitignore', '/storage/*.key\n/bootstrap/cache/*\n');
+    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
+    expect(detected.framework).toBe('laravel');
+    expect(detected.defaultExcludeGlobs).toEqual(
+      expect.arrayContaining(['web/storage', 'web/bootstrap/cache']),
+    );
+    const defaults = collectDefaults(detected.tree, detected.defaultExcludeGlobs);
+    expect(defaults).toContain('web/app');
+    expect(defaults).not.toContain('web/storage/logs');
+    expect(defaults).not.toContain('web/bootstrap/cache');
+  });
+
+  it.each(['root', 'worktree'])(
+    'enforces the current saved scope when replaying an older sync form (%s scan)',
+    async (scan) => {
+      const kbPath = '.haive-data/knowledge_base/architecture.md';
+      for (const base of [root, worktree]) {
+        await writeSource(kbPath, '# Architecture\n\nProject knowledge.\n', base);
+        await writeSource('web/core/library.php', undefined, base);
+        await writeSource('web/modules/custom/project/project.php', undefined, base);
+      }
+      repo.scopeExcludeGlobs = [];
+      await ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(indexedChunks.get('web/core/library.php')!.length).toBeGreaterThan(0);
+      const cached = await preRagSyncStep.detect!(ctx);
+      expect(cached.codeCollect.exclude).toEqual([]);
+      repo.scopeExcludeGlobs = ['web/core'];
+      expect((await preRagSyncStep.detect!(ctx)).codeCollect.exclude).toEqual(['web/core']);
+      inserts = [];
+      if (scan === 'root') {
+        await preRagSyncStep.apply(ctx, {
+          detected: cached,
+          formValues: { runSync: true },
+          iteration: 0,
+          previousIterations: [],
+        });
+      } else {
+        await runRagIndexSync(ctx, {
+          repoPath: worktree,
+          prefs: cached.ragToolingPrefs!,
+          projectName: cached.projectName,
+          ollamaReachable: cached.ollamaReachable,
+          codeCollect: cached.codeCollect,
+          sweepProtectedPaths: new Set(['web/core/library.php']),
+        });
+      }
+      expect(inserts.map((row) => row[3])).not.toContain('web/core/library.php');
+      expect(indexedChunks.get('web/core/library.php')).toEqual([]);
+      expect(indexedChunks.get(kbPath)!.length).toBeGreaterThan(0);
+      expect(indexedChunks.get('web/modules/custom/project/project.php')!.length).toBeGreaterThan(
+        0,
+      );
+    },
+  );
+
   it('recognizes Drupal 7 without any onboarding detector or Composer manifest', async () => {
     await writeSource('includes/bootstrap.inc', '<?php function bootstrap() {}');
     await writeSource('modules/system/system.module');

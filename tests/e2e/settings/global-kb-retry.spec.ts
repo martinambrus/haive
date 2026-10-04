@@ -75,6 +75,9 @@ test.describe('global KB entries', () => {
       );
       await expect(card('Task was cancelled')).not.toContainText('retry');
     } finally {
+      // The page polls the list. Drain route callbacks before deleting its user
+      // or closing the fixture, otherwise route.fetch can outlive the test.
+      await page.unrouteAll({ behavior: 'wait' });
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
     }

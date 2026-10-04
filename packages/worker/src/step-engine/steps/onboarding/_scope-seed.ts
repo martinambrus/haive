@@ -106,6 +106,8 @@ export interface SeedSources {
   gitignore?: string | null;
   /** Detected framework key (drives FRAMEWORK_PATTERNS lookup). */
   framework: string | null;
+  /** Winning framework probe root, relative to the project (e.g. 'web/'). */
+  frameworkBase?: string;
   /** Every directory path present in the scope tree (used to filter the seed to
    *  real dirs). */
   treePaths: readonly string[];
@@ -131,7 +133,7 @@ export interface SeedSources {
  *  (deferred) LLM structure-detect; this deterministic seed is the fast path for
  *  the common cases. Returned sorted for a stable picker default + persisted value. */
 export function computeSeedExcludeGlobs(sources: SeedSources): string[] {
-  const { composer, gitignore, framework, treePaths } = sources;
+  const { composer, gitignore, framework, frameworkBase = '', treePaths } = sources;
   const treeSet = new Set(treePaths);
   const candidates = new Set<string>();
 
@@ -142,7 +144,10 @@ export function computeSeedExcludeGlobs(sources: SeedSources): string[] {
     : undefined;
   for (const p of pattern?.excludePaths ?? []) {
     const norm = trimGlobSlashes(p);
-    if (norm) candidates.add(norm);
+    if (norm) {
+      const base = trimGlobSlashes(frameworkBase);
+      candidates.add(base && !norm.startsWith(`${base}/`) ? `${base}/${norm}` : norm);
+    }
   }
 
   for (const d of gitignoreExcludeDirs(gitignore)) candidates.add(d);

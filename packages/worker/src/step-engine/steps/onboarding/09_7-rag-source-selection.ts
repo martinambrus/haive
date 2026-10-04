@@ -55,6 +55,7 @@ export async function detectRagSourceSelection(
   ctx: StepContext,
   options: {
     framework?: string | null;
+    frameworkBase?: string;
     extensionSet?: readonly string[];
     workspace?: { anchor: string; prefix: string };
   } = {},
@@ -97,6 +98,7 @@ export async function detectRagSourceSelection(
     composer,
     gitignore,
     framework,
+    frameworkBase: options.frameworkBase,
     treePaths,
   });
   // The AI-agent tooling dirs are unioned onto the INHERITED default. The
