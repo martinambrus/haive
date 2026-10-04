@@ -19,8 +19,10 @@ name, then replaces the runner. Snapshot failure leaves the existing runner inta
 restores that access snapshot and refuses a failed restore rather than serving an empty database.
 Failed bring-up removes the newly created runner before releasing the boot, so Retry must
 attempt the cold restore again instead of reusing a serving runner with an empty database.
-A later import or migration snapshot takes precedence by modification time, so subsequent cold
-recovery cannot undo database work done after the access change. Snapshot paths use the same
+A later import or migration snapshot takes precedence by modification time, retaining the
+winning name even when both ordinary snapshots exist. A known snapshot that fails to restore
+does not fall back to an older database. Subsequent cold recovery cannot undo database work
+done after the access change or a later re-import. Snapshot paths use the same
 anchored filesystem primitives as other DDEV inputs.
 
 **A worker reload cannot rely on its in-memory boot map to serialize DDEV.** On task

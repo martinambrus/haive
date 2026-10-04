@@ -2158,7 +2158,10 @@ async function reconcileDdevAccess(
   return ensureDdevStartedInner(taskId, repoSubpath, opts, scope);
 }
 
-async function latestAccessSnapshot(taskId: string, repoSubpath: string): Promise<string | null> {
+async function latestDurabilitySnapshot(
+  taskId: string,
+  repoSubpath: string,
+): Promise<string | null> {
   const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
   const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'));
   const candidates = await Promise.all(
@@ -2174,7 +2177,7 @@ async function latestAccessSnapshot(taskId: string, repoSubpath: string): Promis
       return { name: entry.name, modified: stat.stats.mtimeMs };
     }),
   );
-  return selectLatestAccessSnapshot(
+  return selectLatestDurabilitySnapshot(
     taskId,
     candidates.filter((candidate) => candidate !== null),
   );
@@ -2182,7 +2185,7 @@ async function latestAccessSnapshot(taskId: string, repoSubpath: string): Promis
 
 /** The engine suffix is written by DDEV; restore takes the original name. Newer ordinary
  * snapshots must win, or a browser change would undo every later migration at a cold boot. */
-export function selectLatestAccessSnapshot(
+export function selectLatestDurabilitySnapshot(
   taskId: string,
   entries: { name: string; modified: number }[],
 ): string | null {
@@ -2191,31 +2194,32 @@ export function selectLatestAccessSnapshot(
     const stamp = entry.name.startsWith(prefix)
       ? /^(\d+)-/.exec(entry.name.slice(prefix.length))?.[1]
       : null;
-    const ordinary = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)].some(
+    const ordinary = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)].find(
       (name) => entry.name.startsWith(`${name}-`),
     );
     return stamp || ordinary
-      ? [{ accessName: stamp ? `${prefix}${stamp}` : null, modified: entry.modified }]
+      ? [{ name: stamp ? `${prefix}${stamp}` : ordinary!, modified: entry.modified }]
       : [];
   });
   // A later import/migration snapshot wins over an older access-change snapshot.
-  return candidates.sort((a, b) => b.modified - a.modified)[0]?.accessName ?? null;
+  return candidates.sort((a, b) => b.modified - a.modified)[0]?.name ?? null;
 }
 
-/** Restore the most recent Haive durability snapshot after a cold boot: a
- *  post-migration snapshot wins over the raw import. Both absent (first boot, or a
- *  project with no imported DB) is the normal no-op case. Tolerant by design —
- *  keyed only on exit codes, never on snapshot-list output formatting. */
+/** Restore the newest known durability snapshot, including a later re-import. Refuse
+ * a failed restore of a known snapshot rather than silently rolling back to an older DB.
+ * If the directory cannot be read, preserve legacy probing by name; absent snapshots
+ * (first boot or a project with no imported DB) remain a normal no-op. */
 async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
   const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
-  const accessSnapshot = await latestAccessSnapshot(taskId, repoSubpath);
-  if (accessSnapshot) {
-    const restored = await ddevSnapshotRestore(handle, accessSnapshot);
+  const snapshot = await latestDurabilitySnapshot(taskId, repoSubpath);
+  if (snapshot) {
+    const restored = await ddevSnapshotRestore(handle, snapshot);
     if (restored.exitCode !== 0) {
       throw new Error(
-        `DDEV browser-access database snapshot could not be restored: ${restored.output.slice(-1500)}`,
+        `DDEV database snapshot ${snapshot} could not be restored: ${restored.output.slice(-1500)}`,
       );
     }
+    log.info({ taskId, snapshot }, 'restored DDEV DB snapshot after cold boot');
     return;
   }
   const failures: string[] = [];

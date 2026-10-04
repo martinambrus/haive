@@ -16,7 +16,7 @@ import {
   buildDdevTableCountCommand,
   parseDdevTableCount,
   warmStartRecoveryVerdict,
-  selectLatestAccessSnapshot,
+  selectLatestDurabilitySnapshot,
   buildDdevShellCommand,
 } from './ddev-runner.js';
 
@@ -51,7 +51,7 @@ describe('database snapshots after changing browser access', () => {
 
   it('restores the database saved for the access change ahead of an older import', () => {
     expect(
-      selectLatestAccessSnapshot('task', [
+      selectLatestDurabilitySnapshot('task', [
         { name: 'haive-import-task-postgres_17.zst', modified: 100 },
         access,
       ]),
@@ -61,17 +61,17 @@ describe('database snapshots after changing browser access', () => {
   it('does not roll back a later migration or re-import to an older access snapshot', () => {
     for (const kind of ['migrated', 'import']) {
       expect(
-        selectLatestAccessSnapshot('task', [
+        selectLatestDurabilitySnapshot('task', [
           access,
           { name: `haive-${kind}-task-postgres_17.zst`, modified: 300 },
         ]),
-      ).toBeNull();
+      ).toBe(`haive-${kind}-task`);
     }
   });
 
   it('uses the most recent completed snapshot when access was changed twice', () => {
     expect(
-      selectLatestAccessSnapshot('task', [
+      selectLatestDurabilitySnapshot('task', [
         access,
         { name: 'haive-access-task-150-mariadb_10.11', modified: 400 },
       ]),
@@ -80,12 +80,32 @@ describe('database snapshots after changing browser access', () => {
 
   it('ignores snapshots from other tasks and malformed access names', () => {
     expect(
-      selectLatestAccessSnapshot('task', [
+      selectLatestDurabilitySnapshot('task', [
         { name: 'haive-access-other-200-postgres_17.zst', modified: 500 },
         { name: 'haive-access-task-incomplete', modified: 600 },
         access,
       ]),
     ).toBe('haive-access-task-100');
+  });
+
+  it('restores a later import rather than falling back to an older migration snapshot', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-migrated-task-postgres_17.zst', modified: 100 },
+        access,
+        { name: 'haive-import-task-postgres_17.zst', modified: 300 },
+      ]),
+    ).toBe('haive-import-task');
+  });
+
+  it('selects the newest ordinary snapshot even when browser access never changed', () => {
+    expect(
+      selectLatestDurabilitySnapshot('task', [
+        { name: 'haive-migrated-task-postgres_17.zst', modified: 100 },
+        { name: 'haive-import-task-postgres_17.zst', modified: 300 },
+      ]),
+    ).toBe('haive-import-task');
+    expect(selectLatestDurabilitySnapshot('task', [])).toBeNull();
   });
 });
 
