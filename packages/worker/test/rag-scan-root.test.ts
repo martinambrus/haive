@@ -10,11 +10,15 @@ vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (importO
   ...(await importOriginal<object>()),
   resolveRagConnection,
 }));
+vi.mock('../src/queues/cli-exec/secret-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  taskSecretMaskPolicy: async () => ({ globs: { deny: [], ignore: [] } }),
+}));
 
 const { runRagIndexSync } = await import('../src/step-engine/steps/workflow/_rag-index.js');
 
 const ctx = {
-  db: {},
+  db: { query: { tasks: { findFirst: async () => undefined } } },
   emitProgress: async () => {},
   logger: { info: () => {}, warn: () => {} },
 } as unknown as StepContext;

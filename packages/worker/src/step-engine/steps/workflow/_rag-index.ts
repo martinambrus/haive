@@ -1,10 +1,11 @@
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
+  IN_STACK_OLLAMA_URL,
 } from '@haive/shared';
 import {
   INVESTIGATIONS_DIR,
@@ -15,8 +16,14 @@ import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haiv
 import type { StepContext } from '../../step-definition.js';
 import { gitRun } from '../../../repo/git-push.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import {
+  listTrackedFiles,
+  SecretMaskError,
+  taskSecretMaskPolicy,
+} from '../../../queues/cli-exec/secret-mask.js';
+import { secretMaskDeniesPath } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
 import {
   resolveRagConnection,
@@ -154,6 +161,11 @@ export interface RagSyncResolved {
   /** The embedding endpoint was re-derived from `ollamaMode` because the tooling this
    *  resolved from carries none — see `resolveToolingOllamaUrl`. */
   ollamaUrlDerived: boolean;
+  /** 11c may offer first-time storage for a blank repo with no onboarding settings.
+   *  Detection only proposes it; apply persists it after the user elects to sync. */
+  needsInitialization?: boolean;
+  /** A blank repo has never had its RAG source scope selected. [] is a saved choice. */
+  needsScopeSelection?: boolean;
 }
 
 /** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
@@ -187,7 +199,10 @@ export function ragOllamaUrlWasDerived(t: Record<string, unknown>): boolean {
  *  extension picks plus 01-env-detect's custom-code exclude heuristic. Anything
  *  absent stays undefined, which the collector reads as "no restriction" — the
  *  behaviour a repo onboarded before 09_7 existed already had. */
-export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncResolved> {
+export async function resolveRagSyncPrefs(
+  ctx: StepContext,
+  initializeIfMissing = false,
+): Promise<RagSyncResolved> {
   const taskRow = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
   });
@@ -201,13 +216,23 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
   const exclude: string[] = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
   let selectedDirs: string[] | undefined;
   let extensionSet: string[] | undefined;
+  let needsInitialization = false;
+  let needsScopeSelection = false;
 
   if (repositoryId) {
     // Col-first: the repo mirror is authoritative when present.
     const repo = await ctx.db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { onboardingTooling: true, onboardingEnvironment: true },
+      columns: {
+        onboardingTooling: true,
+        onboardingEnvironment: true,
+        source: true,
+        name: true,
+        onboardingResetAt: true,
+        scopeExcludeGlobs: true,
+      },
     });
+    needsScopeSelection = repo?.source === 'blank' && repo.scopeExcludeGlobs == null;
     const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
     const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
 
@@ -271,6 +296,29 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
       selectedDirs = ragSourceOutput?.selectedDirs;
       extensionSet = ragSourceOutput?.extensionSet;
     }
+
+    // Blank INIT seeds templates, but never runs 04-tooling or 10-rag-populate.
+    // Once learning has written knowledge, 11c can be its first ingestion. Never
+    // turn a deliberate ragMode:'none', a partial onboarding, or a reset into an
+    // implicit opt-in. 02/estimation keep their read-only, unconfigured behaviour.
+    if (
+      initializeIfMissing &&
+      repo?.source === 'blank' &&
+      !repo.onboardingResetAt &&
+      repo.onboardingTooling == null &&
+      repo.onboardingEnvironment == null &&
+      !onboardingTask
+    ) {
+      ragPrefs = {
+        ragMode: 'internal',
+        ragConnectionString: null,
+        ollamaUrl: IN_STACK_OLLAMA_URL,
+        embeddingModel: 'qwen3-embedding:4b',
+        embeddingDimensions: 2560,
+      };
+      projectName = repo.name;
+      needsInitialization = true;
+    }
   }
 
   return {
@@ -280,7 +328,52 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
     projectName,
     codeCollect: { exclude, selectedDirs, extensionSet },
     ollamaUrlDerived,
+    needsInitialization,
+    needsScopeSelection,
   };
+}
+
+/** Save a greenfield opt-in in the SAME columns both ingestion and rag_search read.
+ *  One conditional write keeps concurrent first workflows from replacing settings
+ *  saved since detect. Re-resolve afterwards so a competing configuration wins. */
+export async function initializeRagSyncPrefs(
+  ctx: StepContext,
+  detected: RagSyncResolved,
+): Promise<RagSyncResolved> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId || !detected.ragToolingPrefs) return resolveRagSyncPrefs(ctx);
+
+  const tooling: OnboardingToolingMirror = {
+    schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
+    tooling: { ...detected.ragToolingPrefs, ollamaMode: 'internal' },
+  };
+  const environment: OnboardingEnvironmentMirror = {
+    schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+    envDetectData: { project: { name: detected.projectName } },
+    confirmedValues: {},
+  };
+  await ctx.db
+    .update(schema.repositories)
+    .set({
+      onboardingTooling: tooling as unknown as Record<string, unknown>,
+      onboardingEnvironment: environment as unknown as Record<string, unknown>,
+    })
+    .where(
+      and(
+        eq(schema.repositories.id, task.repositoryId),
+        eq(schema.repositories.source, 'blank'),
+        isNull(schema.repositories.onboardingTooling),
+        isNull(schema.repositories.onboardingEnvironment),
+        isNull(schema.repositories.onboardingResetAt),
+        sql`NOT EXISTS (SELECT 1 FROM ${schema.tasks}
+        WHERE ${schema.tasks.repositoryId} = ${task.repositoryId}
+          AND ${schema.tasks.type} = 'onboarding')`,
+      ),
+    );
+  return resolveRagSyncPrefs(ctx);
 }
 
 export interface RunRagIndexOpts {
@@ -289,10 +382,11 @@ export interface RunRagIndexOpts {
   repoPath: string;
   prefs: RagToolingPrefs;
   projectName: string;
+  /** Probe result for warmup/display only. A configured endpoint is always
+   *  attempted through embedBatch, even when its earlier probe failed. */
   ollamaReachable: boolean;
-  /** From `resolveRagSyncPrefs`. Must be the same value the caller's detect
-   *  counted with — a narrower set here than at detect time means the orphan
-   *  sweep below deletes the difference. */
+  /** Collector inputs counted by detect. Apply refreshes the repository deny
+   *  list so a later scope edit is authoritative, including its orphan cleanup. */
   codeCollect: CodeCollectOptions;
   /** Indexed paths this scan root cannot see, from `resolveSweepProtectedPaths`.
    *  The orphan sweep skips them instead of reading their absence as a deletion.
@@ -335,7 +429,14 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
-  const { repoPath, prefs, projectName, ollamaReachable, codeCollect, sweepProtectedPaths } = opts;
+  const {
+    repoPath,
+    prefs,
+    projectName,
+    ollamaReachable,
+    codeCollect: detectedCodeCollect,
+    sweepProtectedPaths,
+  } = opts;
   const wa = workspaceAnchor(repoPath);
 
   const refusal = await scanRootRefusal(repoPath);
@@ -344,6 +445,23 @@ export async function runRagIndexSync(
     return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
   }
 
+  const scope = await resolveRagSyncPrefs(ctx);
+  if (scope.needsScopeSelection) {
+    return EMPTY_RESULT(
+      'RAG index scope must be selected at 11b1-rag-source-selection before indexing',
+    );
+  }
+  // A form's detect output can predate a repository scope edit. Use the current
+  // deny list at apply time so cached forms cannot re-ingest newly excluded code.
+  const codeCollect = { ...detectedCodeCollect, exclude: scope.codeCollect.exclude };
+
+  // RAG is another route into an agent's context. Use the same policy as prompt
+  // writers, including this scan root's tracked set; a worktree may track different
+  // files from the main checkout. Failure to resolve the policy must stop ingestion.
+  const secretPolicy = await taskSecretMaskPolicy(ctx.db, ctx.taskId);
+  if (!secretPolicy) throw new SecretMaskError('RAG secret-mask policy has no repository');
+  const ingestionPolicy = { ...secretPolicy, tracked: await listTrackedFiles(repoPath) };
+
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
   if (!conn) return EMPTY_RESULT('connection resolved to null');
@@ -351,7 +469,10 @@ export async function runRagIndexSync(
   try {
     await ctx.emitProgress('Ensuring RAG schema...');
     const { usedPgvector } = await ensureRagSchema(conn);
-    const useOllama = ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
+    // A failed probe is an outage, not the user's choice of hash mode. Otherwise
+    // first-time ingestion writes hash vectors that content hashing preserves
+    // forever, since the saved explicit endpoint never sets ollamaUrlDerived.
+    const useOllama = !!prefs.ollamaUrl && !!prefs.embeddingModel;
 
     // Resolve repository_id first — required for dedup (without it we'd re-embed
     // the same content on every task) and for the per-repo embed-health record, and
@@ -370,6 +491,23 @@ export async function runRagIndexSync(
       return EMPTY_RESULT('task has no repository_id');
     }
     const health = await loadRagEmbedHealth(ctx.db, repositoryId);
+
+    // Purge old denied rows BEFORE any embedding attempts. Secret exclusions must
+    // survive embedding outages and the worktree's untracked-file protections,
+    // even when the source file has disappeared since an earlier sync.
+    let deleted = 0;
+    const indexedPaths = (await conn.pg.unsafe(
+      `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
+      [repositoryId, TASK_EMBED_SOURCE_TYPE],
+    )) as Array<{ source_path: string }>;
+    for (const row of indexedPaths) {
+      if (!secretMaskDeniesPath(ingestionPolicy, row.source_path)) continue;
+      const result = await conn.pg.unsafe(
+        `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
+        [repositoryId, row.source_path],
+      );
+      deleted += result.count;
+    }
 
     // A re-derived endpoint means the stored tooling never carried one, so every earlier
     // sync of this repo ran with `useOllama` false and wrote hash vectors. Content hashing
@@ -401,14 +539,15 @@ export async function runRagIndexSync(
     }
 
     let embedDevice: EmbedDevice = 'unknown';
-    if (useOllama) {
+    if (useOllama && ollamaReachable) {
       // Warm the embedding model once so a cold (slow-to-load) model does not
-      // time out every batch into hash fallback; keep_alive keeps it resident.
+      // time out every batch; keep_alive keeps it resident. An unavailable probe
+      // skips warmup, while the batches still retry the configured endpoint.
       await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
       const warmed = await warmOllamaModel(prefs.ollamaUrl!, prefs.embeddingModel!);
       ctx.logger.info(
         { model: prefs.embeddingModel, warmed },
-        warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
+        warmed ? 'embedding model warmed' : 'embedding model warmup failed (batches will retry)',
       );
       // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
       // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.
@@ -430,9 +569,9 @@ export async function runRagIndexSync(
     let inserted = 0;
     let updated = 0;
     let skipped = 0;
-    let deleted = 0;
     let embedSkippedChunks = 0;
     let embedFailureReason: string | null = null;
+    let realEmbeddingSucceeded = false;
     const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
@@ -441,7 +580,7 @@ export async function runRagIndexSync(
     const allFiles: Array<{ relPath: string; sourceType: RagSourceType }> = [
       ...kbFiles.map((r) => ({ relPath: r, sourceType: classifyKbSourceType(r) })),
       ...codeFiles.map((r) => ({ relPath: r, sourceType: 'code' as const })),
-    ];
+    ].filter(({ relPath }) => !secretMaskDeniesPath(ingestionPolicy, relPath));
 
     // Track all source_paths we process (for stale cleanup)
     const processedPaths = new Set<string>();
@@ -555,28 +694,12 @@ export async function runRagIndexSync(
         }
 
         if (existingHash !== undefined) {
-          // Hash changed — delete old, will insert new
-          await conn.pg.unsafe(
-            `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-            [repositoryId, relPath, chunk.sectionId, chunk.chunkIndex],
-          );
+          // Keep the searchable row until embedding succeeds. The insert below
+          // already upserts this key, so deleting first only loses knowledge
+          // during an outage (including hashes nulled for a forced re-embed).
           toEmbed.push({ chunk, action: 'update' });
         } else {
           toEmbed.push({ chunk, action: 'insert' });
-        }
-      }
-
-      // Delete stale entries (sections/chunks no longer in current extraction)
-      for (const key of existingMap.keys()) {
-        if (!seenKeys.has(key)) {
-          const colonPos = key.indexOf(':');
-          const sectionId = key.slice(0, colonPos);
-          const chunkIdx = parseInt(key.slice(colonPos + 1), 10);
-          await conn.pg.unsafe(
-            `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-            [repositoryId, relPath, sectionId, chunkIdx],
-          );
-          deleted += 1;
         }
       }
 
@@ -587,6 +710,7 @@ export async function runRagIndexSync(
       }
 
       // Embed and insert new/updated chunks in batches
+      let fileEmbedFailed = false;
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += embedBatchSize) {
         ctx.throwIfCancelled();
         const batch = toEmbed.slice(batchStart, batchStart + embedBatchSize);
@@ -600,6 +724,7 @@ export async function runRagIndexSync(
           texts,
         });
         if (outcome.kind === 'failed') {
+          fileEmbedFailed = true;
           // Leave these chunks UNINDEXED. An insert simply does not happen; an
           // update leaves the previous row in place, which is stale but still
           // points at the right file — both beat a hash vector, which cannot be
@@ -614,6 +739,7 @@ export async function runRagIndexSync(
           continue;
         }
         const embeddings = outcome.embeddings;
+        if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -660,6 +786,24 @@ export async function runRagIndexSync(
           else inserted += 1;
         }
       }
+
+      // A renamed heading or changed chunk boundary gives replacements new keys.
+      // Retain every stale key until all replacements for this file are written,
+      // including when only one batch fails. A deletion-only edit needs no embeds.
+      if (!fileEmbedFailed) {
+        for (const key of existingMap.keys()) {
+          if (!seenKeys.has(key)) {
+            const colonPos = key.indexOf(':');
+            const sectionId = key.slice(0, colonPos);
+            const chunkIdx = parseInt(key.slice(colonPos + 1), 10);
+            await conn.pg.unsafe(
+              `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
+              [repositoryId, relPath, sectionId, chunkIdx],
+            );
+            deleted += 1;
+          }
+        }
+      }
     }
 
     // Delete entries for files that no longer exist in the repo. Scoped by
@@ -673,8 +817,24 @@ export async function runRagIndexSync(
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
     )) as Array<{ source_path: string }>;
     for (const row of orphanRows) {
-      if (sweepProtectedPaths?.has(row.source_path)) continue;
+      // Already purged above, independently of orphan/embedding protections.
+      if (secretMaskDeniesPath(ingestionPolicy, row.source_path)) continue;
+      if (
+        sweepProtectedPaths?.has(row.source_path) &&
+        !isDeniedFile(row.source_path, false, codeCollect.exclude ?? [])
+      )
+        continue;
       if (!processedPaths.has(row.source_path)) {
+        // Missing paths may be files moved to a new path whose embeddings failed.
+        // Without a reliable rename mapping, retain them until a healthy run.
+        // Existing files excluded by scope/limits still need to leave the index.
+        if (
+          embedSkippedChunks > 0 &&
+          !isDeniedFile(row.source_path, false, codeCollect.exclude ?? []) &&
+          (await lstatNoFollow(wa.anchor, `${wa.prefix}${row.source_path}`)) === null
+        ) {
+          continue;
+        }
         const result = await conn.pg.unsafe(
           `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
           [repositoryId, row.source_path],
@@ -702,28 +862,40 @@ export async function runRagIndexSync(
       }
     }
 
+    // An unchanged scan proves nothing about an endpoint that previously failed.
+    // A small real batch lets a healthy endpoint recover without requiring a file
+    // edit, while an outage (or an explicitly enabled hash fallback) keeps the flag.
+    if (useOllama && health.degradedAt && !embedFailureReason && !realEmbeddingSucceeded) {
+      const outcome = await embedBatch({
+        ollamaUrl: prefs.ollamaUrl,
+        model: prefs.embeddingModel,
+        dimensions: prefs.embeddingDimensions,
+        useOllama,
+        texts: ['RAG embedding health check'],
+      });
+      if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
+      else if (outcome.kind === 'failed') embedFailureReason = outcome.reason;
+    }
+
     // Remember (or forget) the embed failure on the REPO, so the condition outlives
     // this step row — a manual retry nulls task_steps.output — and every later RAG
     // step can say so. Only an actual model run can clear it: a hash-mode sync
     // proves nothing about whether embeddings work.
     if (embedFailureReason) {
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
-    } else if (useOllama && health.degradedAt) {
+      health.degradedAt ??= new Date();
+      health.degradedReason = embedFailureReason;
+    } else if (realEmbeddingSucceeded && health.degradedAt) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
+      health.degradedAt = null;
+      health.degradedReason = null;
     }
     await ctx.db
       .update(schema.taskSteps)
       .set({
         warningMessage: composeRagWarning(
           embedDeviceWarning(embedDevice),
-          ragEmbedWarning(
-            {
-              degradedAt: embedFailureReason ? (health.degradedAt ?? new Date()) : null,
-              degradedReason: embedFailureReason ?? health.degradedReason,
-              lexicalOnly: health.lexicalOnly,
-            },
-            { skippedChunks: embedSkippedChunks },
-          ),
+          ragEmbedWarning(health, { skippedChunks: embedSkippedChunks }),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));

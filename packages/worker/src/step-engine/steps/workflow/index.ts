@@ -45,6 +45,7 @@ import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
 import { skillSyncStep } from './11d-skill-sync.js';
 import { kbCommitStep } from './11b-kb-commit.js';
+import { workflowRagSourceSelectionStep } from './11b1-rag-source-selection.js';
 import { ragReindexStep } from './11c-rag-reindex.js';
 import { gate4PushStep } from './11a-gate-4-push.js';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
@@ -94,6 +95,7 @@ export {
   phase8LearningStep,
   skillSyncStep,
   kbCommitStep,
+  workflowRagSourceSelectionStep,
   ragReindexStep,
   promptGuidanceStep,
   gate4PushStep,
@@ -146,6 +148,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase8LearningStep);
   registry.register(skillSyncStep);
   registry.register(kbCommitStep);
+  registry.register(workflowRagSourceSelectionStep);
   registry.register(ragReindexStep);
   registry.register(promptGuidanceStep);
   registry.register(planReconcileStep);

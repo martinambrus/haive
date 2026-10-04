@@ -51,6 +51,7 @@ const SPINE: readonly string[] = [
   '08b-test-management',
   '08-phase-5-verify',
   '10-gate-3-commit',
+  '11b1-rag-source-selection',
   '11a-gate-4-push',
   '12-worktree-cleanup',
   '13-pr-wait',

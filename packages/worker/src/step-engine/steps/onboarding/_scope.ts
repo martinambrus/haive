@@ -289,8 +289,8 @@ function denyFrontierNode(node: TreeNode, selected: Set<string>, out: string[]):
 }
 
 /** Parsed composer.json (or null) — a seed input for computeSeedExcludeGlobs. */
-export async function readComposerJson(repoPath: string): Promise<unknown> {
-  const text = await readTextNoFollow(repoPath, 'composer.json');
+export async function readComposerJson(repoPath: string, prefix = ''): Promise<unknown> {
+  const text = await readTextNoFollow(repoPath, `${prefix}composer.json`);
   if (text === null) return null;
   try {
     return JSON.parse(text);
@@ -300,6 +300,6 @@ export async function readComposerJson(repoPath: string): Promise<unknown> {
 }
 
 /** Raw .gitignore text (or null) — a seed input for computeSeedExcludeGlobs. */
-export async function readGitignore(repoPath: string): Promise<string | null> {
-  return readTextNoFollow(repoPath, '.gitignore');
+export async function readGitignore(repoPath: string, prefix = ''): Promise<string | null> {
+  return readTextNoFollow(repoPath, `${prefix}.gitignore`);
 }

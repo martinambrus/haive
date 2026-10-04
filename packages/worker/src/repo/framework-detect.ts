@@ -107,6 +107,14 @@ export async function buildFileTree(root: string, prefix = ''): Promise<string[]
 }
 
 export function detectFramework(fileTree: string[]): FrameworkName | null {
+  return detectFrameworkMatch(fileTree)?.framework ?? null;
+}
+
+/** Expose the same score/ratio used by directory detection so callers probing
+ *  multiple candidate roots can compare them without preferring the first hit. */
+export function detectFrameworkMatch(
+  fileTree: string[],
+): { framework: FrameworkName; score: number; ratio: number } | null {
   let bestMatch: FrameworkName | null = null;
   let bestScore = 0;
   let bestRatio = 0;
@@ -140,7 +148,9 @@ export function detectFramework(fileTree: string[]): FrameworkName | null {
     }
   }
 
-  return bestScore >= 2 ? bestMatch : null;
+  return bestScore >= 2 && bestMatch
+    ? { framework: bestMatch, score: bestScore, ratio: bestRatio }
+    : null;
 }
 
 export function detectLanguages(fileTree: string[]): Record<string, number> {

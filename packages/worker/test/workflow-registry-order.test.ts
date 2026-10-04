@@ -26,3 +26,29 @@ describe('workflow run order: test management before verify', () => {
     });
   }
 });
+
+describe('workflow RAG scope precedes indexing', () => {
+  const registry = new StepRegistry();
+  registerWorkflowSteps(registry);
+  it('quick_bugfix can save missing scope for the next pre-sync', () => {
+    const ids = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], 'quick_bugfix').map(
+      (s) => s.metadata.id,
+    );
+    expect(ids.indexOf('11b1-rag-source-selection')).toBeGreaterThan(
+      ids.indexOf('10-gate-3-commit'),
+    );
+    expect(ids.indexOf('11b1-rag-source-selection')).toBeLessThan(
+      ids.indexOf('12-worktree-cleanup'),
+    );
+    expect(ids).not.toContain('11c-rag-reindex');
+  });
+  for (const path of ['full_workflow', 'plan_tasklist'] as const) {
+    it(`${path}: KB commit → RAG scope → re-index`, () => {
+      const ids = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], path).map(
+        (s) => s.metadata.id,
+      );
+      expect(ids.indexOf('11b1-rag-source-selection')).toBe(ids.indexOf('11b-kb-commit') + 1);
+      expect(ids.indexOf('11c-rag-reindex')).toBe(ids.indexOf('11b1-rag-source-selection') + 1);
+    });
+  }
+});

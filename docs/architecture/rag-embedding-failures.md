@@ -1,5 +1,57 @@
 # RAG embedding failures
 
+**A blank repository can initialize RAG at its first workflow's `11c-rag-reindex`.**
+Blank INIT seeds templates but runs neither tooling selection nor ingestion. 11c offers
+internal storage with onboarding's embedding defaults when both repo mirrors are absent,
+no onboarding task exists, and the repo has not been reset. Before ingestion,
+`11b1-rag-source-selection` (index 11.6, between 11b and 11c) presents the shared onboarding
+RAG directory picker for a blank repo whose `scope_exclude_globs` is NULL. It scans the
+worktree, using framework marker probes, Composer installer paths and `.gitignore` to
+pre-exclude framework/library/generated folders, while keeping managed knowledge immune.
+The tree, framework markers, Composer metadata and `.gitignore` all use the repository
+root as their filesystem anchor with a relative worktree prefix. A linked worktree or
+parent is refused rather than enumerated, and the displayed paths remain worktree-relative.
+Framework markers at the root and `web/` are compared using the same match score and
+completeness ratio as repository detection, so frontend tooling cannot hide a stronger
+backend match in either location.
+The winning base also prefixes framework exclusions: a Laravel app in `web/` excludes
+`web/storage` and `web/bootstrap/cache`, while already-prefixed Drupal exclusions stay
+unchanged. Composer and `.gitignore` metadata from both the repository root and the
+winning app base contribute defaults, with each metadata file's paths rebased from its
+own directory. Reads keep the repository anchor and relative worktree prefix.
+Repository scope edits retain saved exclusions for paths absent from their
+current tree. MEASURED on a blank Drupal repo: the picker excluded `web/core` and `vendor`
+in the worktree, the main checkout lacked both when the repo editor was opened, and editing
+other checkboxes dropped those exclusions. Both folders appeared after installation and
+the next 02 sync then counted 10,026 code files. An unseen exclusion remains in force until
+its folder is visible and explicitly re-enabled.
+Both sync steps re-read the current repository deny list at apply time, so a cached form
+cannot re-ingest code excluded after its file count was detected. Scope exclusions also
+take precedence over worktree orphan protections when removing old indexed library rows.
+Both code and managed KB ingestion also apply `taskSecretMaskPolicy`: untracked secret
+paths stay out of the index, using the scan root's own tracked set and the repository's
+custom allow/deny rules. An unavailable git listing treats all matches as untracked;
+an unresolved task/repository policy fails closed before connecting or embedding.
+Previously indexed denied paths are purged within the repository's scope before embedding,
+even when missing, protected by a worktree scan, or an embedding endpoint is down.
+An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
+covers blank repos already initialized by 11c before scope selection was added. The step
+parks for a decision even under auto-continue, and appears in every path that includes 11c.
+It also appears on `quick_bugfix` for a repo with existing RAG but no saved scope, so later
+quick fixes can run pre-sync. Unconfigured quick fixes defer the picker until a workflow
+that offers ingestion; the quick path still has no 11c initialization step.
+`02-pre-rag-sync` waits while that scope is missing; the shared workflow indexer refuses
+unscoped blank repositories even when replaying old detect outputs. An already parked 11c
+can reach the new picker by retrying 11b. Saving the scope uses the existing repo-level deny
+list; subsequent sync removes previously indexed files now excluded. Detect counts the new knowledge
+and code without creating storage; selecting the sync persists tooling and a minimal
+environment mirror containing the project name before the existing indexer creates the
+database/schema. Both `rag_search` and later workflow syncs therefore resolve the same store,
+and repository cleanup can identify it. These settings are stored on this install's repository
+row; 11c does not commit mirror files. An explicit `ragMode: 'none'`, onboarding history,
+or reset prevents this initialization offer. A conditional write followed by re-resolution
+preserves settings saved concurrently. `02-pre-rag-sync` still skips an unconfigured repo.
+
 **A failed embed never becomes a hash vector.** `hashEmbed` is a deterministic SHA-256
 vector with no semantic content, so once an index holds real vectors a hash row is NOISE
 in the dense half of the RRF fusion — it can outrank a genuine lexical hit, and nothing
@@ -18,11 +70,27 @@ embedding endpoint at all (every chunk hashes, which is homogeneous and therefor
 or `CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED` is off, which restores the old behaviour byte for
 byte and is the no-deploy rollback.
 
+In workflow syncs, an unreachable Ollama probe skips model warmup but never selects
+hash mode for a configured endpoint. Batches still try that endpoint through `embedBatch`:
+under strict mode an outage leaves new chunks absent and records degradation, so a later
+healthy sync indexes them normally. This matters especially for greenfield initialization,
+whose saved explicit URL does not set `ollamaUrlDerived`; hash rows written there would
+otherwise survive every incremental sync after the service recovered.
+
 **What a failure does depends on WHEN the step runs.** `10-rag-populate` FAILS — "the index
 is populated" is its whole contract and a human is watching onboarding. `02-pre-rag-sync`
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every
 workflow task, so failing it would block all work on the repo over a broken index. An
 absent row is honest; a stale row left by a skipped update still points at the right file.
+Workflow sync upserts a changed key only after embedding succeeds. It also defers removing
+old section/chunk keys until every replacement batch for that file succeeds, so renamed
+headings and changed chunk boundaries keep their prior searchable rows through an outage.
+A partial batch failure retains those old keys until a healthy retry; a deletion-only edit
+can remove stale keys immediately because it has no replacements to embed.
+If any replacement batch fails, orphan cleanup also retains missing source paths until
+a healthy sync: a disappeared path may have been renamed to the failed replacement.
+Paths excluded by the saved scope and files still present but outside indexing limits
+are removed even during an outage, so an explicit exclusion does not wait for recovery.
 
 **Two timeouts, because one call serves both jobs.** `ollamaEmbed` is used by bulk ingestion
 AND by the interactive `rag_search` query embed, so a single budget is simultaneously too
@@ -37,6 +105,10 @@ rag_embed_degraded_at` is the STRUCTURAL flag every reader gates on;
 `rag_embed_degraded_reason` beside it is display copy that outlives the state it describes
 (the message-column rule in [AGENTS.md](../../AGENTS.md)'s Conventions). Only a completed run with REAL embeddings clears it — a
 hash-mode run proves nothing about whether embeddings work.
+An unchanged scan also proves nothing: if the repo is already degraded and no file batch
+produces a real embedding, workflow sync embeds one short health-check text before clearing
+the flag. A failed or hashed check retains degradation and the step warning; a healthy
+check permits recovery without requiring a source edit.
 
 **`rag_embed_lexical_only` is the accepted verdict, and it is NOT "keep hashing".** It forces
 `ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes),
