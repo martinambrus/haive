@@ -27,6 +27,7 @@ import {
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
+import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 import type { TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { collectChangedLineMap, type ChangedLineMap } from './_impl-changes.js';
@@ -93,7 +94,8 @@ interface CheckResult {
  *  the probe itself was unavailable — gate-2 treats that as non-blocking. */
 interface RuntimeSmoke {
   ran: boolean;
-  passed: boolean;
+  /** null = a 4xx response without a runtime-error signature; human review needed. */
+  passed: boolean | null;
   httpStatus: number | null;
   url: string | null;
   errorExcerpt: string;
@@ -534,7 +536,7 @@ const SMOKE_STATUS_MARKER = 'HAIVE_HTTP_CODE=';
  *  status otherwise means the app never answered (a failure). */
 export function parseRuntimeSmokeOutput(raw: string): {
   ran: boolean;
-  passed: boolean;
+  passed: boolean | null;
   httpStatus: number | null;
   errorExcerpt: string;
 } {
@@ -555,7 +557,12 @@ export function parseRuntimeSmokeOutput(raw: string): {
   ) {
     return { ran: false, passed: false, httpStatus: null, errorExcerpt };
   }
-  const passed = httpStatus !== null && httpStatus < 500 && !FATAL_PATTERNS.test(cleaned);
+  const passed =
+    httpStatus === null || httpStatus >= 500 || FATAL_PATTERNS.test(cleaned)
+      ? false
+      : httpStatus >= 400
+        ? null
+        : true;
   return { ran: true, passed, httpStatus, errorExcerpt };
 }
 
@@ -799,7 +806,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         test: test.ran ? (test.passed ? 'pass' : 'fail') : 'skip',
         lint: lint.ran ? (lint.passed ? 'pass' : 'fail') : 'skip',
         typecheck: typecheck.ran ? (typecheck.passed ? 'pass' : 'fail') : 'skip',
-        smoke: runtimeSmoke.ran ? (runtimeSmoke.passed ? 'pass' : 'fail') : 'skip',
+        smoke: runtimeSmokeVerdict(runtimeSmoke),
       },
       'verify phase complete',
     );

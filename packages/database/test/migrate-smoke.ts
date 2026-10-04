@@ -16,7 +16,7 @@
  */
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, readdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -106,6 +106,97 @@ async function withDb<T>(dbName: string, fn: (sql: postgres.Sql) => Promise<T>):
 }
 
 async function main(): Promise<void> {
+  // Rendered gates are durable too. A temporary table shadows the real task_steps for
+  // this transaction, so the data repair can be tested without touching any live task.
+  await admin.begin(async (sql) => {
+    await sql`CREATE TEMP TABLE task_steps (
+      id text PRIMARY KEY, step_id text, status text, waiting_started_at timestamp,
+      form_values jsonb, detect_output jsonb, form_schema jsonb
+    ) ON COMMIT DROP`;
+    const browserPass = {
+      method: 'mcp',
+      passed: true,
+      skipped: false,
+      verificationIncomplete: false,
+    };
+    const cases = [
+      { id: '403', code: 403, repair: true },
+      { id: '401', code: 401, repair: true },
+      { id: '404', code: 404, repair: true },
+      { id: 'browser', code: 403, browser: browserPass, repair: true, approve: true },
+      { id: 'manual', code: 403, browser: { ...browserPass, method: 'manual' }, repair: true },
+      {
+        id: 'incomplete',
+        code: 403,
+        browser: { ...browserPass, verificationIncomplete: true },
+        repair: true,
+      },
+      { id: 'skipped', code: 403, browser: { ...browserPass, skipped: true }, repair: true },
+      { id: '200', code: 200 },
+      { id: '503', code: 503 },
+      { id: 'fatal', code: 403, passed: false },
+      { id: 'submitted', code: 403, submitted: true },
+      { id: 'sent', code: 403, sent: true },
+      { id: 'done', code: 403, done: true },
+    ];
+    const original = {
+      statusSummary: [
+        { label: 'Tests', status: 'pass' },
+        { label: 'Runtime smoke', status: 'pass', statusLabel: 'PASS' },
+      ],
+      fields: [
+        { id: 'decision', default: 'approve' },
+        { id: 'feedback', default: '' },
+      ],
+    };
+    for (const c of cases) {
+      await sql`INSERT INTO task_steps VALUES (
+        ${c.id}, '09-gate-2-verify-approval', ${'done' in c ? 'done' : 'waiting_form'},
+        ${'sent' in c ? null : new Date()},
+        ${'submitted' in c ? sql.json({ decision: 'approve' }) : null},
+        ${sql.json({
+          runtimeSmoke: {
+            ran: true,
+            passed: 'passed' in c ? c.passed : true,
+            httpStatus: c.code,
+            errorExcerpt: 'Access denied\n```\nbody',
+          },
+          browser: 'browser' in c ? c.browser : null,
+        })},
+        ${sql.json(original)}
+      )`;
+    }
+    const repair = await readFile(
+      path.join(MIGRATIONS, '0174_gate2_runtime_smoke_unsure.sql'),
+      'utf8',
+    );
+    await sql.unsafe(repair);
+    const first = await sql<{ id: string; form_schema: typeof original }[]>`
+      SELECT id, form_schema FROM task_steps ORDER BY id`;
+    for (const c of cases) {
+      const form = first.find((r) => r.id === c.id)!.form_schema;
+      if ('repair' in c) {
+        check(`smoke 4xx: ${c.id} is UNSURE`, form.statusSummary[1]?.statusLabel === 'UNSURE');
+        check(
+          `smoke 4xx: ${c.id} default`,
+          form.fields[0]?.default === ('approve' in c ? 'approve' : 'reject'),
+        );
+        check(
+          `smoke 4xx: ${c.id} keeps other fields`,
+          JSON.stringify(form.fields[1]) === JSON.stringify(original.fields[1]),
+        );
+      } else {
+        check(
+          `smoke 4xx: ${c.id} untouched`,
+          JSON.stringify(form) === JSON.stringify(first.find((r) => r.id === '200')!.form_schema),
+        );
+      }
+    }
+    await sql.unsafe(repair);
+    const second = await sql`SELECT id, form_schema FROM task_steps ORDER BY id`;
+    check('smoke 4xx: repair is idempotent', JSON.stringify(first) === JSON.stringify(second));
+  });
+
   // 1. FRESH — the baseline builds the whole schema and journals itself.
   {
     const db = await freshDatabase('fresh');

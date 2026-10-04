@@ -1,5 +1,17 @@
 # DDEV runtime
 
+**An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
+probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
+records `runtimeSmoke.passed: null` for a 4xx without a runtime-error signature; an explicit
+fatal/DB error still records `false`, as do 5xx and no-response failures. Gate 2 renders an
+amber UNSURE row with the HTTP code and response excerpt, and does not pre-select Approve
+unless a completed, verified MCP/interactive browser test passed. Manual, skipped or
+incomplete browser results cannot override it. Runtime smoke never drives an automatic fix
+round. `runtimeSmokeVerdict` also reclassifies legacy 4xx `passed:true` payloads at form
+render time, so a gate already parked with a saved 403 pass shows the warning without
+re-running detect. Migration `0174` repairs the rendered forms already stored on
+unsubmitted, genuinely waiting gates, preserving their evidence and all human decisions.
+
 **An import that exits 0 is not an import that happened.** `ddev import-db` returns 0 for a dump that created nothing — wrong engine, truncated stream, an archive whose restore wrote no statements — so `01c-ddev-env` counts the tables afterwards (`ddevCountTables`, via `ddev psql` / `ddev mysql` so DDEV owns the credentials). MEASURED on task ef954a3d: the step recorded `"imported": true, "DDEV started; database dump imported"` against a database with ZERO tables; every request answered `relation "semaphore" does not exist`, and the run only found out ~20 hours and 5 fix rounds later at gate 2, where no code change could repair it because the failure was never in the code. Only a CONFIDENT zero blocks — a probe that could not be read returns null and warns, since refusing an import on a probe that failed to run would block projects whose database is fine.
 
 **`06a-db-migrate` detects a framework by files it SHIPS, not by composer.json.** A `drupal/core` regex reports `unknown` for every Drupal 7 site (7.90 ships no composer.json at all), which left `migrationCommand` empty, silently skipped `drush updatedb`, and — because the D7 bootstrap pre-flight below it is gated on `framework === 'drupal'` — made the check that exists to catch an unusable database dead code on exactly the sites it was written for. Markers must be TRACKED files: the workspace is a git worktree, which materialises tracked files only, so `wp-config.php` (credentials + salts, universally gitignored) is the wrong way to find WordPress and `wp-includes/version.php` is the right one — the same failure class as a test fixture missing from a worktree. Root `includes/bootstrap.inc` is D7-only (D8+ puts it under `core/`) so it is checked first; both resolve to `drupal` because the command and the pre-flight are identical.
