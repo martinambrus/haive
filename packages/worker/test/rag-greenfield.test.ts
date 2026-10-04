@@ -963,6 +963,75 @@ describe('first workflow RAG source scope', () => {
     expect(defaults).not.toContain('web/bootstrap/cache');
   });
 
+  it('combines root and nested app metadata and rebases each file relative to its own directory', async () => {
+    await writeSource('web/artisan', '<?php');
+    await writeSource(
+      'web/composer.json',
+      JSON.stringify({
+        extra: {
+          'installer-paths': {
+            'packages/contrib/{$name}': [],
+            'packages/custom/{$name}': [],
+            'web/libraries/{$name}': [],
+          },
+        },
+      }),
+    );
+    await writeSource(
+      'composer.json',
+      '{"extra":{"installer-paths":{"root-libraries/{$name}":[]}}}',
+    );
+    await writeSource('.gitignore', '/root-generated/\n');
+    await writeSource('web/.gitignore', '/generated/\n');
+    for (const path of [
+      'web/packages/contrib/plugin.php',
+      'web/packages/custom/project.php',
+      'web/web/libraries/plugin.php',
+      'web/generated/cache.php',
+      'root-libraries/plugin.php',
+      'root-generated/cache.php',
+      'packages/contrib/project.php',
+      'generated/project.php',
+    ])
+      await writeSource(path);
+    repo.scopeExcludeGlobs = null;
+    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
+    expect(detected.framework).toBe('laravel');
+    expect(detected.defaultExcludeGlobs).toEqual(
+      expect.arrayContaining([
+        'web/packages/contrib',
+        'web/web/libraries',
+        'web/generated',
+        'root-libraries',
+        'root-generated',
+      ]),
+    );
+    const defaults = collectDefaults(detected.tree, detected.defaultExcludeGlobs);
+    expect(defaults).toEqual(
+      expect.arrayContaining(['web/packages/custom', 'packages/contrib', 'generated']),
+    );
+    expect(defaults).not.toContain('web/packages/contrib');
+    expect(defaults).not.toContain('web/generated');
+    await saveScope(detected, defaults);
+    await ragReindexStep.apply(ctx, {
+      detected: await ragReindexStep.detect!(ctx),
+      formValues: { runReindex: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+    const paths = inserts.map((row) => row[3]);
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'web/packages/custom/project.php',
+        'packages/contrib/project.php',
+        'generated/project.php',
+      ]),
+    );
+    expect(paths).not.toContain('web/packages/contrib/plugin.php');
+    expect(paths).not.toContain('web/generated/cache.php');
+    expect(paths).not.toContain('root-libraries/plugin.php');
+  });
+
   it.each(['root', 'worktree'])(
     'enforces the current saved scope when replaying an older sync form (%s scan)',
     async (scan) => {

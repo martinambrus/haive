@@ -108,6 +108,8 @@ export interface SeedSources {
   framework: string | null;
   /** Winning framework probe root, relative to the project (e.g. 'web/'). */
   frameworkBase?: string;
+  /** Directory containing composer.json/.gitignore, relative to the scope tree. */
+  metadataBase?: string;
   /** Every directory path present in the scope tree (used to filter the seed to
    *  real dirs). */
   treePaths: readonly string[];
@@ -150,8 +152,12 @@ export function computeSeedExcludeGlobs(sources: SeedSources): string[] {
     }
   }
 
-  for (const d of gitignoreExcludeDirs(gitignore)) candidates.add(d);
-  for (const d of composerExcludeDirs(composer)) candidates.add(d);
+  const metadataBase = trimGlobSlashes(sources.metadataBase ?? '');
+  for (const d of [...gitignoreExcludeDirs(gitignore), ...composerExcludeDirs(composer)]) {
+    // Manifest/ignore paths are relative to the metadata file, even when they
+    // begin with the same directory name as that file's parent.
+    candidates.add(metadataBase ? `${metadataBase}/${d}` : d);
+  }
   for (const d of agentToolingDirsInTree(treePaths)) candidates.add(d);
 
   const out: string[] = [];

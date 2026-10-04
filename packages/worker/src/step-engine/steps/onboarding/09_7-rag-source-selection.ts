@@ -10,6 +10,7 @@ import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import {
   stripManagedKnowledgeGlobs,
   tagManagedKnowledgeNodes,
+  trimGlobSlashes,
 } from '@haive/shared/knowledge-paths';
 import { agentToolingDirsInTree, computeSeedExcludeGlobs } from './_scope-seed.js';
 import {
@@ -91,16 +92,29 @@ export async function detectRagSourceSelection(
   const repoRaw = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
   const miningPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_7-scope-selection');
   const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
-  const composer = await readComposerJson(workspace.anchor, workspace.prefix);
-  const gitignore = await readGitignore(workspace.anchor, workspace.prefix);
   const treePaths = collectAllPaths(tree);
-  const seedExclude = computeSeedExcludeGlobs({
-    composer,
-    gitignore,
-    framework,
-    frameworkBase: options.frameworkBase,
-    treePaths,
-  });
+  // Keep root metadata (e.g. a Drupal site's root Composer manifest) and also
+  // read the detected app's metadata. Every path is relative to its own file,
+  // while IO stays anchored at the repository root with the worktree prefix.
+  const metadataBases = [...new Set(['', trimGlobSlashes(options.frameworkBase ?? '')])];
+  const seeds = await Promise.all(
+    metadataBases.map(async (metadataBase) => {
+      const prefix = `${workspace.prefix}${metadataBase ? `${metadataBase}/` : ''}`;
+      const [composer, gitignore] = await Promise.all([
+        readComposerJson(workspace.anchor, prefix),
+        readGitignore(workspace.anchor, prefix),
+      ]);
+      return computeSeedExcludeGlobs({
+        composer,
+        gitignore,
+        metadataBase,
+        framework,
+        frameworkBase: options.frameworkBase,
+        treePaths,
+      });
+    }),
+  );
+  const seedExclude = [...new Set(seeds.flat())].sort();
   // The AI-agent tooling dirs are unioned onto the INHERITED default. The
   // mining pick answers a different question ("what should the agents read"),
   // and one made before those dirs were seeded carries them as included — so

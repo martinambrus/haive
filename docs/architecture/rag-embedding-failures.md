@@ -16,7 +16,10 @@ completeness ratio as repository detection, so frontend tooling cannot hide a st
 backend match in either location.
 The winning base also prefixes framework exclusions: a Laravel app in `web/` excludes
 `web/storage` and `web/bootstrap/cache`, while already-prefixed Drupal exclusions stay
-unchanged. Repository scope edits retain saved exclusions for paths absent from their
+unchanged. Composer and `.gitignore` metadata from both the repository root and the
+winning app base contribute defaults, with each metadata file's paths rebased from its
+own directory. Reads keep the repository anchor and relative worktree prefix.
+Repository scope edits retain saved exclusions for paths absent from their
 current tree. MEASURED on a blank Drupal repo: the picker excluded `web/core` and `vendor`
 in the worktree, the main checkout lacked both when the repo editor was opened, and editing
 other checkboxes dropped those exclusions. Both folders appeared after installation and
