@@ -135,7 +135,13 @@ beforeEach(async () => {
           query.includes('WHERE repository_id = $1 AND source_path = $2')
         ) {
           deletedPaths.push(params[1] as string);
-          return Object.assign([], { count: 1 });
+          const path = params[1] as string;
+          const rows = indexedChunks.get(path) ?? [];
+          const kept = query.includes('AND section_id = $3')
+            ? rows.filter((row) => row.section_id !== params[2] || row.chunk_index !== params[3])
+            : [];
+          indexedChunks.set(path, kept);
+          return Object.assign([], { count: rows.length - kept.length });
         }
         return Object.assign([], { count: 0 });
       },
@@ -379,6 +385,78 @@ describe('greenfield RAG initialization at 11c', () => {
     },
   );
 
+  it.each(['failed', 'partial'])(
+    'retains renamed section keys until all replacement batches succeed (%s outage)',
+    async (outage) => {
+      const sync = async () =>
+        ragReindexStep.apply(ctx, {
+          detected: await ragReindexStep.detect!(ctx),
+          formValues: { runReindex: true },
+          iteration: 0,
+          previousIterations: [],
+        });
+      await sync();
+      const kbPath = '.haive-data/knowledge_base/architecture.md';
+      const previous = { ...indexedChunks.get(kbPath)![0]! };
+      await writeSource(
+        kbPath,
+        Array.from(
+          { length: 12 },
+          (_, i) => `# Renamed section ${i}\n\nThe new architecture detail is number ${i}.\n`,
+        ).join('\n'),
+      );
+      deletedPaths = [];
+      mocks.embed.mockClear();
+      if (outage === 'failed') {
+        mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+      } else {
+        mocks.embed.mockResolvedValueOnce({ kind: 'failed', reason: 'Ollama timed out' });
+      }
+      const failed = await sync();
+      expect(mocks.embed.mock.calls.length).toBeGreaterThan(1);
+      expect(failed.embedSkippedChunks).toBeGreaterThan(0);
+      expect(failed.deleted).toBe(0);
+      expect(deletedPaths).toEqual([]);
+      expect(indexedChunks.get(kbPath)).toContainEqual(previous);
+      if (outage === 'partial') expect(failed.inserted).toBeGreaterThan(0);
+
+      mocks.embed.mockImplementation(async ({ texts }) => ({
+        kind: 'embedded',
+        embeddings: texts.map(() => [0.1, 0.2]),
+      }));
+      const recovered = await sync();
+      expect(recovered.embedSkippedChunks).toBe(0);
+      expect(recovered.deleted).toBeGreaterThan(0);
+      expect(deletedPaths).toContain(kbPath);
+      expect(indexedChunks.get(kbPath)).not.toContainEqual(previous);
+      expect(indexedChunks.get(kbPath)).toHaveLength(12);
+      expect(repo.ragEmbedDegradedAt).toBeNull();
+    },
+  );
+
+  it('removes deleted sections when unchanged replacements need no embedding', async () => {
+    const kbPath = '.haive-data/knowledge_base/architecture.md';
+    const retained = '# Architecture\n\nThe app stores its documents in PostgreSQL.\n';
+    await writeSource(kbPath, `${retained}\n# Removed\n\nThis section will be removed.\n`);
+    const sync = async () =>
+      ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+    await sync();
+    expect(indexedChunks.get(kbPath)).toHaveLength(2);
+    await writeSource(kbPath, retained);
+    mocks.embed.mockClear();
+    mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+    const result = await sync();
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(result.deleted).toBe(1);
+    expect(indexedChunks.get(kbPath)).toHaveLength(1);
+    expect(indexedChunks.get(kbPath)![0]!.content).toContain('stores its documents');
+  });
+
   it('does not initialize when the user declines', async () => {
     const detected = await ragReindexStep.detect!(ctx);
     expect(
@@ -606,6 +684,11 @@ describe('first workflow RAG source scope', () => {
     expect(saved.excludeGlobs).toEqual(expect.arrayContaining(['.', 'scratch', 'core', 'modules']));
     expect(saved.excludeGlobs).not.toContain('.haive-data');
     stalePaths = ['core/library.php', 'scratch/debug.ts'];
+    for (const path of stalePaths) {
+      indexedChunks.set(path, [
+        { section_id: 'legacy', chunk_index: 0, chunk_hash: 'old', content: 'old library code' },
+      ]);
+    }
     const reindex = await ragReindexStep.detect!(ctx);
     const result = await ragReindexStep.apply(ctx, {
       detected: reindex,

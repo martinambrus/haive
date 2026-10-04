@@ -53,6 +53,11 @@ is populated" is its whole contract and a human is watching onboarding. `02-pre-
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every
 workflow task, so failing it would block all work on the repo over a broken index. An
 absent row is honest; a stale row left by a skipped update still points at the right file.
+Workflow sync upserts a changed key only after embedding succeeds. It also defers removing
+old section/chunk keys until every replacement batch for that file succeeds, so renamed
+headings and changed chunk boundaries keep their prior searchable rows through an outage.
+A partial batch failure retains those old keys until a healthy retry; a deletion-only edit
+can remove stale keys immediately because it has no replacements to embed.
 
 **Two timeouts, because one call serves both jobs.** `ollamaEmbed` is used by bulk ingestion
 AND by the interactive `rag_search` query embed, so a single budget is simultaneously too

@@ -664,20 +664,6 @@ export async function runRagIndexSync(
         }
       }
 
-      // Delete stale entries (sections/chunks no longer in current extraction)
-      for (const key of existingMap.keys()) {
-        if (!seenKeys.has(key)) {
-          const colonPos = key.indexOf(':');
-          const sectionId = key.slice(0, colonPos);
-          const chunkIdx = parseInt(key.slice(colonPos + 1), 10);
-          await conn.pg.unsafe(
-            `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-            [repositoryId, relPath, sectionId, chunkIdx],
-          );
-          deleted += 1;
-        }
-      }
-
       if (toEmbed.length > 0) {
         await ctx.emitProgress(
           `Indexing (${fi + 1}/${allFiles.length}): ${relPath} — ${toEmbed.length} chunks`,
@@ -685,6 +671,7 @@ export async function runRagIndexSync(
       }
 
       // Embed and insert new/updated chunks in batches
+      let fileEmbedFailed = false;
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += embedBatchSize) {
         ctx.throwIfCancelled();
         const batch = toEmbed.slice(batchStart, batchStart + embedBatchSize);
@@ -698,6 +685,7 @@ export async function runRagIndexSync(
           texts,
         });
         if (outcome.kind === 'failed') {
+          fileEmbedFailed = true;
           // Leave these chunks UNINDEXED. An insert simply does not happen; an
           // update leaves the previous row in place, which is stale but still
           // points at the right file — both beat a hash vector, which cannot be
@@ -756,6 +744,24 @@ export async function runRagIndexSync(
           }
           if (action === 'update') updated += 1;
           else inserted += 1;
+        }
+      }
+
+      // A renamed heading or changed chunk boundary gives replacements new keys.
+      // Retain every stale key until all replacements for this file are written,
+      // including when only one batch fails. A deletion-only edit needs no embeds.
+      if (!fileEmbedFailed) {
+        for (const key of existingMap.keys()) {
+          if (!seenKeys.has(key)) {
+            const colonPos = key.indexOf(':');
+            const sectionId = key.slice(0, colonPos);
+            const chunkIdx = parseInt(key.slice(colonPos + 1), 10);
+            await conn.pg.unsafe(
+              `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
+              [repositoryId, relPath, sectionId, chunkIdx],
+            );
+            deleted += 1;
+          }
         }
       }
     }
