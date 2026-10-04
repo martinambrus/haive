@@ -57,6 +57,10 @@ let writes: Record<string, unknown>[];
 let inserts: unknown[][];
 let stalePaths: string[];
 let deletedPaths: string[];
+let indexedChunks: Map<
+  string,
+  { section_id: string; chunk_index: number; chunk_hash: string | null; content: string }[]
+>;
 let ctx: StepContext;
 
 beforeEach(async () => {
@@ -90,11 +94,40 @@ beforeEach(async () => {
   inserts = [];
   stalePaths = [];
   deletedPaths = [];
+  indexedChunks = new Map();
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
     pg: {
       unsafe: async (query: string, params: unknown[] = []) => {
-        if (query.includes('INSERT INTO')) inserts.push(params);
+        if (query.includes('INSERT INTO')) {
+          inserts.push(params);
+          const rows = indexedChunks.get(params[3] as string) ?? [];
+          const row = {
+            section_id: params[4] as string,
+            chunk_index: params[5] as number,
+            chunk_hash: params[6] as string,
+            content: params[7] as string,
+          };
+          const idx = rows.findIndex(
+            (r) => r.section_id === row.section_id && r.chunk_index === row.chunk_index,
+          );
+          if (idx >= 0) rows[idx] = row;
+          else rows.push(row);
+          indexedChunks.set(params[3] as string, rows);
+        }
+        if (query.includes('SELECT section_id, chunk_index, chunk_hash'))
+          return indexedChunks.get(params[1] as string) ?? [];
+        if (query.includes('UPDATE') && query.includes('SET chunk_hash = NULL')) {
+          let count = 0;
+          for (const rows of indexedChunks.values())
+            for (const row of rows) {
+              if (row.chunk_hash !== null) {
+                row.chunk_hash = null;
+                count += 1;
+              }
+            }
+          return Object.assign([], { count });
+        }
         if (query.includes('SELECT DISTINCT source_path'))
           return stalePaths.map((source_path) => ({ source_path }));
         if (
@@ -282,6 +315,69 @@ describe('greenfield RAG initialization at 11c', () => {
     expect(recovered.embedSkippedChunks).toBe(0);
     expect(repo.ragEmbedDegradedAt).toBeNull();
   });
+
+  it.each([false, true])(
+    'retains existing chunks through an outage (derived endpoint: %s)',
+    async (derived) => {
+      await ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      const kbPath = '.haive-data/knowledge_base/architecture.md';
+      const previous = { ...indexedChunks.get(kbPath)![0]! };
+      if (derived) {
+        const mirror = repo.onboardingTooling as { tooling: Record<string, unknown> };
+        delete mirror.tooling.ollamaUrl;
+      } else {
+        await writeSource(
+          kbPath,
+          '# Architecture\n\nThe app now stores documents in a new database.\n',
+        );
+      }
+      inserts = [];
+      deletedPaths = [];
+      mocks.probe.mockResolvedValue(false);
+      mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+      const failed = await ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(failed).toMatchObject({
+        inserted: 0,
+        updated: 0,
+        embedFailureReason: 'Ollama is unreachable',
+      });
+      expect(failed.embedSkippedChunks).toBeGreaterThan(0);
+      expect(inserts).toEqual([]);
+      expect(deletedPaths).toEqual([]);
+      expect(indexedChunks.get(kbPath)![0]).toMatchObject({
+        content: previous.content,
+        chunk_hash: derived ? null : previous.chunk_hash,
+      });
+
+      mocks.probe.mockResolvedValue(true);
+      mocks.embed.mockImplementation(async ({ texts }) => ({
+        kind: 'embedded',
+        embeddings: texts.map(() => [0.1, 0.2]),
+      }));
+      const recovered = await ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(recovered.updated).toBeGreaterThan(0);
+      expect(recovered.embedSkippedChunks).toBe(0);
+      expect(indexedChunks.get(kbPath)![0]!.chunk_hash).not.toBeNull();
+      if (!derived) expect(indexedChunks.get(kbPath)![0]!.content).toContain('a new database');
+      expect(deletedPaths).toEqual([]);
+      expect(repo.ragEmbedDegradedAt).toBeNull();
+    },
+  );
 
   it('does not initialize when the user declines', async () => {
     const detected = await ragReindexStep.detect!(ctx);

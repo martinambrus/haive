@@ -655,11 +655,9 @@ export async function runRagIndexSync(
         }
 
         if (existingHash !== undefined) {
-          // Hash changed — delete old, will insert new
-          await conn.pg.unsafe(
-            `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-            [repositoryId, relPath, chunk.sectionId, chunk.chunkIndex],
-          );
+          // Keep the searchable row until embedding succeeds. The insert below
+          // already upserts this key, so deleting first only loses knowledge
+          // during an outage (including hashes nulled for a forced re-embed).
           toEmbed.push({ chunk, action: 'update' });
         } else {
           toEmbed.push({ chunk, action: 'insert' });
