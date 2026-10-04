@@ -6,6 +6,7 @@ export class DdevBootAbortedError extends Error {
 }
 
 export interface DdevBootScope {
+  readonly signal: AbortSignal | undefined;
   throwIfAborted(): void;
   /** The immutable ID returned by docker run, never the reusable task container name. */
   created(containerId: string): void;
@@ -14,31 +15,43 @@ export interface DdevBootScope {
 /** A caller at a newer epoch waits out the old boot's teardown and then gets its own boot.
  * Successful concurrent ensures still share one runner, as the runtime/VNC paths require. */
 export class DdevBoots<T> {
-  private readonly inFlight = new Map<string, Promise<T>>();
+  private readonly inFlight = new Map<
+    string,
+    { controller: AbortController; promise: Promise<T> }
+  >();
 
   async ensure(
     taskId: string,
     signal: AbortSignal | undefined,
-    boot: () => Promise<T>,
+    boot: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     if (signal?.aborted) throw new DdevBootAbortedError();
-    const existing = this.inFlight.get(taskId);
-    if (existing) {
-      try {
-        const result = await existing;
-        if (signal?.aborted) throw new DdevBootAbortedError();
-        return result;
-      } catch (err) {
-        if (!(err instanceof DdevBootAbortedError) || signal?.aborted) throw err;
-        return this.ensure(taskId, signal, boot);
-      }
+    let entry = this.inFlight.get(taskId);
+    const joined = entry !== undefined;
+    if (!entry) {
+      const controller = new AbortController();
+      // Publish the entry before invoking the boot so every concurrent caller can
+      // attach its cancellation, including a step joining a signal-less runtime job.
+      const promise = Promise.resolve()
+        .then(() => boot(controller.signal))
+        .finally(() => {
+          this.inFlight.delete(taskId);
+        });
+      entry = { controller, promise };
+      this.inFlight.set(taskId, entry);
     }
-    const running = boot();
-    this.inFlight.set(taskId, running);
+    const held = entry;
+    const abort = (): void => held.controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
     try {
-      return await running;
+      const result = await held.promise;
+      if (signal?.aborted) throw new DdevBootAbortedError();
+      return result;
+    } catch (err) {
+      if (!joined || !(err instanceof DdevBootAbortedError) || signal?.aborted) throw err;
+      return this.ensure(taskId, signal, boot);
     } finally {
-      this.inFlight.delete(taskId);
+      signal?.removeEventListener('abort', abort);
     }
   }
 }
@@ -64,6 +77,7 @@ export async function withDdevBootCancellation<T>(
     void teardown.catch(() => {});
   };
   const scope: DdevBootScope = {
+    signal,
     throwIfAborted() {
       if (signal?.aborted) throw new DdevBootAbortedError();
     },

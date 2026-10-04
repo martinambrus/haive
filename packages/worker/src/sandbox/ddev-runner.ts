@@ -166,27 +166,32 @@ async function resolveImageTag(): Promise<string> {
   return cachedTag;
 }
 
-async function imageExists(tag: string): Promise<boolean> {
+async function imageExists(tag: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    await exec('docker', ['image', 'inspect', tag], { timeout: 15_000 });
+    await exec('docker', ['image', 'inspect', tag], { timeout: 15_000, signal });
     return true;
   } catch {
+    signal?.throwIfAborted();
     return false;
   }
 }
 
 /** Build the runner image if not already present. Idempotent + process-cached. */
-export async function ensureDdevRunnerImage(): Promise<string> {
+export async function ensureDdevRunnerImage(signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const tag = await resolveImageTag();
-  if (await imageExists(tag)) return tag;
+  if (await imageExists(tag, signal)) return tag;
+  signal?.throwIfAborted();
   const dir = runnerContextDir();
   log.info({ tag, dir }, 'building haive-ddev-runner image');
   await exec('docker', ['build', '-t', tag, dir], {
     timeout: 900_000,
     maxBuffer: 50 * 1024 * 1024,
+    signal,
   });
+  signal?.throwIfAborted();
   log.info({ tag }, 'ddev runner image built');
-  await pruneOldRunnerImages(tag);
+  await pruneOldRunnerImages(tag, signal);
   return tag;
 }
 
@@ -194,18 +199,20 @@ export async function ensureDdevRunnerImage(): Promise<string> {
  *  The tag is a content hash of the build context, so old tags are dead weight
  *  (~2GB each) once the context changes. Best-effort — a tag still referenced by a
  *  stopped container is logged and skipped. */
-async function pruneOldRunnerImages(currentTag: string): Promise<void> {
+async function pruneOldRunnerImages(currentTag: string, signal?: AbortSignal): Promise<void> {
   try {
     const { stdout } = await exec(
       'docker',
       ['images', DDEV_RUNNER_IMAGE, '--format', '{{.Repository}}:{{.Tag}}'],
-      { timeout: 15_000 },
+      { timeout: 15_000, signal },
     );
     const stale = stdout
       .split(/\s+/)
       .filter((t) => t.length > 0 && t !== currentTag && t.startsWith(`${DDEV_RUNNER_IMAGE}:`));
     for (const t of stale) {
-      await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000 }).catch((err) => {
+      signal?.throwIfAborted();
+      await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000, signal }).catch((err) => {
+        signal?.throwIfAborted();
         log.warn(
           { tag: t, err: err instanceof Error ? err.message : String(err) },
           'prune stale runner image failed',
@@ -214,6 +221,7 @@ async function pruneOldRunnerImages(currentTag: string): Promise<void> {
     }
     if (stale.length > 0) log.info({ removed: stale.length }, 'pruned stale runner images');
   } catch (err) {
+    signal?.throwIfAborted();
     log.warn(
       { err: err instanceof Error ? err.message : String(err) },
       'runner image prune failed',
@@ -294,7 +302,7 @@ export async function startDdevRunner(params: {
   bootScope?: DdevBootScope;
 }): Promise<DdevRunnerHandle> {
   params.bootScope?.throwIfAborted();
-  const tag = await ensureDdevRunnerImage();
+  const tag = await ensureDdevRunnerImage(params.bootScope?.signal);
   params.bootScope?.throwIfAborted();
   const name = runnerName(params.taskId);
   const dumpMounts = await resolveDumpMounts(params.taskId);
@@ -1881,17 +1889,18 @@ export async function ensureDdevStarted(
   // calls would then collide on the fixed container name (`docker run --name`
   // conflict) and fail the loser. The first call's in-flight promise serves both.
   let configured = false;
-  const handle = await ddevBoots.ensure(taskId, opts.signal, () =>
+  const handle = await ddevBoots.ensure(taskId, opts.signal, (signal) =>
     withDdevBootCancellation(
-      opts.signal,
+      signal,
       async (id) => {
         opts.onProgress?.('Removing the incomplete DDEV startup…');
         await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
       },
       async (scope) => {
-        let handle = await ensureDdevStartedInner(taskId, repoSubpath, opts, scope);
+        const bootOpts = { ...opts, signal };
+        let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
         scope.throwIfAborted();
-        handle = await reconcileDdevAccess(taskId, repoSubpath, handle, opts, scope);
+        handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
         scope.throwIfAborted();
         // Keep cancellation armed through debugging/database wiring, including its restart.
         await opts.onReady?.(handle);

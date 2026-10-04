@@ -8,7 +8,10 @@ owns the immutable container ID returned by `docker run` until bring-up and wiri
 Aborting removes that runner and its anonymous Docker volume; killing the host's `docker exec`
 client alone cannot stop the nested process. Creation that finishes after the abort is removed
 too. `DdevBoots` keeps the old boot held until teardown settles, then a surviving caller boots
-with the current settings. A completed runtime is no longer owned by that startup, so an
+with the current settings. Every coalesced caller's signal reaches the shared boot, including
+a step that joins a signal-less runtime-ensure job. The shared signal also cancels runner-image
+inspection/build and stale-image pruning before a container exists. A completed runtime is
+no longer owned by that startup, so an
 ordinary Stop keeps its imported database as before.
 
 **A changed browser choice must reconcile the runner's immutable published ports.**

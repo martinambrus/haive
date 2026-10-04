@@ -26,8 +26,8 @@ describe('DDEV cold-boot cancellation', () => {
       await teardown.promise;
     });
     const boots = new DdevBoots<string>();
-    const old = boots.ensure('task', stop.signal, () =>
-      withDdevBootCancellation(stop.signal, remove, async (scope) => {
+    const old = boots.ensure('task', stop.signal, (signal) =>
+      withDdevBootCancellation(signal, remove, async (scope) => {
         scope.created('old-container-id');
         created.resolve();
         await command.promise;
@@ -49,6 +49,42 @@ describe('DDEV cold-boot cancellation', () => {
     // An old signal fired again cannot delete the replacement.
     stop.abort();
     expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it('lets a coalesced step stop a cold boot initiated by a signal-less runtime job', async () => {
+    const stop = new AbortController();
+    const created = deferred();
+    const command = deferred();
+    const teardown = deferred();
+    const remove = vi.fn(async () => {
+      command.reject(new Error('runner removed'));
+      await teardown.promise;
+    });
+    const boots = new DdevBoots<string>();
+    const runtime = boots.ensure('task', undefined, (signal) =>
+      withDdevBootCancellation(signal, remove, async (scope) => {
+        scope.created('runtime-owned-runner');
+        created.resolve();
+        await command.promise;
+        return 'vnc';
+      }),
+    );
+    const runtimeError = runtime.catch((err: unknown) => err);
+    await created.promise;
+    const duplicate = vi.fn(async () => 'duplicate');
+    const step = boots.ensure('task', stop.signal, duplicate);
+    const stepError = step.catch((err: unknown) => err);
+    stop.abort();
+    expect(remove).toHaveBeenCalledExactlyOnceWith('runtime-owned-runner');
+    const replacement = vi.fn(async () => 'direct');
+    const retry = boots.ensure('task', undefined, replacement);
+    expect(replacement).not.toHaveBeenCalled();
+    teardown.resolve();
+    expect(await runtimeError).toBeInstanceOf(DdevBootAbortedError);
+    expect(await stepError).toBeInstanceOf(DdevBootAbortedError);
+    await expect(retry).resolves.toBe('direct');
+    expect(replacement).toHaveBeenCalledOnce();
+    expect(duplicate).not.toHaveBeenCalled();
   });
 
   it('cleans up when Stop lands while docker run is creating the container', async () => {
