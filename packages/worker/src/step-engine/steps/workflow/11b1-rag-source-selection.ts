@@ -1,6 +1,6 @@
 import { FRAMEWORK_PATTERNS } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import { detectFramework } from '../../../repo/framework-detect.js';
+import { detectFrameworkMatch } from '../../../repo/framework-detect.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -20,21 +20,26 @@ async function probeFramework(wa: { anchor: string; prefix: string }): Promise<s
   const indicators = [
     ...new Set(Object.values(FRAMEWORK_PATTERNS).flatMap((p) => [...p.indicators])),
   ];
-  // A Composer Drupal app often also has package.json/node_modules at the repo
-  // root for its theme tooling. Prefer the web docroot over that generic Node match.
-  for (const base of ['web/', '']) {
-    const present = await Promise.all(
-      indicators.map(async (indicator) => {
-        const rel = `${wa.prefix}${base}${indicator.replace(/\/$/, '')}`;
-        const info = await lstatNoFollow(wa.anchor, rel);
-        const expectedKind = indicator.endsWith('/') ? 'directory' : 'file';
-        return info?.kind === expectedKind ? indicator : null;
-      }),
-    );
-    const framework = detectFramework(present.filter((p) => p !== null));
-    if (framework) return framework;
-  }
-  return null;
+  // Compare both roots: theme tooling at the root must not hide Drupal in web/,
+  // and a frontend in web/ must not hide a stronger backend match at the root.
+  const candidates = await Promise.all(
+    ['', 'web/'].map(async (base) => {
+      const present = await Promise.all(
+        indicators.map(async (indicator) => {
+          const rel = `${wa.prefix}${base}${indicator.replace(/\/$/, '')}`;
+          const info = await lstatNoFollow(wa.anchor, rel);
+          const expectedKind = indicator.endsWith('/') ? 'directory' : 'file';
+          return info?.kind === expectedKind ? indicator : null;
+        }),
+      );
+      return detectFrameworkMatch(present.filter((p) => p !== null));
+    }),
+  );
+  return (
+    candidates
+      .filter((candidate) => candidate !== null)
+      .sort((a, b) => b.score - a.score || b.ratio - a.ratio)[0]?.framework ?? null
+  );
 }
 
 export const workflowRagSourceSelectionStep: StepDefinition<

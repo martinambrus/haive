@@ -533,6 +533,7 @@ export async function runRagIndexSync(
     let deleted = 0;
     let embedSkippedChunks = 0;
     let embedFailureReason: string | null = null;
+    let realEmbeddingSucceeded = false;
     const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
@@ -700,6 +701,7 @@ export async function runRagIndexSync(
           continue;
         }
         const embeddings = outcome.embeddings;
+        if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -816,28 +818,40 @@ export async function runRagIndexSync(
       }
     }
 
+    // An unchanged scan proves nothing about an endpoint that previously failed.
+    // A small real batch lets a healthy endpoint recover without requiring a file
+    // edit, while an outage (or an explicitly enabled hash fallback) keeps the flag.
+    if (useOllama && health.degradedAt && !embedFailureReason && !realEmbeddingSucceeded) {
+      const outcome = await embedBatch({
+        ollamaUrl: prefs.ollamaUrl,
+        model: prefs.embeddingModel,
+        dimensions: prefs.embeddingDimensions,
+        useOllama,
+        texts: ['RAG embedding health check'],
+      });
+      if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
+      else if (outcome.kind === 'failed') embedFailureReason = outcome.reason;
+    }
+
     // Remember (or forget) the embed failure on the REPO, so the condition outlives
     // this step row — a manual retry nulls task_steps.output — and every later RAG
     // step can say so. Only an actual model run can clear it: a hash-mode sync
     // proves nothing about whether embeddings work.
     if (embedFailureReason) {
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
-    } else if (useOllama && health.degradedAt) {
+      health.degradedAt ??= new Date();
+      health.degradedReason = embedFailureReason;
+    } else if (realEmbeddingSucceeded && health.degradedAt) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
+      health.degradedAt = null;
+      health.degradedReason = null;
     }
     await ctx.db
       .update(schema.taskSteps)
       .set({
         warningMessage: composeRagWarning(
           embedDeviceWarning(embedDevice),
-          ragEmbedWarning(
-            {
-              degradedAt: embedFailureReason ? (health.degradedAt ?? new Date()) : null,
-              degradedReason: embedFailureReason ?? health.degradedReason,
-              lexicalOnly: health.lexicalOnly,
-            },
-            { skippedChunks: embedSkippedChunks },
-          ),
+          ragEmbedWarning(health, { skippedChunks: embedSkippedChunks }),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));

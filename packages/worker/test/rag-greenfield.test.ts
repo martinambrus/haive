@@ -56,6 +56,7 @@ let worktree: string;
 let repo: Record<string, unknown>;
 let onboarding: { id: string } | null;
 let writes: Record<string, unknown>[];
+let warnings: Array<string | null>;
 let inserts: unknown[][];
 let stalePaths: string[];
 let deletedPaths: string[];
@@ -93,6 +94,7 @@ beforeEach(async () => {
   };
   onboarding = null;
   writes = [];
+  warnings = [];
   inserts = [];
   stalePaths = [];
   deletedPaths = [];
@@ -191,6 +193,8 @@ beforeEach(async () => {
     update: (table: unknown) => ({
       set: (values: Record<string, unknown>) => ({
         where: async (condition: never) => {
+          if (table === schema.taskSteps && 'warningMessage' in values)
+            warnings.push(values.warningMessage as string | null);
           if (table !== schema.repositories) return [];
           if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
             writes.push(values);
@@ -536,6 +540,48 @@ describe('greenfield RAG initialization at 11c', () => {
     expect(indexedChunks.get('app.ts')).toEqual([]);
   });
 
+  it.each(['reverted', 'deleted', 'hashed'])(
+    'retains degradation until a real health-check embedding succeeds (%s failed edit)',
+    async (scenario) => {
+      const kbPath = '.haive-data/knowledge_base/architecture.md';
+      const original = '# Architecture\n\nThe app stores its documents in PostgreSQL.\n';
+      const sync = async () =>
+        ragReindexStep.apply(ctx, {
+          detected: await ragReindexStep.detect!(ctx),
+          formValues: { runReindex: true },
+          iteration: 0,
+          previousIterations: [],
+        });
+      await sync();
+      await writeSource(kbPath, '# Architecture\n\nA failed update.\n');
+      mocks.probe.mockResolvedValue(false);
+      mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+      await sync();
+      expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+      if (scenario === 'deleted') await rm(join(worktree, kbPath));
+      else await writeSource(kbPath, original);
+      mocks.embed.mockClear();
+      if (scenario === 'hashed')
+        mocks.embed.mockResolvedValue({ kind: 'hashed', embeddings: [[0.1, 0.2]] });
+      const stillDegraded = await sync();
+      expect(stillDegraded).toMatchObject({ inserted: 0, updated: 0, embedSkippedChunks: 0 });
+      expect(mocks.embed).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ useOllama: true, texts: ['RAG embedding health check'] }),
+      );
+      expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+      expect(warnings.at(-1)).toContain('RAG embeddings are failing');
+
+      mocks.embed.mockImplementation(async ({ texts }) => ({
+        kind: 'embedded',
+        embeddings: texts.map(() => [0.1, 0.2]),
+      }));
+      const recovered = await sync();
+      expect(recovered).toMatchObject({ inserted: 0, updated: 0, embedFailureReason: null });
+      expect(repo.ragEmbedDegradedAt).toBeNull();
+      expect(warnings.at(-1)).toBeNull();
+    },
+  );
+
   it('does not initialize when the user declines', async () => {
     const detected = await ragReindexStep.detect!(ctx);
     expect(
@@ -763,6 +809,27 @@ describe('first workflow RAG source scope', () => {
     expect(indexedPaths).not.toContain('web/modules/contrib/plugin/plugin.php');
     expect(indexedPaths).not.toContain('third-party/library/library.php');
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+  });
+
+  it('prefers a stronger root Laravel match over Node frontend tooling in web/', async () => {
+    await writeSource('artisan', '<?php');
+    await writeSource('composer.json', '{}');
+    await writeSource('app/Service.php');
+    await writeSource('routes/web.php');
+    await writeSource('storage/logs/debug.php');
+    await writeSource('bootstrap/cache/services.php');
+    await writeSource('web/package.json', '{}');
+    await writeSource('web/node_modules/frontend/index.js');
+    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
+    expect(detected.framework).toBe('laravel');
+    expect(detected.defaultExcludeGlobs).toEqual(
+      expect.arrayContaining(['storage', 'bootstrap/cache']),
+    );
+    const defaults = collectDefaults(detected.tree, detected.defaultExcludeGlobs);
+    expect(defaults).toContain('app');
+    expect(defaults).toContain('routes');
+    expect(defaults).not.toContain('storage/logs');
+    expect(defaults).not.toContain('bootstrap/cache');
   });
 
   it('recognizes Drupal 7 without any onboarding detector or Composer manifest', async () => {

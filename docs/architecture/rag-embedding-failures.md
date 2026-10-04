@@ -11,6 +11,9 @@ pre-exclude framework/library/generated folders, while keeping managed knowledge
 The tree, framework markers, Composer metadata and `.gitignore` all use the repository
 root as their filesystem anchor with a relative worktree prefix. A linked worktree or
 parent is refused rather than enumerated, and the displayed paths remain worktree-relative.
+Framework markers at the root and `web/` are compared using the same match score and
+completeness ratio as repository detection, so frontend tooling cannot hide a stronger
+backend match in either location.
 An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
 covers blank repos already initialized by 11c before scope selection was added. The step
 parks for a decision even under auto-continue, and appears in every path that includes 11c.
@@ -79,6 +82,10 @@ rag_embed_degraded_at` is the STRUCTURAL flag every reader gates on;
 `rag_embed_degraded_reason` beside it is display copy that outlives the state it describes
 (the message-column rule in [AGENTS.md](../../AGENTS.md)'s Conventions). Only a completed run with REAL embeddings clears it — a
 hash-mode run proves nothing about whether embeddings work.
+An unchanged scan also proves nothing: if the repo is already degraded and no file batch
+produces a real embedding, workflow sync embeds one short health-check text before clearing
+the flag. A failed or hashed check retains degradation and the step warning; a healthy
+check permits recovery without requiring a source edit.
 
 **`rag_embed_lexical_only` is the accepted verdict, and it is NOT "keep hashing".** It forces
 `ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes),
