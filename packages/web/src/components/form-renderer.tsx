@@ -15,6 +15,7 @@ import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
 import { isFieldVisible } from '@/components/form-visibility';
 import { accordionItemTitle } from '@/components/form-accordion-title';
+import { HoursMinutesInput } from '@/components/hours-minutes-input';
 
 export type { FormValues };
 
@@ -625,6 +626,22 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
         />
       );
     case 'number':
+      // Forms are persisted. Older estimate gates predate the explicit unit,
+      // so recognise their existing field id while preserving the numeric payload.
+      if (field.unit === 'hours' || field.id === 'estimatedHours') {
+        return (
+          <HoursMinutesInput
+            id={field.id}
+            label={field.label}
+            value={typeof value === 'number' ? value : ''}
+            onChange={onChange}
+            min={field.min}
+            max={field.max}
+            required={field.required}
+            disabled={disabled}
+          />
+        );
+      }
       return (
         <Input
           id={field.id}

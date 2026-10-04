@@ -362,11 +362,12 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     fields.push({
       type: 'number',
       id: 'estimatedHours',
-      label: 'Estimated effort (hours)',
+      label: 'Estimated effort',
+      unit: 'hours',
       description:
         'Effort = active agent work + your time at review gates (idle / queue time excluded). ' +
         'Defaults to the AI estimate; adjust if you disagree.',
-      default: round2(defaultHours),
+      default: defaultHours,
       min: MIN_HOURS,
       max: MAX_HOURS,
       // 'any', not a numeric step: the browser anchors its step ladder at `min`, so
@@ -413,7 +414,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     // estimate or the AI number). Feeds the existing verdict card via estimated_time_hours.
     const confirmedHours =
       Number.isFinite(submitted) && submitted > 0
-        ? clampHours(round2(submitted))
+        ? clampHours(submitted)
         : clampHours(detected.manualEstimateHours ?? aiHours);
     const range = estimateRange(detected.anchors, detected.executionPath);
 

@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import type { StepContext } from '../../step-definition.js';
 import { parseEstimateOutput, resolveEstimate, estimateStep } from './00b-estimate.js';
 import type { EstimateAnchor } from './_estimate.js';
 
@@ -165,5 +168,42 @@ describe('estimateStep.form', () => {
     const num = schema.fields.find((f) => f.id === 'estimatedHours') as { default?: number };
     expect(num.default).toBe(3);
     expect(schema.fields.some((f) => f.id === 'priorEstimateNote')).toBe(true);
+  });
+
+  it('keeps a manual minutes estimate intact when opening and confirming it', async () => {
+    const hours = 35 / 60;
+    const detected = { ...baseDetect, manualEstimateHours: hours };
+    const form = estimateStep.form!(null as never, detected, { estimatedHours: 4 })!;
+    expect(form.fields.find((field) => field.id === 'estimatedHours')).toMatchObject({
+      type: 'number',
+      unit: 'hours',
+      default: hours,
+    });
+
+    const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
+    const taskId = '00000000-0000-4000-8000-0000000000e1';
+    fake.insert(schema.tasks, { id: taskId, estimatedTimeHours: hours });
+    const ctx = {
+      db: fake.db,
+      taskId,
+      taskStepId: '00000000-0000-4000-8000-0000000000e2',
+      logger: { info: vi.fn() },
+    } as unknown as StepContext;
+    await expect(
+      estimateStep.apply(ctx, {
+        detected,
+        formValues: { estimatedHours: hours },
+        llmOutput: { estimatedHours: 4 },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).resolves.toMatchObject({ confirmedHours: hours, aiHours: 4 });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({
+      estimatedTimeHours: hours,
+      aiEstimatedTimeHours: 4,
+    });
+    expect(fake.rows(schema.taskEvents)[0]).toMatchObject({
+      payload: { confirmedHours: hours },
+    });
   });
 });

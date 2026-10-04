@@ -16,6 +16,8 @@ import {
 import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
+import { HoursMinutesInput } from '@/components/hours-minutes-input';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import {
   api,
   API_BASE_URL,
@@ -164,7 +166,7 @@ export default function NewTaskPage() {
    *  point, and silently restoring it over an edit would be the worse failure. */
   const titleTouched = useRef(false);
   const descriptionTouched = useRef(false);
-  const [estimatedTime, setEstimatedTime] = useState('');
+  const [estimatedTime, setEstimatedTime] = useState<number | ''>('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
@@ -565,9 +567,8 @@ export default function NewTaskPage() {
         repositoryId,
       };
       if (description.trim()) body.description = description.trim();
-      const estHours = Number(estimatedTime);
-      if (estimatedTime.trim() && Number.isFinite(estHours) && estHours > 0) {
-        body.estimatedTimeHours = estHours;
+      if (estimatedTime !== '' && Number.isFinite(estimatedTime) && estimatedTime > 0) {
+        body.estimatedTimeHours = estimatedTime;
       }
       // Always sent, empty included: naming the field is how the server learns the
       // choice was stated rather than defaulted, which is what makes it stick for the
@@ -955,20 +956,18 @@ export default function NewTaskPage() {
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="estimatedTime">Estimated time (hours, optional)</Label>
-              <Input
+              <Label htmlFor="estimatedTime">Estimated time (optional)</Label>
+              <HoursMinutesInput
                 id="estimatedTime"
-                type="number"
-                inputMode="decimal"
-                step="0.25"
-                min="0"
+                label="Estimated time"
+                max={1000}
                 value={estimatedTime}
-                onChange={(e) => setEstimatedTime(e.target.value)}
-                placeholder="e.g. 1.5"
+                onChange={setEstimatedTime}
               />
-              <p className="text-xs text-neutral-500">
-                Decimal hours (0.25, 0.5, 1, 1.5). Compared against the actual effort spent.
-              </p>
+              <InlineMarkdown
+                body="Enter hours and minutes. Compared against the actual effort spent."
+                className="text-xs text-neutral-500"
+              />
             </div>
           </>
         )}

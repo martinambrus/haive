@@ -5,6 +5,16 @@ queue waiting. `_estimate.ts` uses the same `computeTaskTiming` as the completio
 capping a completed task's timing at its own `completedAt`. Prior AI estimates remain separate
 from the user's confirmed estimate; calibration compares the AI value with measured effort.
 
+**People enter hours and minutes.** The new-task estimate and the confirmation gate share
+`HoursMinutesInput`: a blank part counts as zero, both blank leave an optional estimate unset,
+and minutes may include fractions or exceed 60. Both submit one decimal-hours number, so
+35 minutes is `35 / 60` without rounding the user's confirmation to two decimal places.
+Number fields declare `unit: 'hours'` in `FormSchema`; the renderer also recognises the older
+persisted `estimatedHours` field so already-parked gates get the same control. The field's
+total-hour bounds and required flag still apply. Existing defaults are split into hours and
+minutes without changing the stored number unless the user edits it. AI estimates retain
+their existing rounding and bounds.
+
 **Execution path is part of comparability.** `quick_bugfix`, `plan_tasklist` and
 `full_workflow` perform different amounts of planning and review. All have task type
 `workflow`, so filtering by that type only excludes onboarding and other non-workflow tasks.
