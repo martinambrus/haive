@@ -26,7 +26,9 @@ changes retain one backup, with at most two during replacement, rather than mult
 the database on the shared repository volume. Port inspection failures fail reconciliation; they never
 mean that direct ports were absent. Projects whose effective merged DDEV configuration
 explicitly omits the DB container (including SQLite projects) can recreate without a DB
-snapshot; an unreachable or empty configured database cannot waive preservation.
+snapshot and skip restoration. Later cold recovery checks the effective configuration too,
+so old snapshots retained after conversion to SQLite cannot target an omitted database.
+An unreachable or empty configured database cannot waive preservation.
 Snapshot failure leaves the existing runner intact. Cold recovery
 restores that access snapshot and refuses a failed restore rather than serving an empty database.
 Failed bring-up removes the newly created runner before releasing the boot, so Retry must

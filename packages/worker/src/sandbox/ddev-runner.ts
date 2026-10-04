@@ -1943,7 +1943,11 @@ export async function ensureDdevStarted(
 async function ensureDdevStartedInner(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void; signal?: AbortSignal; restoreSnapshot?: string },
+  opts: {
+    onProgress?: (line: string) => void;
+    signal?: AbortSignal;
+    restoreSnapshot?: string | null;
+  },
   scope: DdevBootScope,
 ): Promise<DdevRunnerHandle> {
   scope.throwIfAborted();
@@ -2153,16 +2157,7 @@ async function ensureDdevStartedInner(
     // DB is empty. A durability snapshot may survive on the repo volume; restore it
     // so downstream verify/browser testing runs against a populated DB. No-op (and
     // not an error) when none exists.
-    if (opts.restoreSnapshot) {
-      const restored = await ddevSnapshotRestore(handle, opts.restoreSnapshot);
-      if (restored.exitCode !== 0) {
-        throw new Error(
-          `DDEV access snapshot ${opts.restoreSnapshot} could not be restored: ${restored.output.slice(-1500)}`,
-        );
-      }
-    } else {
-      await restoreLatestSnapshot(handle, taskId);
-    }
+    await restoreLatestSnapshot(handle, taskId, opts.restoreSnapshot);
     return handle;
   } finally {
     releaseSlot();
@@ -2228,7 +2223,7 @@ async function reconcileDdevAccess(
   const replacement = await ensureDdevStartedInner(
     taskId,
     repoSubpath,
-    { ...opts, restoreSnapshot: accessSnapshot?.next },
+    { ...opts, restoreSnapshot: accessSnapshot?.next ?? null },
     scope,
   );
   scope.throwIfAborted();
@@ -2340,9 +2335,19 @@ export function selectLatestDurabilitySnapshot(
  * a failed restore of a known snapshot rather than silently rolling back to an older DB.
  * If the directory is absent, preserve legacy probing by name; absent snapshots
  * (first boot or a project with no imported DB) remain a normal no-op. */
-async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
+export async function restoreLatestSnapshot(
+  handle: DdevRunnerHandle,
+  taskId: string,
+  requested?: string | null,
+): Promise<void> {
+  // null is the explicit no-DB access-replacement state. Ordinary later cold boots
+  // must check the current merged configuration too: old backups may outlive a
+  // conversion to SQLite and must not recreate or target an obsolete database.
+  if (requested === null) return;
+  const config = await ddevExec(handle, 'utility configyaml --full-yaml', { timeoutMs: 30_000 });
+  if (config.exitCode === 0 && ddevConfigOmitsDatabase(config.output) === true) return;
   const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
-  const snapshot = await latestDurabilitySnapshot(taskId, repoSubpath);
+  const snapshot = requested ?? (await latestDurabilitySnapshot(taskId, repoSubpath));
   if (snapshot) {
     const restored = await ddevSnapshotRestore(handle, snapshot);
     if (restored.exitCode !== 0) {
