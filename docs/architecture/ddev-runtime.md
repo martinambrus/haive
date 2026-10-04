@@ -17,8 +17,16 @@ ordinary Stop keeps its imported database as before.
 **A changed browser choice must reconcile the runner's immutable published ports.**
 An existing VNC runner cannot gain direct browser ports by changing `tasks.direct_access`.
 Every DDEV ensure compares that choice (including the global switch) with the published-port
-labels. A mismatch first snapshots the live database under a unique `haive-access-<task>-<time>`
-name, then replaces the runner. Snapshot failure leaves the existing runner intact. Cold recovery
+labels. A mismatch first snapshots the live database, then replaces the runner.
+Access snapshots alternate between `haive-access-<task>-0` and `-1`: clean the inactive
+slot before creation, retain the latest backup until the replacement succeeds, then prune
+the superseded backup. Legacy timestamped access snapshots are pruned too. Repeated mode
+changes retain one backup, with at most two during replacement, rather than multiplying
+the database on the shared repository volume. Port inspection failures fail reconciliation; they never
+mean that direct ports were absent. Projects whose effective merged DDEV configuration
+explicitly omits the DB container (including SQLite projects) can recreate without a DB
+snapshot; an unreachable or empty configured database cannot waive preservation.
+Snapshot failure leaves the existing runner intact. Cold recovery
 restores that access snapshot and refuses a failed restore rather than serving an empty database.
 Failed bring-up removes the newly created runner before releasing the boot, so Retry must
 attempt the cold restore again instead of reusing a serving runner with an empty database.
@@ -34,11 +42,16 @@ recovery instead of choosing from a partial listing or allocating work for every
 `70b9dc50`, repeated source reloads re-drove `01c` while the old `docker exec`'s
 `ddev start` still ran inside the surviving runner. Two compose operations then collided
 on `ddev-elmont-novy-codex-web`, and warm recovery discarded the runner's image cache.
-Both buffered and streaming `start`/`restart` commands now hold the same runner-local
+Both buffered and streaming `start`/`restart` and snapshot/restore/cleanup commands hold the same runner-local
 `flock` outside the repository. The lock survives loss of the worker/client and is
-released when the nested command exits. Warm recovery allows the cold-start time budget
-because it may first wait for that orphaned boot; the lock's wait expires before the
-host exec timeout so a timed-out waiter cannot launch a delayed startup behind it.
+released when the nested command exits. Lock acquisition allows 900 seconds for an
+orphaned cold boot, then a runner-local `timeout` gives the new command its full execution
+budget (300 seconds for warm startup, 900 for cold startup/restart), plus ten seconds
+before KILL. The host exec timeout includes both budgets and that grace, so a late lock
+acquisition cannot launch a command with only seconds remaining before its client dies.
+A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
+runner: the earlier operation may still be restoring its live database. Snapshot locking
+also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`

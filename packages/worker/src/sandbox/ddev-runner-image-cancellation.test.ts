@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { run } = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock('node:child_process', async () => {
@@ -8,8 +8,38 @@ vi.mock('node:child_process', async () => {
   return { ...actual, execFile };
 });
 
-import { ensureDdevRunnerImage } from './ddev-runner.js';
+import { ensureDdevRunnerImage, readDdevPublishedPorts } from './ddev-runner.js';
 import { DdevBootAbortedError, withDdevBootCancellation } from './ddev-boot-cancellation.js';
+
+beforeEach(() => {
+  run.mockReset();
+});
+
+describe('DDEV port-label inspection', () => {
+  it('distinguishes unpublished ports from a failed inspection during reconciliation', async () => {
+    run.mockResolvedValue({ stdout: '<no value>,<no value>\n', stderr: '' });
+    await expect(readDdevPublishedPorts('runner', { strict: true })).resolves.toBeNull();
+    run.mockRejectedValue(new Error('docker inspect timed out'));
+    await expect(readDdevPublishedPorts('runner', { strict: true })).rejects.toThrow(
+      'Cannot inspect DDEV published ports',
+    );
+    await expect(readDdevPublishedPorts('runner')).resolves.toBeNull();
+  });
+
+  it('reads valid ports and rejects partial or malformed labels in strict mode', async () => {
+    run.mockResolvedValue({ stdout: '56001,56002\n', stderr: '' });
+    await expect(readDdevPublishedPorts('runner', { strict: true })).resolves.toEqual({
+      https: 56001,
+      http: 56002,
+    });
+    for (const stdout of ['56001,<no value>', 'broken,56002', '56001,99999']) {
+      run.mockResolvedValue({ stdout, stderr: '' });
+      await expect(readDdevPublishedPorts('runner', { strict: true })).rejects.toThrow(
+        'Cannot inspect DDEV published ports',
+      );
+    }
+  });
+});
 
 describe('DDEV runner image cancellation', () => {
   it('aborts the image build before a container exists instead of waiting for its timeout', async () => {

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { parse as parseYaml } from 'yaml';
 import {
   CONFIG_KEYS,
   RUNNER_SUBPATH_LABEL,
@@ -1023,6 +1024,7 @@ async function readPortPairLabels(
   name: string,
   httpsLabel: string,
   httpLabel: string,
+  strict = false,
 ): Promise<DdevPublishedPorts | null> {
   try {
     const { stdout } = await exec(
@@ -1036,19 +1038,28 @@ async function readPortPairLabels(
       { timeout: 8_000 },
     );
     const [hs, ht] = stdout.trim().split(',');
+    const absent = (value: string | undefined): boolean => value === '' || value === '<no value>';
+    if (absent(hs) && absent(ht)) return null;
     const https = Number(hs);
     const http = Number(ht);
-    if (!Number.isFinite(https) || !Number.isFinite(http) || !https || !http) return null;
+    if (![https, http].every((port) => Number.isInteger(port) && port > 0 && port <= 65535)) {
+      if (strict) throw new Error('Published-port labels are incomplete or invalid');
+      return null;
+    }
     return { https, http };
-  } catch {
+  } catch (cause) {
+    if (strict) throw new Error(`Cannot inspect DDEV published ports for ${name}`, { cause });
     return null;
   }
 }
 
 /** Read a DDEV runner's published host ports from its labels, or null when direct
  *  access was off at start (no labels stamped). */
-async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts | null> {
-  return readPortPairLabels(name, DDEV_HTTPS_PORT_LABEL, DDEV_HTTP_PORT_LABEL);
+export async function readDdevPublishedPorts(
+  name: string,
+  opts: { strict?: boolean } = {},
+): Promise<DdevPublishedPorts | null> {
+  return readPortPairLabels(name, DDEV_HTTPS_PORT_LABEL, DDEV_HTTP_PORT_LABEL, opts.strict);
 }
 
 /** Read a DDEV runner's published Mailpit host ports from its labels, or null when they
@@ -1124,12 +1135,12 @@ async function ddevExecOnce(
   // buffered path below returns nothing until a multi-minute op completes).
   if (opts.onLine)
     return ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
-  const cmd = buildDdevShellCommand(handle.projectDir, ddevArgs, opts.timeoutMs ?? 600_000);
+  const command = buildDdevCommand(handle.projectDir, ddevArgs, opts.timeoutMs ?? 600_000);
   try {
     const { stdout, stderr } = await exec(
       'docker',
-      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd],
-      { timeout: opts.timeoutMs ?? 600_000, maxBuffer: 10 * 1024 * 1024 },
+      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', command.shell],
+      { timeout: command.hostTimeoutMs, maxBuffer: 10 * 1024 * 1024 },
     );
     // Keep the TAIL: ddev's result/error lands at the END, after verbose
     // image-pull progress. Slicing the head drops the actual failure line (e.g.
@@ -1144,18 +1155,22 @@ async function ddevExecOnce(
 
 /** Docker exec outlives its host client. Keep startup/restart exclusion inside the runner
  * so a worker hot reload cannot overlap an orphaned DDEV compose operation. The lock lives
- * outside the repository and expires its wait before the host command times out. */
-export function buildDdevShellCommand(
+ * outside the repository. Lock acquisition and command execution have separate budgets,
+ * enforced inside the runner; the host allows both plus TERM/KILL and transport grace. */
+export function buildDdevCommand(
   projectDir: string,
   ddevArgs: string,
   timeoutMs: number,
-): string {
-  const lifecycle = /^(?:start|restart)(?:\s|$)/.test(ddevArgs);
-  const waitSeconds = Math.max(1, Math.floor(timeoutMs / 1000) - 5);
-  const prefix = lifecycle
-    ? `flock --exclusive --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock `
-    : '';
-  return `cd ${projectDir} && ${prefix}ddev ${ddevArgs}`;
+): { shell: string; hostTimeoutMs: number } {
+  const lifecycle = /^(?:start|restart|snapshot)(?:\s|$)/.test(ddevArgs);
+  if (!lifecycle)
+    return { shell: `cd ${projectDir} && ddev ${ddevArgs}`, hostTimeoutMs: timeoutMs };
+  const waitSeconds = 900;
+  const runSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  return {
+    shell: `cd ${projectDir} && flock --exclusive --conflict-exit-code 75 --timeout ${waitSeconds} /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s ${runSeconds}s ddev ${ddevArgs}`,
+    hostTimeoutMs: (waitSeconds + runSeconds + 15) * 1000,
+  };
 }
 
 /** `runnerHandleForTask` and `startDdevRunner` both build `projectDir` this way, so the repo
@@ -1996,15 +2011,15 @@ async function ensureDdevStartedInner(
       // a worker hot-reload SIGKILLed an in-flight `ddev` op mid-restart). Restart
       // the project IN PLACE — the base images are still cached in the surviving
       // anon /var/lib/docker, so this pulls nothing (only a genuinely-changed
-      // php/db image would). Allow the cold-boot budget here too: the runner-local
-      // lifecycle lock may first wait for an orphaned cold start to finish after a
-      // worker reload. A 300s total budget could destroy that boot while it still
-      // makes progress, discarding its newly cached images and starting over.
+      // php/db image would). Its 300s execution budget starts AFTER taking the
+      // runner-local lifecycle lock, which separately allows an orphaned cold boot
+      // up to 900s to finish. Waiting must not consume this command's execution time.
       const warm = await ddevExec(existing, 'start', {
         onLine: opts.onProgress,
-        timeoutMs: 900_000,
+        timeoutMs: 300_000,
       });
       scope.throwIfAborted();
+      if (warm.exitCode === 75) throw ddevLifecycleBusyError();
       if (warm.exitCode === 0) {
         // Normally NO restoreLatestSnapshot here: the container survived, so its
         // nested DB volume survived and holds the live (possibly newer) DB, and a
@@ -2065,8 +2080,10 @@ async function ensureDdevStartedInner(
         }
         const retry = await ddevExec(existing, 'start', {
           onLine: opts.onProgress,
-          timeoutMs: 900_000,
+          timeoutMs: 300_000,
         });
+        scope.throwIfAborted();
+        if (retry.exitCode === 75) throw ddevLifecycleBusyError();
         if (retry.exitCode === 0) return existing;
         if (isDdevVersionConstraintFailure(retry.output)) {
           throw ddevVersionConstraintError(retry.output);
@@ -2134,6 +2151,12 @@ async function ensureDdevStartedInner(
   }
 }
 
+function ddevLifecycleBusyError(): Error {
+  return new Error(
+    'An earlier DDEV operation is still running. The existing runner and database were kept; retry after it finishes.',
+  );
+}
+
 /** Port publishing is immutable. A retried viewing choice must replace a runner whose
  * ports describe the old choice, but only after saving its LIVE database successfully. */
 async function reconcileDdevAccess(
@@ -2144,18 +2167,40 @@ async function reconcileDdevAccess(
   scope: DdevBootScope,
 ): Promise<DdevRunnerHandle> {
   const directAccess = await resolveTaskDirectAccess(taskId);
-  const ports = await readDdevPublishedPorts(handle.container);
+  const ports = await readDdevPublishedPorts(handle.container, { strict: true });
   scope.throwIfAborted();
   if (directAccess === (ports !== null)) return handle;
-  opts.onProgress?.('Saving the database before changing browser access…');
-  // A unique name cannot mistake a prior snapshot for the database being preserved now.
-  const snapshotName = `haive-access-${taskId}-${Date.now()}`;
-  const snapshot = await ddevSnapshot(handle, snapshotName, { onLine: opts.onProgress });
+  // Ask DDEV for its merged configuration, including config.*.yaml overrides. Absence
+  // of a reachable DB is not proof that none is configured: only explicit omission
+  // can waive the snapshot, including SQLite projects configured with omit_containers.
+  const config = await ddevExec(handle, 'utility configyaml --full-yaml', { timeoutMs: 30_000 });
   scope.throwIfAborted();
-  if (snapshot.exitCode !== 0) {
-    throw new Error(
-      `Cannot change DDEV browser access: database snapshot failed. ${snapshot.output.slice(-1500)}`,
+  if (config.exitCode !== 0 || ddevConfigOmitsDatabase(config.output) !== true) {
+    opts.onProgress?.('Saving the database before changing browser access…');
+    const retention = selectAccessSnapshotRetention(
+      taskId,
+      await durabilitySnapshotEntries(taskId, repoSubpath),
     );
+    scope.throwIfAborted();
+    for (const stale of retention.prune) {
+      await cleanupAccessSnapshot(handle, stale, opts);
+      scope.throwIfAborted();
+    }
+    // The inactive slot was cleaned before creation; its prior file cannot masquerade
+    // as the live database being preserved now. Keep the active backup until success.
+    const snapshotName = retention.next;
+    const snapshot = await ddevSnapshot(handle, snapshotName, { onLine: opts.onProgress });
+    scope.throwIfAborted();
+    if (snapshot.exitCode !== 0) {
+      await cleanupAccessSnapshot(handle, snapshotName, opts);
+      throw new Error(
+        `Cannot change DDEV browser access: database snapshot failed. ${snapshot.output.slice(-1500)}`,
+      );
+    }
+    if (retention.keep) {
+      await cleanupAccessSnapshot(handle, retention.keep, opts);
+      scope.throwIfAborted();
+    }
   }
   const { stdout: id } = await exec('docker', ['inspect', '-f', '{{.Id}}', handle.container], {
     timeout: 8000,
@@ -2167,12 +2212,70 @@ async function reconcileDdevAccess(
   return ensureDdevStartedInner(taskId, repoSubpath, opts, scope);
 }
 
+/** DDEV's processed configuration explicitly omits the DB; unknown output never waives
+ * preservation. Read the merged configuration, not a repo file that overrides can change. */
+export function ddevConfigOmitsDatabase(output: string): boolean | null {
+  const marker = '# Complete processed project configuration:\n';
+  const start = output.indexOf(marker);
+  if (start < 0) return null;
+  try {
+    const config = parseYaml(output.slice(start + marker.length), { maxAliasCount: 0 }) as unknown;
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+    const omitted = (config as { omit_containers?: unknown }).omit_containers;
+    if (omitted === undefined) return false;
+    return Array.isArray(omitted) ? omitted.includes('db') : null;
+  } catch {
+    return null;
+  }
+}
+
 const DDEV_SNAPSHOT_ENTRY_LIMIT = 1024;
 
-async function latestDurabilitySnapshot(
+async function cleanupAccessSnapshot(
+  handle: DdevRunnerHandle,
+  name: string,
+  opts: { onProgress?: (line: string) => void },
+): Promise<void> {
+  const result = await ddevExec(handle, `snapshot --cleanup --name=${name} --yes`, {
+    timeoutMs: 120_000,
+    onLine: opts.onProgress,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Cannot remove superseded DDEV access snapshot ${name}: ${result.output.slice(-1500)}`,
+    );
+  }
+}
+
+function accessSnapshotName(taskId: string, fileName: string): string | null {
+  const prefix = `haive-access-${taskId}-`;
+  const stamp = fileName.startsWith(prefix)
+    ? /^(\d+)-/.exec(fileName.slice(prefix.length))?.[1]
+    : null;
+  return stamp ? `${prefix}${stamp}` : null;
+}
+
+/** Reuse two names: preserve one completed backup while replacing the inactive slot.
+ * Prune legacy timestamped names too, without touching import/migration or other tasks. */
+export function selectAccessSnapshotRetention(
+  taskId: string,
+  entries: { name: string; modified: number }[],
+): { next: string; keep: string | null; prune: string[] } {
+  const byName = new Map<string, number>();
+  for (const entry of entries) {
+    const name = accessSnapshotName(taskId, entry.name);
+    if (name) byName.set(name, Math.max(byName.get(name) ?? 0, entry.modified));
+  }
+  const names = [...byName.keys()].sort((a, b) => byName.get(b)! - byName.get(a)!);
+  const keep = names[0] ?? null;
+  const first = `haive-access-${taskId}-0`;
+  return { next: keep === first ? `haive-access-${taskId}-1` : first, keep, prune: names.slice(1) };
+}
+
+async function durabilitySnapshotEntries(
   taskId: string,
   repoSubpath: string,
-): Promise<string | null> {
+): Promise<{ name: string; modified: number }[]> {
   const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
   const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'), {
     maxEntries: DDEV_SNAPSHOT_ENTRY_LIMIT,
@@ -2191,7 +2294,17 @@ async function latestDurabilitySnapshot(
     if (!stat || (stat.kind !== 'file' && stat.kind !== 'directory')) continue;
     candidates.push({ name: entry.name, modified: stat.stats.mtimeMs });
   }
-  return selectLatestDurabilitySnapshot(taskId, candidates);
+  return candidates;
+}
+
+async function latestDurabilitySnapshot(
+  taskId: string,
+  repoSubpath: string,
+): Promise<string | null> {
+  return selectLatestDurabilitySnapshot(
+    taskId,
+    await durabilitySnapshotEntries(taskId, repoSubpath),
+  );
 }
 
 /** The engine suffix is written by DDEV; restore takes the original name. Newer ordinary
@@ -2200,17 +2313,12 @@ export function selectLatestDurabilitySnapshot(
   taskId: string,
   entries: { name: string; modified: number }[],
 ): string | null {
-  const prefix = `haive-access-${taskId}-`;
   const candidates = entries.flatMap((entry) => {
-    const stamp = entry.name.startsWith(prefix)
-      ? /^(\d+)-/.exec(entry.name.slice(prefix.length))?.[1]
-      : null;
+    const access = accessSnapshotName(taskId, entry.name);
     const ordinary = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)].find(
       (name) => entry.name.startsWith(`${name}-`),
     );
-    return stamp || ordinary
-      ? [{ name: stamp ? `${prefix}${stamp}` : ordinary!, modified: entry.modified }]
-      : [];
+    return access || ordinary ? [{ name: access ?? ordinary!, modified: entry.modified }] : [];
   });
   // A later import/migration snapshot wins over an older access-change snapshot.
   return candidates.sort((a, b) => b.modified - a.modified)[0]?.name ?? null;
@@ -2324,12 +2432,8 @@ function ddevExecStreaming(
   onLine?: (line: string) => void,
   timeoutMs = 900_000,
 ): Promise<{ exitCode: number; output: string }> {
-  return runnerShellStreaming(
-    handle,
-    buildDdevShellCommand(handle.projectDir, ddevArgs, timeoutMs),
-    onLine,
-    timeoutMs,
-  );
+  const command = buildDdevCommand(handle.projectDir, ddevArgs, timeoutMs);
+  return runnerShellStreaming(handle, command.shell, onLine, command.hostTimeoutMs);
 }
 
 /** Streaming counterpart of runnerExec: an arbitrary shell command in the runner

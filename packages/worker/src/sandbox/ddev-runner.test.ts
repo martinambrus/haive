@@ -17,32 +17,70 @@ import {
   parseDdevTableCount,
   warmStartRecoveryVerdict,
   selectLatestDurabilitySnapshot,
-  buildDdevShellCommand,
+  buildDdevCommand,
+  ddevConfigOmitsDatabase,
+  selectAccessSnapshotRetention,
 } from './ddev-runner.js';
 
 describe('DDEV lifecycle commands across worker restarts', () => {
   it('locks startup and restart in the runner for both buffered and streaming execution', () => {
-    for (const command of ['start', 'restart', 'start --skip-hooks']) {
-      expect(buildDdevShellCommand('/repos/project', command, 900_000)).toBe(
-        `cd /repos/project && flock --exclusive --timeout 895 /tmp/haive-ddev-lifecycle.lock ddev ${command}`,
-      );
+    for (const command of [
+      'start',
+      'restart',
+      'start --skip-hooks',
+      'snapshot restore saved',
+      'snapshot --cleanup --name=old --yes',
+    ]) {
+      expect(buildDdevCommand('/repos/project', command, 900_000)).toEqual({
+        shell: `cd /repos/project && flock --exclusive --conflict-exit-code 75 --timeout 900 /tmp/haive-ddev-lifecycle.lock timeout --kill-after=10s 900s ddev ${command}`,
+        hostTimeoutMs: 1_815_000,
+      });
     }
   });
 
   it('lets probes and database commands run without taking the startup lock', () => {
-    for (const command of [
-      'describe -j',
-      'snapshot restore saved',
-      'import-db --file=/tmp/db.sql',
-    ]) {
-      expect(buildDdevShellCommand('/repos/project', command, 30_000)).toBe(
-        `cd /repos/project && ddev ${command}`,
-      );
+    for (const command of ['describe -j', 'import-db --file=/tmp/db.sql']) {
+      expect(buildDdevCommand('/repos/project', command, 30_000)).toEqual({
+        shell: `cd /repos/project && ddev ${command}`,
+        hostTimeoutMs: 30_000,
+      });
     }
   });
 
-  it('bounds lock waiting before the host docker-exec timeout', () => {
-    expect(buildDdevShellCommand('/repos/project', 'start', 300_000)).toContain('--timeout 295');
+  it('reserves the full warm-start execution time after a nearly exhausted lock wait', () => {
+    const command = buildDdevCommand('/repos/project', 'start', 300_000);
+    expect(command.shell).toContain('--timeout 900');
+    expect(command.shell).toContain('--conflict-exit-code 75');
+    expect(command.shell).toContain('timeout --kill-after=10s 300s ddev start');
+    const acquiredAtMs = 899_000;
+    expect(command.hostTimeoutMs - acquiredAtMs).toBeGreaterThan(300_000 + 10_000);
+  });
+});
+
+describe('database preservation when changing browser access', () => {
+  const config = (yaml: string) =>
+    `These config files were loaded\n# Complete processed project configuration:\n${yaml}`;
+
+  it('waives a database snapshot only when the merged config explicitly omits db', () => {
+    expect(ddevConfigOmitsDatabase(config('name: sqlite-site\nomit_containers: [db]\n'))).toBe(
+      true,
+    );
+    expect(
+      ddevConfigOmitsDatabase(config('name: app\nomit_containers:\n  - ddev-ssh-agent\n  - db\n')),
+    ).toBe(true);
+  });
+
+  it('preserves a configured database even when the project has no tables or the service is unreachable', () => {
+    expect(ddevConfigOmitsDatabase(config('name: app\ndatabase:\n  type: postgres\n'))).toBe(false);
+    expect(ddevConfigOmitsDatabase(config('name: app\nomit_containers: [ddev-ssh-agent]\n'))).toBe(
+      false,
+    );
+  });
+
+  it('never waives preservation for failed, truncated or malformed configuration output', () => {
+    expect(ddevConfigOmitsDatabase('omit_containers: [db]\n')).toBeNull();
+    expect(ddevConfigOmitsDatabase(config('omit_containers: db\n'))).toBeNull();
+    expect(ddevConfigOmitsDatabase(config('omit_containers: [\n'))).toBeNull();
   });
 });
 
@@ -106,6 +144,41 @@ describe('database snapshots after changing browser access', () => {
       ]),
     ).toBe('haive-import-task');
     expect(selectLatestDurabilitySnapshot('task', [])).toBeNull();
+  });
+});
+
+describe('access snapshot retention', () => {
+  it('keeps the newest backup while cleaning the inactive slot and legacy snapshots', () => {
+    expect(
+      selectAccessSnapshotRetention('task', [
+        { name: 'haive-access-task-0-postgres_17.zst', modified: 300 },
+        { name: 'haive-access-task-1-postgres_17.zst', modified: 100 },
+        { name: 'haive-access-task-150-postgres_17.zst', modified: 200 },
+        { name: 'haive-migrated-task-postgres_17.zst', modified: 400 },
+      ]),
+    ).toEqual({
+      next: 'haive-access-task-1',
+      keep: 'haive-access-task-0',
+      prune: ['haive-access-task-150', 'haive-access-task-1'],
+    });
+  });
+
+  it('alternates back to the first slot after a successful second-slot backup', () => {
+    expect(
+      selectAccessSnapshotRetention('task', [
+        { name: 'haive-access-task-1-mariadb_10.11', modified: 500 },
+      ]),
+    ).toEqual({ next: 'haive-access-task-0', keep: 'haive-access-task-1', prune: [] });
+  });
+
+  it('starts with a clean first slot and never prunes other tasks or unrelated backups', () => {
+    expect(
+      selectAccessSnapshotRetention('task', [
+        { name: 'haive-access-other-0-postgres_17.zst', modified: 600 },
+        { name: 'haive-import-task-postgres_17.zst', modified: 500 },
+        { name: 'haive-access-task-malformed', modified: 400 },
+      ]),
+    ).toEqual({ next: 'haive-access-task-0', keep: null, prune: [] });
   });
 });
 
