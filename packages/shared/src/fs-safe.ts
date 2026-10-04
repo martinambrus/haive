@@ -7,6 +7,7 @@ import {
   lstat,
   mkdir,
   open,
+  opendir,
   readdir,
   readlink,
   rename,
@@ -455,18 +456,42 @@ export async function readTextNoFollow(
   return read === null ? null : read.data.toString('utf8');
 }
 
+export interface ReadDirOptions extends StrictOption {
+  /** Bound allocation by iterating the held directory. Exceeding the cap refuses the whole
+   * listing (throws when strict, null otherwise), never returns an incomplete prefix. */
+  maxEntries?: number;
+}
+
 /** Entries of the directory at `<anchor>/<relDir>` (`''` for the anchor). The listing reopens the
  *  held inode through `/proc/self/fd`, so `Dirent.parentPath` is that `/proc` path: callers join
  *  `entry.name` onto their own rel, never read the parent off the entry. */
 export async function readdirNoFollow(
   anchor: string,
   relDir: string,
-  opts: StrictOption = {},
+  opts: ReadDirOptions = {},
 ): Promise<Dirent[] | null> {
   const safe = toSafeRel(relDir);
+  if (
+    opts.maxEntries !== undefined &&
+    (!Number.isSafeInteger(opts.maxEntries) || opts.maxEntries < 0)
+  ) {
+    throw new RangeError('maxEntries must be a nonnegative safe integer');
+  }
   return readResult(opts.strict, async () => {
     const dir = await walkDir(anchor, safe, segments(safe));
     try {
+      if (opts.maxEntries !== undefined) {
+        const entries: Dirent[] = [];
+        const listing = await opendir(fdPath(dir.fh.fd), { bufferSize: 32 });
+        // The async iterator closes the listing on completion, early return, or throw.
+        for await (const entry of listing) {
+          if (entries.length === opts.maxEntries) {
+            throw new Error(`Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`);
+          }
+          entries.push(entry);
+        }
+        return entries;
+      }
       return await readdir(fdPath(dir.fh.fd), { withFileTypes: true });
     } finally {
       await closeQuietly(dir.fh);

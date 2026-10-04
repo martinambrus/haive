@@ -26,7 +26,9 @@ A later import or migration snapshot takes precedence by modification time, reta
 winning name even when both ordinary snapshots exist. A known snapshot that fails to restore
 does not fall back to an older database. Subsequent cold recovery cannot undo database work
 done after the access change or a later re-import. Snapshot paths use the same
-anchored filesystem primitives as other DDEV inputs.
+anchored filesystem primitives as other DDEV inputs. Snapshot listings iterate the held
+directory with a 1,024-entry cap and stat candidates sequentially. Exceeding the cap fails
+recovery instead of choosing from a partial listing or allocating work for every entry.
 
 **A worker reload cannot rely on its in-memory boot map to serialize DDEV.** On task
 `70b9dc50`, repeated source reloads re-drove `01c` while the old `docker exec`'s

@@ -2167,29 +2167,31 @@ async function reconcileDdevAccess(
   return ensureDdevStartedInner(taskId, repoSubpath, opts, scope);
 }
 
+const DDEV_SNAPSHOT_ENTRY_LIMIT = 1024;
+
 async function latestDurabilitySnapshot(
   taskId: string,
   repoSubpath: string,
 ): Promise<string | null> {
   const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
-  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'));
-  const candidates = await Promise.all(
-    (entries ?? []).map(async (entry) => {
-      if (
-        !entry.name.startsWith(`haive-access-${taskId}-`) &&
-        !entry.name.startsWith(`${ddevMigratedSnapshotName(taskId)}-`) &&
-        !entry.name.startsWith(`${ddevImportSnapshotName(taskId)}-`)
-      )
-        return null;
-      const stat = await lstatNoFollow(anchor, joinRel(rel, `.ddev/db_snapshots/${entry.name}`));
-      if (!stat || stat.kind === 'symlink') return null;
-      return { name: entry.name, modified: stat.stats.mtimeMs };
-    }),
-  );
-  return selectLatestDurabilitySnapshot(
-    taskId,
-    candidates.filter((candidate) => candidate !== null),
-  );
+  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'), {
+    maxEntries: DDEV_SNAPSHOT_ENTRY_LIMIT,
+    strict: true,
+  });
+  const candidates: { name: string; modified: number }[] = [];
+  // Repository-controlled entries must not create unbounded concurrent descriptor walks.
+  for (const entry of entries ?? []) {
+    if (
+      !entry.name.startsWith(`haive-access-${taskId}-`) &&
+      !entry.name.startsWith(`${ddevMigratedSnapshotName(taskId)}-`) &&
+      !entry.name.startsWith(`${ddevImportSnapshotName(taskId)}-`)
+    )
+      continue;
+    const stat = await lstatNoFollow(anchor, joinRel(rel, `.ddev/db_snapshots/${entry.name}`));
+    if (!stat || (stat.kind !== 'file' && stat.kind !== 'directory')) continue;
+    candidates.push({ name: entry.name, modified: stat.stats.mtimeMs });
+  }
+  return selectLatestDurabilitySnapshot(taskId, candidates);
 }
 
 /** The engine suffix is written by DDEV; restore takes the original name. Newer ordinary
@@ -2216,7 +2218,7 @@ export function selectLatestDurabilitySnapshot(
 
 /** Restore the newest known durability snapshot, including a later re-import. Refuse
  * a failed restore of a known snapshot rather than silently rolling back to an older DB.
- * If the directory cannot be read, preserve legacy probing by name; absent snapshots
+ * If the directory is absent, preserve legacy probing by name; absent snapshots
  * (first boot or a project with no imported DB) remain a normal no-op. */
 async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
   const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
@@ -2290,9 +2292,12 @@ async function hasDurabilitySnapshot(taskId: string, repoSubpath: string): Promi
     ddevImportSnapshotName(taskId),
     `haive-access-${taskId}-`,
   ];
-  // Lenient: `null` is an absent directory (the common case — no snapshot was ever taken), an
-  // unreadable one, and a refused one alike, and none of the three is a snapshot this task left.
-  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'));
+  // An absent directory is the common case — no snapshot was ever taken. Refused, unreadable
+  // or oversized directories fail recovery rather than being treated as an empty listing.
+  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'), {
+    maxEntries: DDEV_SNAPSHOT_ENTRY_LIMIT,
+    strict: true,
+  });
   if (entries === null) return false;
   return entries.some((entry) => names.some((name) => entry.name.startsWith(name)));
 }
