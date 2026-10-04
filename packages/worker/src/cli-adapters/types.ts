@@ -57,6 +57,9 @@ export interface InvokeOpts {
    *  (e.g. 01-env-detect), where a high-effort model would otherwise burn the
    *  timeout exploring the repo. codex/gemini adapters ignore it. */
   disableTools?: boolean;
+  /** Refuse adapters that cannot actually disable built-in tools. Requires
+   *  disableTools:true and a prompt invocation; unset keeps best-effort behavior. */
+  requireDisabledTools?: true;
 }
 
 /** Per-task facts a steering transport can depend on — see

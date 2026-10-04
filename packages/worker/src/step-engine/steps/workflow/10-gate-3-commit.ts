@@ -262,8 +262,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     preForm: true,
     optional: true,
     disableTools: true,
+    requireDisabledTools: true,
     toolProfile: 'none',
-    skipAgentRules: true,
     skipIf: ({ detected }) => {
       const d = detected as CommitGateDetect;
       return !d.hasGit || d.dirtyFiles === 0;

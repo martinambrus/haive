@@ -284,7 +284,15 @@ describe('advanceStep LLM phase', () => {
     ).toHaveLength(1);
   });
 
-  it('offers gate-3 manual message entry when no provider can generate a suggestion', async () => {
+  it.each([
+    { name: 'no dependencies', providers: undefined },
+    { name: 'an empty provider list', providers: [] },
+    { name: 'only disabled providers', providers: [{ ...makeProvider(), enabled: false }] },
+    ...(['codex', 'gemini', 'amp', 'antigravity'] as const).map((name) => ({
+      name: `only ${name} (cannot disable built-in tools)`,
+      providers: [{ ...makeProvider(), name }],
+    })),
+  ])('offers gate-3 manual message entry with $name', async ({ providers }) => {
     const state = freshState();
     state.taskStepRow.stepId = gate3CommitStep.metadata.id;
     state.taskStepRow.detectOutput = {
@@ -296,6 +304,7 @@ describe('advanceStep LLM phase', () => {
       changedFileCount: 1,
       diffArtifactTruncated: false,
     };
+    const enqueueCliInvocation = vi.fn();
     const result = await advanceStep({
       db: makeMockDb(state),
       taskId: 'task-1',
@@ -304,11 +313,71 @@ describe('advanceStep LLM phase', () => {
       workspacePath: '/tmp',
       cliProviderId: null,
       stepDef: gate3CommitStep,
+      ...(providers ? { providers, deps: { enqueueCliInvocation } } : {}),
     });
     expect(result.status).toBe('waiting_form');
     const form = state.taskStepRow.formSchema as { fields: { id: string; default?: unknown }[] };
     expect(form.fields.find((f) => f.id === 'commitMessage')!.default).toBe('');
     expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toHaveLength(0);
+    expect(enqueueCliInvocation).not.toHaveBeenCalled();
+  });
+
+  it('keeps required LLM dispatch unavailable as a failure with worker dependencies supplied', async () => {
+    const state = freshState();
+    const enqueueCliInvocation = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: baseStep(),
+      providers: [],
+      deps: { enqueueCliInvocation },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('no cli provider available');
+    expect(enqueueCliInvocation).not.toHaveBeenCalled();
+  });
+
+  it('injects the selected provider commit conventions into gate-3 generation', async () => {
+    const state = freshState();
+    state.taskStepRow.stepId = gate3CommitStep.metadata.id;
+    state.taskStepRow.detectOutput = {
+      hasGit: true,
+      workspacePath: '/tmp',
+      dirtyFiles: 1,
+      diffSummary: 'a.txt | 1 +',
+      diffArtifactPath: null,
+      changedFileCount: 1,
+      diffArtifactTruncated: false,
+    };
+    const rulesContent = 'Commit subjects must use scope (accounts) and reference the task issue.';
+    const realGet = configService.get.bind(configService);
+    const spy = vi
+      .spyOn(configService, 'get')
+      .mockImplementation(async (key) =>
+        key === CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED ? 'true' : realGet(key),
+      );
+    try {
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: gate3CommitStep,
+        providers: [{ ...makeProvider(), rulesContent }],
+        deps: { async enqueueCliInvocation() {} },
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(state.cliInvocationRow!.prompt).toContain(rulesContent);
+      expect(state.cliInvocationRow!.prompt).toContain('Return ONLY one JSON object');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('fails when a step has llm but no providers and deps are supplied', async () => {

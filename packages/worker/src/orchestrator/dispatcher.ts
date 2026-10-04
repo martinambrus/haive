@@ -450,7 +450,9 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   return skipPlan(
     needsVision
       ? 'this task has attachments that can only be read by LOOKING at them (an image, or a document no text could be extracted from) and no enabled CLI provider can see images — configure a vision-capable model, or remove those files'
-      : 'no provider matched required capabilities',
+      : req.invokeOpts.requireDisabledTools
+        ? 'no enabled CLI provider can disable built-in tools for this invocation'
+        : 'no provider matched required capabilities',
   );
 }
 
@@ -492,6 +494,11 @@ function tryBuildPlan(
   needsVision: boolean,
 ): DispatchPlan | null {
   if (!adapter.supportsCliAuth) return null;
+  if (
+    req.invokeOpts.requireDisabledTools &&
+    (!adapter.supportsDisableTools || !req.invokeOpts.disableTools || req.input.kind !== 'prompt')
+  )
+    return null;
   // A hard exclusion, not a warning. The remedy for a blind model
   // (NO_VISION_BOUNDARY_PROMPT) tells the agent not to open images at all, so
   // handing it work that DEPENDS on one produces a confident answer that ignored

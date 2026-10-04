@@ -9,8 +9,13 @@ The snapshot is against HEAD, because this message describes the pending commit 
 the whole task's changes already committed by DAG execution or prior fix rounds.
 
 The invocation uses no tools or MCP servers and asks for a JSON `commitMessage` containing a
-subject and optional body. Git remains host-side. Change evidence is fenced at prompt-build
-time, including older persisted detect payloads that only have the diff summary. Repository
+subject and optional body. `requireDisabledTools` excludes adapters that ignore `disableTools`;
+if no eligible provider exists, the gate offers manual message entry. The requirement uses
+the adapter's declared `supportsDisableTools` capability and leaves other steps' best-effort
+`disableTools` behavior unchanged. Git remains host-side. Change evidence is fenced at prompt-build
+time. The selected provider's operator rules remain injected, including commit conventions;
+the step's explicit JSON contract takes precedence where necessary. Evidence fencing covers
+older persisted detect payloads that only have the diff summary. Repository
 secret-mask policy removes denied file contents from the message context; it conservatively
 omits tracked secret contents too and applies even with masking switched off. A failed policy
 lookup leaves only the diff summary available, never the unfiltered contents.
@@ -20,6 +25,8 @@ skips clean workspaces and non-git directories. Generation is optional, with one
 unusable output: without a usable suggestion the form offers manual entry, never the old static
 `feat: apply workflow changes` fallback. Apply uses the submitted message, or the generated
 suggestion when the field is absent, and rejects an explicitly blank message before staging.
+The optional fallback also applies when the worker supplies an empty or entirely disabled
+provider list and dispatch returns no invocation; required LLM steps still fail in that case.
 The user can still skip committing. Step-runner retains the invocation through form submission
 and recovery using its existing pre-form lifecycle.
 
