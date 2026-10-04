@@ -223,6 +223,7 @@ export function PlanDetailPanel({
 
   const node = detail.node;
   const humanAction = humanPlanAction(node);
+  const humanSettled = node.status === 'done' || node.status === 'not_applicable';
   const rolled = isRolledUp(node.status, node.rolledStatus);
 
   // The inline title editor's commit path: Enter blurs the input, and the blur
@@ -548,7 +549,7 @@ export function PlanDetailPanel({
       {humanAction && (
         <div className="flex flex-col gap-2 rounded border border-indigo-900 bg-indigo-950/20 p-3">
           <strong className="text-sm text-indigo-200">
-            {node.status === 'done' || node.status === 'not_applicable'
+            {humanSettled
               ? 'Human item settled'
               : humanAction === 'decision'
                 ? 'Needs your decision'
@@ -556,12 +557,16 @@ export function PlanDetailPanel({
           </strong>
           <MarkdownView
             body={
-              humanAction === 'decision'
-                ? 'Record your answer and choose whether this decision is resolved or still waiting. An implementation task cannot supply this business answer for you.'
-                : 'Complete the outside action, then record the outcome and whether anything remains outstanding. Choosing an option alone may not finish the action.'
+              humanSettled
+                ? node.status === 'done'
+                  ? 'This item is resolved. Change its status to reopen it if more action is needed.'
+                  : 'This item is marked not applicable. Change its status to reopen it if needed.'
+                : humanAction === 'decision'
+                  ? 'Record your answer and choose whether this decision is resolved or still waiting. An implementation task cannot supply this business answer for you.'
+                  : 'Complete the outside action, then record the outcome and whether anything remains outstanding. Choosing an option alone may not finish the action.'
             }
           />
-          {!resolutionNode && (
+          {!humanSettled && !resolutionNode && (
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
