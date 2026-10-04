@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -44,7 +44,9 @@ const { ragReindexStep } = await import('../src/step-engine/steps/workflow/11c-r
 const { workflowRagSourceSelectionStep } =
   await import('../src/step-engine/steps/workflow/11b1-rag-source-selection.js');
 const { preRagSyncStep } = await import('../src/step-engine/steps/workflow/02-pre-rag-sync.js');
-const { collectDefaults } = await import('../src/step-engine/steps/onboarding/_scope.js');
+const { collectDefaults, readComposerJson, readGitignore } =
+  await import('../src/step-engine/steps/onboarding/_scope.js');
+const { workspaceAnchor } = await import('../src/repo/worktree-paths.js');
 const { resolveRagSyncPrefs, runRagIndexSync } =
   await import('../src/step-engine/steps/workflow/_rag-index.js');
 
@@ -593,6 +595,29 @@ describe('first workflow RAG source scope', () => {
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
   });
 
+  it.each(['.haive', '.haive/worktrees', '.haive/worktrees/task'])(
+    'refuses a linked worktree component (%s) without exposing its target',
+    async (linked) => {
+      const outside = await mkdtemp(join(tmpdir(), 'haive-rag-foreign-'));
+      try {
+        const targetWorkspace = join(outside, '.haive/worktrees/task'.slice(linked.length + 1));
+        await mkdir(join(targetWorkspace, 'private'), { recursive: true });
+        await writeFile(join(targetWorkspace, 'private/secret.ts'), 'export const secret = true;');
+        await writeFile(join(targetWorkspace, 'composer.json'), '{"name":"private/project"}');
+        await writeFile(join(targetWorkspace, '.gitignore'), '/private/\n');
+        await rm(join(root, linked), { recursive: true, force: true });
+        await symlink(outside, join(root, linked));
+        await expect(workflowRagSourceSelectionStep.detect!(ctx)).rejects.toThrow();
+        expect(writes).toEqual([]);
+        const wa = workspaceAnchor(worktree);
+        expect(await readComposerJson(wa.anchor, wa.prefix)).toBeNull();
+        expect(await readGitignore(wa.anchor, wa.prefix)).toBeNull();
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('pre-excludes Drupal/Composer dependencies and generated folders from the worktree', async () => {
     await writeSource('web/core/lib/framework.php');
     await writeSource('web/modules/contrib/plugin/plugin.php');
@@ -617,6 +642,12 @@ describe('first workflow RAG source scope', () => {
     );
     await writeSource('.gitignore', '/generated/\n');
     await writeSource('old-tree/only-in-root.ts', undefined, root);
+    await writeSource('.gitignore', '/web/modules/custom/\n', root);
+    await writeSource(
+      'composer.json',
+      '{"extra":{"installer-paths":{"web/modules/custom/{$name}":["type:drupal-module"]}}}',
+      root,
+    );
     const detected = await workflowRagSourceSelectionStep.detect!(ctx);
     expect(detected.framework).toBe('drupal');
     expect(detected.defaultExcludeGlobs).toEqual(

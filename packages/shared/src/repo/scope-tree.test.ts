@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -110,5 +110,26 @@ describe('buildScopeTree', () => {
     const src = find(subdirs(tree), 'src');
     // depth 1 = src itself; its children (lib) must not be walked
     expect(src?.children).toBeUndefined();
+  });
+
+  it('scans a relative subtree while keeping display paths relative to that subtree', async () => {
+    const tree = await buildScopeTree(root, {
+      rootRel: 'src/',
+      extensions: new Set(['.ts']),
+    });
+    expect(rootFilesLeaf(tree)?.fileCount).toBe(1);
+    expect(subdirs(tree)).toEqual([{ path: 'lib', label: 'lib', fileCount: 1 }]);
+  });
+
+  it('refuses linked subtree components without enumerating the target', async () => {
+    const anchor = await mkdtemp(path.join(tmpdir(), 'scope-tree-anchor-'));
+    try {
+      await symlink(root, path.join(anchor, 'linked'));
+      expect(await buildScopeTree(anchor, { rootRel: 'linked' })).toEqual([]);
+      expect(await buildScopeTree(anchor, { rootRel: 'linked/src' })).toEqual([]);
+      await expect(buildScopeTree(anchor, { rootRel: '../' })).rejects.toThrow();
+    } finally {
+      await rm(anchor, { recursive: true, force: true });
+    }
   });
 });

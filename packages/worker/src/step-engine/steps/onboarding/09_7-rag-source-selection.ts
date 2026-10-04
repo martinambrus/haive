@@ -5,6 +5,8 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveConfirmedProject, loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import {
   stripManagedKnowledgeGlobs,
   tagManagedKnowledgeNodes,
@@ -51,8 +53,15 @@ export interface RagSourceSelectionApply {
 
 export async function detectRagSourceSelection(
   ctx: StepContext,
-  options: { framework?: string | null; extensionSet?: readonly string[] } = {},
+  options: {
+    framework?: string | null;
+    extensionSet?: readonly string[];
+    workspace?: { anchor: string; prefix: string };
+  } = {},
 ): Promise<RagSourceSelectionDetect> {
+  const workspace = options.workspace ?? workspaceAnchor(ctx.repoPath);
+  const scanRoot = await lstatNoFollow(workspace.anchor, workspace.prefix, { strict: true });
+  if (scanRoot?.kind !== 'directory') throw new Error('RAG scope scan requires a real directory');
   await ctx.emitProgress('Loading project metadata...');
   const framework =
     options.framework !== undefined
@@ -68,7 +77,10 @@ export async function detectRagSourceSelection(
 
   await ctx.emitProgress('Scanning directories...');
   const tree = tagManagedKnowledgeNodes(
-    await buildScopeTree(ctx.repoPath, extensionSet.size > 0 ? { extensions: extensionSet } : {}),
+    await buildScopeTree(workspace.anchor, {
+      rootRel: workspace.prefix,
+      ...(extensionSet.size > 0 ? { extensions: extensionSet } : {}),
+    }),
   );
 
   // Default the RAG deny list to (in order): the repo's stored RAG scope
@@ -78,8 +90,8 @@ export async function detectRagSourceSelection(
   const repoRaw = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
   const miningPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_7-scope-selection');
   const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
-  const composer = await readComposerJson(ctx.repoPath);
-  const gitignore = await readGitignore(ctx.repoPath);
+  const composer = await readComposerJson(workspace.anchor, workspace.prefix);
+  const gitignore = await readGitignore(workspace.anchor, workspace.prefix);
   const treePaths = collectAllPaths(tree);
   const seedExclude = computeSeedExcludeGlobs({
     composer,

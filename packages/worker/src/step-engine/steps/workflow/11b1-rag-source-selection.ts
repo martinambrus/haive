@@ -16,8 +16,7 @@ import { resolveRagWorkspace } from './11c-rag-reindex.js';
 /** No onboarding detector has run on a blank repo. Probe the existing framework
  * markers without walking dependency trees, then use the usual scoring rule.
  * Composer installer paths and .gitignore cover custom docroots in the shared picker. */
-async function probeFramework(repoPath: string): Promise<string | null> {
-  const wa = workspaceAnchor(repoPath);
+async function probeFramework(wa: { anchor: string; prefix: string }): Promise<string | null> {
   const indicators = [
     ...new Set(Object.values(FRAMEWORK_PATTERNS).flatMap((p) => [...p.indicators])),
   ];
@@ -59,15 +58,14 @@ export const workflowRagSourceSelectionStep: StepDefinition<
 
   async detect(ctx) {
     const repoPath = await resolveRagWorkspace(ctx);
-    return detectRagSourceSelection(
-      { ...ctx, repoPath },
-      {
-        framework: await probeFramework(repoPath),
-        // Workflow sync has no 09_7 output to restrict extensions. Count exactly
-        // the collector's default set so the picker and ingestion cover the same files.
-        extensionSet: Object.keys(CODE_EXTENSIONS),
-      },
-    );
+    const workspace = workspaceAnchor(repoPath);
+    return detectRagSourceSelection(ctx, {
+      workspace,
+      framework: await probeFramework(workspace),
+      // Workflow sync has no 09_7 output to restrict extensions. Count exactly
+      // the collector's default set so the picker and ingestion cover the same files.
+      extensionSet: Object.keys(CODE_EXTENSIONS),
+    });
   },
 
   form: (ctx, detected) => ragSourceSelectionStep.form!(ctx, detected),

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readdirNoFollow } from '../fs-safe.js';
+import { readdirNoFollow, toSafeRel } from '../fs-safe.js';
 import type { TreeNode } from '../schemas/form.js';
 
 /** Directories shown in the scope tree as collapsed, toggleable leaves but NOT
@@ -47,6 +47,9 @@ export const ROOT_FILES_SCOPE = '.';
 export const REPO_ROOT_NODE_PATH = '__repo_root__';
 
 export interface ScopeTreeOptions {
+  /** Directory beneath the trusted root to scan, keeping returned paths relative
+   *  to that directory. Worktrees must be passed here, never used as the root. */
+  rootRel?: string;
   /** Lowercase extensions WITH the leading dot (e.g. ".php"). When set, a node's
    *  `fileCount` only counts files whose extension is in the set; omit to count
    *  every file. */
@@ -68,9 +71,11 @@ export async function buildScopeTree(
 ): Promise<TreeNode[]> {
   const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
   const extensions = opts.extensions ?? null;
+  const rootRel = toSafeRel(opts.rootRel ?? '');
+  const prefix = rootRel ? `${rootRel}/` : '';
 
-  const subdirs = await childDirNodes(root, '', 0, maxDepth, extensions);
-  const rootFileCount = await countDirectFiles(root, '', extensions);
+  const subdirs = await childDirNodes(root, '', 0, maxDepth, extensions, prefix);
+  const rootFileCount = await countDirectFiles(root, prefix, extensions);
 
   // Root's own direct files get their OWN leaf (deny token ROOT_FILES_SCOPE) so
   // they can be unticked — the previous tree had no node for them, so they were
@@ -123,8 +128,9 @@ async function childDirNodes(
   depth: number,
   maxDepth: number,
   extensions: ReadonlySet<string> | null,
+  prefix: string,
 ): Promise<TreeNode[]> {
-  const entries = await readdirNoFollow(absRoot, relDir);
+  const entries = await readdirNoFollow(absRoot, `${prefix}${relDir}`);
   if (entries === null) return [];
 
   const nodes: TreeNode[] = [];
@@ -133,7 +139,7 @@ async function childDirNodes(
     const name = entry.name;
     const rel = relDir ? `${relDir}/${name}` : name;
     // depth is the depth of relDir's children; `rel` sits at depth+1.
-    const node = await buildDirNode(absRoot, rel, name, depth + 1, maxDepth, extensions);
+    const node = await buildDirNode(absRoot, rel, name, depth + 1, maxDepth, extensions, prefix);
     nodes.push(node);
   }
   nodes.sort((a, b) => a.label.localeCompare(b.label));
@@ -150,8 +156,9 @@ async function buildDirNode(
   depth: number,
   maxDepth: number,
   extensions: ReadonlySet<string> | null,
+  prefix: string,
 ): Promise<TreeNode> {
-  const entries = (await readdirNoFollow(absRoot, rel)) ?? [];
+  const entries = (await readdirNoFollow(absRoot, `${prefix}${rel}`)) ?? [];
 
   let fileCount = 0;
   const subdirs: string[] = [];
@@ -170,7 +177,15 @@ async function buildDirNode(
     const children: TreeNode[] = [];
     for (const child of subdirs) {
       children.push(
-        await buildDirNode(absRoot, `${rel}/${child}`, child, depth + 1, maxDepth, extensions),
+        await buildDirNode(
+          absRoot,
+          `${rel}/${child}`,
+          child,
+          depth + 1,
+          maxDepth,
+          extensions,
+          prefix,
+        ),
       );
     }
     children.sort((a, b) => a.label.localeCompare(b.label));

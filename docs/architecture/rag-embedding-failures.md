@@ -8,6 +8,9 @@ no onboarding task exists, and the repo has not been reset. Before ingestion,
 RAG directory picker for a blank repo whose `scope_exclude_globs` is NULL. It scans the
 worktree, using framework marker probes, Composer installer paths and `.gitignore` to
 pre-exclude framework/library/generated folders, while keeping managed knowledge immune.
+The tree, framework markers, Composer metadata and `.gitignore` all use the repository
+root as their filesystem anchor with a relative worktree prefix. A linked worktree or
+parent is refused rather than enumerated, and the displayed paths remain worktree-relative.
 An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
 covers blank repos already initialized by 11c before scope selection was added. The step
 parks for a decision even under auto-continue, and appears in every path that includes 11c.
