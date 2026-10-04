@@ -92,6 +92,16 @@ test.describe('human plan resolutions', () => {
       );
       await page.getByRole('button', { name: 'Save answer and status' }).click();
       expect((await saved).status()).toBe(200);
+      await expect(page.getByText('Human item settled', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Record decision', exact: true })).toHaveCount(
+        0,
+      );
+      await expect(page.getByRole('button', { name: 'Help me evaluate the options' })).toHaveCount(
+        0,
+      );
+      await expect(
+        page.getByText('Record your answer and choose whether', { exact: false }),
+      ).toHaveCount(0);
       await expect(page.getByRole('button', { name: /^Start next/ })).toHaveAttribute(
         'title',
         /Build inspection records/,
@@ -106,6 +116,79 @@ test.describe('human plan resolutions', () => {
       });
       const ready = await page.request.get(`${API_BASE}/repositories/${repo.repoId}/plan/ready`);
       expect(await ready.json()).toMatchObject({ matches: [{ id: workId }] });
+    } finally {
+      if (repo) await cleanupRepoFixture(sql, repo.repoId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('hides settled outcome actions and restores them when reopened', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    let repo: Awaited<ReturnType<typeof seedRepoFixture>> | null = null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'human-plan-settled' })).userId;
+      repo = await seedRepoFixture(sql, userId, 'human-settled');
+      const plan = await seedPlan(sql, repo.repoId, 'human-settled');
+      await sql`update plan_nodes set kind = 'external', taskable = false where id = ${plan.todoId}`;
+      await page.goto(`/repos/${repo.repoId}/plan?node=${plan.todoId}`);
+      const instructions = page.getByText('Complete the outside action, then record', {
+        exact: false,
+      });
+      const record = page.getByRole('button', { name: 'Record outcome', exact: true });
+      const research = page.getByRole('button', { name: 'Help me evaluate the options' });
+
+      await record.click({ timeout: 120_000 });
+      await page
+        .getByRole('textbox', { name: /What is the outcome/ })
+        .fill('Account created; access still pending.');
+      await page.getByRole('button', { name: 'Save answer and status' }).click();
+      await expect(record).toBeVisible();
+      await expect(instructions).toBeVisible();
+      await expect(research).toBeVisible();
+      await expect(page.getByText('Human item settled', { exact: true })).toHaveCount(0);
+
+      for (const status of ['Resolved', 'Not applicable']) {
+        await record.click();
+        await page
+          .getByRole('textbox', { name: /What is the outcome/ })
+          .fill('Access requirements are settled.');
+        await page.getByRole('radio', { name: new RegExp(`^${status}`) }).check();
+        await page.getByRole('button', { name: 'Save answer and status' }).click();
+        await expect(page.getByText('Human item settled', { exact: true })).toBeVisible();
+        await expect(instructions).toHaveCount(0);
+        await expect(record).toHaveCount(0);
+        await expect(research).toHaveCount(0);
+        await expect(
+          page
+            .locator('aside')
+            .filter({ has: page.getByText('Human item settled', { exact: true }) }),
+        ).toContainText('Access requirements are settled.');
+
+        await page.getByRole('button', { name: 'Change status or kind' }).click();
+        await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption('todo');
+        await page.getByRole('button', { name: 'OK', exact: true }).click();
+        await expect(record).toBeVisible();
+        await expect(instructions).toBeVisible();
+        await expect(research).toBeVisible();
+      }
+
+      for (const status of ['done', 'not_applicable']) {
+        await record.click();
+        await page.getByRole('textbox', { name: /What is the outcome/ }).fill('Unsaved outcome.');
+        await page.getByRole('button', { name: 'Change status or kind' }).click();
+        await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption(status);
+        await page.getByRole('button', { name: 'OK', exact: true }).click();
+        await expect(page.getByText('Human item settled', { exact: true })).toBeVisible();
+        await expect(page.getByRole('textbox', { name: /What is the outcome/ })).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Save answer and status' })).toHaveCount(0);
+
+        await page.getByRole('button', { name: 'Change status or kind' }).click();
+        await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption('todo');
+        await page.getByRole('button', { name: 'OK', exact: true }).click();
+        await expect(record).toBeVisible();
+      }
     } finally {
       if (repo) await cleanupRepoFixture(sql, repo.repoId);
       if (userId) await cleanupUser(sql, userId);
