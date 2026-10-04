@@ -109,7 +109,7 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
         `RAG mode: ${detected.ragMode}`,
         `KB files: ${detected.kbFileCount}`,
         `Code files: ${detected.codeFileCount}`,
-        `Ollama: ${detected.ollamaReachable ? 'reachable' : 'unavailable (hash fallback)'}`,
+        `Ollama: ${detected.ollamaReachable ? 'reachable' : 'unavailable (configured embeddings will be retried; failed chunks stay unindexed)'}`,
         'Unchanged chunks will be skipped via content hashing.',
       ].join('\n'),
       fields: [

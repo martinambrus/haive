@@ -376,6 +376,8 @@ export interface RunRagIndexOpts {
   repoPath: string;
   prefs: RagToolingPrefs;
   projectName: string;
+  /** Probe result for warmup/display only. A configured endpoint is always
+   *  attempted through embedBatch, even when its earlier probe failed. */
   ollamaReachable: boolean;
   /** From `resolveRagSyncPrefs`. Must be the same value the caller's detect
    *  counted with — a narrower set here than at detect time means the orphan
@@ -445,7 +447,10 @@ export async function runRagIndexSync(
   try {
     await ctx.emitProgress('Ensuring RAG schema...');
     const { usedPgvector } = await ensureRagSchema(conn);
-    const useOllama = ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
+    // A failed probe is an outage, not the user's choice of hash mode. Otherwise
+    // first-time ingestion writes hash vectors that content hashing preserves
+    // forever, since the saved explicit endpoint never sets ollamaUrlDerived.
+    const useOllama = !!prefs.ollamaUrl && !!prefs.embeddingModel;
 
     // Resolve repository_id first — required for dedup (without it we'd re-embed
     // the same content on every task) and for the per-repo embed-health record, and
@@ -495,14 +500,15 @@ export async function runRagIndexSync(
     }
 
     let embedDevice: EmbedDevice = 'unknown';
-    if (useOllama) {
+    if (useOllama && ollamaReachable) {
       // Warm the embedding model once so a cold (slow-to-load) model does not
-      // time out every batch into hash fallback; keep_alive keeps it resident.
+      // time out every batch; keep_alive keeps it resident. An unavailable probe
+      // skips warmup, while the batches still retry the configured endpoint.
       await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
       const warmed = await warmOllamaModel(prefs.ollamaUrl!, prefs.embeddingModel!);
       ctx.logger.info(
         { model: prefs.embeddingModel, warmed },
-        warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
+        warmed ? 'embedding model warmed' : 'embedding model warmup failed (batches will retry)',
       );
       // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
       // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.

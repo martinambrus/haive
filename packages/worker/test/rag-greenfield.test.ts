@@ -16,10 +16,12 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   ensure: vi.fn(async () => ({ usedPgvector: false, tableName: 'ai_rag_embeddings' })),
   probe: vi.fn(async () => true),
-  embed: vi.fn(async ({ texts }: { texts: string[] }) => ({
-    kind: 'embedded',
-    embeddings: texts.map(() => [0.1, 0.2]),
-  })),
+  embed:
+    vi.fn<
+      (
+        opts: import('../src/step-engine/steps/_rag-embed-health.js').EmbedBatchOpts,
+      ) => Promise<import('../src/step-engine/steps/_rag-embed-health.js').EmbedBatchOutcome>
+    >(),
   close: vi.fn(async () => {}),
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (original) => ({
@@ -59,6 +61,11 @@ let ctx: StepContext;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mocks.probe.mockResolvedValue(true);
+  mocks.embed.mockImplementation(async ({ texts }) => ({
+    kind: 'embedded',
+    embeddings: texts.map(() => [0.1, 0.2]),
+  }));
   root = await mkdtemp(join(tmpdir(), 'haive-rag-greenfield-'));
   worktree = join(root, '.haive/worktrees/task');
   await mkdir(join(worktree, '.haive-data/knowledge_base'), { recursive: true });
@@ -142,7 +149,7 @@ beforeEach(async () => {
       set: (values: Record<string, unknown>) => ({
         where: async (condition: never) => {
           if (table !== schema.repositories) return [];
-          if ('scopeExcludeGlobs' in values) {
+          if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
             writes.push(values);
             Object.assign(repo, values);
             return [];
@@ -235,6 +242,45 @@ describe('greenfield RAG initialization at 11c', () => {
       projectName: 'new-app',
       ragMode: 'internal',
     });
+  });
+
+  it('keeps initial chunks unindexed during an Ollama outage and indexes them on recovery', async () => {
+    mocks.probe.mockResolvedValue(false);
+    mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+    const detected = await ragReindexStep.detect!(ctx);
+    const first = await ragReindexStep.apply(ctx, {
+      detected,
+      formValues: { runReindex: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(first).toMatchObject({
+      performed: true,
+      inserted: 0,
+      embedFailureReason: 'Ollama is unreachable',
+    });
+    expect(first.embedSkippedChunks).toBeGreaterThan(0);
+    expect(inserts).toEqual([]);
+    expect(mocks.embed.mock.calls.every(([opts]) => opts.useOllama)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    const saved = await resolveRagSyncPrefs(ctx);
+    expect(saved.ollamaUrlDerived).toBe(false);
+    expect(saved.ragToolingPrefs?.ollamaUrl).toBe(IN_STACK_OLLAMA_URL);
+
+    mocks.probe.mockResolvedValue(true);
+    mocks.embed.mockImplementation(async ({ texts }) => ({
+      kind: 'embedded',
+      embeddings: texts.map(() => [0.1, 0.2]),
+    }));
+    const recovered = await ragReindexStep.apply(ctx, {
+      detected: await ragReindexStep.detect!(ctx),
+      formValues: { runReindex: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(recovered.inserted).toBeGreaterThanOrEqual(2);
+    expect(recovered.embedSkippedChunks).toBe(0);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 
   it('does not initialize when the user declines', async () => {

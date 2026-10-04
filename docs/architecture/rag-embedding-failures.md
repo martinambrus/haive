@@ -41,6 +41,13 @@ embedding endpoint at all (every chunk hashes, which is homogeneous and therefor
 or `CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED` is off, which restores the old behaviour byte for
 byte and is the no-deploy rollback.
 
+In workflow syncs, an unreachable Ollama probe skips model warmup but never selects
+hash mode for a configured endpoint. Batches still try that endpoint through `embedBatch`:
+under strict mode an outage leaves new chunks absent and records degradation, so a later
+healthy sync indexes them normally. This matters especially for greenfield initialization,
+whose saved explicit URL does not set `ollamaUrlDerived`; hash rows written there would
+otherwise survive every incremental sync after the service recovered.
+
 **What a failure does depends on WHEN the step runs.** `10-rag-populate` FAILS — "the index
 is populated" is its whole contract and a human is watching onboarding. `02-pre-rag-sync`
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every
