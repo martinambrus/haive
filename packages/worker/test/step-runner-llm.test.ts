@@ -6,6 +6,7 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
+import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -225,6 +226,91 @@ function makeProvider(): CliProviderRecord {
 }
 
 describe('advanceStep LLM phase', () => {
+  it('generates gate-3 copy before parking the commit form, and reuses it on submission', async () => {
+    const state = freshState();
+    state.taskStepRow.stepId = gate3CommitStep.metadata.id;
+    state.taskStepRow.detectOutput = {
+      hasGit: true,
+      workspacePath: '/tmp',
+      dirtyFiles: 1,
+      diffSummary: 'src/session.ts | 2 +-',
+      diffArtifactPath: null,
+      changedFileCount: 1,
+      diffArtifactTruncated: false,
+      commitMessageContext: 'session lookup now handles a missing user',
+    };
+    const db = makeMockDb(state);
+    const enqueueCliInvocation = vi.fn();
+    const apply = vi.fn(gate3CommitStep.apply);
+    const stepDef = { ...gate3CommitStep, apply };
+    const params = {
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation },
+    };
+    expect((await advanceStep(params)).status).toBe('waiting_cli');
+    expect(state.taskStepRow.formSchema).toBeNull();
+    expect(apply).not.toHaveBeenCalled();
+    expect(enqueueCliInvocation).toHaveBeenCalledTimes(1);
+    expect(enqueueCliInvocation.mock.calls[0]![0].toolProfile).toBe('none');
+    expect(state.cliInvocationRow!.prompt).toContain('session lookup now handles a missing user');
+
+    const generated = 'fix: handle missing session users';
+    state.cliInvocationRow = {
+      ...state.cliInvocationRow,
+      exitCode: 0,
+      endedAt: new Date(),
+      rawOutput: JSON.stringify({ commitMessage: generated }),
+      parsedOutput: null,
+    };
+    expect((await advanceStep(params)).status).toBe('waiting_form');
+    const form = state.taskStepRow.formSchema as { fields: { id: string; default?: unknown }[] };
+    expect(form.fields.find((f) => f.id === 'commitMessage')!.default).toBe(generated);
+    expect(apply).not.toHaveBeenCalled();
+    expect(
+      (await advanceStep({ ...params, formValues: { commit: false, commitMessage: generated } }))
+        .status,
+    ).toBe('done');
+    expect(apply).toHaveBeenCalledTimes(1);
+    // Finishing can enqueue a separate step recap; the gate's own invocation is reused.
+    expect(
+      enqueueCliInvocation.mock.calls.filter(([job]) => job.taskStepId === 'ts-1'),
+    ).toHaveLength(1);
+  });
+
+  it('offers gate-3 manual message entry when no provider can generate a suggestion', async () => {
+    const state = freshState();
+    state.taskStepRow.stepId = gate3CommitStep.metadata.id;
+    state.taskStepRow.detectOutput = {
+      hasGit: true,
+      workspacePath: '/tmp',
+      dirtyFiles: 1,
+      diffSummary: 'a.txt | 1 +',
+      diffArtifactPath: null,
+      changedFileCount: 1,
+      diffArtifactTruncated: false,
+    };
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: gate3CommitStep,
+    });
+    expect(result.status).toBe('waiting_form');
+    const form = state.taskStepRow.formSchema as { fields: { id: string; default?: unknown }[] };
+    expect(form.fields.find((f) => f.id === 'commitMessage')!.default).toBe('');
+    expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toHaveLength(0);
+  });
+
   it('fails when a step has llm but no providers and deps are supplied', async () => {
     const state = freshState();
     const db = makeMockDb(state);

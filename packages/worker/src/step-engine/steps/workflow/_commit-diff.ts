@@ -59,6 +59,8 @@ export interface CommitDiffArtifact {
 }
 
 export interface CommitDiffResult {
+  /** In-memory snapshot for callers that also need to describe the pending commit. */
+  artifact: CommitDiffArtifact;
   /** Absolute path to the written artifact. */
   artifactPath: string;
   changedFileCount: number;
@@ -233,6 +235,7 @@ export async function buildCommitDiffArtifact(
   );
 
   return {
+    artifact,
     artifactPath,
     changedFileCount: entries.length,
     truncated: artifact.truncated,
