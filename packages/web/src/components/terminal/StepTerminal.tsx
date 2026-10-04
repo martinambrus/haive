@@ -9,7 +9,7 @@ import {
 } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
-import { AgentPersonaBadges } from './AgentPersonaBadges';
+import { AgentPersonaBadges, distinctAgentTitle } from './AgentPersonaBadges';
 import { describeInvocationStatus } from './cli-stream-status';
 import {
   INVOCATION_HISTORY_PAGE,
@@ -413,6 +413,7 @@ function InvocationPanel({
   // queued branch below never falls through to the step-status fallback. Also the
   // auto-scroll fallback target (data-cli-queued) when nothing on the step is running.
   const isQueued = invocation.isActive && invocation.startedAt === null;
+  const agentTitle = distinctAgentTitle(invocation.agentTitle, invocation.assignedAgentIds);
   return (
     // scroll-mt-12: the auto-scroll aligns a panel's TOP with the viewport top and a
     // fixed 39px bar spans the content column — without the margin this panel's run
@@ -438,12 +439,9 @@ function InvocationPanel({
             [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
             push the badges and the runtime onto their own line. Capped and ellipsized; the
             full string stays readable on hover. */}
-        {invocation.agentTitle && (
-          <span
-            className="max-w-[24rem] truncate font-medium text-indigo-300"
-            title={invocation.agentTitle}
-          >
-            {invocation.agentTitle}
+        {agentTitle && (
+          <span className="max-w-[24rem] truncate font-medium text-indigo-300" title={agentTitle}>
+            {agentTitle}
           </span>
         )}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">

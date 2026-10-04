@@ -32,7 +32,9 @@ Persona assignment is also recorded at DISPATCH in `cli_invocations.assigned_age
 (migration 0173), before a queued run starts or completion writes `tool_usage`. The terminal
 header and split browser/terminal pane show one badge per assigned id. The run's `agentTitle`
 stays separate: it can name a work item or pass (Validator / Fixer), which is not evidence of
-a personality assignment. Legacy assignments are recovered only from recorded
+a personality assignment. When that title repeats an assigned id (case, whitespace and
+hyphen/underscore differences ignored), the header keeps the personality badge and hides the
+redundant title. Legacy assignments are recovered only from recorded
 `tool_usage.agents.assigned`, never from prompt prose, file paths or today's repository files.
 Exec stamps the assignment again at start for jobs queued before this recording shipped.
 The badge means ASSIGNED, not that the CLI spawned a native sub-agent or opened its definition.
