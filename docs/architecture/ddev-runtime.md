@@ -1,5 +1,26 @@
 # DDEV runtime
 
+**Stop and Retry abort a cold DDEV startup, including its debug/database wiring.**
+The step's abort signal used to reach only runtime admission. Task `987e2eb2` stopped
+`01c-ddev-env`, retried `98-choose-view` from VNC to direct access, and spent five minutes
+with a pending step while the superseded startup still built images. `withDdevBootCancellation`
+owns the immutable container ID returned by `docker run` until bring-up and wiring finish.
+Aborting removes that runner and its anonymous Docker volume; killing the host's `docker exec`
+client alone cannot stop the nested process. Creation that finishes after the abort is removed
+too. `DdevBoots` keeps the old boot held until teardown settles, then a surviving caller boots
+with the current settings. A completed runtime is no longer owned by that startup, so an
+ordinary Stop keeps its imported database as before.
+
+**A changed browser choice must reconcile the runner's immutable published ports.**
+An existing VNC runner cannot gain direct browser ports by changing `tasks.direct_access`.
+Every DDEV ensure compares that choice (including the global switch) with the published-port
+labels. A mismatch first snapshots the live database under a unique `haive-access-<task>-<time>`
+name, then replaces the runner. Snapshot failure leaves the existing runner intact. Cold recovery
+restores that access snapshot and refuses a failed restore rather than serving an empty database.
+A later import or migration snapshot takes precedence by modification time, so subsequent cold
+recovery cannot undo database work done after the access change. Snapshot paths use the same
+anchored filesystem primitives as other DDEV inputs.
+
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
 records `runtimeSmoke.passed: null` for a 4xx without a runtime-error signature; an explicit

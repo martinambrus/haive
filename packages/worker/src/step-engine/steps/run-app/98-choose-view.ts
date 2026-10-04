@@ -26,7 +26,8 @@ interface ChooseViewApply {
  *  01a-app-boot) — like 01d-browser-access for workflow tasks — so the runner is
  *  CREATED with the chosen surface: 'direct' publishes loopback host ports (read at
  *  runner create via resolveTaskDirectAccess from tasks.direct_access; host publishing
- *  is fixed at cold boot and never reconfigured), 'vnc'/default stays portless. The
+ *  is fixed at cold boot; a changed choice makes the next DDEV ensure snapshot the database
+ *  and recreate the runner), 'vnc'/default stays portless. The
  *  runtime hold step (99-run-app-ready) then surfaces only the chosen view: VNC
  *  navigates the in-runner headed browser to the app, own-browser shows the URL and
  *  never starts the VNC desktop. Mirrors 08a-browser-setup's interactive-vs-direct

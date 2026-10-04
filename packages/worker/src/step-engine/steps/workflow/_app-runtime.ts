@@ -28,6 +28,7 @@ import {
   type AppRunnerHandle,
 } from '../../../sandbox/app-runner.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
+import { DdevBootAbortedError } from '../../../sandbox/ddev-boot-cancellation.js';
 import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
 import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
 import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
@@ -332,25 +333,25 @@ export async function ensureDdevWithProgress(
     ctx,
     'Ensuring the DDEV environment is up…',
     (onLine) =>
-      ensureDdevStarted(ctx.taskId, repoSubpath, { onProgress: onLine, signal: ctx.signal }),
+      ensureDdevStarted(ctx.taskId, repoSubpath, {
+        onProgress: onLine,
+        signal: ctx.signal,
+        onReady: async (ready) => {
+          ctx.throwIfCancelled?.();
+          await maybeWireDdevXdebug(ctx, ready, repoSubpath);
+          ctx.throwIfCancelled?.();
+          await maybeExposeDdevDbPort(ctx, ready, repoSubpath);
+          ctx.throwIfCancelled?.();
+        },
+      }),
     { initialLine: 'starting containers…' },
   ).catch((err: unknown) => {
     // The step runner tells a Stop from a failure only by `instanceof TaskCancelledError`.
-    if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
+    if (err instanceof RuntimeSlotAbortedError || err instanceof DdevBootAbortedError)
+      throw new TaskCancelledError();
     throw err;
   });
-  // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug
-  // so the Editor tab's php-debug listener receives DBGp. Idempotent + restart-
-  // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
-  // gateway change across a cold-boot is re-applied. Never fails the bring-up.
-  await maybeWireDdevXdebug(ctx, handle, repoSubpath);
-  // Direct database access: when the task opted in, (re)expose its DDEV database on the
-  // runner's reserved loopback host port (a socat hop to the nested db container) so a
-  // local DB client can connect. Idempotent; runs on EVERY bring-up (re-resolves the db
-  // IP after a restart). Never fails the bring-up.
-  await maybeExposeDdevDbPort(ctx, handle, repoSubpath);
-  // The signal reaches only the slot wait, so a Stop during the boot or the wiring above goes
-  // unseen, and the caller would go on to migrate or import into a stopped task.
+  // Coalesced callers still check their own cancellation before exposing the runtime.
   ctx.throwIfCancelled?.();
   return handle;
 }

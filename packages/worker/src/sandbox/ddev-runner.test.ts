@@ -16,7 +16,51 @@ import {
   buildDdevTableCountCommand,
   parseDdevTableCount,
   warmStartRecoveryVerdict,
+  selectLatestAccessSnapshot,
 } from './ddev-runner.js';
+
+describe('database snapshots after changing browser access', () => {
+  const access = { name: 'haive-access-task-100-postgres_17.zst', modified: 200 };
+
+  it('restores the database saved for the access change ahead of an older import', () => {
+    expect(
+      selectLatestAccessSnapshot('task', [
+        { name: 'haive-import-task-postgres_17.zst', modified: 100 },
+        access,
+      ]),
+    ).toBe('haive-access-task-100');
+  });
+
+  it('does not roll back a later migration or re-import to an older access snapshot', () => {
+    for (const kind of ['migrated', 'import']) {
+      expect(
+        selectLatestAccessSnapshot('task', [
+          access,
+          { name: `haive-${kind}-task-postgres_17.zst`, modified: 300 },
+        ]),
+      ).toBeNull();
+    }
+  });
+
+  it('uses the most recent completed snapshot when access was changed twice', () => {
+    expect(
+      selectLatestAccessSnapshot('task', [
+        access,
+        { name: 'haive-access-task-150-mariadb_10.11', modified: 400 },
+      ]),
+    ).toBe('haive-access-task-150');
+  });
+
+  it('ignores snapshots from other tasks and malformed access names', () => {
+    expect(
+      selectLatestAccessSnapshot('task', [
+        { name: 'haive-access-other-200-postgres_17.zst', modified: 500 },
+        { name: 'haive-access-task-incomplete', modified: 600 },
+        access,
+      ]),
+    ).toBe('haive-access-task-100');
+  });
+});
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
 // the three booleans by shelling out (ddev describe / docker info) and then routes
