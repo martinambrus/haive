@@ -86,6 +86,7 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '09-gate-2-verify-approval',
   '11-phase-8-learning',
   '11b-kb-commit',
+  '11b1-rag-source-selection',
   '11c-rag-reindex',
   '11e-prompt-guidance',
   // Same membership as 04-phase-0b, whose spec and affected-component set it

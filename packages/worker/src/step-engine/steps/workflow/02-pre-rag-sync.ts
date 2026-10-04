@@ -57,6 +57,10 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
     autoSubmitDefaults: true,
   },
 
+  async shouldRun(ctx) {
+    return !(await resolveRagSyncPrefs(ctx)).needsScopeSelection;
+  },
+
   async detect(ctx: StepContext): Promise<RagSyncDetect> {
     await ctx.emitProgress('Loading RAG configuration...');
     const resolved = await resolveRagSyncPrefs(ctx);

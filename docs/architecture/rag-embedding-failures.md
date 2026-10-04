@@ -1,5 +1,28 @@
 # RAG embedding failures
 
+**A blank repository can initialize RAG at its first workflow's `11c-rag-reindex`.**
+Blank INIT seeds templates but runs neither tooling selection nor ingestion. 11c offers
+internal storage with onboarding's embedding defaults when both repo mirrors are absent,
+no onboarding task exists, and the repo has not been reset. Before ingestion,
+`11b1-rag-source-selection` (index 11.6, between 11b and 11c) presents the shared onboarding
+RAG directory picker for a blank repo whose `scope_exclude_globs` is NULL. It scans the
+worktree, using framework marker probes, Composer installer paths and `.gitignore` to
+pre-exclude framework/library/generated folders, while keeping managed knowledge immune.
+An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
+covers blank repos already initialized by 11c before scope selection was added. The step
+parks for a decision even under auto-continue, and appears in every path that includes 11c.
+`02-pre-rag-sync` waits while that scope is missing; the shared workflow indexer refuses
+unscoped blank repositories even when replaying old detect outputs. An already parked 11c
+can reach the new picker by retrying 11b. Saving the scope uses the existing repo-level deny
+list; subsequent sync removes previously indexed files now excluded. Detect counts the new knowledge
+and code without creating storage; selecting the sync persists tooling and a minimal
+environment mirror containing the project name before the existing indexer creates the
+database/schema. Both `rag_search` and later workflow syncs therefore resolve the same store,
+and repository cleanup can identify it. These settings are stored on this install's repository
+row; 11c does not commit mirror files. An explicit `ragMode: 'none'`, onboarding history,
+or reset prevents this initialization offer. A conditional write followed by re-resolution
+preserves settings saved concurrently. `02-pre-rag-sync` still skips an unconfigured repo.
+
 **A failed embed never becomes a hash vector.** `hashEmbed` is a deterministic SHA-256
 vector with no semantic content, so once an index holds real vectors a hash row is NOISE
 in the dense half of the RRF fusion — it can outrank a genuine lexical hit, and nothing

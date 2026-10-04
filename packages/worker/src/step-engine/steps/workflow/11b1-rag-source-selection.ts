@@ -1,0 +1,75 @@
+import { FRAMEWORK_PATTERNS } from '@haive/shared';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { detectFramework } from '../../../repo/framework-detect.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import type { StepDefinition } from '../../step-definition.js';
+import {
+  detectRagSourceSelection,
+  ragSourceSelectionStep,
+  type RagSourceSelectionDetect,
+  type RagSourceSelectionApply,
+} from '../onboarding/09_7-rag-source-selection.js';
+import { CODE_EXTENSIONS } from '../onboarding/_rag-chunkers.js';
+import { resolveRagSyncPrefs } from './_rag-index.js';
+import { resolveRagWorkspace } from './11c-rag-reindex.js';
+
+/** No onboarding detector has run on a blank repo. Probe the existing framework
+ * markers without walking dependency trees, then use the usual scoring rule.
+ * Composer installer paths and .gitignore cover custom docroots in the shared picker. */
+async function probeFramework(repoPath: string): Promise<string | null> {
+  const wa = workspaceAnchor(repoPath);
+  const indicators = [
+    ...new Set(Object.values(FRAMEWORK_PATTERNS).flatMap((p) => [...p.indicators])),
+  ];
+  // A Composer Drupal app often also has package.json/node_modules at the repo
+  // root for its theme tooling. Prefer the web docroot over that generic Node match.
+  for (const base of ['web/', '']) {
+    const present = await Promise.all(
+      indicators.map(async (indicator) => {
+        const rel = `${wa.prefix}${base}${indicator.replace(/\/$/, '')}`;
+        const info = await lstatNoFollow(wa.anchor, rel);
+        const expectedKind = indicator.endsWith('/') ? 'directory' : 'file';
+        return info?.kind === expectedKind ? indicator : null;
+      }),
+    );
+    const framework = detectFramework(present.filter((p) => p !== null));
+    if (framework) return framework;
+  }
+  return null;
+}
+
+export const workflowRagSourceSelectionStep: StepDefinition<
+  RagSourceSelectionDetect,
+  RagSourceSelectionApply
+> = {
+  metadata: {
+    id: '11b1-rag-source-selection',
+    workflowType: 'workflow',
+    index: 11.6,
+    title: 'Select RAG index scope',
+    description:
+      'Choose which parts of this new project to index into RAG. Framework, library, generated, and agent tooling folders are pre-excluded. The scope is saved for future tasks.',
+    requiresCli: false,
+  },
+
+  async shouldRun(ctx) {
+    const resolved = await resolveRagSyncPrefs(ctx, true);
+    return resolved.ragConfigured && resolved.needsScopeSelection === true;
+  },
+
+  async detect(ctx) {
+    const repoPath = await resolveRagWorkspace(ctx);
+    return detectRagSourceSelection(
+      { ...ctx, repoPath },
+      {
+        framework: await probeFramework(repoPath),
+        // Workflow sync has no 09_7 output to restrict extensions. Count exactly
+        // the collector's default set so the picker and ingestion cover the same files.
+        extensionSet: Object.keys(CODE_EXTENSIONS),
+      },
+    );
+  },
+
+  form: (ctx, detected) => ragSourceSelectionStep.form!(ctx, detected),
+  apply: (ctx, args) => ragSourceSelectionStep.apply(ctx, args),
+};

@@ -25,7 +25,7 @@ import {
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
-interface RagSourceSelectionDetect {
+export interface RagSourceSelectionDetect {
   framework: string | null;
   tree: TreeNode[];
   /** Directories pre-unticked in the picker (the default RAG deny list). */
@@ -49,6 +49,74 @@ export interface RagSourceSelectionApply {
 /* Step definition                                                     */
 /* ------------------------------------------------------------------ */
 
+export async function detectRagSourceSelection(
+  ctx: StepContext,
+  options: { framework?: string | null; extensionSet?: readonly string[] } = {},
+): Promise<RagSourceSelectionDetect> {
+  await ctx.emitProgress('Loading project metadata...');
+  const framework =
+    options.framework !== undefined
+      ? options.framework
+      : (await resolveConfirmedProject(ctx.db, ctx.taskId)).framework;
+
+  await ctx.emitProgress('Loading extension data...');
+  const rgPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01_5-ripgrep-config');
+  const rgOutput = rgPrev?.output as { extensions?: ExtensionInfo[] } | null;
+  const extensionSet = options.extensionSet
+    ? new Set(options.extensionSet)
+    : buildFullExtensionSet(rgOutput?.extensions ?? []);
+
+  await ctx.emitProgress('Scanning directories...');
+  const tree = tagManagedKnowledgeNodes(
+    await buildScopeTree(ctx.repoPath, extensionSet.size > 0 ? { extensions: extensionSet } : {}),
+  );
+
+  // Default the RAG deny list to (in order): the repo's stored RAG scope
+  // (re-onboard / repo-settings memory), else THIS run's mining pick (06_7),
+  // else the deterministic framework seed. `null` from the raw repo read means
+  // "never set" (fall through); `[]` means "index everything" (respected).
+  const repoRaw = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
+  const miningPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_7-scope-selection');
+  const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
+  const composer = await readComposerJson(ctx.repoPath);
+  const gitignore = await readGitignore(ctx.repoPath);
+  const treePaths = collectAllPaths(tree);
+  const seedExclude = computeSeedExcludeGlobs({
+    composer,
+    gitignore,
+    framework,
+    treePaths,
+  });
+  // The AI-agent tooling dirs are unioned onto the INHERITED default. The
+  // mining pick answers a different question ("what should the agents read"),
+  // and one made before those dirs were seeded carries them as included — so
+  // inheriting it verbatim re-ticks `.claude`/`.codex`/... here. A no-op on the
+  // seed branch, which already contains them. Deliberately NOT applied to
+  // `repoRaw`: that IS a saved answer to THIS question, and overriding it would
+  // undo a deliberate re-tick on every re-onboarding.
+  const agentDirs = agentToolingDirsInTree(treePaths);
+  const defaultExcludeGlobs = repoRaw ?? [
+    ...new Set([...(Array.isArray(miningExclude) ? miningExclude : seedExclude), ...agentDirs]),
+  ];
+
+  const totalCodeFiles = sumFileCount(tree);
+  await ctx.emitProgress(
+    `Found ${totalCodeFiles} code files across ${treePaths.length} directories.`,
+  );
+  ctx.logger.info(
+    { framework, totalCodeFiles, defaultExcludeCount: defaultExcludeGlobs.length },
+    'rag-source-selection detect complete',
+  );
+
+  return {
+    framework,
+    tree,
+    defaultExcludeGlobs,
+    extensionSet: [...extensionSet],
+    totalCodeFiles,
+  };
+}
+
 export const ragSourceSelectionStep: StepDefinition<
   RagSourceSelectionDetect,
   RagSourceSelectionApply
@@ -64,65 +132,7 @@ export const ragSourceSelectionStep: StepDefinition<
     requiresCli: false,
   },
 
-  async detect(ctx: StepContext): Promise<RagSourceSelectionDetect> {
-    await ctx.emitProgress('Loading project metadata...');
-    const { framework } = await resolveConfirmedProject(ctx.db, ctx.taskId);
-
-    await ctx.emitProgress('Loading extension data...');
-    const rgPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01_5-ripgrep-config');
-    const rgOutput = rgPrev?.output as { extensions?: ExtensionInfo[] } | null;
-    const extensionSet = buildFullExtensionSet(rgOutput?.extensions ?? []);
-
-    await ctx.emitProgress('Scanning directories...');
-    const tree = tagManagedKnowledgeNodes(
-      await buildScopeTree(ctx.repoPath, extensionSet.size > 0 ? { extensions: extensionSet } : {}),
-    );
-
-    // Default the RAG deny list to (in order): the repo's stored RAG scope
-    // (re-onboard / repo-settings memory), else THIS run's mining pick (06_7),
-    // else the deterministic framework seed. `null` from the raw repo read means
-    // "never set" (fall through); `[]` means "index everything" (respected).
-    const repoRaw = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
-    const miningPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_7-scope-selection');
-    const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
-    const composer = await readComposerJson(ctx.repoPath);
-    const gitignore = await readGitignore(ctx.repoPath);
-    const treePaths = collectAllPaths(tree);
-    const seedExclude = computeSeedExcludeGlobs({
-      composer,
-      gitignore,
-      framework,
-      treePaths,
-    });
-    // The AI-agent tooling dirs are unioned onto the INHERITED default. The
-    // mining pick answers a different question ("what should the agents read"),
-    // and one made before those dirs were seeded carries them as included — so
-    // inheriting it verbatim re-ticks `.claude`/`.codex`/... here. A no-op on the
-    // seed branch, which already contains them. Deliberately NOT applied to
-    // `repoRaw`: that IS a saved answer to THIS question, and overriding it would
-    // undo a deliberate re-tick on every re-onboarding.
-    const agentDirs = agentToolingDirsInTree(treePaths);
-    const defaultExcludeGlobs = repoRaw ?? [
-      ...new Set([...(Array.isArray(miningExclude) ? miningExclude : seedExclude), ...agentDirs]),
-    ];
-
-    const totalCodeFiles = sumFileCount(tree);
-    await ctx.emitProgress(
-      `Found ${totalCodeFiles} code files across ${treePaths.length} directories.`,
-    );
-    ctx.logger.info(
-      { framework, totalCodeFiles, defaultExcludeCount: defaultExcludeGlobs.length },
-      'rag-source-selection detect complete',
-    );
-
-    return {
-      framework,
-      tree,
-      defaultExcludeGlobs,
-      extensionSet: [...extensionSet],
-      totalCodeFiles,
-    };
-  },
+  detect: (ctx) => detectRagSourceSelection(ctx),
 
   form(_ctx, detected): FormSchema {
     if (detected.tree.length === 0) {
@@ -140,7 +150,7 @@ export const ragSourceSelectionStep: StepDefinition<
         `Found ${detected.totalCodeFiles} code files.`,
         'Ticked directories are indexed into the RAG semantic-search index reused across every task.',
         'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) and AI-agent tooling dirs (.claude, .codex, .gemini, .cursor, ...) are pre-unticked — leave them off to keep the RAG index focused on this project’s own code.',
-        'This is the repository’s global RAG scope: it is saved on the repo (editable later in repository settings). It defaults to your onboarding mining selection — adjust it if RAG should cover more or less.',
+        'This is the repository’s global RAG scope: it is saved on the repo (editable later in repository settings). Adjust the selection if RAG should cover more or less.',
         'Un-ticked directories become the repo RAG exclusion list; new folders added by later tasks are included automatically.',
       ].join(' '),
       fields: [

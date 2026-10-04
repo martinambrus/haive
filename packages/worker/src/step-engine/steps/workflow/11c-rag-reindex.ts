@@ -10,6 +10,7 @@ import {
   resolveRagSyncPrefs,
   resolveSweepProtectedPaths,
   runRagIndexSync,
+  initializeRagSyncPrefs,
   type CodeCollectOptions,
 } from './_rag-index.js';
 
@@ -29,6 +30,8 @@ interface RagReindexDetect {
   ollamaReachable: boolean;
   /** The embedding endpoint was re-derived; this repo's existing rows are hash vectors. */
   ollamaUrlDerived: boolean;
+  needsInitialization?: boolean;
+  needsScopeSelection?: boolean;
 }
 
 interface RagReindexApply {
@@ -48,7 +51,7 @@ interface RagReindexApply {
 /** Resolve the worktree the learning phase wrote into (mirrors 11-phase-8-learning
  *  / 11b-kb-commit): the worktree path from 01-worktree-setup, falling back to the
  *  repo workspace when there is no worktree row. */
-async function resolveWorkspace(ctx: StepContext): Promise<string> {
+export async function resolveRagWorkspace(ctx: StepContext): Promise<string> {
   const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
   const out = prev?.output as { worktreePath?: string } | null;
   return out?.worktreePath ?? ctx.workspacePath;
@@ -67,7 +70,7 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
     index: 11.7,
     title: 'Re-index knowledge base into RAG',
     description:
-      'Incrementally re-indexes the worktree (updated knowledge base, learnings, bug investigations, and implemented code) into the RAG vector store so this run’s knowledge is immediately searchable and removals are deleted. Skipped if no RAG infrastructure is configured.',
+      'Incrementally re-indexes the worktree (updated knowledge base, learnings, bug investigations, and implemented code) into the RAG vector store. Can initialize internal RAG for a new blank repository.',
     requiresCli: false,
     // Nothing to sync / RAG off is a clean no-op; let it be skippable.
     allowSkip: true,
@@ -75,14 +78,14 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
 
   async detect(ctx: StepContext): Promise<RagReindexDetect> {
     await ctx.emitProgress('Loading RAG configuration...');
-    const resolved = await resolveRagSyncPrefs(ctx);
-    const worktreePath = await resolveWorkspace(ctx);
+    const resolved = await resolveRagSyncPrefs(ctx, true);
+    const worktreePath = await resolveRagWorkspace(ctx);
 
     let kbFileCount = 0;
     let codeFileCount = 0;
     let ollamaReachable = false;
 
-    if (resolved.ragConfigured && resolved.ragToolingPrefs) {
+    if (resolved.ragConfigured && resolved.ragToolingPrefs && !resolved.needsScopeSelection) {
       await ctx.emitProgress('Counting source files...');
       kbFileCount = (await collectKbFiles(worktreePath)).length;
       codeFileCount = (await collectCodeFiles(worktreePath, resolved.codeCollect)).length;
@@ -104,10 +107,22 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
       codeFileCount,
       ollamaReachable,
       ollamaUrlDerived: resolved.ollamaUrlDerived,
+      needsInitialization: resolved.needsInitialization,
+      needsScopeSelection: resolved.needsScopeSelection,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    if (detected.needsScopeSelection && detected.ragConfigured) {
+      return {
+        title: 'Select RAG index scope first',
+        description:
+          'Run 11b1-rag-source-selection before indexing this repository. It lets you exclude framework and library folders. If this task already reached re-indexing, retry 11b-kb-commit to reach the new scope picker.',
+        fields: [{ type: 'checkbox', id: 'runReindex', label: 'Run RAG re-index', default: false }],
+        submitLabel: 'Continue',
+      };
+    }
+
     if (!detected.ragConfigured) {
       return {
         title: 'Re-index knowledge base into RAG',
@@ -120,6 +135,11 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
     return {
       title: 'Re-index knowledge base into RAG',
       description: [
+        ...(detected.needsInitialization
+          ? [
+              'RAG has not been initialized for this new repository. Running this step will initialize internal RAG storage and ingest the knowledge base and code. These settings will be saved for future searches and syncs.',
+            ]
+          : []),
         `RAG mode: ${detected.ragMode}`,
         `KB files: ${detected.kbFileCount}`,
         `Code files: ${detected.codeFileCount}`,
@@ -130,7 +150,9 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
         {
           type: 'checkbox',
           id: 'runReindex',
-          label: 'Re-index the updated knowledge base + code into RAG',
+          label: detected.needsInitialization
+            ? 'Initialize RAG and index the knowledge base + code'
+            : 'Re-index the updated knowledge base + code into RAG',
           default: true,
         },
       ],
@@ -139,7 +161,7 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
   },
 
   async apply(ctx, args): Promise<RagReindexApply> {
-    const detected = args.detected as RagReindexDetect;
+    let detected = args.detected as RagReindexDetect;
     const values = args.formValues as { runReindex?: boolean };
 
     if (!values.runReindex || !detected.ragConfigured || !detected.ragToolingPrefs) {
@@ -154,6 +176,40 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
       };
     }
 
+    if ((await resolveRagSyncPrefs(ctx)).needsScopeSelection) {
+      return {
+        performed: false,
+        reason: 'RAG index scope must be selected at 11b1-rag-source-selection before indexing',
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        deleted: 0,
+      };
+    }
+
+    let prefs = detected.ragToolingPrefs;
+    if (detected.needsInitialization) {
+      await ctx.emitProgress('Saving first-time RAG settings...');
+      const resolved = await initializeRagSyncPrefs(ctx, detected);
+      if (!resolved.ragConfigured || !resolved.ragToolingPrefs) {
+        return {
+          performed: false,
+          reason: 'RAG settings changed before initialization; no longer configured',
+          inserted: 0,
+          updated: 0,
+          skipped: 0,
+          deleted: 0,
+        };
+      }
+      detected = { ...detected, ...resolved };
+      prefs = resolved.ragToolingPrefs;
+      // A concurrent workflow may have saved a different endpoint while this form
+      // was open. Probe the settings we actually persisted/resolved, not the proposal.
+      detected.ollamaReachable = resolved.ragToolingPrefs.ollamaUrl
+        ? await probeOllama(resolved.ragToolingPrefs.ollamaUrl)
+        : false;
+    }
+
     // This step scans the worktree, which holds tracked files only, while 02 indexed
     // the repo root. Anything untracked there is invisible here and must not be read
     // as a deletion — without this every `kb` chunk of a repo with an uncommitted
@@ -166,7 +222,7 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
 
     const result = await runRagIndexSync(ctx, {
       repoPath: detected.worktreePath,
-      prefs: detected.ragToolingPrefs,
+      prefs,
       projectName: detected.projectName,
       ollamaReachable: detected.ollamaReachable,
       codeCollect: detected.codeCollect,

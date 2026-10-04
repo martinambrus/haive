@@ -1,10 +1,11 @@
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
+  IN_STACK_OLLAMA_URL,
 } from '@haive/shared';
 import {
   INVESTIGATIONS_DIR,
@@ -154,6 +155,11 @@ export interface RagSyncResolved {
   /** The embedding endpoint was re-derived from `ollamaMode` because the tooling this
    *  resolved from carries none — see `resolveToolingOllamaUrl`. */
   ollamaUrlDerived: boolean;
+  /** 11c may offer first-time storage for a blank repo with no onboarding settings.
+   *  Detection only proposes it; apply persists it after the user elects to sync. */
+  needsInitialization?: boolean;
+  /** A blank repo has never had its RAG source scope selected. [] is a saved choice. */
+  needsScopeSelection?: boolean;
 }
 
 /** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
@@ -187,7 +193,10 @@ export function ragOllamaUrlWasDerived(t: Record<string, unknown>): boolean {
  *  extension picks plus 01-env-detect's custom-code exclude heuristic. Anything
  *  absent stays undefined, which the collector reads as "no restriction" — the
  *  behaviour a repo onboarded before 09_7 existed already had. */
-export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncResolved> {
+export async function resolveRagSyncPrefs(
+  ctx: StepContext,
+  initializeIfMissing = false,
+): Promise<RagSyncResolved> {
   const taskRow = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
   });
@@ -201,13 +210,23 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
   const exclude: string[] = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
   let selectedDirs: string[] | undefined;
   let extensionSet: string[] | undefined;
+  let needsInitialization = false;
+  let needsScopeSelection = false;
 
   if (repositoryId) {
     // Col-first: the repo mirror is authoritative when present.
     const repo = await ctx.db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { onboardingTooling: true, onboardingEnvironment: true },
+      columns: {
+        onboardingTooling: true,
+        onboardingEnvironment: true,
+        source: true,
+        name: true,
+        onboardingResetAt: true,
+        scopeExcludeGlobs: true,
+      },
     });
+    needsScopeSelection = repo?.source === 'blank' && repo.scopeExcludeGlobs == null;
     const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
     const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
 
@@ -271,6 +290,29 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
       selectedDirs = ragSourceOutput?.selectedDirs;
       extensionSet = ragSourceOutput?.extensionSet;
     }
+
+    // Blank INIT seeds templates, but never runs 04-tooling or 10-rag-populate.
+    // Once learning has written knowledge, 11c can be its first ingestion. Never
+    // turn a deliberate ragMode:'none', a partial onboarding, or a reset into an
+    // implicit opt-in. 02/estimation keep their read-only, unconfigured behaviour.
+    if (
+      initializeIfMissing &&
+      repo?.source === 'blank' &&
+      !repo.onboardingResetAt &&
+      repo.onboardingTooling == null &&
+      repo.onboardingEnvironment == null &&
+      !onboardingTask
+    ) {
+      ragPrefs = {
+        ragMode: 'internal',
+        ragConnectionString: null,
+        ollamaUrl: IN_STACK_OLLAMA_URL,
+        embeddingModel: 'qwen3-embedding:4b',
+        embeddingDimensions: 2560,
+      };
+      projectName = repo.name;
+      needsInitialization = true;
+    }
   }
 
   return {
@@ -280,7 +322,52 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
     projectName,
     codeCollect: { exclude, selectedDirs, extensionSet },
     ollamaUrlDerived,
+    needsInitialization,
+    needsScopeSelection,
   };
+}
+
+/** Save a greenfield opt-in in the SAME columns both ingestion and rag_search read.
+ *  One conditional write keeps concurrent first workflows from replacing settings
+ *  saved since detect. Re-resolve afterwards so a competing configuration wins. */
+export async function initializeRagSyncPrefs(
+  ctx: StepContext,
+  detected: RagSyncResolved,
+): Promise<RagSyncResolved> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId || !detected.ragToolingPrefs) return resolveRagSyncPrefs(ctx);
+
+  const tooling: OnboardingToolingMirror = {
+    schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
+    tooling: { ...detected.ragToolingPrefs, ollamaMode: 'internal' },
+  };
+  const environment: OnboardingEnvironmentMirror = {
+    schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+    envDetectData: { project: { name: detected.projectName } },
+    confirmedValues: {},
+  };
+  await ctx.db
+    .update(schema.repositories)
+    .set({
+      onboardingTooling: tooling as unknown as Record<string, unknown>,
+      onboardingEnvironment: environment as unknown as Record<string, unknown>,
+    })
+    .where(
+      and(
+        eq(schema.repositories.id, task.repositoryId),
+        eq(schema.repositories.source, 'blank'),
+        isNull(schema.repositories.onboardingTooling),
+        isNull(schema.repositories.onboardingEnvironment),
+        isNull(schema.repositories.onboardingResetAt),
+        sql`NOT EXISTS (SELECT 1 FROM ${schema.tasks}
+        WHERE ${schema.tasks.repositoryId} = ${task.repositoryId}
+          AND ${schema.tasks.type} = 'onboarding')`,
+      ),
+    );
+  return resolveRagSyncPrefs(ctx);
 }
 
 export interface RunRagIndexOpts {
@@ -342,6 +429,13 @@ export async function runRagIndexSync(
   if (refusal !== null) {
     ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
     return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
+  }
+
+  const scope = await resolveRagSyncPrefs(ctx);
+  if (scope.needsScopeSelection) {
+    return EMPTY_RESULT(
+      'RAG index scope must be selected at 11b1-rag-source-selection before indexing',
+    );
   }
 
   await ctx.emitProgress('Connecting to RAG database...');
