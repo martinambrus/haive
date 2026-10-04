@@ -324,6 +324,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '08c2-code-audit', workflowType: 'workflow', title: 'Code audit (broad)' },
   { id: '08d-adversarial-qa', workflowType: 'workflow', title: 'Phase 7: Adversarial QA' },
   { id: '08e-insights-triage', workflowType: 'workflow', title: 'Insight triage' },
+  { id: '10-gate-3-commit', workflowType: 'workflow', title: 'Gate 3: Commit' },
   { id: '11-phase-8-learning', workflowType: 'workflow', title: 'Phase 8: Learning capture' },
   { id: '11d-skill-sync', workflowType: 'workflow', title: 'Skill sync' },
   { id: '11f-plan-reconcile', workflowType: 'workflow', title: 'Plan reconcile' },

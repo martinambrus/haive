@@ -68,6 +68,62 @@ const sampleSubAgentSpec: SubAgentSpec = {
 };
 
 describe('resolveDispatch', () => {
+  it.each(['codex', 'gemini', 'amp', 'antigravity'] as const)(
+    'rejects %s when disabling built-in tools is required',
+    (name) => {
+      const plan = resolveDispatch({
+        providers: [{ ...makeProvider({ id: 'provider', name }), model: 'test-model' }],
+        input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
+        invokeOpts: { disableTools: true, requireDisabledTools: true },
+        toolProfile: 'none',
+      });
+      expect(plan.mode).toBe('skip');
+      expect(plan.invocation).toBeNull();
+      expect(plan.reason).toContain('disable built-in tools');
+    },
+  );
+
+  it.each(['claude-code', 'zai', 'ollama', 'muse', 'openrouter', 'grok'] as const)(
+    'accepts %s and emits the no-tools flag when required',
+    (name) => {
+      const plan = resolveDispatch({
+        providers: [{ ...makeProvider({ id: 'provider', name }), model: 'test-model' }],
+        input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
+        invokeOpts: { disableTools: true, requireDisabledTools: true },
+        toolProfile: 'none',
+      });
+      expect(plan.mode).toBe('cli');
+      expect(plan.invocation?.kind).toBe('cli');
+      if (plan.invocation?.kind === 'cli') {
+        const args = plan.invocation.spec.args;
+        expect(args[args.indexOf('--tools') + 1]).toBe('');
+      }
+    },
+  );
+
+  it('falls back from an incapable preferred provider to one that can disable tools', () => {
+    const plan = resolveDispatch({
+      providers: [
+        makeProvider({ id: 'gemini', name: 'gemini' }),
+        makeProvider({ id: 'claude', name: 'claude-code' }),
+      ],
+      preferredProviderId: 'gemini',
+      input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
+      invokeOpts: { disableTools: true, requireDisabledTools: true },
+      toolProfile: 'none',
+    });
+    expect(plan.providerId).toBe('claude');
+  });
+
+  it('refuses a hard requirement when disabling tools was not requested', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'claude', name: 'claude-code' })],
+      input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
+      invokeOpts: { requireDisabledTools: true },
+    });
+    expect(plan.mode).toBe('skip');
+  });
+
   it('returns skip when there are no enabled providers', () => {
     const plan = resolveDispatch({
       providers: [],

@@ -341,7 +341,8 @@ async function main(): Promise<void> {
       const values = formPayloads[stepId];
       if (!values) throw new Error(`no canned form values for step ${stepId}`);
 
-      if (stepId === '10-gate-3-commit' && !fabricatedDiff) {
+      // Create the diff BEFORE gate 3 detects it and generates the message prelude.
+      if (stepId === '09-gate-2-verify-approval' && !fabricatedDiff) {
         const worktreeStep = await db.query.taskSteps.findFirst({
           where: and(
             eq(schema.taskSteps.taskId, task.id),
@@ -384,6 +385,19 @@ async function main(): Promise<void> {
 
     const commitStep = allSteps.find((s) => s.stepId === '10-gate-3-commit');
     if (!commitStep) throw new Error('commit step row missing');
+    const commitDetect = commitStep.detectOutput as { commitMessageContext?: string } | null;
+    if (!commitDetect?.commitMessageContext?.includes('LOGOUT.md')) {
+      throw new Error('gate-3 message generation did not receive the pending change');
+    }
+    const commitForm = commitStep.formSchema as {
+      fields?: { id: string; default?: unknown }[];
+    } | null;
+    if (
+      commitForm?.fields?.find((f) => f.id === 'commitMessage')?.default !==
+      'test: describe pending workflow changes'
+    ) {
+      throw new Error('gate-3 form did not receive the bypass LLM commit message');
+    }
     const commitOutput = commitStep.output as {
       committed?: boolean;
       commitSha?: string | null;

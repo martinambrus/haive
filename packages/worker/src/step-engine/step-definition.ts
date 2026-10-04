@@ -75,6 +75,10 @@ export interface LlmInvocationSpec {
    *  already embedded in the prompt — a high-effort model otherwise crawls the
    *  workspace and blows the timeout. codex/gemini ignore it. */
   disableTools?: boolean;
+  /** Hard requirement that the selected adapter honors disableTools. Pair with
+   *  disableTools:true; otherwise dispatch is unavailable. Optional LLMs degrade
+   *  to manual/default output when only tool-capable adapters are configured. */
+  requireDisabledTools?: true;
   /** Narrow the MCP surface this invocation is given. Unset = the full surface
    *  (rag, plus chrome-devtools when the repo does browser testing, ddev-control
    *  on a DDEV task, and the user's own servers from `.claude/mcp_settings.json`).

@@ -235,6 +235,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   `step-ownership.ts`, `queues/boot-requeue.ts`, `queues/stalled-redrive.ts`.
 - [Merge conflicts](docs/architecture/merge-conflicts.md): the shared git merge core, fixer
   baselines and leftovers. `git-merge.ts`, `12-worktree-cleanup`, `01-plan-merge`.
+- [Workflow commits](docs/architecture/workflow-commits.md): generated gate-3 messages, pending
+  change excerpts and editable approval. `10-gate-3-commit`, `_commit-diff.ts`.
 
 ### CLI adapters
 

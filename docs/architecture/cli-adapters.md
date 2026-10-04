@@ -20,4 +20,12 @@ Two traps in that data. `result.modelUsage` keys are recorded as `billed` and ar
 
 The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first, and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI.
 
+`requireDisabledTools` makes `disableTools` a hard dispatch requirement for prompt invocations.
+The adapter must declare `supportsDisableTools` and the invocation must request `disableTools:true`;
+otherwise it is excluded before any invocation is built. Gate 3 uses this with `toolProfile:'none'`
+so diff text cannot authorize tool calls. The Claude-family adapters and grok honor the flag;
+codex, gemini, amp and antigravity do not, so the dispatcher tries another provider. With none
+eligible, an optional LLM phase degrades to manual/default output; a required phase still fails.
+An invocation that sets only `disableTools` retains its prior best-effort behavior.
+
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)

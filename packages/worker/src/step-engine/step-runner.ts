@@ -808,10 +808,21 @@ async function resolveLlmPhase(
       effortLevel: preferredEffort ?? undefined,
       disallowedTools: miningDisallowedTools(stepDef.metadata.id),
       disableTools: llmSpec.disableTools,
+      requireDisabledTools: llmSpec.requireDisabledTools,
     },
   });
 
   if (plan.mode === 'skip' || !plan.invocation) {
+    // The worker supplies providers/deps even when every provider is disabled or
+    // incompatible. Optional enrichment must degrade here just as it does when
+    // dependencies are absent or an invocation fails.
+    if (llmSpec.optional) {
+      ctx.logger.warn(
+        { reason: plan.reason },
+        'optional llm dispatch unavailable; degrading to null',
+      );
+      return { resolved: true, llmOutput: null, llmInvocationId: null, current };
+    }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
       errorMessage: `no cli provider available: ${plan.reason}`,
