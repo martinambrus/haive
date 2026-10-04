@@ -1,4 +1,6 @@
 import { FRAMEWORK_PATTERNS } from '@haive/shared';
+import { schema } from '@haive/database';
+import { eq } from 'drizzle-orm';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { detectFrameworkMatch } from '../../../repo/framework-detect.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -61,7 +63,16 @@ export const workflowRagSourceSelectionStep: StepDefinition<
 
   async shouldRun(ctx) {
     const resolved = await resolveRagSyncPrefs(ctx, true);
-    return resolved.ragConfigured && resolved.needsScopeSelection === true;
+    if (!resolved.ragConfigured || !resolved.needsScopeSelection) return false;
+    if (!resolved.needsInitialization) return true;
+    // Quick fixes have no 11c initialization step. Existing RAG still gets the
+    // picker here, so its next pre-sync can resume, but an unconfigured quick fix
+    // does not ask for a scope until a workflow can offer ingestion.
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { executionPath: true },
+    });
+    return task?.executionPath !== 'quick_bugfix';
   },
 
   async detect(ctx) {

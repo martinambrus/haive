@@ -51,6 +51,7 @@ const SPINE: readonly string[] = [
   '08b-test-management',
   '08-phase-5-verify',
   '10-gate-3-commit',
+  '11b1-rag-source-selection',
   '11a-gate-4-push',
   '12-worktree-cleanup',
   '13-pr-wait',
@@ -86,7 +87,6 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '09-gate-2-verify-approval',
   '11-phase-8-learning',
   '11b-kb-commit',
-  '11b1-rag-source-selection',
   '11c-rag-reindex',
   '11e-prompt-guidance',
   // Same membership as 04-phase-0b, whose spec and affected-component set it

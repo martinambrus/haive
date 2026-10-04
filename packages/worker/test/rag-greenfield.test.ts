@@ -65,6 +65,7 @@ let indexedChunks: Map<
   { section_id: string; chunk_index: number; chunk_hash: string | null; content: string }[]
 >;
 let ctx: StepContext;
+let executionPath: 'full_workflow' | 'quick_bugfix';
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -93,6 +94,7 @@ beforeEach(async () => {
     ragEmbedLexicalOnly: false,
   };
   onboarding = null;
+  executionPath = 'full_workflow';
   writes = [];
   warnings = [];
   inserts = [];
@@ -158,7 +160,9 @@ beforeEach(async () => {
       tasks: {
         findFirst: async ({ where }: { where: never }) => {
           const query = dialect.sqlToQuery(where);
-          return query.params.includes('onboarding') ? onboarding : { repositoryId: 'repo-1' };
+          return query.params.includes('onboarding')
+            ? onboarding
+            : { repositoryId: 'repo-1', executionPath };
         },
       },
       repositories: { findFirst: async () => repo },
@@ -706,6 +710,18 @@ describe('first workflow RAG source scope', () => {
     repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
     repo.scopeExcludeGlobs = [];
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await preRagSyncStep.shouldRun!(ctx)).toBe(true);
+  });
+
+  it('allows quick fixes to select missing scope for existing RAG, without offering initialization', async () => {
+    executionPath = 'quick_bugfix';
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    expect(await preRagSyncStep.shouldRun!(ctx)).toBe(false);
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
+    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
+    await saveScope(detected, collectDefaults(detected.tree, detected.defaultExcludeGlobs));
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
     expect(await preRagSyncStep.shouldRun!(ctx)).toBe(true);
   });

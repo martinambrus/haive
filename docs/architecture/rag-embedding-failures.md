@@ -28,6 +28,9 @@ take precedence over worktree orphan protections when removing old indexed libra
 An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
 covers blank repos already initialized by 11c before scope selection was added. The step
 parks for a decision even under auto-continue, and appears in every path that includes 11c.
+It also appears on `quick_bugfix` for a repo with existing RAG but no saved scope, so later
+quick fixes can run pre-sync. Unconfigured quick fixes defer the picker until a workflow
+that offers ingestion; the quick path still has no 11c initialization step.
 `02-pre-rag-sync` waits while that scope is missing; the shared workflow indexer refuses
 unscoped blank repositories even when replaying old detect outputs. An already parked 11c
 can reach the new picker by retrying 11b. Saving the scope uses the existing repo-level deny
