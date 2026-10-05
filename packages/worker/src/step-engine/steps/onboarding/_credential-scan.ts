@@ -18,6 +18,8 @@ export interface CredentialScan {
 }
 
 const READ_CAP = 512 * 1024;
+const INVENTORY_BYTES = 4 * 1024 * 1024;
+const INVENTORY_FILES = 100_000;
 // Classify a captured whole key separately to avoid greedy keyword-prefix/suffix
 // patterns backtracking quadratically on long, repeated identifiers.
 const CREDENTIAL_NAME = /password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key/i;
@@ -150,8 +152,26 @@ export async function scanForCredentials(
 ): Promise<CredentialScan> {
   if (!Number.isSafeInteger(cap) || cap < 0)
     throw new RangeError('Invalid credential candidate cap');
-  const { stdout } = await gitExec(['ls-files', '-z'], { cwd: repoPath });
-  const files = [...new Set(stdout.split('\0').filter(Boolean))].sort();
+  checkCancelled();
+  // Bound Git's captured output before parsing, then stop before allocating an
+  // unbounded split array or set. Exceeding either limit makes this aid unavailable;
+  // the agent's independent whole-tree search still runs.
+  const { stdout } = await gitExec(['ls-files', '-z'], {
+    cwd: repoPath,
+    maxBuffer: INVENTORY_BYTES,
+  });
+  const unique = new Set<string>();
+  let entries = 0;
+  let start = 0;
+  for (let end = stdout.indexOf('\0'); end !== -1; end = stdout.indexOf('\0', start)) {
+    checkCancelled();
+    if (end > start) {
+      if (++entries > INVENTORY_FILES) throw new RangeError('Credential inventory file limit');
+      unique.add(stdout.slice(start, end));
+    }
+    start = end + 1;
+  }
+  const files = [...unique].sort();
   const retained = new BoundedCandidates(cap);
   let total = 0;
   let next = 0;

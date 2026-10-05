@@ -24,6 +24,10 @@ locations. No depth or extension filter narrows the tracked inventory. Binary
 content is ignored when it contains NUL. Each read stops at 512 KiB; unreadable
 files and truncated reads are counted in internal scan metadata. Sixteen concurrent readers
 bound in-flight allocations. Cancellation is checked between files.
+Git output is limited to 4 MiB, and at most 100,000 NUL-delimited entries are
+parsed before sorting. Parsing checks cancellation and never splits the whole
+output into an unbounded array. Exceeding either inventory limit makes the
+deterministic aid unavailable internally; the agent's whole-tree search still runs.
 Candidate collection also stays bounded: a max heap retains at most the requested
 cap while each file is scanned. Matches beyond it increment the omission count
 without allocating retained candidate records; regex matches are visited lazily.

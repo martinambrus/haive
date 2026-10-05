@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { gitExec } from '../../../repo/git-exec.js';
+import { gitExec, gitRun } from '../../../repo/git-exec.js';
 import { scanForCredentials, scanTextForCredentials } from './_credential-scan.js';
 
 const roots: string[] = [];
@@ -246,6 +246,45 @@ describe('tracked credential inventory', () => {
     expect(scan.hits.slice(0, fileCount).map((hit) => hit.file)).toEqual(files);
     expect(scan.hits.at(-1)).toMatchObject({ file: 'file-07.env', line: 7 });
   }, 45_000);
+
+  it.each([
+    { count: 100_001, prefix: 'vendor/', error: 'Credential inventory file limit' },
+    { count: 5_000, prefix: `vendor/${'a/'.repeat(450)}`, error: 'maxBuffer' },
+  ])(
+    'bounds inventory allocation under a 64 MiB heap (%j)',
+    async ({ count, prefix, error }) => {
+      const root = await repo();
+      const blob = await gitRun(root, ['hash-object', '-w', '--stdin'], undefined, {
+        input: Buffer.from('token=a\n'),
+      });
+      expect(blob.code).toBe(0);
+      const input = Buffer.from(
+        Array.from(
+          { length: count },
+          (_, i) => `100644 ${blob.stdout.trim()}\t${prefix}file-${i}.env\n`,
+        ).join(''),
+      );
+      const index = await gitRun(root, ['update-index', '--index-info'], undefined, { input });
+      expect(index.code).toBe(0);
+      const moduleUrl = new URL('./_credential-scan.ts', import.meta.url).href;
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [
+          '--max-old-space-size=64',
+          '--import',
+          'tsx',
+          '--input-type=module',
+          '--eval',
+          `import { scanForCredentials } from ${JSON.stringify(moduleUrl)};
+         try { await scanForCredentials(${JSON.stringify(root)}, 200); }
+         catch (err) { process.stdout.write(err.message); }`,
+        ],
+        { timeout: 35_000 },
+      );
+      expect(stdout).toContain(error);
+    },
+    45_000,
+  );
 
   it('propagates cancellation rather than completing a partial scan', async () => {
     const root = await repo();
