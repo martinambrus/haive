@@ -3,7 +3,14 @@ import { FRAMEWORK_PATTERNS, type FormSchema } from '@haive/shared';
 import { coerceReviewSeverity, normalizeCweId } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
-import { REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-repo.js';
+import {
+  fencedAgentBlock,
+  isSingleLine,
+  survivesFence,
+  REPO_IS_DATA_ONE_CLASS_LINES,
+} from '../_untrusted-repo.js';
+import { updateOwnedStep } from '../../step-ownership.js';
+import { scanForCredentials, type CredentialScan } from './_credential-scan.js';
 import { hasAnyKey, parseAgentJson } from '../workflow/_agent-json.js';
 import { recordReviewFindings } from '../workflow/_review-findings.js';
 import { resolveConfirmedProject } from './_helpers.js';
@@ -38,6 +45,10 @@ const MAX_LISTED_IN_FORM = 25;
 /** Candidate paths handed to the model. A cap because this is an aid, not a report: past
  *  a few dozen the block stops being a list to rule on and starts being noise to skim. */
 const OPAQUE_PATH_CAP = 40;
+const CREDENTIAL_CAP = 200;
+const FOLLOWUP_BATCH = 24;
+const MAX_CANDIDATE_ATTEMPTS = 3;
+const MAX_FOLLOWUP_PASSES = 32;
 
 export interface SecretFinding {
   severity: ReviewSeverity;
@@ -82,17 +93,31 @@ interface SecretSweepDetect {
    *  payload persisted before this existed replays without them. */
   opaquePaths?: OpaquePathHit[];
   opaquePathsOmitted?: number;
+  credentialScan?: CredentialScan;
+  credentialScanUnavailable?: boolean;
+  completion?: SweepCompletion;
+}
+
+interface SweepCompletion {
+  report: SweepReport;
+  processedInvocations: string[];
+  findingInvocations: Record<string, string>;
+  attempts: Record<string, number>;
+  pending: { file: string; line: number }[];
+  passes: number;
 }
 
 export interface SecretSweepApply {
   swept: boolean;
   findings: SecretFinding[];
   counts: { critical: number; high: number; total: number };
+  summary?: string;
   /** Candidates the agent ruled out, with its reason. Present only when non-empty. */
   dismissed?: DismissedCandidate[];
-  /** Candidates in neither list: the agent never said. Present only when non-empty,
-   *  because a silent drop and a considered dismissal must not read the same. */
+  /** Legacy diagnostic fields; new runs keep candidate bookkeeping in detect_output. */
   candidatesUnruled?: string[];
+  credentialCoverage?: Omit<CredentialScan, 'hits'>;
+  credentialScanUnavailable?: boolean;
 }
 
 const SWEEP_RULES = [
@@ -110,6 +135,12 @@ const SWEEP_RULES = [
   'sample data, seed files and example configuration ARE in scope for this pass. A real key',
   'committed to a test file is a real leak — it is live at the provider whatever directory',
   'it sits in.',
+  'This explicitly includes tracked DEPENDENCIES, framework core, vendor/, libraries/,',
+  'build/ and dist/. Ownership limits repairs, not this read-only credential report.',
+  'An upstream account credential still leaks when committed here; being public upstream',
+  'does not establish that it is revoked or harmless. Do not edit dependency files.',
+  'Search generic password/secret/authToken assignments in those directories too: a',
+  'provider-prefix-only search cannot find an ordinary account password or tunnel secret.',
   '',
   'Distinguish a real credential from a placeholder. `AKIAIOSFODNN7EXAMPLE`, `xxx`,',
   '`your-api-key-here`, `changeme`, an obvious dummy in documentation, and a value read from',
@@ -163,6 +194,7 @@ const SWEEP_RULES = [
   'than padding it.',
   '',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
+  'Return only the report, without commentary about scan limits or candidate bookkeeping.',
   '{',
   '  "findings": [ { "severity": "critical|high|medium|low", "path": "<file>", "line": 0, "symbol": "<enclosing function/key>", "kind": "<what sort of credential>", "cwe": "CWE-798", "commit": "<short sha, only when the secret is history-only>", "issue": "<what is committed and what it unlocks — never the value>", "fix": "<rotate it, then remove it from the tree and from history>" } ],',
   '  "dismissed": [ { "path": "<file>", "line": 0, "reason": "<why this candidate is not a committed secret>" } ]',
@@ -210,14 +242,182 @@ function opaquePathBlock(d: SecretSweepDetect): string[] {
 
 function buildPrompt(args: LlmBuildArgs): string {
   const d = args.detected as SecretSweepDetect;
+  if (d.completion?.pending.length) {
+    return [
+      ...SWEEP_RULES,
+      '',
+      'FOCUSED FOLLOW-UP: the initial sweep is saved. Assess ONLY the locations below.',
+      'Read the relevant source around EVERY listed line. For a source map or generated',
+      'bundle, inspect the actual matched literal and its original source when available.',
+      'Do not assume copies are equivalent or dismiss them just because they are generated.',
+      'Return one findings/dismissed entry per exact path and line, even when several share',
+      'a reason. Put additional locations in separate entries, never in reason prose.',
+      'Keep reasons brief. Do not redo the whole-tree search or repeat previous findings.',
+      fencedAgentBlock(
+        d.completion.pending
+          .filter(safeCandidate)
+          .map((h) => `- ${h.file}:${h.line}`)
+          .join('\n'),
+      ),
+      '',
+      ...REPO_IS_DATA_ONE_CLASS_LINES,
+      '',
+      'This read-only credential assignment includes dependency internals. Ownership limits repairs, not reporting.',
+      `Repository root: ${d.repoPath}`,
+    ].join('\n');
+  }
   return [
     ...SWEEP_RULES,
     ...opaquePathBlock(d),
+    ...credentialBlock(d),
     '',
     ...REPO_IS_DATA_ONE_CLASS_LINES,
     '',
+    'For THIS assignment, the requested scope is the whole committed repository, including',
+    'third-party internals. Inspect and report credentials there; the ownership boundary',
+    'still forbids modifying those files. Do not substitute a project-owned-only audit.',
+    '',
     `Repository root: ${d.repoPath}`,
   ].join('\n');
+}
+
+function credentialHits(d: SecretSweepDetect) {
+  // detect_output is persisted. Filter again when building a prompt or rendering a form.
+  return (d.credentialScan?.hits ?? []).filter(safeCandidate);
+}
+
+function safeCandidate(h: { file: string; line: number }): boolean {
+  return (
+    isSingleLine(h.file) && survivesFence(h.file) && Number.isSafeInteger(h.line) && h.line > 0
+  );
+}
+
+const locationKey = (f: { path: string; line?: number }) => `${f.path}:${f.line ?? ''}`;
+const findingKey = (f: SecretFinding) => `${locationKey(f)}:${f.commit ?? ''}:${f.kind ?? ''}`;
+
+/** Keep confirmed findings across focused follow-ups. A later dismissal cannot erase one. */
+export function mergeSweepReports(prior: SweepReport, next: SweepReport): SweepReport {
+  const findings = new Map<string, SecretFinding>();
+  for (const f of [...prior.findings, ...next.findings]) {
+    const key = findingKey(f);
+    if (!findings.has(key)) findings.set(key, f);
+  }
+  const locations = new Set([...findings.values()].filter((f) => !f.commit).map(locationKey));
+  const dismissed = new Map<string, DismissedCandidate>();
+  for (const f of [...prior.dismissed, ...next.dismissed]) {
+    if (!locations.has(locationKey(f))) dismissed.set(locationKey(f), f);
+  }
+  return { findings: [...findings.values()], dismissed: [...dismissed.values()] };
+}
+
+/** Checkpoint before the runner consumes the invocation. Replayed ids cannot spend a batch twice. */
+export async function completeSecretSweep(args: {
+  ctx: StepContext;
+  detected: unknown;
+  llmOutput: unknown;
+  llmInvocationId: string | null;
+}) {
+  const d = args.detected as SecretSweepDetect;
+  const report = parseSweepReport(args.llmOutput);
+  // Bypass runs have no real invocation, and must not request paid follow-ups.
+  if (!args.llmInvocationId) return { llmOutput: report, continueRequested: false };
+  // Reusing an already completed invocation skips llm.prepare. Older parked
+  // detections still need the inventory before deciding whether the report is ready.
+  await hydrateCredentialScan(args.ctx, d);
+  const progress: SweepCompletion = d.completion ?? {
+    report: { findings: [], dismissed: [] },
+    processedInvocations: [],
+    findingInvocations: {},
+    attempts: {},
+    pending: [],
+    passes: 0,
+  };
+  if (!progress.processedInvocations.includes(args.llmInvocationId)) {
+    for (const h of progress.pending) {
+      const key = `${h.file}:${h.line}`;
+      progress.attempts[key] = (progress.attempts[key] ?? 0) + 1;
+    }
+    for (const f of report.findings) {
+      progress.findingInvocations[findingKey(f)] ??= args.llmInvocationId;
+    }
+    progress.report = mergeSweepReports(progress.report, report);
+    progress.processedInvocations.push(args.llmInvocationId);
+    progress.pending = [];
+  }
+  const unruled = new Set(sweepUnruled(d, progress.report));
+  if (progress.pending.length === 0 && progress.passes < MAX_FOLLOWUP_PASSES) {
+    const candidates = [...(d.opaquePaths ?? []), ...credentialHits(d)].filter(safeCandidate);
+    const unique = new Map(
+      candidates.map((h) => [`${h.file}:${h.line}`, { file: h.file, line: h.line }]),
+    );
+    progress.pending = [...unique.values()]
+      .filter(
+        (h) =>
+          unruled.has(`${h.file}:${h.line}`) &&
+          (progress.attempts[`${h.file}:${h.line}`] ?? 0) < MAX_CANDIDATE_ATTEMPTS,
+      )
+      .slice(0, FOLLOWUP_BATCH);
+    if (progress.pending.length > 0) progress.passes++;
+  }
+  d.completion = progress;
+  await updateOwnedStep(args.ctx.db, args.ctx.taskStepId, { detectOutput: d });
+  return {
+    llmOutput: progress.report,
+    continueRequested: progress.pending.length > 0,
+    statusMessage: 'Continuing the secret sweep…',
+  };
+}
+
+function credentialBlock(d: SecretSweepDetect): string[] {
+  const scan = d.credentialScan;
+  if (!scan)
+    return d.credentialScanUnavailable
+      ? [
+          '',
+          'The deterministic credential pre-scan was unavailable. Search the tracked tree independently.',
+        ]
+      : [];
+  return [
+    '',
+    `CANDIDATE credentials — deterministic pre-scan of ${scan.files} tracked files, including dependencies and build/test tooling.`,
+    'These are locations to inspect, not confirmed leaks. Values are deliberately withheld.',
+    'Read each location and account for EVERY candidate as a finding or a dismissal, with',
+    'its exact path and line. Do not dismiss an account credential solely for being upstream.',
+    'Use a separate entry for every line/path. Other locations mentioned only in reason prose do not count.',
+    'Group locations by file when inspecting: read each file once and assess its candidates.',
+    'The list is an aid, not the boundary of your search; git history still needs inspection.',
+    fencedAgentBlock(
+      credentialHits(d)
+        .map((h) => `- ${h.file}:${h.line} [tracked]`)
+        .join('\n'),
+    ),
+    ...(scan.omitted > 0
+      ? [`COVERAGE: ${scan.omitted} further credential candidates are not listed.`]
+      : []),
+    ...(scan.unreadable > 0
+      ? [`COVERAGE: ${scan.unreadable} tracked files could not be read safely.`]
+      : []),
+    ...(scan.truncated > 0
+      ? [`COVERAGE: ${scan.truncated} files were scanned only through the first 512 KiB.`]
+      : []),
+  ];
+}
+
+async function hydrateCredentialScan(ctx: StepContext, d: SecretSweepDetect): Promise<void> {
+  if (!d.scannable || d.credentialScan || d.credentialScanUnavailable) return;
+  try {
+    d.credentialScan = await scanForCredentials(d.repoPath, CREDENTIAL_CAP, () =>
+      ctx.throwIfCancelled(),
+    );
+  } catch (err) {
+    ctx.throwIfCancelled();
+    d.credentialScanUnavailable = true;
+    ctx.logger.warn({ err }, 'secret sweep: credential pre-scan unavailable');
+  }
+}
+
+function sweepUnruled(d: SecretSweepDetect, report: SweepReport): string[] {
+  return [...new Set(unruledCandidates([...(d.opaquePaths ?? []), ...credentialHits(d)], report))];
 }
 
 /** The sweeper's own report names a findings list; a JSON fixture it opened while
@@ -285,10 +485,13 @@ export function parseSweepReport(raw: unknown): SweepReport {
  *  Matched on the EXACT line, deliberately: four of this repo's candidates sit in one
  *  file, so a file-only match would let one finding mark all four ruled on. The prompt
  *  asks for the line verbatim for that reason. */
-export function unruledCandidates(hits: readonly OpaquePathHit[], report: SweepReport): string[] {
+export function unruledCandidates(
+  hits: readonly { file: string; line: number }[],
+  report: SweepReport,
+): string[] {
   if (hits.length === 0) return [];
   const seen = new Set<string>();
-  for (const f of report.findings) if (f.line) seen.add(`${f.path}:${f.line}`);
+  for (const f of report.findings) if (f.line && !f.commit) seen.add(`${f.path}:${f.line}`);
   for (const d of report.dismissed) if (d.line) seen.add(`${d.path}:${d.line}`);
   return hits.map((h) => `${h.file}:${h.line}`).filter((key) => !seen.has(key));
 }
@@ -387,7 +590,15 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
         }
       }
     }
-    return { repoPath: ctx.repoPath, scannable, opaquePaths, opaquePathsOmitted, trackedFiles };
+    const detected = {
+      repoPath: ctx.repoPath,
+      scannable,
+      opaquePaths,
+      opaquePathsOmitted,
+      trackedFiles,
+    };
+    await hydrateCredentialScan(ctx, detected);
+    return detected;
   },
 
   llm: {
@@ -404,19 +615,29 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
     // The findings ARE the form, so the sweep runs before it (see the lifecycle note in
     // LlmInvocationSpec.preForm).
     preForm: true,
+    // Old parked detect_output predates the pre-scan. Persist its hydrated locations so
+    // the completion/form pass checks accountability against the same list the CLI saw.
+    prepare: async ({ ctx, detected }) => {
+      const d = detected as SecretSweepDetect;
+      if (!d.scannable || d.credentialScan || d.credentialScanUnavailable) return;
+      await hydrateCredentialScan(ctx, d);
+      await updateOwnedStep(ctx.db, ctx.taskStepId, { detectOutput: d });
+    },
     buildPrompt,
+    completePreForm: completeSecretSweep,
     skipIf: (args) => !(args.detected as SecretSweepDetect).scannable,
     bypassStub: () => ({ findings: [] }),
   },
 
   form(_ctx, detected, llmOutput): FormSchema | null {
-    const report = parseSweepReport(llmOutput ?? null);
+    const report = mergeSweepReports(
+      detected.completion?.report ?? { findings: [], dismissed: [] },
+      parseSweepReport(llmOutput ?? null),
+    );
     const findings = report.findings;
-    // Nothing found: no form, so onboarding flows straight through. A form here would
-    // pause every clean repo to say nothing. An unruled candidate is NOT a reason to
-    // raise one either — it is a gap in the report, not a claim about the repository.
+    // Candidate bookkeeping stays in detect_output and logs. The person receives
+    // actionable findings, with no claim of exhaustive coverage when none were found.
     if (findings.length === 0) return null;
-    const unruled = unruledCandidates(detected.opaquePaths ?? [], report);
     const shown = findings.slice(0, MAX_LISTED_IN_FORM);
     const hidden = findings.length - shown.length;
     return {
@@ -443,17 +664,6 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
               },
             ]
           : []),
-        ...(unruled.length > 0
-          ? [
-              {
-                id: 'unruled',
-                type: 'note' as const,
-                label: 'Candidates not ruled on',
-                body: `The sweep was handed ${(detected.opaquePaths ?? []).length} candidate path(s) and did not say either way about ${unruled.length} of them: ${unruled.join(', ')}. They are neither reported nor cleared.`,
-                variant: 'info' as const,
-              },
-            ]
-          : []),
         {
           id: 'acknowledged',
           type: 'checkbox' as const,
@@ -471,15 +681,23 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
     if (!args.detected.scannable) {
       return { swept: false, findings: [], counts: { critical: 0, high: 0, total: 0 } };
     }
-    const report = parseSweepReport(args.llmOutput ?? null);
+    const report = mergeSweepReports(
+      args.detected.completion?.report ?? { findings: [], dismissed: [] },
+      parseSweepReport(args.llmOutput ?? null),
+    );
     const findings = report.findings;
-    const unruled = unruledCandidates(args.detected.opaquePaths ?? [], report);
+    const unruled = sweepUnruled(args.detected, report);
     await recordReviewFindings(
       ctx,
       '07_7-secret-sweep',
       findings.map((f) => ({
         reviewerId: 'secret-sweeper',
-        cliInvocationId: args.llmInvocationId ?? null,
+        cliInvocationId:
+          args.detected.completion?.findingInvocations[findingKey(f)] ??
+          // Compatibility with checkpoints whose attribution was keyed only by location.
+          args.detected.completion?.findingInvocations[locationKey(f)] ??
+          args.llmInvocationId ??
+          null,
         severity: f.severity,
         issue: f.issue,
         path: f.path,
@@ -497,7 +715,11 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
     };
     if (unruled.length > 0) {
       ctx.logger.warn(
-        { unruled, candidates: (args.detected.opaquePaths ?? []).length },
+        {
+          unruled,
+          candidates:
+            (args.detected.opaquePaths ?? []).length + credentialHits(args.detected).length,
+        },
         'secret sweep: candidates the agent ruled on neither way',
       );
     }
@@ -509,8 +731,11 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
       swept: true,
       findings,
       counts,
+      summary:
+        findings.length > 0
+          ? `Reported ${findings.length} potential committed credential(s).`
+          : 'The sweep reported no credentials.',
       ...(report.dismissed.length > 0 ? { dismissed: report.dismissed } : {}),
-      ...(unruled.length > 0 ? { candidatesUnruled: unruled } : {}),
     };
   },
 };

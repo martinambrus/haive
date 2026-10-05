@@ -2412,6 +2412,33 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // A report may need targeted follow-ups before it is ready for its form. Its
+    // checkpoint lands before consuming the invocation, so a crash replays that id
+    // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
+    // ownership/reservation path; no CLI is spawned directly from this hook.
+    // Include submitted forms: a legacy form can predate this completion checkpoint.
+    if (stepDef.llm?.preForm && stepDef.llm.completePreForm) {
+      const completion = await stepDef.llm.completePreForm({
+        ctx,
+        detected,
+        llmOutput,
+        llmInvocationId,
+      });
+      llmOutput = completion.llmOutput;
+      throwIfCancelled();
+      if (completion.continueRequested) {
+        current = await updateRow(db, current.id, {
+          formSchema: null,
+          formValues: null,
+          statusMessage: completion.statusMessage ?? 'Completing the report…',
+        });
+        await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
+        const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
+        if (!followup.resolved) return followup.result;
+        throw new Error('Pre-form continuation did not dispatch a fresh invocation');
+      }
+    }
+
     // --- Form ---
     // Auto-continue flag + gate-1 pre-answers for this step. One indexed PK
     // lookup; a missing row (unit-test fixtures) behaves like autoContinue=true
@@ -3948,6 +3975,27 @@ async function reconcileOrphanedMiningAgents(
     }
   }
   return changed;
+}
+
+/** A continuation consumes the completed run it processed, never a newer live run. */
+async function markCompletedInvocationConsumed(
+  db: Database,
+  taskStepId: string,
+  invocationId: string | null,
+): Promise<void> {
+  if (!invocationId) return;
+  await db
+    .update(schema.cliInvocations)
+    .set({ consumedAt: new Date() })
+    .where(
+      and(
+        eq(schema.cliInvocations.id, invocationId),
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNotNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.consumedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
 }
 
 /** Mark the currently-active LLM invocation row as consumed so the next
