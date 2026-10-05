@@ -22,6 +22,7 @@ export type HistoryStep = Pick<
   | 'cliInvocationCount'
   | 'degradedNote'
   | 'warningMessage'
+  | 'startedAt'
   | 'endedAt'
 >;
 
@@ -71,7 +72,8 @@ function findings(output: Row): Row[] {
     .filter(
       (f) =>
         f.refuted !== true &&
-        (text(f.issue) ||
+        (text(f.severity) ||
+          text(f.issue) ||
           text(f.description) ||
           text(f.comment) ||
           text(f.impact) ||
@@ -284,9 +286,12 @@ export function buildTaskHistory(
       )
         return [];
       const event = fixes.get(step.id);
-      // Older events describe an attempt replaced by a manual retry.
+      // Retry resets startedAt, whereas completing an escalation gate only
+      // advances endedAt. Keep requests recorded during the current attempt.
       const currentEvent =
-        event && Date.parse(event.createdAt) >= Date.parse(step.endedAt) ? event : undefined;
+        event && Date.parse(event.createdAt) >= Date.parse(step.startedAt ?? step.endedAt)
+          ? event
+          : undefined;
       const output = row(step.output);
       const hasError =
         step.status === 'failed' ||

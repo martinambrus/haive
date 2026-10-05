@@ -5,7 +5,8 @@ The task header's history clock and the fixed header's history clock open the sa
 not another summary invocation. `web/src/lib/task-history.ts` generates brief outcome
 headlines from finding counts/severity, fix counts, and explicit review/check verdicts.
 It never clips or reprints the agent's detailed recap or diagnosis; the linked step holds
-those details. Reviewer counts describe findings, not unique defects. Bodies render through
+those details. Reviewer counts describe findings, not unique defects, including typed
+findings whose explanatory prose is absent. Bodies render through
 `InlineMarkdown`. Only workflow steps from `07-phase-2-implement` through
 `09-gate-2-verify-approval` are eligible, in every round; the explicit ID set excludes
 planning, setup, commits, learning and unrelated workflow families. An agent step with no
@@ -24,8 +25,10 @@ browser checklists are neutral, and `verificationIncomplete` prevents a browser 
 claim even when fixes were applied. Confirmed browser passes require a known test method.
 A `done` row's `errorMessage` alone is not a failure: only the failed status or a current `fix_loop.requested` event proves that
 outcome. While open, the panel polls only those sparse events via the existing authenticated
-events endpoint; an event older than the row's latest completion belongs to a replaced
-attempt and is ignored. The panel follows the same lifetime as step cards: separate fix
+events endpoint; an event older than the row's latest `startedAt` belongs to a replaced
+attempt and is ignored. Escalation-gate completion rewrites `endedAt` without starting a
+new attempt, so it does not discard that attempt's request. Legacy rows without a start
+time fall back to their completion time. The panel follows the same lifetime as step cards: separate fix
 rounds remain separate, but a manual retry replaces that step row's previous result. The
 previous-visit boundary is local to the browser and task: closing stores the last completion
 present in the panel. Reopening snapshots a single horizontal divider after that entry

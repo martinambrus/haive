@@ -15,6 +15,7 @@ function step(patch: Partial<HistoryStep> = {}): HistoryStep {
     output: null,
     warningMessage: null,
     degradedNote: null,
+    startedAt: '2026-10-05T11:00:00.000Z',
     endedAt,
     ...patch,
   };
@@ -251,6 +252,17 @@ describe('implementation overview', () => {
       message: 'The audit recorded no findings.',
     });
   });
+  it('counts persisted audit findings even when the issue prose is missing', () => {
+    expect(
+      entry({
+        stepId: '08c2-code-audit',
+        output: {
+          audited: true,
+          findings: [{ severity: 'medium', path: 'src/main.ts', fix: 'Suggested repair.' }],
+        },
+      }),
+    ).toMatchObject({ tone: 'warning', message: 'The audit found 1 medium-severity finding.' });
+  });
   it('qualifies manual, incomplete and unknown browser results before claiming a pass', () => {
     const output = { ran: true, skipped: false, passed: true };
     expect(
@@ -400,7 +412,38 @@ describe('implementation overview', () => {
     );
   });
   it('ignores an old fix request after the same row finishes a manual retry', () => {
-    expect(entry({ endedAt: '2026-10-05T13:00:00Z' }, [fixEvent()]).tone).toBe('neutral');
+    expect(
+      entry({ startedAt: '2026-10-05T12:45:00Z', endedAt: '2026-10-05T13:00:00Z' }, [fixEvent()])
+        .tone,
+    ).toBe('neutral');
+  });
+  it('retains a deterministic fix request when an escalation gate finishes the same attempt later', () => {
+    expect(
+      entry(
+        {
+          stepId: '07c-ddev-reconcile',
+          usesCli: false,
+          cliInvocationCount: 0,
+          output: null,
+          endedAt: '2026-10-05T13:00:00Z',
+        },
+        [fixEvent()],
+      ),
+    ).toMatchObject({ tone: 'error', message: 'Another implementation pass was requested.' });
+    expect(
+      buildTaskHistory(
+        [
+          step({
+            stepId: '07c-ddev-reconcile',
+            usesCli: false,
+            cliInvocationCount: 0,
+            startedAt: '2026-10-05T12:45:00Z',
+            endedAt: '2026-10-05T13:00:00Z',
+          }),
+        ],
+        [fixEvent()],
+      ),
+    ).toEqual([]);
   });
   it('does not reprint human rejection diagnoses or degraded-result details', () => {
     expect(
