@@ -1,5 +1,6 @@
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import { gitExec } from '../../../repo/git-exec.js';
+import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 
 /** Location only: neither the value nor its surrounding source may enter detect_output. */
 export interface CredentialCandidate {
@@ -162,6 +163,9 @@ export async function scanForCredentials(
         checkCancelled();
         const index = next++;
         const rel = files[index]!;
+        // Unusable prompt locations must not crowd valid locations out of the cap.
+        // Still inspect/count their matches so internal omissions remain exact.
+        const usablePath = isSingleLine(rel) && survivesFence(rel);
         const read = await readFileNoFollow(repoPath, rel, { maxBytes: READ_CAP });
         if (read === null) {
           unreadable++;
@@ -171,7 +175,7 @@ export async function scanForCredentials(
         let ordinal = 0;
         visitCredentials(read.data.toString('utf8'), (line, kind) => {
           total++;
-          retained.add(rel, index, ordinal++, line, kind);
+          if (usablePath) retained.add(rel, index, ordinal++, line, kind);
         });
       }
     }),

@@ -186,6 +186,21 @@ describe('tracked credential inventory', () => {
     expect(scan.omitted).toBe(4);
   });
 
+  it.each(['\n', '====', '\u0085', '\u2028'])(
+    'keeps prompt-unsafe paths (%j) from exhausting the retained cap',
+    async (unsafe) => {
+      const root = await repo();
+      const files = [0, 1, 2].map((i) => `a${i}${unsafe}.env`);
+      files.push('z.env');
+      for (const file of files) await writeFile(path.join(root, file), 'PASSWORD=p\n');
+      await gitExec(['add', '--', ...files], { cwd: root });
+      const scan = await scanForCredentials(root, 2);
+      expect(scan.hits).toEqual([{ file: 'z.env', line: 1, kind: 'credential assignment' }]);
+      expect(scan.omitted).toBe(3);
+      expect(scan.files).toBe(4);
+    },
+  );
+
   it('reports bounded reads and still inspects the prefix of a large file', async () => {
     const root = await repo();
     await writeFile(
