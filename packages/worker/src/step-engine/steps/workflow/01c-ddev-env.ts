@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, initializeTaskDatabaseState } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import {
   applyTreeNoFollow,
@@ -226,6 +226,14 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         proposedConfig = await buildProposedConfig(ctx, deps, webserverType, nodeInspect);
       }
     }
+
+    // Older/internal tasks may not have creation-time snapshot state. Capture
+    // their baseline at startup even when they have no database to restore.
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { id: true, repositoryId: true, userId: true },
+    });
+    if (task?.repositoryId) await initializeTaskDatabaseState(ctx.db, task);
 
     return {
       ddevConfigured,

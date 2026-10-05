@@ -30,6 +30,7 @@ import {
   sweepDatabaseSnapshots,
   verifyDatabaseSnapshotFile,
 } from '../src/repo/database-snapshots.js';
+import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 
 const runtime = vi.hoisted(() => ({ import: vi.fn(), config: vi.fn() }));
@@ -174,6 +175,26 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     formValues: {},
     iteration: 0,
     previousIterations: [],
+  });
+
+  it('captures an older task’s project revision at startup even without a database input', async () => {
+    const a = await task('older task without a dump');
+    await db
+      .delete(schema.taskDatabaseStates)
+      .where(eq(schema.taskDatabaseStates.taskId, a.taskId));
+    await ddevEnvStep.detect!(a);
+    expect(
+      (await db.query.taskDatabaseStates.findFirst({
+        where: eq(schema.taskDatabaseStates.taskId, a.taskId),
+      }))!.baseRevision,
+    ).toBe(0);
+    const b = await task('parallel save');
+    await candidate(b);
+    await promoteDatabaseSnapshot(b, 0);
+    const form = databaseSaveForm(await loadDatabaseSnapshotState(a))!;
+    expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
+      options: expect.arrayContaining([{ value: 'replace:1', label: expect.any(String) }]),
+    });
   });
 
   it('restores a pinned snapshot once, keeps its file and ignores stale detect data on retry', async () => {
