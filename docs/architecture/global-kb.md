@@ -49,6 +49,23 @@ description sets it, beside the existing entry's in a superseding draft's "Updat
 and in 09_6_5's draft list. The page renders it as markdown like every prose body; its editor and
 the prompt carry the stored text.
 
+Authoring and description editing show and enforce the 300-character limit before submission;
+the description counter and validation measure the collapsed line through the browser-safe
+`@haive/shared/collapse-line` export, exactly as the API does. Over-limit input stays available
+to correct, with an inline error and disabled submit/save, rather than being cut by `maxLength`.
+the title has the same limit, and the connection namespace allows 120 characters. The API refuses
+over-limit person-authored text without cutting it. Notes, article bodies, scope values, allowed
+domains, connection strings and embedding model/URL fields have no application character cap
+(the entry table uses `TEXT`/`jsonb`, not length-limited columns). Connection settings validate
+whole-number dimensions from 1 to 8192 and archive retention from 0 to 3650 days before saving.
+
+Existing articles, including AI-written drafts and promoted replacements, offer **Edit body** in
+the Settings detail dialog through the shared `MarkdownEditor` WYSIWYG editor. Save PATCHes the
+markdown body and shows the returned stored entry; Cancel leaves it untouched, and a failed save
+keeps the draft for retry. Body edits use the existing pending-embedding/sync path. An open scope,
+description or body edit blocks activation, archiving and deletion until saved or cancelled.
+The replacement diff is shown again after a body save, using the corrected text.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a

@@ -29,7 +29,10 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { MarkdownEditor } from '@/components/markdown/markdown-editor';
+import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { IN_STACK_OLLAMA_URL, DEFAULT_EXTERNAL_OLLAMA_URL } from '@haive/shared/constants';
+import { collapseToLine } from '@haive/shared/collapse-line';
 
 function parseList(s: string): string[] {
   return s
@@ -89,8 +92,8 @@ function FacetFields({
   );
 }
 
-/** The one description input, used by the enrich form and by the entry detail modal. It only
- *  counts: the api measures after collapsing whitespace, and it is the api that refuses a long one. */
+/** Measure the same collapsed line as the API. Keep the full input so excess text can be
+ * corrected rather than silently discarded by the browser's raw-string maxLength. */
 function DescriptionField({
   id,
   value,
@@ -104,7 +107,7 @@ function DescriptionField({
   disabled?: boolean;
   placeholder?: string;
 }) {
-  const length = value.replace(/\s+/g, ' ').trim().length;
+  const length = collapseToLine(value).length;
   return (
     <div className="flex flex-col gap-1">
       <Input
@@ -112,13 +115,23 @@ function DescriptionField({
         value={value}
         placeholder={placeholder}
         disabled={disabled}
+        aria-describedby={`${id}-limit`}
+        aria-invalid={length > GLOBAL_KB_DESCRIPTION_MAX}
         onChange={(e) => onChange(e.target.value)}
       />
       <span
+        id={`${id}-limit`}
         className={`self-end text-[11px] ${length > GLOBAL_KB_DESCRIPTION_MAX ? 'text-red-400' : 'text-neutral-500'}`}
       >
         {length} / {GLOBAL_KB_DESCRIPTION_MAX}
       </span>
+      <FormError
+        message={
+          length > GLOBAL_KB_DESCRIPTION_MAX
+            ? `Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters after whitespace is collapsed.`
+            : null
+        }
+      />
     </div>
   );
 }
@@ -284,7 +297,10 @@ export default function GlobalKbPage() {
   const [descEdit, setDescEdit] = useState<string | null>(null);
   const [descBusy, setDescBusy] = useState(false);
   const [descError, setDescError] = useState<string | null>(null);
-  // Drop a half-finished scope or description edit whenever the modal moves to another entry or
+  const [bodyEdit, setBodyEdit] = useState<string | null>(null);
+  const [bodyBusy, setBodyBusy] = useState(false);
+  const [bodyError, setBodyError] = useState<string | null>(null);
+  // Drop a half-finished edit whenever the modal moves to another entry or
   // closes. Keyed on the entry id and not wired into each close path on purpose: the dialog closes
   // on Escape, on the backdrop and on the X as well as on Cancel, and a leftover editor would show
   // the PREVIOUS entry's values and write them over this one on Save.
@@ -293,6 +309,8 @@ export default function GlobalKbPage() {
     setScopeError(null);
     setDescEdit(null);
     setDescError(null);
+    setBodyEdit(null);
+    setBodyError(null);
   }, [selected?.id]);
   // The LIVE entry that replaced this one, asked of the SERVER rather than read out of
   // `entries`. That list is filtered and paginated, so a reviewer who filtered to `archived`
@@ -508,6 +526,26 @@ export default function GlobalKbPage() {
   }, [cfgLoaded]);
 
   async function saveConfig() {
+    if (!cfg.namespace.trim() || cfg.namespace.length > 120) {
+      setCfgMsg('Namespace must contain 1–120 characters.');
+      return;
+    }
+    if (
+      !Number.isInteger(cfg.embedDimensions) ||
+      cfg.embedDimensions < 1 ||
+      cfg.embedDimensions > 8192
+    ) {
+      setCfgMsg('Dimensions must be a whole number from 1 to 8192.');
+      return;
+    }
+    if (
+      !Number.isInteger(cfg.archiveRetentionDays) ||
+      cfg.archiveRetentionDays < 0 ||
+      cfg.archiveRetentionDays > 3650
+    ) {
+      setCfgMsg('Archive retention must be a whole number from 0 to 3650 days.');
+      return;
+    }
     setCfgBusy(true);
     setCfgMsg(null);
     try {
@@ -747,6 +785,10 @@ export default function GlobalKbPage() {
    *  clears a blank one. */
   async function saveDescription(e: GlobalKbEntry) {
     if (descEdit === null) return;
+    if (collapseToLine(descEdit).length > GLOBAL_KB_DESCRIPTION_MAX) {
+      setDescError(`Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters.`);
+      return;
+    }
     setDescBusy(true);
     setDescError(null);
     try {
@@ -761,6 +803,29 @@ export default function GlobalKbPage() {
       setDescError((err as ApiError).message ?? 'Failed to save the description');
     } finally {
       setDescBusy(false);
+    }
+  }
+
+  async function saveBody(e: GlobalKbEntry) {
+    if (bodyEdit === null) return;
+    if (!bodyEdit.trim()) {
+      setBodyError('The article body cannot be empty.');
+      return;
+    }
+    setBodyBusy(true);
+    setBodyError(null);
+    try {
+      const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
+        body: bodyEdit,
+      });
+      const saved = res.entry;
+      setSelected((cur) => (cur?.id === e.id ? saved : cur));
+      setEntries((rows) => rows?.map((r) => (r.id === e.id ? saved : r)) ?? rows);
+      setBodyEdit(null);
+    } catch (err) {
+      setBodyError((err as ApiError).message ?? 'Failed to save the body');
+    } finally {
+      setBodyBusy(false);
     }
   }
 
@@ -835,6 +900,14 @@ export default function GlobalKbPage() {
       setEnrichError('Give the article a title.');
       return;
     }
+    if (enrich.title.length > 300) {
+      setEnrichError('Title must be at most 300 characters.');
+      return;
+    }
+    if (collapseToLine(enrich.description).length > GLOBAL_KB_DESCRIPTION_MAX) {
+      setEnrichError(`Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters.`);
+      return;
+    }
     if (!enrich.notes.trim()) {
       setEnrichError('Write something for the AI to work from.');
       return;
@@ -885,7 +958,7 @@ export default function GlobalKbPage() {
     statusFilter !== 'all' ||
     categoryFilter !== 'all' ||
     frameworkFilter !== 'all';
-  const editOpen = scopeEdit !== null || descEdit !== null;
+  const editOpen = scopeEdit !== null || descEdit !== null || bodyEdit !== null;
   const editOpenHint = editOpen ? 'Save or cancel the open edit first' : undefined;
 
   /** Escape and the backdrop close an open edit before they close the dialog, so one stray press
@@ -895,9 +968,10 @@ export default function GlobalKbPage() {
       setSelected(null);
       return;
     }
-    if (scopeBusy || descBusy) return;
+    if (scopeBusy || descBusy || bodyBusy) return;
     setScopeEdit(null);
     setDescEdit(null);
+    setBodyEdit(null);
   }
 
   return (
@@ -981,10 +1055,15 @@ export default function GlobalKbPage() {
                 <Label htmlFor="cfg-namespace">Namespace</Label>
                 <Input
                   id="cfg-namespace"
+                  maxLength={120}
+                  aria-describedby="cfg-namespace-limit"
                   value={cfg.namespace}
                   onChange={(e) => setCfg({ ...cfg, namespace: e.target.value })}
                   className="w-40"
                 />
+                <span id="cfg-namespace-limit" className="text-[11px] text-neutral-500">
+                  {cfg.namespace.length} / 120
+                </span>
               </div>
             </div>
             {cfg.mode === 'external' && (
@@ -1066,10 +1145,11 @@ export default function GlobalKbPage() {
                 <Input
                   id="cfg-dims"
                   type="number"
-                  value={cfg.embedDimensions}
-                  onChange={(e) =>
-                    setCfg({ ...cfg, embedDimensions: Number(e.target.value) || 2560 })
-                  }
+                  min={1}
+                  max={8192}
+                  step={1}
+                  value={Number.isNaN(cfg.embedDimensions) ? '' : cfg.embedDimensions}
+                  onChange={(e) => setCfg({ ...cfg, embedDimensions: e.target.valueAsNumber })}
                   className="w-32"
                 />
               </div>
@@ -1078,11 +1158,14 @@ export default function GlobalKbPage() {
                 <Input
                   id="cfg-retention"
                   type="number"
-                  value={cfg.archiveRetentionDays}
+                  min={0}
+                  max={3650}
+                  step={1}
+                  value={Number.isNaN(cfg.archiveRetentionDays) ? '' : cfg.archiveRetentionDays}
                   onChange={(e) =>
                     setCfg({
                       ...cfg,
-                      archiveRetentionDays: Math.max(0, Number(e.target.value) || 0),
+                      archiveRetentionDays: e.target.valueAsNumber,
                     })
                   }
                   className="w-32"
@@ -1148,8 +1231,12 @@ export default function GlobalKbPage() {
               value={enrich.title}
               onChange={(e) => setEnrich({ ...enrich, title: e.target.value })}
               maxLength={300}
+              aria-describedby="enrich-title-limit"
               placeholder="A title you'll recognize, e.g. Drupal 11 paragraphs nesting limit"
             />
+            <span id="enrich-title-limit" className="self-end text-[11px] text-neutral-500">
+              {enrich.title.length} / 300
+            </span>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="enrich-description">Description (optional)</Label>
@@ -1265,7 +1352,12 @@ export default function GlobalKbPage() {
           )}
           <FormError message={enrichError} />
           <div>
-            <Button disabled={enrichBusy} onClick={() => void runEnrich()}>
+            <Button
+              disabled={
+                enrichBusy || collapseToLine(enrich.description).length > GLOBAL_KB_DESCRIPTION_MAX
+              }
+              onClick={() => void runEnrich()}
+            >
               {enrichBusy ? 'Starting…' : 'Add with AI'}
             </Button>
           </div>
@@ -1558,7 +1650,7 @@ export default function GlobalKbPage() {
                 <DialogTitle>{selected.title}</DialogTitle>
                 <button
                   type="button"
-                  onClick={() => setSelected(null)}
+                  onClick={dismiss}
                   aria-label="Close"
                   className="-mr-1 -mt-1 shrink-0 rounded-md px-2 text-2xl leading-none text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
                 >
@@ -1594,14 +1686,18 @@ export default function GlobalKbPage() {
                   <DescriptionField
                     id="description-edit"
                     value={descEdit}
-                    disabled={descBusy}
+                    disabled={descBusy || bodyBusy}
                     onChange={setDescEdit}
                   />
                   {descError && <FormError message={descError} />}
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
-                      disabled={descBusy}
+                      disabled={
+                        descBusy ||
+                        bodyBusy ||
+                        collapseToLine(descEdit).length > GLOBAL_KB_DESCRIPTION_MAX
+                      }
                       onClick={() => void saveDescription(selected)}
                     >
                       {descBusy ? 'Saving…' : 'Save description'}
@@ -1628,11 +1724,12 @@ export default function GlobalKbPage() {
                   )}
                   <button
                     type="button"
+                    disabled={bodyBusy}
                     onClick={() => {
                       setDescError(null);
                       setDescEdit(selected.description ?? '');
                     }}
-                    className="shrink-0 text-xs text-indigo-400 hover:text-indigo-300"
+                    className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
                   >
                     Edit description
                   </button>
@@ -1656,12 +1753,16 @@ export default function GlobalKbPage() {
                   <FacetFields
                     idPrefix="scope-edit"
                     fields={scopeEdit}
-                    disabled={scopeBusy}
+                    disabled={scopeBusy || bodyBusy}
                     onChange={(key, value) => setScopeEdit((f) => ({ ...(f ?? {}), [key]: value }))}
                   />
                   {scopeError && <FormError message={scopeError} />}
                   <div className="flex items-center gap-2">
-                    <Button size="sm" disabled={scopeBusy} onClick={() => void saveScope(selected)}>
+                    <Button
+                      size="sm"
+                      disabled={scopeBusy || bodyBusy}
+                      onClick={() => void saveScope(selected)}
+                    >
                       {scopeBusy ? 'Saving…' : 'Save scope'}
                     </Button>
                     <Button
@@ -1679,17 +1780,63 @@ export default function GlobalKbPage() {
                   {facetsSummary(selected.facets)}
                   <button
                     type="button"
+                    disabled={bodyBusy}
                     onClick={() => {
                       setScopeError(null);
                       setScopeEdit(fieldsFromFacets(selected.facets));
                     }}
-                    className="text-indigo-400 hover:text-indigo-300"
+                    className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
                   >
                     Edit scope
                   </button>
                 </p>
               )}
-              {supersededEntry ? (
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-neutral-300">Article body</span>
+                {bodyEdit === null && (
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={busy || scopeBusy || descBusy}
+                    onClick={() => {
+                      setBodyError(null);
+                      setBodyEdit(selected.body);
+                    }}
+                  >
+                    Edit body
+                  </button>
+                )}
+              </div>
+              {bodyEdit !== null ? (
+                <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800 p-3">
+                  <MarkdownEditor
+                    key={selected.id}
+                    value={bodyEdit}
+                    onChange={setBodyEdit}
+                    disabled={bodyBusy || scopeBusy || descBusy || busy}
+                    breaks={!looksLikeMarkdown(selected.body)}
+                    placeholder="Write the article…"
+                  />
+                  <FormError message={bodyError} />
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={bodyBusy || scopeBusy || descBusy || busy}
+                      onClick={() => void saveBody(selected)}
+                    >
+                      {bodyBusy ? 'Saving…' : 'Save body'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={bodyBusy}
+                      onClick={() => setBodyEdit(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : supersededEntry ? (
                 <>
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                     <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
@@ -1759,7 +1906,7 @@ export default function GlobalKbPage() {
                     size="sm"
                     variant="ghost"
                     className="mt-1"
-                    disabled={busy || scopeBusy || descBusy || editOpen}
+                    disabled={busy || scopeBusy || descBusy || bodyBusy || editOpen}
                     title={editOpenHint}
                     onClick={() => void openEntry(activeSuccessor.id)}
                   >
@@ -1776,12 +1923,14 @@ export default function GlobalKbPage() {
                     server-side can serialise it, and the reviewer's unsaved re-scope is exactly
                     the judgement the activation would be ignoring. Saving afterwards re-scopes
                     the now-active entry and does NOT bring the predecessor back. An open
-                    description edit blocks it too: activating publishes the stored description
-                    into every matching prompt, not the one being typed. */}
+                    description or body edit blocks it too: activating publishes the stored
+                    article, so the reviewer must save or cancel their corrections first. */}
                 {(selected.status === 'draft' || selected.status === 'archived') && (
                   <Button
                     size="sm"
-                    disabled={busy || scopeBusy || descBusy || editOpen || successorLoading}
+                    disabled={
+                      busy || scopeBusy || descBusy || bodyBusy || editOpen || successorLoading
+                    }
                     title={
                       editOpenHint ??
                       (successorLoading
@@ -1799,7 +1948,7 @@ export default function GlobalKbPage() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={busy || scopeBusy || descBusy || editOpen}
+                    disabled={busy || scopeBusy || descBusy || bodyBusy || editOpen}
                     title={editOpenHint}
                     onClick={() => void archive(selected)}
                   >
@@ -1809,7 +1958,8 @@ export default function GlobalKbPage() {
                 <Button
                   size="sm"
                   variant="destructive"
-                  disabled={busy}
+                  disabled={busy || scopeBusy || descBusy || bodyBusy || editOpen}
+                  title={editOpenHint}
                   onClick={() => void remove(selected)}
                 >
                   Delete
