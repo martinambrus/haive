@@ -29,6 +29,7 @@ import {
   discardDatabaseSnapshot,
   sweepDatabaseSnapshots,
   verifyDatabaseSnapshotFile,
+  offerDatabaseRestore,
 } from '../src/repo/database-snapshots.js';
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
@@ -38,6 +39,9 @@ vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
   ensureDdevWithProgress: async () => ({ container: 'test', projectDir: '/repos/test' }),
   withDdevProgress: async (_ctx: unknown, _label: string, fn: (onLine: () => void) => unknown) =>
     fn(() => {}),
+}));
+vi.mock('../src/sandbox/ddev-database-import.js', () => ({
+  importDdevDatabaseSnapshot: runtime.import,
 }));
 vi.mock('../src/sandbox/ddev-runner.js', async (original) => ({
   ...(await original<typeof import('../src/sandbox/ddev-runner.js')>()),
@@ -172,7 +176,7 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
       databaseSnapshotId: snapshot.id as string | null,
       snapshotEngine: 'postgres' as string | null,
     },
-    formValues: {},
+    formValues: { action: `restore:${snapshot.id}` },
     iteration: 0,
     previousIterations: [],
   });
@@ -197,6 +201,77 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     });
   });
 
+  async function declareDdev(ctx: StepContext) {
+    const [template] = await db
+      .insert(schema.envTemplates)
+      .values({
+        userId,
+        repositoryId: repoId,
+        name: 'DDEV',
+        baseImage: 'test',
+        declaredDeps: { containerTool: 'ddev' },
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ envTemplateId: template!.id })
+      .where(eq(schema.tasks.id, ctx.taskId));
+  }
+  it('offers a checkpoint saved after task creation without a creation-time selection', async () => {
+    const b = await task('created before any save');
+    await declareDdev(b);
+    expect(await restoreDatabaseStep.shouldRun!(b)).toBe(false);
+    const a = await task('later save');
+    const saved = await candidate(a);
+    await promoteDatabaseSnapshot(a, 0);
+    expect(await restoreDatabaseStep.shouldRun!(b)).toBe(true);
+    const detected = await restoreDatabaseStep.detect!(b);
+    expect(detected.databaseSnapshotId).toBe(saved.id);
+    expect(detected.checkpoint?.sourceTaskTitle).toBe('later save');
+    const args = { detected, formValues: {}, iteration: 0, previousIterations: [] };
+    await expect(restoreDatabaseStep.apply(b, args)).rejects.toThrow('Choose whether');
+    expect(runtime.import).not.toHaveBeenCalled();
+    expect(
+      (
+        await restoreDatabaseStep.apply(b, {
+          ...args,
+          formValues: { action: `restore:${saved.id}` },
+        })
+      ).imported,
+    ).toBe(true);
+    expect(
+      (await db.query.taskDatabaseStates.findFirst({
+        where: eq(schema.taskDatabaseStates.taskId, b.taskId),
+      }))!.baseRevision,
+    ).toBe(1);
+  });
+  it('pins the offered checkpoint while the form waits, and releases it when declined', async () => {
+    const a = await task('first save');
+    const first = await candidate(a);
+    await promoteDatabaseSnapshot(a, 0);
+    const b = await task('waiting for a restore choice');
+    await declareDdev(b);
+    const detected = await restoreDatabaseStep.detect!(b);
+    const c = await task('new save');
+    await candidate(c);
+    await promoteDatabaseSnapshot(c, 0);
+    await sweepDatabaseSnapshots(db);
+    await expect(access(path.join(root, databaseSnapshotRel(first)))).resolves.toBeUndefined();
+    expect((await offerDatabaseRestore(b, 0))!.snapshot.id).toBe(first.id);
+    expect(
+      (
+        await restoreDatabaseStep.apply(b, {
+          detected,
+          formValues: { action: 'skip' },
+          iteration: 0,
+          previousIterations: [],
+        })
+      ).imported,
+    ).toBe(false);
+    expect(runtime.import).not.toHaveBeenCalled();
+    await expect(access(path.join(root, databaseSnapshotRel(first)))).rejects.toThrow();
+  });
+
   it('restores a pinned snapshot once, keeps its file and ignores stale detect data on retry', async () => {
     const a = await task('source');
     const saved = await candidate(a);
@@ -211,10 +286,14 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     ).toBeInstanceOf(Date);
     expect((await restoreDatabaseStep.apply(b, restoreArgs(saved))).imported).toBe(false);
     expect(runtime.import).toHaveBeenCalledTimes(1);
+    expect(await offerDatabaseRestore(b, 0)).toBeNull();
     await expect(access(path.join(root, databaseSnapshotRel(saved)))).resolves.toBeUndefined();
   });
 
   it('restores an uploaded dump in the separate step and ignores consumed uploads on retry', async () => {
+    const source = await task('checkpoint overridden by upload');
+    await candidate(source);
+    await promoteDatabaseSnapshot(source, 0);
     const a = await task('uploaded database');
     const [upload] = await db
       .insert(schema.dbUploads)
@@ -261,6 +340,7 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     });
     a.repoPath = path.join(root, 'restore-fixture');
     expect(await restoreDatabaseStep.shouldRun!(a)).toBe(true);
+    expect((await restoreDatabaseStep.detect!(a)).databaseSnapshotId).toBeNull();
     expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(true);
     expect(await restoreDatabaseStep.shouldRun!(a)).toBe(false);
     expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(false);

@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, type FileHandle } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
@@ -1548,13 +1548,25 @@ export function ddevImportDb(
     format?: DumpImportFormat;
     timeoutMs?: number;
     onLine?: (line: string) => void;
+    stdin?: FileHandle;
+    signal?: AbortSignal;
   } = {},
 ): Promise<{ exitCode: number; output: string }> {
   const format = opts.format ?? { pgRestore: false, gzipped: false };
-  const cmd = buildDdevImportCommand(handle.projectDir, dumpRunnerPath, format);
+  const cmd = opts.stdin
+    ? `cd ${handle.projectDir} && set -o pipefail && ${format.gzipped ? 'gzip -dc | ' : ''}ddev import-db`
+    : buildDdevImportCommand(handle.projectDir, dumpRunnerPath, format);
   return withAptPinRepair(
     handle,
-    () => runnerShellStreaming(handle, cmd, opts.onLine, opts.timeoutMs ?? 1_800_000),
+    () =>
+      runnerShellStreaming(
+        handle,
+        cmd,
+        opts.onLine,
+        opts.timeoutMs ?? 1_800_000,
+        opts.stdin,
+        opts.signal,
+      ),
     opts.onLine,
   );
 }
@@ -2472,9 +2484,28 @@ function runnerShellStreaming(
   cmd: string,
   onLine?: (line: string) => void,
   timeoutMs = 900_000,
+  stdin?: FileHandle,
+  signal?: AbortSignal,
 ): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn('docker', ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd]);
+    const child = spawn(
+      'docker',
+      ['exec', ...(stdin ? ['-i'] : []), '-u', 'ddev', handle.container, 'bash', '-lc', cmd],
+      {
+        stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        ...(signal ? { signal, killSignal: 'SIGKILL' as const } : {}),
+      },
+    );
+    // A held source descriptor, never a repository path reopened by Docker.
+    // Starting at zero also makes an apt-pin repair retry read the complete dump.
+    const input = stdin?.createReadStream({ autoClose: false, start: 0, signal });
+    child.stdin?.on('error', () => undefined);
+    let inputError: Error | undefined;
+    input?.on('error', (err) => {
+      inputError = err;
+      child.kill('SIGKILL');
+    });
+    if (input && child.stdin) input.pipe(child.stdin);
     let buf = '';
     let lineBuf = '';
     const onData = (chunk: Buffer): void => {
@@ -2489,8 +2520,8 @@ function runnerShellStreaming(
         if (onLine && line.trim()) onLine(line);
       }
     };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
     const timer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
@@ -2500,11 +2531,16 @@ function runnerShellStreaming(
     }, timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
+      input?.destroy();
       if (onLine && lineBuf.trim()) onLine(lineBuf);
-      resolve({ exitCode: code ?? 1, output: buf.slice(-8000) });
+      resolve({
+        exitCode: inputError ? 1 : (code ?? 1),
+        output: inputError ? `${buf}\n${inputError.message}`.slice(-8000) : buf.slice(-8000),
+      });
     });
     child.on('error', () => {
       clearTimeout(timer);
+      input?.destroy();
       resolve({ exitCode: 1, output: buf.slice(-8000) });
     });
   });
