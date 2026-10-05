@@ -1572,7 +1572,7 @@ export default function TaskDetailPage() {
               finally puts air on both sides of the meters. Full string stays on hover and in
               the page header one scroll up. */}
           <p
-            className="min-w-0 max-w-[20rem] truncate text-sm font-semibold text-indigo-300"
+            className="min-w-20 max-w-[20rem] truncate text-sm font-semibold text-indigo-300 @sm:min-w-0"
             title={task.title}
           >
             {task.title}
