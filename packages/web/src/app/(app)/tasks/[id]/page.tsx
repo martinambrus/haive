@@ -38,6 +38,7 @@ import { ActionMenu } from '@/components/action-menu';
 import {
   ArrowLeft,
   Ban,
+  CheckCircle2,
   CircleDot,
   Pause,
   Pencil,
@@ -1455,7 +1456,8 @@ export default function TaskDetailPage() {
   const isUpgradeTask = task.type === 'onboarding_upgrade';
   const backHref = origin?.href ?? (isUpgradeTask ? '/repos' : '/tasks');
   const backLabel = origin?.label ?? (isUpgradeTask ? 'Back to repositories' : 'Back to tasks');
-  const canCancel = !['completed', 'cancelled'].includes(task.status);
+  const taskFinished = task.status === 'completed' || task.status === 'cancelled';
+  const canCancel = !taskFinished;
   // A CLI step is actively executing. The Stop buttons (top-right + the running
   // step row) target it: stop the CLI, keep the environment, task stays open.
   // Cancel, by contrast, ends the whole task and tears the environment down.
@@ -1551,13 +1553,16 @@ export default function TaskDetailPage() {
           >
             {task.title}
           </p>
-          {/* The strip carries no status badge, so a held task would otherwise look like it
-              is working once the page is scrolled past the header. */}
-          {task.pausedAt && (
+          {/* Keep the final status visible after the main header scrolls away. */}
+          {taskFinished ? (
+            <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
+              {task.status}
+            </Badge>
+          ) : task.pausedAt ? (
             <Badge variant="warning" className="shrink-0">
               paused
             </Badge>
-          )}
+          ) : null}
           {task.repository && (
             <Badge
               variant="default"
@@ -1577,7 +1582,7 @@ export default function TaskDetailPage() {
               {EXECUTION_PATH_LABELS[task.executionPath]}
             </Badge>
           )}
-          {currentStep && (
+          {!taskFinished && currentStep && (
             <Badge variant="warning" className="min-w-0 shrink gap-1" title={currentStepBadgeText}>
               <CircleDot className="h-3 w-3 shrink-0" />
               <span className="truncate">{currentStepBadgeText}</span>
@@ -1679,7 +1684,11 @@ export default function TaskDetailPage() {
                     `running` in both cases, so show the real state instead (same precedence
                     as the tasks listing — paused wins, and the server suppresses slotWait
                     while it is set, so the two can never both be true). */}
-                {task.pausedAt ? (
+                {taskFinished ? (
+                  <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
+                    {task.status}
+                  </Badge>
+                ) : task.pausedAt ? (
                   <Badge variant="warning" className="shrink-0">
                     paused
                   </Badge>
@@ -1884,7 +1893,7 @@ export default function TaskDetailPage() {
 
       {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
           repeated here — this one only ever means "you paused this task". */}
-      {task.pausedAt && (
+      {!taskFinished && task.pausedAt && (
         <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           <span className="font-semibold">Paused</span> since{' '}
           {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
@@ -1935,7 +1944,7 @@ export default function TaskDetailPage() {
 
       {tab === 'steps' && (
         <div ref={stepsContainerRef} className="flex flex-col gap-3">
-          {steps.length === 0 && (
+          {steps.length === 0 && !taskFinished && (
             <div className="text-sm text-neutral-500">
               No steps recorded yet. The task worker will populate them once it starts.
             </div>
@@ -2063,6 +2072,40 @@ export default function TaskDetailPage() {
               <Link href="/repos">
                 <Button>Back to repositories</Button>
               </Link>
+            </div>
+          )}
+          {taskFinished && (
+            <div
+              role="status"
+              className={`flex items-start gap-3 rounded-md border px-4 py-4 ${
+                task.status === 'completed'
+                  ? 'border-emerald-800 bg-emerald-950/40 text-emerald-300'
+                  : 'border-red-900 bg-red-950/40 text-red-300'
+              }`}
+            >
+              {task.status === 'completed' ? (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+              ) : (
+                <Ban className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+              )}
+              <div className="flex min-w-0 flex-col gap-1">
+                <h2 className="text-sm font-semibold">
+                  {task.status === 'completed' ? 'Task completed' : 'Task cancelled'}
+                </h2>
+                <InlineMarkdown
+                  className="text-sm"
+                  body={
+                    task.status === 'completed'
+                      ? 'This task has finished.'
+                      : 'This task has ended. No further steps will run.'
+                  }
+                />
+                {task.completedAt && (
+                  <time dateTime={task.completedAt} className="text-xs opacity-80">
+                    {new Date(task.completedAt).toLocaleString()}
+                  </time>
+                )}
+              </div>
             </div>
           )}
         </div>
