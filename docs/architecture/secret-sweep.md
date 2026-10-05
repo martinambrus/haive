@@ -28,6 +28,8 @@ bound in-flight allocations. Cancellation is checked between files.
 The scanner nominates literal credential assignments, selected provider key
 formats, private-key markers and credential URLs. These are candidates, not
 findings: the model still judges context, placeholders, reach and severity.
+Quoted assignments and bounded bare scalars in `.env` and YAML are included;
+runtime environment references and function-call prefixes are not nominated.
 Candidates persist only their path, line and a fixed kind, never source text,
 credential values, prefixes or hashes. Obvious placeholders and environment
 references are filtered as a recall aid; the model's independent whole-tree and
@@ -74,8 +76,9 @@ into a user-facing coverage warning.
 
 Older persisted detection payloads lack the credential inventory. The LLM
 `prepare` hook hydrates it before dispatch and persists it through
-`updateOwnedStep`, so the completion/form pass checks the list the agent actually
-received. Unsafe candidate paths are filtered again when building the prompt or
+`updateOwnedStep`. Reusing a finished invocation skips `prepare`, so completion
+hydrates legacy payloads too and gives newly discovered locations focused verdicts
+before presenting the form. Unsafe candidate paths are filtered again when building the prompt or
 form, and prompt locations sit in an untrusted-text fence. A failed pre-scan is
 recorded internally rather than represented as zero candidates; a cancelled scan propagates
 cancellation. This inventory covers the current tracked working tree; it does

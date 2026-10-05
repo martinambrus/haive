@@ -67,6 +67,26 @@ describe('credential candidates', () => {
     expect(hits.map((hit) => hit.kind)).toEqual(['private key', 'provider key', 'credential URL']);
   });
 
+  it('includes unquoted dotenv and YAML credentials while excluding references and expressions', () => {
+    const hits = scanTextForCredentials(
+      'build/config.env',
+      [
+        'PASSWORD=SyntheticEnvCredential',
+        '  password: SyntheticYamlCredential # account password',
+        'AUTH_TOKEN=SyntheticAuthCredential;',
+        'password: process.env.PASSWORD,',
+        'token: import.meta.env.AUTH_TOKEN',
+        'secret: ${ENV_SECRET}',
+        'password: your-password-here',
+        'password: undefined',
+        'password: generatePassword()',
+      ].join('\n'),
+    );
+    expect(hits.map((hit) => hit.line)).toEqual([1, 2, 3]);
+    expect(hits.every((hit) => hit.kind === 'credential assignment')).toBe(true);
+    expect(JSON.stringify(hits)).not.toContain('Synthetic');
+  });
+
   it('does not persist binary content or nominate obvious placeholders/environment references', () => {
     expect(scanTextForCredentials('binary', "\0password: 'SyntheticPassword'")).toEqual([]);
     expect(

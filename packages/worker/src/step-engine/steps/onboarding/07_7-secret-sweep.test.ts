@@ -481,6 +481,50 @@ describe('focused secret-sweep completion', () => {
       llmOutput: report,
     });
 
+  it('hydrates legacy detection when resuming an already completed invocation without prepare', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { gitExec } = await import('../../../repo/git-exec.js');
+    const root = await mkdtemp(join(tmpdir(), 'haive-sweep-resume-'));
+    try {
+      await gitExec(['init'], { cwd: root });
+      await writeFile(join(root, 'build.env'), 'PASSWORD=SyntheticLegacyCredential');
+      await gitExec(['add', '--', 'build.env'], { cwd: root });
+      const legacy = { repoPath: root, scannable: true };
+      const set = vi.fn((_patch: unknown) => ({
+        where: () => ({ returning: async () => [{ id: 's1' }] }),
+      }));
+      const result = await completeSecretSweep({
+        detected: legacy,
+        llmInvocationId: 'old-completed-invocation',
+        llmOutput: { findings: [{ path: 'old.js', line: 1, issue: 'Existing finding' }] },
+        ctx: {
+          taskStepId: 's1',
+          throwIfCancelled: () => {},
+          logger: { warn: vi.fn() },
+          db: { update: () => ({ set }) },
+        } as never,
+      });
+      expect(result.continueRequested).toBe(true);
+      expect(parseSweepReport(result.llmOutput).findings[0]!.path).toBe('old.js');
+      expect(set.mock.calls[0]![0]).toMatchObject({
+        detectOutput: {
+          credentialScan: { hits: [{ file: 'build.env', line: 1 }] },
+          completion: {
+            pending: [{ file: 'build.env', line: 1 }],
+            processedInvocations: ['old-completed-invocation'],
+          },
+        },
+      });
+      const prompt = secretSweepStep.llm!.buildPrompt({ detected: legacy, formValues: {} });
+      expect(prompt).toContain('build.env:1');
+      expect(prompt).not.toContain('SyntheticLegacyCredential');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('requests a small batch containing only missing exact verdicts', async () => {
     const d: Detection = detection(30);
     const result = await complete(d, 'first', {

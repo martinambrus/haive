@@ -320,6 +320,9 @@ export async function completeSecretSweep(args: {
   const report = parseSweepReport(args.llmOutput);
   // Bypass runs have no real invocation, and must not request paid follow-ups.
   if (!args.llmInvocationId) return { llmOutput: report, continueRequested: false };
+  // Reusing an already completed invocation skips llm.prepare. Older parked
+  // detections still need the inventory before deciding whether the report is ready.
+  await hydrateCredentialScan(args.ctx, d);
   const progress: SweepCompletion = d.completion ?? {
     report: { findings: [], dismissed: [] },
     processedInvocations: [],
