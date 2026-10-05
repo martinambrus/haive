@@ -153,7 +153,7 @@ describe('implementation overview', () => {
       }).message,
     ).toBe('The review found 2 findings (highest severity: high).');
   });
-  it('keeps report-only observations advisory and trusts the host fix verdict', () => {
+  it('keeps findings separate from an actual fix-round request', () => {
     const output = {
       blocking: false,
       peer: {
@@ -164,9 +164,30 @@ describe('implementation overview', () => {
       tone: 'warning',
       message: 'The review found 1 critical-severity finding.',
     });
-    expect(entry({ output: { ...output, blocking: true } }).message).toContain(
+    expect(entry({ output: { ...output, blocking: true } }).message).not.toContain(
       'Fix round requested.',
     );
+    expect(entry({ output: { ...output, blocking: true } }, [fixEvent()]).message).toContain(
+      'Fix round requested.',
+    );
+  });
+  it('does not claim adversarial QA requested a fix before the human review gate decides', () => {
+    expect(
+      entry({
+        stepId: '08d-adversarial-qa',
+        output: {
+          ran: true,
+          blocking: true,
+          findings: [{ severity: 'high', category: 'security', impact: 'Reported risk.' }],
+        },
+      }),
+    ).toMatchObject({ tone: 'warning', message: 'The review found 1 high-severity finding.' });
+    expect(
+      entry({ stepId: '08d2-adversarial-qa-review', output: { decision: 'fix' } }),
+    ).toMatchObject({
+      tone: 'error',
+      message: 'QA review requested fixes.',
+    });
   });
   it('counts reviewer reports rather than claiming they are unique bugs', () => {
     expect(

@@ -23,6 +23,8 @@ must never turn into a blanket clean-review claim. Validation discloses
 was clean: its producer also writes `audited: true` for an unparseable report. Manual
 browser checklists are neutral, and `verificationIncomplete` prevents a browser pass
 claim even when fixes were applied. Confirmed browser passes require a known test method.
+Fix-round headlines require a recorded request or an explicit gate decision: QA's
+`blocking` severity flag only proposes findings for the developer to accept or send back.
 A `done` row's `errorMessage` alone is not a failure: only the failed status or a current `fix_loop.requested` event proves that
 outcome. While open, the panel polls only those sparse events via the existing authenticated
 events endpoint; an event older than the row's latest `startedAt` belongs to a replaced

@@ -119,7 +119,7 @@ function outcome(
       : ['VALID', 'ISSUES_FOUND', 'UNPARSEABLE'].includes(text(output.verdict))
         ? 'Validation'
         : 'The review';
-  if (output.blocking === true || fixEvent) {
+  if (fixEvent) {
     return {
       message: found.length
         ? `${findingHeadline(found, activity)} Fix round requested.`
@@ -145,6 +145,10 @@ function outcome(
     };
   }
   if (found.length) return { message: findingHeadline(found, activity), tone: 'warning' };
+  // A severity flag can await a human gate or be accepted without a fix loop.
+  // Only the recorded request (or explicit gate decisions above) proves one.
+  if (output.blocking === true)
+    return { message: 'Blocking findings were reported.', tone: 'warning' };
   if (output.advisoryVerdict === true)
     return { message: 'Reviewers raised concerns.', tone: 'warning' };
   if (output.verdict === 'UNPARSEABLE')
