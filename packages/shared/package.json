@@ -87,6 +87,10 @@
       "types": "./dist/fs-safe.d.ts",
       "import": "./dist/fs-safe.js"
     },
+    "./database-snapshot-files": {
+      "types": "./dist/database-snapshot-files.d.ts",
+      "import": "./dist/database-snapshot-files.js"
+    },
     "./attachments-fs": {
       "types": "./dist/attachments-fs.d.ts",
       "import": "./dist/attachments-fs.js"

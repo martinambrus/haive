@@ -50,6 +50,7 @@ import { workflowRagSourceSelectionStep } from './11b1-rag-source-selection.js';
 import { ragReindexStep } from './11c-rag-reindex.js';
 import { gate4PushStep } from './11a-gate-4-push.js';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
+import { saveDatabaseStep } from './11g-save-database.js';
 import { prWaitStep } from './13-pr-wait.js';
 
 export {
@@ -156,6 +157,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(promptGuidanceStep);
   registry.register(planReconcileStep);
   registry.register(gate4PushStep);
+  registry.register(saveDatabaseStep);
   registry.register(worktreeCleanupStep);
   registry.register(prWaitStep);
 }
