@@ -3,6 +3,7 @@ import { StepRegistry } from '../src/step-engine/registry.js';
 import { registerWorkflowSteps } from '../src/step-engine/steps/workflow/index.js';
 import { orderWorkflowRunList } from '../src/orchestrator/execution-paths.js';
 import type { ExecutionPath } from '@haive/shared';
+import { registerOnboardingSteps } from '../src/step-engine/steps/onboarding/index.js';
 
 // Test management must reconcile the suite BEFORE verify runs it, or a stale assertion
 // costs an implementation round instead of a test pass. Registry order comes from
@@ -30,7 +31,16 @@ describe('workflow run order: test management before verify', () => {
 describe('workflow RAG scope precedes indexing', () => {
   const registry = new StepRegistry();
   registerWorkflowSteps(registry);
-  it('quick_bugfix can save missing scope for the next pre-sync', () => {
+  for (const path of ['full_workflow', 'quick_bugfix', 'plan_tasklist'] as const) {
+    it(`${path}: pre-sync is immediately preceded by its scope picker`, () => {
+      const ids = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], path).map(
+        (s) => s.metadata.id,
+      );
+      expect(ids.indexOf('01g-rag-source-selection')).toBeGreaterThan(-1);
+      expect(ids.indexOf('02-pre-rag-sync')).toBe(ids.indexOf('01g-rag-source-selection') + 1);
+    });
+  }
+  it('quick_bugfix has no end-of-task ingestion', () => {
     const ids = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], 'quick_bugfix').map(
       (s) => s.metadata.id,
     );
@@ -41,6 +51,12 @@ describe('workflow RAG scope precedes indexing', () => {
       ids.indexOf('12-worktree-cleanup'),
     );
     expect(ids).not.toContain('11c-rag-reindex');
+  });
+  it('onboarding population is immediately preceded by its scope picker', () => {
+    const onboarding = new StepRegistry();
+    registerOnboardingSteps(onboarding);
+    const ids = onboarding.listByWorkflow('onboarding').map((s) => s.metadata.id);
+    expect(ids.indexOf('10-rag-populate')).toBe(ids.indexOf('09_7-rag-source-selection') + 1);
   });
   for (const path of ['full_workflow', 'plan_tasklist'] as const) {
     it(`${path}: KB commit → RAG scope → re-index`, () => {

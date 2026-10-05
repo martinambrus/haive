@@ -5,7 +5,7 @@ Blank INIT seeds templates but runs neither tooling selection nor ingestion. 11c
 internal storage with onboarding's embedding defaults when both repo mirrors are absent,
 no onboarding task exists, and the repo has not been reset. Before ingestion,
 `11b1-rag-source-selection` (index 11.6, between 11b and 11c) presents the shared onboarding
-RAG directory picker for a blank repo whose `scope_exclude_globs` is NULL. It scans the
+RAG directory picker before every configured or offered end-of-task ingestion. It scans the
 worktree, using framework marker probes, Composer installer paths and `.gitignore` to
 pre-exclude framework/library/generated folders, while keeping managed knowledge immune.
 The tree, framework markers, Composer metadata and `.gitignore` all use the repository
@@ -34,12 +34,21 @@ custom allow/deny rules. An unavailable git listing treats all matches as untrac
 an unresolved task/repository policy fails closed before connecting or embedding.
 Previously indexed denied paths are purged within the repository's scope before embedding,
 even when missing, protected by a worktree scan, or an embedding endpoint is down.
-An existing `[]` is a deliberate saved choice and does not re-open the picker. This also
-covers blank repos already initialized by 11c before scope selection was added. The step
-parks for a decision even under auto-continue, and appears in every path that includes 11c.
-It also appears on `quick_bugfix` for a repo with existing RAG but no saved scope, so later
-quick fixes can run pre-sync. Unconfigured quick fixes defer the picker until a workflow
-that offers ingestion; the quick path still has no 11c initialization step.
+The picker refreshes its tree on every task and preselects the saved scope, including an
+explicit `[]` (include everything). `01g-rag-source-selection` (index 1.95) also precedes
+every configured `02-pre-rag-sync` on full, tasklist, and quick-fix paths. It scans the main
+checkout, so files installed or edited outside the task worktree are visible before pre-sync;
+11b1 scans the same worktree that 11c indexes. Onboarding already presents 09_7 immediately
+before population. Both workflow pickers park even under auto-continue, since reviewing
+new project folders is a current decision rather than a reusable past answer. Saving keeps
+exclusions for directories absent from the displayed tree; visible directories can be
+explicitly re-enabled. Managed knowledge remains immune to scope exclusions.
+Once a repository scope has been saved, it supersedes onboarding's old custom-code
+exclusion heuristic and retired directory allow list; those remain fallbacks only for
+repositories without a saved scope. The onboarding extension selection still applies.
+Quick fixes have no 11c ingestion and skip its end picker (retained in the registry for
+compatibility with tasks already parked there). Unconfigured quick fixes defer setup to a
+workflow that offers ingestion. Disabled or unconfigured RAG has no pre-sync picker.
 `02-pre-rag-sync` waits while that scope is missing; the shared workflow indexer refuses
 unscoped blank repositories even when replaying old detect outputs. An already parked 11c
 can reach the new picker by retrying 11b. Saving the scope uses the existing repo-level deny

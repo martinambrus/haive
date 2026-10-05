@@ -11,6 +11,7 @@ import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
 import { externalKbSyncStep } from './01e-external-kb-sync.js';
 import { externalPlanSyncStep } from './01f-external-plan-sync.js';
+import { preRagSourceSelectionStep } from './01g-rag-source-selection.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
 import { businessRequirementsStep } from './03b-business-requirements.js';
@@ -63,6 +64,7 @@ export {
   ddevEnvStep,
   externalKbSyncStep,
   externalPlanSyncStep,
+  preRagSourceSelectionStep,
   preRagSyncStep,
   phase0aDiscoveryStep,
   businessRequirementsStep,
@@ -116,6 +118,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(ddevEnvStep);
   registry.register(externalKbSyncStep);
   registry.register(externalPlanSyncStep);
+  registry.register(preRagSourceSelectionStep);
   registry.register(preRagSyncStep);
   registry.register(phase0aDiscoveryStep);
   registry.register(businessRequirementsStep);

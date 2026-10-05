@@ -178,7 +178,7 @@ export const ragSourceSelectionStep: StepDefinition<
         `Found ${detected.totalCodeFiles} code files.`,
         'Ticked directories are indexed into the RAG semantic-search index reused across every task.',
         'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) and AI-agent tooling dirs (.claude, .codex, .gemini, .cursor, ...) are pre-unticked — leave them off to keep the RAG index focused on this project’s own code.',
-        'This is the repository’s global RAG scope: it is saved on the repo (editable later in repository settings). Adjust the selection if RAG should cover more or less.',
+        'This is the repository’s global RAG scope, including changes made outside this task. Your saved exclusions are preselected when available. Review newly added folders and adjust what RAG should cover before ingestion.',
         'Un-ticked directories become the repo RAG exclusion list; new folders added by later tasks are included automatically.',
       ].join(' '),
       fields: [
@@ -204,7 +204,13 @@ export const ragSourceSelectionStep: StepDefinition<
     // The knowledge dirs are never excludable, however the user ticks the tree —
     // this is the repo-level list, so an unticked `.haive-data` would otherwise
     // persist and follow the repo into every later task.
-    const excludeGlobs = stripManagedKnowledgeGlobs(frontier);
+    // A worktree or capped tree can omit folders excluded by an earlier task.
+    // Saving its visible checkboxes must not silently re-enable those paths.
+    const visible = new Set(collectAllPaths(detected.tree));
+    const saved = (await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId)) ?? [];
+    const excludeGlobs = stripManagedKnowledgeGlobs([
+      ...new Set([...frontier, ...saved.filter((rel) => !visible.has(rel))]),
+    ]);
     excludeGlobs.sort();
 
     const repositoryId = await resolveRepositoryId(ctx.db, ctx.taskId);
