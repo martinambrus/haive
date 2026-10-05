@@ -6,6 +6,7 @@ declare module '@novnc/novnc' {
     constructor(target: HTMLElement, url: string, options?: Record<string, unknown>);
     scaleViewport: boolean;
     resizeSession: boolean;
+    focus(options?: FocusOptions): void;
     disconnect(): void;
     /** Send text to the remote's clipboard (client → server paste). */
     clipboardPasteFrom(text: string): void;
