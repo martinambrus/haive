@@ -442,7 +442,7 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     const lostSnapshot = winner === a ? cb : ca;
     const form = databaseSaveForm(await loadDatabaseSnapshotState(loser));
     expect(form?.fields.find((f) => f.id === 'sourceTask')).toMatchObject({
-      body: winner === a ? 'A' : 'B',
+      body: `**Saved by task:**\n\n${winner === a ? 'A' : 'B'}\n\n[Open source task](/tasks/${winner.taskId})`,
     });
     expect(await promoteDatabaseSnapshot(winner, 0)).toBe('saved');
     expect((await head())!.revision).toBe(1);
