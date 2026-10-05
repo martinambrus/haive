@@ -293,15 +293,16 @@ function safeCandidate(h: { file: string; line: number }): boolean {
 }
 
 const locationKey = (f: { path: string; line?: number }) => `${f.path}:${f.line ?? ''}`;
+const findingKey = (f: SecretFinding) => `${locationKey(f)}:${f.commit ?? ''}:${f.kind ?? ''}`;
 
 /** Keep confirmed findings across focused follow-ups. A later dismissal cannot erase one. */
 export function mergeSweepReports(prior: SweepReport, next: SweepReport): SweepReport {
   const findings = new Map<string, SecretFinding>();
   for (const f of [...prior.findings, ...next.findings]) {
-    const key = `${locationKey(f)}:${f.commit ?? ''}:${f.kind ?? ''}`;
+    const key = findingKey(f);
     if (!findings.has(key)) findings.set(key, f);
   }
-  const locations = new Set([...findings.values()].map(locationKey));
+  const locations = new Set([...findings.values()].filter((f) => !f.commit).map(locationKey));
   const dismissed = new Map<string, DismissedCandidate>();
   for (const f of [...prior.dismissed, ...next.dismissed]) {
     if (!locations.has(locationKey(f))) dismissed.set(locationKey(f), f);
@@ -337,7 +338,7 @@ export async function completeSecretSweep(args: {
       progress.attempts[key] = (progress.attempts[key] ?? 0) + 1;
     }
     for (const f of report.findings) {
-      progress.findingInvocations[locationKey(f)] ??= args.llmInvocationId;
+      progress.findingInvocations[findingKey(f)] ??= args.llmInvocationId;
     }
     progress.report = mergeSweepReports(progress.report, report);
     progress.processedInvocations.push(args.llmInvocationId);
@@ -490,7 +491,7 @@ export function unruledCandidates(
 ): string[] {
   if (hits.length === 0) return [];
   const seen = new Set<string>();
-  for (const f of report.findings) if (f.line) seen.add(`${f.path}:${f.line}`);
+  for (const f of report.findings) if (f.line && !f.commit) seen.add(`${f.path}:${f.line}`);
   for (const d of report.dismissed) if (d.line) seen.add(`${d.path}:${d.line}`);
   return hits.map((h) => `${h.file}:${h.line}`).filter((key) => !seen.has(key));
 }
@@ -692,6 +693,8 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
       findings.map((f) => ({
         reviewerId: 'secret-sweeper',
         cliInvocationId:
+          args.detected.completion?.findingInvocations[findingKey(f)] ??
+          // Compatibility with checkpoints whose attribution was keyed only by location.
           args.detected.completion?.findingInvocations[locationKey(f)] ??
           args.llmInvocationId ??
           null,

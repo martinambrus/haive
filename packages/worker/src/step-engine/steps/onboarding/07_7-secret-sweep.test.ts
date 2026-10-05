@@ -627,6 +627,54 @@ describe('focused secret-sweep completion', () => {
     ).toHaveLength(2);
   });
 
+  it('requires a current-tree verdict even when history has a finding at the same path and line', async () => {
+    const d: Detection = detection(1);
+    const first = await complete(d, 'history', {
+      findings: [{ path: 'file-0.js', line: 1, commit: 'abcdef0', issue: 'Historical credential' }],
+    });
+    expect(first.continueRequested).toBe(true);
+    expect(d.completion!.pending).toEqual([{ file: 'file-0.js', line: 1 }]);
+    const final = await complete(d, 'current', {
+      findings: [],
+      dismissed: [{ path: 'file-0.js', line: 1, reason: 'Current line is a placeholder' }],
+    });
+    expect(final.continueRequested).toBe(false);
+    expect(parseSweepReport(final.llmOutput)).toMatchObject({
+      findings: [{ commit: 'abcdef0' }],
+      dismissed: [{ path: 'file-0.js', line: 1 }],
+    });
+  });
+
+  it('keeps separate invocation attribution for historical and current credentials at the same location', async () => {
+    const d: Detection = detection(1);
+    await complete(d, 'history', {
+      findings: [{ path: 'file-0.js', line: 1, commit: 'abcdef0', issue: 'Historical credential' }],
+    });
+    const current = {
+      findings: [{ path: 'file-0.js', line: 1, issue: 'Current credential' }],
+    };
+    expect((await complete(d, 'current', current)).continueRequested).toBe(false);
+    const rows: Record<string, unknown>[] = [];
+    await secretSweepStep.apply(
+      {
+        taskId: 't1',
+        taskStepId: 's1',
+        round: 0,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        db: {
+          insert: () => ({
+            values: (values: Record<string, unknown>[]) => {
+              rows.push(...values);
+              return { onConflictDoNothing: async () => {} };
+            },
+          }),
+        },
+      } as never,
+      { detected: d, llmOutput: current, llmInvocationId: 'current' } as never,
+    );
+    expect(rows.map((row) => row.cliInvocationId)).toEqual(['history', 'current']);
+  });
+
   it('does not allow a later dismissal to remove an earlier finding', () => {
     const prior = parseSweepReport({
       findings: [{ severity: 'high', path: 'a.js', line: 1, issue: 'credential' }],

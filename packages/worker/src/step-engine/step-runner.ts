@@ -2417,7 +2417,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // checkpoint lands before consuming the invocation, so a crash replays that id
     // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
     // ownership/reservation path; no CLI is spawned directly from this hook.
-    if (stepDef.llm?.preForm && stepDef.llm.completePreForm && !current.formValues) {
+    // Include submitted forms: a legacy form can predate this completion checkpoint.
+    if (stepDef.llm?.preForm && stepDef.llm.completePreForm) {
       const completion = await stepDef.llm.completePreForm({
         ctx,
         detected,

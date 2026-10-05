@@ -156,7 +156,8 @@ export interface LlmInvocationSpec {
   shouldRetryPreForm?: (llmOutput: unknown) => boolean;
   /** Finish a pre-form report before presenting it. May checkpoint partial results in
    * detect_output and request another targeted invocation. The step must bound retries
-   * and make processing an invocation idempotent across crash recovery. */
+   * and make processing an invocation idempotent across crash recovery and submitted
+   * forms. A continuation clears the previous form and its answers. */
   completePreForm?: (args: {
     ctx: StepContext;
     detected: unknown;

@@ -65,8 +65,12 @@ source maps and generated copies are inspected rather than assumed equivalent.
 The completed invocation ids, pending batch, attempt counts and merged findings
 persist in `detect_output.completion`, so a replay cannot spend a batch twice.
 Previously reported findings survive later batches and keep their original
-invocation attribution. The form and apply merge the saved report with the last
-invocation, including when a saved form answer skips the completion hook.
+invocation attribution, keyed by location, history commit and credential kind.
+A history-only finding cannot clear a current-tree candidate or erase its dismissal
+at the same path and line. The form and apply merge the saved report with the last
+invocation, including submitted-form continuations. Completion runs on those
+continuations too, so an upgraded legacy form cannot bypass inventory hydration;
+if new verdicts are needed, the previous form and its answers are cleared.
 
 Retries are bounded to three focused attempts per candidate and 32 follow-up
 passes. Remaining gaps stay in internal detection records and worker logs, never

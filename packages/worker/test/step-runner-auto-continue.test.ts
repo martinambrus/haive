@@ -267,35 +267,40 @@ describe('pre-form report completion', () => {
     expect(form.mock.calls[0]![2]).toEqual({ initial: true, last: true });
   });
 
-  it('consumes the completed invocation and does not present a form while follow-up work is owed', async () => {
-    const state = freshState();
-    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
-    state.invocation = {
-      id: 'inv-1',
-      endedAt: new Date(),
-      exitCode: 0,
-      rawOutput: '{"findings":[]}',
-      parsedOutput: null,
-      errorMessage: null,
-    };
-    const form = vi.fn(() => ZERO_FIELD_FORM);
-    const def = makeStep({ form });
-    def.llm = {
-      preForm: true,
-      requiredCapabilities: [],
-      buildPrompt: () => '',
-      completePreForm: async ({ llmInvocationId }) => {
-        expect(llmInvocationId).toBe('inv-1');
-        return { llmOutput: { findings: [] }, continueRequested: true };
-      },
-    };
-    // No worker dependencies are supplied: a fresh dispatch must fail instead of
-    // replaying the just-consumed result and showing a premature results form.
-    expect((await run(state, def)).status).toBe('failed');
-    expect(state.invocation.consumedAt).toBeInstanceOf(Date);
-    expect(form).not.toHaveBeenCalled();
-    expect(state.taskStepRow.formSchema).toBeNull();
-  });
+  it.each([null, { acknowledged: true }])(
+    'consumes the completed invocation and clears any previous answers (%j) while follow-up work is owed',
+    async (formValues) => {
+      const state = freshState();
+      state.taskStepRow.formValues = formValues;
+      state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+      state.invocation = {
+        id: 'inv-1',
+        endedAt: new Date(),
+        exitCode: 0,
+        rawOutput: '{"findings":[]}',
+        parsedOutput: null,
+        errorMessage: null,
+      };
+      const form = vi.fn(() => ZERO_FIELD_FORM);
+      const def = makeStep({ form });
+      def.llm = {
+        preForm: true,
+        requiredCapabilities: [],
+        buildPrompt: () => '',
+        completePreForm: async ({ llmInvocationId }) => {
+          expect(llmInvocationId).toBe('inv-1');
+          return { llmOutput: { findings: [] }, continueRequested: true };
+        },
+      };
+      // No worker dependencies are supplied: a fresh dispatch must fail instead of
+      // replaying the just-consumed result and showing a premature results form.
+      expect((await run(state, def)).status).toBe('failed');
+      expect(state.invocation.consumedAt).toBeInstanceOf(Date);
+      expect(form).not.toHaveBeenCalled();
+      expect(state.taskStepRow.formSchema).toBeNull();
+      expect(state.taskStepRow.formValues).toBeNull();
+    },
+  );
 });
 
 const QUESTION_FORM: FormSchema = {
