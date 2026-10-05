@@ -19,9 +19,11 @@ export interface DependencyPolicy {
 export const OWNERSHIP_POLICY_PATH = '.haive-data/dependency-ownership.json';
 const DEFAULT_ROOTS = ['', 'web', 'docroot', 'public', 'html'];
 
-function relativePath(value: string): string | null {
+function relativePath(value: string, allowGitControls = false): string | null {
   const raw = value.replace(/:\d+(?::\d+)?$/, '').replaceAll('\\', '/');
-  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(raw)) return null;
+  // Git accepts tabs and newlines in filenames. Refusing a policy declaration is safe;
+  // refusing to classify such a changed path would let upstream source through the guard.
+  if (!allowGitControls && /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(raw)) return null;
   if (path.posix.isAbsolute(raw)) return null;
   const normalized = path.posix.normalize(raw).replace(/^\.\//, '').replace(/\/$/, '');
   if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../'))
@@ -62,6 +64,7 @@ export function upstreamKind(
   const workspaceRoot = policy?.workspaceRoots?.find((root) => file.startsWith(`${root}/`));
   const rel = relativePath(
     workspaceRoot ? file.slice(workspaceRoot.length + 1) : file.replace(/^\/haive\/workdir\//, ''),
+    true,
   );
   if (!rel) return null;
   const roots = policy?.drupalRoots ?? DEFAULT_ROOTS;

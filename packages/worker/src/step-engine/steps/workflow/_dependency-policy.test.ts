@@ -182,6 +182,17 @@ describe('dependency ownership', () => {
     await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
   });
 
+  it.each(['vendor/acme/pkg/a\nb.php', 'web/core/lib/a\tb.php', 'node_modules/pkg/a\u0085b.js'])(
+    'refuses upstream paths containing Git-valid control characters: %s',
+    async (rel) => {
+      const root = await repository();
+      await file(root, rel, 'rewritten\n');
+      await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
+        'Refusing to commit',
+      );
+    },
+  );
+
   it('rejects earlier committed edits and ownership claims, but allows restoring upstream source', async () => {
     const root = await repository();
     await git(root, ['branch', 'task-base']);
