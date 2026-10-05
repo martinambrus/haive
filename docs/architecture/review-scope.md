@@ -1,5 +1,22 @@
 # Review scope
 
+Ownership is a separate boundary from change causality. Newly installing a module makes
+its integration relevant to acceptance checks; it does not authorize auditing or rewriting
+its internals. `_dependency-policy.ts` classifies Drupal core as infrastructure and conventional
+contrib, vendor and node_modules locations as third-party. Composer scaffold roots and Drupal 7
+core layouts are recognized. An operator can declare exact maintained package directories in
+`.haive-data/dependency-ownership.json` (`{"ownedPaths":["web/modules/contrib/company_module"]}`)
+on the task's base branch. The policy is read from the fork point; an agent's working-copy or
+task-branch declaration cannot claim ownership. Core cannot be exempted. Other framework
+layouts remain governed by the prompt rules; this classifier is not a sandbox write filter.
+
+07b and 08c assign upstream classification on the host, independently of the reviewer's
+`in_scope` claim. Upstream findings remain visible, marked for a user decision at gate 2;
+they never become automatic repair assignments or refuter work. Validation stops its local
+fix loop when upstream findings are present. Medium and low advisories never piggyback on a
+high or critical finding's automatic repair diagnosis. Review dimensions assess task behavior
+and existing project contracts; they do not mandate new translation or other subsystems.
+
 Every reviewing step (07a, 07b, 08a, 08b, 08c, 08c2, 08d) is scoped by ONE collector,
 `collectImplementationFiles` (`_impl-changes.ts`). It unions 07's agent-reported
 `filesTouched`, the DAG issues' `filesModified`, and the dirty worktree, caps the list at 100

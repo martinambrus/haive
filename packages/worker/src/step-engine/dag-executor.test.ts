@@ -916,6 +916,7 @@ function makeDagMergeWaitDb(opts: {
   stepRowStatus?: string;
   /** The issue as a coder left it, for section C, or still unmerged (`mergeStatus: null`). */
   issue?: Partial<{
+    worktreePath: string;
     outcome: string;
     cliInvocationId: string | null;
     infraRetries: number;
@@ -1447,15 +1448,17 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
 
   it('a merge git refused in the merge pass halts with its reason and sends no fixer', async () => {
     const integrationDir = await setupConflictedIntegration(true);
+    const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-commit-'));
     try {
       await gitCode(integrationDir, ['merge', '--abort']);
+      await git(integrationDir, ['worktree', 'add', issueDir, 'main--ISSUE-1']);
       // An untracked file where the issue adds one: git refuses the merge outright.
       await writeFile(path.join(integrationDir, 'issue.txt'), 'mine\n', 'utf8');
       const h = makeDagMergeWaitDb({
         invocation: undefined,
         integrationDir,
         autoResolveConflicts: true,
-        issue: { mergeStatus: null },
+        issue: { mergeStatus: null, worktreePath: issueDir },
       });
       vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
       const result = await resolveDagPhase(
@@ -1478,6 +1481,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       );
       expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe('mine\n');
     } finally {
+      await rm(issueDir, { recursive: true, force: true });
       await rm(integrationDir, { recursive: true, force: true });
     }
   });

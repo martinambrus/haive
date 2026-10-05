@@ -1,3 +1,4 @@
+import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
@@ -425,6 +426,7 @@ async function commitIssueWork(
   issue: DagIssueRow,
   gitEnv: Record<string, string>,
 ): Promise<void> {
+  await assertDependencyCommitSafe(ctx, worktreePath);
   await gitRun(worktreePath, ['add', '-A']);
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
   if (status.code === 0 && status.stdout.trim().length === 0) return;
@@ -2612,7 +2614,7 @@ export async function resolveDagPhase(
     );
     for (const issue of acceptedForMerge) {
       if (!issue.worktreePath || issue.mergeStatus !== null) continue;
-      await commitIssueWork(ctx, issue.worktreePath, issue, gitEnv);
+      await commitIssueWork({ ...ctx, db }, issue.worktreePath, issue, gitEnv);
       if (!(await issueBranchHasChanges(ctx, issue))) {
         const error =
           `DAG issue ${issue.issueKey} produced no branch changes; ` +

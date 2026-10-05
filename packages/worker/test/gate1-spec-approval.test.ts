@@ -154,6 +154,36 @@ function applyArgs(formValues: Record<string, unknown>) {
 }
 
 describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
+  it('shows unresolved scope conflicts and requires an explicit answer before approval', async () => {
+    const detected = {
+      ...detectedStub(),
+      scopeQuestions: ['May Navigation be removed despite the preserve-permissions constraint?'],
+    };
+    const { ctx } = makeApplyCtx();
+    const schema = gate1SpecApprovalStep.form!(ctx, detected) as FormSchema;
+    expect(
+      schema.infoSections?.find((section) => section.title === 'Scope decisions required')?.body,
+    ).toContain('Navigation');
+    expect(schema.fields.find((field) => field.id === 'decision')).toMatchObject({
+      default: 'reject',
+    });
+    await expect(
+      gate1SpecApprovalStep.apply(ctx, {
+        detected,
+        formValues: { decision: 'approve' },
+        iteration: 0,
+        previousIterations: [],
+      } as never),
+    ).rejects.toThrow();
+    const out = await gate1SpecApprovalStep.apply(ctx, {
+      detected,
+      formValues: { decision: 'approve', feedback: 'Keep Navigation and preserve permissions.' },
+      iteration: 0,
+      previousIterations: [],
+    } as never);
+    expect(out.feedback).toBe('Keep Navigation and preserve permissions.');
+  });
+
   it('rejecting records feedback and returns reject without throwing', async () => {
     const { ctx, events } = makeApplyCtx();
     const out = (await gate1SpecApprovalStep.apply(

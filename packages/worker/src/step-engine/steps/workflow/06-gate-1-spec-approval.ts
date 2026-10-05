@@ -14,6 +14,7 @@ import {
 } from './_affected-components.js';
 
 interface SpecGateDetect {
+  scopeQuestions?: string[];
   /** Full spec body (markdown). The renderer turns this into HTML inside
    *  the expandable "Full specification" section. */
   specBody: string;
@@ -334,7 +335,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
-    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
+    const resolvedOutput =
+      (resolved?.output as { spec?: string; scopeQuestions?: string[] } | null) ?? {};
     // Prefer the post-checkpoint spec (05a: user/agent warning fixes), then the
     // 05 amended body, then the original 04 spec/summary.
     const specBody =
@@ -349,6 +351,12 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const repositoryId = task?.repositoryId ?? null;
 
     return {
+      scopeQuestions: [
+        ...new Set([
+          ...((qualityOutput as { scopeQuestions?: string[] }).scopeQuestions ?? []),
+          ...(resolvedOutput.scopeQuestions ?? []),
+        ]),
+      ],
       specBody,
       specSummary: buildSpecSummary(specBody),
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
@@ -386,7 +394,17 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       detected.specBody.trim().length > 0
         ? `${detected.specBody.length.toLocaleString()} chars`
         : 'empty';
+    const scopeQuestions = detected.scopeQuestions ?? [];
     const infoSections: InfoSection[] = [
+      ...(scopeQuestions.length
+        ? [
+            {
+              title: 'Scope decisions required',
+              body: scopeQuestions.map((question, index) => `${index + 1}. ${question}`).join('\n'),
+              defaultOpen: true,
+            },
+          ]
+        : []),
       {
         title: 'Specification summary',
         ...(summaryPreview ? { preview: summaryPreview } : {}),
@@ -414,13 +432,16 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
             { value: 'approve', label: 'Approve — proceed to implementation' },
             { value: 'reject', label: 'Reject — request changes and re-draft' },
           ],
-          default: 'approve',
+          default: scopeQuestions.length ? 'reject' : 'approve',
           required: true,
         },
         {
           type: 'textarea',
           id: 'feedback',
-          label: 'Feedback for the implementation phase',
+          label: scopeQuestions.length
+            ? 'Answer the scope questions or give revision instructions'
+            : 'Feedback for the implementation phase',
+          required: scopeQuestions.length > 0,
           rows: 4,
         },
       ],
@@ -444,6 +465,9 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     const feedback = typeof values.feedback === 'string' ? values.feedback : '';
+    if ((args.detected.scopeQuestions?.length ?? 0) > 0 && !feedback.trim()) {
+      throw new Error('Answer the scope questions before recording the spec decision.');
+    }
     ctx.logger.info({ decision }, 'spec gate decision recorded');
     if (decision === 'reject') {
       // Record the rejection feedback, then return normally (no throw, no halt). The

@@ -13,6 +13,26 @@ const base = {
 };
 
 describe('05a form auto-submit on a spec revise', () => {
+  it('preserves explicit scope questions for the user gate', async () => {
+    const out = await resolveSpecWarningsStep.apply(
+      { logger: { info: () => undefined, warn: () => undefined } } as never,
+      {
+        detected: { ...base, revising: false },
+        formValues: { action: 'agent' },
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: {
+          amendedSpec: 'SPEC',
+          scopeQuestions: ['May we remove Navigation despite the permission constraint?'],
+        },
+      },
+    );
+    expect(out.scopeQuestions).toEqual([
+      'May we remove Navigation despite the permission constraint?',
+    ]);
+    expect(out.spec).toBe('SPEC');
+  });
+
   it('auto-submits the default "continue as-is" when revising', () => {
     const schema = resolveSpecWarningsStep.form!(ctx, { ...base, revising: true })!;
     expect(schema.autoSubmit).toBe(true);

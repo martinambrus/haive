@@ -1,5 +1,15 @@
 # Workflow commits
 
+Before `git add -A`, both gate 3 and the DAG issue committer run `assertDependencyCommitSafe`.
+It checks uncapped untracked paths and tracked changes against the task's fork point, including
+earlier issue commits, deletions and both sides of renames. Modified infrastructure and
+third-party source refuse the commit. Restoring upstream source to its baseline is allowed.
+Ownership comes from the baseline policy described in [Review scope](review-scope.md), never
+a declaration introduced by the agent. Package manifests, lockfiles, patch files and project
+integration code remain valid commit artifacts. This guard checks Git deliverables; ignored
+installed source and ad-hoc scripts are constrained by the agent rules and review, rather than
+being inspected by this path check.
+
 `10-gate-3-commit` generates its message with a pre-form LLM invocation. Detection remains
 deterministic: the worker builds the commit-diff snapshot from the same staged, unstaged and
 untracked files `git add -A` will include. The message invocation receives bounded before/after

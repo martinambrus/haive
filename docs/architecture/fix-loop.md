@@ -1,5 +1,13 @@
 # Fix loop
 
+Automatic repair diagnoses from 07b and 08c contain only unresolved high or critical findings
+in project-owned code. Medium and low observations stay visible at gate 2. Host-classified
+upstream findings are report-only, even when newly reachable or labelled in scope by a reviewer.
+07b stops its local validator/fixer loop when such findings appear. Infrastructure defects are
+never repair assignments; a blocking failure requires a user decision. A reproduced contributed
+module failure can be resolved with the minimal package-manager-applied patch under the task
+boundary, never by committing edited dependency source.
+
 A downstream step that finds a blocking defect returns `loop_back` instead of failing: the
 queue bumps the round, records the diagnosis as a `fix_loop.requested` task event and
 re-enters at `FIX_LOOP_TARGET_STEP_ID` (`_fix-loop.ts`), which is `07-phase-2-implement` and

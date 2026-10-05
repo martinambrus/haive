@@ -1,0 +1,212 @@
+import path from 'node:path';
+import { readTextNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
+import { gitRun } from '../../../repo/git-exec.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import type { StepContext } from '../../step-definition.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { parsePorcelainZ } from './_commit-diff.js';
+
+export type UpstreamKind = 'infrastructure' | 'dependency';
+export interface DependencyPolicy {
+  baselineRef?: string;
+  workspaceRoots?: string[];
+  drupal: boolean;
+  drupal7?: boolean;
+  drupalRoots: string[];
+  ownedPaths: string[];
+}
+
+export const OWNERSHIP_POLICY_PATH = '.haive-data/dependency-ownership.json';
+const DEFAULT_ROOTS = ['', 'web', 'docroot', 'public', 'html'];
+
+function relativePath(value: string): string | null {
+  const raw = value.replace(/:\d+(?::\d+)?$/, '').replaceAll('\\', '/');
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(raw)) return null;
+  if (path.posix.isAbsolute(raw)) return null;
+  const normalized = path.posix.normalize(raw).replace(/^\.\//, '').replace(/\/$/, '');
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../'))
+    return null;
+  return normalized;
+}
+
+export function parseDependencyOwnership(raw: string | null): string[] {
+  if (raw === null) return [];
+  const data = JSON.parse(raw) as { ownedPaths?: unknown };
+  if (!data || !Array.isArray(data.ownedPaths)) {
+    throw new Error(`${OWNERSHIP_POLICY_PATH} must contain an ownedPaths array.`);
+  }
+  return data.ownedPaths.map((entry: unknown) => {
+    const rel = typeof entry === 'string' ? relativePath(entry) : null;
+    if (!rel || entry !== rel || !rel.includes('/')) {
+      throw new Error(`Ownership entries must name exact package directories, not roots or globs.`);
+    }
+    if (/[?*{}[\]]/.test(rel)) throw new Error('Ownership entries cannot contain globs.');
+    if (
+      /(^|\/)(vendor|node_modules|contrib)$/.test(rel) ||
+      /(^|\/)vendor\/[^/]+$/.test(rel) ||
+      /(^|\/)node_modules\/@[^/]+$/.test(rel)
+    )
+      throw new Error(
+        'Ownership entries must name individual packages, not dependency containers.',
+      );
+    return rel;
+  });
+}
+
+export function upstreamKind(
+  file: string | undefined,
+  policy?: DependencyPolicy,
+): UpstreamKind | null {
+  if (!file) return null;
+  // Reviewers sometimes supply an absolute sandbox path instead of a repository-relative one.
+  const workspaceRoot = policy?.workspaceRoots?.find((root) => file.startsWith(`${root}/`));
+  const rel = relativePath(
+    workspaceRoot ? file.slice(workspaceRoot.length + 1) : file.replace(/^\/haive\/workdir\//, ''),
+  );
+  if (!rel) return null;
+  const roots = policy?.drupalRoots ?? DEFAULT_ROOTS;
+  for (const root of roots) {
+    const prefix = root ? `${root}/` : '';
+    if (
+      (policy ? policy.drupal : root !== '') &&
+      (rel === `${prefix}core` || rel.startsWith(`${prefix}core/`))
+    )
+      return 'infrastructure';
+    if (
+      policy?.drupal7 &&
+      /^(includes|modules|profiles|themes|misc)(\/|$)/.test(rel.slice(prefix.length)) &&
+      rel.startsWith(prefix)
+    ) {
+      // Drupal 7's core modules live directly under modules; project extensions live in sites/.
+      if (!/^(modules|themes|profiles)\/(contrib|custom)(\/|$)/.test(rel.slice(prefix.length)))
+        return 'infrastructure';
+    }
+  }
+  if (/(^|\/)vendor\/drupal\/core(?:\/|$)/.test(rel)) return 'infrastructure';
+  const installed =
+    /(^|\/)(vendor|node_modules)(\/|$)/.test(rel) ||
+    /(^|\/)(modules|themes|profiles)\/contrib(?:\/|$)/.test(rel) ||
+    /(^|\/)sites\/[^/]+\/(modules|themes)\/(?!custom(?:\/|$))/.test(rel);
+  if (!installed) return null;
+  if (
+    policy?.ownedPaths.some((owned) => {
+      if (rel === owned) return true;
+      if (!rel.startsWith(`${owned}/`)) return false;
+      // Owning a package does not establish ownership of its installed dependencies.
+      return !/(^|\/)(vendor|node_modules|contrib)(\/|$)/.test(rel.slice(owned.length + 1));
+    })
+  )
+    return null;
+  return 'dependency';
+}
+
+/** Only host-assigned upstream metadata is accepted; reviewer schemas discard this field. */
+export function findingUpstream(f: {
+  path?: string;
+  file?: string;
+  upstream?: UpstreamKind | null;
+}): UpstreamKind | null {
+  return f.upstream === undefined ? upstreamKind(f.path ?? f.file) : f.upstream;
+}
+
+/** Ownership is read from the task's fork point, never from an agent's edited working copy. */
+export async function loadDependencyPolicy(
+  ctx: StepContext,
+  workspace: string,
+): Promise<DependencyPolicy> {
+  const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const baseBranch = (previous?.output as { baseBranch?: string } | null)?.baseBranch;
+  const base = baseBranch
+    ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch])
+    : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD']);
+  if (base.code !== 0) {
+    throw new Error('Cannot establish the repository baseline for dependency ownership.');
+  }
+  const ownership = await gitRun(workspace, [
+    'show',
+    `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
+  ]);
+  const baselineComposer = await gitRun(workspace, ['show', `${base.stdout.trim()}:composer.json`]);
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
+  let drupal = false;
+  const roots = [...DEFAULT_ROOTS];
+  // Removing the framework from the working manifest cannot remove its protection.
+  for (const raw of [baselineComposer.code === 0 ? baselineComposer.stdout : null, composer]) {
+    if (!raw) continue;
+    const manifest = JSON.parse(raw) as {
+      type?: string;
+      require?: Record<string, unknown>;
+      extra?: { 'drupal-scaffold'?: { locations?: { 'web-root'?: string } } };
+    };
+    drupal ||=
+      !['drupal-module', 'drupal-theme', 'drupal-profile'].includes(manifest.type ?? '') &&
+      Object.keys(manifest.require ?? {}).some((name) => name.startsWith('drupal/core'));
+    const root = manifest.extra?.['drupal-scaffold']?.locations?.['web-root'];
+    if (typeof root === 'string') {
+      const rel = relativePath(root);
+      if (rel) roots.push(rel);
+    }
+  }
+  const baselineDrupal7 = await gitRun(workspace, [
+    'cat-file',
+    '-e',
+    `${base.stdout.trim()}:includes/bootstrap.inc`,
+  ]);
+  const drupal7 =
+    baselineDrupal7.code === 0 ||
+    (await lstatNoFollow(anchor, `${prefix}includes/bootstrap.inc`)) !== null;
+  drupal ||= drupal7;
+  return {
+    baselineRef: base.stdout.trim(),
+    workspaceRoots: [workspace, ctx.sandboxWorkdir]
+      .filter((root): root is string => !!root)
+      .map((root) => root.replace(/\/$/, '')),
+    drupal,
+    drupal7,
+    drupalRoots: [...new Set(roots)],
+    ownedPaths: parseDependencyOwnership(ownership.code === 0 ? ownership.stdout : null),
+  };
+}
+
+/** No changed upstream source may enter either a workflow or DAG issue commit. */
+export async function assertDependencyCommitSafe(
+  ctx: StepContext,
+  workspace: string,
+): Promise<void> {
+  const policy = await loadDependencyPolicy(ctx, workspace);
+  const status = await gitRun(workspace, [
+    '--no-optional-locks',
+    'status',
+    '--porcelain',
+    '-z',
+    '-uall',
+  ]);
+  if (status.code !== 0) throw new Error(`Cannot check dependency changes: ${status.stderr}`);
+  // Compare the final tracked tree with the fork point, including previous issue commits.
+  // Restoring an accidentally committed upstream file to its baseline is permitted.
+  const changes = await gitRun(workspace, [
+    'diff',
+    '--name-only',
+    '-z',
+    '--no-renames',
+    policy.baselineRef!,
+    '--',
+  ]);
+  if (changes.code !== 0)
+    throw new Error(`Cannot check dependency changes against the baseline: ${changes.stderr}`);
+  const denied = [
+    ...parsePorcelainZ(status.stdout)
+      .filter((entry) => entry.x === '?')
+      .map((entry) => entry.path),
+    ...changes.stdout.split('\0'),
+  ].filter((file): file is string => !!file && upstreamKind(file, policy) !== null);
+  if (denied.length > 0) {
+    throw new Error(
+      `Refusing to commit changed upstream source: ${[...new Set(denied)].join(', ')}. ` +
+        'Report infrastructure defects to the user. For a reproduced third-party module blocker, ' +
+        'commit a package-manager-applied patch and restore the upstream source before committing. ' +
+        `Declare genuinely project-owned packages in ${OWNERSHIP_POLICY_PATH} on the base branch.`,
+    );
+  }
+}

@@ -150,6 +150,24 @@ describe('gate-2 status summary', () => {
     expect(decisionDefault(d)).toBe('approve');
   });
 
+  it('keeps upstream observations visible for a decision without labelling them automatic blockers', () => {
+    const d = baseDetect({
+      codeReview: {
+        ...cleanReview,
+        advisoryVerdict: true,
+        upstreamObservations: true,
+        securityFindings: [
+          '[upstream dependency — user decision] [medium] web/modules/contrib/foo/a.php upstream observation',
+        ],
+      },
+    });
+    expect(row(d, 'Code review')?.status).toBe('warn');
+    expect(row(d, 'Code review')?.body).toContain('upstream dependency — user decision');
+    expect(row(d, 'Code review')?.statusLabel).toBe('UPSTREAM');
+    expect(row(d, 'Code review')?.detail).toContain('no upstream repair was assigned');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
   it('a blocking review still outranks incomplete', () => {
     const d = baseDetect({
       codeReview: { ...cleanReview, blocking: true, reviewIncomplete: true },

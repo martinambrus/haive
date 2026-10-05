@@ -1518,3 +1518,117 @@ describe('08c review-dimension scope', () => {
     expect(security.prompt).not.toContain('DIMENSION SCOPE FOR THIS RUN');
   });
 });
+
+describe('upstream ownership routing', () => {
+  it('keeps upstream observations visible without sending them to refuters or fixers', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', JSON.stringify({ verdict: 'APPROVE', findings: [] })),
+      mining(
+        'security-code-reviewer',
+        JSON.stringify({
+          verdict: 'VULNERABLE',
+          findings: [
+            {
+              severity: 'high',
+              in_scope: 'yes',
+              path: 'web/modules/contrib/admin_toolbar/js/shortcut.js',
+              issue: 'upstream defect',
+              fix: 'rewrite upstream',
+            },
+          ],
+        }),
+      ),
+    ]);
+    expect(out.security.findings).toHaveLength(1);
+    expect(out.security.findings[0]!.upstream).toBe('dependency');
+    expect(out.blocking).toBe(false);
+    expect(out.advisoryVerdict).toBe(true);
+    expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+    expect(collectRefutable(out.peer, out.security, out.extraLenses)).toEqual([]);
+  });
+
+  it('hands a fixer only blocking project defects, even when upstream and optional advisories share the review', async () => {
+    const out = await runReview([
+      mining(
+        'peer-reviewer',
+        JSON.stringify({
+          verdict: 'REQUEST_CHANGES',
+          findings: [
+            {
+              severity: 'high',
+              path: 'scripts/enable.php',
+              issue: 'activation reports success on failure',
+              fix: 'preserve failure status',
+            },
+            {
+              severity: 'low',
+              path: 'README.md',
+              issue: 'optional harness',
+              fix: 'add another test subsystem',
+            },
+          ],
+        }),
+      ),
+      mining(
+        'security-code-reviewer',
+        JSON.stringify({
+          verdict: 'NEEDS_FIXES',
+          findings: [
+            {
+              severity: 'medium',
+              in_scope: 'yes',
+              path: 'web/modules/contrib/admin_toolbar/js/shortcut.js',
+              issue: 'upstream optional shortcut',
+              fix: 'patch module',
+            },
+          ],
+        }),
+      ),
+    ]);
+    const diagnosis = codeReviewStep.fixLoop!.evaluate(out)!.diagnosis;
+    expect(diagnosis).toContain('activation reports success on failure');
+    expect(diagnosis).not.toContain('upstream optional shortcut');
+    expect(diagnosis).not.toContain('optional harness');
+    expect(out.peer.findings).toHaveLength(2);
+    expect(out.security.findings).toHaveLength(1);
+  });
+
+  it('allows an operator-owned module at a contrib path and rejects reviewer-supplied ownership claims', async () => {
+    const results = [
+      mining(
+        'peer-reviewer',
+        JSON.stringify({
+          verdict: 'REQUEST_CHANGES',
+          findings: [
+            {
+              severity: 'high',
+              path: 'web/modules/contrib/company/a.php',
+              issue: 'owned module defect',
+              upstream: null,
+            },
+          ],
+        }),
+      ),
+      mining('security-code-reviewer', '{"verdict":"SECURE","findings":[]}'),
+    ];
+    const unowned = await runReview(results);
+    expect(unowned.blocking).toBe(false);
+    const owned = await codeReviewStep.apply(fakeCtx, {
+      detected: {
+        spec: 'spec',
+        implementationFiles: [],
+        debtBlock: '',
+        level: 'none',
+        dependencyPolicy: {
+          drupal: true,
+          drupalRoots: ['web'],
+          ownedPaths: ['web/modules/contrib/company'],
+        },
+      },
+      agentMiningResults: results,
+      miningWaveExhausted: true,
+    } as never);
+    expect(owned.blocking).toBe(true);
+    expect(owned.peer.findings[0]!.upstream).toBeNull();
+  });
+});
