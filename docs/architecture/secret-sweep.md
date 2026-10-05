@@ -50,6 +50,9 @@ Named assignments have no minimum credential length beyond being nonempty: short
 passwords still expose accounts, and the model decides whether they are real.
 Credential names may include prefixes and suffixes, including `SECRET_KEY_BASE`
 and `AUTH_TOKEN_PRODUCTION`, in both quoted and bare assignments.
+Names are matched as snake-case, hyphenated or camel-case segments, preserving
+those suffixes without treating `tokenizer`, `secretary` or `passwordless_mode`
+as credential keys that would crowd genuine candidates out of the cap.
 Candidates persist only their path, line and a fixed kind, never source text,
 credential values, prefixes or hashes. Obvious placeholders and environment
 references are filtered as a recall aid; the model's independent whole-tree and

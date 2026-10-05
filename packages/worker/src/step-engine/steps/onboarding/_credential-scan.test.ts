@@ -126,6 +126,18 @@ describe('credential candidates', () => {
     expect(hits.map((hit) => hit.line)).toEqual([1, 2, 3, 4, 5]);
   });
 
+  it('does not nominate unrelated words containing credential-name substrings', () => {
+    const text = [
+      'tokenizer: "bert-base",',
+      'passwordless_mode: "optional",',
+      'secretary: "alice",',
+      'AUTH_TOKEN_PRODUCTION=short',
+      'secretKeyValue: "short",',
+      'APIKeyValue: "short",',
+    ].join('\n');
+    expect(scanTextForCredentials('config', text).map((hit) => hit.line)).toEqual([4, 5, 6]);
+  });
+
   it('rejects a long repeated credential-like identifier without an assignment', () => {
     expect(scanTextForCredentials('generated.js', 'token-'.repeat(80_000))).toEqual([]);
     expect(scanTextForCredentials('generated.js', 'a-'.repeat(160_000) + '://account:p')).toEqual(
@@ -200,6 +212,18 @@ describe('tracked credential inventory', () => {
       expect(scan.files).toBe(4);
     },
   );
+
+  it('keeps unrelated key substrings from crowding credentials out of the cap', async () => {
+    const root = await repo();
+    const content = 'tokenizer: "bert-base"\npasswordless_mode: "optional"\nsecretary: "alice"\n';
+    for (const file of ['a.json', 'b.json', 'c.json'])
+      await writeFile(path.join(root, file), content);
+    await writeFile(path.join(root, 'z.env'), 'AUTH_TOKEN_PRODUCTION=short\n');
+    await gitExec(['add', '--all'], { cwd: root });
+    const scan = await scanForCredentials(root, 1);
+    expect(scan.hits).toEqual([{ file: 'z.env', line: 1, kind: 'credential assignment' }]);
+    expect(scan.omitted).toBe(0);
+  });
 
   it('reports bounded reads and still inspects the prefix of a large file', async () => {
     const root = await repo();

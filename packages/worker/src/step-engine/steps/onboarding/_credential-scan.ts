@@ -22,7 +22,8 @@ const READ_CAP = 512 * 1024;
 const PATH_BYTES = 4096;
 // Classify a captured whole key separately to avoid greedy keyword-prefix/suffix
 // patterns backtracking quadratically on long, repeated identifiers.
-const CREDENTIAL_NAME = /password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key/i;
+const CREDENTIAL_NAME =
+  /(?:^|[_-])(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(?=$|[_-])/i;
 const ASSIGNMENT = /(?<![\w-])([\w-]+)["']?\s*(?:=>|[:=])\s*(["'`])([^"'`\r\n]+)\2/gi;
 // .env and YAML commonly use bare scalars. Require a scalar terminator rather
 // than matching the prefix of a function call or another compound expression.
@@ -46,7 +47,10 @@ function placeholder(value: string): boolean {
 
 function hasLiteralAssignment(text: string, pattern: RegExp, group: number): boolean {
   for (const match of text.matchAll(pattern)) {
-    if (CREDENTIAL_NAME.test(match[1]!) && !placeholder(match[group]!)) return true;
+    const key = match[1]!
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2');
+    if (CREDENTIAL_NAME.test(key) && !placeholder(match[group]!)) return true;
   }
   return false;
 }
