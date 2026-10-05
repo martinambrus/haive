@@ -97,7 +97,7 @@ test.describe('global KB authoring and editing', () => {
     await sql.end({ timeout: 5 });
   });
 
-  test('limited fields stop at their visible caps and numeric settings reject invalid values', async ({
+  test('field limits use normalized descriptions and numeric settings reject invalid values', async ({
     page,
   }) => {
     const mock = await mockKb(page);
@@ -111,8 +111,18 @@ test.describe('global KB authoring and editing', () => {
     await description.fill('d'.repeat(300));
     await description.press('End');
     await description.press('x');
-    await expect(description).toHaveValue('d'.repeat(300));
-    await expect(page.locator('#enrich-description-limit')).toHaveText('300 / 300');
+    await expect(description).toHaveValue(`${'d'.repeat(300)}x`);
+    await expect(page.locator('#enrich-description-limit')).toHaveText('301 / 300');
+    await expect(description).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByRole('button', { name: 'Add with AI' })).toBeDisabled();
+    await expect(
+      page.getByText('Description must be at most 300 characters after whitespace is collapsed.'),
+    ).toBeVisible();
+    const padded = `Keep${' '.repeat(400)}all words.`;
+    await description.fill(padded);
+    await expect(description).toHaveValue(padded);
+    await expect(page.locator('#enrich-description-limit')).toHaveText('15 / 300');
+    await expect(page.getByRole('button', { name: 'Add with AI' })).toBeEnabled();
     await page.getByLabel('House rules / notes').fill('n'.repeat(2000));
     await expect(page.getByLabel('House rules / notes')).toHaveValue('n'.repeat(2000));
 
@@ -144,9 +154,18 @@ test.describe('global KB authoring and editing', () => {
     await dialog.locator('#description-edit').fill('e'.repeat(300));
     await dialog.locator('#description-edit').press('End');
     await dialog.locator('#description-edit').press('x');
-    await expect(dialog.locator('#description-edit')).toHaveValue('e'.repeat(300));
+    await expect(dialog.locator('#description-edit')).toHaveValue(`${'e'.repeat(300)}x`);
+    await expect(dialog.getByRole('button', { name: 'Save description' })).toBeDisabled();
+    expect(mock.patches).toHaveLength(0);
+    await dialog.locator('#description-edit').fill(padded);
+    await expect(dialog.locator('#description-edit-limit')).toHaveText('15 / 300');
     await dialog.getByRole('button', { name: 'Save description' }).click();
-    expect(mock.patches).toEqual([{ description: 'e'.repeat(300) }]);
+    await expect(dialog.getByRole('button', { name: 'Edit description' })).toBeVisible();
+    expect(mock.patches).toEqual([{ description: padded }]);
+    await dialog.getByRole('button', { name: 'Edit description' }).click();
+    await dialog.locator('#description-edit').fill('e'.repeat(300));
+    await dialog.getByRole('button', { name: 'Save description' }).click();
+    expect(mock.patches).toEqual([{ description: padded }, { description: 'e'.repeat(300) }]);
   });
 
   test('edits an AI replacement in the WYSIWYG editor and saves markdown back to the diff', async ({

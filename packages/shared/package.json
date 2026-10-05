@@ -111,6 +111,10 @@
       "types": "./dist/markdown-fences.d.ts",
       "import": "./dist/markdown-fences.js"
     },
+    "./collapse-line": {
+      "types": "./dist/utils/collapse-line.d.ts",
+      "import": "./dist/utils/collapse-line.js"
+    },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"

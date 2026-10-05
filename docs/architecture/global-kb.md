@@ -50,6 +50,9 @@ and in 09_6_5's draft list. The page renders it as markdown like every prose bod
 the prompt carry the stored text.
 
 Authoring and description editing show and enforce the 300-character limit before submission;
+the description counter and validation measure the collapsed line through the browser-safe
+`@haive/shared/collapse-line` export, exactly as the API does. Over-limit input stays available
+to correct, with an inline error and disabled submit/save, rather than being cut by `maxLength`.
 the title has the same limit, and the connection namespace allows 120 characters. The API refuses
 over-limit person-authored text without cutting it. Notes, article bodies, scope values, allowed
 domains, connection strings and embedding model/URL fields have no application character cap

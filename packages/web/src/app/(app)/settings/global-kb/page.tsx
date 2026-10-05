@@ -32,6 +32,7 @@ import { MarkdownView } from '@/components/markdown/markdown-view';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { IN_STACK_OLLAMA_URL, DEFAULT_EXTERNAL_OLLAMA_URL } from '@haive/shared/constants';
+import { collapseToLine } from '@haive/shared/collapse-line';
 
 function parseList(s: string): string[] {
   return s
@@ -91,7 +92,8 @@ function FacetFields({
   );
 }
 
-/** The same visible limit for authoring and editing; the API also checks the collapsed line. */
+/** Measure the same collapsed line as the API. Keep the full input so excess text can be
+ * corrected rather than silently discarded by the browser's raw-string maxLength. */
 function DescriptionField({
   id,
   value,
@@ -105,7 +107,7 @@ function DescriptionField({
   disabled?: boolean;
   placeholder?: string;
 }) {
-  const length = value.length;
+  const length = collapseToLine(value).length;
   return (
     <div className="flex flex-col gap-1">
       <Input
@@ -113,7 +115,6 @@ function DescriptionField({
         value={value}
         placeholder={placeholder}
         disabled={disabled}
-        maxLength={GLOBAL_KB_DESCRIPTION_MAX}
         aria-describedby={`${id}-limit`}
         aria-invalid={length > GLOBAL_KB_DESCRIPTION_MAX}
         onChange={(e) => onChange(e.target.value)}
@@ -124,6 +125,13 @@ function DescriptionField({
       >
         {length} / {GLOBAL_KB_DESCRIPTION_MAX}
       </span>
+      <FormError
+        message={
+          length > GLOBAL_KB_DESCRIPTION_MAX
+            ? `Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters after whitespace is collapsed.`
+            : null
+        }
+      />
     </div>
   );
 }
@@ -777,7 +785,7 @@ export default function GlobalKbPage() {
    *  clears a blank one. */
   async function saveDescription(e: GlobalKbEntry) {
     if (descEdit === null) return;
-    if (descEdit.length > GLOBAL_KB_DESCRIPTION_MAX) {
+    if (collapseToLine(descEdit).length > GLOBAL_KB_DESCRIPTION_MAX) {
       setDescError(`Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters.`);
       return;
     }
@@ -896,7 +904,7 @@ export default function GlobalKbPage() {
       setEnrichError('Title must be at most 300 characters.');
       return;
     }
-    if (enrich.description.length > GLOBAL_KB_DESCRIPTION_MAX) {
+    if (collapseToLine(enrich.description).length > GLOBAL_KB_DESCRIPTION_MAX) {
       setEnrichError(`Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters.`);
       return;
     }
@@ -1344,7 +1352,12 @@ export default function GlobalKbPage() {
           )}
           <FormError message={enrichError} />
           <div>
-            <Button disabled={enrichBusy} onClick={() => void runEnrich()}>
+            <Button
+              disabled={
+                enrichBusy || collapseToLine(enrich.description).length > GLOBAL_KB_DESCRIPTION_MAX
+              }
+              onClick={() => void runEnrich()}
+            >
               {enrichBusy ? 'Starting…' : 'Add with AI'}
             </Button>
           </div>
@@ -1680,7 +1693,11 @@ export default function GlobalKbPage() {
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
-                      disabled={descBusy || bodyBusy}
+                      disabled={
+                        descBusy ||
+                        bodyBusy ||
+                        collapseToLine(descEdit).length > GLOBAL_KB_DESCRIPTION_MAX
+                      }
                       onClick={() => void saveDescription(selected)}
                     >
                       {descBusy ? 'Saving…' : 'Save description'}
