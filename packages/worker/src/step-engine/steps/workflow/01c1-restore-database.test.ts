@@ -29,15 +29,25 @@ describe('database restoration decisions', () => {
       default: 'skip',
       options: [
         { value: 'skip', label: expect.any(String) },
-        { value: 'restore:snapshot-A', label: expect.any(String) },
+        {
+          value: 'restore:snapshot-A',
+          label: 'Restore this saved database checkpoint (2026-10-05T08:30:00.000Z · postgres 17)',
+        },
       ],
     });
-    expect(form.fields[0]).toMatchObject({ body: 'Installed Drupal' });
+    expect(form.fields.find((f) => f.id === 'checkpoint')).toMatchObject({
+      body: '**Database checkpoint:** `2026-10-05T08:30:00.000Z · postgres 17`',
+    });
+    expect(form.fields.find((f) => f.id === 'sourceTask')).toMatchObject({
+      body: '**Saved by task:**\n\nInstalled Drupal\n\n[Open source task](/tasks/task-A)',
+    });
   });
   it('renders persisted checkpoint timestamps and omits the choice when an upload overrides it', () => {
-    expect(databaseRestoreForm(JSON.parse(JSON.stringify(detected)))!.description).toContain(
-      '2026-10-05T08:30:00.000Z',
-    );
+    expect(
+      databaseRestoreForm(JSON.parse(JSON.stringify(detected)))!.fields.find(
+        (f) => f.id === 'checkpoint',
+      ),
+    ).toMatchObject({ body: expect.stringContaining('2026-10-05T08:30:00.000Z') });
     expect(databaseRestoreForm({ ...detected, dbUploadId: 'upload-A' })).toBeNull();
     expect(databaseRestoreForm({ ...detected, databaseSnapshotId: null })).toBeNull();
   });

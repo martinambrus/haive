@@ -55,16 +55,24 @@ interface RestoreDetect {
 export function databaseRestoreForm(d: RestoreDetect): FormSchema | null {
   if (d.dbUploadId || !d.databaseSnapshotId || !d.checkpoint) return null;
   const c = d.checkpoint;
+  const checkpointName = `${new Date(c.createdAt).toISOString()} · ${c.engine}${c.engineVersion ? ` ${c.engineVersion}` : ''}`;
   return {
     title: 'Restore project database',
-    description: `This project has a saved database checkpoint. Restoring replaces this task’s current DDEV database.\n\nSaved ${new Date(c.createdAt).toISOString()} · ${c.engine}${c.engineVersion ? ` ${c.engineVersion}` : ''}`,
+    description:
+      'Choose whether to restore the saved checkpoint below. Restoring replaces this task’s current DDEV database.',
     autoSubmit: false,
     fields: [
+      {
+        id: 'checkpoint',
+        type: 'note',
+        label: 'Database checkpoint',
+        body: `**Database checkpoint:** \`${checkpointName}\``,
+      },
       {
         id: 'sourceTask',
         type: 'note',
         label: 'Checkpoint saved by',
-        body: c.sourceTaskTitle,
+        body: `**Saved by task:**\n\n${c.sourceTaskTitle}${c.sourceTaskId ? `\n\n[Open source task](/tasks/${c.sourceTaskId})` : ''}`,
       },
       {
         id: 'action',
@@ -74,7 +82,10 @@ export function databaseRestoreForm(d: RestoreDetect): FormSchema | null {
         default: 'skip',
         options: [
           { value: 'skip', label: 'Continue without restoring a checkpoint' },
-          { value: `restore:${c.id}`, label: 'Restore this saved database checkpoint' },
+          {
+            value: `restore:${c.id}`,
+            label: `Restore this saved database checkpoint (${checkpointName})`,
+          },
         ],
       },
     ],
