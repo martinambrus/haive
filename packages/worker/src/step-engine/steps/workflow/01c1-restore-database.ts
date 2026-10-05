@@ -79,7 +79,7 @@ export function databaseRestoreForm(d: RestoreDetect): FormSchema | null {
         type: 'select',
         label: 'Database checkpoint',
         required: true,
-        default: 'skip',
+        default: `restore:${c.id}`,
         options: [
           { value: 'skip', label: 'Continue without restoring a checkpoint' },
           {

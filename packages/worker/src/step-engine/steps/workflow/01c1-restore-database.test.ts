@@ -26,7 +26,7 @@ describe('database restoration decisions', () => {
     expect(form.autoSubmit).toBe(false);
     expect(restoreDatabaseStep.metadata.alwaysWaitForUser).toBe(true);
     expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
-      default: 'skip',
+      default: 'restore:snapshot-A',
       options: [
         { value: 'skip', label: expect.any(String) },
         {

@@ -3,6 +3,7 @@
 Workflow and run-app tasks can continue from a saved DDEV primary database. After DDEV startup,
 `01c1-restore-database` shows the saved checkpoint with its source task and timestamp and waits
 for an explicit Restore or Continue without restoring choice, including in automatic mode.
+Restore is pre-selected for the offered checkpoint; the user must still submit the form.
 Saving is an explicit choice at the end of each task. An uploaded database dump takes precedence
 over the saved checkpoint; without either source, restoration is skipped. This persists the database only: uploaded assets, other
 services and their volumes are not included.
@@ -54,8 +55,11 @@ save opens a normal step form, even when no other task saved meanwhile. Step met
 `alwaysWaitForUser` disables every automatic submission path, including pre-answers. The New Task
 form has no save setting, and historical `save_enabled = false` rows do not bypass this choice.
 Users choose **Save database for the next task** or **Finish without saving** before any export.
+The save option is pre-selected, including **Save and overwrite** on a conflict; submitting the
+form is still required before export.
 If the project revision moved since task creation or the approved restore, the form instead offers **Save and overwrite**,
-showing the task that last saved and its timestamp. Declining deletes any candidate from a prior
+showing the current checkpoint's timestamp and database engine in a separate note, followed by
+the source task title and a link to open it, matching the restore form. Declining deletes any candidate from a prior
 attempt. Overwriting selects the whole database; databases are not merged.
 
 Approval carries the revision shown in the form. A further save while it is open asks again

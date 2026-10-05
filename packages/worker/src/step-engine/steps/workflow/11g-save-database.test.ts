@@ -12,6 +12,8 @@ const view = (patch: Partial<View> = {}): View => ({
     sourceTaskId: 'task-A',
     sourceTaskTitle: 'Drupal installation',
     createdAt: new Date('2026-10-05T00:00:00Z'),
+    engine: 'postgres',
+    engineVersion: '17',
   } as View['current'],
   epoch: 0,
   title: 'task B',
@@ -25,10 +27,17 @@ describe('database save decisions', () => {
     expect(form.autoSubmit).not.toBe(true);
     const action = form.fields.find((f) => f.id === 'action');
     expect(action).toMatchObject({
-      default: 'discard',
+      default: 'replace:2',
       options: expect.arrayContaining([{ value: 'replace:2', label: expect.any(String) }]),
     });
-    expect(form.description).toContain('task-A');
+    expect(form.fields.find((f) => f.id === 'checkpoint')).toMatchObject({
+      type: 'note',
+      body: '**Database checkpoint:** `2026-10-05T00:00:00.000Z · postgres 17`',
+    });
+    expect(form.fields.find((f) => f.id === 'sourceTask')).toMatchObject({
+      type: 'note',
+      body: '**Saved by task:**\n\nDrupal installation\n\n[Open source task](/tasks/task-A)',
+    });
     expect(form.description).toContain('deletes');
     expect(saveDatabaseStep.metadata.alwaysWaitForUser).toBe(true);
   });
@@ -48,12 +57,15 @@ describe('database save decisions', () => {
     const persisted = JSON.parse(JSON.stringify(view())) as View;
     const form = databaseSaveForm(persisted)!;
     expect(formSchemaSchema.safeParse(form).success).toBe(true);
-    expect(form.description).toContain('2026-10-05T00:00:00.000Z');
+    expect(form.fields.find((f) => f.id === 'checkpoint')).toMatchObject({
+      body: expect.stringContaining('2026-10-05T00:00:00.000Z'),
+    });
   });
   it('always prompts before export even when there is no conflict or candidate', () => {
     const form = databaseSaveForm(view({ revision: 1, candidate: null }))!;
     expect(form.autoSubmit).toBe(false);
     expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
+      default: 'save:1',
       options: expect.arrayContaining([{ value: 'save:1', label: expect.any(String) }]),
     });
   });
@@ -61,5 +73,21 @@ describe('database save decisions', () => {
     expect(databaseSaveForm(view({ state: { ...view().state, outcome: 'saved' } }))).toBeNull();
     expect(databaseSaveForm(view({ state: { ...view().state, outcome: 'discarded' } }))).toBeNull();
     expect(saveDatabaseStep.metadata.index).toBeLessThan(14);
+  });
+  it('omits checkpoint details when the project has no saved database', () => {
+    const form = databaseSaveForm(view({ revision: 1, current: null }))!;
+    expect(formSchemaSchema.safeParse(form).success).toBe(true);
+    expect(form.fields.map((f) => f.id)).toEqual(['action']);
+  });
+  it('keeps the source title without a link when its task has been deleted', () => {
+    const form = databaseSaveForm(
+      view({ current: { ...view().current!, sourceTaskId: null, engineVersion: null } }),
+    )!;
+    expect(form.fields.find((f) => f.id === 'sourceTask')).toMatchObject({
+      body: '**Saved by task:**\n\nDrupal installation',
+    });
+    expect(form.fields.find((f) => f.id === 'checkpoint')).toMatchObject({
+      body: '**Database checkpoint:** `2026-10-05T00:00:00.000Z · postgres`',
+    });
   });
 });
