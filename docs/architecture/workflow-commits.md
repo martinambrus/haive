@@ -20,8 +20,11 @@ secret-mask policy removes denied file contents from the message context; it con
 omits tracked secret contents too and applies even with masking switched off. A failed policy
 lookup leaves only the diff summary available, never the unfiltered contents.
 
-The LLM runs before the gate parks and its suggestion becomes the editable form default. It
-skips clean workspaces and non-git directories. Generation is optional, with one re-roll for
+The LLM runs before the gate parks and its suggestion becomes the editable form default. The
+web changes viewer stays hidden until the form schema is ready, so the terminal can mount
+above it without shifting an already visible diff. Completed and skipped gates keep their
+diff available, including older records without a persisted form schema. Generation skips
+clean workspaces and non-git directories and is optional, with one re-roll for
 unusable output: without a usable suggestion the form offers manual entry, never the old static
 `feat: apply workflow changes` fallback. Apply uses the submitted message, or the generated
 suggestion when the field is absent, and rejects an explicitly blank message before staging.
