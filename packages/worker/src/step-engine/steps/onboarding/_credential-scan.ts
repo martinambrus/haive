@@ -18,11 +18,11 @@ export interface CredentialScan {
 
 const READ_CAP = 512 * 1024;
 const ASSIGNMENT =
-  /\b(?:[\w]*password|passwd|[\w]*secret|[\w]*token|[\w]*api[_-]?key|[\w]*access[_-]?key|[\w]*private[_-]?key)\b["']?\s*(?:=>|[:=])\s*(["'`])([^"'`\r\n]{8,})\1/gi;
+  /\b(?:[\w]*password|passwd|[\w]*secret|[\w]*token|[\w]*api[_-]?key|[\w]*access[_-]?key|[\w]*private[_-]?key)\b["']?\s*(?:=>|[:=])\s*(["'`])([^"'`\r\n]+)\1/gi;
 // .env and YAML commonly use bare scalars. Require a scalar terminator rather
 // than matching the prefix of a function call or another compound expression.
 const UNQUOTED_ASSIGNMENT =
-  /\b(?:[\w]*password|passwd|[\w]*secret|[\w]*token|[\w]*api[_-]?key|[\w]*access[_-]?key|[\w]*private[_-]?key)\b["']?[ \t]*(?:=>|[:=])[ \t]*([^\s"'`#,;{}\[\]()\\]{8,4096})(?=[ \t]*(?:[,;#}\r\n]|$))/gi;
+  /\b(?:[\w]*password|passwd|[\w]*secret|[\w]*token|[\w]*api[_-]?key|[\w]*access[_-]?key|[\w]*private[_-]?key)\b["']?[ \t]*(?:=>|[:=])[ \t]*([^\s"'`#,;{}\[\]()\\]{1,4096})(?=[ \t]*(?:[,;#}\r\n]|$))/gi;
 const PROVIDER_KEY =
   /\b(?:(?:AKIA|ASIA)[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|sk_live_[A-Za-z0-9]{20,}|sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}|AIza[A-Za-z0-9_-]{35}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/;
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;

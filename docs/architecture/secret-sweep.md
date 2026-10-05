@@ -30,6 +30,8 @@ formats, private-key markers and credential URLs. These are candidates, not
 findings: the model still judges context, placeholders, reach and severity.
 Quoted assignments and bounded bare scalars in `.env` and YAML are included;
 runtime environment references and function-call prefixes are not nominated.
+Named assignments have no minimum credential length beyond being nonempty: short
+passwords still expose accounts, and the model decides whether they are real.
 Candidates persist only their path, line and a fixed kind, never source text,
 credential values, prefixes or hashes. Obvious placeholders and environment
 references are filtered as a recall aid; the model's independent whole-tree and

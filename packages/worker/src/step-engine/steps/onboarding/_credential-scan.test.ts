@@ -87,6 +87,22 @@ describe('credential candidates', () => {
     expect(JSON.stringify(hits)).not.toContain('Synthetic');
   });
 
+  it('does not discard short named credentials before the model can judge them', () => {
+    const hits = scanTextForCredentials(
+      'vendor/config',
+      [
+        'PASSWORD=hunter2',
+        'password: s3cr3t',
+        "password: 'pw'",
+        'PASSWORD=p',
+        'PASSWORD=',
+        "password: ''",
+        'password: false',
+      ].join('\n'),
+    );
+    expect(hits.map((hit) => hit.line)).toEqual([1, 2, 3, 4]);
+  });
+
   it('does not persist binary content or nominate obvious placeholders/environment references', () => {
     expect(scanTextForCredentials('binary', "\0password: 'SyntheticPassword'")).toEqual([]);
     expect(
