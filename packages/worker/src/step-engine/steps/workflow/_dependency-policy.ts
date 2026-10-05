@@ -6,7 +6,8 @@ import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 
-export type UpstreamKind = 'infrastructure' | 'dependency';
+/** Unknown ownership is report-only just like upstream source; it never means owned. */
+export type UpstreamKind = 'infrastructure' | 'dependency' | 'unknown';
 export interface DependencyPolicy {
   baselineRef?: string;
   workspaceRoots?: string[];
@@ -60,7 +61,7 @@ export function upstreamKind(
   file: string | undefined,
   policy?: DependencyPolicy,
 ): UpstreamKind | null {
-  if (!file) return null;
+  if (!file?.trim()) return 'unknown';
   // Reviewers sometimes supply an absolute sandbox path instead of a repository-relative one.
   const workspaceRoot = policy?.workspaceRoots
     ?.filter((root) => file.startsWith(`${root}/`))
@@ -69,7 +70,7 @@ export function upstreamKind(
     workspaceRoot ? file.slice(workspaceRoot.length + 1) : file.replace(/^\/haive\/workdir\//, ''),
     true,
   );
-  if (!rel) return null;
+  if (!rel || /^[a-z]:\//i.test(rel)) return 'unknown';
   const roots = policy?.drupalRoots ?? DEFAULT_ROOTS;
   for (const root of roots) {
     const prefix = root ? `${root}/` : '';
@@ -116,6 +117,7 @@ export function findingUpstream(f: {
   file?: string;
   upstream?: UpstreamKind | null;
 }): UpstreamKind | null {
+  if (!(f.path ?? f.file)?.trim()) return 'unknown';
   return f.upstream === undefined ? upstreamKind(f.path ?? f.file) : f.upstream;
 }
 

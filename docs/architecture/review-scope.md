@@ -19,6 +19,8 @@ layouts remain governed by the prompt rules; this classifier is not a sandbox wr
 `in_scope` claim. Upstream findings remain visible, marked for a user decision at gate 2.
 Absolute finding paths are resolved relative to the actual sandbox worktree, using the most
 specific known workspace root rather than its containing repository mount.
+Missing or unnormalizable finding locations have unknown ownership and are report-only too;
+they cannot establish that a framework or package complaint belongs to project-owned code.
 Upstream findings never become automatic repair assignments or refuter work. Validation stops its local
 fix loop when upstream findings are present. Medium and low advisories never piggyback on a
 high or critical finding's automatic repair diagnosis. Review dimensions assess task behavior

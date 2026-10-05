@@ -130,6 +130,7 @@ interface VerifyGateDetect {
      *  contract as reviewIncomplete: no fix round, but no silent approve either. */
     advisoryVerdict: boolean;
     upstreamObservations?: boolean;
+    unknownOwnership?: boolean;
     /** How much of the change the reviewers were given. Same contract again: a review
      *  that approved everything it saw is not a clean review of the whole change. */
     coverage: FileCoverage | null;
@@ -290,6 +291,7 @@ function scopeTag(f: {
   upstream?: UpstreamKind | null;
 }): string {
   const upstream = findingUpstream(f);
+  if (upstream === 'unknown') return '[ownership unknown — user decision] ';
   if (upstream) return `[upstream ${upstream} — user decision] `;
   return isOutOfScope(f) ? '[pre-existing] ' : '';
 }
@@ -594,6 +596,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ...(pc.security?.findings ?? []),
         ...(pc.extraLenses ?? []).flatMap((lens) => lens.findings ?? []),
       ].some((finding) => !finding.refuted && findingUpstream(finding));
+      const unknownOwnership = [
+        ...(pc.peer?.findings ?? []),
+        ...(pc.security?.findings ?? []),
+        ...(pc.extraLenses ?? []).flatMap((lens) => lens.findings ?? []),
+      ].some((finding) => !finding.refuted && findingUpstream(finding) === 'unknown');
       codeReview = {
         peerVerdict: pc.peer?.verdict ?? 'DISCUSS',
         securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
@@ -601,6 +608,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         reviewIncomplete: pc.reviewIncomplete === true,
         advisoryVerdict: pc.advisoryVerdict === true || upstreamObservations,
         upstreamObservations,
+        unknownOwnership,
         coverage: readCoverage(pc.coverage),
         // A refuted finding is shown, not hidden: a refuter disproved it, and the human
         // at this gate is the one entitled to disagree with that. It no longer blocks,
@@ -1082,11 +1090,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       if (crCoverage) lines.push('', `## Coverage`, `- ${crCoverage}`);
       const base = cr.reviewIncomplete
         ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
-        : cr.upstreamObservations
-          ? 'upstream observations require a user decision — no upstream repair was assigned'
-          : cr.advisoryVerdict
-            ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
-            : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
+        : cr.unknownOwnership
+          ? 'findings with unknown ownership require a user decision — those findings were not assigned for automatic repair'
+          : cr.upstreamObservations
+            ? 'upstream observations require a user decision — no upstream repair was assigned'
+            : cr.advisoryVerdict
+              ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
+              : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
       const detail = crCoverage ? `${base}; ${crCoverage}` : base;
       const crPartial = cr.coverage?.truncated === true;
       rows.push({
@@ -1100,13 +1110,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           ? 'BLOCKING'
           : cr.reviewIncomplete
             ? 'INCOMPLETE'
-            : cr.upstreamObservations
-              ? 'UPSTREAM'
-              : cr.advisoryVerdict
-                ? 'ADVISORY'
-                : crPartial
-                  ? 'PARTIAL'
-                  : 'OK',
+            : cr.unknownOwnership
+              ? 'UNCLASSIFIED'
+              : cr.upstreamObservations
+                ? 'UPSTREAM'
+                : cr.advisoryVerdict
+                  ? 'ADVISORY'
+                  : crPartial
+                    ? 'PARTIAL'
+                    : 'OK',
         detail,
         body: lines.join('\n'),
         defaultOpen: cr.blocking || cr.reviewIncomplete || cr.advisoryVerdict || crPartial,

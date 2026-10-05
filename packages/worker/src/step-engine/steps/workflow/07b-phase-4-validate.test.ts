@@ -624,6 +624,36 @@ describe('phase4ValidateStep browser bring-up', () => {
 });
 
 describe('validator repair boundary', () => {
+  it.each([undefined, '../vendor/acme/a.php', '/other/checkout/core/a.php'])(
+    'keeps a high finding with an unusable location report-only: %s',
+    async (file) => {
+      const out = await phase4ValidateStep.apply(
+        { logger: stubLogger } as never,
+        {
+          detected: {},
+          iteration: 0,
+          previousIterations: [],
+          llmOutput: {
+            verdict: 'ISSUES_FOUND',
+            issues: [
+              {
+                severity: 'high',
+                file,
+                description: 'unlocated framework complaint',
+                upstream: null,
+              },
+            ],
+          },
+        } as never,
+      );
+      expect(out.issues[0]?.upstream).toBe('unknown');
+      expect(out.findingsSummary).toContain('ownership unknown');
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+      expect(
+        await phase4ValidateStep.loop!.shouldContinue({ applyOutput: out, iteration: 0 } as never),
+      ).toBe(false);
+    },
+  );
   it('keeps low advisories out of a blocking repair diagnosis', () => {
     const out = mkValidateApply({
       issues: [

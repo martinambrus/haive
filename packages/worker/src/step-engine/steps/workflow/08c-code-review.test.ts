@@ -290,6 +290,15 @@ describe('lensesForLevel', () => {
 });
 
 describe('computeBlocking', () => {
+  it('does not turn unlocated high findings into automatic repair assignments', () => {
+    expect(
+      computeBlocking(
+        { findings: [{ severity: 'critical' }] },
+        { findings: [{ severity: 'high' }] },
+        [{ findings: [{ severity: 'high' }] }],
+      ),
+    ).toBe(false);
+  });
   it('does NOT block on a bare REQUEST_CHANGES / VULNERABLE verdict', () => {
     // Measured on 36 real historical reviews: 7 of 25 blocking rounds were a verdict with
     // nothing worse than `medium` behind it. Each spent a fix round on an assertion no
@@ -313,11 +322,15 @@ describe('computeBlocking', () => {
   });
 
   it('blocks on any critical/high security finding', () => {
-    expect(computeBlocking({ findings: [] }, { findings: [{ severity: 'high' }] })).toBe(true);
+    expect(
+      computeBlocking({ findings: [] }, { findings: [{ severity: 'high', path: 'src/a.ts' }] }),
+    ).toBe(true);
   });
 
   it('blocks on a peer critical finding', () => {
-    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [] })).toBe(true);
+    expect(
+      computeBlocking({ findings: [{ severity: 'critical', path: 'src/a.ts' }] }, { findings: [] }),
+    ).toBe(true);
   });
 
   it('does not block on clean reviews or low/medium only', () => {
@@ -340,7 +353,7 @@ describe('computeBlocking', () => {
   it('blocks on an extra lens critical/high finding', () => {
     expect(
       computeBlocking({ findings: [] }, { findings: [] }, [
-        { findings: [{ severity: 'critical' }] },
+        { findings: [{ severity: 'critical', path: 'src/a.ts' }] },
       ]),
     ).toBe(true);
   });
@@ -381,6 +394,39 @@ describe('codeReviewStep.fixLoop diagnosis', () => {
 });
 
 describe('codeReviewStep.apply de-silence', () => {
+  it.each(['peer-reviewer', 'security-code-reviewer', 'operational-reviewer'])(
+    'does not refute or repair unlocated critical findings from %s',
+    async (reviewer) => {
+      const out = await runReview(
+        [
+          ...(reviewer === 'peer-reviewer'
+            ? []
+            : [mining('peer-reviewer', JSON.stringify({ verdict: 'APPROVE', findings: [] }))]),
+          mining(
+            reviewer,
+            JSON.stringify({
+              verdict: reviewer === 'security-code-reviewer' ? 'VULNERABLE' : 'REQUEST_CHANGES',
+              findings: [
+                { severity: 'critical', issue: 'unlocated upstream complaint', upstream: null },
+              ],
+            }),
+          ),
+        ],
+        undefined,
+        false,
+      );
+      const finding = [
+        ...out.peer.findings,
+        ...out.security.findings,
+        ...out.extraLenses.flatMap((lens) => lens.findings),
+      ][0];
+      expect(finding?.upstream).toBe('unknown');
+      expect(out.blocking).toBe(false);
+      expect(out.advisoryVerdict).toBe(true);
+      expect(collectRefutable(out.peer, out.security, out.extraLenses)).toEqual([]);
+      expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+    },
+  );
   it('does NOT silently APPROVE/SECURE when a reviewer ran but its output was unparseable', async () => {
     const out = await runReview([
       mining('peer-reviewer', 'I reviewed everything thoroughly but forgot to emit any JSON'),
@@ -404,7 +450,7 @@ describe('codeReviewStep.apply de-silence', () => {
     const out = await runReview([
       mining(
         'peer-reviewer',
-        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","issue":"bug"}]}\n```',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"src/a.ts","issue":"bug"}]}\n```',
       ),
     ]);
     expect(out.reviewed).toBe(true);
@@ -448,7 +494,7 @@ describe('codeReviewStep.apply de-silence', () => {
     const out = await runReview([
       mining(
         'peer-reviewer',
-        '```json\n{"verdict":"DISCUSS","findings":[{"severity":"warning","issue":"w"},{"severity":"suggestion","issue":"s"},{"severity":"blocker","issue":"b"}],"positives":[]}\n```',
+        '```json\n{"verdict":"DISCUSS","findings":[{"severity":"warning","issue":"w"},{"severity":"suggestion","issue":"s"},{"severity":"blocker","path":"src/a.ts","issue":"b"}],"positives":[]}\n```',
       ),
     ]);
     expect(out.peer.findings.map((f) => f.severity)).toEqual(['medium', 'low', 'critical']);
@@ -717,12 +763,15 @@ describe('scope fence', () => {
   it('fences only the security list — a peer or lens critical is unaffected', () => {
     // in_scope is the security reviewer's field; the others dispose of out-of-scope
     // observations through `## INSIGHTS` instead, so nothing here reads a flag.
-    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [fenced] })).toBe(
-      true,
-    );
+    expect(
+      computeBlocking(
+        { findings: [{ severity: 'critical', path: 'src/a.ts' }] },
+        { findings: [fenced] },
+      ),
+    ).toBe(true);
     expect(
       computeBlocking({ findings: [] }, { findings: [fenced] }, [
-        { findings: [{ severity: 'high' }] },
+        { findings: [{ severity: 'high', path: 'src/a.ts' }] },
       ]),
     ).toBe(true);
   });

@@ -301,8 +301,9 @@ function buildFindingsSummary(
     lines.push('', `### Remaining issues (${issues.length})`);
     for (const i of issues) {
       const loc = i.file ? `\`${i.file}\` — ` : '';
+      const ownership = i.upstream === 'unknown' ? 'ownership unknown' : `upstream ${i.upstream}`;
       lines.push(
-        `- [${i.severity}] ${i.upstream ? `[upstream ${i.upstream} — user decision required] ` : ''}${loc}${i.description}`,
+        `- [${i.severity}] ${i.upstream ? `[${ownership} — user decision required] ` : ''}${loc}${i.description}`,
       );
     }
   }
@@ -781,10 +782,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // validator pass also stops — the human decides at gate-2.
       if (roleForIteration(iteration) === ROLE_FIXER) return true;
       const out = applyOutput as ValidateApply;
-      if ((out.upstreamIssues?.length ?? 0) > 0 || out.issues.some(findingUpstream)) return false;
+      const issues = out.issues ?? [];
+      if ((out.upstreamIssues?.length ?? 0) > 0 || issues.some(findingUpstream)) return false;
       if (out.verdict !== 'ISSUES_FOUND') return false;
       if ((out.churnFiles?.length ?? 0) > 0) return false;
-      return out.issues.some((issue) => isBlockingSeverity(issue.severity));
+      return issues.some((issue) => isBlockingSeverity(issue.severity));
     },
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;

@@ -168,6 +168,21 @@ describe('gate-2 status summary', () => {
     expect(decisionDefault(d)).toBe('reject');
   });
 
+  it('requires a decision for findings with unknown ownership', () => {
+    const unknown = baseDetect({
+      codeReview: {
+        ...cleanReview,
+        advisoryVerdict: true,
+        upstreamObservations: true,
+        unknownOwnership: true,
+        peerFindings: ['[ownership unknown — user decision] [critical] unlocated complaint'],
+      },
+    });
+    expect(row(unknown, 'Code review')?.statusLabel).toBe('UNCLASSIFIED');
+    expect(row(unknown, 'Code review')?.detail).toContain('not assigned for automatic repair');
+    expect(decisionDefault(unknown)).toBe('reject');
+  });
+
   it('a blocking review still outranks incomplete', () => {
     const d = baseDetect({
       codeReview: { ...cleanReview, blocking: true, reviewIncomplete: true },

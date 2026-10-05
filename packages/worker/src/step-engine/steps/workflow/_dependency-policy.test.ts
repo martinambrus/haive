@@ -10,6 +10,7 @@ import {
   loadDependencyPolicy,
   parseDependencyOwnership,
   upstreamKind,
+  findingUpstream,
   OWNERSHIP_POLICY_PATH,
 } from './_dependency-policy.js';
 
@@ -62,6 +63,22 @@ afterEach(async () => {
 });
 
 describe('dependency ownership', () => {
+  it.each([
+    undefined,
+    '',
+    '  ',
+    '.',
+    '../vendor/acme/a.php',
+    '/other/checkout/core/a.php',
+    'C:\\repo\\core\\a.php',
+  ])('does not infer project ownership from an unusable location: %s', (file) => {
+    expect(upstreamKind(file)).toBe('unknown');
+    expect(findingUpstream({ file })).toBe('unknown');
+  });
+
+  it('does not let a missing location inherit a stale owned classification', () => {
+    expect(findingUpstream({ upstream: null })).toBe('unknown');
+  });
   it('distinguishes upstream implementation from project integration and patch artifacts', () => {
     expect(upstreamKind('web/core/lib/Framework.php')).toBe('infrastructure');
     expect(upstreamKind('/haive/workdir/web/modules/contrib/admin_toolbar/a.js:140')).toBe(
