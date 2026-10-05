@@ -4,9 +4,23 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES, type RepoResourceCleanupPayload } from '@haive/shared';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, removed: [] as string[] }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  removed: [] as string[],
+  killRepoIde: vi.fn(),
+  del: vi.fn(),
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/sandbox/ide-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/ide-runner.js')>()),
+  killRepoIdeRunner: h.killRepoIde,
+}));
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/redis.js')>()),
+  getRedis: () => ({ del: h.del }),
+}));
+
 vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/docker-runner.js')>()),
   defaultDockerRunner: {
@@ -43,9 +57,18 @@ function cleanup(payload: Partial<RepoResourceCleanupPayload>) {
 
 beforeEach(() => {
   h.removed.length = 0;
+  h.killRepoIde.mockReset().mockResolvedValue(undefined);
+  h.del.mockReset().mockResolvedValue(1);
 });
 
 describe('repository resource cleanup', () => {
+  it('removes the repository editor and its session even when the repo had no tasks', async () => {
+    h.db = createFakeDb({ tasks: schema.tasks, envTemplates: schema.envTemplates }).db;
+    await cleanup({ taskIds: [], envTemplateIds: [] });
+    expect(h.killRepoIde).toHaveBeenCalledWith('00000000-0000-4000-8000-0000000000b1');
+    expect(h.del).toHaveBeenCalledWith('ide:session:repo-00000000-0000-4000-8000-0000000000b1');
+  });
+
   it('removes the image of a template whose row went with its user', async () => {
     h.db = createFakeDb({ tasks: schema.tasks, envTemplates: schema.envTemplates }).db;
     await cleanup({ envImageTags: { [TEMPLATE]: 'haive-env:abc' } });

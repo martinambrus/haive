@@ -33,7 +33,7 @@ import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
 import { planRoutes } from './routes/plan.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
-import { ideRoutes, installIdeWebSocket } from './routes/ide.js';
+import { ideRoutes, repoIdeAccessRoutes, installIdeWebSocket } from './routes/ide.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from './routes/cli-stream.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
@@ -88,6 +88,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/cli-providers', cliProviderRoutes);
   app.route('/cli-pricing', cliPricingRoutes);
   app.route('/env-dep-presets', envDepPresetRoutes);
+  app.route('/repos', repoIdeAccessRoutes);
   app.route('/repos', repoRoutes);
   app.route('/db-dumps', dbDumpRoutes);
   app.route('/repo-credentials', repoCredentialsRoutes);

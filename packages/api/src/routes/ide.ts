@@ -5,12 +5,15 @@ import { Hono, type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
+  configService,
   IDE_ENSURE_JOB_NAMES,
   IDE_INTERNAL_PORT,
   IDE_SESSION_PREFIX,
   ideRunnerName,
   ideSessionKey,
   logger,
+  repoIdeSessionId,
   type IdeEnsurePayload,
   type IdeEnsureResult,
 } from '@haive/shared';
@@ -23,7 +26,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
-// Reverse-proxies the in-task code-server editor through the authenticated api,
+// Reverse-proxies task and repository code-server editors through the authenticated api,
 // exactly mirroring how the terminal/VNC routes proxy into per-task containers.
 // Two transports:
 //   - HTTP (this Hono router): the editor SPA + its assets. The iframe loads
@@ -33,7 +36,7 @@ import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 //   - WebSocket (installIdeWebSocket): code-server's live session socket, bridged
 //     as a raw upgrade replay. Connection open/close drives the Redis refcount the
 //     worker's idle reaper reads to grace-stop the container after the tab closes.
-// code-server runs `--auth none`; the api proxy (cookie-JWT + task ownership) is
+// code-server runs `--auth none`; the api proxy (cookie-JWT + task/repo ownership) is
 // the only auth boundary, and the container is never host-published.
 
 const log = logger.child({ module: 'ide-proxy' });
@@ -57,25 +60,67 @@ const HOP_BY_HOP = [
 export const ideRoutes = new Hono<AppEnv>();
 ideRoutes.use('*', requireAuth);
 
-async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
-  const db = getDb();
-  const row = await db.query.tasks.findFirst({
-    where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
-  });
-  if (!row) throw new HttpError(404, 'Task not found');
+interface IdeTarget {
+  sessionId: string;
+  prefix: string;
+  payload: IdeEnsurePayload;
 }
 
-async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
+function ideTarget(id: string, userId: string, repository = false): IdeTarget {
+  return {
+    sessionId: repository ? repoIdeSessionId(id) : id,
+    prefix: repository ? `/ide/repos/${id}` : `/ide/${id}`,
+    payload: repository ? { repositoryId: id, userId } : { taskId: id, userId },
+  };
+}
+
+async function targetBelongsToUser(target: IdeTarget): Promise<boolean> {
+  const db = getDb();
+  const { userId, repositoryId, taskId } = target.payload;
+  const row = repositoryId
+    ? await db.query.repositories.findFirst({
+        where: and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.userId, userId),
+        ),
+        columns: { id: true },
+      })
+    : await db.query.tasks.findFirst({
+        where: and(eq(schema.tasks.id, taskId!), eq(schema.tasks.userId, userId)),
+        columns: { id: true },
+      });
+  return row != null;
+}
+
+// Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.
+export const repoIdeAccessRoutes = new Hono<AppEnv>();
+repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) throw new HttpError(404, 'Repository not found');
+  const target = ideTarget(id, c.get('userId'), true);
+  if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Repository not found');
+  const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
+  if (!enabled) return c.json({ enabled: false, ready: false });
+  try {
+    const result = await ensureIde(target);
+    if (result?.ok) return c.json({ enabled: true, ready: true });
+    return c.json({ enabled: true, ready: false, reason: result?.reason ?? 'unavailable' }, 409);
+  } catch {
+    return c.json({ enabled: true, ready: false, pending: true }, 202);
+  }
+});
+
+async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
   if (!taskId || !UUID_RE.test(taskId)) throw new HttpError(404, 'Not found');
-  await requireOwnedTask(taskId, userId);
+  const target = ideTarget(taskId, userId, repository);
+  if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
   const url = new URL(c.req.url);
-  const prefix = `/ide/${taskId}`;
+  const prefix = target.prefix;
   const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '/';
-  const upstreamUrl = `http://${ideRunnerName(taskId)}:${IDE_INTERNAL_PORT}${rest || '/'}${url.search}`;
+  const upstreamUrl = `http://${ideRunnerName(target.sessionId)}:${IDE_INTERNAL_PORT}${rest || '/'}${url.search}`;
 
   const headers = new Headers(c.req.raw.headers);
   headers.delete('host');
@@ -104,7 +149,7 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
   // Re-prefix a root-absolute redirect so it stays inside the proxy namespace.
   const loc = outHeaders.get('location');
   if (loc && loc.startsWith('/') && !loc.startsWith('//')) {
-    outHeaders.set('location', `/ide/${taskId}${loc}`);
+    outHeaders.set('location', `${prefix}${loc}`);
   }
   return new Response(resp.body, {
     status: resp.status,
@@ -113,6 +158,8 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
   });
 }
 
+ideRoutes.all('/repos/:id', (c) => proxyHttp(c, true));
+ideRoutes.all('/repos/:id/*', (c) => proxyHttp(c, true));
 ideRoutes.all('/:id', (c) => proxyHttp(c));
 ideRoutes.all('/:id/*', (c) => proxyHttp(c));
 
@@ -131,8 +178,8 @@ export function installIdeWebSocket(server: Server): void {
 
     void (async () => {
       try {
-        const taskId = extractIdeTaskId(rawUrl);
-        if (!taskId) {
+        const parsed = extractIdeTarget(rawUrl);
+        if (!parsed) {
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
@@ -141,7 +188,8 @@ export function installIdeWebSocket(server: Server): void {
           rejectUpgrade(socket, 401, 'Unauthorized');
           return;
         }
-        const owned = await taskBelongsToUser(taskId, auth.userId);
+        const target = ideTarget(parsed.id, auth.userId, parsed.repository);
+        const owned = await targetBelongsToUser(target);
         if (!owned) {
           rejectUpgrade(socket, 404, 'Not Found');
           return;
@@ -149,12 +197,20 @@ export function installIdeWebSocket(server: Server): void {
         // Bring the IDE container up before bridging (worker-only). Coalesced per
         // task; on timeout reject so the editor's reconnect retries once a slow
         // first-launch image pull finishes in the background.
-        const ready = await ensureIdeUp(taskId, auth.userId);
+        const ready = await ensureIde(target)
+          .then((r) => r?.ok === true)
+          .catch((err) => {
+            log.warn(
+              { sessionId: target.sessionId, err },
+              'ide ensure for ws did not complete in time',
+            );
+            return false;
+          });
         if (!ready) {
           rejectUpgrade(socket, 503, 'IDE starting');
           return;
         }
-        proxyWsUpgrade(req, socket, head, taskId);
+        proxyWsUpgrade(req, socket, head, target);
       } catch (err) {
         log.error({ err, url: rawUrl }, 'ide upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
@@ -169,8 +225,14 @@ export function installIdeWebSocket(server: Server): void {
  *  /ide/<taskId> prefix stripped, then pipe bytes both ways. Holds a refcount on
  *  the task's IDE session for the life of the connection so the idle reaper never
  *  grace-stops a container with a live editor attached. */
-function proxyWsUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, taskId: string): void {
-  const prefix = `/ide/${taskId}`;
+function proxyWsUpgrade(
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  target: IdeTarget,
+): void {
+  const taskId = target.sessionId;
+  const prefix = target.prefix;
   const rawUrl = req.url ?? '';
   const strippedPath = rawUrl.slice(prefix.length) || '/';
   const host = ideRunnerName(taskId);
@@ -270,38 +332,24 @@ export async function resetStaleIdeRefcounts(): Promise<void> {
 
 // ---- ensure + auth helpers (mirror browser-vnc) ---------------------------
 
-async function ensureIdeUp(taskId: string, userId: string): Promise<boolean> {
-  try {
-    const job = await getIdeEnsureQueue().add(
-      IDE_ENSURE_JOB_NAMES.ENSURE,
-      { taskId, userId } satisfies IdeEnsurePayload,
-      { jobId: `ensure-ide-${taskId}`, removeOnComplete: true, removeOnFail: true },
-    );
-    const result = (await job.waitUntilFinished(
-      getIdeEnsureQueueEvents(),
-      IDE_ENSURE_TIMEOUT_MS,
-    )) as IdeEnsureResult;
-    return result?.ok === true;
-  } catch (err) {
-    log.warn({ taskId, err }, 'ide ensure for ws did not complete in time');
-    return false;
-  }
-}
-
-function extractIdeTaskId(rawUrl: string): string | null {
-  const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
-  const afterPrefix = withoutQuery.slice(WS_PATH_PREFIX.length);
-  const id = (afterPrefix.split('/')[0] ?? '').replace(/\/+$/, '');
-  return UUID_RE.test(id) ? id : null;
-}
-
-async function taskBelongsToUser(taskId: string, userId: string): Promise<boolean> {
-  const db = getDb();
-  const row = await db.query.tasks.findFirst({
-    where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
+async function ensureIde(target: IdeTarget): Promise<IdeEnsureResult> {
+  const job = await getIdeEnsureQueue().add(IDE_ENSURE_JOB_NAMES.ENSURE, target.payload, {
+    jobId: `ensure-ide-${target.sessionId}`,
+    removeOnComplete: true,
+    removeOnFail: true,
   });
-  return row !== undefined && row !== null;
+  return (await job.waitUntilFinished(
+    getIdeEnsureQueueEvents(),
+    IDE_ENSURE_TIMEOUT_MS,
+  )) as IdeEnsureResult;
+}
+
+function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } | null {
+  const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
+  const parts = withoutQuery.slice(WS_PATH_PREFIX.length).split('/');
+  const repository = parts[0] === 'repos';
+  const id = parts[repository ? 1 : 0] ?? '';
+  return UUID_RE.test(id) ? { id, repository } : null;
 }
 
 async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {

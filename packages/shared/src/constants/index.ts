@@ -294,12 +294,11 @@ export const IDE_ENSURE_JOB_NAMES = {
 } as const;
 
 /** Payload for `IDE_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this when the user
- *  opens the Editor tab; the worker lazily launches the task's code-server
+ *  opens a task or repository Editor; the worker lazily launches its code-server
  *  container (spawning task containers is worker-only). */
-export interface IdeEnsurePayload {
-  taskId: string;
-  userId: string;
-}
+export type IdeEnsurePayload = { userId: string } & (
+  { taskId: string; repositoryId?: never } | { repositoryId: string; taskId?: never }
+);
 
 /** Result the worker returns for an ide-ensure job. `ok=false` with a `reason`
  *  when the IDE can't be started (e.g. the task has no editable volume-backed
@@ -719,11 +718,17 @@ export const APP_RUNNER_LABEL = 'haive.apprunner';
  *  served the tree it happened to be created for. */
 export const RUNNER_SUBPATH_LABEL = 'haive.repo.subpath';
 
-/** Name of a task's per-task browser-IDE (code-server) container. Shared because
+/** Name of a task or repository browser-IDE (code-server) container. Shared because
  *  the api reverse-proxies the editor by this DNS name on the internal sandbox
  *  network (the /ide HTTP+WS proxy) while the worker creates and destroys it. */
-export function ideRunnerName(taskId: string): string {
-  return containerName(CONTAINER_FAMILY.ide, taskId.slice(0, 8));
+export function ideRunnerName(sessionId: string): string {
+  return sessionId.startsWith('repo-')
+    ? containerName(CONTAINER_FAMILY.ide, 'repo', sessionId.slice(5))
+    : containerName(CONTAINER_FAMILY.ide, sessionId.slice(0, 8));
+}
+/** Repository editors have their own lifecycle, separate from every task's worktree. */
+export function repoIdeSessionId(repositoryId: string): string {
+  return `repo-${repositoryId}`;
 }
 /** Docker label marking a container as a per-task browser-IDE, so task-end
  *  cleanup finds it and the worker-boot reaper spares it while a session is live
@@ -750,12 +755,14 @@ export function ideExtensionsVolumeName(userId: string): string {
   const userSlug = userId.replace(/-/g, '').slice(0, 12);
   return volumeName(IDE_EXT_FAMILY, userSlug);
 }
-/** Per-TASK volume holding code-server user-data: the global settings.json seeded
+/** Per-session volume holding code-server user-data: the global settings.json seeded
  *  at launch, workbench state, and hot-exit backups. Persists across the idle-grace
- *  container reap so reopening restores unsaved work; destroyed only at task end. */
-export function ideUserDataVolumeName(taskId: string): string {
-  const taskSlug = taskId.replace(/-/g, '').slice(0, 12);
-  return volumeName(IDE_UDATA_FAMILY, taskSlug);
+ *  container reap so reopening restores unsaved work; destroyed at task end or repo deletion. */
+export function ideUserDataVolumeName(sessionId: string): string {
+  const sessionSlug = sessionId.startsWith('repo-')
+    ? `repo_${sessionId.slice(5).replace(/-/g, '')}`
+    : sessionId.replace(/-/g, '').slice(0, 12);
+  return volumeName(IDE_UDATA_FAMILY, sessionSlug);
 }
 /** True for any IDE-owned Docker volume (extensions or user-data), so cleanup can
  *  target them precisely without touching unrelated volumes. */
@@ -764,12 +771,12 @@ export function isIdeVolume(name: string): boolean {
     name.startsWith(volumePrefix(IDE_EXT_FAMILY)) || name.startsWith(volumePrefix(IDE_UDATA_FAMILY))
   );
 }
-/** Redis hash key for a task's IDE session. The api owns refcount + lastSeenAt as
+/** Redis hash key for a task or repository IDE session. The api owns refcount + lastSeenAt as
  *  proxied connections open/close; the worker's idle reaper reads them to grace-
- *  stop the container. One per task (the IDE has a single workspace = the task). */
+ *  stop the container. One per workspace session, identified by task id or repoIdeSessionId. */
 export const IDE_SESSION_PREFIX = 'ide:session:';
-export function ideSessionKey(taskId: string): string {
-  return `${IDE_SESSION_PREFIX}${taskId}`;
+export function ideSessionKey(sessionId: string): string {
+  return `${IDE_SESSION_PREFIX}${sessionId}`;
 }
 
 /** A single way a user can reach a task's running web app from their OWN browser —

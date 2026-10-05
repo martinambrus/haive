@@ -2,7 +2,7 @@ import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CODE_SERVER_IMAGE,
@@ -16,6 +16,7 @@ import {
   ideRunnerName,
   ideUserDataVolumeName,
   logger,
+  repoIdeSessionId,
   volumeName,
 } from '@haive/shared';
 import {
@@ -28,6 +29,7 @@ import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './d
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
 import { runnerSubpathVerdict } from './app-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
+import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
 // ONLY workspace folder. It mirrors the app-runner's lifecycle (long-lived
@@ -181,6 +183,7 @@ export async function ensureIdeVolumes(
  *  by DNS name. Drops any stale container first. */
 export async function startIdeRunner(params: {
   taskId: string;
+  repositoryId?: string;
   workspaceSubpath: string;
   /** The workspace's own `.git`, mounted back read-only (`repoGitDataBoundary`). code-server runs
    *  repository-supplied code — tasks, extensions — and host-side git later runs in this tree as
@@ -201,7 +204,9 @@ export async function startIdeRunner(params: {
       '--name',
       name,
       '--label',
-      `haive.task.id=${params.taskId}`,
+      params.repositoryId
+        ? `haive.repo.id=${params.repositoryId}`
+        : `haive.task.id=${params.taskId}`,
       '--label',
       `${IDE_RUNNER_LABEL}=1`,
       '--label',
@@ -280,15 +285,54 @@ async function waitForIdeReady(name: string, timeoutMs: number): Promise<boolean
  *  survives a recreate so unsaved work is restored. */
 const inFlightIdeBoots = new Map<string, Promise<IdeRunnerHandle | null>>();
 
+/** Repository editors always open the checkout root, independent of task worktrees. */
+export async function resolveRepoIdeWorkspaceSubpath(
+  db: Database,
+  repositoryId: string,
+  userId: string,
+): Promise<string | null> {
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: { storagePath: true, localPath: true, status: true, source: true, writable: true },
+  });
+  const repoPath = repo?.storagePath ?? repo?.localPath;
+  if (
+    !repo ||
+    repo.status !== 'ready' ||
+    isReadOnlyLocalRepo(repo) ||
+    !repoPath ||
+    repoPath.startsWith(HOST_REPO_ROOT + '/')
+  ) {
+    return null;
+  }
+  return `${userId}/${repositoryId}`;
+}
+
+export async function ensureRepoIdeRunnerStarted(
+  db: Database,
+  repositoryId: string,
+  userId: string,
+  settingsJson: string,
+): Promise<IdeRunnerHandle | null> {
+  return ensureIdeRunnerStarted(
+    db,
+    repoIdeSessionId(repositoryId),
+    userId,
+    settingsJson,
+    repositoryId,
+  );
+}
+
 export async function ensureIdeRunnerStarted(
   db: Database,
   taskId: string,
   userId: string,
   settingsJson: string,
+  repositoryId?: string,
 ): Promise<IdeRunnerHandle | null> {
   const inFlight = inFlightIdeBoots.get(taskId);
   if (inFlight) return inFlight;
-  const boot = ensureIdeRunnerStartedInner(db, taskId, userId, settingsJson);
+  const boot = ensureIdeRunnerStartedInner(db, taskId, userId, settingsJson, repositoryId);
   inFlightIdeBoots.set(taskId, boot);
   try {
     return await boot;
@@ -302,8 +346,11 @@ async function ensureIdeRunnerStartedInner(
   taskId: string,
   userId: string,
   settingsJson: string,
+  repositoryId?: string,
 ): Promise<IdeRunnerHandle | null> {
-  const workspaceSubpath = await resolveIdeWorkspaceSubpath(db, taskId);
+  const workspaceSubpath = repositoryId
+    ? await resolveRepoIdeWorkspaceSubpath(db, repositoryId, userId)
+    : await resolveIdeWorkspaceSubpath(db, taskId);
   if (!workspaceSubpath) return null;
 
   const name = ideRunnerName(taskId);
@@ -328,25 +375,28 @@ async function ensureIdeRunnerStartedInner(
   // it were a repository root. A DDEV SUB-DIRECTORY workspace needs no boundary either: `.git` sits
   // above what the editor mounts, so it is not in the container at all and nothing there can write
   // it — the boundary applies exactly where the workspace IS the repository root.
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true },
-  });
+  const task = repositoryId
+    ? null
+    : await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, taskId),
+        columns: { repositoryId: true },
+      });
   const gitDataMounts = (
     await repoGitDataBoundary(
       { source: REPO_VOLUME, target: '/workspace', subpath: workspaceSubpath },
-      { hasWorktree: false, hasRepo: task?.repositoryId != null },
+      { hasWorktree: false, hasRepo: repositoryId != null || task?.repositoryId != null },
     )
   ).mounts;
   const handle = await startIdeRunner({
     taskId,
+    repositoryId,
     workspaceSubpath,
     gitDataMounts,
     extVolume,
     udataVolume,
   });
   await waitForIdeReady(name, 15_000);
-  await setupIdeDebugging(db, taskId, name);
+  if (!repositoryId) await setupIdeDebugging(db, taskId, name);
   return handle;
 }
 
@@ -463,6 +513,15 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   log.info({ taskId, container: name }, 'ide runner stopped (idle grace)');
   return true;
+}
+
+/** Repository deletion also discards its editor state. Wait out a boot already in progress
+ *  so it cannot create a container after cleanup has finished. */
+export async function killRepoIdeRunner(repositoryId: string): Promise<void> {
+  const sessionId = repoIdeSessionId(repositoryId);
+  await inFlightIdeBoots.get(sessionId)?.catch(() => undefined);
+  await stopIdeRunner(sessionId);
+  await defaultDockerRunner.volumeRemove(ideUserDataVolumeName(sessionId));
 }
 
 /** Tear down every IDE container for a task AND remove its per-task user-data

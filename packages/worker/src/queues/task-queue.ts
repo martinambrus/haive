@@ -28,6 +28,7 @@ import {
   QUEUE_NAMES,
   TASK_JOB_NAMES,
   ideSessionKey,
+  repoIdeSessionId,
   logger,
   parseAllowanceWatchMode,
   type CliExecJobPayload,
@@ -84,7 +85,7 @@ import {
 } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
-import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
+import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
 import {
   ensureTaskScratchWorkspace,
   cleanupTaskScratchWorkspace,
@@ -3301,6 +3302,20 @@ async function handleCleanupRepoResources(
   db: Database,
   payload: RepoResourceCleanupPayload,
 ): Promise<void> {
+  await killRepoIdeRunner(payload.repositoryId).catch((err) =>
+    logger.warn(
+      { err, repositoryId: payload.repositoryId },
+      'repo-cleanup: editor teardown failed',
+    ),
+  );
+  await getRedis()
+    .del(ideSessionKey(repoIdeSessionId(payload.repositoryId)))
+    .catch((err) =>
+      logger.warn(
+        { err, repositoryId: payload.repositoryId },
+        'repo-cleanup: editor session cleanup failed',
+      ),
+    );
   // Per-task runners — incl. failed tasks whose DDEV/app runners were kept for
   // recovery and are otherwise never torn down.
   for (const taskId of payload.taskIds) {
