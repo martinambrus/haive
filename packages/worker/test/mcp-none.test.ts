@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyMcpSurface } from '../src/sandbox/mcp-surface.js';
 import { resolveMcpExtraFiles } from '../src/queues/cli-exec/resolvers.js';
 import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import {
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
@@ -50,10 +51,13 @@ describe('toolProfile: none', () => {
     expect(res).toEqual({ files: [], extraArgs: [] });
   });
 
-  it('is declared by the step that disables built-in tools', () => {
-    expect(envDetectStep.llm?.disableTools).toBe(true);
-    expect(envDetectStep.llm?.toolProfile).toBe('none');
-  });
+  it.each([envDetectStep, gate3CommitStep])(
+    'is declared by $metadata.id, which requests disabled built-in tools',
+    (step) => {
+      expect(step.llm?.disableTools).toBe(true);
+      expect(step.llm?.toolProfile).toBe('none');
+    },
+  );
 });
 
 // Wiring nothing is not the same as leaving nothing wired. A `bind` delivery is self-clearing,

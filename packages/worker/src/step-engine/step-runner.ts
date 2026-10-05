@@ -808,7 +808,6 @@ async function resolveLlmPhase(
       effortLevel: preferredEffort ?? undefined,
       disallowedTools: miningDisallowedTools(stepDef.metadata.id),
       disableTools: llmSpec.disableTools,
-      requireDisabledTools: llmSpec.requireDisabledTools,
     },
   });
 
