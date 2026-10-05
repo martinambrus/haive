@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, initializeTaskDatabaseState } from '@haive/database';
+import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import type { FormSchema } from '@haive/shared';
 import {
   applyTreeNoFollow,
@@ -19,6 +20,8 @@ import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import {
   ddevCountTables,
+  ddevConfigOmitsDatabase,
+  ddevExec,
   ddevImportDb,
   ddevSnapshot,
   ddevImportSnapshotName,
@@ -26,6 +29,7 @@ import {
   type DumpImportFormat,
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
+import { verifyDatabaseSnapshotFile, withSnapshotStep } from '../../../repo/database-snapshots.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
 // imports the uploaded DB dump (then deletes it). Gated on the repo actually
@@ -53,6 +57,8 @@ interface DdevEnvDetect {
   needsConfig: boolean;
   /** The proposed .ddev/config.yaml shown for review; written on apply. */
   proposedConfig: string | null;
+  databaseSnapshotId?: string | null;
+  snapshotEngine?: string | null;
 }
 
 /** php/db snapshot of the `.ddev/config.yaml` that was actually booted, plus a
@@ -244,12 +250,14 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { dbUploadId: true },
+      columns: { id: true, dbUploadId: true, repositoryId: true, userId: true },
     });
 
     let dbUploadId: string | null = null;
     let dumpWorkerPath: string | null = null;
     let dumpRunnerPath: string | null = null;
+    let databaseSnapshotId: string | null = null;
+    let snapshotEngine: string | null = null;
     if (task?.dbUploadId) {
       const dump = await ctx.db.query.dbUploads.findFirst({
         where: eq(schema.dbUploads.id, task.dbUploadId),
@@ -265,6 +273,22 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       }
     }
 
+    if (task?.repositoryId) {
+      const state = await initializeTaskDatabaseState(ctx.db, task);
+      if (!task.dbUploadId && state?.sourceSnapshotId && !state.importedAt) {
+        const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
+          where: eq(schema.databaseSnapshots.id, state.sourceSnapshotId),
+        });
+        if (!snapshot || snapshot.status !== 'ready')
+          throw new Error('The selected saved database is unavailable');
+        databaseSnapshotId = snapshot.id;
+        snapshotEngine = snapshot.engine;
+        const rel = databaseSnapshotRel(snapshot);
+        dumpWorkerPath = `${REPO_STORAGE_ROOT}/${rel}`;
+        dumpRunnerPath = `/repos/${rel}`;
+      }
+    }
+
     return {
       ddevConfigured,
       repoSubpath,
@@ -274,6 +298,8 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       dumpRunnerPath,
       needsConfig,
       proposedConfig,
+      databaseSnapshotId,
+      snapshotEngine,
     };
   },
 
@@ -301,6 +327,10 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
   async apply(ctx, args): Promise<DdevEnvApply> {
     const d = args.detected;
+    const importEpoch = d.databaseSnapshotId
+      ? (await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }))
+          ?.orchestrationEpoch
+      : undefined;
     if (!d.repoSubpath) {
       return { started: false, imported: false, skipped: true, output: 'no repo', baseline: null };
     }
@@ -347,7 +377,25 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
     let imported = false;
     const dumpRunnerPath = d.dumpRunnerPath;
-    if (dumpRunnerPath && d.dbUploadId) {
+    const savedState = d.databaseSnapshotId
+      ? await ctx.db.query.taskDatabaseStates.findFirst({
+          where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+        })
+      : null;
+    if (dumpRunnerPath && (d.dbUploadId || (d.databaseSnapshotId && !savedState?.importedAt))) {
+      if (d.databaseSnapshotId) {
+        const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
+          where: eq(schema.databaseSnapshots.id, d.databaseSnapshotId),
+        });
+        if (
+          !snapshot ||
+          snapshot.status !== 'ready' ||
+          savedState?.sourceSnapshotId !== snapshot.id
+        )
+          throw new Error('The selected saved database is unavailable');
+        await ctx.emitProgress('Verifying the saved database…');
+        await verifyDatabaseSnapshotFile(snapshot, ctx.signal);
+      }
       // A pg_dump archive can't go through `ddev import-db` alone; it is restored
       // with pg_restore inside the db container first. Classified by magic bytes,
       // not by the filename, which carries no reliable extension (`.backup`,
@@ -369,7 +417,23 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
             return readTextNoFollow(anchor, rel);
           })()
         : null;
-      const dbType = cfgText === null ? null : parseDdevConfig(cfgText).dbType;
+      let dbType = cfgText === null ? null : parseDdevConfig(cfgText).dbType;
+      if (d.snapshotEngine) {
+        const effective = await ddevExec(handle, 'utility configyaml --full-yaml', {
+          timeoutMs: 30_000,
+        });
+        if (effective.exitCode !== 0 || ddevConfigOmitsDatabase(effective.output) !== false)
+          throw new Error('The saved database requires a configured DDEV database container');
+        dbType = parseDdevConfig(
+          effective.output.slice(
+            effective.output.indexOf('# Complete processed project configuration:'),
+          ),
+        ).dbType;
+        if (d.snapshotEngine !== (dbType ?? 'mariadb'))
+          throw new Error(
+            `The saved database uses ${d.snapshotEngine}, but this DDEV project uses ${dbType ?? 'mariadb'}. Select a compatible database or start without a saved database.`,
+          );
+      }
       if (format.pgRestore) {
         // pg_restore only exists in a postgres db container. An absent `database:`
         // block means DDEV's mariadb default, so a null dbType is still "not
@@ -429,11 +493,22 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         );
       }
       // Delete the dump immediately + mark the upload consumed (the env now holds it).
-      if (dump) await removeNoFollow(dump.anchor, dump.rel).catch(() => {});
-      await ctx.db
-        .update(schema.dbUploads)
-        .set({ status: 'consumed', updatedAt: new Date() })
-        .where(eq(schema.dbUploads.id, d.dbUploadId));
+      if (d.dbUploadId) {
+        if (dump) await removeNoFollow(dump.anchor, dump.rel).catch(() => {});
+        await ctx.db
+          .update(schema.dbUploads)
+          .set({ status: 'consumed', updatedAt: new Date() })
+          .where(eq(schema.dbUploads.id, d.dbUploadId));
+      } else {
+        ctx.throwIfCancelled();
+        if (importEpoch === undefined) throw new Error('The task is unavailable');
+        await withSnapshotStep(ctx, importEpoch, async (tx) => {
+          await tx
+            .update(schema.taskDatabaseStates)
+            .set({ importedAt: new Date() })
+            .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
+        });
+      }
     }
 
     const baseline = await readDdevBaseline(d.workspace);

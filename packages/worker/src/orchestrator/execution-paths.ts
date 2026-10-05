@@ -54,6 +54,7 @@ const SPINE: readonly string[] = [
   '10-gate-3-commit',
   '11b1-rag-source-selection',
   '11a-gate-4-push',
+  '11g-save-database',
   '12-worktree-cleanup',
   '13-pr-wait',
 ];

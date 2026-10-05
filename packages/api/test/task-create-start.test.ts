@@ -45,6 +45,9 @@ function setup() {
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
+    taskDatabaseStates: schema.taskDatabaseStates,
+    repositoryDatabaseStates: schema.repositoryDatabaseStates,
+    databaseSnapshots: schema.databaseSnapshots,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   h.db = fake.db;
@@ -64,6 +67,75 @@ const starts = () =>
   h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.START).map(([, data]) => data);
 
 describe('POST /tasks', () => {
+  const SNAPSHOT = '00000000-0000-4000-8000-0000000000c1';
+  function savedDatabase() {
+    const t = setup();
+    t.fake.insert(schema.databaseSnapshots, {
+      id: SNAPSHOT,
+      repositoryId: REPO,
+      userId: USER,
+      status: 'ready',
+      engine: 'postgres',
+      sourceTaskTitle: 'Source',
+    });
+    t.fake.insert(schema.repositoryDatabaseStates, {
+      repositoryId: REPO,
+      revision: 3,
+      snapshotId: SNAPSHOT,
+    });
+    return t;
+  }
+
+  it('pins the chosen snapshot before START and honours the save opt-out', async () => {
+    const t = savedDatabase();
+    h.add.mockImplementation(async () => {
+      expect(t.fake.rows(schema.taskDatabaseStates)[0]).toMatchObject({
+        sourceSnapshotId: SNAPSHOT,
+        baseRevision: 3,
+        saveEnabled: false,
+      });
+    });
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'continue',
+      description: 'Continue from saved state',
+      repositoryId: REPO,
+      databaseSnapshotId: SNAPSHOT,
+      saveDatabase: false,
+    });
+    expect(res.status).toBe(201);
+    expect(starts()).toHaveLength(1);
+  });
+
+  it('rejects stale or foreign snapshots without creating a task or START', async () => {
+    const t = savedDatabase();
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'continue',
+      description: 'Continue from saved state',
+      repositoryId: REPO,
+      databaseSnapshotId: '00000000-0000-4000-8000-0000000000c2',
+    });
+    expect(res.status).toBe(409);
+    expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+    expect(t.fake.rows(schema.taskDatabaseStates)).toHaveLength(0);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('rejects combining a saved database and a manual dump', async () => {
+    setup();
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'continue',
+      description: 'Continue from saved state',
+      repositoryId: REPO,
+      databaseSnapshotId: SNAPSHOT,
+      dbUploadId: SNAPSHOT,
+    });
+    expect(res.status).toBe(400);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
   it('queues the task before it queues its START', async () => {
     const t = setup();
     h.add.mockImplementation(async () => {

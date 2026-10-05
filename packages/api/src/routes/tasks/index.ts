@@ -14,7 +14,12 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import {
+  schema,
+  type DbTx,
+  initializeTaskDatabaseState,
+  DatabaseSnapshotUnavailableError,
+} from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
@@ -513,6 +518,9 @@ taskRoutes.post('/', async (c) => {
     if (!provider) throw new HttpError(404, 'Summary CLI provider not found');
   }
 
+  if (body.databaseSnapshotId && body.dbUploadId) {
+    throw new HttpError(400, 'Select either a saved database or an uploaded dump');
+  }
   if (body.dbUploadId) {
     const dump = await db.query.dbUploads.findFirst({
       where: and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)),
@@ -522,6 +530,16 @@ taskRoutes.post('/', async (c) => {
     if (dump.status !== 'complete') {
       throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
     }
+  }
+
+  if (
+    body.databaseSnapshotId &&
+    (!body.repositoryId || !['workflow', 'run_app'].includes(body.type))
+  ) {
+    throw new HttpError(
+      400,
+      'Saved databases require a workflow or Run app task with a repository',
+    );
   }
 
   // Parent-task link (bug fixes only, one level). The chosen parent must be a
@@ -683,6 +701,22 @@ taskRoutes.post('/', async (c) => {
   // Every write after the insert that can fail, before the task is `queued`. An upgrade takes them
   // inside its insert's transaction: a `created` one left behind would block the repository's next
   // upgrade and rollback, and nothing starts or ends a `created` task.
+  const pinDatabase = async (
+    handle: typeof db | DbTx,
+    created: typeof schema.tasks.$inferSelect,
+  ) => {
+    if (created.type === 'workflow' || created.type === 'run_app') {
+      try {
+        await initializeTaskDatabaseState(handle, created, {
+          sourceSnapshotId: body.databaseSnapshotId,
+          saveEnabled: body.saveDatabase ?? true,
+        });
+      } catch (err) {
+        if (err instanceof DatabaseSnapshotUnavailableError) throw new HttpError(409, err.message);
+        throw err;
+      }
+    }
+  };
   const settle = async (handle: typeof db | DbTx, created: typeof schema.tasks.$inferSelect) => {
     if (planLinks && planNodes.length > 0) {
       await handle
@@ -701,7 +735,11 @@ taskRoutes.post('/', async (c) => {
       return { task: row, queued: await settle(tx, row) };
     }));
   } else {
-    task = firstRow(await insertTask(db));
+    task = await db.transaction(async (tx) => {
+      const row = firstRow(await insertTask(tx));
+      await pinDatabase(tx, row);
+      return row;
+    });
     queued = await settle(db, task);
   }
 

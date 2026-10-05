@@ -272,6 +272,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   `buildPlanExpansionContext`.
 - [Task attachments](docs/architecture/task-attachments.md): relative-path names, archive
   expansion, the attachments lock, prompt caps. `expand-archives.ts`, `withTaskAttachmentsLock`.
+- [Database persistence](docs/architecture/database-persistence.md): pinned project dumps,
+  concurrent save decisions and automatic cleanup. `11g-save-database`, `database-snapshots.ts`.
 - [Plan inputs](docs/architecture/plan-inputs.md): 00-plan-inputs extraction, the `vision`
   requirement, live inputs. `00-plan-inputs.ts`, `_plan-inputs.ts`.
 

@@ -161,6 +161,14 @@ jobs:
       - name: Apply database migrations
         run: pnpm --filter @haive/database migrate
 
+      - name: Database snapshot concurrency, restore and cleanup
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U haive -d postgres -c 'CREATE DATABASE snapshot_test'
+          DATABASE_URL="$DATABASE_SNAPSHOT_TEST_URL" pnpm --filter @haive/database migrate
+          pnpm --filter @haive/worker exec vitest run test/database-snapshots.test.ts
+        env:
+          DATABASE_SNAPSHOT_TEST_URL: postgres://haive:haive_dev_password@localhost:5432/snapshot_test
+
       # api smokes first: they are seconds each, so a broken route surfaces before the
       # worker suite spends most of the job's 30-minute budget. smoke:terminal is
       # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same

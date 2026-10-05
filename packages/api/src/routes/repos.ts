@@ -305,6 +305,44 @@ repoRoutes.get('/', async (c) => {
   return c.json({ repositories });
 });
 
+repoRoutes.get('/:id/database-snapshot', async (c) => {
+  const db = getDb();
+  const repositoryId = c.req.param('id');
+  const repo = await db.query.repositories.findFirst({
+    where: and(
+      eq(schema.repositories.id, repositoryId),
+      eq(schema.repositories.userId, c.get('userId')),
+    ),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const head = await db.query.repositoryDatabaseStates.findFirst({
+    where: eq(schema.repositoryDatabaseStates.repositoryId, repositoryId),
+  });
+  const snapshot = head?.snapshotId
+    ? await db.query.databaseSnapshots.findFirst({
+        where: and(
+          eq(schema.databaseSnapshots.id, head.snapshotId),
+          eq(schema.databaseSnapshots.status, 'ready'),
+        ),
+      })
+    : null;
+  return c.json({
+    snapshot: snapshot
+      ? {
+          id: snapshot.id,
+          sourceTaskId: snapshot.sourceTaskId,
+          sourceTaskTitle: snapshot.sourceTaskTitle,
+          createdAt: snapshot.createdAt,
+          engine: snapshot.engine,
+          engineVersion: snapshot.engineVersion,
+          codeCommit: snapshot.codeCommit,
+          sizeBytes: snapshot.sizeBytes,
+        }
+      : null,
+  });
+});
+
 repoRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = createRepoRequestSchema.parse(await c.req.json());

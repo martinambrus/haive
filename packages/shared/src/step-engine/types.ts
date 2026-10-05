@@ -179,6 +179,7 @@ export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
  *  answers `canSkip: false` and the button simply never renders, which reads as
  *  "this step is not skippable" rather than as a bug. */
 export const SKIPPABLE_STEP_IDS: readonly string[] = [
+  '11g-save-database',
   '01e-external-kb-sync',
   '01f-external-plan-sync',
   '03b-business-requirements',

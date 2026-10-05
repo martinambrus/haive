@@ -253,6 +253,16 @@ async function buildRunAppRunList(
   const containerTool = (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
     ?.containerTool;
 
+  if (containerTool && containerTool !== 'ddev') {
+    const database = await db.query.taskDatabaseStates.findFirst({
+      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+    });
+    if (database?.sourceSnapshotId && !database.importedAt)
+      throw new Error(
+        'The selected saved database requires DDEV. Choose DDEV in the declared dependencies before continuing.',
+      );
+  }
+
   let runtime: StepDefinition[] = [];
   if (containerTool === 'ddev') {
     // 01c brings DDEV up + imports the uploaded dump; 06a then runs the framework
@@ -268,7 +278,7 @@ async function buildRunAppRunList(
       stepRegistry.require('01a-app-boot'),
     ];
   }
-  return [...prefix, chooseView, ...runtime, ready];
+  return [...prefix, chooseView, ...runtime, ready, stepRegistry.require('11g-save-database')];
 }
 
 async function resolveTaskContext(

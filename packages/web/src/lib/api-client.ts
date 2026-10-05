@@ -736,6 +736,17 @@ export interface NotificationSettings {
   soundFilename: string | null;
 }
 
+export interface ProjectDatabaseSnapshot {
+  id: string;
+  sourceTaskId: string | null;
+  sourceTaskTitle: string;
+  createdAt: string;
+  engine: string;
+  engineVersion: string | null;
+  codeCommit: string | null;
+  sizeBytes: number | null;
+}
+
 export interface Task {
   id: string;
   userId: string;

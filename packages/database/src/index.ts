@@ -10,6 +10,12 @@ export function createDatabase(connectionString: string) {
 }
 
 export * as schema from './schema/index.js';
+export {
+  withDatabaseSnapshotLock,
+  initializeTaskDatabaseState,
+  DatabaseSnapshotUnavailableError,
+  snapshotPromotionAllowed,
+} from './database-snapshots.js';
 export { ONE_LIVE_UPGRADE_INDEX } from './schema/tasks.js';
 export type { StepIterationEntry, MergeResolveState } from './schema/index.js';
 export type { StepGuidanceScope, StepGuidanceCause, StepGuidanceStatus } from './schema/index.js';

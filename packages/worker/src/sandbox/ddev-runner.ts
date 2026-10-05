@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -285,7 +286,18 @@ export async function resolveDumpSubpath(taskId: string): Promise<string | null>
   const task = await getDb()
     .query.tasks.findFirst({ where: eq(schema.tasks.id, taskId), columns: { dbUploadId: true } })
     .catch(() => null);
-  if (!task?.dbUploadId) return null;
+  if (!task?.dbUploadId) {
+    const state = await getDb().query.taskDatabaseStates.findFirst({
+      where: eq(schema.taskDatabaseStates.taskId, taskId),
+    });
+    if (!state?.sourceSnapshotId) return null;
+    const snapshot = await getDb().query.databaseSnapshots.findFirst({
+      where: eq(schema.databaseSnapshots.id, state.sourceSnapshotId),
+    });
+    if (!snapshot || snapshot.status !== 'ready')
+      throw new Error('The selected database snapshot is unavailable');
+    return databaseSnapshotRel(snapshot);
+  }
   const dump = await getDb()
     .query.dbUploads.findFirst({
       where: eq(schema.dbUploads.id, task.dbUploadId),
@@ -1163,7 +1175,7 @@ export function buildDdevCommand(
   ddevArgs: string,
   timeoutMs: number,
 ): { shell: string; hostTimeoutMs: number } {
-  const lifecycle = /^(?:start|restart|snapshot)(?:\s|$)/.test(ddevArgs);
+  const lifecycle = /^(?:start|restart|snapshot|export-db)(?:\s|$)/.test(ddevArgs);
   if (!lifecycle)
     return { shell: `cd ${projectDir} && ddev ${ddevArgs}`, hostTimeoutMs: timeoutMs };
   return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);

@@ -2,6 +2,7 @@ export * from './auth.js';
 export * from './cli-providers.js';
 export * from './repos.js';
 export * from './db-dumps.js';
+export * from './database-snapshots.js';
 export * from './tasks.js';
 export * from './task-dag.js';
 export * from './review.js';
