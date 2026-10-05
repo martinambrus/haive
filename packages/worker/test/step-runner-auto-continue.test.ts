@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -278,6 +279,43 @@ describe('advanceStep auto-continue', () => {
       });
     });
   }
+
+  it('database restoration waits for the user in automatic mode even with a restore pre-answer', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { '01c1-restore-database': { action: 'restore:snapshot-A' } },
+    };
+    const apply = vi.fn(async () => ({ imported: false }));
+    const step = {
+      ...restoreDatabaseStep,
+      shouldRun: async () => true,
+      detect: async () => ({
+        repoSubpath: 'project',
+        workspace: null,
+        dbUploadId: null,
+        dumpWorkerPath: null,
+        dumpRunnerPath: null,
+        databaseSnapshotId: 'snapshot-A',
+        snapshotEngine: 'postgres',
+        checkpoint: {
+          id: 'snapshot-A',
+          sourceTaskId: 'task-A',
+          sourceTaskTitle: 'Installed Drupal',
+          createdAt: '2026-10-05T08:30:00Z',
+          engine: 'postgres',
+          engineVersion: '17',
+        },
+      }),
+      apply,
+    };
+    expect((await run(state, step)).status).toBe('waiting_form');
+    expect(apply).not.toHaveBeenCalled();
+    expect((state.taskStepRow.formSchema as FormSchema).title).toBe('Restore project database');
+    expect((await run(state, step, { action: 'skip' })).status).toBe('done');
+    expect(apply).toHaveBeenCalledOnce();
+  });
 
   it('always-wait steps require an explicit submission despite auto mode, pre-answers and defaults', async () => {
     const state = freshState();

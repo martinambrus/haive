@@ -1,9 +1,10 @@
 import { eq } from 'drizzle-orm';
+import type { FormSchema } from '@haive/shared';
 import { schema, initializeTaskDatabaseState } from '@haive/database';
 import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import { readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { splitUploadPath, workspaceAnchor } from '../../../repo/worktree-paths.js';
-import type { StepDefinition } from '../../step-definition.js';
+import { ReopenStepFormError, type StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
 import { parseDdevConfig } from '../_ddev-config.js';
@@ -18,7 +19,14 @@ import {
   type DumpImportFormat,
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
-import { verifyDatabaseSnapshotFile, withSnapshotStep } from '../../../repo/database-snapshots.js';
+import {
+  verifyDatabaseSnapshotFile,
+  withSnapshotStep,
+  offerDatabaseRestore,
+  sweepDatabaseSnapshots,
+} from '../../../repo/database-snapshots.js';
+
+import { importDdevDatabaseSnapshot } from '../../../sandbox/ddev-database-import.js';
 
 const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 function ddevConfigRef(workspace: string) {
@@ -33,6 +41,45 @@ interface RestoreDetect {
   dumpRunnerPath: string | null;
   databaseSnapshotId: string | null;
   snapshotEngine: string | null;
+  snapshotRevision?: number;
+  checkpoint?: {
+    id: string;
+    sourceTaskId: string | null;
+    sourceTaskTitle: string;
+    createdAt: Date | string;
+    engine: string;
+    engineVersion: string | null;
+  };
+}
+
+export function databaseRestoreForm(d: RestoreDetect): FormSchema | null {
+  if (d.dbUploadId || !d.databaseSnapshotId || !d.checkpoint) return null;
+  const c = d.checkpoint;
+  return {
+    title: 'Restore project database',
+    description: `This project has a saved database checkpoint. Restoring replaces this task’s current DDEV database.\n\nSaved ${new Date(c.createdAt).toISOString()} · ${c.engine}${c.engineVersion ? ` ${c.engineVersion}` : ''}`,
+    autoSubmit: false,
+    fields: [
+      {
+        id: 'sourceTask',
+        type: 'note',
+        label: 'Checkpoint saved by',
+        body: c.sourceTaskTitle,
+      },
+      {
+        id: 'action',
+        type: 'select',
+        label: 'Database checkpoint',
+        required: true,
+        default: 'skip',
+        options: [
+          { value: 'skip', label: 'Continue without restoring a checkpoint' },
+          { value: `restore:${c.id}`, label: 'Restore this saved database checkpoint' },
+        ],
+      },
+    ],
+    submitLabel: 'Continue',
+  };
 }
 export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: boolean }> = {
   needsRuntime: 'ddev',
@@ -43,6 +90,7 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
     title: 'Restore project database',
     description: 'Restore the selected saved database or uploaded dump after DDEV startup.',
     requiresCli: false,
+    alwaysWaitForUser: true,
   },
   async shouldRun(ctx) {
     const task = await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
@@ -64,9 +112,22 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
       const upload = await ctx.db.query.dbUploads.findFirst({
         where: eq(schema.dbUploads.id, task.dbUploadId),
       });
-      if (upload?.status === 'complete') return true;
+      return upload?.status === 'complete';
     }
-    return pendingSource;
+    if (pendingSource) return true;
+    if (state?.importedAt || !task.repositoryId) return false;
+    const head = await ctx.db.query.repositoryDatabaseStates.findFirst({
+      where: eq(schema.repositoryDatabaseStates.repositoryId, task.repositoryId),
+    });
+    if (!head?.snapshotId) return false;
+    const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
+      where: eq(schema.databaseSnapshots.id, head.snapshotId),
+    });
+    return (
+      snapshot?.status === 'ready' &&
+      snapshot.repositoryId === task.repositoryId &&
+      snapshot.userId === task.userId
+    );
   },
   async detect(ctx) {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
@@ -96,19 +157,25 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
       }
     }
 
+    let checkpoint: RestoreDetect['checkpoint'];
+    let snapshotRevision: number | undefined;
     if (task?.repositoryId) {
-      const state = await initializeTaskDatabaseState(ctx.db, task);
-      if (!task.dbUploadId && state?.sourceSnapshotId && !state.importedAt) {
-        const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
-          where: eq(schema.databaseSnapshots.id, state.sourceSnapshotId),
-        });
-        if (!snapshot || snapshot.status !== 'ready')
-          throw new Error('The selected saved database is unavailable');
-        databaseSnapshotId = snapshot.id;
-        snapshotEngine = snapshot.engine;
-        const rel = databaseSnapshotRel(snapshot);
-        dumpWorkerPath = `${REPO_STORAGE_ROOT}/${rel}`;
-        dumpRunnerPath = `/repos/${rel}`;
+      await initializeTaskDatabaseState(ctx.db, task);
+      if (!task.dbUploadId) {
+        const epoch = (await ctx.db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, ctx.taskId),
+        }))!.orchestrationEpoch;
+        const offered = await offerDatabaseRestore(ctx, epoch);
+        if (offered) {
+          checkpoint = offered.snapshot;
+          snapshotRevision = offered.revision;
+          databaseSnapshotId = offered.snapshot.id;
+          snapshotEngine = offered.snapshot.engine;
+          dumpWorkerPath = `${REPO_STORAGE_ROOT}/${databaseSnapshotRel(offered.snapshot)}`;
+          // The runner has already started; its mounts cannot change. Import streams
+          // this held file through stdin into that running runner.
+          dumpRunnerPath = null;
+        }
       }
     }
 
@@ -120,14 +187,40 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
       dumpRunnerPath,
       databaseSnapshotId,
       snapshotEngine,
+      checkpoint,
+      snapshotRevision,
     };
   },
+  form: (_ctx, d) => databaseRestoreForm(d),
   async apply(ctx, args) {
     const d = args.detected;
     const importEpoch = d.databaseSnapshotId
       ? (await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }))
           ?.orchestrationEpoch
       : undefined;
+    if (d.databaseSnapshotId && !d.dbUploadId) {
+      const state = await ctx.db.query.taskDatabaseStates.findFirst({
+        where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+      });
+      if (state?.importedAt) return { imported: false };
+      if (importEpoch === undefined) throw new Error('The task is unavailable');
+      if (args.formValues.action === 'skip') {
+        await withSnapshotStep(ctx, importEpoch, async (tx) => {
+          await tx
+            .update(schema.taskDatabaseStates)
+            .set({ sourceSnapshotId: null })
+            .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
+        });
+        await sweepDatabaseSnapshots(ctx.db);
+        return { imported: false };
+      }
+      if (
+        args.formValues.action !== `restore:${d.databaseSnapshotId}` ||
+        state?.sourceSnapshotId !== d.databaseSnapshotId
+      ) {
+        throw new ReopenStepFormError('Choose whether to restore the offered database checkpoint');
+      }
+    }
     if (!d.repoSubpath) throw new Error('No DDEV workspace is available for the selected database');
     const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
     let imported = false;
@@ -141,7 +234,8 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
           where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
         })
       : null;
-    if (dumpRunnerPath && (pendingUpload || (d.databaseSnapshotId && !savedState?.importedAt))) {
+    if ((dumpRunnerPath && pendingUpload) || (d.databaseSnapshotId && !savedState?.importedAt)) {
+      let snapshotForImport: typeof schema.databaseSnapshots.$inferSelect | null = null;
       if (d.databaseSnapshotId) {
         const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
           where: eq(schema.databaseSnapshots.id, d.databaseSnapshotId),
@@ -154,6 +248,7 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
           throw new Error('The selected saved database is unavailable');
         await ctx.emitProgress('Verifying the saved database…');
         await verifyDatabaseSnapshotFile(snapshot, ctx.signal);
+        snapshotForImport = snapshot;
       }
       // A pg_dump archive can't go through `ddev import-db` alone; it is restored
       // with pg_restore inside the db container first. Classified by magic bytes,
@@ -212,7 +307,9 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
         );
       }
       const imp = await withDdevProgress(ctx, 'Importing database dump…', (onLine) =>
-        ddevImportDb(handle, dumpRunnerPath, { format, timeoutMs: 1_800_000, onLine }),
+        d.databaseSnapshotId
+          ? importDdevDatabaseSnapshot(handle, snapshotForImport!, ctx.signal, onLine)
+          : ddevImportDb(handle, dumpRunnerPath!, { format, timeoutMs: 1_800_000, onLine }),
       );
       if (imp.exitCode !== 0) {
         throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
@@ -264,7 +361,10 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
         await withSnapshotStep(ctx, importEpoch, async (tx) => {
           await tx
             .update(schema.taskDatabaseStates)
-            .set({ importedAt: new Date() })
+            .set({
+              importedAt: new Date(),
+              ...(d.snapshotRevision !== undefined ? { baseRevision: d.snapshotRevision } : {}),
+            })
             .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
         });
       }

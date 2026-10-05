@@ -127,7 +127,8 @@ The DDEV project's Mailpit is surfaced at every step that already shows the runn
 
 `01c-ddev-env` configures and starts DDEV and records its configuration baseline. Database imports
 run in `01c1-restore-database` immediately afterwards, before migrations, for both workflow and
-run-app tasks. The New Task checkbox loads the saved project database; it does not choose whether
-to save at completion. The final `11g-save-database` form always requires the user to choose save,
+run-app tasks. When a saved checkpoint exists, the restore step always shows a manual choice,
+even in automatic mode. An uploaded dump overrides it; without either source the step skips.
+Checkpoints are discovered at restoration time, including those saved after task creation. The final `11g-save-database` form always requires the user to choose save,
 finish without saving, or save and overwrite when another task advanced the project snapshot.
 See [Project database persistence](database-persistence.md) for revision fencing and cleanup.

@@ -1,9 +1,10 @@
 # Project database persistence
 
-Workflow and run-app tasks can continue from a saved DDEV primary database. New Task shows the
-current snapshot beside the database attachment, with its source task and timestamp. Restoring
-is opt-in; saving is an explicit choice at the end of each task. A manual database attachment and a
-saved database are mutually exclusive. This persists the database only: uploaded assets, other
+Workflow and run-app tasks can continue from a saved DDEV primary database. After DDEV startup,
+`01c1-restore-database` shows the saved checkpoint with its source task and timestamp and waits
+for an explicit Restore or Continue without restoring choice, including in automatic mode.
+Saving is an explicit choice at the end of each task. An uploaded database dump takes precedence
+over the saved checkpoint; without either source, restoration is skipped. This persists the database only: uploaded assets, other
 services and their volumes are not included.
 
 ## Storage and task selection
@@ -14,18 +15,23 @@ Postgres owns the inventory (`database_snapshots`), repository pointer and monot
 `REPO_STORAGE_ROOT/_database_snapshots/<user>/<repository>/<snapshot>.sql.gz`, outside repository
 checkouts, worktrees, Git and ordinary task attachments. No `.gitignore` modification is needed.
 
-Task creation pins the exact selected snapshot and records the current project revision before
-enqueueing START. Selection verifies ownership, readiness and that the snapshot is still current;
-a stale form returns 409, requiring a fresh selection. A queued task keeps its pinned source even
-when another task replaces the project pointer. Internal and older tasks initialise their save
-state lazily. No restore is implied by lazy initialisation.
+Task creation records the current project revision before enqueueing START. The restore step
+checks availability when it runs, so a checkpoint saved after task creation can still be offered.
+Detect pins the offered ready, owned checkpoint under the repository lock before rendering the
+form. Another task can replace the project pointer without deleting the version awaiting a
+choice. Continuing without restoring releases that pin and immediately sweeps superseded dumps.
+Older API clients can still select an exact checkpoint at creation; stale selections return 409.
+Internal and older tasks initialise their save state lazily. Initialisation never implies restore.
 
-The DDEV runner mounts only the selected dump read-only. `01c1-restore-database` runs immediately
-after `01c-ddev-env` starts DDEV. It verifies the dump’s size and SHA-256 and checks the effective
-database engine before import. A successful import records
-`imported_at` under step/task ownership fencing; retrying cached detect data must not re-import
-over subsequent work. The existing task-local DDEV durability snapshot supports cold runtime
-recovery. A saved project dump is never consumed or deleted as though it were an uploaded dump.
+`01c1-restore-database` runs immediately after `01c-ddev-env` starts DDEV. It verifies the dump’s
+size and SHA-256 and checks the effective database engine before import. A saved dump is streamed
+from a held file descriptor through `docker exec -i` into the existing runner, with gzip validation
+via pipefail. No container recreation, additional mount or temporary dump copy is needed. Uploaded
+dumps keep their existing read-only mount. A successful saved import records `imported_at` and
+sets the save baseline to the offered revision under step/task ownership fencing; retrying cached
+detect data must not re-import over subsequent work. The existing task-local DDEV durability
+snapshot supports cold runtime recovery. A saved project dump is never consumed or deleted as
+though it were an uploaded dump. Even a consumed upload suppresses fallback to a saved checkpoint.
 
 ## Saving and concurrent tasks
 
@@ -48,7 +54,7 @@ save opens a normal step form, even when no other task saved meanwhile. Step met
 `alwaysWaitForUser` disables every automatic submission path, including pre-answers. The New Task
 form has no save setting, and historical `save_enabled = false` rows do not bypass this choice.
 Users choose **Save database for the next task** or **Finish without saving** before any export.
-If the project revision moved since task creation, the form instead offers **Save and overwrite**,
+If the project revision moved since task creation or the approved restore, the form instead offers **Save and overwrite**,
 showing the task that last saved and its timestamp. Declining deletes any candidate from a prior
 attempt. Overwriting selects the whole database; databases are not merged.
 
@@ -88,5 +94,7 @@ with `snapshot_test`. Set `DATABASE_SNAPSHOT_TEST_URL` to run it; CI creates its
 It covers competing saves, stale approvals, queued source pins, rejected ownership/selection,
 cancellation/reset fencing, import idempotency, engine/checksum rejection and file cleanup after
 discard, skip and repository deletion. Export tests cover binary streaming, invalid gzip, empty
-output, failed commands and symlink refusal. Form tests verify explicit conflict choices and
-ordering before teardown.
+output, failed commands and symlink refusal. Form and step-runner tests verify explicit save/restore choices, automatic-mode pauses and
+ordering before teardown. Restore tests cover checkpoints saved after task creation, offered pins
+across competing saves, declining cleanup, uploaded-dump precedence and streaming into a running
+runner without staging files.

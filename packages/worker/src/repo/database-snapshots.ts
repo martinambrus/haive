@@ -98,6 +98,39 @@ export async function loadDatabaseSnapshotState(ctx: StepContext) {
   };
 }
 
+/** Offer one owned checkpoint and pin it until the user answers the restore form. */
+export async function offerDatabaseRestore(ctx: StepContext, epoch: number) {
+  return withSnapshotStep(ctx, epoch, async (tx) => {
+    const state = await tx.query.taskDatabaseStates.findFirst({
+      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+    });
+    if (!state || state.importedAt) return null;
+    const head = await tx.query.repositoryDatabaseStates.findFirst({
+      where: eq(schema.repositoryDatabaseStates.repositoryId, state.repositoryId),
+    });
+    const id = state.sourceSnapshotId ?? head?.snapshotId;
+    if (!id) return null;
+    const snapshot = await tx.query.databaseSnapshots.findFirst({
+      where: and(
+        eq(schema.databaseSnapshots.id, id),
+        eq(schema.databaseSnapshots.repositoryId, state.repositoryId),
+        eq(schema.databaseSnapshots.userId, ctx.userId),
+        eq(schema.databaseSnapshots.status, 'ready'),
+      ),
+    });
+    if (!snapshot) throw new Error('The selected saved database is unavailable');
+    if (!state.sourceSnapshotId)
+      await tx
+        .update(schema.taskDatabaseStates)
+        .set({ sourceSnapshotId: snapshot.id })
+        .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
+    return {
+      snapshot,
+      revision: head?.snapshotId === snapshot.id ? head.revision : state.baseRevision,
+    };
+  });
+}
+
 /** Lock the step before the task, matching Retry/Stop's ordering, then take the repository lock. */
 export async function withSnapshotStep<T>(
   ctx: StepContext,

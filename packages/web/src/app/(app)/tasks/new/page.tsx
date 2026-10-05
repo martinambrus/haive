@@ -29,7 +29,6 @@ import {
   type PlanBlocker,
   type OnboardingStatus,
   type Repository,
-  type ProjectDatabaseSnapshot,
   type Task,
   type TaskListResponse,
   type WorkflowType,
@@ -199,36 +198,8 @@ export default function NewTaskPage() {
   const [dumpProgress, setDumpProgress] = useState(0);
   const [dumpUploading, setDumpUploading] = useState(false);
   const dumpInputRef = useRef<HTMLInputElement>(null);
-  const [databaseSnapshot, setDatabaseSnapshot] = useState<{
-    repositoryId: string;
-    snapshot: ProjectDatabaseSnapshot | null;
-  } | null>(null);
-  const [databaseSnapshotError, setDatabaseSnapshotError] = useState<string | null>(null);
-  const [restoreDatabase, setRestoreDatabase] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    setDatabaseSnapshot(null);
-    setDatabaseSnapshotError(null);
-    setRestoreDatabase(false);
-    if (repositoryId) {
-      api
-        .get<{ snapshot: ProjectDatabaseSnapshot | null }>(
-          `/repos/${repositoryId}/database-snapshot`,
-        )
-        .then(({ snapshot }) => {
-          if (!cancelled) setDatabaseSnapshot({ repositoryId, snapshot });
-        })
-        .catch((err: Error) => {
-          if (!cancelled) setDatabaseSnapshotError(err.message);
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [repositoryId]);
 
   /** The file and folder pickers ADD to one list. Replacing it would mean picking
    *  a folder silently discards the files picked a moment earlier. */
@@ -616,15 +587,6 @@ export default function NewTaskPage() {
         if (overrideBlocked) body.overrideBlocked = true;
       }
       if (fromPlanChat) body.fromPlanChat = true;
-      if (type === 'workflow' || type === 'run_app') {
-        if (
-          restoreDatabase &&
-          databaseSnapshot?.repositoryId === repositoryId &&
-          databaseSnapshot.snapshot
-        ) {
-          body.databaseSnapshotId = databaseSnapshot.snapshot.id;
-        }
-      }
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -636,7 +598,7 @@ export default function NewTaskPage() {
         if (isBugFix && parentTaskId) body.parentTaskId = parentTaskId;
       }
 
-      if ((type === 'workflow' || type === 'run_app') && dumpFile && !restoreDatabase) {
+      if ((type === 'workflow' || type === 'run_app') && dumpFile) {
         setDumpUploading(true);
         try {
           body.dbUploadId = await chunkedUploadDbDump({
@@ -1107,46 +1069,6 @@ export default function NewTaskPage() {
 
         {(inferredType === 'workflow' || inferredType === 'run_app') && (
           <div className="flex flex-col gap-1.5">
-            {databaseSnapshot?.repositoryId === repositoryId && databaseSnapshot.snapshot && (
-              <>
-                <label className="flex items-center gap-2 text-sm text-neutral-200">
-                  <input
-                    type="checkbox"
-                    checked={restoreDatabase}
-                    onChange={(e) => {
-                      setRestoreDatabase(e.target.checked);
-                      if (e.target.checked) {
-                        setDumpFile(null);
-                        setDumpProgress(0);
-                        if (dumpInputRef.current) dumpInputRef.current.value = '';
-                      }
-                    }}
-                  />
-                  Load the saved project database
-                </label>
-                <div className="text-xs text-neutral-500">
-                  <InlineMarkdown
-                    body={`Saved ${new Date(databaseSnapshot.snapshot.createdAt).toLocaleString()} · ${databaseSnapshot.snapshot.engine}${databaseSnapshot.snapshot.engineVersion ? ` ${databaseSnapshot.snapshot.engineVersion}` : ''}`}
-                  />
-                  <InlineMarkdown body={databaseSnapshot.snapshot.sourceTaskTitle} />
-                  {databaseSnapshot.snapshot.sourceTaskId && (
-                    <Link
-                      href={`/tasks/${databaseSnapshot.snapshot.sourceTaskId}`}
-                      className="text-indigo-400 hover:underline"
-                    >
-                      View source task
-                    </Link>
-                  )}
-                </div>
-              </>
-            )}
-            {databaseSnapshotError && (
-              <div className="text-xs text-amber-400">
-                <InlineMarkdown
-                  body={`Could not load the saved database: ${databaseSnapshotError}`}
-                />
-              </div>
-            )}
             <Label htmlFor="dbDump">Database dump (optional)</Label>
             <input
               ref={dumpInputRef}
@@ -1155,7 +1077,6 @@ export default function NewTaskPage() {
               accept=".sql,.sql.gz,.dump,.backup"
               onChange={(e) => {
                 setDumpFile(e.target.files?.[0] ?? null);
-                setRestoreDatabase(false);
                 setDumpProgress(0);
               }}
               className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
@@ -1169,7 +1090,7 @@ export default function NewTaskPage() {
               <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>
             )}
             <div className="text-xs text-neutral-500">
-              <InlineMarkdown body="The selected database is restored in a separate step after DDEV starts. At the end of the task, you choose whether to save its database for the next task. Snapshots are stored locally outside Git; unused snapshots are deleted automatically." />
+              <InlineMarkdown body="After DDEV starts, the Restore project database step lets you choose a saved checkpoint when one is available. An uploaded dump takes precedence. At the end of the task, you choose whether to save its database for the next task. Snapshots are stored locally outside Git; unused snapshots are deleted automatically." />
             </div>
           </div>
         )}
