@@ -3,6 +3,7 @@
 Workflow and run-app tasks can continue from a saved DDEV primary database. After DDEV startup,
 `01c1-restore-database` shows the saved checkpoint with its source task and timestamp and waits
 for an explicit Restore or Continue without restoring choice, including in automatic mode.
+Restore is pre-selected for the offered checkpoint; the user must still submit the form.
 Saving is an explicit choice at the end of each task. An uploaded database dump takes precedence
 over the saved checkpoint; without either source, restoration is skipped. This persists the database only: uploaded assets, other
 services and their volumes are not included.
