@@ -48,6 +48,8 @@ Quoted assignments, bracketed string/symbol keys and bounded bare scalars in `.e
 runtime environment references and function-call prefixes are not nominated.
 Named assignments have no minimum credential length beyond being nonempty: short
 passwords still expose accounts, and the model decides whether they are real.
+Credential URLs allow an empty username (for example Redis password-only auth),
+but still require a nonempty literal password.
 Credential names may include prefixes and suffixes, including `SECRET_KEY_BASE`
 and `AUTH_TOKEN_PRODUCTION`, in both quoted and bare assignments.
 Names are matched as snake-case, hyphenated or camel-case segments, preserving

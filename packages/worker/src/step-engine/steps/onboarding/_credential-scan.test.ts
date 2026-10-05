@@ -75,6 +75,19 @@ describe('credential candidates', () => {
     ]);
   });
 
+  it('recognizes password-only credential URLs without nominating empty passwords', () => {
+    const text = [
+      'REDIS_URL=redis://:hunter2@cache.example',
+      'REDIS_URL="rediss://:p@cache.example"',
+      'REDIS_URL=redis://:@cache.example',
+      'REDIS_URL=redis://:process.env.PASSWORD@cache.example',
+    ].join('\n');
+    expect(scanTextForCredentials('vendor/config', text)).toEqual([
+      { file: 'vendor/config', line: 1, kind: 'credential URL' },
+      { file: 'vendor/config', line: 2, kind: 'credential URL' },
+    ]);
+  });
+
   it('includes unquoted dotenv and YAML credentials while excluding references and expressions', () => {
     const hits = scanTextForCredentials(
       'build/config.env',
