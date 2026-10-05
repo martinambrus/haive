@@ -14,6 +14,7 @@ import {
 } from './_affected-components.js';
 
 interface SpecGateDetect {
+  scopeQuestions?: string[];
   /** Full spec body (markdown). The renderer turns this into HTML inside
    *  the expandable "Full specification" section. */
   specBody: string;
@@ -334,7 +335,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
-    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
+    const resolvedOutput =
+      (resolved?.output as { spec?: string; scopeQuestions?: string[] } | null) ?? {};
     // Prefer the post-checkpoint spec (05a: user/agent warning fixes), then the
     // 05 amended body, then the original 04 spec/summary.
     const specBody =
@@ -349,6 +351,12 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const repositoryId = task?.repositoryId ?? null;
 
     return {
+      scopeQuestions: [
+        ...new Set([
+          ...((qualityOutput as { scopeQuestions?: string[] }).scopeQuestions ?? []),
+          ...(resolvedOutput.scopeQuestions ?? []),
+        ]),
+      ],
       specBody,
       specSummary: buildSpecSummary(specBody),
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
@@ -386,7 +394,19 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       detected.specBody.trim().length > 0
         ? `${detected.specBody.length.toLocaleString()} chars`
         : 'empty';
+    const scopeQuestions = detected.scopeQuestions ?? [];
+    const needsClarification =
+      scopeQuestions.length > 0 || detected.qualityVerdict === 'BLOCKING_AMBIGUITY';
     const infoSections: InfoSection[] = [
+      ...(scopeQuestions.length
+        ? [
+            {
+              title: 'Scope decisions required',
+              body: scopeQuestions.map((question, index) => `${index + 1}. ${question}`).join('\n'),
+              defaultOpen: true,
+            },
+          ]
+        : []),
       {
         title: 'Specification summary',
         ...(summaryPreview ? { preview: summaryPreview } : {}),
@@ -402,25 +422,33 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     ];
     return {
       title: 'Gate 1: Spec approval',
-      description:
-        'Review the spec drafted in phase 0b and approve it before implementation begins. Reject with feedback to send it back for an automatic re-draft (the spec is regenerated and re-reviewed here).',
+      description: needsClarification
+        ? 'Clarify the questions below and reject to regenerate and review the specification. The revised spec must include your answer before it can be approved.'
+        : 'Review the spec drafted in phase 0b and approve it before implementation begins. Reject with feedback to send it back for an automatic re-draft (the spec is regenerated and re-reviewed here).',
       infoSections,
       fields: [
         {
           type: 'radio',
           id: 'decision',
-          label: 'Approve the specification?',
-          options: [
-            { value: 'approve', label: 'Approve — proceed to implementation' },
-            { value: 'reject', label: 'Reject — request changes and re-draft' },
-          ],
-          default: 'approve',
+          label: needsClarification ? 'Revise the specification' : 'Approve the specification?',
+          options: needsClarification
+            ? [{ value: 'reject', label: 'Reject — clarify and re-draft' }]
+            : [
+                { value: 'approve', label: 'Approve — proceed to implementation' },
+                { value: 'reject', label: 'Reject — request changes and re-draft' },
+              ],
+          default: needsClarification ? 'reject' : 'approve',
           required: true,
         },
         {
           type: 'textarea',
           id: 'feedback',
-          label: 'Feedback for the implementation phase',
+          label: scopeQuestions.length
+            ? 'Answer the scope questions or give revision instructions'
+            : needsClarification
+              ? 'Clarify the blocking ambiguity or give revision instructions'
+              : 'Feedback for the implementation phase',
+          required: needsClarification,
           rows: 4,
         },
       ],
@@ -444,6 +472,19 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     const feedback = typeof values.feedback === 'string' ? values.feedback : '';
+    const needsClarification =
+      (args.detected.scopeQuestions?.length ?? 0) > 0 ||
+      args.detected.qualityVerdict === 'BLOCKING_AMBIGUITY';
+    if (needsClarification && !feedback.trim()) {
+      throw new Error(
+        'Clarify the blocking ambiguity or scope questions before recording the spec decision.',
+      );
+    }
+    if (needsClarification && decision !== 'reject') {
+      throw new Error(
+        'Reject with clarification to regenerate and review the spec before approval.',
+      );
+    }
     ctx.logger.info({ decision }, 'spec gate decision recorded');
     if (decision === 'reject') {
       // Record the rejection feedback, then return normally (no throw, no halt). The

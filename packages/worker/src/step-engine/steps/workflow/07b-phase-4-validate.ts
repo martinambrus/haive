@@ -9,7 +9,7 @@ import {
   type StepLoopPassRecord,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
@@ -36,6 +36,7 @@ import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import {
   coerceReviewSeverity,
+  isBlockingSeverity,
   numberedDimensionBlock,
   resolveReviewDimensions,
 } from '@haive/shared/review';
@@ -46,6 +47,14 @@ import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/app-runner.js';
+import {
+  findingUpstream,
+  loadDependencyPolicy,
+  loadReviewDependencyPolicy,
+  upstreamKind,
+  type DependencyPolicy,
+  type UpstreamKind,
+} from './_dependency-policy.js';
 
 // Phase 4 — Implementation validation (legacy phase4-validation.md + the
 // implementation-validator agent). An LLM validator checks what the test suite
@@ -72,6 +81,8 @@ function roleForIteration(iteration: number): string {
 }
 
 interface ValidateDetect {
+  taskBrief?: string;
+  dependencyPolicy?: DependencyPolicy;
   worktreePath: string;
   sandboxWorktreePath: string;
   /** What this change must deliver: the approved spec, or — on lightweight paths that
@@ -105,6 +116,7 @@ interface ValidateDetect {
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
 
 interface ValidationIssue {
+  upstream?: UpstreamKind | null;
   severity: ReviewSeverity;
   file?: string;
   description: string;
@@ -118,6 +130,8 @@ interface DimensionResult {
 }
 
 interface ValidateApply {
+  /** Upstream observations require a user decision, never an automatic repair round. */
+  upstreamIssues?: ValidationIssue[];
   verdict: ValidationVerdict;
   summary: string;
   issues: ValidationIssue[];
@@ -288,7 +302,10 @@ function buildFindingsSummary(
     lines.push('', `### Remaining issues (${issues.length})`);
     for (const i of issues) {
       const loc = i.file ? `\`${i.file}\` — ` : '';
-      lines.push(`- [${i.severity}] ${loc}${i.description}`);
+      const ownership = i.upstream === 'unknown' ? 'ownership unknown' : `upstream ${i.upstream}`;
+      lines.push(
+        `- [${i.severity}] ${i.upstream ? `[${ownership} — user decision required] ` : ''}${loc}${i.description}`,
+      );
     }
   }
   if (fixesApplied.length === 0 && issues.length === 0) {
@@ -338,7 +355,7 @@ function codeValidatorDefinition(dimensions: readonly ReviewDimension[]): readon
     '2. Check Logic Correctness - algorithms and conditionals are right',
     '3. Validate Edge Cases - boundary conditions are handled',
     '4. Confirm Error Handling - failures are handled gracefully',
-    '5. Detect and REMOVE Dead Code - unused functions/code left behind by refactoring',
+    '5. Report code made unused by THIS change; do not clean up pre-existing code',
     '6. Validate All Review Dimensions - verify the actual code satisfies each dimension the spec',
     '   promised; mismatches between spec promises and code are validation failures.',
     '',
@@ -363,19 +380,20 @@ function codeValidatorDefinition(dimensions: readonly ReviewDimension[]): readon
     '',
     'Step 4 - Refactoring impact check (HIGH PRIORITY, WHOLE CODEBASE, BLOCKING): if ANY function was',
     'renamed or removed in this implementation, search the ENTIRE codebase for calls to the old name',
-    '(grep -rn / find-references). If references exist outside the modified files, UPDATE those',
-    'callers to the new name (or restore the old function if removal was premature). FAIL if any old',
-    'name is still called anywhere. Document every change made to external files.',
+    '(grep -rn / find-references). Report stale project-owned callers as issues; do not edit them.',
+    'For upstream callers, report the compatibility problem and preserve our public contract.',
     '',
     'Step 5 - Dead code detection (SCOPED TO MODIFIED FILES ONLY - do not scan the whole codebase):',
     'unused functions (zero references), unused variables, unreachable code after return/exit,',
-    'commented-out code, deprecated functions replaced in this change. REMOVE dead code immediately -',
-    'do not leave it "for reference"; git history exists for that.',
+    'commented-out code, deprecated functions replaced in this change. Report only code THIS change',
+    'made unused. Do not edit files during validation.',
     '',
     "Step 6 - UI language validation: all new/modified user-facing strings match the project's UI",
     'language (from project config such as .claude/project-config.yaml ui_language when present, else',
     'infer from the existing UI strings) and are wrapped in the translation mechanism the project',
-    'uses (e.g. t() / framework equivalent). Check labels, options, error messages, descriptions.',
+    'uses (e.g. t() / framework equivalent), where the task or an established project contract',
+    'requires it. A CLI deployment helper does not need a new translation subsystem merely to',
+    'satisfy a review dimension. Check only the language contract this change actually has.',
     '',
     ...reviewDimensionSection(dimensions),
     '',
@@ -390,9 +408,9 @@ function codeValidatorDefinition(dimensions: readonly ReviewDimension[]): readon
     // contract and says nothing about editing prose.
     INVARIANT_CITATION,
     '',
-    'You may fix what your protocol REQUIRES you to fix (stale callers in Step 4, dead-code removal',
-    'in Step 5) by editing files directly. All OTHER issues you find are reported, not fixed - a',
-    'separate fix agent applies them.',
+    'Validation is read-only. Report defects in the project change; a separate fixer handles them.',
+    'Report upstream defects separately as observations requiring a user decision. Do not add',
+    'requirements merely because a review dimension or a hypothetical edge case suggests them.',
   ];
 }
 
@@ -583,7 +601,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // than routing back to implement, where re-implementing the same churn would
     // just burn another round.
     evaluate: (out) => {
+      // Older persisted outputs may contain only a verdict/summary. They provide no
+      // structured repair assignments and must still be safe to replay after an upgrade.
+      const issues = out.issues ?? [];
+      if ((out.upstreamIssues?.length ?? 0) > 0 || issues.some(findingUpstream)) return null;
       if (out.verdict === 'VALID') return null;
+      if (!issues.some((issue) => isBlockingSeverity(issue.severity))) return null;
       // A parse miss is not a finding. Its findingsSummary reads "_No issues found — nothing to
       // fix._", so looping back spends a whole fix round on a diagnosis that names no defect —
       // and hands the oscillation guard a phantom opposing side, which is how one task reached
@@ -593,7 +616,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       if ((out.churnFiles?.length ?? 0) > 0) return null;
       return {
         blocking: true,
-        diagnosis: out.findingsSummary || out.summary || 'Validation found unresolved issues.',
+        diagnosis: buildFindingsSummary(
+          out.verdict,
+          [],
+          issues.filter((issue) => isBlockingSeverity(issue.severity)),
+          [],
+        ),
       };
     },
   },
@@ -615,6 +643,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
     const view = await resolveSpecView(ctx);
+    const meta = await loadTaskMeta(ctx.db, ctx.taskId);
     let spec = view.text;
     if (view.spec.trim().length === 0) {
       // Lightweight paths (quick_bugfix) skip 03/04/05, so no spec was ever drafted and
@@ -622,7 +651,6 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // code matched what the spec promised — a validator grading against nothing. 07
       // already falls back to the raw task title + description here; share the helper so
       // the implementer and the validator cannot drift on what was asked.
-      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
       spec = briefFromTaskMeta(meta.title, meta.description);
     }
 
@@ -663,6 +691,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const implementationFiles = await collectImplementationFiles(ctx, wt.worktreePath);
 
     return {
+      taskBrief: briefFromTaskMeta(meta.title, meta.description),
+      dependencyPolicy: await loadDependencyPolicy(ctx, wt.worktreePath),
       worktreePath: wt.worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -687,6 +717,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // the static validator pass simply ignores it. Best-effort — never blocks the step.
     prepare: async ({ ctx, detected }) => {
       const d = detected as ValidateDetect;
+      // Replayed detect output may predate this field, including a pending fixer pass.
+      d.dependencyPolicy ??= await loadReviewDependencyPolicy(ctx, d);
+      await hydrateTaskBrief(ctx, d);
       if (!d.browserTesting) return;
       try {
         const runtime = await ensureAppServing(ctx);
@@ -731,6 +764,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         specHeading(d.docsOnly),
         d.spec || '(no brief recorded)',
+        '=== Original user request (scope constraints) ===',
+        d.taskBrief ?? '(not recorded — do not expand scope)',
         d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)
@@ -751,15 +786,23 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // validator pass also stops — the human decides at gate-2.
       if (roleForIteration(iteration) === ROLE_FIXER) return true;
       const out = applyOutput as ValidateApply;
+      const issues = out.issues ?? [];
+      if ((out.upstreamIssues?.length ?? 0) > 0 || issues.some(findingUpstream)) return false;
       if (out.verdict !== 'ISSUES_FOUND') return false;
       if ((out.churnFiles?.length ?? 0) > 0) return false;
-      return true;
+      return issues.some((issue) => isBlockingSeverity(issue.severity));
     },
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;
       if (roleForIteration(iteration) === ROLE_FIXER) {
         const prior = latestValidator(previousIterations);
-        const issues = prior?.issues ?? [];
+        const issues = (prior?.issues ?? []).filter(
+          (issue) =>
+            isBlockingSeverity(issue.severity) &&
+            !findingUpstream(issue) &&
+            !!d.dependencyPolicy &&
+            !upstreamKind(issue.file, d.dependencyPolicy),
+        );
         return [
           'A validation agent reviewed the implementation in the workspace:',
           d.sandboxWorktreePath,
@@ -781,10 +824,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
                       `${n + 1}. [${i.severity}] ${i.file ?? ''} ${i.description}${i.fix ? ` — required fix: ${i.fix}` : ''}`,
                   )
                   .join('\n')
-              : '(the validator reported issues but provided no list — re-read its report in the spec context and fix what is broken)',
+              : '(no project-owned repair assignments — make no edits and report that result)',
           ),
           '',
           'Make ONLY the fixes needed - do not add unrelated changes.',
+          '=== Original user request (scope constraints) ===',
+          d.taskBrief ?? '(not recorded — do not expand scope)',
           'Do NOT run git and do NOT run the test suite.',
           // The fixer is the agent that actually writes the prose, so the evidence bar has
           // to reach IT, not only the validator that raised the issue. Measured over 66
@@ -823,6 +868,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
             ? '=== Brief (what the document was asked to cover) ==='
             : '=== Spec (the original requirements) ===',
           d.spec || '(no brief recorded)',
+          '=== Original user request (scope constraints) ===',
+          d.taskBrief ?? '(not recorded — do not expand scope)',
         ].join('\n');
       }
       // Validator re-pass after fixes.
@@ -867,6 +914,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         specHeading(d.docsOnly),
         d.spec || '(no brief recorded)',
+        '=== Original user request (scope constraints) ===',
+        d.taskBrief ?? '(not recorded — do not expand scope)',
         d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)
@@ -904,6 +953,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
         summary: prior?.summary ?? '',
         issues: prior?.issues ?? [],
+        upstreamIssues: prior?.upstreamIssues ?? [],
         dimensions: prior?.dimensions ?? [],
         excludedDimensions,
         converged: prior?.converged ?? true,
@@ -928,10 +978,19 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         : JSON.stringify(args.llmOutput ?? '').slice(-REPORT_CAP);
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
+      const d = args.detected as ValidateDetect;
+      const policy =
+        parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
+      const issues = parsed.issues.map((issue) => {
+        const upstream = upstreamKind(issue.file, policy);
+        return { ...issue, upstream };
+      });
+      const upstreamIssues = issues.filter((issue) => issue.upstream);
+      const verdict = upstreamIssues.length > 0 ? 'ISSUES_FOUND' : parsed.verdict;
       // Churn only matters while issues remain; a VALID pass converged by definition.
       const churnFiles =
         parsed.verdict === 'ISSUES_FOUND'
-          ? churnHotspots([...priorValidatorIssueLists(previous), parsed.issues])
+          ? churnHotspots([...priorValidatorIssueLists(previous), issues])
           : [];
       ctx.logger.info(
         {
@@ -944,12 +1003,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       );
       // Every validator pass records; the dedupe index collapses an issue this step
       // row already saw this round, so a loop that re-flags the same file once per
-      // pass leaves one row, not one per pass. blocking:false — 07b's fixLoop keys
-      // on the verdict, not on a per-issue severity.
+      // pass leaves one row, not one per pass. The step output drives routing;
+      // upstream observations never become automatic repair assignments.
       await recordReviewFindings(
         ctx,
         '07b-phase-4-validate',
-        parsed.issues.map((i) => {
+        issues.map((i) => {
           const { path, lines } = splitLocation(i.file);
           return {
             reviewerId: 'validator',
@@ -970,20 +1029,16 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         text: parsed.summary,
       });
       return {
-        verdict: parsed.verdict,
+        verdict,
         summary: parsed.summary,
-        issues: parsed.issues,
+        issues,
+        upstreamIssues,
         dimensions: parsed.dimensions,
         excludedDimensions,
         converged: churnFiles.length === 0,
         churnFiles,
         fixesApplied: fixesSoFar,
-        findingsSummary: buildFindingsSummary(
-          parsed.verdict,
-          fixesSoFar,
-          parsed.issues,
-          churnFiles,
-        ),
+        findingsSummary: buildFindingsSummary(verdict, fixesSoFar, issues, churnFiles),
         report,
         validatorPasses: validatorPasses + 1,
         source: 'validator',

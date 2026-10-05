@@ -1,3 +1,5 @@
+import { TASK_SCOPE_RULES } from '@haive/shared';
+
 // Single source of truth for the review SCOPE FENCE, shared across the always-on
 // code-review step (08c), the implementation validator (07b), and the onboarded
 // reviewer agent templates (_agent-templates.ts). Defined once here — the
@@ -21,8 +23,8 @@
  *
  *  Blast radius is IN scope — this is the same rule 08c2's auditor already applies —
  *  so a stale caller or a broken consumer of a changed contract is never fenced out.
- *  The last line is deliberate and points the SAME way as `isOutOfScope`: doubt
- *  resolves to in-scope, so the fence can only ever be too narrow, never too wide.
+ *  Ownership is independent of causality: upstream code can supply evidence and
+ *  observations, but newly reaching it never authorizes rewriting it.
  *
  *  The unit is LINES, not files. It was files, because a list of paths was all a reviewer
  *  had — which made a pre-existing defect anywhere in a 5,000-line file a legitimate
@@ -37,6 +39,8 @@
  *  notes existed. Narrowing on a measurement nobody made is how a real defect gets waved
  *  through, and it is the one direction this fence must never fail in. */
 const SCOPE_BOUNDARY = [
+  ...TASK_SCOPE_RULES,
+  '',
   'SCOPE FENCE. IN SCOPE = the lines this change wrote — listed per file in the changed-files',
   'block — together with the function or block each changed line sits in, PLUS any code whose',
   'contract this change alters: a caller of a signature that changed, a consumer of a schema,',
@@ -44,7 +48,9 @@ const SCOPE_BOUNDARY = [
   'problem in code this change did not write and does not newly expose is OUT OF SCOPE,',
   'however real it is — including code inside a file this change touched but outside the lines',
   'it wrote. Where a file carries no line note its lines were not recorded, and the WHOLE file',
-  'is in scope. If you are unsure whether this change caused it, treat it as IN scope.',
+  'is in scope for review, subject to the ownership boundary above. Being newly reachable',
+  'does not authorize upstream repairs. If causality is uncertain, investigate and report the',
+  'uncertainty; do not broaden the editing scope to make it disappear.',
 ] as const;
 
 /** Disposition A — a reviewer with a `findings` list and a `## INSIGHTS` sink.
@@ -86,8 +92,8 @@ export const SCOPE_FENCE_IN_SCOPE_FLAG = [
  *  gate 2 while `issues` reaches a fix agent that edits files.
  *
  *  The Step 4 carve-out is load-bearing: a stale caller of something this change
- *  renamed IS in scope by definition, and the validator's protocol requires it to be
- *  fixed repo-wide. Without the carve-out this fence would contradict that step. */
+ *  renamed IS in scope by definition. The validator reports the impact; a fixer
+ *  may edit owned callers only. */
 export const SCOPE_FENCE_REPORT_ONLY = [
   ...SCOPE_BOUNDARY,
   'Every entry you put in `issues` is handed to a fix agent that will EDIT the code, so `issues`',
@@ -95,7 +101,9 @@ export const SCOPE_FENCE_REPORT_ONLY = [
   'touch belongs in your markdown report as an observation — never in `issues`, and never',
   'edited by you.',
   'The exception is the one your protocol already names: a stale caller of something this change',
-  'renamed or removed (Step 4) is in scope wherever it lives, and you fix it.',
+  'renamed or removed (Step 4) is in scope wherever it lives. Report it; the fixer changes only',
+  'project-owned callers. An upstream caller requires preserving our compatible API or a user',
+  'decision, never rewriting upstream code.',
 ] as const;
 
 /** Disposition D — the 07b validator on a DOCUMENTATION-ONLY change.
@@ -112,6 +120,8 @@ export const SCOPE_FENCE_REPORT_ONLY = [
  *  structure — a document made true by changing the project, which is the failure
  *  this fence exists to stop. */
 export const SCOPE_FENCE_DOC_REPORT_ONLY = [
+  ...TASK_SCOPE_RULES,
+  '',
   'SCOPE FENCE. This change touched documentation only. Read anything in the repository you need',
   'as EVIDENCE for a claim — that is the job — but the source code is NOT the work surface here.',
   'Every entry you put in `issues` must be a defect in the DOCUMENT, because a fix agent reads',

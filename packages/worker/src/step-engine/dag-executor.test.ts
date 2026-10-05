@@ -469,6 +469,19 @@ describe('06c buildCoderPrompt spec directive', () => {
   });
   const DIRECTIVE = 'Read them IN FULL from the spec file named above';
 
+  it('gives each coder the original request alongside a wider planner-authored assignment', () => {
+    const prompt = build(
+      ctx({
+        taskBrief: 'Install admin_toolbar only. Preserve existing permissions.',
+        description: 'Install admin_toolbar and change permissions',
+      }),
+      '',
+    );
+    expect(prompt).toContain('=== Original user request (scope constraints) ===');
+    expect(prompt).toContain('Install admin_toolbar only. Preserve existing permissions.');
+    expect(prompt).toContain('The user request and its explicit constraints define the work.');
+  });
+
   it('tells a coder to read its own sections when the view is condensed', () => {
     expect(build(ctx({}), '')).toContain(DIRECTIVE);
   });
@@ -916,6 +929,7 @@ function makeDagMergeWaitDb(opts: {
   stepRowStatus?: string;
   /** The issue as a coder left it, for section C, or still unmerged (`mergeStatus: null`). */
   issue?: Partial<{
+    worktreePath: string;
     outcome: string;
     cliInvocationId: string | null;
     infraRetries: number;
@@ -1447,15 +1461,17 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
 
   it('a merge git refused in the merge pass halts with its reason and sends no fixer', async () => {
     const integrationDir = await setupConflictedIntegration(true);
+    const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-commit-'));
     try {
       await gitCode(integrationDir, ['merge', '--abort']);
+      await git(integrationDir, ['worktree', 'add', issueDir, 'main--ISSUE-1']);
       // An untracked file where the issue adds one: git refuses the merge outright.
       await writeFile(path.join(integrationDir, 'issue.txt'), 'mine\n', 'utf8');
       const h = makeDagMergeWaitDb({
         invocation: undefined,
         integrationDir,
         autoResolveConflicts: true,
-        issue: { mergeStatus: null },
+        issue: { mergeStatus: null, worktreePath: issueDir },
       });
       vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
       const result = await resolveDagPhase(
@@ -1478,6 +1494,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       );
       expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe('mine\n');
     } finally {
+      await rm(issueDir, { recursive: true, force: true });
       await rm(integrationDir, { recursive: true, force: true });
     }
   });
@@ -1643,6 +1660,12 @@ function makeSpawnDb() {
     // The ownership probe a run is recorded under: these cases never lose the row.
     select: () => ({ from: () => ({ where: () => ({ for: async () => [{ id: 'step1' }] }) }) }),
     query: {
+      tasks: {
+        findFirst: async () => ({
+          title: 'Install one module',
+          description: 'Preserve existing permissions',
+        }),
+      },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
@@ -1764,6 +1787,7 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
       expect(coderInv?.values.agentTitle).toContain('Fix coder');
       // The stored verdict's issues were read and threaded into the re-dispatch, not dropped.
       expect(coderInv?.values.prompt).toContain('stale cache bug');
+      expect(coderInv?.values.prompt).toContain('Preserve existing permissions');
       expect(runInsert?.values.role).toBe('coder');
       expect(runInsert?.values.iteration).toBe(1);
       // Exactly one agent was spawned — a reviewer was never dispatched against unchanged code.
@@ -1826,6 +1850,7 @@ describe('ingestReviewRun: a reviewer that started, produced no verdict, and was
     expect(issueUpdate?.patch).toMatchObject({ reviewInfraRetries: 1 });
     const reviewerInv = inserts.find((i) => i.table === schema.cliInvocations);
     expect(reviewerInv?.values.agentTitle).toContain('Reviewer');
+    expect(reviewerInv?.values.prompt).toContain('Preserve existing permissions');
   });
 });
 
@@ -1887,6 +1912,7 @@ describe('ingestAdvisor: an advisor that never answered', () => {
       const advisorInv = inserts.find((i) => i.table === schema.cliInvocations);
       expect(advisorInv?.values.mode).toBe('dag_parallel');
       expect(advisorInv?.values.agentTitle).toContain('Advisor');
+      expect(advisorInv?.values.prompt).toContain('Preserve existing permissions');
     },
   );
 });

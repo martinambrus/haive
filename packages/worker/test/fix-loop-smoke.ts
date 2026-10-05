@@ -232,7 +232,9 @@ function overrideValidateAlwaysFails(): void {
       return {
         verdict: 'ISSUES_FOUND' as const,
         summary: 'forced failure for the fix-loop smoke',
-        issues: [{ description: 'smoke-forced issue' }],
+        issues: [
+          { severity: 'high' as const, file: 'package.json', description: 'smoke-forced issue' },
+        ],
         dimensions: [],
         fixesApplied: [],
         findingsSummary: 'Smoke-forced ISSUES_FOUND to drive the fix loop.',

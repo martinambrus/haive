@@ -1,5 +1,12 @@
 # Review dimensions
 
+Dimensions evaluate the requested behavior and existing project contracts. Selecting all
+dimensions does not authorize new features, permission changes, module removals, translation
+frameworks or tests of dependency internals. For example, installing one Drupal module calls
+for installation and integration checks; the i18n dimension alone does not require translating
+an activation helper's CLI messages. The mandatory task boundary takes precedence over inline
+and previously generated personas (see [Agent rules](agent-rules.md)).
+
 `REVIEW_DIMENSIONS` (`packages/shared/src/review/dimensions.ts`) is the canonical set of 14 a
 change is scored against. Before it, the same names were hardcoded prose in five files across
 eleven sites, worded three ways (`Privacy/Compliance` / `Privacy / Compliance` / `Privacy`;

@@ -1,5 +1,31 @@
 # Agent rules
 
+The task and dependency boundary is `TASK_SCOPE_RULES` in shared constants. It is part of
+the default provider rules and the step-level repository-data guards, so a custom provider
+persona or an old onboarded persona cannot opt out of it. The original task request reaches
+spec correction, implementation, validation and code review. Review dimensions and a revised
+spec cannot authorize extra work or override explicit constraints. A spec corrector reports
+conflicts as `scopeQuestions`; gate 1 shows them, defaults to rejection and requires an answer.
+The same default and required clarification apply when the reviewer directly reports
+`BLOCKING_AMBIGUITY`, even without a corrector-generated question list.
+An unresolved question must be rejected with clarification to regenerate and review the spec.
+It cannot be approved merely by adding feedback: implementation and validators must share the
+revised specification rather than reading different answers to the same question.
+The sprint planner, every DAG coder and the DAG review/recovery dispatches receive the
+original request too. Refuters carry the mandatory task boundary and original brief;
+when an older review resumes, the second-wave dispatch reloads that brief from the task.
+`hydrateTaskBrief` reloads a missing brief before spec review/correction, sprint planning,
+implementation, validation and both code-review waves dispatch. The boundary therefore
+also applies to forms and CLI waits parked before these detect fields existed.
+
+Agents may read infrastructure as evidence, but never repair framework core or underlying
+infrastructure. They report defects and their impact; a blocker requires a user decision.
+Contrib and installed packages remain third-party unless ownership is established. A repair
+is allowed only for a reproduced failure breaking the requested installation or behavior,
+and must be delivered as a versioned package-manager-applied patch, tested from a clean
+lockfile install. Speculative hardening and optional-feature defects are observations.
+Edited upstream source and search-and-replace install hooks are never the deliverable.
+
 **Every dispatch carries its provider's rules, whatever the checkout holds.** Onboarding writes
 the merged `haive:cli-rules` block into AGENTS.md, but a workflow task runs in a worktree checked
 out from HEAD, onboarding's commit defaults off, and an upgrade never re-committed the file —

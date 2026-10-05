@@ -9,6 +9,18 @@ vi.mock('./_app-runtime.js', async (importOriginal) => ({
   ensureAppServing: m.ensureAppServing,
 }));
 
+vi.mock('./_dependency-policy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_dependency-policy.js')>()),
+  loadReviewDependencyPolicy: vi.fn(
+    async (_ctx, detected) =>
+      detected.dependencyPolicy ?? {
+        drupal: true,
+        drupalRoots: ['', 'web', 'docroot', 'public', 'html'],
+        ownedPaths: [],
+      },
+  ),
+}));
+
 import { TaskCancelledError } from '../../step-definition.js';
 import {
   parseValidatorOutput,
@@ -94,7 +106,7 @@ function mkValidateApply(partial: Record<string, unknown> = {}) {
   return {
     verdict: 'ISSUES_FOUND',
     summary: '',
-    issues: [],
+    issues: [{ severity: 'high', description: 'missing requested behavior', file: 'src/app.ts' }],
     dimensions: [],
     converged: true,
     churnFiles: [],
@@ -216,6 +228,15 @@ describe('phase4ValidateStep churn bail wiring', () => {
     expect(v).not.toBeNull();
     expect(v!.blocking).toBe(true);
   });
+
+  it.each(['VALID', 'ISSUES_FOUND'])(
+    'safely replays old %s outputs without structured issues',
+    (verdict) => {
+      expect(
+        step.fixLoop!.evaluate({ verdict, findingsSummary: 'Old validation report' } as never),
+      ).toBeNull();
+    },
+  );
 
   // A parse miss names no defect — its summary literally reads "nothing to fix" — so it must
   // reach gate-2 rather than spend a fix round and feed the oscillation guard a phantom side.
@@ -576,7 +597,7 @@ describe('phase4ValidateStep browser bring-up', () => {
   const prepare = () =>
     phase4ValidateStep.llm!.prepare!({
       ctx,
-      detected: { browserTesting: true },
+      detected: { browserTesting: true, taskBrief: 'brief' },
       formValues: {},
     } as never);
   const rejection = (run: () => Promise<unknown>) =>
@@ -611,5 +632,148 @@ describe('phase4ValidateStep browser bring-up', () => {
 
     expect(m.ensureAppServing).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
+  });
+});
+
+describe('validator repair boundary', () => {
+  it('gives a resumed fixer no assignments until repository ownership is known', () => {
+    const prompt = phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: { sandboxWorktreePath: '/ws' },
+      iteration: 1,
+      previousIterations: [
+        {
+          iteration: 0,
+          applyOutput: mkValidateApply({
+            issues: [
+              {
+                severity: 'high',
+                file: 'includes/bootstrap.inc',
+                description: 'rewrite Drupal bootstrap',
+                upstream: null,
+              },
+            ],
+          }),
+        },
+      ],
+    } as never);
+    expect(prompt).not.toContain('rewrite Drupal bootstrap');
+    expect(prompt).toContain('no project-owned repair assignments');
+  });
+  it.each([undefined, '../vendor/acme/a.php', '/other/checkout/core/a.php'])(
+    'keeps a high finding with an unusable location report-only: %s',
+    async (file) => {
+      const out = await phase4ValidateStep.apply(
+        { logger: stubLogger } as never,
+        {
+          detected: {},
+          iteration: 0,
+          previousIterations: [],
+          llmOutput: {
+            verdict: 'ISSUES_FOUND',
+            issues: [
+              {
+                severity: 'high',
+                file,
+                description: 'unlocated framework complaint',
+                upstream: null,
+              },
+            ],
+          },
+        } as never,
+      );
+      expect(out.issues[0]?.upstream).toBe('unknown');
+      expect(out.findingsSummary).toContain('ownership unknown');
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+      expect(
+        await phase4ValidateStep.loop!.shouldContinue({ applyOutput: out, iteration: 0 } as never),
+      ).toBe(false);
+    },
+  );
+  it('keeps low advisories out of a blocking repair diagnosis', () => {
+    const out = mkValidateApply({
+      issues: [
+        { severity: 'high', file: 'scripts/enable.php', description: 'retry incorrectly fails' },
+        { severity: 'low', file: 'README.md', description: 'expand documentation now' },
+      ],
+      findingsSummary: 'retry incorrectly fails; expand documentation now',
+    });
+    const repair = phase4ValidateStep.fixLoop!.evaluate(out as never);
+    expect(repair?.diagnosis).toContain('retry incorrectly fails');
+    expect(repair?.diagnosis).not.toContain('expand documentation now');
+  });
+
+  it('stops for a user decision when the validator names upstream code, even with an in-scope project defect', async () => {
+    const out = await phase4ValidateStep.apply(
+      { logger: stubLogger } as never,
+      {
+        detected: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: {
+          verdict: 'ISSUES_FOUND',
+          issues: [
+            { severity: 'high', file: 'web/core/lib/Installer.php', description: 'core defect' },
+            { severity: 'high', file: 'scripts/enable.php', description: 'project defect' },
+          ],
+        },
+      } as never,
+    );
+    expect(out.upstreamIssues).toHaveLength(1);
+    expect(out.findingsSummary).toContain('user decision required');
+    expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+    expect(
+      await phase4ValidateStep.loop!.shouldContinue({
+        ctx: {} as never,
+        llmOutput: null,
+        iteration: 0,
+        previousIterations: [],
+        applyOutput: out,
+      } as never),
+    ).toBe(false);
+  });
+
+  it('does not spend fixer passes or fix rounds on medium/low suggestions', async () => {
+    const out = mkValidateApply({
+      issues: [
+        { severity: 'low', file: 'scripts/enable.php', description: 'translate CLI messages' },
+      ],
+    });
+    expect(phase4ValidateStep.fixLoop!.evaluate(out as never)).toBeNull();
+    expect(
+      await phase4ValidateStep.loop!.shouldContinue({
+        ctx: {} as never,
+        llmOutput: null,
+        iteration: 0,
+        previousIterations: [],
+        applyOutput: out,
+      } as never),
+    ).toBe(false);
+  });
+
+  it('filters old persisted repair assignments at prompt-build time', () => {
+    const prompt = phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: { sandboxWorktreePath: '/ws', spec: 'spec', implementationFiles: [] },
+      iteration: 1,
+      formValues: {},
+      previousIterations: [
+        {
+          iteration: 0,
+          llmOutput: null,
+          continueRequested: true,
+          applyOutput: mkValidateApply({
+            issues: [
+              {
+                severity: 'high',
+                file: 'web/modules/contrib/foo/foo.php',
+                description: 'rewrite contrib module now',
+              },
+            ],
+          }),
+        },
+      ],
+    } as never);
+    expect(prompt).not.toContain('rewrite contrib module now');
+    expect(prompt).toContain('no project-owned repair assignments');
+    expect(prompt).not.toContain('re-read its report in the spec context and fix what is broken');
   });
 });

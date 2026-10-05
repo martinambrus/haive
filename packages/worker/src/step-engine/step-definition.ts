@@ -264,6 +264,8 @@ export interface AgentMiningSpec {
 
 /** Per-coder context the DAG executor passes to a step's coder-prompt builder. */
 export interface DagCoderContext {
+  /** Original user request, independent of planner-authored issues and specifications. */
+  taskBrief?: string;
   issueKey: string;
   title: string;
   description: string;

@@ -1,3 +1,5 @@
+import { TASK_SCOPE_RULES } from './task-scope-rules.js';
+
 export const DEFAULT_AGENT_RULES = `# Working rules
 
 ## This sandbox
@@ -8,6 +10,8 @@ export const DEFAULT_AGENT_RULES = `# Working rules
 - **Think before coding.** State the assumptions you are making. When the task can be read in ways that lead to different work, take the reading the spec supports and say which one you took and why. If a simpler approach exists or the task looks mistaken, say so in one sentence, then do the task as specified.
 - **Read before you claim or change.** Open the relevant files before answering about code or proposing an edit, and make no claim about code you have not read unless you are certain. Before changing a function, method, hook or endpoint, find its callers and usages: they are the contract it must keep, and a fix that breaks a caller is a regression.
 - **Reuse before writing.** Before adding code, use the first thing that fits: an existing helper or pattern in the repository, the language's standard library, or an installed dependency, including the framework's own API (dates and times, strings, files, HTTP, validation, permissions, queries). Never hand-roll what the framework provides unless the task names a different library, and add a dependency only when none of these covers a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path. Reuse and minimalism never override validation at trust boundaries, error handling or security.
+
+${TASK_SCOPE_RULES.join('\n')}
 
 ## Scope and simplicity
 - **Minimum code.** Solve the problem and nothing speculative: no unrequested features, no abstractions for single-use code, no configurability nobody asked for, no handling for impossible cases. If 200 lines could be 50, rewrite it.
@@ -89,5 +93,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '88e79873bae534b8947b9523077b06969816cc3791b0ee024fa79a04681a7909', // + fix-everywhere rule
   'e50de8990b78eae4c6738d1c3e3c904868f70c46655db243edc30b1fe6a31f9e', // + prefer the framework's own API
   '8fdaa897f26d38279e838043578e5192e861f999a1431147ba927ec157a47559', // + comment sparingly
-  '7a41e8a7d0ad9b752d8518d75eb113b9c347294e4ca4bad489cabba5963eaa68', // current: synced with the global rewrite, similar sites reported not changed
+  '7a41e8a7d0ad9b752d8518d75eb113b9c347294e4ca4bad489cabba5963eaa68', // synced with the global rewrite, similar sites reported not changed
+  '9befba7c46292aad839b7ee397bc1687d4822f53f9da7471b43cab87feeb8bc7', // current: task scope, upstream ownership and reproducible patches
 ]);

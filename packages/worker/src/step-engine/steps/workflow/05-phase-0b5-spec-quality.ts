@@ -17,8 +17,11 @@ import {
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
+import { parseAgentJson } from './_agent-json.js';
 
 interface SpecQualityDetect {
+  taskBrief?: string;
   specSummary: string;
   spec: string;
   specLength: number;
@@ -65,6 +68,7 @@ interface QualityFinding {
 type SpecVerdict = 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY';
 
 export interface SpecQualityApply {
+  scopeQuestions?: string[];
   /** Reviewer verdict driving the loop + gate 1: APPROVED stops as done,
    *  NEEDS_REVISION continues the review/correct loop, BLOCKING_AMBIGUITY stops
    *  and surfaces to the user (intent must be clarified; the corrector can't fix it). */
@@ -181,6 +185,20 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
     return { amendedSpec: typeof obj.amendedSpec === 'string' ? obj.amendedSpec : null };
   }
   return null;
+}
+
+export function parseScopeQuestions(raw: unknown): string[] {
+  return (
+    parseAgentJson(raw, (candidate) => {
+      const questions = (candidate as { scopeQuestions?: unknown }).scopeQuestions;
+      return Array.isArray(questions) && questions.every((question) => typeof question === 'string')
+        ? questions
+            .map((question: string) => question.trim())
+            .filter(Boolean)
+            .slice(0, 20)
+        : null;
+    }) ?? []
+  );
 }
 
 /** Smallest fraction of the spec it was given that a corrector's `amendedSpec`
@@ -557,11 +575,14 @@ const CORRECT_RULES = [
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
   '{',
   '  "amendedSpec": "<the FULL revised spec body — never a diff or partial snippet>",',
+  '  "scopeQuestions": ["<user decision needed if a correction would violate the original request>"],',
   '  "accepted": [ "<short ref to each finding you validated and fixed>" ],',
   '  "rejected": [ { "finding": "<short ref>", "reason": "<why you did not act on it>" } ]',
   '}',
   'If no finding is valid, return the current spec unchanged in amendedSpec with an empty',
   '"accepted" list. amendedSpec is REQUIRED.',
+  'When a correction conflicts with the original user request, leave the conflicting requirement',
+  'unchanged and report scopeQuestions. Never resolve the conflict by inventing extra scope.',
 ] as const;
 
 /** Substituted for the reviewer's findings when a review pass was lost (parse failure
@@ -600,13 +621,14 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     const spec = output.spec ?? '';
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { stepLoopLimits: true },
+      columns: { stepLoopLimits: true, title: true, description: true },
     });
     const limits = (taskRow?.stepLoopLimits ?? {}) as Record<string, number>;
     const taskBudget = limits['05-phase-0b5-spec-quality'];
     const currentBudget =
       typeof taskBudget === 'number' && taskBudget > 0 ? taskBudget : SPEC_QUALITY_DEFAULT_BUDGET;
     return {
+      taskBrief: briefFromTaskMeta(taskRow?.title ?? '', taskRow?.description ?? ''),
       specSummary: output.summary ?? '',
       spec,
       specLength: spec.length,
@@ -666,6 +688,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateTaskBrief(ctx, detected as SpecQualityDetect),
     requiredCapabilities: ['tool_use'],
     timeoutMs: 60 * 60 * 1000,
     // First pass (iteration 0) is always a REVIEW.
@@ -680,6 +703,8 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         ...dimensionScopeLines(detected.reviewDimensionIds),
         '',
         `Focus areas: ${values.focusAreas ?? '(none)'}`,
+        '=== Original user request (scope constraints) ===',
+        detected.taskBrief ?? '(not recorded — do not expand scope)',
         '',
         '=== Spec body ===',
         detected.spec || '(empty)',
@@ -694,6 +719,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     passesPerRound: 2,
     resolveRole: roleForIteration,
     shouldContinue: ({ ctx, applyOutput, iteration, previousIterations }) => {
+      if (((applyOutput as SpecQualityApply).scopeQuestions?.length ?? 0) > 0) return false;
       // After a correction (odd) always re-review (even) unless the runner's
       // budget stops us. After a review (even) keep going only while the reviewer
       // says NEEDS_REVISION; APPROVED is done, BLOCKING_AMBIGUITY needs a human.
@@ -735,6 +761,8 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
           ...CORRECT_RULES,
           '',
           `Focus areas: ${values.focusAreas ?? '(none)'}`,
+          '=== Original user request (scope constraints) ===',
+          det.taskBrief ?? '(not recorded — do not expand scope)',
           findingsBlock,
           '',
           '=== Current spec body ===',
@@ -747,6 +775,8 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         'Re-review the corrected spec below; assess only — amend nothing.',
         '',
         `Focus areas: ${values.focusAreas ?? '(none)'}`,
+        '=== Original user request (scope constraints) ===',
+        det.taskBrief ?? '(not recorded — do not expand scope)',
         '',
         '=== Current spec body (post-correction) ===',
         workingSpec || '(empty)',
@@ -763,6 +793,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     // until the next review re-scores it.
     if (roleForIteration(args.iteration) === ROLE_CORRECTOR) {
       const correction = parseCorrectorOutput(args.llmOutput ?? null);
+      const scopeQuestions = parseScopeQuestions(args.llmOutput);
       const lastReview = latestReview(args.previousIterations);
       const decision = chooseAmendedSpec(workingSpec, correction?.amendedSpec);
       if (decision.rejected) {
@@ -780,11 +811,12 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         'spec correction applied',
       );
       return {
-        verdict: 'NEEDS_REVISION',
+        verdict: scopeQuestions.length ? 'BLOCKING_AMBIGUITY' : 'NEEDS_REVISION',
         score: lastReview?.score ?? 5,
         findings: lastReview?.findings ?? [],
         source: 'correct',
-        spec: decision.spec,
+        spec: scopeQuestions.length ? workingSpec : decision.spec,
+        ...(scopeQuestions.length ? { scopeQuestions } : {}),
         ...(decision.rejected ? { amendmentDiscarded: decision.rejected } : {}),
       };
     }

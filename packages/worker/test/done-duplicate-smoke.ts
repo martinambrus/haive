@@ -235,7 +235,7 @@ async function main(): Promise<void> {
       );
 
     // --- Case 1: fix loop -------------------------------------------------------------
-    // 07b's fixLoop fires on any non-VALID verdict with no churn files.
+    // 07b's fixLoop fires for an unresolved high/critical project finding with no churn files.
     {
       const taskId = await makeTask('fix-loop dup', {
         executionPath: 'quick_bugfix',
@@ -244,6 +244,7 @@ async function main(): Promise<void> {
       });
       await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
         verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
       });
       await enqueueDuplicate(taskId, '07b-phase-4-validate', 0);
@@ -394,6 +395,7 @@ async function main(): Promise<void> {
       });
       await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
         verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'would have been blocking, but the chain moved on',
       });
       const before = await loadTask(db, taskId);
@@ -440,6 +442,7 @@ async function main(): Promise<void> {
       });
       await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
         verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
       });
       await enqueueDuplicate(taskId, '07b-phase-4-validate', 0, {
@@ -497,6 +500,7 @@ async function main(): Promise<void> {
       });
       await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
         verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
       });
       await enqueueDuplicate(taskId, '07b-phase-4-validate', 0, {
@@ -542,6 +546,7 @@ async function main(): Promise<void> {
       });
       await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
         verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
       });
       const job = await enqueueDuplicate(
@@ -605,6 +610,7 @@ async function main(): Promise<void> {
         7.7,
         {
           verdict: 'ISSUES_FOUND',
+          issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
           findingsSummary: 'smoke-forced blocking finding',
         },
         { [FIX_LOOP_ACTION_FIELD]: 'accept' },

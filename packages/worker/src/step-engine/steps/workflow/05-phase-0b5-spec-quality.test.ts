@@ -10,6 +10,33 @@ import type { StepContext, StepApplyArgs, StepLoopPassRecord } from '../../step-
 
 const ctx = { logger: { info: () => {} } } as unknown as StepContext;
 
+describe('spec correction scope boundary', () => {
+  it('preserves the original draft and stops automatic correction for a conflicting decision', async () => {
+    const questions = ['May Navigation be removed despite the preserve-permissions constraint?'];
+    const out = await phase0b5SpecQualityStep.apply(ctx, {
+      detected: { spec: 'Install Admin Toolbar and preserve permissions.' },
+      iteration: 1,
+      previousIterations: [],
+      formValues: {},
+      llmOutput: {
+        amendedSpec: 'Remove Navigation and its permissions, then install Admin Toolbar.',
+        scopeQuestions: questions,
+      },
+    } as never);
+    expect(out.spec).toBe('Install Admin Toolbar and preserve permissions.');
+    expect(out.verdict).toBe('BLOCKING_AMBIGUITY');
+    expect(out.scopeQuestions).toEqual(questions);
+    expect(
+      await phase0b5SpecQualityStep.loop!.shouldContinue({
+        ctx,
+        applyOutput: out,
+        iteration: 1,
+        previousIterations: [],
+      } as never),
+    ).toBe(false);
+  });
+});
+
 function review(over: Partial<SpecQualityApply>): SpecQualityApply {
   return {
     verdict: 'NEEDS_REVISION',

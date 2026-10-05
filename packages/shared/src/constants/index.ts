@@ -1228,3 +1228,5 @@ export function computeEffectiveSecretGlobs(opts: {
   ];
   return { deny, ignore };
 }
+
+export { TASK_SCOPE_RULES } from './task-scope-rules.js';

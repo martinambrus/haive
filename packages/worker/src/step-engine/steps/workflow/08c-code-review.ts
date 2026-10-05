@@ -1,3 +1,13 @@
+import { loadTaskMeta } from './_task-meta.js';
+import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
+import {
+  findingUpstream,
+  loadDependencyPolicy,
+  loadReviewDependencyPolicy,
+  upstreamKind,
+  type DependencyPolicy,
+  type UpstreamKind,
+} from './_dependency-policy.js';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -79,6 +89,9 @@ const REVIEW_TIMEOUT_MS = 30 * 60 * 1000;
 type QaLevel = 'none' | 'poc' | 'standard' | 'enterprise';
 
 interface CodeReviewDetect {
+  worktreePath?: string;
+  taskBrief?: string;
+  dependencyPolicy?: DependencyPolicy;
   spec: string;
   implementationFiles: ImplementationFileSet;
   debtBlock: string;
@@ -95,6 +108,7 @@ interface CodeReviewDetect {
 }
 
 interface PeerFinding {
+  upstream?: UpstreamKind | null;
   severity: ReviewSeverity;
   path?: string;
   lines?: string;
@@ -107,6 +121,7 @@ interface PeerFinding {
   refuted?: boolean;
 }
 interface SecurityFinding {
+  upstream?: UpstreamKind | null;
   severity: ReviewSeverity;
   /** The reviewer's own placement of the finding relative to the change. Typed
    *  `unknown`, and normalized by `isOutOfScope` rather than at the boundary, for the
@@ -291,16 +306,27 @@ export function parseReviewLens(raw: unknown): { verdict: string; findings: Peer
  *  what counts as an explicit "no" (see there); everything else still blocks.
  */
 export function computeBlocking(
-  peer: { findings?: { severity: ReviewSeverity }[] } | null,
-  security: { findings: { severity: ReviewSeverity; in_scope?: unknown }[] } | null,
-  lenses: { findings?: { severity: ReviewSeverity }[] }[] = [],
+  peer: {
+    findings?: { severity: ReviewSeverity; path?: string; upstream?: UpstreamKind | null }[];
+  } | null,
+  security: {
+    findings: {
+      severity: ReviewSeverity;
+      path?: string;
+      upstream?: UpstreamKind | null;
+      in_scope?: unknown;
+    }[];
+  } | null,
+  lenses: {
+    findings?: { severity: ReviewSeverity; path?: string; upstream?: UpstreamKind | null }[];
+  }[] = [],
 ): boolean {
   const findings = [
     ...(peer?.findings ?? []),
     ...(security?.findings ?? []).filter((f) => !isOutOfScope(f)),
     ...lenses.flatMap((l) => l.findings ?? []),
   ];
-  return findings.some((f) => isBlockingSeverity(f.severity));
+  return findings.some((f) => isBlockingSeverity(f.severity) && !findingUpstream(f));
 }
 
 /** A reviewer asked for changes without grounding it in a critical/high finding.
@@ -487,7 +513,7 @@ export function collectRefutable(
     // to stop a fix round. Filtered per ROW, not per reviewer: when the peer reviewer names
     // the same defect without fencing it, that row still dispatches a refuter and the bug is
     // examined once, which is exactly what the dedupe below is for.
-    if ('in_scope' in f && isOutOfScope(f)) continue;
+    if (findingUpstream(f) || ('in_scope' in f && isOutOfScope(f))) continue;
     const path = f.path ?? '';
     const key = dispatchKey(path, f.issue);
     const fingerprint = findingFingerprint(reviewerId, path, f.issue);
@@ -583,6 +609,8 @@ export function buildRefutePrompt(
     '',
     '=== Spec (the intended behavior) ===',
     d.spec || '(no spec recorded)',
+    '=== Original user request (scope constraints) ===',
+    d.taskBrief ?? '(not recorded — do not expand scope)',
   ]
     .filter(Boolean)
     .join('\n');
@@ -663,7 +691,7 @@ function live<T extends { refuted?: boolean }>(findings: T[]): T[] {
  *  the only one carrying `in_scope`, and a fenced-out finding travels exactly like a refuted
  *  one from here on: visible at gate 2, never handed to the implementer. */
 function liveInScope(findings: SecurityFinding[]): SecurityFinding[] {
-  return live(findings).filter((f) => !isOutOfScope(f));
+  return live(findings).filter((f) => !isOutOfScope(f) && !findingUpstream(f));
 }
 
 const SEARCH_LADDER = [
@@ -827,6 +855,9 @@ function reviewAssignment(d: CodeReviewDetect): string {
     d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
     '',
     ...SEARCH_LADDER,
+    '',
+    '=== Original user request (scope constraints) ===',
+    d.taskBrief ?? '(not recorded — do not expand scope)',
     '',
     '=== Spec (what the change must deliver) ===',
     d.spec || '(no spec recorded)',
@@ -1041,11 +1072,15 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // Refuted findings are dropped, not annotated: the implementer must not spend a
       // capped fix round arguing with a claim a refuter already disproved. They stay
       // visible at gate 2, where a human can disagree.
-      const peerFindings = live(out.peer.findings);
+      const peerFindings = live(out.peer.findings).filter(
+        (f) => !findingUpstream(f) && isBlockingSeverity(f.severity),
+      );
       // Fenced-out findings are dropped for the same reason refuted ones are: the
       // implementer must not spend a capped fix round rewriting legacy code the change
       // never touched — which is what then widens the changed-file list every later round.
-      const securityFindings = liveInScope(out.security.findings);
+      const securityFindings = liveInScope(out.security.findings).filter((f) =>
+        isBlockingSeverity(f.severity),
+      );
       // One element: `parts` is joined with a blank line, so the preamble must arrive
       // as a single block rather than one paragraph per line.
       const parts: string[] = [VALIDATE_THEN_ACT];
@@ -1056,10 +1091,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         parts.push('### Security\n' + securityFindings.map(diagnosisLine).join('\n'));
       }
       for (const lens of out.extraLenses) {
-        const lensFindings = live(lens.findings);
+        const lensFindings = live(lens.findings).filter(
+          (f) => !findingUpstream(f) && isBlockingSeverity(f.severity),
+        );
         if (!lensFindings.length) continue;
         parts.push(`### ${lens.title}\n` + lensFindings.map(diagnosisLine).join('\n'));
       }
+      if (parts.length === 1) return null;
       // Last, so it reads as a caveat on the findings above rather than displacing them.
       if (out.recurringNote) parts.push(out.recurringNote);
       return { blocking: true, diagnosis: parts.join('\n\n') || 'Code review requested changes.' };
@@ -1115,9 +1153,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       columns: { adversarialQaLevel: true },
     });
     const level = (task?.adversarialQaLevel ?? 'none') as QaLevel;
+    const meta = await loadTaskMeta(ctx.db, ctx.taskId);
 
     return {
+      taskBrief: briefFromTaskMeta(meta.title, meta.description),
       spec,
+      dependencyPolicy: await loadDependencyPolicy(ctx, wt.worktreePath),
+      worktreePath: wt.worktreePath,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       level,
@@ -1143,7 +1185,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // zero-grace — so on those the escalating per-agent budget, not this, is what keeps
     // a long review from dying empty. exec-core logs when the request cannot be honored.
     softTimeout: true,
-    async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
+    async selectAgents({ ctx, detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke
       // doesn't enqueue real CLI jobs (mirrors 03-discovery's empty-persona path).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
@@ -1152,6 +1194,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // re-runs detect() only when detect_output is null, so a row stored before this shipped
       // reaches the prompt builders directly. Still before any dispatch, so nothing is spent.
       assertReviewableChange('08c-code-review', d.implementationFiles);
+      await hydrateTaskBrief(ctx, d);
       // roleKey === agentId here: every reviewer in this wave is a fixed persona, so its
       // id is already the stable seat STEP_MINING_SEATS enumerates.
       return [
@@ -1319,6 +1362,17 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
     // synthetic findings for an unparseable reviewer, so the blocking decision and
     // the gate-2 finding list can never disagree.
+    const d = args.detected as CodeReviewDetect;
+    const findings = [
+      ...peerOut.findings,
+      ...securityOut.findings,
+      ...extraLenses.flatMap((lens) => lens.findings),
+    ];
+    const policy =
+      findings.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
+    for (const finding of findings) {
+      finding.upstream = upstreamKind(finding.path, policy);
+    }
     let blocking = computeBlocking(peerOut, securityOut, extraLenses);
 
     // Refutation, in two passes over the same apply(). The first throws to dispatch one
@@ -1369,6 +1423,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           { count: wave.length, lenses: refuteLenses.length },
           'dispatching refuters for blocking findings',
         );
+        // A second-wave dispatch may resume detect output from before taskBrief existed.
+        await hydrateTaskBrief(ctx, d);
         throw new MiningWaveError(
           // The agent id here is per FINDING and unbounded, so it cannot be a seat. The
           // LENS is what repeats across the wave and is what a per-seat model choice is
@@ -1395,7 +1451,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         path: f.path,
         lines: f.lines,
         fix: f.fix,
-        blocking: isBlockingSeverity(f.severity) && !f.refuted,
+        blocking: isBlockingSeverity(f.severity) && !f.refuted && !findingUpstream(f),
         disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
         dispositionSource: f.refuted ? 'refuter' : undefined,
         raw: f,
@@ -1410,7 +1466,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         fix: f.fix,
         // Written, not dropped — the whole point of keeping the field rather than deleting
         // it. The row stays queryable as the advisory it is, with `blocking: false`.
-        blocking: isBlockingSeverity(f.severity) && !f.refuted && !isOutOfScope(f),
+        blocking:
+          isBlockingSeverity(f.severity) && !f.refuted && !isOutOfScope(f) && !findingUpstream(f),
         disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
         dispositionSource: f.refuted ? 'refuter' : undefined,
         raw: f,
@@ -1424,7 +1481,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           path: f.path,
           lines: f.lines,
           fix: f.fix,
-          blocking: isBlockingSeverity(f.severity) && !f.refuted,
+          blocking: isBlockingSeverity(f.severity) && !f.refuted && !findingUpstream(f),
           disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
           dispositionSource: f.refuted ? 'refuter' : undefined,
           raw: f,
@@ -1440,7 +1497,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     const securityOutOfScope = securityOut.findings.filter(isOutOfScope).length;
     // After applyRefutations, so a verdict its refuted findings no longer support has
     // already been downgraded and does not hold the gate.
-    const advisoryVerdict = !blocking && hasNonApprovingVerdict(peerOut, securityOut);
+    const upstreamObservations = [
+      ...peerOut.findings,
+      ...securityOut.findings,
+      ...extraLenses.flatMap((lens) => lens.findings),
+    ].some((f) => !f.refuted && findingUpstream(f));
+    const advisoryVerdict =
+      upstreamObservations || (!blocking && hasNonApprovingVerdict(peerOut, securityOut));
 
     ctx.logger.info(
       {
@@ -1465,13 +1528,19 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     const recurrence = await loadFindingRecurrence(ctx, ctx.round);
     const recurringNote = buildRecurringNote(
       [
-        ...live(peerOut.findings).map((f) => ({ reviewerId: 'peer-reviewer', path: f.path })),
-        ...liveInScope(securityOut.findings).map((f) => ({
-          reviewerId: 'security-code-reviewer',
-          path: f.path,
-        })),
+        ...live(peerOut.findings)
+          .filter((f) => !findingUpstream(f) && isBlockingSeverity(f.severity))
+          .map((f) => ({ reviewerId: 'peer-reviewer', path: f.path })),
+        ...liveInScope(securityOut.findings)
+          .filter((f) => isBlockingSeverity(f.severity))
+          .map((f) => ({
+            reviewerId: 'security-code-reviewer',
+            path: f.path,
+          })),
         ...extraLenses.flatMap((lens) =>
-          live(lens.findings).map((f) => ({ reviewerId: lens.id, path: f.path })),
+          live(lens.findings)
+            .filter((f) => !findingUpstream(f) && isBlockingSeverity(f.severity))
+            .map((f) => ({ reviewerId: lens.id, path: f.path })),
         ),
       ],
       recurrence,

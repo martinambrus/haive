@@ -1,4 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('./_dependency-policy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_dependency-policy.js')>()),
+  loadReviewDependencyPolicy: vi.fn(
+    async (_ctx, detected) =>
+      detected.dependencyPolicy ?? {
+        drupal: true,
+        drupalRoots: ['', 'web', 'docroot', 'public', 'html'],
+        ownedPaths: [],
+      },
+  ),
+}));
+vi.mock('./_task-meta.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_task-meta.js')>()),
+  loadTaskMeta: vi.fn(async () => ({
+    title: 'Install one module',
+    description: 'Preserve existing permissions',
+  })),
+}));
 import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
 import {
   parsePeerReview,
@@ -11,6 +30,7 @@ import {
   isRefuted,
   refuterTitle,
   codeReviewStep,
+  buildRefutePrompt,
 } from './08c-code-review.js';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { buildRecurringNote } from './08c-code-review.js';
@@ -66,6 +86,24 @@ function runReview(
 }
 
 describe('refuterTitle', () => {
+  it('uses the original request and mandatory task boundary when disproving a finding', () => {
+    const prompt = buildRefutePrompt(
+      {
+        spec: 'Change permissions',
+        taskBrief: 'Install one module; preserve existing permissions',
+      } as never,
+      {
+        reviewerId: 'peer-reviewer',
+        path: 'src/a.ts',
+        severity: 'high',
+        issue: 'Unauthorized permission change',
+      } as never,
+      null,
+    );
+    expect(prompt).toContain('=== Original user request (scope constraints) ===');
+    expect(prompt).toContain('Install one module; preserve existing permissions');
+    expect(prompt).toContain('TASK AND OWNERSHIP BOUNDARY');
+  });
   const f = {
     severity: 'high' as const,
     path: 'src/auth.ts',
@@ -290,6 +328,15 @@ describe('lensesForLevel', () => {
 });
 
 describe('computeBlocking', () => {
+  it('does not turn unlocated high findings into automatic repair assignments', () => {
+    expect(
+      computeBlocking(
+        { findings: [{ severity: 'critical' }] },
+        { findings: [{ severity: 'high' }] },
+        [{ findings: [{ severity: 'high' }] }],
+      ),
+    ).toBe(false);
+  });
   it('does NOT block on a bare REQUEST_CHANGES / VULNERABLE verdict', () => {
     // Measured on 36 real historical reviews: 7 of 25 blocking rounds were a verdict with
     // nothing worse than `medium` behind it. Each spent a fix round on an assertion no
@@ -313,11 +360,15 @@ describe('computeBlocking', () => {
   });
 
   it('blocks on any critical/high security finding', () => {
-    expect(computeBlocking({ findings: [] }, { findings: [{ severity: 'high' }] })).toBe(true);
+    expect(
+      computeBlocking({ findings: [] }, { findings: [{ severity: 'high', path: 'src/a.ts' }] }),
+    ).toBe(true);
   });
 
   it('blocks on a peer critical finding', () => {
-    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [] })).toBe(true);
+    expect(
+      computeBlocking({ findings: [{ severity: 'critical', path: 'src/a.ts' }] }, { findings: [] }),
+    ).toBe(true);
   });
 
   it('does not block on clean reviews or low/medium only', () => {
@@ -340,7 +391,7 @@ describe('computeBlocking', () => {
   it('blocks on an extra lens critical/high finding', () => {
     expect(
       computeBlocking({ findings: [] }, { findings: [] }, [
-        { findings: [{ severity: 'critical' }] },
+        { findings: [{ severity: 'critical', path: 'src/a.ts' }] },
       ]),
     ).toBe(true);
   });
@@ -381,6 +432,39 @@ describe('codeReviewStep.fixLoop diagnosis', () => {
 });
 
 describe('codeReviewStep.apply de-silence', () => {
+  it.each(['peer-reviewer', 'security-code-reviewer', 'operational-reviewer'])(
+    'does not refute or repair unlocated critical findings from %s',
+    async (reviewer) => {
+      const out = await runReview(
+        [
+          ...(reviewer === 'peer-reviewer'
+            ? []
+            : [mining('peer-reviewer', JSON.stringify({ verdict: 'APPROVE', findings: [] }))]),
+          mining(
+            reviewer,
+            JSON.stringify({
+              verdict: reviewer === 'security-code-reviewer' ? 'VULNERABLE' : 'REQUEST_CHANGES',
+              findings: [
+                { severity: 'critical', issue: 'unlocated upstream complaint', upstream: null },
+              ],
+            }),
+          ),
+        ],
+        undefined,
+        false,
+      );
+      const finding = [
+        ...out.peer.findings,
+        ...out.security.findings,
+        ...out.extraLenses.flatMap((lens) => lens.findings),
+      ][0];
+      expect(finding?.upstream).toBe('unknown');
+      expect(out.blocking).toBe(false);
+      expect(out.advisoryVerdict).toBe(true);
+      expect(collectRefutable(out.peer, out.security, out.extraLenses)).toEqual([]);
+      expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+    },
+  );
   it('does NOT silently APPROVE/SECURE when a reviewer ran but its output was unparseable', async () => {
     const out = await runReview([
       mining('peer-reviewer', 'I reviewed everything thoroughly but forgot to emit any JSON'),
@@ -404,7 +488,7 @@ describe('codeReviewStep.apply de-silence', () => {
     const out = await runReview([
       mining(
         'peer-reviewer',
-        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","issue":"bug"}]}\n```',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"src/a.ts","issue":"bug"}]}\n```',
       ),
     ]);
     expect(out.reviewed).toBe(true);
@@ -448,7 +532,7 @@ describe('codeReviewStep.apply de-silence', () => {
     const out = await runReview([
       mining(
         'peer-reviewer',
-        '```json\n{"verdict":"DISCUSS","findings":[{"severity":"warning","issue":"w"},{"severity":"suggestion","issue":"s"},{"severity":"blocker","issue":"b"}],"positives":[]}\n```',
+        '```json\n{"verdict":"DISCUSS","findings":[{"severity":"warning","issue":"w"},{"severity":"suggestion","issue":"s"},{"severity":"blocker","path":"src/a.ts","issue":"b"}],"positives":[]}\n```',
       ),
     ]);
     expect(out.peer.findings.map((f) => f.severity)).toEqual(['medium', 'low', 'critical']);
@@ -717,12 +801,15 @@ describe('scope fence', () => {
   it('fences only the security list — a peer or lens critical is unaffected', () => {
     // in_scope is the security reviewer's field; the others dispose of out-of-scope
     // observations through `## INSIGHTS` instead, so nothing here reads a flag.
-    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [fenced] })).toBe(
-      true,
-    );
+    expect(
+      computeBlocking(
+        { findings: [{ severity: 'critical', path: 'src/a.ts' }] },
+        { findings: [fenced] },
+      ),
+    ).toBe(true);
     expect(
       computeBlocking({ findings: [] }, { findings: [fenced] }, [
-        { findings: [{ severity: 'high' }] },
+        { findings: [{ severity: 'high', path: 'src/a.ts' }] },
       ]),
     ).toBe(true);
   });
@@ -773,6 +860,7 @@ describe('scope fence', () => {
     // The fence is prompt text, so a persona that never receives it is a reviewer with the
     // old licence. Enterprise selects the full roster (peer, security + three lenses).
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         // Non-empty: selectAgents refuses a change set it cannot name (assertReviewableChange).
@@ -1250,7 +1338,7 @@ describe('repository text is data, not direction', () => {
   };
 
   const dispatches = async () =>
-    codeReviewStep.agentMining!.selectAgents({ detected } as never) as Promise<
+    codeReviewStep.agentMining!.selectAgents({ ctx: fakeCtx, detected } as never) as Promise<
       { agentId: string; prompt: string }[]
     >;
 
@@ -1366,6 +1454,7 @@ describe('08c change-set guard', () => {
     // detect() so a replayed detect_output is covered too, and before any dispatch.
     await expect(
       codeReviewStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
         detected: {
           spec: 's',
           implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
@@ -1381,6 +1470,7 @@ describe('08c mining seats', () => {
   it('seats every wave-1 reviewer by its own agent id', async () => {
     // These are fixed personas, so the agent id already IS the stable seat.
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
@@ -1396,6 +1486,7 @@ describe('08c mining seats', () => {
     // unconfigurable; one the registry lists but no wave emits is a dead control. Enterprise
     // is the widest roster, so it is what the registry must cover.
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
@@ -1476,6 +1567,7 @@ describe('08c review-dimension scope', () => {
 
   const peerPrompt = async (ids?: string[]): Promise<string> => {
     const agents = (await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: detected(ids),
     } as never)) as { agentId: string; prompt: string }[];
     return agents.find((a) => a.agentId === 'peer-reviewer')!.prompt;
@@ -1512,9 +1604,124 @@ describe('08c review-dimension scope', () => {
 
   it('leaves the security reviewer alone — it is not a 14-dimension sweep', async () => {
     const agents = (await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: detected(['security']),
     } as never)) as { agentId: string; prompt: string }[];
     const security = agents.find((a) => a.agentId === 'security-code-reviewer')!;
     expect(security.prompt).not.toContain('DIMENSION SCOPE FOR THIS RUN');
+  });
+});
+
+describe('upstream ownership routing', () => {
+  it('keeps upstream observations visible without sending them to refuters or fixers', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', JSON.stringify({ verdict: 'APPROVE', findings: [] })),
+      mining(
+        'security-code-reviewer',
+        JSON.stringify({
+          verdict: 'VULNERABLE',
+          findings: [
+            {
+              severity: 'high',
+              in_scope: 'yes',
+              path: 'web/modules/contrib/admin_toolbar/js/shortcut.js',
+              issue: 'upstream defect',
+              fix: 'rewrite upstream',
+            },
+          ],
+        }),
+      ),
+    ]);
+    expect(out.security.findings).toHaveLength(1);
+    expect(out.security.findings[0]!.upstream).toBe('dependency');
+    expect(out.blocking).toBe(false);
+    expect(out.advisoryVerdict).toBe(true);
+    expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+    expect(collectRefutable(out.peer, out.security, out.extraLenses)).toEqual([]);
+  });
+
+  it('hands a fixer only blocking project defects, even when upstream and optional advisories share the review', async () => {
+    const out = await runReview([
+      mining(
+        'peer-reviewer',
+        JSON.stringify({
+          verdict: 'REQUEST_CHANGES',
+          findings: [
+            {
+              severity: 'high',
+              path: 'scripts/enable.php',
+              issue: 'activation reports success on failure',
+              fix: 'preserve failure status',
+            },
+            {
+              severity: 'low',
+              path: 'README.md',
+              issue: 'optional harness',
+              fix: 'add another test subsystem',
+            },
+          ],
+        }),
+      ),
+      mining(
+        'security-code-reviewer',
+        JSON.stringify({
+          verdict: 'NEEDS_FIXES',
+          findings: [
+            {
+              severity: 'medium',
+              in_scope: 'yes',
+              path: 'web/modules/contrib/admin_toolbar/js/shortcut.js',
+              issue: 'upstream optional shortcut',
+              fix: 'patch module',
+            },
+          ],
+        }),
+      ),
+    ]);
+    const diagnosis = codeReviewStep.fixLoop!.evaluate(out)!.diagnosis;
+    expect(diagnosis).toContain('activation reports success on failure');
+    expect(diagnosis).not.toContain('upstream optional shortcut');
+    expect(diagnosis).not.toContain('optional harness');
+    expect(out.peer.findings).toHaveLength(2);
+    expect(out.security.findings).toHaveLength(1);
+  });
+
+  it('allows an operator-owned module at a contrib path and rejects reviewer-supplied ownership claims', async () => {
+    const results = [
+      mining(
+        'peer-reviewer',
+        JSON.stringify({
+          verdict: 'REQUEST_CHANGES',
+          findings: [
+            {
+              severity: 'high',
+              path: 'web/modules/contrib/company/a.php',
+              issue: 'owned module defect',
+              upstream: null,
+            },
+          ],
+        }),
+      ),
+      mining('security-code-reviewer', '{"verdict":"SECURE","findings":[]}'),
+    ];
+    const unowned = await runReview(results);
+    expect(unowned.blocking).toBe(false);
+    const owned = await codeReviewStep.apply(fakeCtx, {
+      detected: {
+        spec: 'spec',
+        implementationFiles: [],
+        debtBlock: '',
+        level: 'none',
+        dependencyPolicy: {
+          drupal: true,
+          drupalRoots: ['web'],
+          ownedPaths: ['web/modules/contrib/company'],
+        },
+      },
+      agentMiningResults: results,
+      miningWaveExhausted: true,
+    } as never);
+    expect(owned.blocking).toBe(true);
+    expect(owned.peer.findings[0]!.upstream).toBeNull();
   });
 });

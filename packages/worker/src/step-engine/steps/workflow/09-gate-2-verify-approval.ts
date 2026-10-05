@@ -1,3 +1,4 @@
+import { findingUpstream, type UpstreamKind } from './_dependency-policy.js';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { CONFIG_KEYS, configService } from '@haive/shared';
@@ -128,6 +129,8 @@ interface VerifyGateDetect {
     /** A reviewer requested changes with no critical/high finding behind it. Same
      *  contract as reviewIncomplete: no fix round, but no silent approve either. */
     advisoryVerdict: boolean;
+    upstreamObservations?: boolean;
+    unknownOwnership?: boolean;
     /** How much of the change the reviewers were given. Same contract again: a review
      *  that approved everything it saw is not a clean review of the whole change. */
     coverage: FileCoverage | null;
@@ -232,6 +235,7 @@ interface Phase8cOutput {
   peer?: {
     verdict?: string;
     findings?: {
+      upstream?: UpstreamKind | null;
       severity?: string;
       path?: string;
       lines?: string;
@@ -244,6 +248,7 @@ interface Phase8cOutput {
   security?: {
     verdict?: string;
     findings?: {
+      upstream?: UpstreamKind | null;
       severity?: string;
       in_scope?: unknown;
       path?: string;
@@ -259,6 +264,7 @@ interface Phase8cOutput {
     title?: string;
     verdict?: string;
     findings?: {
+      upstream?: UpstreamKind | null;
       severity?: string;
       path?: string;
       lines?: string;
@@ -278,7 +284,15 @@ function refutedTag(f: { refuted?: boolean }): string {
  *  fence). Same job as refutedTag: the finding is shown in full and the human here is the
  *  one entitled to act on it, but without the tag a `[critical]` that did not block reads
  *  as an inconsistency rather than as the pre-existing issue it is. */
-function scopeTag(f: { in_scope?: unknown }): string {
+function scopeTag(f: {
+  in_scope?: unknown;
+  path?: string;
+  file?: string;
+  upstream?: UpstreamKind | null;
+}): string {
+  const upstream = findingUpstream(f);
+  if (upstream === 'unknown') return '[ownership unknown — user decision] ';
+  if (upstream) return `[upstream ${upstream} — user decision] `;
   return isOutOfScope(f) ? '[pre-existing] ' : '';
 }
 
@@ -332,7 +346,13 @@ interface Phase5bOutput {
 interface Phase4Output {
   verdict?: string;
   summary?: string;
-  issues?: { severity?: string; file?: string; description?: string; fix?: string }[];
+  issues?: {
+    upstream?: UpstreamKind | null;
+    severity?: string;
+    file?: string;
+    description?: string;
+    fix?: string;
+  }[];
   dimensions?: { name?: string; status?: string; note?: string }[];
   excludedDimensions?: string[];
   fixesApplied?: string[];
@@ -512,7 +532,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         verdict: p4.verdict,
         summary: p4.summary ?? '',
         openIssues: (p4.issues ?? []).map((i) =>
-          `[${i.severity ?? 'unspecified'}] ${i.file ?? ''} ${i.description ?? ''}`.trim(),
+          `${scopeTag(i)}[${i.severity ?? 'unspecified'}] ${i.file ?? ''} ${i.description ?? ''}`.trim(),
         ),
         failedDimensions: (p4.dimensions ?? [])
           .filter((d) => d.status === 'FAIL')
@@ -571,25 +591,37 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // Earlier rounds only — this round's own rows must not make every finding look repeated.
     const recurrence = await loadFindingRecurrence(ctx, ctx.round);
     if (pc?.reviewed) {
+      const upstreamObservations = [
+        ...(pc.peer?.findings ?? []),
+        ...(pc.security?.findings ?? []),
+        ...(pc.extraLenses ?? []).flatMap((lens) => lens.findings ?? []),
+      ].some((finding) => !finding.refuted && findingUpstream(finding));
+      const unknownOwnership = [
+        ...(pc.peer?.findings ?? []),
+        ...(pc.security?.findings ?? []),
+        ...(pc.extraLenses ?? []).flatMap((lens) => lens.findings ?? []),
+      ].some((finding) => !finding.refuted && findingUpstream(finding) === 'unknown');
       codeReview = {
         peerVerdict: pc.peer?.verdict ?? 'DISCUSS',
         securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
         blocking: pc.blocking === true,
         reviewIncomplete: pc.reviewIncomplete === true,
-        advisoryVerdict: pc.advisoryVerdict === true,
+        advisoryVerdict: pc.advisoryVerdict === true || upstreamObservations,
+        upstreamObservations,
+        unknownOwnership,
         coverage: readCoverage(pc.coverage),
         // A refuted finding is shown, not hidden: a refuter disproved it, and the human
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
         peerFindings: (pc.peer?.findings ?? []).map((f) =>
-          `${refutedTag(f)}${recurrenceTag(recurrence, 'peer-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'peer-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         securityFindings: (pc.security?.findings ?? []).map((f) =>
           `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'security-code-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         lensFindings: (pc.extraLenses ?? []).flatMap((lens) =>
           (lens.findings ?? []).map((f) =>
-            `${refutedTag(f)}${recurrenceTag(recurrence, lens.id ?? '', f.path)}[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+            `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, lens.id ?? '', f.path)}[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
           ),
         ),
         positives: pc.peer?.positives ?? [],
@@ -1058,9 +1090,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       if (crCoverage) lines.push('', `## Coverage`, `- ${crCoverage}`);
       const base = cr.reviewIncomplete
         ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
-        : cr.advisoryVerdict
-          ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
-          : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
+        : cr.unknownOwnership
+          ? 'findings with unknown ownership require a user decision — those findings were not assigned for automatic repair'
+          : cr.upstreamObservations
+            ? 'upstream observations require a user decision — no upstream repair was assigned'
+            : cr.advisoryVerdict
+              ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
+              : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
       const detail = crCoverage ? `${base}; ${crCoverage}` : base;
       const crPartial = cr.coverage?.truncated === true;
       rows.push({
@@ -1074,11 +1110,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           ? 'BLOCKING'
           : cr.reviewIncomplete
             ? 'INCOMPLETE'
-            : cr.advisoryVerdict
-              ? 'ADVISORY'
-              : crPartial
-                ? 'PARTIAL'
-                : 'OK',
+            : cr.unknownOwnership
+              ? 'UNCLASSIFIED'
+              : cr.upstreamObservations
+                ? 'UPSTREAM'
+                : cr.advisoryVerdict
+                  ? 'ADVISORY'
+                  : crPartial
+                    ? 'PARTIAL'
+                    : 'OK',
         detail,
         body: lines.join('\n'),
         defaultOpen: cr.blocking || cr.reviewIncomplete || cr.advisoryVerdict || crPartial,

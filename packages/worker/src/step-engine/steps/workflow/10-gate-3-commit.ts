@@ -1,3 +1,4 @@
+import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -359,6 +360,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const workspace = args.detected.workspacePath;
     const message = (values.commitMessage ?? generatedCommitMessage(args.llmOutput) ?? '').trim();
     if (!message) throw new Error('Enter a commit message before committing.');
+    await assertDependencyCommitSafe(ctx, workspace);
     const add = await gitRun(workspace, ['add', '-A']);
     if (add.code !== 0) {
       throw new Error(`git add failed: ${add.stderr || add.stdout}`);

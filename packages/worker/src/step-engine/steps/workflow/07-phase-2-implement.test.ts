@@ -546,7 +546,7 @@ describe('phase2ImplementStep fix-round browser bring-up', () => {
   const prepare = () =>
     phase2ImplementStep.llm!.prepare!({
       ctx,
-      detected: { browserTesting: true, round: 1 },
+      detected: { browserTesting: true, round: 1, taskBrief: 'brief' },
       formValues: {},
     } as never);
   const rejection = (run: () => Promise<unknown>) =>

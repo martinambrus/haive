@@ -10,7 +10,8 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
+import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, fileOverlapTaskIds, overlapRefinedEstimate } from './_estimate.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
@@ -26,6 +27,7 @@ import { loadSeededPlanNodes, renderPlanOrderingConstraint } from './_plan-task-
 // as before. Re-planning = Retry this step (re-runs the planner).
 
 interface SprintPlanningDetect {
+  taskBrief?: string;
   specSummary: string;
   spec: string;
   gateFeedback: string;
@@ -346,7 +348,9 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     const gate = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-gate-1-spec-approval');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const gateOutput = (gate?.output as Gate1Output | null) ?? {};
+    const meta = await loadTaskMeta(ctx.db, ctx.taskId);
     return {
+      taskBrief: briefFromTaskMeta(meta.title, meta.description),
       specSummary: planOutput.summary ?? '',
       // The planner reads the WHOLE spec — it is what carves the document into the issue
       // sections every coder is then pointed at, so an index would plan against headings.
@@ -357,6 +361,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateTaskBrief(ctx, detected as SprintPlanningDetect),
     requiredCapabilities: ['tool_use'],
     preForm: true,
     timeoutMs: 30 * 60 * 1000,
@@ -379,6 +384,8 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
             ]
           : []),
         `Gate 1 feedback: ${d.gateFeedback || '(none)'}`,
+        '=== Original user request (scope constraints) ===',
+        d.taskBrief ?? '(not recorded — do not expand scope)',
         '',
         '=== Approved spec ===',
         d.spec || '(empty spec — default to single-agent)',

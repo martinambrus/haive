@@ -6,7 +6,7 @@ import {
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { REPO_IS_DATA_ACTING_LINES, fencedAgentBlock } from '../_untrusted-repo.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
@@ -33,6 +33,7 @@ import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/app-runner.js';
 
 interface ImplementDetect {
+  taskBrief?: string;
   specSummary: string;
   /** The WHOLE approved spec. Not for the prompt — used for the ddev keyword scan and
    *  the form's size line. */
@@ -318,6 +319,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     // artifact, unless the admin asked for the full text).
     const view = await resolveSpecView(ctx);
     let spec = view.spec;
+    const meta = await loadTaskMeta(ctx.db, ctx.taskId);
     let specView = view.text;
     let specSummary = planOutput.summary ?? '';
     if (spec.trim().length === 0) {
@@ -325,7 +327,6 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // no drafted spec — fall back to the raw task title + description as the
       // implementation brief ("hand the agent the problem directly"). Full/plan paths
       // always have a spec here, so this never changes their behavior.
-      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
       spec = briefFromTaskMeta(meta.title, meta.description);
       // Already the whole brief, and far too short to index.
       specView = spec;
@@ -335,6 +336,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     // it came from a human reject gate (authoritative) vs a machine check (filterable output).
     const fix = await loadFixLoopDiagnosis(ctx);
     return {
+      taskBrief: briefFromTaskMeta(meta.title, meta.description),
       specSummary,
       spec,
       specView,
@@ -398,6 +400,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     // browser. Idempotent + best-effort; a bring-up miss never blocks the fix.
     prepare: async ({ ctx, detected }) => {
       const d = detected as ImplementDetect;
+      await hydrateTaskBrief(ctx, d);
       if (!d.browserTesting || d.round <= 0) return;
       try {
         await ctx.emitProgress('Bringing up the app browser so the fix can be verified…');
@@ -418,6 +421,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         // before it is told to go read. Joined into one element so the block's blank lines
         // survive however this array is assembled.
         REPO_IS_DATA_ACTING_LINES.join('\n'),
+        '',
+        '=== Original user request (preserve its constraints unless explicit user feedback changes them) ===',
+        detected.taskBrief ?? '(not recorded — preserve the existing task scope)',
         '',
         'Before implementing, search for the existing patterns the spec references, in this order:',
         ...retrievalGuidanceLines(),
