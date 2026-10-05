@@ -395,6 +395,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         ? `${detected.specBody.length.toLocaleString()} chars`
         : 'empty';
     const scopeQuestions = detected.scopeQuestions ?? [];
+    const needsClarification =
+      scopeQuestions.length > 0 || detected.qualityVerdict === 'BLOCKING_AMBIGUITY';
     const infoSections: InfoSection[] = [
       ...(scopeQuestions.length
         ? [
@@ -432,7 +434,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
             { value: 'approve', label: 'Approve — proceed to implementation' },
             { value: 'reject', label: 'Reject — request changes and re-draft' },
           ],
-          default: scopeQuestions.length ? 'reject' : 'approve',
+          default: needsClarification ? 'reject' : 'approve',
           required: true,
         },
         {
@@ -440,8 +442,10 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
           id: 'feedback',
           label: scopeQuestions.length
             ? 'Answer the scope questions or give revision instructions'
-            : 'Feedback for the implementation phase',
-          required: scopeQuestions.length > 0,
+            : needsClarification
+              ? 'Clarify the blocking ambiguity or give revision instructions'
+              : 'Feedback for the implementation phase',
+          required: needsClarification,
           rows: 4,
         },
       ],
@@ -465,8 +469,14 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     const feedback = typeof values.feedback === 'string' ? values.feedback : '';
-    if ((args.detected.scopeQuestions?.length ?? 0) > 0 && !feedback.trim()) {
-      throw new Error('Answer the scope questions before recording the spec decision.');
+    if (
+      ((args.detected.scopeQuestions?.length ?? 0) > 0 ||
+        args.detected.qualityVerdict === 'BLOCKING_AMBIGUITY') &&
+      !feedback.trim()
+    ) {
+      throw new Error(
+        'Clarify the blocking ambiguity or scope questions before recording the spec decision.',
+      );
     }
     ctx.logger.info({ decision }, 'spec gate decision recorded');
     if (decision === 'reject') {

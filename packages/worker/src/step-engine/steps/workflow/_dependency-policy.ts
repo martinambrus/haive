@@ -151,14 +151,22 @@ export async function loadDependencyPolicy(
       if (rel) roots.push(rel);
     }
   }
-  const baselineDrupal7 = await gitRun(workspace, [
-    'cat-file',
-    '-e',
-    `${base.stdout.trim()}:includes/bootstrap.inc`,
-  ]);
-  const drupal7 =
-    baselineDrupal7.code === 0 ||
-    (await lstatNoFollow(anchor, `${prefix}includes/bootstrap.inc`)) !== null;
+  let drupal7 = false;
+  for (const root of new Set(roots)) {
+    const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
+    const baselineDrupal7 = await gitRun(workspace, [
+      'cat-file',
+      '-e',
+      `${base.stdout.trim()}:${marker}`,
+    ]);
+    if (
+      baselineDrupal7.code === 0 ||
+      (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null
+    ) {
+      drupal7 = true;
+      break;
+    }
+  }
   drupal ||= drupal7;
   return {
     baselineRef: base.stdout.trim(),

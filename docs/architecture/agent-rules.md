@@ -6,6 +6,8 @@ persona or an old onboarded persona cannot opt out of it. The original task requ
 spec correction, implementation, validation and code review. Review dimensions and a revised
 spec cannot authorize extra work or override explicit constraints. A spec corrector reports
 conflicts as `scopeQuestions`; gate 1 shows them, defaults to rejection and requires an answer.
+The same default and required clarification apply when the reviewer directly reports
+`BLOCKING_AMBIGUITY`, even without a corrector-generated question list.
 
 Agents may read infrastructure as evidence, but never repair framework core or underlying
 infrastructure. They report defects and their impact; a blocker requires a user decision.

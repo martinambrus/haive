@@ -7,6 +7,8 @@ upstream findings are report-only, even when newly reachable or labelled in scop
 never repair assignments; a blocking failure requires a user decision. A reproduced contributed
 module failure can be resolved with the minimal package-manager-applied patch under the task
 boundary, never by committing edited dependency source.
+Older persisted validation outputs without structured issues remain report-only on replay;
+a verdict and prose summary alone cannot establish a high/critical repair assignment.
 
 A downstream step that finds a blocking defect returns `loop_back` instead of failing: the
 queue bumps the round, records the diagnosis as a `fix_loop.requested` task event and

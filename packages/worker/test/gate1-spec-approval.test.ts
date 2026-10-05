@@ -154,6 +154,33 @@ function applyArgs(formValues: Record<string, unknown>) {
 }
 
 describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
+  it.each(['approve', 'reject'])(
+    'requires clarification for a direct blocking ambiguity before %s',
+    async (decision) => {
+      const detected = { ...detectedStub(), qualityVerdict: 'BLOCKING_AMBIGUITY' };
+      const { ctx, events } = makeApplyCtx();
+      const form = gate1SpecApprovalStep.form!(ctx, detected) as FormSchema;
+      expect(form.fields.find((field) => field.id === 'decision')).toMatchObject({
+        default: 'reject',
+      });
+      expect(form.fields.find((field) => field.id === 'feedback')).toMatchObject({
+        required: true,
+      });
+      const args = {
+        detected,
+        formValues: { decision, feedback: '  ' },
+        iteration: 0,
+        previousIterations: [],
+      };
+      await expect(gate1SpecApprovalStep.apply(ctx, args as never)).rejects.toThrow('Clarify');
+      expect(events).toHaveLength(0);
+      args.formValues.feedback = 'Keep the existing permissions and enable only admin_toolbar.';
+      const out = await gate1SpecApprovalStep.apply(ctx, args as never);
+      expect(out).toMatchObject({ decision, feedback: args.formValues.feedback });
+      expect(events[0]?.payload?.feedback).toBe(args.formValues.feedback);
+    },
+  );
+
   it('shows unresolved scope conflicts and requires an explicit answer before approval', async () => {
     const detected = {
       ...detectedStub(),

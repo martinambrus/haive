@@ -217,6 +217,15 @@ describe('phase4ValidateStep churn bail wiring', () => {
     expect(v!.blocking).toBe(true);
   });
 
+  it.each(['VALID', 'ISSUES_FOUND'])(
+    'safely replays old %s outputs without structured issues',
+    (verdict) => {
+      expect(
+        step.fixLoop!.evaluate({ verdict, findingsSummary: 'Old validation report' } as never),
+      ).toBeNull();
+    },
+  );
+
   // A parse miss names no defect — its summary literally reads "nothing to fix" — so it must
   // reach gate-2 rather than spend a fix round and feed the oscillation guard a phantom side.
   it('fixLoop does NOT route back on UNPARSEABLE', () => {

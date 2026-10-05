@@ -4,7 +4,10 @@ Ownership is a separate boundary from change causality. Newly installing a modul
 its integration relevant to acceptance checks; it does not authorize auditing or rewriting
 its internals. `_dependency-policy.ts` classifies Drupal core as infrastructure and conventional
 contrib, vendor and node_modules locations as third-party. Composer scaffold roots and Drupal 7
-core layouts are recognized. An operator can declare exact maintained package directories in
+core layouts are recognized.
+Core detection checks both the baseline and working tree at every recognized web root,
+including nested Drupal 7 installations; deleting the bootstrap marker cannot disable protection.
+An operator can declare exact maintained package directories in
 `.haive-data/dependency-ownership.json` (`{"ownedPaths":["web/modules/contrib/company_module"]}`)
 on the task's base branch. The policy is read from the fork point; an agent's working-copy or
 task-branch declaration cannot claim ownership. Core cannot be exempted. Other framework

@@ -599,9 +599,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // than routing back to implement, where re-implementing the same churn would
     // just burn another round.
     evaluate: (out) => {
-      if ((out.upstreamIssues?.length ?? 0) > 0 || out.issues.some(findingUpstream)) return null;
+      // Older persisted outputs may contain only a verdict/summary. They provide no
+      // structured repair assignments and must still be safe to replay after an upgrade.
+      const issues = out.issues ?? [];
+      if ((out.upstreamIssues?.length ?? 0) > 0 || issues.some(findingUpstream)) return null;
       if (out.verdict === 'VALID') return null;
-      if (!out.issues.some((issue) => isBlockingSeverity(issue.severity))) return null;
+      if (!issues.some((issue) => isBlockingSeverity(issue.severity))) return null;
       // A parse miss is not a finding. Its findingsSummary reads "_No issues found — nothing to
       // fix._", so looping back spends a whole fix round on a diagnosis that names no defect —
       // and hands the oscillation guard a phantom opposing side, which is how one task reached
@@ -614,7 +617,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         diagnosis: buildFindingsSummary(
           out.verdict,
           [],
-          out.issues.filter((issue) => isBlockingSeverity(issue.severity)),
+          issues.filter((issue) => isBlockingSeverity(issue.severity)),
           [],
         ),
       };

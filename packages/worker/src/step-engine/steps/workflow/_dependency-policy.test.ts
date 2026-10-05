@@ -115,6 +115,39 @@ describe('dependency ownership', () => {
     ).toBeNull();
   });
 
+  it.each(['web', 'docroot', 'custom/site'])(
+    'detects Drupal 7 core under %s in the working tree and baseline',
+    async (webRoot) => {
+      const root = await repository();
+      await file(
+        root,
+        'composer.json',
+        JSON.stringify({ extra: { 'drupal-scaffold': { locations: { 'web-root': webRoot } } } }),
+      );
+      await git(root, ['add', '-A']);
+      await git(root, ['commit', '-qm', 'non-Drupal manifest']);
+      const marker = `${webRoot}/includes/bootstrap.inc`;
+      const module = `${webRoot}/modules/system/system.module`;
+      await file(root, marker);
+      await file(root, module, 'rewritten\n');
+      const policy = await loadDependencyPolicy(context(), root);
+      expect(policy.drupal7).toBe(true);
+      expect(upstreamKind(marker, policy)).toBe('infrastructure');
+      expect(upstreamKind(module, policy)).toBe('infrastructure');
+      await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
+        'Refusing to commit',
+      );
+      await git(root, ['add', '-A']);
+      await git(root, ['commit', '-qm', 'Drupal 7 baseline']);
+      await rm(path.join(root, marker));
+      await file(root, module, 'edited again\n');
+      expect((await loadDependencyPolicy(context(), root)).drupal7).toBe(true);
+      await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
+        'Refusing to commit',
+      );
+    },
+  );
+
   it.each([
     '.',
     '../other/module',
