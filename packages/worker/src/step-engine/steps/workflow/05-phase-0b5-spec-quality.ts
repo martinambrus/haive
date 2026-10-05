@@ -17,7 +17,7 @@ import {
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
-import { briefFromTaskMeta } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
 import { parseAgentJson } from './_agent-json.js';
 
 interface SpecQualityDetect {
@@ -688,6 +688,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateTaskBrief(ctx, detected as SpecQualityDetect),
     requiredCapabilities: ['tool_use'],
     timeoutMs: 60 * 60 * 1000,
     // First pass (iteration 0) is always a REVIEW.

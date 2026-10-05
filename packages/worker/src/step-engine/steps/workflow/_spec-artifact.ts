@@ -7,6 +7,17 @@ import type { StepContext } from '../../step-definition.js';
 import { condenseDocument } from '../_doc-view.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
+import { loadTaskMeta } from './_task-meta.js';
+
+/** Called before dispatch: a parked step can replay detect output from before taskBrief existed. */
+export async function hydrateTaskBrief(
+  ctx: StepContext,
+  detected: { taskBrief?: string },
+): Promise<void> {
+  if (detected.taskBrief !== undefined) return;
+  const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+  detected.taskBrief = briefFromTaskMeta(meta.title, meta.description);
+}
 
 /** Where the approved spec is materialized, relative to the worktree root. Under
  *  `.haive/` because 01-worktree-setup git-excludes that dir, so the artifact never

@@ -14,6 +14,9 @@ revised specification rather than reading different answers to the same question
 The sprint planner, every DAG coder and the DAG review/recovery dispatches receive the
 original request too. Refuters carry the mandatory task boundary and original brief;
 when an older review resumes, the second-wave dispatch reloads that brief from the task.
+`hydrateTaskBrief` reloads a missing brief before spec review/correction, sprint planning,
+implementation, validation and both code-review waves dispatch. The boundary therefore
+also applies to forms and CLI waits parked before these detect fields existed.
 
 Agents may read infrastructure as evidence, but never repair framework core or underlying
 infrastructure. They report defects and their impact; a blocker requires a user decision.

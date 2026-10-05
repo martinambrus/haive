@@ -10,7 +10,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, fileOverlapTaskIds, overlapRefinedEstimate } from './_estimate.js';
@@ -361,6 +361,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateTaskBrief(ctx, detected as SprintPlanningDetect),
     requiredCapabilities: ['tool_use'],
     preForm: true,
     timeoutMs: 30 * 60 * 1000,

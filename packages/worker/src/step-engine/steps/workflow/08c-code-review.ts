@@ -1,5 +1,5 @@
 import { loadTaskMeta } from './_task-meta.js';
-import { briefFromTaskMeta } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
 import {
   findingUpstream,
   loadDependencyPolicy,
@@ -1185,7 +1185,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // zero-grace — so on those the escalating per-agent budget, not this, is what keeps
     // a long review from dying empty. exec-core logs when the request cannot be honored.
     softTimeout: true,
-    async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
+    async selectAgents({ ctx, detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke
       // doesn't enqueue real CLI jobs (mirrors 03-discovery's empty-persona path).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
@@ -1194,6 +1194,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // re-runs detect() only when detect_output is null, so a row stored before this shipped
       // reaches the prompt builders directly. Still before any dispatch, so nothing is spent.
       assertReviewableChange('08c-code-review', d.implementationFiles);
+      await hydrateTaskBrief(ctx, d);
       // roleKey === agentId here: every reviewer in this wave is a fixed persona, so its
       // id is already the stable seat STEP_MINING_SEATS enumerates.
       return [
@@ -1423,10 +1424,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           'dispatching refuters for blocking findings',
         );
         // A second-wave dispatch may resume detect output from before taskBrief existed.
-        if (d.taskBrief === undefined) {
-          const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-          d.taskBrief = briefFromTaskMeta(meta.title, meta.description);
-        }
+        await hydrateTaskBrief(ctx, d);
         throw new MiningWaveError(
           // The agent id here is per FINDING and unbounded, so it cannot be a seat. The
           // LENS is what repeats across the wave and is what a per-seat model choice is

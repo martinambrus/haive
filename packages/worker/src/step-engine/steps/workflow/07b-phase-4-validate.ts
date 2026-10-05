@@ -9,7 +9,7 @@ import {
   type StepLoopPassRecord,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
@@ -719,6 +719,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       const d = detected as ValidateDetect;
       // Replayed detect output may predate this field, including a pending fixer pass.
       d.dependencyPolicy ??= await loadReviewDependencyPolicy(ctx, d);
+      await hydrateTaskBrief(ctx, d);
       if (!d.browserTesting) return;
       try {
         const runtime = await ensureAppServing(ctx);

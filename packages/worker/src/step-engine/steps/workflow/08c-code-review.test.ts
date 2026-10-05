@@ -860,6 +860,7 @@ describe('scope fence', () => {
     // The fence is prompt text, so a persona that never receives it is a reviewer with the
     // old licence. Enterprise selects the full roster (peer, security + three lenses).
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         // Non-empty: selectAgents refuses a change set it cannot name (assertReviewableChange).
@@ -1337,7 +1338,7 @@ describe('repository text is data, not direction', () => {
   };
 
   const dispatches = async () =>
-    codeReviewStep.agentMining!.selectAgents({ detected } as never) as Promise<
+    codeReviewStep.agentMining!.selectAgents({ ctx: fakeCtx, detected } as never) as Promise<
       { agentId: string; prompt: string }[]
     >;
 
@@ -1453,6 +1454,7 @@ describe('08c change-set guard', () => {
     // detect() so a replayed detect_output is covered too, and before any dispatch.
     await expect(
       codeReviewStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
         detected: {
           spec: 's',
           implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
@@ -1468,6 +1470,7 @@ describe('08c mining seats', () => {
   it('seats every wave-1 reviewer by its own agent id', async () => {
     // These are fixed personas, so the agent id already IS the stable seat.
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
@@ -1483,6 +1486,7 @@ describe('08c mining seats', () => {
     // unconfigurable; one the registry lists but no wave emits is a dead control. Enterprise
     // is the widest roster, so it is what the registry must cover.
     const agents = await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: {
         spec: 's',
         implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
@@ -1563,6 +1567,7 @@ describe('08c review-dimension scope', () => {
 
   const peerPrompt = async (ids?: string[]): Promise<string> => {
     const agents = (await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: detected(ids),
     } as never)) as { agentId: string; prompt: string }[];
     return agents.find((a) => a.agentId === 'peer-reviewer')!.prompt;
@@ -1599,6 +1604,7 @@ describe('08c review-dimension scope', () => {
 
   it('leaves the security reviewer alone — it is not a 14-dimension sweep', async () => {
     const agents = (await codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
       detected: detected(['security']),
     } as never)) as { agentId: string; prompt: string }[];
     const security = agents.find((a) => a.agentId === 'security-code-reviewer')!;

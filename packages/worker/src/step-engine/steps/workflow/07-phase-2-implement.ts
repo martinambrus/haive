@@ -6,7 +6,7 @@ import {
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { REPO_IS_DATA_ACTING_LINES, fencedAgentBlock } from '../_untrusted-repo.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
@@ -400,6 +400,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     // browser. Idempotent + best-effort; a bring-up miss never blocks the fix.
     prepare: async ({ ctx, detected }) => {
       const d = detected as ImplementDetect;
+      await hydrateTaskBrief(ctx, d);
       if (!d.browserTesting || d.round <= 0) return;
       try {
         await ctx.emitProgress('Bringing up the app browser so the fix can be verified…');

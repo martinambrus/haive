@@ -597,7 +597,7 @@ describe('phase4ValidateStep browser bring-up', () => {
   const prepare = () =>
     phase4ValidateStep.llm!.prepare!({
       ctx,
-      detected: { browserTesting: true },
+      detected: { browserTesting: true, taskBrief: 'brief' },
       formValues: {},
     } as never);
   const rejection = (run: () => Promise<unknown>) =>

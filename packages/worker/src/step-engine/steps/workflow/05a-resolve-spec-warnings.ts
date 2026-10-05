@@ -1,5 +1,5 @@
 import { loadTaskMeta } from './_task-meta.js';
-import { briefFromTaskMeta } from './_spec-artifact.js';
+import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
 import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -245,6 +245,8 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
     },
 
     llm: {
+      prepare: async ({ ctx, detected }) =>
+        hydrateTaskBrief(ctx, detected as ResolveWarningsDetect),
       requiredCapabilities: ['tool_use'],
       timeoutMs: 60 * 60 * 1000,
       // The fixing agent only runs when the user chose "agent".
