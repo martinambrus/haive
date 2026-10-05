@@ -30,6 +30,12 @@ continue scanning rather than disabling this aid. One unfinished pathname is
 bounded to 4096 bytes; longer paths and non-UTF-8 names that fs-safe's string API
 cannot address are counted internally as unreadable. Fatal UTF-8 decoding prevents
 such a name from opening a different file through replacement characters.
+Total work stops at 500,000 files, 32 MiB of pathname bytes or two minutes. The
+time limit aborts and reaps the Git child even while awaiting its output. A limit
+preserves candidates already collected and records `limited` internally, rather
+than discarding the partial aid. This bounds crafted indexes containing millions
+of missing paths. The independent model search remains required, and budgets
+never add coverage diagnostics to the form, output or recap.
 Candidate collection also stays bounded: a max heap retains at most the requested
 cap while each file is scanned. Matches beyond it increment the omission count
 without allocating retained candidate records; regex matches are visited lazily.
@@ -61,8 +67,9 @@ references are filtered as a recall aid; the model's independent whole-tree and
 history searches remain required.
 
 The prompt receives at most 200 credential locations, taking one from every
-matching file before another from the same file. The entire inventory is scanned
-before capping, so the omission count is exact. MEASURED against that task's
+matching file before another from the same file. The inventory is scanned within
+the work budget; omissions count matches encountered beyond the retained cap.
+MEASURED against that task's
 37,085-file tree, the scan took about 40 seconds, nominated 188 locations and
 included all three bunyip credential lines (13, 20 and 27). Twenty-three files
 needed the bounded-read disclosure. This verifies deterministic discovery, not

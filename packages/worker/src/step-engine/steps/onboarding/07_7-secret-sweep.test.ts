@@ -312,6 +312,7 @@ describe('credential coverage', () => {
       omitted: 0,
       unreadable: 0,
       truncated: 0,
+      limited: true,
     },
   };
 
@@ -324,6 +325,7 @@ describe('credential coverage', () => {
     )!;
     expect(schema.fields.map((f) => f.id)).toEqual(['finding_0', 'acknowledged']);
     expect(JSON.stringify(schema)).not.toContain('bunyip');
+    expect(JSON.stringify(schema)).not.toMatch(/limited|budget|coverage/i);
   });
 
   it('continues without a form when every candidate was explicitly dismissed and coverage is complete', () => {

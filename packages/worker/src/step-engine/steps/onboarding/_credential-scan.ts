@@ -16,7 +16,21 @@ export interface CredentialScan {
   files: number;
   unreadable: number;
   truncated: number;
+  /** Internal bookkeeping only; the public report makes no exhaustive coverage claim. */
+  limited?: boolean;
 }
+
+interface ScanLimits {
+  maxFiles: number;
+  maxPathBytes: number;
+  timeoutMs: number;
+}
+
+const DEFAULT_LIMITS: ScanLimits = {
+  maxFiles: 500_000,
+  maxPathBytes: 32 * 1024 * 1024,
+  timeoutMs: 120_000,
+};
 
 const READ_CAP = 512 * 1024;
 const PATH_BYTES = 4096;
@@ -150,15 +164,25 @@ class BoundedCandidates {
 /** Stream Git's sorted index with backpressure; retain only one unfinished pathname.
  * Filesystem paths that cannot be represented by fs-safe's UTF-8 string interface
  * are counted as unreadable instead of decoding to a different file's name. */
-async function* trackedPaths(repoPath: string, checkCancelled: () => void) {
+async function* trackedPaths(
+  repoPath: string,
+  checkCancelled: () => void,
+  signal: AbortSignal,
+  takePathBytes: (bytes: number) => boolean,
+) {
   const child = spawn('git', hardenGitArgs(['ls-files', '-z']), {
     cwd: repoPath,
     env: { ...process.env, ...GIT_BASE_ENV },
     stdio: ['ignore', 'pipe', 'ignore'],
+    signal,
+    killSignal: 'SIGKILL',
   });
+  let childError: Error | undefined;
   const exited = new Promise<{ code?: number | null; error?: Error }>((resolve) => {
-    child.once('error', (error) => resolve({ error }));
-    child.once('close', (code) => resolve({ code }));
+    child.once('error', (error) => {
+      childError = error;
+    });
+    child.once('close', (code) => resolve({ code, error: childError }));
   });
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   let pending = Buffer.alloc(0);
@@ -170,8 +194,10 @@ async function* trackedPaths(repoPath: string, checkCancelled: () => void) {
       let start = 0;
       while (start < data.length) {
         checkCancelled();
+        if (signal.aborted) return;
         const end = data.indexOf(0, start);
         const part = data.subarray(start, end < 0 ? data.length : end);
+        if (!takePathBytes(part.length)) return;
         if (!oversized) {
           if (pending.length + part.length > PATH_BYTES) {
             pending = Buffer.alloc(0);
@@ -195,9 +221,12 @@ async function* trackedPaths(repoPath: string, checkCancelled: () => void) {
       }
     }
     const result = await exited;
+    if (signal.aborted) return;
     if (result.error) throw result.error;
     if (result.code !== 0 || pending.length || oversized)
       throw new Error('Could not stream the tracked credential inventory');
+  } catch (error) {
+    if (!(signal.aborted && error instanceof Error && error.name === 'AbortError')) throw error;
   } finally {
     if (child.exitCode === null && !child.killed) child.kill('SIGKILL');
     await exited;
@@ -210,15 +239,25 @@ export async function scanForCredentials(
   repoPath: string,
   cap: number,
   checkCancelled: () => void = () => {},
+  limits: Partial<ScanLimits> = {},
 ): Promise<CredentialScan> {
   if (!Number.isSafeInteger(cap) || cap < 0)
     throw new RangeError('Invalid credential candidate cap');
   checkCancelled();
+  const budget = { ...DEFAULT_LIMITS, ...limits };
+  if (Object.values(budget).some((value) => !Number.isSafeInteger(value) || value < 0))
+    throw new RangeError('Invalid credential scan budget');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budget.timeoutMs);
+  timer.unref();
+  if (budget.timeoutMs === 0) controller.abort();
   const retained = new BoundedCandidates(cap);
   let total = 0;
   let files = 0;
   let unreadable = 0;
   let truncated = 0;
+  let pathBytes = 0;
+  let limited = false;
   const batch: Promise<void>[] = [];
   async function inspect(rel: string | null, index: number) {
     if (rel === null) {
@@ -241,7 +280,19 @@ export async function scanForCredentials(
     });
   }
   try {
-    for await (const rel of trackedPaths(repoPath, checkCancelled)) {
+    const inventory = trackedPaths(repoPath, checkCancelled, controller.signal, (bytes) => {
+      if (pathBytes + bytes > budget.maxPathBytes) {
+        limited = true;
+        return false;
+      }
+      pathBytes += bytes;
+      return true;
+    });
+    for await (const rel of inventory) {
+      if (controller.signal.aborted || files >= budget.maxFiles) {
+        limited = true;
+        break;
+      }
       const read = inspect(rel, files++);
       // Observe immediately; all readers settle before propagating a batch failure.
       void read.catch(() => {});
@@ -253,8 +304,18 @@ export async function scanForCredentials(
     }
     await Promise.all(batch);
   } finally {
+    clearTimeout(timer);
     await Promise.allSettled(batch);
   }
+  checkCancelled();
+  limited ||= controller.signal.aborted;
   const hits = retained.hits();
-  return { hits, omitted: total - hits.length, files, unreadable, truncated };
+  return {
+    hits,
+    omitted: total - hits.length,
+    files,
+    unreadable,
+    truncated,
+    ...(limited ? { limited: true } : {}),
+  };
 }

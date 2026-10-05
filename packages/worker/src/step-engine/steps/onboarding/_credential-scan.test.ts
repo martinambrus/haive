@@ -341,6 +341,29 @@ describe('tracked credential inventory', () => {
     90_000,
   );
 
+  it.each([{ maxFiles: 2 }, { maxPathBytes: 10 }])(
+    'keeps prior candidates when a total-work budget stops the scan (%j)',
+    async (limits) => {
+      const root = await repo();
+      for (const file of ['a.env', 'b.env', 'c.env'])
+        await writeFile(path.join(root, file), 'token=a\n');
+      await gitExec(['add', '--all'], { cwd: root });
+      const scan = await scanForCredentials(root, 10, () => {}, limits);
+      expect(scan.limited).toBe(true);
+      expect(scan.hits.map((hit) => hit.file)).toEqual(['a.env', 'b.env']);
+      expect(scan.files).toBe(2);
+    },
+  );
+
+  it('ends a timed-out inventory without losing already completed reads', async () => {
+    const root = await repo();
+    for (let i = 0; i < 40; i++) await writeFile(path.join(root, `file-${i}.env`), 'token=a\n');
+    await gitExec(['add', '--all'], { cwd: root });
+    const scan = await scanForCredentials(root, 10, () => {}, { timeoutMs: 1 });
+    expect(scan.limited).toBe(true);
+    expect(scan.files).toBeLessThan(40);
+  });
+
   it('does not read another file through a non-UTF-8 path replacement', async () => {
     const root = await repo();
     const rawPath = Buffer.concat([Buffer.from(`${root}/bad-`), Buffer.from([0xff])]);
