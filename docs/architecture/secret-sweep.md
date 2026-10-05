@@ -24,6 +24,12 @@ locations. No depth or extension filter narrows the tracked inventory. Binary
 content is ignored when it contains NUL. Each read stops at 512 KiB; unreadable
 files and truncated reads are counted in internal scan metadata. Sixteen concurrent readers
 bound in-flight allocations. Cancellation is checked between files.
+Candidate collection also stays bounded: a max heap retains at most the requested
+cap while each file is scanned. Matches beyond it increment the omission count
+without allocating retained candidate records; regex matches are visited lazily.
+Rank by match ordinal and sorted file index preserves breadth before depth even
+when concurrent reads finish in a different order. A repository containing millions
+of short assignments cannot make the worker retain millions of candidate objects.
 
 The scanner nominates literal credential assignments, selected provider key
 formats, private-key markers and credential URLs. These are candidates, not
@@ -32,6 +38,8 @@ Quoted assignments and bounded bare scalars in `.env` and YAML are included;
 runtime environment references and function-call prefixes are not nominated.
 Named assignments have no minimum credential length beyond being nonempty: short
 passwords still expose accounts, and the model decides whether they are real.
+Credential names may include prefixes and suffixes, including `SECRET_KEY_BASE`
+and `AUTH_TOKEN_PRODUCTION`, in both quoted and bare assignments.
 Candidates persist only their path, line and a fixed kind, never source text,
 credential values, prefixes or hashes. Obvious placeholders and environment
 references are filtered as a recall aid; the model's independent whole-tree and
@@ -59,7 +67,9 @@ Missing entries do not prove the model never inspected their files.
 
 `llm.completePreForm` checkpoints the accumulated report before the results form
 is built. The runner consumes the finished invocation and dispatches a focused
-follow-up through the normal ownership/reservation path. Each batch contains at
+follow-up through the normal ownership/reservation path. Consumption is guarded
+on that exact invocation id and its terminal, unsuperseded state; it never selects
+a newer live invocation to consume. Each batch contains at
 most 24 missing locations and asks for a separate verdict per exact path/line;
 source maps and generated copies are inspected rather than assumed equivalent.
 The completed invocation ids, pending batch, attempt counts and merged findings

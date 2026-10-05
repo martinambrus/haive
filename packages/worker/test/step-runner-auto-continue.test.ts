@@ -133,6 +133,12 @@ function makeMockDb(state: MockState): Database {
               if (tableName === 'task_steps' && refusedByRowGuard(cond, state.taskStepRow.status)) {
                 return [];
               }
+              if (
+                tableName === 'cli_invocations' &&
+                state.invocation &&
+                !conditionValues(cond).includes(state.invocation.id)
+              )
+                return [];
               state.updates.push({ table: tableName, patch: v });
               if (tableName === 'cli_invocations' && state.invocation)
                 Object.assign(state.invocation, v);
@@ -301,6 +307,44 @@ describe('pre-form report completion', () => {
       expect(state.taskStepRow.formValues).toBeNull();
     },
   );
+
+  it('does not consume a newer live invocation when the completed report is replayed', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    state.invocation = {
+      id: 'inv-completed',
+      endedAt: new Date(),
+      exitCode: 0,
+      rawOutput: '{"findings":[]}',
+      parsedOutput: null,
+      errorMessage: null,
+    };
+    const followup = {
+      id: 'inv-followup',
+      startedAt: new Date(),
+      endedAt: null,
+      exitCode: null,
+      consumedAt: null,
+      rawOutput: null,
+      parsedOutput: null,
+      errorMessage: null,
+    };
+    const form = vi.fn(() => ZERO_FIELD_FORM);
+    const def = makeStep({ form });
+    def.llm = {
+      preForm: true,
+      requiredCapabilities: [],
+      buildPrompt: () => '',
+      completePreForm: async ({ llmInvocationId }) => {
+        expect(llmInvocationId).toBe('inv-completed');
+        state.invocation = followup;
+        return { llmOutput: { findings: [] }, continueRequested: true };
+      },
+    };
+    expect((await run(state, def)).status).toBe('waiting_cli');
+    expect(followup.consumedAt).toBeNull();
+    expect(form).not.toHaveBeenCalled();
+  });
 });
 
 const QUESTION_FORM: FormSchema = {

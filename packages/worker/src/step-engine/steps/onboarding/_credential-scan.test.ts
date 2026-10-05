@@ -1,4 +1,6 @@
 import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,9 +64,15 @@ describe('credential candidates', () => {
         '-----BEGIN OPENSSH PRIVATE KEY-----',
         `const value = "ghp_${'a'.repeat(36)}";`,
         'postgres://account:SyntheticUrlPassword@remote.example/db',
+        'postgres://account:p@remote.example/db',
       ].join('\n'),
     );
-    expect(hits.map((hit) => hit.kind)).toEqual(['private key', 'provider key', 'credential URL']);
+    expect(hits.map((hit) => hit.kind)).toEqual([
+      'private key',
+      'provider key',
+      'credential URL',
+      'credential URL',
+    ]);
   });
 
   it('includes unquoted dotenv and YAML credentials while excluding references and expressions', () => {
@@ -101,6 +109,28 @@ describe('credential candidates', () => {
       ].join('\n'),
     );
     expect(hits.map((hit) => hit.line)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('recognizes suffixed credential names in both quoted and unquoted assignments', () => {
+    const hits = scanTextForCredentials(
+      'config',
+      [
+        'SECRET_KEY_BASE=SyntheticBaseCredential',
+        'CLIENT_SECRET_VALUE=SyntheticClientCredential',
+        'AUTH_TOKEN_PRODUCTION=SyntheticProductionCredential',
+        '"apiKeyValue": "SyntheticApiCredential",',
+        'secretKeyValue: `SyntheticSigningCredential`,',
+        'AUTH_TOKEN_PRODUCTION=process.env.AUTH_TOKEN',
+      ].join('\n'),
+    );
+    expect(hits.map((hit) => hit.line)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('rejects a long repeated credential-like identifier without an assignment', () => {
+    expect(scanTextForCredentials('generated.js', 'token-'.repeat(80_000))).toEqual([]);
+    expect(scanTextForCredentials('generated.js', 'a-'.repeat(160_000) + '://account:p')).toEqual(
+      [],
+    );
   });
 
   it('does not persist binary content or nominate obvious placeholders/environment references', () => {
@@ -167,6 +197,40 @@ describe('tracked credential inventory', () => {
     expect(scan.truncated).toBe(1);
     expect(scan.hits).toHaveLength(1);
   });
+
+  it('counts millions of matches under a 64 MiB heap limit while retaining only the cap', async () => {
+    const root = await repo();
+    const linesPerFile = 65_536;
+    const fileCount = 32;
+    const content = 'token=a\n'.repeat(linesPerFile);
+    const files = Array.from(
+      { length: fileCount },
+      (_, i) => `file-${String(i).padStart(2, '0')}.env`,
+    );
+    for (const file of files) await writeFile(path.join(root, file), content);
+    await gitExec(['add', '--', ...files], { cwd: root });
+    const moduleUrl = new URL('./_credential-scan.ts', import.meta.url).href;
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [
+        '--max-old-space-size=64',
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { scanForCredentials } from ${JSON.stringify(moduleUrl)};
+       const scan = await scanForCredentials(${JSON.stringify(root)}, 200);
+       process.stdout.write(JSON.stringify(scan));`,
+      ],
+      { timeout: 35_000 },
+    );
+    const scan = JSON.parse(stdout) as Awaited<ReturnType<typeof scanForCredentials>>;
+    expect(scan.files).toBe(fileCount);
+    expect(scan.hits).toHaveLength(200);
+    expect(scan.omitted).toBe(fileCount * linesPerFile - 200);
+    expect(scan.hits.slice(0, fileCount).map((hit) => hit.file)).toEqual(files);
+    expect(scan.hits.at(-1)).toMatchObject({ file: 'file-07.env', line: 7 });
+  }, 45_000);
 
   it('propagates cancellation rather than completing a partial scan', async () => {
     const root = await repo();

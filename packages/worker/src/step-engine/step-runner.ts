@@ -2433,7 +2433,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           formValues: null,
           statusMessage: completion.statusMessage ?? 'Completing the report…',
         });
-        await markLatestInvocationConsumed(db, current.id);
+        await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
         const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
         if (!followup.resolved) return followup.result;
         throw new Error('Pre-form continuation did not dispatch a fresh invocation');
@@ -3976,6 +3976,27 @@ async function reconcileOrphanedMiningAgents(
     }
   }
   return changed;
+}
+
+/** A continuation consumes the completed run it processed, never a newer live run. */
+async function markCompletedInvocationConsumed(
+  db: Database,
+  taskStepId: string,
+  invocationId: string | null,
+): Promise<void> {
+  if (!invocationId) return;
+  await db
+    .update(schema.cliInvocations)
+    .set({ consumedAt: new Date() })
+    .where(
+      and(
+        eq(schema.cliInvocations.id, invocationId),
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNotNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.consumedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
 }
 
 /** Mark the currently-active LLM invocation row as consumed so the next
