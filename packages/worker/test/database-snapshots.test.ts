@@ -17,7 +17,10 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
-import { databaseSaveForm } from '../src/step-engine/steps/workflow/11g-save-database.js';
+import {
+  databaseSaveForm,
+  saveDatabaseStep,
+} from '../src/step-engine/steps/workflow/11g-save-database.js';
 import {
   DATABASE_SAVE_STEP_ID,
   loadDatabaseSnapshotState,
@@ -28,6 +31,7 @@ import {
   verifyDatabaseSnapshotFile,
 } from '../src/repo/database-snapshots.js';
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
+import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 
 const runtime = vi.hoisted(() => ({ import: vi.fn(), config: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
@@ -155,22 +159,42 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     db.query.repositoryDatabaseStates.findFirst({
       where: eq(schema.repositoryDatabaseStates.repositoryId, repoId),
     });
-  const restoreArgs = (snapshot: Awaited<ReturnType<typeof candidate>>) => ({
+  const restoreArgs = (snapshot: { id: string }) => ({
     detected: {
       ddevConfigured: true,
       repoSubpath: 'test',
       workspace: null,
-      dbUploadId: null,
+      dbUploadId: null as string | null,
       dumpWorkerPath: null,
       dumpRunnerPath: '/db-dump/project.sql.gz',
       needsConfig: false,
       proposedConfig: null,
-      databaseSnapshotId: snapshot.id,
-      snapshotEngine: 'postgres',
+      databaseSnapshotId: snapshot.id as string | null,
+      snapshotEngine: 'postgres' as string | null,
     },
     formValues: {},
     iteration: 0,
     previousIterations: [],
+  });
+
+  it('captures an older task’s project revision at startup even without a database input', async () => {
+    const a = await task('older task without a dump');
+    await db
+      .delete(schema.taskDatabaseStates)
+      .where(eq(schema.taskDatabaseStates.taskId, a.taskId));
+    await ddevEnvStep.detect!(a);
+    expect(
+      (await db.query.taskDatabaseStates.findFirst({
+        where: eq(schema.taskDatabaseStates.taskId, a.taskId),
+      }))!.baseRevision,
+    ).toBe(0);
+    const b = await task('parallel save');
+    await candidate(b);
+    await promoteDatabaseSnapshot(b, 0);
+    const form = databaseSaveForm(await loadDatabaseSnapshotState(a))!;
+    expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
+      options: expect.arrayContaining([{ value: 'replace:1', label: expect.any(String) }]),
+    });
   });
 
   it('restores a pinned snapshot once, keeps its file and ignores stale detect data on retry', async () => {
@@ -178,16 +202,80 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     const saved = await candidate(a);
     await promoteDatabaseSnapshot(a, 0);
     const b = await task('restore', saved.id);
-    const first = await ddevEnvStep.apply(b, restoreArgs(saved));
+    const first = await restoreDatabaseStep.apply(b, restoreArgs(saved));
     expect(first.imported).toBe(true);
     expect(
       (await db.query.taskDatabaseStates.findFirst({
         where: eq(schema.taskDatabaseStates.taskId, b.taskId),
       }))!.importedAt,
     ).toBeInstanceOf(Date);
-    expect((await ddevEnvStep.apply(b, restoreArgs(saved))).imported).toBe(false);
+    expect((await restoreDatabaseStep.apply(b, restoreArgs(saved))).imported).toBe(false);
     expect(runtime.import).toHaveBeenCalledTimes(1);
     await expect(access(path.join(root, databaseSnapshotRel(saved)))).resolves.toBeUndefined();
+  });
+
+  it('restores an uploaded dump in the separate step and ignores consumed uploads on retry', async () => {
+    const a = await task('uploaded database');
+    const [upload] = await db
+      .insert(schema.dbUploads)
+      .values({
+        userId,
+        filename: 'project.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        chunkSize: 10,
+        dumpPath: '/unused/project.sql',
+        status: 'complete',
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ dbUploadId: upload!.id })
+      .where(eq(schema.tasks.id, a.taskId));
+    const args = restoreArgs({ id: '' });
+    args.detected.dbUploadId = upload!.id;
+    args.detected.databaseSnapshotId = null;
+    args.detected.snapshotEngine = null;
+    // A manual upload does not make a non-DDEV workflow eligible for restoration.
+    expect(await ddevEnvStep.shouldRun!(a)).toBe(false);
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(false);
+    const [template] = await db
+      .insert(schema.envTemplates)
+      .values({
+        userId,
+        repositoryId: repoId,
+        name: 'DDEV',
+        baseImage: 'test',
+        declaredDeps: { containerTool: 'ddev' },
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ envTemplateId: template!.id })
+      .where(eq(schema.tasks.id, a.taskId));
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(true);
+    // Existing config is also eligible without a declared DDEV template.
+    await db.update(schema.tasks).set({ envTemplateId: null }).where(eq(schema.tasks.id, a.taskId));
+    await writeFileNoFollow(root, 'restore-fixture/.ddev/config.yaml', 'name: test\n', {
+      createParents: true,
+    });
+    a.repoPath = path.join(root, 'restore-fixture');
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(true);
+    expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(true);
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(false);
+    expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(false);
+    expect(runtime.import).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an explicitly selected saved database when the workspace cannot run DDEV', async () => {
+    const a = await task('source');
+    const saved = await candidate(a);
+    await promoteDatabaseSnapshot(a, 0);
+    const b = await task('restore in an incompatible workspace', saved.id);
+    await expect(restoreDatabaseStep.shouldRun!(b)).rejects.toThrow(
+      'selected saved database requires a DDEV workspace',
+    );
+    expect(runtime.import).not.toHaveBeenCalled();
   });
 
   it('rejects corrupt snapshots and incompatible engines before importing', async () => {
@@ -200,7 +288,7 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
       output:
         '# Complete processed project configuration:\nomit_containers: []\ndatabase:\n  type: mariadb\n  version: "10.11"\n',
     });
-    await expect(ddevEnvStep.apply(b, restoreArgs(saved))).rejects.toThrow(
+    await expect(restoreDatabaseStep.apply(b, restoreArgs(saved))).rejects.toThrow(
       'saved database uses postgres',
     );
     expect(runtime.import).not.toHaveBeenCalled();
@@ -211,8 +299,51 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     const bytes = await readFile(path.join(root, databaseSnapshotRel(saved)));
     bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1;
     await writeFileNoFollow(root, databaseSnapshotRel(saved), bytes);
-    await expect(ddevEnvStep.apply(b, restoreArgs(saved))).rejects.toThrow('checksum');
+    await expect(restoreDatabaseStep.apply(b, restoreArgs(saved))).rejects.toThrow('checksum');
     expect(runtime.import).not.toHaveBeenCalled();
+  });
+
+  const saveArgs = (action?: string) => ({
+    detected: null,
+    formValues: action ? { action } : {},
+    iteration: 0,
+    previousIterations: [],
+  });
+  it('requires explicit approval before saving even with a ready candidate', async () => {
+    const a = await task('manual decision');
+    const saved = await candidate(a);
+    await expect(saveDatabaseStep.apply(a, saveArgs())).rejects.toThrow('Choose whether');
+    expect((await head())!.revision).toBe(0);
+    expect((await saveDatabaseStep.apply(a, saveArgs('save:0'))).outcome).toBe('saved');
+    expect((await head())!.snapshotId).toBe(saved.id);
+  });
+  it('rejects an unseen revision before export and discards an existing candidate on decline', async () => {
+    const a = await task('first');
+    const b = await task('second');
+    await candidate(a);
+    const unused = await candidate(b);
+    await promoteDatabaseSnapshot(a, 0);
+    await expect(saveDatabaseStep.apply(b, saveArgs('save:0'))).rejects.toThrow('Choose whether');
+    expect(runtime.config).not.toHaveBeenCalled();
+    expect((await head())!.revision).toBe(1);
+    expect((await saveDatabaseStep.apply(b, saveArgs('discard'))).outcome).toBe('discarded');
+    await expect(access(path.join(root, databaseSnapshotRel(unused)))).rejects.toThrow();
+  });
+  it('declining without a candidate never touches the database runtime', async () => {
+    const a = await task('no snapshot needed');
+    await db
+      .update(schema.taskDatabaseStates)
+      .set({ saveEnabled: false })
+      .where(eq(schema.taskDatabaseStates.taskId, a.taskId));
+    expect(databaseSaveForm(await loadDatabaseSnapshotState(a))).not.toBeNull();
+    expect((await saveDatabaseStep.apply(a, saveArgs('discard'))).outcome).toBe('discarded');
+    expect(runtime.config).not.toHaveBeenCalled();
+    expect(
+      await db
+        .select()
+        .from(schema.databaseSnapshots)
+        .where(eq(schema.databaseSnapshots.repositoryId, repoId)),
+    ).toHaveLength(0);
   });
 
   it('one concurrent save wins; declining the other deletes its file and inventory', async () => {

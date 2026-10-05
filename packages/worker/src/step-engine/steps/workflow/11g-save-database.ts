@@ -36,32 +36,23 @@ type Detected = Awaited<ReturnType<typeof loadDatabaseSnapshotState>>;
 
 export function databaseSaveForm(d: Detected): FormSchema | null {
   if (!d || d.state.outcome !== 'pending') return null;
-  if (d.state.exportError)
-    return {
-      title: 'Database could not be saved',
-      description: d.state.exportError,
-      fields: [
-        {
-          id: 'action',
-          type: 'select',
-          label: 'Next action',
-          required: true,
-          default: 'retry',
-          options: [
-            { value: 'retry', label: 'Retry database export' },
-            { value: 'discard', label: 'Finish without saving the database' },
-          ],
-        },
-      ],
-      submitLabel: 'Continue',
-    };
-  if (d.candidate?.status !== 'ready' || d.revision === d.state.baseRevision) return null;
+  const conflict = d.revision !== d.state.baseRevision;
   const current = d.current;
   return {
-    title: 'The project database changed during this task',
-    description: current
-      ? `Another database snapshot became current after this task was created.\n\nLast saved by task **${current.sourceTaskId ?? '(deleted task)'}**, on ${new Date(current.createdAt).toISOString()}.\n\nReplacing it selects this task’s complete database; it does not merge the two databases. Keeping it deletes this task’s candidate snapshot.`
-      : 'The project database selection changed during this task. Keeping the current selection deletes this task’s candidate snapshot.',
+    title: conflict ? 'The project database changed during this task' : 'Save project database',
+    description: [
+      d.state.exportError ? `Database export failed: ${d.state.exportError}` : '',
+      conflict
+        ? 'Another task changed the saved project database. Overwriting selects this task’s complete database; it does not merge the databases.'
+        : 'Choose whether to save this task’s DDEV database locally for the next task.',
+      current
+        ? `Last saved by task **${current.sourceTaskId ?? '(deleted task)'}**, on ${new Date(current.createdAt).toISOString()}.`
+        : '',
+      'Finishing without saving deletes any unused snapshot from this task.',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+    autoSubmit: false,
     fields: [
       ...(current
         ? [
@@ -76,14 +67,16 @@ export function databaseSaveForm(d: Detected): FormSchema | null {
       {
         id: 'action',
         type: 'select',
-        label: 'Project database',
+        label: 'Database snapshot',
         required: true,
         default: 'discard',
         options: [
-          { value: 'discard', label: 'Keep the current database and delete my snapshot' },
+          { value: 'discard', label: 'Finish without saving the database' },
           {
-            value: `replace:${d.revision}`,
-            label: 'Replace the current database with this task’s snapshot',
+            value: `${conflict ? 'replace' : 'save'}:${d.revision}`,
+            label: conflict
+              ? 'Save and overwrite the current database'
+              : 'Save database for the next task',
           },
         ],
       },
@@ -103,14 +96,11 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
         'Save the DDEV primary database locally for the next task, before workspace cleanup.',
       requiresCli: false,
       allowSkip: true,
+      alwaysWaitForUser: true,
     },
     async shouldRun(ctx) {
       const task = await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
       if (!task?.repositoryId) return false;
-      const state = await ctx.db.query.taskDatabaseStates.findFirst({
-        where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
-      });
-      if (state?.saveEnabled === false) return false;
       const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
       if (!ws) return false;
       const { anchor, prefix } = workspaceAnchor(ws.workspace);
@@ -124,6 +114,20 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
       if (d.state.outcome !== 'pending') return { outcome: d.state.outcome };
       if (args.formValues.action === 'discard') {
         return { outcome: await discardDatabaseSnapshot(ctx, d.epoch) };
+      }
+      const action = String(args.formValues.action ?? '');
+      const match = /^(save|replace):(\d+)$/.exec(action);
+      const approved = match ? Number(match[2]) : NaN;
+      const expected = d.revision === d.state.baseRevision ? 'save' : 'replace';
+      if (
+        !match ||
+        !Number.isSafeInteger(approved) ||
+        approved !== d.revision ||
+        match[1] !== expected
+      ) {
+        throw new ReopenStepFormError(
+          'Choose whether to save the database; review the current project snapshot',
+        );
       }
       let candidate = d.candidate?.status === 'ready' ? d.candidate : null;
       if (!candidate) {
@@ -213,14 +217,10 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
           });
           await sweepDatabaseSnapshots(ctx.db);
           throw new ReopenStepFormError(
-            'Database export failed; choose Retry or finish without saving',
+            'Database export failed; choose whether to retry saving or finish without saving',
           );
         }
       }
-      const action = String(args.formValues.action ?? '');
-      const approved = /^replace:\d+$/.test(action)
-        ? Number(action.slice('replace:'.length))
-        : undefined;
       const outcome = await promoteDatabaseSnapshot(ctx, d.epoch, approved);
       if (outcome === 'conflict') {
         throw new ReopenStepFormError(

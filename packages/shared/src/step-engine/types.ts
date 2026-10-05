@@ -72,6 +72,8 @@ export interface StepMetadata {
    *  and the step still falls back to waiting_form. Read only by the worker step
    *  runner, so no shared-constant mirror is needed. */
   autoSubmitDefaults?: boolean;
+  /** Requires an explicit submission even with auto-continue or pre-answers. */
+  alwaysWaitForUser?: boolean;
   /** When true, and the task is in auto-continue mode, the runner reuses the most
    *  recent SUCCESSFULLY COMPLETED same-repository, same-workflow-type task's
    *  submitted `formValues` for this step id and auto-submits them instead of

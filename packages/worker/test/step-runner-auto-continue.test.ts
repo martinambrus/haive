@@ -279,6 +279,26 @@ describe('advanceStep auto-continue', () => {
     });
   }
 
+  it('always-wait steps require an explicit submission despite auto mode, pre-answers and defaults', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { action: 'update' } },
+    };
+    const step = makeStep({
+      form: () => ({ ...QUESTION_FORM, autoSubmit: true }),
+      autoSubmitDefaults: true,
+    });
+    step.metadata.alwaysWaitForUser = true;
+    const apply = vi.fn(step.apply);
+    step.apply = apply;
+    expect((await run(state, step)).status).toBe('waiting_form');
+    expect(apply).not.toHaveBeenCalled();
+    expect((await run(state, step, { action: 'skip', flag: false })).status).toBe('done');
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
   it('auto mode passes zero-field info forms without stopping', async () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };

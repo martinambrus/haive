@@ -709,7 +709,6 @@ taskRoutes.post('/', async (c) => {
       try {
         await initializeTaskDatabaseState(handle, created, {
           sourceSnapshotId: body.databaseSnapshotId,
-          saveEnabled: body.saveDatabase ?? true,
         });
       } catch (err) {
         if (err instanceof DatabaseSnapshotUnavailableError) throw new HttpError(409, err.message);

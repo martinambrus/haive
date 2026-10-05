@@ -1,43 +1,27 @@
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema, initializeTaskDatabaseState } from '@haive/database';
-import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import type { FormSchema } from '@haive/shared';
 import {
   applyTreeNoFollow,
   lstatNoFollow,
   readTextNoFollow,
   relUnder,
-  removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { SANDBOX_GID, SANDBOX_UID } from '../../../sandbox/sandbox-identity.js';
-import { splitUploadPath, workspaceAnchor } from '../../../repo/worktree-paths.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import {
-  ddevCountTables,
-  ddevConfigOmitsDatabase,
-  ddevExec,
-  ddevImportDb,
-  ddevSnapshot,
-  ddevImportSnapshotName,
-  sniffDumpFormat,
-  type DumpImportFormat,
-} from '../../../sandbox/ddev-runner.js';
-import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
-import { verifyDatabaseSnapshotFile, withSnapshotStep } from '../../../repo/database-snapshots.js';
+import { ensureDdevWithProgress } from './_app-runtime.js';
 
-// Boots the project's DDEV environment in a per-task nested-Docker runner and
-// imports the uploaded DB dump (then deletes it). Gated on the repo actually
-// having `.ddev/config.yaml` — a task that is ADDING ddev (no config yet) skips
-// this and just writes the config; a later task lights the env up. See
-// sandbox/ddev-runner.ts for why DDEV runs in nested Docker.
-
-const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+// Boots the project's DDEV environment in a per-task nested-Docker runner.
+// Projects declaring DDEV can review a generated config when none exists.
+// Database restoration runs in the following step. See sandbox/ddev-runner.ts
+// for why DDEV runs in nested Docker.
 
 /** The repo volume is chowned to uid 1000 (the `node`/`ddev` sandbox user) so
  *  DDEV and sandboxed CLIs can write. See resolvers.ts chownRepoVolume. */
@@ -48,17 +32,12 @@ interface DdevEnvDetect {
   /** Absolute worker path to the active workspace (worktree), so apply can read
    *  the booted `.ddev/config.yaml` to record the baseline. */
   workspace: string | null;
-  dbUploadId: string | null;
-  dumpWorkerPath: string | null;
-  dumpRunnerPath: string | null;
   /** True when the project declares DDEV (containerTool=ddev) but has no
    *  .ddev/config.yaml yet — 01c generates one from the declared deps, writes it
    *  into the worktree (the commit gate persists it), then boots. */
   needsConfig: boolean;
   /** The proposed .ddev/config.yaml shown for review; written on apply. */
   proposedConfig: string | null;
-  databaseSnapshotId?: string | null;
-  snapshotEngine?: string | null;
 }
 
 /** php/db snapshot of the `.ddev/config.yaml` that was actually booted, plus a
@@ -201,7 +180,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     index: 1.6,
     title: 'DDEV environment',
     description:
-      "Boots the project's DDEV environment in an isolated nested-Docker runner and imports the DB dump.",
+      "Boots the project's DDEV environment in an isolated nested-Docker runner before the separate database restore step.",
     requiresCli: false,
   },
 
@@ -248,58 +227,20 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       }
     }
 
+    // Older/internal tasks may not have creation-time snapshot state. Capture
+    // their baseline at startup even when they have no database to restore.
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { id: true, dbUploadId: true, repositoryId: true, userId: true },
+      columns: { id: true, repositoryId: true, userId: true },
     });
-
-    let dbUploadId: string | null = null;
-    let dumpWorkerPath: string | null = null;
-    let dumpRunnerPath: string | null = null;
-    let databaseSnapshotId: string | null = null;
-    let snapshotEngine: string | null = null;
-    if (task?.dbUploadId) {
-      const dump = await ctx.db.query.dbUploads.findFirst({
-        where: eq(schema.dbUploads.id, task.dbUploadId),
-        columns: { id: true, dumpPath: true, status: true },
-      });
-      if (dump?.dumpPath && dump.status === 'complete') {
-        dbUploadId = dump.id;
-        dumpWorkerPath = dump.dumpPath;
-        // The dump lives in the haive_repos volume (_uploads/...); inside the
-        // runner that volume is mounted at /repos, so translate the worker path.
-        const upload = splitUploadPath(REPO_STORAGE_ROOT, dump.dumpPath);
-        if (upload) dumpRunnerPath = `/repos/${upload.rel}`;
-      }
-    }
-
-    if (task?.repositoryId) {
-      const state = await initializeTaskDatabaseState(ctx.db, task);
-      if (!task.dbUploadId && state?.sourceSnapshotId && !state.importedAt) {
-        const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
-          where: eq(schema.databaseSnapshots.id, state.sourceSnapshotId),
-        });
-        if (!snapshot || snapshot.status !== 'ready')
-          throw new Error('The selected saved database is unavailable');
-        databaseSnapshotId = snapshot.id;
-        snapshotEngine = snapshot.engine;
-        const rel = databaseSnapshotRel(snapshot);
-        dumpWorkerPath = `${REPO_STORAGE_ROOT}/${rel}`;
-        dumpRunnerPath = `/repos/${rel}`;
-      }
-    }
+    if (task?.repositoryId) await initializeTaskDatabaseState(ctx.db, task);
 
     return {
       ddevConfigured,
       repoSubpath,
       workspace: ws?.workspace ?? null,
-      dbUploadId,
-      dumpWorkerPath,
-      dumpRunnerPath,
       needsConfig,
       proposedConfig,
-      databaseSnapshotId,
-      snapshotEngine,
     };
   },
 
@@ -327,10 +268,6 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
   async apply(ctx, args): Promise<DdevEnvApply> {
     const d = args.detected;
-    const importEpoch = d.databaseSnapshotId
-      ? (await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }))
-          ?.orchestrationEpoch
-      : undefined;
     if (!d.repoSubpath) {
       return { started: false, imported: false, skipped: true, output: 'no repo', baseline: null };
     }
@@ -373,143 +310,8 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     }
 
     await ctx.emitProgress('Starting DDEV environment (nested Docker)…');
-    const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
-
-    let imported = false;
-    const dumpRunnerPath = d.dumpRunnerPath;
-    const savedState = d.databaseSnapshotId
-      ? await ctx.db.query.taskDatabaseStates.findFirst({
-          where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
-        })
-      : null;
-    if (dumpRunnerPath && (d.dbUploadId || (d.databaseSnapshotId && !savedState?.importedAt))) {
-      if (d.databaseSnapshotId) {
-        const snapshot = await ctx.db.query.databaseSnapshots.findFirst({
-          where: eq(schema.databaseSnapshots.id, d.databaseSnapshotId),
-        });
-        if (
-          !snapshot ||
-          snapshot.status !== 'ready' ||
-          savedState?.sourceSnapshotId !== snapshot.id
-        )
-          throw new Error('The selected saved database is unavailable');
-        await ctx.emitProgress('Verifying the saved database…');
-        await verifyDatabaseSnapshotFile(snapshot, ctx.signal);
-      }
-      // A pg_dump archive can't go through `ddev import-db` alone; it is restored
-      // with pg_restore inside the db container first. Classified by magic bytes,
-      // not by the filename, which carries no reliable extension (`.backup`,
-      // `.dump`, `.pgsql`, …).
-      // The dump sits in `_uploads/<userId>/`, which is NOT an anchor: that directory is in the
-      // `haive_repos` volume the runner mounts from (its own dump file, read-only, since
-      // `resolveDumpMounts`). The storage root anchors it and both segments below are walked; a row
-      // whose path is not that shape answers null and the sniff is skipped, exactly as an
-      // unreadable dump already was.
-      const dump = d.dumpWorkerPath ? splitUploadPath(REPO_STORAGE_ROOT, d.dumpWorkerPath) : null;
-      const format: DumpImportFormat = dump
-        ? await sniffDumpFormat(dump.anchor, dump.rel)
-        : { pgRestore: false, gzipped: false };
-      // Read once: the engine decides both whether a pg archive can be restored at
-      // all and which client the post-import table count speaks.
-      const cfgText = d.workspace
-        ? await (async () => {
-            const { anchor, rel } = ddevConfigRef(d.workspace!);
-            return readTextNoFollow(anchor, rel);
-          })()
-        : null;
-      let dbType = cfgText === null ? null : parseDdevConfig(cfgText).dbType;
-      if (d.snapshotEngine) {
-        const effective = await ddevExec(handle, 'utility configyaml --full-yaml', {
-          timeoutMs: 30_000,
-        });
-        if (effective.exitCode !== 0 || ddevConfigOmitsDatabase(effective.output) !== false)
-          throw new Error('The saved database requires a configured DDEV database container');
-        dbType = parseDdevConfig(
-          effective.output.slice(
-            effective.output.indexOf('# Complete processed project configuration:'),
-          ),
-        ).dbType;
-        if (d.snapshotEngine !== (dbType ?? 'mariadb'))
-          throw new Error(
-            `The saved database uses ${d.snapshotEngine}, but this DDEV project uses ${dbType ?? 'mariadb'}. Select a compatible database or start without a saved database.`,
-          );
-      }
-      if (format.pgRestore) {
-        // pg_restore only exists in a postgres db container. An absent `database:`
-        // block means DDEV's mariadb default, so a null dbType is still "not
-        // postgres"; only an unreadable config leaves the engine unknown, and then
-        // the restore itself reports the mismatch.
-        if (cfgText !== null && dbType !== 'postgres') {
-          throw new Error(
-            'The uploaded dump is a PostgreSQL archive (pg_dump -Fc/-Ft), but this ' +
-              "project's DDEV database is not postgres. Upload a plain .sql dump, or switch the " +
-              'project to a postgres database.',
-          );
-        }
-        await ctx.emitProgress(
-          format.gzipped
-            ? 'Dump is a gzipped PostgreSQL archive — inflating it and restoring it with pg_restore'
-            : 'Dump is a PostgreSQL archive — restoring it with pg_restore',
-        );
-      }
-      const imp = await withDdevProgress(ctx, 'Importing database dump…', (onLine) =>
-        ddevImportDb(handle, dumpRunnerPath, { format, timeoutMs: 1_800_000, onLine }),
-      );
-      if (imp.exitCode !== 0) {
-        throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
-      }
-      // Exit 0 is not proof a database arrived — see ddevCountTables. Only a
-      // CONFIDENT zero blocks; null means the probe could not be read, which is not
-      // evidence the database is empty and must not fail a project that is fine.
-      const tables = await ddevCountTables(handle, dbType);
-      if (tables === 0) {
-        throw new Error(
-          'The database dump imported without error but the database is EMPTY (0 tables). ' +
-            'The dump is most likely for a different engine than this project, or truncated. ' +
-            `This project's DDEV database is ${dbType ?? 'mysql/mariadb (DDEV default)'} — ` +
-            'upload a dump taken from that engine and retry. Import output: ' +
-            imp.output.slice(-800),
-        );
-      }
-      if (tables === null) {
-        ctx.logger.warn(
-          { taskId: ctx.taskId, dbType },
-          'post-import table count could not be read — import left unverified',
-        );
-      }
-      imported = true;
-      // Durability snapshot of the freshly-imported DB. It lives on the repo
-      // volume (.ddev/.snapshots), so it survives the worker-boot reaper /
-      // daemon / host restart that destroys the runner's nested DB —
-      // ensureDdevStarted restores it on a cold boot. Non-fatal: the import
-      // already succeeded, and a prior attempt's snapshot may already exist.
-      const snap = await withDdevProgress(ctx, 'Snapshotting the imported database…', (onLine) =>
-        ddevSnapshot(handle, ddevImportSnapshotName(ctx.taskId), { onLine }),
-      );
-      if (snap.exitCode !== 0) {
-        ctx.logger.warn(
-          { taskId: ctx.taskId, output: snap.output.slice(-500) },
-          'ddev import snapshot non-zero (continuing)',
-        );
-      }
-      // Delete the dump immediately + mark the upload consumed (the env now holds it).
-      if (d.dbUploadId) {
-        if (dump) await removeNoFollow(dump.anchor, dump.rel).catch(() => {});
-        await ctx.db
-          .update(schema.dbUploads)
-          .set({ status: 'consumed', updatedAt: new Date() })
-          .where(eq(schema.dbUploads.id, d.dbUploadId));
-      } else {
-        ctx.throwIfCancelled();
-        if (importEpoch === undefined) throw new Error('The task is unavailable');
-        await withSnapshotStep(ctx, importEpoch, async (tx) => {
-          await tx
-            .update(schema.taskDatabaseStates)
-            .set({ importedAt: new Date() })
-            .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
-        });
-      }
-    }
+    await ensureDdevWithProgress(ctx, d.repoSubpath);
+    const imported = false;
 
     const baseline = await readDdevBaseline(d.workspace);
     ctx.logger.info({ taskId: ctx.taskId, imported, baseline }, 'ddev env ready');
@@ -517,7 +319,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       started: true,
       imported,
       skipped: false,
-      output: imported ? 'DDEV started; database dump imported' : 'DDEV started',
+      output: 'DDEV started',
       baseline,
     };
   },
