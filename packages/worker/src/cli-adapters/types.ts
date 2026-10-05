@@ -51,15 +51,13 @@ export interface InvokeOpts {
    *  spawn its own Claude Code sub-agents (uncontrolled token fan-out). Non-claude
    *  adapters ignore it. */
   disallowedTools?: string[];
-  /** Claude-family only: when true, emit `--tools ""` to disable ALL built-in
+  /** Best-effort preference: adapters that support it disable ALL built-in
    *  tools so the model answers from the prompt alone (no repo crawl). Set for
    *  enrichment/classification steps whose full input is already in the prompt
    *  (e.g. 01-env-detect), where a high-effort model would otherwise burn the
-   *  timeout exploring the repo. codex/gemini adapters ignore it. */
+   *  timeout exploring the repo. Unsupported adapters keep their tools; this
+   *  preference must never exclude a provider or cause a provider switch. */
   disableTools?: boolean;
-  /** Refuse adapters that cannot actually disable built-in tools. Requires
-   *  disableTools:true and a prompt invocation; unset keeps best-effort behavior. */
-  requireDisabledTools?: true;
 }
 
 /** Per-task facts a steering transport can depend on — see

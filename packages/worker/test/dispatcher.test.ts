@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
+import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 import {
   agentDefinitionGuidance,
@@ -68,60 +69,51 @@ const sampleSubAgentSpec: SubAgentSpec = {
 };
 
 describe('resolveDispatch', () => {
-  it.each(['codex', 'gemini', 'amp', 'antigravity'] as const)(
-    'rejects %s when disabling built-in tools is required',
+  it.each(cliAdapterRegistry.names())(
+    'keeps the preferred %s provider for gate-3 message generation',
     (name) => {
-      const plan = resolveDispatch({
-        providers: [{ ...makeProvider({ id: 'provider', name }), model: 'test-model' }],
-        input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
-        invokeOpts: { disableTools: true, requireDisabledTools: true },
-        toolProfile: 'none',
+      const llm = gate3CommitStep.llm!;
+      const prompt = llm.buildPrompt({
+        detected: { diffSummary: 'src/session.ts | 2 +-' },
+        formValues: {},
       });
-      expect(plan.mode).toBe('skip');
-      expect(plan.invocation).toBeNull();
-      expect(plan.reason).toContain('disable built-in tools');
-    },
-  );
-
-  it.each(['claude-code', 'zai', 'ollama', 'muse', 'openrouter', 'grok'] as const)(
-    'accepts %s and emits the no-tools flag when required',
-    (name) => {
       const plan = resolveDispatch({
-        providers: [{ ...makeProvider({ id: 'provider', name }), model: 'test-model' }],
-        input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
-        invokeOpts: { disableTools: true, requireDisabledTools: true },
-        toolProfile: 'none',
+        providers: [
+          makeProvider({ id: 'alternative', name: 'claude-code' }),
+          { ...makeProvider({ id: 'preferred', name }), model: 'test-model' },
+        ],
+        preferredProviderId: 'preferred',
+        input: { kind: 'prompt', prompt, capabilities: llm.requiredCapabilities },
+        invokeOpts: { disableTools: llm.disableTools },
+        toolProfile: llm.toolProfile,
       });
       expect(plan.mode).toBe('cli');
+      expect(plan.providerId).toBe('preferred');
       expect(plan.invocation?.kind).toBe('cli');
+      expect(plan.effectivePrompt).toContain('Return ONLY one JSON object');
+      expect(plan.effectivePrompt).toContain('Do not run tools, modify files, stage, or commit.');
       if (plan.invocation?.kind === 'cli') {
         const args = plan.invocation.spec.args;
-        expect(args[args.indexOf('--tools') + 1]).toBe('');
+        if (cliAdapterRegistry.get(name).supportsDisableTools) {
+          expect(args[args.indexOf('--tools') + 1]).toBe('');
+          expect(plan.effectivePrompt).toContain('NO tools are wired into this run');
+        } else {
+          expect(args).not.toContain('--tools');
+          expect(plan.effectivePrompt).not.toContain('NO tools are wired into this run');
+        }
       }
     },
   );
 
-  it('falls back from an incapable preferred provider to one that can disable tools', () => {
+  it.each(cliAdapterRegistry.names())('dispatches a sole %s provider with disableTools', (name) => {
     const plan = resolveDispatch({
-      providers: [
-        makeProvider({ id: 'gemini', name: 'gemini' }),
-        makeProvider({ id: 'claude', name: 'claude-code' }),
-      ],
-      preferredProviderId: 'gemini',
+      providers: [{ ...makeProvider({ id: 'only', name }), model: 'test-model' }],
       input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
-      invokeOpts: { disableTools: true, requireDisabledTools: true },
+      invokeOpts: { disableTools: true },
       toolProfile: 'none',
     });
-    expect(plan.providerId).toBe('claude');
-  });
-
-  it('refuses a hard requirement when disabling tools was not requested', () => {
-    const plan = resolveDispatch({
-      providers: [makeProvider({ id: 'claude', name: 'claude-code' })],
-      input: { kind: 'prompt', prompt: 'describe the supplied changes', capabilities: [] },
-      invokeOpts: { requireDisabledTools: true },
-    });
-    expect(plan.mode).toBe('skip');
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe('only');
   });
 
   it('returns skip when there are no enabled providers', () => {

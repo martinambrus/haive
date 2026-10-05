@@ -23,11 +23,13 @@ remain visible. Binary files and oversized content carry metadata only; truncati
 The snapshot is against HEAD, because this message describes the pending commit rather than
 the whole task's changes already committed by DAG execution or prior fix rounds.
 
-The invocation uses no tools or MCP servers and asks for a JSON `commitMessage` containing a
-subject and optional body. `requireDisabledTools` excludes adapters that ignore `disableTools`;
-if no eligible provider exists, the gate offers manual message entry. The requirement uses
-the adapter's declared `supportsDisableTools` capability and leaves other steps' best-effort
-`disableTools` behavior unchanged. Git remains host-side. Change evidence is fenced at prompt-build
+The invocation asks for a JSON `commitMessage` containing a subject and optional body and
+instructs the agent to answer from the supplied changes without using tools. `disableTools`
+is a best-effort optimization: adapters that support it disable built-in tools; the others
+keep them available and remain eligible. The gate never switches away from the selected CLI
+because it cannot disable tools. `toolProfile:'none'` still wires no MCP servers, including
+on Muse where disabled built-in tools and deferred MCP tools can cause a provider error.
+Git remains host-side. Change evidence is fenced at prompt-build
 time. The selected provider's operator rules remain injected, including commit conventions;
 the step's explicit JSON contract takes precedence where necessary. Evidence fencing covers
 older persisted detect payloads that only have the diff summary. Repository

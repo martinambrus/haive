@@ -263,7 +263,6 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     preForm: true,
     optional: true,
     disableTools: true,
-    requireDisabledTools: true,
     toolProfile: 'none',
     skipIf: ({ detected }) => {
       const d = detected as CommitGateDetect;

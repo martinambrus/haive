@@ -20,13 +20,15 @@ Two traps in that data. `result.modelUsage` keys are recorded as `billed` and ar
 
 The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first, and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI.
 
-`requireDisabledTools` makes `disableTools` a hard dispatch requirement for prompt invocations.
-The adapter must declare `supportsDisableTools` and the invocation must request `disableTools:true`;
-otherwise it is excluded before any invocation is built. Gate 3 uses this with `toolProfile:'none'`
-so diff text cannot authorize tool calls. The Claude-family adapters and grok honor the flag;
-codex, gemini, amp and antigravity do not, so the dispatcher tries another provider. With none
-eligible, an optional LLM phase degrades to manual/default output; a required phase still fails.
-An invocation that sets only `disableTools` retains its prior best-effort behavior.
+`disableTools` is a best-effort optimization, never a provider eligibility requirement.
+The Claude-family adapters and grok honor the flag; codex, gemini, amp and antigravity keep
+their built-in tools available. The selected provider remains selected in either case.
+`supportsDisableTools` still tells the dispatcher whether its prompt may truthfully state
+that no built-in tools are available. Gate 3 and environment detection pair the preference
+with `toolProfile:'none'`, which wires no MCP servers for every CLI. This preserves Muse's
+deferred-tool compatibility fix without excluding CLIs that cannot disable built-in tools.
+The former `requireDisabledTools` gate was removed after it routed a Codex task to a
+quota-exhausted Claude provider and left the commit-message form empty.
 
 Persona assignment is also recorded at DISPATCH in `cli_invocations.assigned_agent_ids`
 (migration 0173), before a queued run starts or completion writes `tool_usage`. The terminal

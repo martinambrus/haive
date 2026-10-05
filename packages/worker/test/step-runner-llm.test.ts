@@ -7,6 +7,7 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
+import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -226,72 +227,75 @@ function makeProvider(): CliProviderRecord {
 }
 
 describe('advanceStep LLM phase', () => {
-  it('generates gate-3 copy before parking the commit form, and reuses it on submission', async () => {
-    const state = freshState();
-    state.taskStepRow.stepId = gate3CommitStep.metadata.id;
-    state.taskStepRow.detectOutput = {
-      hasGit: true,
-      workspacePath: '/tmp',
-      dirtyFiles: 1,
-      diffSummary: 'src/session.ts | 2 +-',
-      diffArtifactPath: null,
-      changedFileCount: 1,
-      diffArtifactTruncated: false,
-      commitMessageContext: 'session lookup now handles a missing user',
-    };
-    const db = makeMockDb(state);
-    const enqueueCliInvocation = vi.fn();
-    const apply = vi.fn(gate3CommitStep.apply);
-    const stepDef = { ...gate3CommitStep, apply };
-    const params = {
-      db,
-      taskId: 'task-1',
-      userId: 'user-1',
-      repoPath: '/tmp',
-      workspacePath: '/tmp',
-      cliProviderId: 'prov-1',
-      stepDef,
-      providers: [makeProvider()],
-      deps: { enqueueCliInvocation },
-    };
-    expect((await advanceStep(params)).status).toBe('waiting_cli');
-    expect(state.taskStepRow.formSchema).toBeNull();
-    expect(apply).not.toHaveBeenCalled();
-    expect(enqueueCliInvocation).toHaveBeenCalledTimes(1);
-    expect(enqueueCliInvocation.mock.calls[0]![0].toolProfile).toBe('none');
-    expect(state.cliInvocationRow!.prompt).toContain('session lookup now handles a missing user');
+  it.each(cliAdapterRegistry.names())(
+    'generates gate-3 copy with %s before parking the form, and reuses it on submission',
+    async (name) => {
+      const state = freshState();
+      state.taskStepRow.stepId = gate3CommitStep.metadata.id;
+      state.taskStepRow.detectOutput = {
+        hasGit: true,
+        workspacePath: '/tmp',
+        dirtyFiles: 1,
+        diffSummary: 'src/session.ts | 2 +-',
+        diffArtifactPath: null,
+        changedFileCount: 1,
+        diffArtifactTruncated: false,
+        commitMessageContext: 'session lookup now handles a missing user',
+      };
+      const db = makeMockDb(state);
+      const enqueueCliInvocation = vi.fn();
+      const apply = vi.fn(gate3CommitStep.apply);
+      const stepDef = { ...gate3CommitStep, apply };
+      const params = {
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef,
+        providers: [
+          { ...makeProvider(), id: 'alternative' },
+          { ...makeProvider(), name, model: 'test-model' },
+        ],
+        deps: { enqueueCliInvocation },
+      };
+      expect((await advanceStep(params)).status).toBe('waiting_cli');
+      expect(state.taskStepRow.formSchema).toBeNull();
+      expect(apply).not.toHaveBeenCalled();
+      expect(enqueueCliInvocation).toHaveBeenCalledTimes(1);
+      expect(enqueueCliInvocation.mock.calls[0]![0].toolProfile).toBe('none');
+      expect(state.cliInvocationRow!.cliProviderId).toBe('prov-1');
+      expect(state.cliInvocationRow!.prompt).toContain('session lookup now handles a missing user');
 
-    const generated = 'fix: handle missing session users';
-    state.cliInvocationRow = {
-      ...state.cliInvocationRow,
-      exitCode: 0,
-      endedAt: new Date(),
-      rawOutput: JSON.stringify({ commitMessage: generated }),
-      parsedOutput: null,
-    };
-    expect((await advanceStep(params)).status).toBe('waiting_form');
-    const form = state.taskStepRow.formSchema as { fields: { id: string; default?: unknown }[] };
-    expect(form.fields.find((f) => f.id === 'commitMessage')!.default).toBe(generated);
-    expect(apply).not.toHaveBeenCalled();
-    expect(
-      (await advanceStep({ ...params, formValues: { commit: false, commitMessage: generated } }))
-        .status,
-    ).toBe('done');
-    expect(apply).toHaveBeenCalledTimes(1);
-    // Finishing can enqueue a separate step recap; the gate's own invocation is reused.
-    expect(
-      enqueueCliInvocation.mock.calls.filter(([job]) => job.taskStepId === 'ts-1'),
-    ).toHaveLength(1);
-  });
+      const generated = 'fix: handle missing session users';
+      state.cliInvocationRow = {
+        ...state.cliInvocationRow,
+        exitCode: 0,
+        endedAt: new Date(),
+        rawOutput: JSON.stringify({ commitMessage: generated }),
+        parsedOutput: null,
+      };
+      expect((await advanceStep(params)).status).toBe('waiting_form');
+      const form = state.taskStepRow.formSchema as { fields: { id: string; default?: unknown }[] };
+      expect(form.fields.find((f) => f.id === 'commitMessage')!.default).toBe(generated);
+      expect(apply).not.toHaveBeenCalled();
+      expect(
+        (await advanceStep({ ...params, formValues: { commit: false, commitMessage: generated } }))
+          .status,
+      ).toBe('done');
+      expect(apply).toHaveBeenCalledTimes(1);
+      // Finishing can enqueue a separate step recap; the gate's own invocation is reused.
+      expect(
+        enqueueCliInvocation.mock.calls.filter(([job]) => job.taskStepId === 'ts-1'),
+      ).toHaveLength(1);
+    },
+  );
 
   it.each([
     { name: 'no dependencies', providers: undefined },
     { name: 'an empty provider list', providers: [] },
     { name: 'only disabled providers', providers: [{ ...makeProvider(), enabled: false }] },
-    ...(['codex', 'gemini', 'amp', 'antigravity'] as const).map((name) => ({
-      name: `only ${name} (cannot disable built-in tools)`,
-      providers: [{ ...makeProvider(), name }],
-    })),
   ])('offers gate-3 manual message entry with $name', async ({ providers }) => {
     const state = freshState();
     state.taskStepRow.stepId = gate3CommitStep.metadata.id;

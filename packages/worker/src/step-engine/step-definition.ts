@@ -69,16 +69,13 @@ export interface LlmInvocationSpec {
   /** Sandbox timeout for the CLI invocation in milliseconds.
    *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
   timeoutMs?: number;
-  /** Claude-family only: run this LLM phase with NO built-in tools (`--tools ""`)
+  /** Best-effort preference: run this LLM phase with NO built-in tools
    *  so the model answers from the prompt alone instead of browsing the repo. For
    *  enrichment/classification steps (e.g. 01-env-detect) whose full input is
    *  already embedded in the prompt — a high-effort model otherwise crawls the
-   *  workspace and blows the timeout. codex/gemini ignore it. */
+   *  workspace and blows the timeout. Unsupported adapters keep their tools;
+   *  the selected provider is never excluded for lacking this optimization. */
   disableTools?: boolean;
-  /** Hard requirement that the selected adapter honors disableTools. Pair with
-   *  disableTools:true; otherwise dispatch is unavailable. Optional LLMs degrade
-   *  to manual/default output when only tool-capable adapters are configured. */
-  requireDisabledTools?: true;
   /** Narrow the MCP surface this invocation is given. Unset = the full surface
    *  (rag, plus chrome-devtools when the repo does browser testing, ddev-control
    *  on a DDEV task, and the user's own servers from `.claude/mcp_settings.json`).
