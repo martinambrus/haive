@@ -82,3 +82,26 @@ and a stuck `building` — which nothing else anywhere resets — DISABLES the R
 that is the only way out of it. Resetting `building` is safe there and only there, because
 `runDataMigrations` runs before any queue starts and compose pins the worker to one
 instance.
+
+**Repository editors open the checkout directly.** The Repositories Actions menu links to
+`/repos/<id>/editor` for ready, writable repositories, alongside Terminal. The page uses the
+same `EditorTab` and code-server launcher as a task, but `POST /repos/:id/ensure-ide` sends a
+repository payload to the worker and `/ide/repos/:id/` proxies its HTTP and WebSocket traffic.
+Both transports require repository ownership; the worker checks ownership, readiness and writable
+storage again before mounting exactly `<userId>/<repositoryId>` from the repos volume at
+`/workspace`. A repository editor never resolves a task's worktree and never creates a task.
+Read-only host imports remain unavailable; writable local imports copied into the volume work.
+
+The shared `EditorTab` has a Maximize/Minimize control for both task and repository editors.
+It requests browser fullscreen, with a viewport overlay when fullscreen is unavailable, and
+keeps the same iframe mounted while resizing so the live session and unsaved buffers survive.
+
+`repoIdeSessionId` gives repository editors a separate `repo-<uuid>` session namespace. Their
+containers and user-data volumes use the full repository id, separate from task editor state;
+extensions and global settings are still shared per user. The existing IDE refcount and 30-minute
+idle reaper keep a connected editor alive and preserve unsaved buffers across reopening. Repository
+deletion waits out a boot in progress, stops its editor, and removes its user-data volume and Redis
+session through the worker's repository resource cleanup job. Repository editors keep the same
+read-only git-data boundary as task editors (`repoGitDataBoundary`), since code-server extensions
+and workspace tasks execute repository code; the repository Terminal remains the surface for git
+commits and pushes.

@@ -7,12 +7,14 @@ import {
   QUEUE_NAMES,
   configService,
   logger,
+  ideSessionKey,
+  repoIdeSessionId,
   type IdeEnsurePayload,
   type IdeEnsureResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getBullRedis } from '../redis.js';
-import { ensureIdeRunnerStarted } from '../sandbox/ide-runner.js';
+import { getBullRedis, getRedis } from '../redis.js';
+import { ensureIdeRunnerStarted, ensureRepoIdeRunnerStarted } from '../sandbox/ide-runner.js';
 import { resolveIdeSettingsJson } from '../sandbox/ide-settings.js';
 
 // The worker side of the Editor-tab "ensure IDE" handshake. The api enqueues a job
@@ -55,7 +57,8 @@ export function startIdeEnsureWorker(): Worker<IdeEnsurePayload, IdeEnsureResult
       if (job.name !== IDE_ENSURE_JOB_NAMES.ENSURE) {
         throw new Error(`Unknown ide-ensure job: ${job.name}`);
       }
-      return ensureIdeForTask(job.data.taskId, job.data.userId);
+      if (job.data.repositoryId) return ensureIdeForRepo(job.data.repositoryId, job.data.userId);
+      return ensureIdeForTask(job.data.taskId!, job.data.userId);
     },
     { connection: getBullRedis(), concurrency: 3 },
   );
@@ -63,4 +66,24 @@ export function startIdeEnsureWorker(): Worker<IdeEnsurePayload, IdeEnsureResult
     log.warn({ jobId: job?.id, taskId: job?.data?.taskId, err }, 'ide-ensure job failed');
   });
   return worker;
+}
+
+export async function ensureIdeForRepo(
+  repositoryId: string,
+  userId: string,
+): Promise<IdeEnsureResult> {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
+  if (!enabled) return { ok: false, reason: 'disabled' };
+  const db = getDb();
+  const settingsJson = await resolveIdeSettingsJson(db, userId);
+  const handle = await ensureRepoIdeRunnerStarted(db, repositoryId, userId, settingsJson);
+  if (!handle) return { ok: false, reason: 'no-editable-repo' };
+  // A cold boot may finish after the page closes, before any editor WebSocket opens.
+  // Register it now so the idle reaper can still reclaim the container in that case.
+  await getRedis().hset(
+    ideSessionKey(repoIdeSessionId(repositoryId)),
+    'lastSeenAt',
+    String(Date.now()),
+  );
+  return { ok: true };
 }

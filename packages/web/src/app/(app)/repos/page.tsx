@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   CirclePlus,
+  Code2,
   Download,
   FolderMinus,
   Gauge,
@@ -482,6 +483,13 @@ function RepoCard(props: RepoCardProps) {
                 label: 'Terminal',
                 icon: Terminal,
                 href: `/repos/${repo.id}/terminal`,
+              },
+            repo.status === 'ready' &&
+              !isReadOnlyLocalRepo(repo) && {
+                key: 'editor',
+                label: 'Editor',
+                icon: Code2,
+                href: `/repos/${repo.id}/editor`,
               },
             repo.status === 'ready' && {
               key: 'plan',

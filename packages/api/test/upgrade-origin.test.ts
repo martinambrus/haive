@@ -76,7 +76,10 @@ function handshake(
 }
 
 describe('a WebSocket handshake', () => {
-  for (const h of HANDLERS) {
+  for (const h of [
+    ...HANDLERS,
+    { file: 'repository editor', install: installIdeWebSocket, path: `/ide/repos/${ID}/` },
+  ]) {
     it(`from another page is refused before auth (${h.file})`, async () => {
       const port = await listen(h.install);
       expect(await handshake(port, h.path, 'http://localhost:5173')).toBe('HTTP/1.1 403 Forbidden');
