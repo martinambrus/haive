@@ -271,6 +271,21 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     await expect(access(path.join(root, databaseSnapshotRel(newer)))).resolves.toBeUndefined();
   });
 
+  it('does not reverse a committed discard or save when a delayed duplicate arrives', async () => {
+    const a = await task('discard first');
+    const rejected = await candidate(a);
+    expect(await discardDatabaseSnapshot(a, 0)).toBe('discarded');
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('discarded');
+    expect((await head())!.snapshotId).toBeNull();
+    await expect(access(path.join(root, databaseSnapshotRel(rejected)))).rejects.toThrow();
+    const b = await task('save first');
+    const saved = await candidate(b);
+    expect(await promoteDatabaseSnapshot(b, 0)).toBe('saved');
+    expect(await discardDatabaseSnapshot(b, 0)).toBe('saved');
+    expect((await head())!.snapshotId).toBe(saved.id);
+    expect((await loadDatabaseSnapshotState(b))!.state.outcome).toBe('saved');
+  });
+
   it('refreshes an overwrite decision if a third task saves while the warning is open', async () => {
     const a = await task('A');
     const b = await task('B');

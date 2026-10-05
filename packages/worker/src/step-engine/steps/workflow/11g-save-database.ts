@@ -123,8 +123,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
       if (!d) return { outcome: 'skipped' };
       if (d.state.outcome !== 'pending') return { outcome: d.state.outcome };
       if (args.formValues.action === 'discard') {
-        await discardDatabaseSnapshot(ctx, d.epoch);
-        return { outcome: 'discarded' };
+        return { outcome: await discardDatabaseSnapshot(ctx, d.epoch) };
       }
       let candidate = d.candidate?.status === 'ready' ? d.candidate : null;
       if (!candidate) {
@@ -222,12 +221,13 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
       const approved = /^replace:\d+$/.test(action)
         ? Number(action.slice('replace:'.length))
         : undefined;
-      if ((await promoteDatabaseSnapshot(ctx, d.epoch, approved)) === 'conflict') {
+      const outcome = await promoteDatabaseSnapshot(ctx, d.epoch, approved);
+      if (outcome === 'conflict') {
         throw new ReopenStepFormError(
           'Another task changed the current database; review the latest snapshot',
         );
       }
       await sweepDatabaseSnapshots(ctx.db);
-      return { outcome: 'saved', snapshotId: candidate.id };
+      return { outcome, ...(outcome === 'saved' ? { snapshotId: candidate.id } : {}) };
     },
   };

@@ -157,12 +157,13 @@ export async function promoteDatabaseSnapshot(
   ctx: StepContext,
   epoch: number,
   approvedRevision?: number,
-): Promise<'saved' | 'conflict'> {
+): Promise<'saved' | 'conflict' | 'discarded'> {
   return withSnapshotStep(ctx, epoch, async (tx) => {
     const state = await tx.query.taskDatabaseStates.findFirst({
       where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
     });
     if (state?.outcome === 'saved') return 'saved';
+    if (state?.outcome === 'discarded') return 'discarded';
     const candidate = state?.candidateSnapshotId
       ? await tx.query.databaseSnapshots.findFirst({
           where: eq(schema.databaseSnapshots.id, state.candidateSnapshotId),
@@ -193,13 +194,20 @@ export async function promoteDatabaseSnapshot(
 }
 
 export async function discardDatabaseSnapshot(ctx: StepContext, epoch: number) {
-  await withSnapshotStep(ctx, epoch, async (tx) => {
+  const outcome = await withSnapshotStep(ctx, epoch, async (tx) => {
+    const state = await tx.query.taskDatabaseStates.findFirst({
+      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+    });
+    if (!state) throw new StepSupersededError(ctx.taskStepId);
+    if (state.outcome !== 'pending') return state.outcome;
     await tx
       .update(schema.taskDatabaseStates)
       .set({ outcome: 'discarded', exportError: null, decisionEpoch: epoch })
       .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
+    return 'discarded';
   });
   await sweepDatabaseSnapshots(ctx.db);
+  return outcome;
 }
 
 /** References are pins only while the owning task can use them. A skipped save releases its candidate. */
