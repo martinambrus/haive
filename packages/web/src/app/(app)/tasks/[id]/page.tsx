@@ -35,6 +35,7 @@ import {
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ActionMenu } from '@/components/action-menu';
+import { TaskHistoryBell, TaskHistoryPanel, useTaskHistory } from '@/components/task-history';
 import {
   ArrowLeft,
   Ban,
@@ -607,6 +608,8 @@ export default function TaskDetailPage() {
   const [planNodeCount, setPlanNodeCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
+  const history = useTaskHistory(id, steps);
+  const [historyStepToFocus, setHistoryStepToFocus] = useState<string | null>(null);
   const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1037,6 +1040,19 @@ export default function TaskDetailPage() {
       scrollTimersRef.current.push(setTimeout(scrollToBottom, delay)),
     );
   }, [task?.status, tab]);
+
+  // An explicit history selection wins over the automatic scroll scheduled
+  // when the Steps tab remounts, including a completed task's bottom scroll.
+  useEffect(() => {
+    if (!historyStepToFocus || tab !== 'steps') return;
+    scrollTimersRef.current.forEach(clearTimeout);
+    scrollTimersRef.current = [];
+    const target = stepsContainerRef.current?.querySelector<HTMLElement>(
+      `[data-step-id="${historyStepToFocus}"]`,
+    );
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setHistoryStepToFocus(null);
+  }, [historyStepToFocus, tab]);
 
   useEffect(() => {
     api
@@ -1506,6 +1522,14 @@ export default function TaskDetailPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <TaskHistoryPanel
+        history={history}
+        roundLabels={roundLabels.byRound}
+        onSelectStep={(stepId) => {
+          setTab('steps');
+          setHistoryStepToFocus(stepId);
+        }}
+      />
       {titleStripVisible && (
         // data-fixed-title-strip: StaleBuildBanner parks itself directly under this strip and
         // MEASURES it rather than carrying a copy of its height — the height is padding plus a
@@ -1514,7 +1538,7 @@ export default function TaskDetailPage() {
         // beside it takes anything from 56 to 484px of the screen.
         <div
           data-fixed-title-strip
-          className="@container fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur md:px-8"
+          className="@container fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-2 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur @sm:gap-3 md:px-8"
         >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}
@@ -1548,7 +1572,7 @@ export default function TaskDetailPage() {
               finally puts air on both sides of the meters. Full string stays on hover and in
               the page header one scroll up. */}
           <p
-            className="min-w-0 max-w-[20rem] truncate text-sm font-semibold text-indigo-300"
+            className="min-w-20 max-w-[20rem] truncate text-sm font-semibold text-indigo-300 @sm:min-w-0"
             title={task.title}
           >
             {task.title}
@@ -1599,6 +1623,7 @@ export default function TaskDetailPage() {
             className="ml-auto @max-7xl:hidden"
           />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
+          <TaskHistoryBell history={history} compact />
         </div>
       )}
       {/* ONE column, not a title column beside an actions column. The actions used to be
@@ -1822,6 +1847,7 @@ export default function TaskDetailPage() {
                 },
               ]}
             />
+            {!titleStripVisible && <TaskHistoryBell history={history} />}
           </div>
         </div>
         {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
@@ -1966,7 +1992,7 @@ export default function TaskDetailPage() {
             // still has something worth re-running.
             const isPastStep = frontierKey != null && isBeforeFrontier(step, frontierKey);
             return (
-              <div key={step.id} data-step-id={step.id}>
+              <div key={step.id} data-step-id={step.id} className="scroll-mt-16">
                 {loopHeader && (
                   <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
                     <span className="h-px flex-1 bg-amber-400/20" />
