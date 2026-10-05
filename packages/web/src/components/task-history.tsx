@@ -116,7 +116,13 @@ export function useTaskHistory(taskId: string, steps: TaskStep[]) {
   };
 }
 
-export function TaskHistoryBell({ history }: { history: ReturnType<typeof useTaskHistory> }) {
+export function TaskHistoryBell({
+  history,
+  compact = false,
+}: {
+  history: ReturnType<typeof useTaskHistory>;
+  compact?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -127,7 +133,7 @@ export function TaskHistoryBell({ history }: { history: ReturnType<typeof useTas
       title="Implementation history"
       data-task-history-bell
       onClick={() => history.setOpen(!history.open)}
-      className="relative flex h-8 w-9 shrink-0 items-center justify-center rounded-md border border-neutral-700 bg-neutral-900 text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+      className={`relative flex ${compact ? 'h-7 w-7' : 'h-8 w-9'} shrink-0 items-center justify-center rounded-md border border-neutral-700 bg-neutral-900 text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400`}
     >
       <History className="h-4 w-4" aria-hidden="true" />
     </button>

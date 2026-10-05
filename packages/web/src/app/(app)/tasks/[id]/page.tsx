@@ -1538,7 +1538,7 @@ export default function TaskDetailPage() {
         // beside it takes anything from 56 to 484px of the screen.
         <div
           data-fixed-title-strip
-          className="@container fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur md:px-8"
+          className="@container fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-2 border-b border-neutral-800 bg-neutral-950/90 px-4 py-2 backdrop-blur @sm:gap-3 md:px-8"
         >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}
@@ -1623,7 +1623,7 @@ export default function TaskDetailPage() {
             className="ml-auto @max-7xl:hidden"
           />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
-          <TaskHistoryBell history={history} />
+          <TaskHistoryBell history={history} compact />
         </div>
       )}
       {/* ONE column, not a title column beside an actions column. The actions used to be

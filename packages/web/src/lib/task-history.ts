@@ -153,17 +153,36 @@ function outcome(
     return { message: 'This step finished with a warning.', tone: 'warning' };
   if (output.source === 'stub')
     return { message: 'No usable agent result was recorded.', tone: 'warning' };
+  // Browser pass-through flags are not verdicts: manual mode prepares a
+  // checklist, and an MCP pass without evidence explicitly remains incomplete.
+  if (step.stepId === '08a-browser-verify') {
+    if (output.verificationIncomplete === true) {
+      return { message: 'Browser verification lacks test evidence.', tone: 'warning' };
+    }
+    if (output.method === 'manual' && output.ran === true && output.skipped === false) {
+      return { message: 'A manual browser checklist was prepared.', tone: 'neutral' };
+    }
+  }
+  const narrowed = list(output.excludedDimensions).length > 0;
   const fixes = list(output.fixesApplied).map(text).filter(Boolean).length;
   if (fixes)
     return {
-      message: `Validation applied ${fixes} ${fixes === 1 ? 'fix' : 'fixes'}.`,
-      tone: 'success',
+      message: `Validation applied ${fixes} ${fixes === 1 ? 'fix' : 'fixes'}${narrowed ? '; some dimensions were excluded' : ''}.`,
+      tone: narrowed ? 'warning' : 'success',
     };
-  if (output.verdict === 'VALID')
-    return { message: 'No issues found; nothing to fix.', tone: 'success' };
+  if (output.verdict === 'VALID') {
+    return {
+      message: narrowed
+        ? 'Selected dimensions passed; some dimensions were excluded.'
+        : 'No issues found; nothing to fix.',
+      tone: narrowed ? 'warning' : 'success',
+    };
+  }
   if (output.verdict === 'ISSUES_FOUND')
     return { message: 'Validation found issues.', tone: 'warning' };
-  if (output.audited === true) return { message: 'The audit found no issues.', tone: 'success' };
+  // The audit producer also records audited:true for unparseable reports.
+  if (output.audited === true)
+    return { message: 'The audit recorded no findings.', tone: 'neutral' };
   if (output.reviewed === true) {
     const verdicts = [row(output.peer), row(output.security), ...list(output.extraLenses).map(row)];
     if (verdicts.every((v) => ['APPROVE', 'SECURE'].includes(text(v.verdict)))) {
@@ -205,9 +224,13 @@ function outcome(
     step.stepId === '08a-browser-verify' &&
     output.ran === true &&
     output.skipped === false &&
-    output.passed === true
+    output.passed === true &&
+    ['mcp', 'interactive', 'headless'].includes(text(output.method))
   ) {
     return { message: 'Browser verification passed.', tone: 'success' };
+  }
+  if (step.stepId === '08a-browser-verify' && output.ran === true && output.skipped === false) {
+    return { message: 'No confirmed browser verdict was recorded.', tone: 'warning' };
   }
   if (step.stepId === '08d-adversarial-qa' && output.ran === true) {
     return {

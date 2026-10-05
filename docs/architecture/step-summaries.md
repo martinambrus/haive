@@ -17,8 +17,12 @@ to last by `endedAt`, with dates and the task page's existing round labels. Sele
 the full step, including from another tab, and takes precedence over automatic follow-scroll.
 
 Incomplete/truncated reviews, advisory findings, refutations and checks that did not run
-must never turn into a blanket clean-review claim. A `done` row's `errorMessage` alone is
-not a failure: only the failed status or a current `fix_loop.requested` event proves that
+must never turn into a blanket clean-review claim. Validation discloses
+`excludedDimensions` even with a `VALID` verdict or applied fixes. An empty audit records no findings, without claiming the audit
+was clean: its producer also writes `audited: true` for an unparseable report. Manual
+browser checklists are neutral, and `verificationIncomplete` prevents a browser pass
+claim even when fixes were applied. Confirmed browser passes require a known test method.
+A `done` row's `errorMessage` alone is not a failure: only the failed status or a current `fix_loop.requested` event proves that
 outcome. While open, the panel polls only those sparse events via the existing authenticated
 events endpoint; an event older than the row's latest completion belongs to a replaced
 attempt and is ignored. The panel follows the same lifetime as step cards: separate fix

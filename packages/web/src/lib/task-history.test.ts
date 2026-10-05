@@ -231,6 +231,61 @@ describe('implementation overview', () => {
     ).toBe('Validation found 1 high-severity finding.');
     expect(entry({ output: { verdict: 'UNPARSEABLE' } }).tone).toBe('warning');
   });
+  it('discloses excluded dimensions on valid results, including results that applied fixes', () => {
+    const output = { verdict: 'VALID', excludedDimensions: ['security'] };
+    expect(entry({ stepId: '07b-phase-4-validate', output })).toMatchObject({
+      tone: 'warning',
+      message: 'Selected dimensions passed; some dimensions were excluded.',
+    });
+    expect(entry({ output: { ...output, fixesApplied: ['One fix.'] } })).toMatchObject({
+      tone: 'warning',
+      message: 'Validation applied 1 fix; some dimensions were excluded.',
+    });
+    expect(entry({ output: { verdict: 'VALID', excludedDimensions: [] } }).tone).toBe('success');
+  });
+  it('does not treat an empty audit as proof that a usable report was clean', () => {
+    expect(
+      entry({ stepId: '08c2-code-audit', output: { audited: true, findings: [] } }),
+    ).toMatchObject({
+      tone: 'neutral',
+      message: 'The audit recorded no findings.',
+    });
+  });
+  it('qualifies manual, incomplete and unknown browser results before claiming a pass', () => {
+    const output = { ran: true, skipped: false, passed: true };
+    expect(
+      entry({ stepId: '08a-browser-verify', output: { ...output, method: 'manual' } }),
+    ).toMatchObject({
+      tone: 'neutral',
+      message: 'A manual browser checklist was prepared.',
+    });
+    for (const fixesApplied of [[], ['A repair.']]) {
+      expect(
+        entry({
+          stepId: '08a-browser-verify',
+          output: { ...output, method: 'mcp', verificationIncomplete: true, fixesApplied },
+        }),
+      ).toMatchObject({
+        tone: 'warning',
+        message: 'Browser verification lacks test evidence.',
+      });
+    }
+    expect(entry({ stepId: '08a-browser-verify', output })).toMatchObject({
+      tone: 'warning',
+      message: 'No confirmed browser verdict was recorded.',
+    });
+    for (const method of ['mcp', 'interactive', 'headless']) {
+      expect(
+        entry({
+          stepId: '08a-browser-verify',
+          output: { ...output, method, verificationIncomplete: false },
+        }),
+      ).toMatchObject({
+        tone: 'success',
+        message: 'Browser verification passed.',
+      });
+    }
+  });
   it('includes only the implementation-to-gate-2 segment, across all rounds', () => {
     const history = buildTaskHistory([
       step({ id: 'early-error', stepId: '01c-ddev-env', status: 'failed' }),
@@ -292,8 +347,10 @@ describe('implementation overview', () => {
         .message,
     ).toBe('The agent simplified 1 file.');
     expect(
-      entry({ stepId: '08a-browser-verify', output: { ran: true, skipped: false, passed: true } })
-        .message,
+      entry({
+        stepId: '08a-browser-verify',
+        output: { ran: true, skipped: false, passed: true, method: 'headless' },
+      }).message,
     ).toBe('Browser verification passed.');
   });
   it('keeps adversarial QA findings and incomplete coverage distinct from a clean result', () => {
