@@ -1,5 +1,39 @@
 # Step summaries
 
+The task header's history clock and the fixed header's history clock open the same **Implementation history** panel
+(`web/src/components/task-history.tsx`). It is a compact view of existing finished step rows,
+not another summary invocation. `web/src/lib/task-history.ts` generates brief outcome
+headlines from finding counts/severity, fix counts, and explicit review/check verdicts.
+It never clips or reprints the agent's detailed recap or diagnosis; the linked step holds
+those details. Reviewer counts describe findings, not unique defects. Bodies render through
+`InlineMarkdown`. Only workflow steps from `07-phase-2-implement` through
+`09-gate-2-verify-approval` are eligible, in every round; the explicit ID set excludes
+planning, setup, commits, learning and unrelated workflow families. An agent step with no
+actionable result is omitted rather than represented by a generic completion line.
+A successful deterministic step is omitted: an agent entry needs both
+`usesCli` and a positive `cliInvocationCount`. Deterministic failures, failing checks and
+fix requests remain visible. Skipped and unfinished rows are omitted; entries sort first
+to last by `endedAt`, with dates and the task page's existing round labels. Selecting a title opens
+the full step, including from another tab, and takes precedence over automatic follow-scroll.
+
+Incomplete/truncated reviews, advisory findings, refutations and checks that did not run
+must never turn into a blanket clean-review claim. A `done` row's `errorMessage` alone is
+not a failure: only the failed status or a current `fix_loop.requested` event proves that
+outcome. While open, the panel polls only those sparse events via the existing authenticated
+events endpoint; an event older than the row's latest completion belongs to a replaced
+attempt and is ignored. The panel follows the same lifetime as step cards: separate fix
+rounds remain separate, but a manual retry replaces that step row's previous result. The
+previous-visit boundary is local to the browser and task: closing stores the last completion
+present in the panel. Reopening snapshots a single horizontal divider after that entry
+when newer entries exist. There is no divider on the first visit or when there are no new
+entries, and live updates never introduce or move it during the current visit. There are
+no read/unread indicators or controls. The panel remembers its scroll position per task when closed
+and reopened, restoring it before paint. A reader at the end stays there as later entries
+arrive; a reader browsing earlier entries keeps their position. Closing also captures the
+position synchronously, since Escape can arrive before the browser's queued scroll event.
+No worker changes,
+migrations, extra LLM calls or historical backfills are needed.
+
 The "What the agent did" panel (`task_steps.summary`) has two producers, and the cheap one wins. `resolveCuratedSummary` (`_step-summary.ts`) lifts `findingsSummary`/`summary`/`notes` straight off the apply output for the steps that emit one — no LLM, and it mirrors its own task-ledger entry. Only when the output carries none of those keys does `maybeEnqueueStepSummary` (`step-runner.ts`) spend a CLI call, and that pass is best-effort throughout: a missing provider, a `skip` dispatch, an empty agent text or a failure all leave `summary` null and never touch the step machine.
 
 **Which CLI writes it is a per-task choice, not the step's.** `tasks.summary_cli_provider_id` (NULL = inherit the step's chain: per-step pref, then `tasks.cli_provider_id`) and `tasks.summary_llm_enabled` (false = skip the pass entirely) are set on the New Task form. The chosen provider is honored only while it is still `enabled`, and that check is load-bearing rather than defensive: handing a disabled id to the dispatcher does NOT fail, because `resolveDispatch` filters to enabled providers and merely ORDERS the preferred one first — an id matching nothing leaves the recap on whichever provider comes first. Falling back to the step's own chain is the predictable answer. MEASURED before the setting existed: claude-code spent 33,945 tokens (24,064 of them cache reads) and 22s writing three sentences.
