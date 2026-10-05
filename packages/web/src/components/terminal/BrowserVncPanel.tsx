@@ -6,6 +6,8 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { useFloatWindow } from '@/lib/use-float-window';
 import { useSplitPane } from '@/lib/use-split-pane';
 import { suppressNovncCloseLog } from '@/lib/suppress-novnc-log';
+import { useKeyboardFullscreen } from '@/lib/use-keyboard-fullscreen';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { SplitTerminalPane } from './SplitTerminalPane';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
@@ -85,12 +87,17 @@ export function BrowserVncPanel({
   const split = useSplitPane(persistId ? `task-ui:${taskId}:vnc:${persistId}:split` : null);
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rfbRef = useRef<{
+    focus(options?: FocusOptions): void;
     disconnect(): void;
     clipboardPasteFrom(text: string): void;
     sendKey(keysym: number, code: string, down?: boolean): void;
   } | null>(null);
+  const keyboardFullscreen = useKeyboardFullscreen(panelRef, () => {
+    rfbRef.current?.focus({ preventScroll: true });
+  });
   // Auto-reconnect bookkeeping (see MAX_CONNECT_RETRIES): connectedRef tells a
   // dropped live session apart from a not-yet-ready runtime; the timer holds the
   // pending reconnect; connectRef lets the disconnect handler call the latest
@@ -112,6 +119,7 @@ export function BrowserVncPanel({
   const autoCollapseRef = useRef(autoCollapse);
 
   const disconnect = useCallback(() => {
+    keyboardFullscreen.exit();
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
@@ -125,7 +133,7 @@ export function BrowserVncPanel({
     }
     rfbRef.current = null;
     setState('idle');
-  }, []);
+  }, [keyboardFullscreen.exit]);
 
   const connect = useCallback(async () => {
     if (!containerRef.current || rfbRef.current) return;
@@ -144,6 +152,7 @@ export function BrowserVncPanel({
         connectedRef.current = true;
         retriesRef.current = 0;
         setState('connected');
+        if (document.fullscreenElement === panelRef.current) rfb.focus({ preventScroll: true });
       });
       rfb.addEventListener('disconnect', () => {
         rfbRef.current = null;
@@ -319,13 +328,6 @@ export function BrowserVncPanel({
     setMaximized((v) => !v);
     nudgeResize();
   }, []);
-  const enterFullscreen = useCallback(() => {
-    void containerRef.current
-      ?.requestFullscreen?.()
-      .then(nudgeResize)
-      .catch(() => {});
-  }, []);
-
   useEffect(() => {
     if (!maximized) return;
     const onKey = (e: KeyboardEvent) => {
@@ -339,7 +341,7 @@ export function BrowserVncPanel({
   // Split and pop-out persist independently, so a reload can restore both. Split takes
   // the whole viewport, so it wins: without this the root would be the split grid while
   // the placeholder bar and the float's resize grips still rendered around it.
-  const detached = float.detached && !splitOn;
+  const detached = float.detached && !splitOn && !keyboardFullscreen.fullscreen;
   const paneOnRight = split.side === 'right';
   // Grid areas for split mode. Placing the EXISTING children by area is the whole
   // trick: wrapping the VNC body in a row to sit it next to the prose column would
@@ -374,12 +376,13 @@ export function BrowserVncPanel({
         </button>
       </div>
       <div
+        ref={panelRef}
         className={
           splitOn
             ? 'fixed inset-0 z-50 grid gap-1 border border-neutral-800 bg-neutral-950 p-2'
             : detached
               ? 'fixed z-50 flex flex-col gap-1 overflow-hidden rounded-md border border-neutral-700 bg-neutral-950 p-2 shadow-2xl shadow-black/60'
-              : maximized
+              : maximized || keyboardFullscreen.fullscreen
                 ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
                 : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
         }
@@ -389,9 +392,11 @@ export function BrowserVncPanel({
                 gridTemplateColumns: paneOnRight
                   ? `1fr 6px ${(split.ratio * 100).toFixed(2)}%`
                   : `${(split.ratio * 100).toFixed(2)}% 6px 1fr`,
-                gridTemplateRows: 'auto auto minmax(0, 1fr)',
+                gridTemplateRows: 'auto auto minmax(0, 1fr) auto',
               }
-            : float.style
+            : keyboardFullscreen.fullscreen
+              ? undefined
+              : float.style
         }
       >
         {/* Doubles as the floating window's title bar: the drag handlers no-op while
@@ -438,12 +443,17 @@ export function BrowserVncPanel({
               <>
                 <button
                   type="button"
-                  onClick={enterFullscreen}
+                  onClick={
+                    keyboardFullscreen.fullscreen
+                      ? keyboardFullscreen.exit
+                      : keyboardFullscreen.enter
+                  }
+                  title="Capture browser shortcuts in fullscreen. Hold Esc or use Exit fullscreen to leave."
                   className="text-xs text-indigo-400 underline"
                 >
-                  Fullscreen
+                  {keyboardFullscreen.fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                 </button>
-                {!detached && !splitOn && (
+                {!keyboardFullscreen.fullscreen && !detached && !splitOn && (
                   <button
                     type="button"
                     onClick={toggleMaximize}
@@ -452,7 +462,7 @@ export function BrowserVncPanel({
                     {maximized ? 'Restore' : 'Maximize'}
                   </button>
                 )}
-                {!maximized && !splitOn && (
+                {!keyboardFullscreen.fullscreen && !maximized && !splitOn && (
                   <button
                     type="button"
                     onClick={detached ? float.dock : float.detach}
@@ -466,7 +476,7 @@ export function BrowserVncPanel({
                     {detached ? 'Dock' : 'Pop out'}
                   </button>
                 )}
-                {terminalStepRowId && (
+                {!keyboardFullscreen.fullscreen && terminalStepRowId && (
                   <button
                     type="button"
                     onClick={splitOn ? split.exit : enterSplit}
@@ -532,7 +542,7 @@ export function BrowserVncPanel({
         {expanded && (
           <div
             className={
-              maximized || detached || splitOn
+              maximized || detached || splitOn || keyboardFullscreen.fullscreen
                 ? 'relative min-h-0 w-full flex-1'
                 : 'relative h-[480px] w-full'
             }
@@ -567,6 +577,19 @@ export function BrowserVncPanel({
                 )}
               </div>
             )}
+          </div>
+        )}
+        {expanded && state === 'connected' && (
+          <div style={rowSpan(4)}>
+            <InlineMarkdown
+              className="text-[11px] text-neutral-500"
+              body={
+                keyboardFullscreen.notice ??
+                (keyboardFullscreen.fullscreen
+                  ? 'Keyboard capture requested. Click the remote browser to send keys. Hold Esc or use **Exit fullscreen** to leave.'
+                  : 'Click the remote browser to send keys. Use **Fullscreen** to capture reserved shortcuts such as Ctrl+W and Ctrl+Tab (Firefox 151+ or Chrome/Edge).')
+              }
+            />
           </div>
         )}
         {/* Resize border. Trailing siblings, so adding them never disturbs the slots
