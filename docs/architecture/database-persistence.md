@@ -54,8 +54,11 @@ save opens a normal step form, even when no other task saved meanwhile. Step met
 `alwaysWaitForUser` disables every automatic submission path, including pre-answers. The New Task
 form has no save setting, and historical `save_enabled = false` rows do not bypass this choice.
 Users choose **Save database for the next task** or **Finish without saving** before any export.
+The save option is pre-selected, including **Save and overwrite** on a conflict; submitting the
+form is still required before export.
 If the project revision moved since task creation or the approved restore, the form instead offers **Save and overwrite**,
-showing the task that last saved and its timestamp. Declining deletes any candidate from a prior
+showing the current checkpoint's timestamp and database engine in a separate note, followed by
+the source task title and a link to open it, matching the restore form. Declining deletes any candidate from a prior
 attempt. Overwriting selects the whole database; databases are not merged.
 
 Approval carries the revision shown in the form. A further save while it is open asks again

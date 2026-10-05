@@ -38,6 +38,9 @@ export function databaseSaveForm(d: Detected): FormSchema | null {
   if (!d || d.state.outcome !== 'pending') return null;
   const conflict = d.revision !== d.state.baseRevision;
   const current = d.current;
+  const checkpointName = current
+    ? `${new Date(current.createdAt).toISOString()} · ${current.engine}${current.engineVersion ? ` ${current.engineVersion}` : ''}`
+    : null;
   return {
     title: conflict ? 'The project database changed during this task' : 'Save project database',
     description: [
@@ -45,9 +48,6 @@ export function databaseSaveForm(d: Detected): FormSchema | null {
       conflict
         ? 'Another task changed the saved project database. Overwriting selects this task’s complete database; it does not merge the databases.'
         : 'Choose whether to save this task’s DDEV database locally for the next task.',
-      current
-        ? `Last saved by task **${current.sourceTaskId ?? '(deleted task)'}**, on ${new Date(current.createdAt).toISOString()}.`
-        : '',
       'Finishing without saving deletes any unused snapshot from this task.',
     ]
       .filter(Boolean)
@@ -57,19 +57,25 @@ export function databaseSaveForm(d: Detected): FormSchema | null {
       ...(current
         ? [
             {
+              id: 'checkpoint',
+              type: 'note' as const,
+              label: 'Database checkpoint',
+              body: `**Database checkpoint:** \`${checkpointName}\``,
+            },
+            {
               id: 'sourceTask',
               type: 'note' as const,
-              label: 'Task that last saved the project database',
-              body: current.sourceTaskTitle,
+              label: 'Checkpoint saved by',
+              body: `**Saved by task:**\n\n${current.sourceTaskTitle}${current.sourceTaskId ? `\n\n[Open source task](/tasks/${current.sourceTaskId})` : ''}`,
             },
           ]
         : []),
       {
         id: 'action',
         type: 'select',
-        label: 'Database snapshot',
+        label: 'Database checkpoint',
         required: true,
-        default: 'discard',
+        default: `${conflict ? 'replace' : 'save'}:${d.revision}`,
         options: [
           { value: 'discard', label: 'Finish without saving the database' },
           {
