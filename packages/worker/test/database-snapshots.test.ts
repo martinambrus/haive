@@ -236,11 +236,46 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     args.detected.dbUploadId = upload!.id;
     args.detected.databaseSnapshotId = null;
     args.detected.snapshotEngine = null;
+    // A manual upload does not make a non-DDEV workflow eligible for restoration.
+    expect(await ddevEnvStep.shouldRun!(a)).toBe(false);
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(false);
+    const [template] = await db
+      .insert(schema.envTemplates)
+      .values({
+        userId,
+        repositoryId: repoId,
+        name: 'DDEV',
+        baseImage: 'test',
+        declaredDeps: { containerTool: 'ddev' },
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ envTemplateId: template!.id })
+      .where(eq(schema.tasks.id, a.taskId));
+    expect(await restoreDatabaseStep.shouldRun!(a)).toBe(true);
+    // Existing config is also eligible without a declared DDEV template.
+    await db.update(schema.tasks).set({ envTemplateId: null }).where(eq(schema.tasks.id, a.taskId));
+    await writeFileNoFollow(root, 'restore-fixture/.ddev/config.yaml', 'name: test\n', {
+      createParents: true,
+    });
+    a.repoPath = path.join(root, 'restore-fixture');
     expect(await restoreDatabaseStep.shouldRun!(a)).toBe(true);
     expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(true);
     expect(await restoreDatabaseStep.shouldRun!(a)).toBe(false);
     expect((await restoreDatabaseStep.apply(a, args)).imported).toBe(false);
     expect(runtime.import).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an explicitly selected saved database when the workspace cannot run DDEV', async () => {
+    const a = await task('source');
+    const saved = await candidate(a);
+    await promoteDatabaseSnapshot(a, 0);
+    const b = await task('restore in an incompatible workspace', saved.id);
+    await expect(restoreDatabaseStep.shouldRun!(b)).rejects.toThrow(
+      'selected saved database requires a DDEV workspace',
+    );
+    expect(runtime.import).not.toHaveBeenCalled();
   });
 
   it('rejects corrupt snapshots and incompatible engines before importing', async () => {

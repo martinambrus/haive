@@ -5,6 +5,7 @@ import { readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { splitUploadPath, workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
+import { ddevEnvStep } from './01c-ddev-env.js';
 import { parseDdevConfig } from '../_ddev-config.js';
 import {
   ddevCountTables,
@@ -46,16 +47,26 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
   async shouldRun(ctx) {
     const task = await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
     if (!task) return false;
+    const state = await ctx.db.query.taskDatabaseStates.findFirst({
+      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
+    });
+    const pendingSource = Boolean(state?.sourceSnapshotId && !state.importedAt);
+    // Share startup eligibility: an upload alone must not start DDEV in a
+    // non-DDEV workflow. An explicitly selected saved database must not be ignored.
+    if (!(await ddevEnvStep.shouldRun!(ctx))) {
+      if (pendingSource)
+        throw new Error(
+          'The selected saved database requires a DDEV workspace. Choose DDEV in the declared dependencies before continuing.',
+        );
+      return false;
+    }
     if (task.dbUploadId) {
       const upload = await ctx.db.query.dbUploads.findFirst({
         where: eq(schema.dbUploads.id, task.dbUploadId),
       });
       if (upload?.status === 'complete') return true;
     }
-    const state = await ctx.db.query.taskDatabaseStates.findFirst({
-      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
-    });
-    return Boolean(state?.sourceSnapshotId && !state.importedAt);
+    return pendingSource;
   },
   async detect(ctx) {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);

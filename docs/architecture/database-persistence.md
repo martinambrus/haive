@@ -56,7 +56,10 @@ Approval carries the revision shown in the form. A further save while it is open
 before exporting, and a change during export reopens the form with the newest revision. Duplicate
 delivery in the same epoch preserves the decision; an upstream retry in a new epoch permits a
 fresh export. Restoration is a separate step for both saved snapshots and uploaded dumps, before
-migrations. Already imported saved snapshots and consumed uploads are skipped on retry.
+migrations. It shares startup’s DDEV eligibility check: an upload alone cannot start DDEV in a
+non-DDEV workflow. An explicitly selected saved database reports missing DDEV eligibility rather
+than continuing without the requested restore. Already imported saved snapshots and consumed
+uploads are skipped on retry.
 
 ## Cleanup
 
