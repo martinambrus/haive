@@ -2413,6 +2413,32 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // A report may need targeted follow-ups before it is ready for its form. Its
+    // checkpoint lands before consuming the invocation, so a crash replays that id
+    // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
+    // ownership/reservation path; no CLI is spawned directly from this hook.
+    if (stepDef.llm?.preForm && stepDef.llm.completePreForm && !current.formValues) {
+      const completion = await stepDef.llm.completePreForm({
+        ctx,
+        detected,
+        llmOutput,
+        llmInvocationId,
+      });
+      llmOutput = completion.llmOutput;
+      throwIfCancelled();
+      if (completion.continueRequested) {
+        current = await updateRow(db, current.id, {
+          formSchema: null,
+          formValues: null,
+          statusMessage: completion.statusMessage ?? 'Completing the report…',
+        });
+        await markLatestInvocationConsumed(db, current.id);
+        const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
+        if (!followup.resolved) return followup.result;
+        throw new Error('Pre-form continuation did not dispatch a fresh invocation');
+      }
+    }
+
     // --- Form ---
     // Auto-continue flag + gate-1 pre-answers for this step. One indexed PK
     // lookup; a missing row (unit-test fixtures) behaves like autoContinue=true

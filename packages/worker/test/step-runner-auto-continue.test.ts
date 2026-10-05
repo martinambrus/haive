@@ -18,6 +18,7 @@ interface MockState {
   taskStepRow: Record<string, unknown>;
   taskRow: Record<string, unknown> | null;
   updates: { table: string; patch: Record<string, unknown> }[];
+  invocation?: Record<string, unknown>;
 }
 
 function tableNameOf(table: unknown): string {
@@ -94,7 +95,12 @@ function makeMockDb(state: MockState): Database {
               }
               return [];
             },
-            orderBy: () => ({ limit: async () => [] }),
+            orderBy: () => ({
+              limit: async () =>
+                tableName === 'cli_invocations' && state.invocation && !state.invocation.consumedAt
+                  ? [state.invocation]
+                  : [],
+            }),
             for: async () =>
               tableName === 'tasks' && taskFenceHolds(cond, state.taskRow)
                 ? [{ id: state.taskRow!.id }]
@@ -128,6 +134,8 @@ function makeMockDb(state: MockState): Database {
                 return [];
               }
               state.updates.push({ table: tableName, patch: v });
+              if (tableName === 'cli_invocations' && state.invocation)
+                Object.assign(state.invocation, v);
               if (tableName === 'task_steps') {
                 state.taskStepRow = { ...state.taskStepRow, ...v };
                 return [state.taskStepRow];
@@ -227,6 +235,68 @@ function run(state: MockState, stepDef: StepDefinition, formValues?: Record<stri
 }
 
 const ZERO_FIELD_FORM: FormSchema = { title: 'Info only', fields: [], submitLabel: 'OK' };
+
+describe('pre-form report completion', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('hands the accumulated report to the form instead of only the last invocation output', async () => {
+    vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '1');
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const form = vi.fn((_ctx, _detected, output) => ({
+      title: 'Findings',
+      fields: [
+        { type: 'note' as const, id: 'report', label: 'Report', body: JSON.stringify(output) },
+      ],
+    }));
+    const def = makeStep({});
+    def.form = form;
+    def.llm = {
+      preForm: true,
+      requiredCapabilities: [],
+      buildPrompt: () => '',
+      bypassStub: () => ({ last: true }),
+      completePreForm: async () => ({
+        llmOutput: { initial: true, last: true },
+        continueRequested: false,
+      }),
+    };
+    expect((await run(state, def)).status).toBe('waiting_form');
+    expect(form.mock.calls[0]![2]).toEqual({ initial: true, last: true });
+  });
+
+  it('consumes the completed invocation and does not present a form while follow-up work is owed', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    state.invocation = {
+      id: 'inv-1',
+      endedAt: new Date(),
+      exitCode: 0,
+      rawOutput: '{"findings":[]}',
+      parsedOutput: null,
+      errorMessage: null,
+    };
+    const form = vi.fn(() => ZERO_FIELD_FORM);
+    const def = makeStep({ form });
+    def.llm = {
+      preForm: true,
+      requiredCapabilities: [],
+      buildPrompt: () => '',
+      completePreForm: async ({ llmInvocationId }) => {
+        expect(llmInvocationId).toBe('inv-1');
+        return { llmOutput: { findings: [] }, continueRequested: true };
+      },
+    };
+    // No worker dependencies are supplied: a fresh dispatch must fail instead of
+    // replaying the just-consumed result and showing a premature results form.
+    expect((await run(state, def)).status).toBe('failed');
+    expect(state.invocation.consumedAt).toBeInstanceOf(Date);
+    expect(form).not.toHaveBeenCalled();
+    expect(state.taskStepRow.formSchema).toBeNull();
+  });
+});
 
 const QUESTION_FORM: FormSchema = {
   title: 'Pick',

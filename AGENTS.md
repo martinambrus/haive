@@ -318,6 +318,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Onboarding and repositories
 
+- [Committed secret sweep](docs/architecture/secret-sweep.md): tracked credential discovery,
+  dependency/build scope and incomplete coverage. `07_7-secret-sweep`, `_credential-scan.ts`.
 - [Onboarding completion](docs/architecture/onboarding-completion.md): when a repository counts
   as onboarded. `onboarding-state.ts`.
 - [Onboarding reset](docs/architecture/onboarding-reset.md): what a reset takes back, claims,
