@@ -60,32 +60,26 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
   });
   beforeEach(async () => {
     runtime.import.mockReset().mockResolvedValue({ exitCode: 0, output: 'imported' });
-    runtime.config
-      .mockReset()
-      .mockResolvedValue({
-        exitCode: 0,
-        output:
-          '# Complete processed project configuration:\nomit_containers: []\ndatabase:\n  type: postgres\n  version: "17"\n',
-      });
+    runtime.config.mockReset().mockResolvedValue({
+      exitCode: 0,
+      output:
+        '# Complete processed project configuration:\nomit_containers: []\ndatabase:\n  type: postgres\n  version: "17"\n',
+    });
     userId = randomUUID();
     repoId = randomUUID();
-    await db
-      .insert(schema.users)
-      .values({
-        id: userId,
-        emailEncrypted: 'test',
-        emailBlindIndex: userId,
-        passwordHash: 'test',
-      });
-    await db
-      .insert(schema.repositories)
-      .values({
-        id: repoId,
-        userId,
-        name: 'snapshot-test',
-        source: 'blank',
-        storagePath: `${root}/${userId}/${repoId}`,
-      });
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+    await db.insert(schema.repositories).values({
+      id: repoId,
+      userId,
+      name: 'snapshot-test',
+      source: 'blank',
+      storagePath: `${root}/${userId}/${repoId}`,
+    });
   });
   afterEach(async () => {
     await db.delete(schema.users).where(eq(schema.users.id, userId));
@@ -330,6 +324,26 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
         ),
       }),
     ).toBeUndefined();
+  });
+
+  it('drops a pending candidate from an earlier epoch before saving retried work', async () => {
+    const a = await task('retried');
+    const old = await candidate(a);
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, a.taskId));
+    const state = await loadDatabaseSnapshotState(a);
+    expect(state!.state).toMatchObject({
+      outcome: 'pending',
+      candidateSnapshotId: null,
+      decisionEpoch: null,
+    });
+    await sweepDatabaseSnapshots(db);
+    await expect(access(path.join(root, databaseSnapshotRel(old)))).rejects.toThrow();
+    const fresh = await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 1)).toBe('saved');
+    expect((await head())!.snapshotId).toBe(fresh.id);
   });
 
   it('reaps abandoned partial exports and skipped candidates, including after repository deletion', async () => {

@@ -56,7 +56,10 @@ export async function loadDatabaseSnapshotState(ctx: StepContext) {
   if (!state) return null;
   // An upstream Retry advances the task epoch. It needs a fresh export after its new work;
   // duplicate delivery in the same epoch must keep the decision that already committed.
-  if (state.outcome !== 'pending' && state.decisionEpoch !== task.orchestrationEpoch) {
+  if (
+    (state.outcome !== 'pending' || state.candidateSnapshotId || state.exportError) &&
+    state.decisionEpoch !== task.orchestrationEpoch
+  ) {
     state = await withSnapshotStep(ctx, task.orchestrationEpoch, async (tx) => {
       const [updated] = await tx
         .update(schema.taskDatabaseStates)
@@ -143,6 +146,7 @@ export async function reserveDatabaseSnapshot(
         candidateSnapshotId: snapshot!.id,
         candidateStepId: ctx.taskStepId,
         exportError: null,
+        decisionEpoch: epoch,
       })
       .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
     return snapshot!;

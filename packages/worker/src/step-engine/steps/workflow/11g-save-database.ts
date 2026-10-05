@@ -208,6 +208,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
                 exportError: String(err instanceof Error ? err.message : err),
                 candidateSnapshotId: null,
                 candidateStepId: null,
+                decisionEpoch: d.epoch,
               })
               .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
           });
