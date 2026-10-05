@@ -7,6 +7,8 @@ contrib, vendor and node_modules locations as third-party. Composer scaffold roo
 core layouts are recognized.
 Core detection checks both the baseline and working tree at every recognized web root,
 including nested Drupal 7 installations; deleting the bootstrap marker cannot disable protection.
+Drupal 7 layout rules apply only at roots where that marker was detected, so a nested site does
+not claim unrelated project directories such as top-level `modules/`.
 An operator can declare exact maintained package directories in
 `.haive-data/dependency-ownership.json` (`{"ownedPaths":["web/modules/contrib/company_module"]}`)
 on the task's base branch. The policy is read from the fork point; an agent's working-copy or

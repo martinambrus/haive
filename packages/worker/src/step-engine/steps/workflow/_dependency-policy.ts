@@ -12,6 +12,7 @@ export interface DependencyPolicy {
   workspaceRoots?: string[];
   drupal: boolean;
   drupal7?: boolean;
+  drupal7Roots?: string[];
   drupalRoots: string[];
   ownedPaths: string[];
 }
@@ -78,7 +79,7 @@ export function upstreamKind(
     )
       return 'infrastructure';
     if (
-      policy?.drupal7 &&
+      (policy?.drupal7Roots ?? (policy?.drupal7 ? roots : [])).includes(root) &&
       /^(includes|modules|profiles|themes|misc)(\/|$)/.test(rel.slice(prefix.length)) &&
       rel.startsWith(prefix)
     ) {
@@ -165,7 +166,7 @@ export async function loadDependencyPolicy(
       if (rel) roots.push(rel);
     }
   }
-  let drupal7 = false;
+  const drupal7Roots: string[] = [];
   for (const root of new Set(roots)) {
     const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
     const baselineDrupal7 = await gitRun(workspace, [
@@ -177,10 +178,10 @@ export async function loadDependencyPolicy(
       baselineDrupal7.code === 0 ||
       (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null
     ) {
-      drupal7 = true;
-      break;
+      drupal7Roots.push(root);
     }
   }
+  const drupal7 = drupal7Roots.length > 0;
   drupal ||= drupal7;
   return {
     baselineRef: base.stdout.trim(),
@@ -189,6 +190,7 @@ export async function loadDependencyPolicy(
       .map((root) => root.replace(/\/$/, '')),
     drupal,
     drupal7,
+    drupal7Roots,
     drupalRoots: [...new Set(roots)],
     ownedPaths: parseDependencyOwnership(ownership.code === 0 ? ownership.stdout : null),
   };

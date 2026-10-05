@@ -133,13 +133,19 @@ describe('dependency ownership', () => {
       await file(root, module, 'rewritten\n');
       const policy = await loadDependencyPolicy(context(), root);
       expect(policy.drupal7).toBe(true);
+      expect(policy.drupal7Roots).toEqual([webRoot]);
       expect(upstreamKind(marker, policy)).toBe('infrastructure');
       expect(upstreamKind(module, policy)).toBe('infrastructure');
+      expect(upstreamKind('modules/application/app.php', policy)).toBeNull();
+      expect(upstreamKind('includes/project.php', policy)).toBeNull();
+      expect(upstreamKind('themes/company/style.css', policy)).toBeNull();
       await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
         'Refusing to commit',
       );
       await git(root, ['add', '-A']);
       await git(root, ['commit', '-qm', 'Drupal 7 baseline']);
+      await file(root, 'modules/application/app.php', 'project change\n');
+      await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
       await rm(path.join(root, marker));
       await file(root, module, 'edited again\n');
       expect((await loadDependencyPolicy(context(), root)).drupal7).toBe(true);
@@ -148,6 +154,24 @@ describe('dependency ownership', () => {
       );
     },
   );
+
+  it('protects every Drupal 7 root and leaves other roots editable', async () => {
+    const root = await repository();
+    await file(root, 'composer.json', '{}');
+    await file(root, 'docroot/includes/bootstrap.inc');
+    await git(root, ['add', '-A']);
+    await git(root, ['commit', '-qm', 'nested Drupal 7 baseline']);
+    await file(root, 'web/includes/bootstrap.inc');
+    const policy = await loadDependencyPolicy(context(), root);
+    expect(policy.drupal7Roots).toEqual(['web', 'docroot']);
+    for (const webRoot of policy.drupal7Roots!) {
+      expect(upstreamKind(`${webRoot}/modules/system/system.module`, policy)).toBe(
+        'infrastructure',
+      );
+    }
+    expect(upstreamKind('modules/application/app.php', policy)).toBeNull();
+    expect(upstreamKind('public/modules/application/app.php', policy)).toBeNull();
+  });
 
   it.each([
     '.',
