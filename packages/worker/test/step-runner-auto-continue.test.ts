@@ -4,6 +4,9 @@ import type { FormSchema } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { preRagSourceSelectionStep } from '../src/step-engine/steps/workflow/01g-rag-source-selection.js';
+import { workflowRagSourceSelectionStep } from '../src/step-engine/steps/workflow/11b1-rag-source-selection.js';
+import { ragSourceSelectionStep } from '../src/step-engine/steps/onboarding/09_7-rag-source-selection.js';
 
 vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/step-engine/task-ledger.js')>();
@@ -243,6 +246,39 @@ const QUESTION_FORM: FormSchema = {
 };
 
 describe('advanceStep auto-continue', () => {
+  for (const picker of [
+    preRagSourceSelectionStep,
+    workflowRagSourceSelectionStep,
+    ragSourceSelectionStep,
+  ]) {
+    it(`${picker.metadata.id}: auto mode parks for the current RAG scope despite saved defaults`, async () => {
+      const state = freshState();
+      state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+      const apply = vi.fn(async () => ({}));
+      const result = await run(state, {
+        ...picker,
+        shouldRun: async () => true,
+        detect: async () => ({
+          framework: null,
+          tree: [
+            { path: 'src', label: 'src', fileCount: 3 },
+            { path: 'vendor', label: 'vendor', fileCount: 1000 },
+          ],
+          defaultExcludeGlobs: ['vendor'],
+          extensionSet: ['.ts'],
+          totalCodeFiles: 1003,
+        }),
+        apply,
+      });
+      expect(result.status).toBe('waiting_form');
+      expect(apply).not.toHaveBeenCalled();
+      expect((state.taskStepRow.formSchema as FormSchema).fields[0]).toMatchObject({
+        type: 'directory-tree',
+        defaults: ['src'],
+      });
+    });
+  }
+
   it('auto mode passes zero-field info forms without stopping', async () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };

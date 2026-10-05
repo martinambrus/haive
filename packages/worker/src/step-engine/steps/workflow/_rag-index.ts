@@ -282,7 +282,10 @@ export async function resolveRagSyncPrefs(
       if (projectName === 'default') {
         projectName = envData?.project?.name ?? 'default';
       }
-      exclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
+      // A saved deny list is the user's current RAG decision. An old onboarding
+      // heuristic must not veto folders explicitly re-enabled by a later picker.
+      if (repo?.scopeExcludeGlobs == null)
+        exclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
 
       const ragSourcePrev = await loadPreviousStepOutput(
         ctx.db,
@@ -293,7 +296,7 @@ export async function resolveRagSyncPrefs(
         selectedDirs?: string[];
         extensionSet?: string[];
       } | null;
-      selectedDirs = ragSourceOutput?.selectedDirs;
+      selectedDirs = repo?.scopeExcludeGlobs == null ? ragSourceOutput?.selectedDirs : undefined;
       extensionSet = ragSourceOutput?.extensionSet;
     }
 

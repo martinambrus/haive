@@ -45,8 +45,10 @@ vi.mock('../src/step-engine/steps/_rag-embed-health.js', async (original) => ({
 const { ragReindexStep } = await import('../src/step-engine/steps/workflow/11c-rag-reindex.js');
 const { workflowRagSourceSelectionStep } =
   await import('../src/step-engine/steps/workflow/11b1-rag-source-selection.js');
+const { preRagSourceSelectionStep } =
+  await import('../src/step-engine/steps/workflow/01g-rag-source-selection.js');
 const { preRagSyncStep } = await import('../src/step-engine/steps/workflow/02-pre-rag-sync.js');
-const { collectDefaults, readComposerJson, readGitignore } =
+const { collectAllPaths, collectDefaults, readComposerJson, readGitignore } =
   await import('../src/step-engine/steps/onboarding/_scope.js');
 const { workspaceAnchor } = await import('../src/repo/worktree-paths.js');
 const { resolveRagSyncPrefs, runRagIndexSync } =
@@ -69,6 +71,7 @@ let indexedChunks: Map<
 >;
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
+let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -97,6 +100,7 @@ beforeEach(async () => {
     ragEmbedLexicalOnly: false,
   };
   onboarding = null;
+  priorSteps = new Map();
   executionPath = 'full_workflow';
   writes = [];
   warnings = [];
@@ -189,6 +193,10 @@ beforeEach(async () => {
           orderBy: () => ({
             limit: async () => {
               const query = dialect.sqlToQuery(condition);
+              if (table === schema.taskSteps) {
+                for (const [stepId, row] of priorSteps)
+                  if (query.params.includes(stepId)) return [row];
+              }
               return table === schema.taskSteps && query.params.includes('01-worktree-setup')
                 ? [{ output: { worktreePath: worktree } }]
                 : [];
@@ -795,39 +803,159 @@ async function saveScope(
   });
 }
 
-describe('first workflow RAG source scope', () => {
+describe('workflow RAG source scope before each ingestion', () => {
   beforeEach(() => {
     repo.scopeExcludeGlobs = null;
   });
 
-  it('asks once, including repositories initialized by the earlier fix, and keeps the pre-sync idle', async () => {
+  it('reviews saved scope every run, with pre-sync deferred only until RAG is configured', async () => {
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
     expect(await preRagSyncStep.shouldRun!(ctx)).toBe(false);
     repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
     repo.scopeExcludeGlobs = [];
-    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
     expect(await preRagSyncStep.shouldRun!(ctx)).toBe(true);
   });
 
-  it('allows quick fixes to select missing scope for existing RAG, without offering initialization', async () => {
+  it('quick fixes review scope before their pre-sync and omit the post-sync picker', async () => {
     executionPath = 'quick_bugfix';
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
     repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
     expect(await preRagSyncStep.shouldRun!(ctx)).toBe(false);
-    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
-    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
-    await saveScope(detected, collectDefaults(detected.tree, detected.defaultExcludeGlobs));
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
+    const detected = await preRagSourceSelectionStep.detect!(ctx);
+    await preRagSourceSelectionStep.apply(ctx, {
+      detected,
+      formValues: { selectedDirs: collectDefaults(detected.tree, detected.defaultExcludeGlobs) },
+      iteration: 0,
+      previousIterations: [],
+    });
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
     expect(await preRagSyncStep.shouldRun!(ctx)).toBe(true);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
   });
 
   it('does not ask when RAG is disabled or for an imported repo without configuration', async () => {
     repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'none' } };
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
     repo.onboardingTooling = null;
     repo.source = 'git_https';
     expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await preRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+  });
+
+  it('reviews externally added root folders on later tasks and preserves absent exclusions when saving the worktree', async () => {
+    repo.source = 'git_https';
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    repo.scopeExcludeGlobs = ['web/core', 'vendor'];
+    await writeSource('web/core/library.php', undefined, root);
+    await writeSource('external/generated/cache.php', undefined, root);
+    await writeSource('src/project.ts', undefined, root);
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
+    const before = await preRagSourceSelectionStep.detect!(ctx);
+    const beforeDefaults = collectDefaults(before.tree, before.defaultExcludeGlobs);
+    expect(beforeDefaults).toContain('external/generated');
+    expect(beforeDefaults).not.toContain('web/core');
+    const form = await preRagSourceSelectionStep.form!(ctx, before);
+    expect(form?.fields[0]).toMatchObject({ type: 'directory-tree', defaults: beforeDefaults });
+    await preRagSourceSelectionStep.apply(ctx, {
+      detected: before,
+      formValues: { selectedDirs: beforeDefaults.filter((rel) => !rel.startsWith('external')) },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(repo.scopeExcludeGlobs).toEqual(
+      expect.arrayContaining(['external', 'web/core', 'vendor']),
+    );
+    const sync = await preRagSyncStep.detect!(ctx);
+    expect(sync.codeFileCount).toBe(1);
+    await preRagSyncStep.apply(ctx, {
+      detected: sync,
+      formValues: { runSync: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(inserts.map((row) => row[3])).toContain('src/project.ts');
+    expect(inserts.map((row) => row[3])).not.toContain('external/generated/cache.php');
+    // The end picker sees the worktree's different contents without forgetting
+    // exclusions for root-only directories. It also rescans newly added files.
+    const endBefore = await workflowRagSourceSelectionStep.detect!(ctx);
+    await writeSource('new-output/debug.ts');
+    const endAfter = await workflowRagSourceSelectionStep.detect!(ctx);
+    expect(collectDefaults(endBefore.tree, endBefore.defaultExcludeGlobs)).not.toContain(
+      'new-output',
+    );
+    expect(collectDefaults(endAfter.tree, endAfter.defaultExcludeGlobs)).toContain('new-output');
+    await saveScope(endAfter, collectDefaults(endAfter.tree, endAfter.defaultExcludeGlobs));
+    expect(repo.scopeExcludeGlobs).toEqual(
+      expect.arrayContaining(['external', 'web/core', 'vendor']),
+    );
+    expect(workflowRagSourceSelectionStep.metadata.autoSubmitDefaults).not.toBe(true);
+    expect(preRagSourceSelectionStep.metadata.autoSubmitDefaults).not.toBe(true);
+  });
+
+  it('can explicitly re-enable a visible saved exclusion', async () => {
+    repo.scopeExcludeGlobs = ['scratch', 'vendor'];
+    await writeSource('scratch/app.ts');
+    const detected = await workflowRagSourceSelectionStep.detect!(ctx);
+    const defaults = collectDefaults(detected.tree, detected.defaultExcludeGlobs);
+    expect(defaults).not.toContain('scratch');
+    await saveScope(detected, [...defaults, 'scratch']);
+    expect(repo.scopeExcludeGlobs).toEqual(['vendor']);
+  });
+
+  it('pre-sync does not expose or count this task or other active worktrees', async () => {
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    await writeSource('src/main.ts', undefined, root);
+    await writeSource('.haive/worktrees/other/src/duplicate.ts', undefined, root);
+    const detected = await preRagSourceSelectionStep.detect!(ctx);
+    expect(detected.totalCodeFiles).toBe(1);
+    expect(collectAllPaths(detected.tree).some((rel) => rel.startsWith('.haive/'))).toBe(false);
+    expect(detected.defaultExcludeGlobs).toContain('.haive');
+    expect((await preRagSyncStep.detect!(ctx)).codeFileCount).toBe(1);
+  });
+
+  it('uses saved scope over stale onboarding path restrictions while retaining the selected extensions', async () => {
+    onboarding = { id: 'onboarding-1' };
+    repo.source = 'git_https';
+    repo.scopeExcludeGlobs = [];
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    priorSteps.set('01-env-detect', {
+      detectOutput: { data: { paths: { customCodePaths: { exclude: ['outside'] } } } },
+    });
+    priorSteps.set('09_7-rag-source-selection', {
+      output: { selectedDirs: ['src'], extensionSet: ['.ts'] },
+    });
+    await writeSource('outside/project.ts', undefined, root);
+    const prefs = await resolveRagSyncPrefs(ctx);
+    expect(prefs.codeCollect).toMatchObject({
+      exclude: [],
+      selectedDirs: undefined,
+      extensionSet: ['.ts'],
+    });
+    const picker = await preRagSourceSelectionStep.detect!(ctx);
+    expect(picker.extensionSet).toEqual(['.ts']);
+    const detected = await preRagSyncStep.detect!(ctx);
+    expect(detected.codeFileCount).toBe(1);
+    await preRagSyncStep.apply(ctx, {
+      detected,
+      formValues: { runSync: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(inserts.map((row) => row[3])).toContain('outside/project.ts');
+    // Unsaved legacy repos still receive their original onboarding restrictions.
+    repo.scopeExcludeGlobs = null;
+    expect((await resolveRagSyncPrefs(ctx)).codeCollect).toMatchObject({
+      exclude: ['outside'],
+      selectedDirs: ['src'],
+    });
   });
 
   it.each(['.haive', '.haive/worktrees', '.haive/worktrees/task'])(
@@ -920,7 +1048,7 @@ describe('first workflow RAG source scope', () => {
     expect(indexedPaths).not.toContain('web/core/lib/framework.php');
     expect(indexedPaths).not.toContain('web/modules/contrib/plugin/plugin.php');
     expect(indexedPaths).not.toContain('third-party/library/library.php');
-    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(false);
+    expect(await workflowRagSourceSelectionStep.shouldRun!(ctx)).toBe(true);
   });
 
   it('prefers a stronger root Laravel match over Node frontend tooling in web/', async () => {

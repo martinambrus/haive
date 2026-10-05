@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { detectFrameworkMatch } from '../../../repo/framework-detect.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
-import type { StepDefinition } from '../../step-definition.js';
+import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   detectRagSourceSelection,
   ragSourceSelectionStep,
@@ -15,8 +15,8 @@ import { CODE_EXTENSIONS } from '../onboarding/_rag-chunkers.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
 import { resolveRagWorkspace } from './11c-rag-reindex.js';
 
-/** No onboarding detector has run on a blank repo. Probe the existing framework
- * markers without walking dependency trees, then use the usual scoring rule.
+/** Probe framework markers in the current checkout without walking dependency
+ * trees, rather than relying on an old onboarding detector.
  * Composer installer paths and .gitignore cover custom docroots in the shared picker. */
 async function probeFramework(wa: { anchor: string; prefix: string }): Promise<{
   framework: string | null;
@@ -47,6 +47,19 @@ async function probeFramework(wa: { anchor: string; prefix: string }): Promise<{
   return { framework: best?.framework ?? null, base: best?.base ?? '' };
 }
 
+/** The picker and ingestion use the same checkout and extension selection. */
+export async function detectWorkflowRagSourceSelection(ctx: StepContext, repoPath: string) {
+  const workspace = workspaceAnchor(repoPath);
+  const match = await probeFramework(workspace);
+  const resolved = await resolveRagSyncPrefs(ctx);
+  return detectRagSourceSelection(ctx, {
+    workspace,
+    framework: match.framework,
+    frameworkBase: match.base,
+    extensionSet: resolved.codeCollect.extensionSet ?? Object.keys(CODE_EXTENSIONS),
+  });
+}
+
 export const workflowRagSourceSelectionStep: StepDefinition<
   RagSourceSelectionDetect,
   RagSourceSelectionApply
@@ -57,17 +70,15 @@ export const workflowRagSourceSelectionStep: StepDefinition<
     index: 11.6,
     title: 'Select RAG index scope',
     description:
-      'Choose which parts of this new project to index into RAG. Framework, library, generated, and agent tooling folders are pre-excluded. The scope is saved for future tasks.',
+      'Review the current project folders before RAG re-indexing. Saved exclusions are preselected, and the updated scope is saved for future tasks.',
     requiresCli: false,
   },
 
   async shouldRun(ctx) {
     const resolved = await resolveRagSyncPrefs(ctx, true);
-    if (!resolved.ragConfigured || !resolved.needsScopeSelection) return false;
-    if (!resolved.needsInitialization) return true;
-    // Quick fixes have no 11c initialization step. Existing RAG still gets the
-    // picker here, so its next pre-sync can resume, but an unconfigured quick fix
-    // does not ask for a scope until a workflow can offer ingestion.
+    if (!resolved.ragConfigured) return false;
+    // Quick fixes ingest only at 02, whose own picker runs before that sync.
+    // Keep this step registered in the spine for tasks already parked here.
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { executionPath: true },
@@ -77,16 +88,7 @@ export const workflowRagSourceSelectionStep: StepDefinition<
 
   async detect(ctx) {
     const repoPath = await resolveRagWorkspace(ctx);
-    const workspace = workspaceAnchor(repoPath);
-    const match = await probeFramework(workspace);
-    return detectRagSourceSelection(ctx, {
-      workspace,
-      framework: match.framework,
-      frameworkBase: match.base,
-      // Workflow sync has no 09_7 output to restrict extensions. Count exactly
-      // the collector's default set so the picker and ingestion cover the same files.
-      extensionSet: Object.keys(CODE_EXTENSIONS),
-    });
+    return detectWorkflowRagSourceSelection(ctx, repoPath);
   },
 
   form: (ctx, detected) => ragSourceSelectionStep.form!(ctx, detected),

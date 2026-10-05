@@ -16,6 +16,9 @@ import type { TreeNode } from '../schemas/form.js';
 export const NO_RECURSE_DIRS: ReadonlySet<string> = new Set([
   'node_modules',
   '.git',
+  // Internal worktrees are full copies of this repository and are never RAG
+  // sources. Keep the directory visible without walking any task's copies.
+  '.haive',
   'vendor',
   '__pycache__',
   '.next',
