@@ -86,13 +86,13 @@ describe('POST /tasks', () => {
     return t;
   }
 
-  it('pins the chosen snapshot before START and honours the save opt-out', async () => {
+  it('pins the chosen snapshot before START; saving is decided at the end', async () => {
     const t = savedDatabase();
     h.add.mockImplementation(async () => {
       expect(t.fake.rows(schema.taskDatabaseStates)[0]).toMatchObject({
         sourceSnapshotId: SNAPSHOT,
         baseRevision: 3,
-        saveEnabled: false,
+        saveEnabled: true,
       });
     });
     const res = await post('/', {

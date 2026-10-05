@@ -2,7 +2,7 @@
 
 Workflow and run-app tasks can continue from a saved DDEV primary database. New Task shows the
 current snapshot beside the database attachment, with its source task and timestamp. Restoring
-is opt-in; saving is enabled by default and can be disabled. A manual database attachment and a
+is opt-in; saving is an explicit choice at the end of each task. A manual database attachment and a
 saved database are mutually exclusive. This persists the database only: uploaded assets, other
 services and their volumes are not included.
 
@@ -20,8 +20,9 @@ a stale form returns 409, requiring a fresh selection. A queued task keeps its p
 when another task replaces the project pointer. Internal and older tasks initialise their save
 state lazily. No restore is implied by lazy initialisation.
 
-The DDEV runner mounts only the selected dump read-only. `01c-ddev-env` verifies its size and
-SHA-256 and checks the effective database engine before import. A successful import records
+The DDEV runner mounts only the selected dump read-only. `01c1-restore-database` runs immediately
+after `01c-ddev-env` starts DDEV. It verifies the dump’s size and SHA-256 and checks the effective
+database engine before import. A successful import records
 `imported_at` under step/task ownership fencing; retrying cached detect data must not re-import
 over subsequent work. The existing task-local DDEV durability snapshot supports cold runtime
 recovery. A saved project dump is never consumed or deleted as though it were an uploaded dump.
@@ -30,23 +31,32 @@ recovery. A saved project dump is never consumed or deleted as though it were an
 
 `11g-save-database` runs after workflow push approval and before worktree cleanup. It also runs
 after the user finishes a run-app session, before completion tears down the runtime. It skips
-non-DDEV workspaces, projects with an omitted database, and confidently empty databases.
+non-DDEV workspaces. Choosing save for an omitted or confidently empty database records that no
+snapshot was saved.
 
 `exportDdevDatabase` streams binary stdout directly from `ddev export-db --gzip` to a held file
 descriptor. It validates the entire gzip stream with bounded memory, records compressed size and
 SHA-256, fsyncs, then renames a `.partial` file to the immutable dump. Inventory is reserved before
 writing bytes, so interrupted exports remain discoverable. Export participates in the runner's
-lifecycle flock. Saving never cold-boots a runtime: an unavailable runtime opens a Retry/finish
+lifecycle flock. Saving never cold-boots a runtime: an unavailable runtime opens a retry/finish
 without saving form, avoiding export of an older recovery database.
 
 Short metadata operations take a repository advisory transaction lock. Publishing also locks the
 owned step before checking the task epoch, matching Retry/Stop ordering. The pointer advances only
-if its revision still equals the task's baseline. A conflict opens a normal step form showing the
-task that last saved and the save timestamp. Keeping the current database is the default and
-deletes this task's candidate. Replacing selects the whole candidate database; databases are not
-merged. Approval carries the revision shown in the form, so a further save while it is open asks
-again instead of overwriting an unseen version. Duplicate delivery in the same epoch preserves
-the decision; an upstream retry in a new epoch permits a fresh export.
+if its revision still equals the revision explicitly approved by the user. Every pending DDEV
+save opens a normal step form, even when no other task saved meanwhile. Step metadata
+`alwaysWaitForUser` disables every automatic submission path, including pre-answers. The New Task
+form has no save setting, and historical `save_enabled = false` rows do not bypass this choice.
+Users choose **Save database for the next task** or **Finish without saving** before any export.
+If the project revision moved since task creation, the form instead offers **Save and overwrite**,
+showing the task that last saved and its timestamp. Declining deletes any candidate from a prior
+attempt. Overwriting selects the whole database; databases are not merged.
+
+Approval carries the revision shown in the form. A further save while it is open asks again
+before exporting, and a change during export reopens the form with the newest revision. Duplicate
+delivery in the same epoch preserves the decision; an upstream retry in a new epoch permits a
+fresh export. Restoration is a separate step for both saved snapshots and uploaded dumps, before
+migrations. Already imported saved snapshots and consumed uploads are skipped on retry.
 
 ## Cleanup
 

@@ -30,17 +30,18 @@ describe('database save decisions', () => {
     });
     expect(form.description).toContain('task-A');
     expect(form.description).toContain('deletes');
+    expect(saveDatabaseStep.metadata.alwaysWaitForUser).toBe(true);
   });
   it('requires a decision for an export failure before teardown', () => {
     const form = databaseSaveForm(view({ state: { ...view().state, exportError: 'disk full' } }))!;
     expect(formSchemaSchema.safeParse(form).success).toBe(true);
-    expect(form.description).toBe('disk full');
-    expect(form.autoSubmit).not.toBe(true);
-    expect(form.fields[0]).toMatchObject({
-      options: [
-        { value: 'retry', label: expect.any(String) },
+    expect(form.description).toContain('disk full');
+    expect(form.autoSubmit).toBe(false);
+    expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
+      options: expect.arrayContaining([
+        { value: 'replace:2', label: expect.any(String) },
         { value: 'discard', label: expect.any(String) },
-      ],
+      ]),
     });
   });
   it('renders the conflict after detect output has been persisted as JSON', () => {
@@ -49,8 +50,14 @@ describe('database save decisions', () => {
     expect(formSchemaSchema.safeParse(form).success).toBe(true);
     expect(form.description).toContain('2026-10-05T00:00:00.000Z');
   });
-  it('does not prompt when the revision is unchanged or a decision already committed', () => {
-    expect(databaseSaveForm(view({ revision: 1 }))).toBeNull();
+  it('always prompts before export even when there is no conflict or candidate', () => {
+    const form = databaseSaveForm(view({ revision: 1, candidate: null }))!;
+    expect(form.autoSubmit).toBe(false);
+    expect(form.fields.find((f) => f.id === 'action')).toMatchObject({
+      options: expect.arrayContaining([{ value: 'save:1', label: expect.any(String) }]),
+    });
+  });
+  it('preserves a decision already committed', () => {
     expect(databaseSaveForm(view({ state: { ...view().state, outcome: 'saved' } }))).toBeNull();
     expect(databaseSaveForm(view({ state: { ...view().state, outcome: 'discarded' } }))).toBeNull();
     expect(saveDatabaseStep.metadata.index).toBeLessThan(14);

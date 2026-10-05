@@ -93,8 +93,6 @@ export const createTaskRequestSchema = z
     dbUploadId: z.string().uuid().optional(),
     /** Exact saved database chosen at task creation; mutually exclusive with an upload. */
     databaseSnapshotId: z.string().uuid().optional(),
-    /** Export the DDEV primary database before workspace/runtime cleanup. */
-    saveDatabase: z.boolean().optional(),
     /** Phase 3.5: run an AI code-simplification pass (plus a conditional fixup
      *  pass) over the implementation before verification. Workflow tasks only. */
     simplifyCode: z.boolean().optional(),

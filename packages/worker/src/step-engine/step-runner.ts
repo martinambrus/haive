@@ -2473,6 +2473,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
         // user can inspect and edit. Cleared on park below (one-shot).
         !current.pauseFormOnRetry &&
+        !meta.alwaysWaitForUser &&
         (autoContinue || persistedSchema.autoSubmit === true) &&
         (persistedSchema.submitAction ?? 'submit') === 'submit'
       ) {
