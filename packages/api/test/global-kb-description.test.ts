@@ -142,6 +142,25 @@ describe('POST /entries and the description', () => {
 });
 
 describe('PATCH /entries/:id and the description', () => {
+  it('saves a long edited markdown body intact and queues its re-embedding', async () => {
+    const body = `## Corrected rule\n\n${'Keep **all** of this content.\n\n'.repeat(1000)}`;
+    const res = await send('PATCH', `/entries/${ENTRY}`, { body });
+
+    expect(res.status).toBe(200);
+    expect(stored().body).toBe(body);
+    expect(stored().description).toBe('Before.');
+    expect(stored().status).toBe('active');
+    expect(stored().embedStatus).toBe('pending');
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts exactly the description cap without shortening it', async () => {
+    const description = 'd'.repeat(GLOBAL_KB_DESCRIPTION_MAX);
+    const res = await send('PATCH', `/entries/${ENTRY}`, { description });
+    expect(res.status).toBe(200);
+    expect(stored().description).toBe(description);
+  });
+
   it('changes only the description, and neither marks the entry for re-embedding nor syncs it', async () => {
     const res = await send('PATCH', `/entries/${ENTRY}`, { description: ' Escape\nlabels. ' });
 
@@ -203,6 +222,43 @@ describe('POST /enrich and the description', () => {
   };
   const skeleton = () => fake.rows(globalKbEntries).find((r) => r.status === 'skeleton')!;
   const task = () => fake.rows(schema.tasks)[0]!;
+
+  it('keeps capped author fields and long notes/scope/domain values intact', async () => {
+    const title = 't'.repeat(300);
+    const description = 'd'.repeat(GLOBAL_KB_DESCRIPTION_MAX);
+    const seedText = 'Notes to enrich.\n'.repeat(1000);
+    const tag = 't'.repeat(1000);
+    const domain = 'd'.repeat(1000);
+    const res = await send('POST', '/enrich', {
+      ...request,
+      title,
+      description,
+      seedText,
+      facets: { tags: [tag] },
+      egress: { mode: 'allowlist', domains: [domain] },
+    });
+    expect(res.status).toBe(201);
+    expect(skeleton().title).toBe(title);
+    expect(skeleton().description).toBe(description);
+    expect(skeleton().seedText).toBe(seedText);
+    expect(skeleton().facets).toEqual({ tags: [tag] });
+    expect(task().description).toBe(seedText);
+    expect((task().metadata as Record<string, unknown>).egress).toEqual({
+      mode: 'allowlist',
+      domains: [domain],
+      ips: [],
+    });
+  });
+
+  it.each([{ title: 't'.repeat(301) }, { namespace: 'n'.repeat(121) }])(
+    'refuses over-limit author fields before creating anything: %j',
+    async (fields) => {
+      const res = await send('POST', '/enrich', { ...request, ...fields });
+      expect(res.status).toBe(400);
+      expect(fake.rows(schema.tasks)).toHaveLength(0);
+      expect(fake.rows(globalKbEntries)).toHaveLength(1);
+    },
+  );
 
   it('keeps an author-stated description on the skeleton and in the task, beside the stated scope', async () => {
     const res = await send('POST', '/enrich', {

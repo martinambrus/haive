@@ -84,12 +84,14 @@ export function MarkdownEditor({
   placeholder = '',
   minHeight = '16rem',
   breaks = false,
+  disabled = false,
 }: {
   value: string;
   onChange: (markdown: string) => void;
   className?: string;
   placeholder?: string;
   minHeight?: string;
+  disabled?: boolean;
   /** Mirror MarkdownView's own line-break policy: a body that does not look
    *  like markdown renders soft newlines as <br>, so the editor must serialize
    *  them as hard breaks or one edit would collapse its line structure. */
@@ -101,6 +103,7 @@ export function MarkdownEditor({
 
   const editor = useEditor({
     content: value,
+    editable: !disabled,
     extensions: markdownEditorExtensions({ placeholder, breaks }),
     autofocus: 'end',
     immediatelyRender: false,
@@ -121,6 +124,10 @@ export function MarkdownEditor({
     lastEmitted.current = value;
     editor.commands.setContent(value, { emitUpdate: false });
   }, [value, editor]);
+
+  useEffect(() => {
+    editor?.setEditable(!disabled, false);
+  }, [disabled, editor]);
 
   const state = useEditorState({
     editor,
@@ -150,7 +157,7 @@ export function MarkdownEditor({
   const chain = () => editor.chain().focus();
 
   return (
-    <div className="flex flex-col gap-2">
+    <fieldset disabled={disabled} className="flex min-w-0 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-1" role="toolbar" aria-label="Formatting">
         <TBtn label="Bold" active={state.bold} onClick={() => chain().toggleBold().run()}>
           <Bold className="h-3.5 w-3.5" />
@@ -266,6 +273,6 @@ export function MarkdownEditor({
           className,
         )}
       />
-    </div>
+    </fieldset>
   );
 }
