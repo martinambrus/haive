@@ -1893,7 +1893,7 @@ export default function TaskDetailPage() {
 
       {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
           repeated here — this one only ever means "you paused this task". */}
-      {task.pausedAt && (
+      {!taskFinished && task.pausedAt && (
         <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           <span className="font-semibold">Paused</span> since{' '}
           {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
