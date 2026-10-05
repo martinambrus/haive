@@ -61,7 +61,9 @@ export function upstreamKind(
 ): UpstreamKind | null {
   if (!file) return null;
   // Reviewers sometimes supply an absolute sandbox path instead of a repository-relative one.
-  const workspaceRoot = policy?.workspaceRoots?.find((root) => file.startsWith(`${root}/`));
+  const workspaceRoot = policy?.workspaceRoots
+    ?.filter((root) => file.startsWith(`${root}/`))
+    .sort((a, b) => b.length - a.length)[0];
   const rel = relativePath(
     workspaceRoot ? file.slice(workspaceRoot.length + 1) : file.replace(/^\/haive\/workdir\//, ''),
     true,
@@ -118,7 +120,11 @@ export async function loadDependencyPolicy(
   workspace: string,
 ): Promise<DependencyPolicy> {
   const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-  const baseBranch = (previous?.output as { baseBranch?: string } | null)?.baseBranch;
+  const worktree = previous?.output as {
+    baseBranch?: string;
+    sandboxWorktreePath?: string;
+  } | null;
+  const baseBranch = worktree?.baseBranch;
   const base = baseBranch
     ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch])
     : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD']);
@@ -137,11 +143,19 @@ export async function loadDependencyPolicy(
   // Removing the framework from the working manifest cannot remove its protection.
   for (const raw of [baselineComposer.code === 0 ? baselineComposer.stdout : null, composer]) {
     if (!raw) continue;
-    const manifest = JSON.parse(raw) as {
+    let manifest: {
       type?: string;
       require?: Record<string, unknown>;
       extra?: { 'drupal-scaffold'?: { locations?: { 'web-root'?: string } } };
     };
+    try {
+      manifest = JSON.parse(raw) as typeof manifest;
+    } catch {
+      // A task may be repairing a broken manifest. The other copy can still establish
+      // framework protection, so parse baseline and current evidence independently.
+      continue;
+    }
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) continue;
     drupal ||=
       !['drupal-module', 'drupal-theme', 'drupal-profile'].includes(manifest.type ?? '') &&
       Object.keys(manifest.require ?? {}).some((name) => name.startsWith('drupal/core'));
@@ -170,7 +184,7 @@ export async function loadDependencyPolicy(
   drupal ||= drupal7;
   return {
     baselineRef: base.stdout.trim(),
-    workspaceRoots: [workspace, ctx.sandboxWorkdir]
+    workspaceRoots: [workspace, worktree?.sandboxWorktreePath, ctx.sandboxWorkdir]
       .filter((root): root is string => !!root)
       .map((root) => root.replace(/\/$/, '')),
     drupal,

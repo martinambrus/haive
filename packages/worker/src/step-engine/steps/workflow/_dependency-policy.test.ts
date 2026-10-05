@@ -27,13 +27,14 @@ async function file(root: string, rel: string, body = 'original\n') {
   await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
   await writeFile(path.join(root, rel), body);
 }
-function context(baseBranch?: string): StepContext {
+function context(baseBranch?: string, sandboxWorktreePath?: string): StepContext {
   const query: Record<string, unknown> = {};
   Object.assign(query, {
     from: () => query,
     where: () => query,
     orderBy: () => query,
-    limit: async () => (baseBranch ? [{ output: { baseBranch } }] : []),
+    limit: async () =>
+      baseBranch || sandboxWorktreePath ? [{ output: { baseBranch, sandboxWorktreePath } }] : [],
   });
   return { taskId: 'task', db: { select: () => query } } as unknown as StepContext;
 }
@@ -178,6 +179,61 @@ describe('dependency ownership', () => {
     await file(root, 'web/modules/contrib/admin_toolbar/admin_toolbar.module', 'owned change\n');
     await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
   });
+
+  it('normalizes absolute findings against the actual sandbox worktree using the longest root', async () => {
+    const root = await repository(['web/modules/contrib/admin_toolbar']);
+    const sandboxRoot = '/haive/workdir/.haive/worktrees/feature';
+    const ctx = { ...context(undefined, sandboxRoot), sandboxWorkdir: '/haive/workdir' };
+    const policy = await loadDependencyPolicy(ctx, root);
+    expect(policy.workspaceRoots).toContain(sandboxRoot);
+    // Deliberately place the containing mount first to verify specificity, not array order.
+    policy.workspaceRoots = ['/haive/workdir', sandboxRoot, root];
+    expect(upstreamKind(`${sandboxRoot}/web/core/lib/Drupal.php:140:2`, policy)).toBe(
+      'infrastructure',
+    );
+    expect(upstreamKind(`${root}/web/core/lib/Drupal.php`, policy)).toBe('infrastructure');
+    expect(
+      upstreamKind(`${sandboxRoot}/web/modules/contrib/admin_toolbar/a.php`, policy),
+    ).toBeNull();
+  });
+
+  it.each(['{ malformed', 'null'])(
+    'allows repairing a broken baseline manifest (%s) while protecting the corrected framework',
+    async (broken) => {
+      const root = await repository();
+      await file(root, 'composer.json', broken);
+      await git(root, ['add', 'composer.json']);
+      await git(root, ['commit', '-qm', 'broken manifest']);
+      await file(
+        root,
+        'composer.json',
+        JSON.stringify({
+          require: { 'drupal/core-recommended': '^11' },
+          extra: { 'drupal-scaffold': { locations: { 'web-root': 'custom/site' } } },
+        }),
+      );
+      const policy = await loadDependencyPolicy(context(), root);
+      expect(policy.drupal).toBe(true);
+      expect(upstreamKind('custom/site/core/lib/Drupal.php', policy)).toBe('infrastructure');
+      await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
+      await file(root, 'custom/site/core/lib/Drupal.php', 'rewritten\n');
+      await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
+        'Refusing to commit',
+      );
+    },
+  );
+
+  it.each(['{ malformed', 'null'])(
+    'keeps baseline framework protection with a broken current manifest (%s)',
+    async (broken) => {
+      const root = await repository();
+      await file(root, 'composer.json', broken);
+      await file(root, 'web/core/lib/Framework.php', 'rewritten\n');
+      await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow(
+        'Refusing to commit',
+      );
+    },
+  );
 
   it.each(['unstaged', 'staged', 'deleted', 'renamed', 'new'])(
     'refuses upstream source at commit time (%s)',

@@ -9,6 +9,9 @@ a declaration introduced by the agent. Package manifests, lockfiles, patch files
 integration code remain valid commit artifacts. This guard checks Git deliverables; ignored
 installed source and ad-hoc scripts are constrained by the agent rules and review, rather than
 being inspected by this path check.
+Baseline and working Composer manifests are parsed independently, so a repaired manifest can
+establish protection even when the committed copy is malformed; valid baseline evidence still
+protects infrastructure when the current copy is broken or removes the framework declaration.
 
 `10-gate-3-commit` generates its message with a pre-form LLM invocation. Detection remains
 deterministic: the worker builds the commit-diff snapshot from the same staged, unstaged and

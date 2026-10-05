@@ -14,8 +14,10 @@ task-branch declaration cannot claim ownership. Core cannot be exempted. Other f
 layouts remain governed by the prompt rules; this classifier is not a sandbox write filter.
 
 07b and 08c assign upstream classification on the host, independently of the reviewer's
-`in_scope` claim. Upstream findings remain visible, marked for a user decision at gate 2;
-they never become automatic repair assignments or refuter work. Validation stops its local
+`in_scope` claim. Upstream findings remain visible, marked for a user decision at gate 2.
+Absolute finding paths are resolved relative to the actual sandbox worktree, using the most
+specific known workspace root rather than its containing repository mount.
+Upstream findings never become automatic repair assignments or refuter work. Validation stops its local
 fix loop when upstream findings are present. Medium and low advisories never piggyback on a
 high or critical finding's automatic repair diagnosis. Review dimensions assess task behavior
 and existing project contracts; they do not mandate new translation or other subsystems.
