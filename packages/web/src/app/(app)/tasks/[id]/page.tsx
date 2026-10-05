@@ -4274,6 +4274,9 @@ function StepCardImpl({
       )}
 
       {step.stepId === '10-gate-3-commit' &&
+        // The form is built after the pre-form LLM finishes. Keep the diff hidden until
+        // then so mounting the terminal above it does not move an already visible viewer.
+        (schema !== null || step.status === 'done' || step.status === 'skipped') &&
         (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
           <CommitDiffViewer
             taskId={taskId}
