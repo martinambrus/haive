@@ -95,6 +95,20 @@ describe('credential candidates', () => {
     expect(JSON.stringify(hits)).not.toContain('Synthetic');
   });
 
+  it('recognizes bracketed string and symbol credential assignments', () => {
+    const text = [
+      "$config['password'] = 'hunter2';",
+      "settings[:api_key] = 'real-key'",
+      'settings["AUTH_TOKEN_PRODUCTION"] = "short";',
+      'settings[:secret] = short',
+      'settings["tokenizer"] = "bert-base";',
+      '$config["password"] = process.env.PASSWORD;',
+    ].join('\n');
+    expect(scanTextForCredentials('vendor/config', text).map((hit) => hit.line)).toEqual([
+      1, 2, 3, 4,
+    ]);
+  });
+
   it('does not discard short named credentials before the model can judge them', () => {
     const hits = scanTextForCredentials(
       'vendor/config',
