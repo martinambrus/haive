@@ -1,5 +1,6 @@
 import { readFileNoFollow } from '@haive/shared/fs-safe';
-import { gitExec } from '../../../repo/git-exec.js';
+import { spawn } from 'node:child_process';
+import { GIT_BASE_ENV, hardenGitArgs } from '../../../repo/git-exec.js';
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 
 /** Location only: neither the value nor its surrounding source may enter detect_output. */
@@ -18,8 +19,7 @@ export interface CredentialScan {
 }
 
 const READ_CAP = 512 * 1024;
-const INVENTORY_BYTES = 4 * 1024 * 1024;
-const INVENTORY_FILES = 100_000;
+const PATH_BYTES = 4096;
 // Classify a captured whole key separately to avoid greedy keyword-prefix/suffix
 // patterns backtracking quadratically on long, repeated identifiers.
 const CREDENTIAL_NAME = /password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key/i;
@@ -143,6 +143,63 @@ class BoundedCandidates {
   }
 }
 
+/** Stream Git's sorted index with backpressure; retain only one unfinished pathname.
+ * Filesystem paths that cannot be represented by fs-safe's UTF-8 string interface
+ * are counted as unreadable instead of decoding to a different file's name. */
+async function* trackedPaths(repoPath: string, checkCancelled: () => void) {
+  const child = spawn('git', hardenGitArgs(['ls-files', '-z']), {
+    cwd: repoPath,
+    env: { ...process.env, ...GIT_BASE_ENV },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const exited = new Promise<{ code?: number | null; error?: Error }>((resolve) => {
+    child.once('error', (error) => resolve({ error }));
+    child.once('close', (code) => resolve({ code }));
+  });
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  let pending = Buffer.alloc(0);
+  let oversized = false;
+  let lastPath: string | undefined;
+  try {
+    for await (const chunk of child.stdout) {
+      const data = chunk as Buffer;
+      let start = 0;
+      while (start < data.length) {
+        checkCancelled();
+        const end = data.indexOf(0, start);
+        const part = data.subarray(start, end < 0 ? data.length : end);
+        if (!oversized) {
+          if (pending.length + part.length > PATH_BYTES) {
+            pending = Buffer.alloc(0);
+            oversized = true;
+          } else pending = Buffer.concat([pending, part]);
+        }
+        if (end < 0) break;
+        let rel: string | null = null;
+        if (!oversized) {
+          try {
+            rel = decoder.decode(pending);
+          } catch {
+            /* unsupported pathname bytes */
+          }
+        }
+        if (rel === null || (rel.length > 0 && rel !== lastPath)) yield rel;
+        lastPath = rel ?? undefined;
+        pending = Buffer.alloc(0);
+        oversized = false;
+        start = end + 1;
+      }
+    }
+    const result = await exited;
+    if (result.error) throw result.error;
+    if (result.code !== 0 || pending.length || oversized)
+      throw new Error('Could not stream the tracked credential inventory');
+  } finally {
+    if (child.exitCode === null && !child.killed) child.kill('SIGKILL');
+    await exited;
+  }
+}
+
 /** Git's tracked inventory, NOT the RAG collector: build/vendor/core/tests and ignored-but-
  * tracked files all count. Reads are bounded and refuse links in every path component. */
 export async function scanForCredentials(
@@ -153,53 +210,47 @@ export async function scanForCredentials(
   if (!Number.isSafeInteger(cap) || cap < 0)
     throw new RangeError('Invalid credential candidate cap');
   checkCancelled();
-  // Bound Git's captured output before parsing, then stop before allocating an
-  // unbounded split array or set. Exceeding either limit makes this aid unavailable;
-  // the agent's independent whole-tree search still runs.
-  const { stdout } = await gitExec(['ls-files', '-z'], {
-    cwd: repoPath,
-    maxBuffer: INVENTORY_BYTES,
-  });
-  const unique = new Set<string>();
-  let entries = 0;
-  let start = 0;
-  for (let end = stdout.indexOf('\0'); end !== -1; end = stdout.indexOf('\0', start)) {
-    checkCancelled();
-    if (end > start) {
-      if (++entries > INVENTORY_FILES) throw new RangeError('Credential inventory file limit');
-      unique.add(stdout.slice(start, end));
-    }
-    start = end + 1;
-  }
-  const files = [...unique].sort();
   const retained = new BoundedCandidates(cap);
   let total = 0;
-  let next = 0;
+  let files = 0;
   let unreadable = 0;
   let truncated = 0;
-  await Promise.all(
-    Array.from({ length: 16 }, async () => {
-      while (next < files.length) {
-        checkCancelled();
-        const index = next++;
-        const rel = files[index]!;
-        // Unusable prompt locations must not crowd valid locations out of the cap.
-        // Still inspect/count their matches so internal omissions remain exact.
-        const usablePath = isSingleLine(rel) && survivesFence(rel);
-        const read = await readFileNoFollow(repoPath, rel, { maxBytes: READ_CAP });
-        if (read === null) {
-          unreadable++;
-          continue;
-        }
-        if (read.truncated) truncated++;
-        let ordinal = 0;
-        visitCredentials(read.data.toString('utf8'), (line, kind) => {
-          total++;
-          if (usablePath) retained.add(rel, index, ordinal++, line, kind);
-        });
+  const batch: Promise<void>[] = [];
+  async function inspect(rel: string | null, index: number) {
+    if (rel === null) {
+      unreadable++;
+      return;
+    }
+    // Unusable prompt locations must not crowd valid locations out of the cap.
+    // Still inspect/count their matches so internal omissions remain exact.
+    const usablePath = isSingleLine(rel) && survivesFence(rel);
+    const read = await readFileNoFollow(repoPath, rel, { maxBytes: READ_CAP });
+    if (read === null) {
+      unreadable++;
+      return;
+    }
+    if (read.truncated) truncated++;
+    let ordinal = 0;
+    visitCredentials(read.data.toString('utf8'), (line, kind) => {
+      total++;
+      if (usablePath) retained.add(rel, index, ordinal++, line, kind);
+    });
+  }
+  try {
+    for await (const rel of trackedPaths(repoPath, checkCancelled)) {
+      const read = inspect(rel, files++);
+      // Observe immediately; all readers settle before propagating a batch failure.
+      void read.catch(() => {});
+      batch.push(read);
+      if (batch.length === 16) {
+        await Promise.all(batch);
+        batch.length = 0;
       }
-    }),
-  );
+    }
+    await Promise.all(batch);
+  } finally {
+    await Promise.allSettled(batch);
+  }
   const hits = retained.hits();
-  return { hits, omitted: total - hits.length, files: files.length, unreadable, truncated };
+  return { hits, omitted: total - hits.length, files, unreadable, truncated };
 }

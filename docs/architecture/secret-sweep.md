@@ -24,10 +24,12 @@ locations. No depth or extension filter narrows the tracked inventory. Binary
 content is ignored when it contains NUL. Each read stops at 512 KiB; unreadable
 files and truncated reads are counted in internal scan metadata. Sixteen concurrent readers
 bound in-flight allocations. Cancellation is checked between files.
-Git output is limited to 4 MiB, and at most 100,000 NUL-delimited entries are
-parsed before sorting. Parsing checks cancellation and never splits the whole
-output into an unbounded array. Exceeding either inventory limit makes the
-deterministic aid unavailable internally; the agent's whole-tree search still runs.
+Git's sorted NUL-delimited index is streamed with backpressure from batches of
+sixteen reads. No whole-inventory array or set is retained, and large inventories
+continue scanning rather than disabling this aid. One unfinished pathname is
+bounded to 4096 bytes; longer paths and non-UTF-8 names that fs-safe's string API
+cannot address are counted internally as unreadable. Fatal UTF-8 decoding prevents
+such a name from opening a different file through replacement characters.
 Candidate collection also stays bounded: a max heap retains at most the requested
 cap while each file is scanned. Matches beyond it increment the omission count
 without allocating retained candidate records; regex matches are visited lazily.
@@ -35,7 +37,7 @@ Paths that cannot survive the prompt's single-line and fence checks are excluded
 before ranking, so unusable locations cannot crowd out valid ones. Their matches
 still contribute to the internal omission count. Persisted locations are filtered
 again at prompt-build time.
-Rank by match ordinal and sorted file index preserves breadth before depth even
+Rank by match ordinal and Git's sorted file index preserves breadth before depth even
 when concurrent reads finish in a different order. A repository containing millions
 of short assignments cannot make the worker retain millions of candidate objects.
 

@@ -248,11 +248,11 @@ describe('tracked credential inventory', () => {
   }, 45_000);
 
   it.each([
-    { count: 100_001, prefix: 'vendor/', error: 'Credential inventory file limit' },
-    { count: 5_000, prefix: `vendor/${'a/'.repeat(450)}`, error: 'maxBuffer' },
+    { count: 100_001, prefix: 'vendor/' },
+    { count: 5_000, prefix: `vendor/${'a/'.repeat(450)}` },
   ])(
-    'bounds inventory allocation under a 64 MiB heap (%j)',
-    async ({ count, prefix, error }) => {
+    'scans oversized inventories under a 64 MiB heap (%j)',
+    async ({ count, prefix }) => {
       const root = await repo();
       const blob = await gitRun(root, ['hash-object', '-w', '--stdin'], undefined, {
         input: Buffer.from('token=a\n'),
@@ -262,10 +262,11 @@ describe('tracked credential inventory', () => {
         Array.from(
           { length: count },
           (_, i) => `100644 ${blob.stdout.trim()}\t${prefix}file-${i}.env\n`,
-        ).join(''),
+        ).join('') + `100644 ${blob.stdout.trim()}\tz.env\n`,
       );
       const index = await gitRun(root, ['update-index', '--index-info'], undefined, { input });
       expect(index.code).toBe(0);
+      await writeFile(path.join(root, 'z.env'), 'token=a\n');
       const moduleUrl = new URL('./_credential-scan.ts', import.meta.url).href;
       const { stdout } = await promisify(execFile)(
         process.execPath,
@@ -276,15 +277,47 @@ describe('tracked credential inventory', () => {
           '--input-type=module',
           '--eval',
           `import { scanForCredentials } from ${JSON.stringify(moduleUrl)};
-         try { await scanForCredentials(${JSON.stringify(root)}, 200); }
-         catch (err) { process.stdout.write(err.message); }`,
+         const scan = await scanForCredentials(${JSON.stringify(root)}, 200);
+         process.stdout.write(JSON.stringify(scan));`,
         ],
-        { timeout: 35_000 },
+        { timeout: 75_000 },
       );
-      expect(stdout).toContain(error);
+      const scan = JSON.parse(stdout) as Awaited<ReturnType<typeof scanForCredentials>>;
+      expect(scan.files).toBe(count + 1);
+      expect(scan.unreadable).toBe(count);
+      expect(scan.hits).toEqual([{ file: 'z.env', line: 1, kind: 'credential assignment' }]);
     },
-    45_000,
+    90_000,
   );
+
+  it('does not read another file through a non-UTF-8 path replacement', async () => {
+    const root = await repo();
+    const rawPath = Buffer.concat([Buffer.from(`${root}/bad-`), Buffer.from([0xff])]);
+    await writeFile(rawPath, 'token=a\n');
+    await writeFile(path.join(root, 'bad-\ufffd'), 'nothing here\n');
+    await writeFile(path.join(root, 'utf8-\u00e9.env'), 'token=a\n');
+    await writeFile(path.join(root, '\ufeffbom.env'), 'token=a\n');
+    await gitExec(['add', '--all'], { cwd: root });
+    const scan = await scanForCredentials(root, 10);
+    expect(scan.files).toBe(4);
+    expect(scan.unreadable).toBe(1);
+    expect(scan.hits).toEqual([
+      { file: 'utf8-\u00e9.env', line: 1, kind: 'credential assignment' },
+      { file: '\ufeffbom.env', line: 1, kind: 'credential assignment' },
+    ]);
+  });
+
+  it('closes the streamed inventory when cancelled during parsing', async () => {
+    const root = await repo();
+    for (let i = 0; i < 40; i++) await writeFile(path.join(root, `file-${i}.env`), 'token=a\n');
+    await gitExec(['add', '--all'], { cwd: root });
+    let checks = 0;
+    await expect(
+      scanForCredentials(root, 10, () => {
+        if (++checks === 20) throw new Error('cancelled during inventory');
+      }),
+    ).rejects.toThrow('cancelled during inventory');
+  });
 
   it('propagates cancellation rather than completing a partial scan', async () => {
     const root = await repo();
