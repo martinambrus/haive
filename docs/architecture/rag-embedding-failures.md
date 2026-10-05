@@ -39,7 +39,10 @@ explicit `[]` (include everything). `01g-rag-source-selection` (index 1.95) also
 every configured `02-pre-rag-sync` on full, tasklist, and quick-fix paths. It scans the main
 checkout, so files installed or edited outside the task worktree are visible before pre-sync;
 11b1 scans the same worktree that 11c indexes. Onboarding already presents 09_7 immediately
-before population. Both workflow pickers park even under auto-continue, since reviewing
+before population. The shared scope tree collapses the internal `.haive` directory without
+enumerating its task worktrees, which ingestion always ignores. Concurrent task copies
+therefore do not multiply the displayed source counts or scan cost.
+Both workflow pickers park even under auto-continue, since reviewing
 new project folders is a current decision rather than a reusable past answer. Saving keeps
 exclusions for directories absent from the displayed tree; visible directories can be
 explicitly re-enabled. Managed knowledge remains immune to scope exclusions.

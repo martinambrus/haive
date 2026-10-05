@@ -48,7 +48,7 @@ const { workflowRagSourceSelectionStep } =
 const { preRagSourceSelectionStep } =
   await import('../src/step-engine/steps/workflow/01g-rag-source-selection.js');
 const { preRagSyncStep } = await import('../src/step-engine/steps/workflow/02-pre-rag-sync.js');
-const { collectDefaults, readComposerJson, readGitignore } =
+const { collectAllPaths, collectDefaults, readComposerJson, readGitignore } =
   await import('../src/step-engine/steps/onboarding/_scope.js');
 const { workspaceAnchor } = await import('../src/repo/worktree-paths.js');
 const { resolveRagSyncPrefs, runRagIndexSync } =
@@ -908,6 +908,17 @@ describe('workflow RAG source scope before each ingestion', () => {
     expect(defaults).not.toContain('scratch');
     await saveScope(detected, [...defaults, 'scratch']);
     expect(repo.scopeExcludeGlobs).toEqual(['vendor']);
+  });
+
+  it('pre-sync does not expose or count this task or other active worktrees', async () => {
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    await writeSource('src/main.ts', undefined, root);
+    await writeSource('.haive/worktrees/other/src/duplicate.ts', undefined, root);
+    const detected = await preRagSourceSelectionStep.detect!(ctx);
+    expect(detected.totalCodeFiles).toBe(1);
+    expect(collectAllPaths(detected.tree).some((rel) => rel.startsWith('.haive/'))).toBe(false);
+    expect(detected.defaultExcludeGlobs).toContain('.haive');
+    expect((await preRagSyncStep.detect!(ctx)).codeFileCount).toBe(1);
   });
 
   it('uses saved scope over stale onboarding path restrictions while retaining the selected extensions', async () => {

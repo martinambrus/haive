@@ -41,6 +41,13 @@ describe('buildScopeTree', () => {
     // Huge dir that must be SHOWN but NOT recursed into.
     await mkdir(path.join(root, 'node_modules', 'foo', 'deep'), { recursive: true });
     await writeFile(path.join(root, 'node_modules', 'bar.js'), '');
+    for (const task of ['current', 'other-active']) {
+      await mkdir(path.join(root, '.haive/worktrees', task, 'src'), { recursive: true });
+      await writeFile(
+        path.join(root, '.haive/worktrees', task, 'src', 'duplicate.ts'),
+        'export {};',
+      );
+    }
     // A single root-level file — surfaces as the root-files leaf, not a dir node.
     await writeFile(path.join(root, 'README.md'), '# readme');
   });
@@ -95,6 +102,15 @@ describe('buildScopeTree', () => {
     expect(NO_RECURSE_DIRS.has('node_modules')).toBe(true);
     // present, but no children materialised (foo/deep must NOT be walked)
     expect(nm?.children).toBeUndefined();
+  });
+
+  it('does not enumerate or count task worktrees beneath the internal .haive directory', async () => {
+    const tree = await buildScopeTree(root, { extensions: new Set(['.ts']) });
+    const internal = find(subdirs(tree), '.haive');
+    expect(internal).toEqual({ path: '.haive', label: '.haive', fileCount: 0 });
+    const count = (nodes: TreeNode[]): number =>
+      nodes.reduce((sum, node) => sum + (node.fileCount ?? 0) + count(node.children ?? []), 0);
+    expect(count(tree)).toBe(2); // Only src/index.ts and src/lib/util.ts.
   });
 
   it('recurses ordinary dirs and counts files by extension', async () => {
