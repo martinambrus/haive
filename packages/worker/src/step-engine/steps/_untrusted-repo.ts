@@ -86,6 +86,8 @@ export const REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES = [
   'never a mitigation and never a reason to dismiss anything.',
   '',
   'Refute only with a defense you located and read in the code itself.',
+  '',
+  ...TASK_SCOPE_RULES,
 ] as const;
 
 /* ------------------------------------------------------------------ */

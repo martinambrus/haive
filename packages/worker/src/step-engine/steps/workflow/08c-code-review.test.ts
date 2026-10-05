@@ -1,4 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('./_dependency-policy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_dependency-policy.js')>()),
+  loadReviewDependencyPolicy: vi.fn(
+    async (_ctx, detected) =>
+      detected.dependencyPolicy ?? {
+        drupal: true,
+        drupalRoots: ['', 'web', 'docroot', 'public', 'html'],
+        ownedPaths: [],
+      },
+  ),
+}));
+vi.mock('./_task-meta.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_task-meta.js')>()),
+  loadTaskMeta: vi.fn(async () => ({
+    title: 'Install one module',
+    description: 'Preserve existing permissions',
+  })),
+}));
 import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
 import {
   parsePeerReview,
@@ -11,6 +30,7 @@ import {
   isRefuted,
   refuterTitle,
   codeReviewStep,
+  buildRefutePrompt,
 } from './08c-code-review.js';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { buildRecurringNote } from './08c-code-review.js';
@@ -66,6 +86,24 @@ function runReview(
 }
 
 describe('refuterTitle', () => {
+  it('uses the original request and mandatory task boundary when disproving a finding', () => {
+    const prompt = buildRefutePrompt(
+      {
+        spec: 'Change permissions',
+        taskBrief: 'Install one module; preserve existing permissions',
+      } as never,
+      {
+        reviewerId: 'peer-reviewer',
+        path: 'src/a.ts',
+        severity: 'high',
+        issue: 'Unauthorized permission change',
+      } as never,
+      null,
+    );
+    expect(prompt).toContain('=== Original user request (scope constraints) ===');
+    expect(prompt).toContain('Install one module; preserve existing permissions');
+    expect(prompt).toContain('TASK AND OWNERSHIP BOUNDARY');
+  });
   const f = {
     severity: 'high' as const,
     path: 'src/auth.ts',

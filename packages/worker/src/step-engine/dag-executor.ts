@@ -51,9 +51,11 @@ import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
   resolveSpecView,
+  briefFromTaskMeta,
   SPEC_ARTIFACT_RELPATH,
   type SpecView,
 } from './steps/workflow/_spec-artifact.js';
+import { loadTaskMeta } from './steps/workflow/_task-meta.js';
 import {
   isFatalProviderFailure,
   isCliTimeoutFailure,
@@ -288,8 +290,10 @@ function coderContext(
   specText: string,
   condensed: boolean,
   planImpact: string,
+  taskBrief: string,
 ): DagCoderContext {
   return {
+    taskBrief,
     planImpact,
     issueKey: issue.issueKey,
     title: issue.title,
@@ -1067,8 +1071,10 @@ async function spawnReviewAgent(
   );
   // Built as the level coder's prompt is: every agent this spawns works in the tree those coders
   // wrote, so it is told what is attached and what earlier agents already established about it.
+  const meta = await loadTaskMeta(ra.db, ra.taskId);
+  const taskBoundary = `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n`;
   const fullPrompt = await augmentPromptWithTerseness(
-    await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + prompt),
+    await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + taskBoundary + prompt),
   );
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
@@ -1821,7 +1827,11 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     .select()
     .from(schema.taskDagIssues)
     .where(eq(schema.taskDagIssues.dagPlanId, ea.plan.id))) as DagIssueRow[];
-  const prompt = await augmentPromptWithTerseness(replannerPrompt(ea.plan, failed, all));
+  const meta = await loadTaskMeta(ea.db, ea.taskId);
+  const prompt = await augmentPromptWithTerseness(
+    `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n` +
+      replannerPrompt(ea.plan, failed, all),
+  );
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
@@ -2244,6 +2254,8 @@ export async function resolveDagPhase(
       // says exactly that, and asks for a small edit plus `concerns` rather than a
       // refusal; see the arm's note in `_plan-impact.ts`.
       const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'dag-coder' });
+      const meta = await loadTaskMeta(db, ctx.taskId);
+      const taskBrief = briefFromTaskMeta(meta.title, meta.description);
       // Once per dispatch pass too: what the task has attached, after the same expansion every
       // other dispatch path runs, so a coder is told about the files as a single-agent step is.
       // `''` when nothing is attached.
@@ -2260,7 +2272,7 @@ export async function resolveDagPhase(
             ctx.taskId,
             attachmentsNotice +
               spec.buildCoderPrompt(
-                coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
+                coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact, taskBrief),
                 upstreamDebt,
               ),
           ),

@@ -68,6 +68,8 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     'look them up rather than assuming the spec repeated them.',
     '',
     issue.description ? `Description: ${issue.description}` : '',
+    '=== Original user request (scope constraints) ===',
+    issue.taskBrief ?? '(not recorded — do not expand scope)',
     issue.provides ? `Deliverable: ${issue.provides}` : '',
     issue.specSections.length > 0
       ? `Spec sections to implement:\n- ${issue.specSections.join('\n- ')}`

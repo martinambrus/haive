@@ -50,6 +50,7 @@ import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/
 import {
   findingUpstream,
   loadDependencyPolicy,
+  loadReviewDependencyPolicy,
   upstreamKind,
   type DependencyPolicy,
   type UpstreamKind,
@@ -716,6 +717,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // the static validator pass simply ignores it. Best-effort — never blocks the step.
     prepare: async ({ ctx, detected }) => {
       const d = detected as ValidateDetect;
+      // Replayed detect output may predate this field, including a pending fixer pass.
+      d.dependencyPolicy ??= await loadReviewDependencyPolicy(ctx, d);
       if (!d.browserTesting) return;
       try {
         const runtime = await ensureAppServing(ctx);
@@ -796,7 +799,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           (issue) =>
             isBlockingSeverity(issue.severity) &&
             !findingUpstream(issue) &&
-            (!d.dependencyPolicy || !upstreamKind(issue.file, d.dependencyPolicy)),
+            !!d.dependencyPolicy &&
+            !upstreamKind(issue.file, d.dependencyPolicy),
         );
         return [
           'A validation agent reviewed the implementation in the workspace:',
@@ -974,8 +978,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
+      const policy =
+        parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const issues = parsed.issues.map((issue) => {
-        const upstream = upstreamKind(issue.file, d.dependencyPolicy);
+        const upstream = upstreamKind(issue.file, policy);
         return { ...issue, upstream };
       });
       const upstreamIssues = issues.filter((issue) => issue.upstream);

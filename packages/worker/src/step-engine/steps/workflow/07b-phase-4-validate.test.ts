@@ -9,6 +9,18 @@ vi.mock('./_app-runtime.js', async (importOriginal) => ({
   ensureAppServing: m.ensureAppServing,
 }));
 
+vi.mock('./_dependency-policy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_dependency-policy.js')>()),
+  loadReviewDependencyPolicy: vi.fn(
+    async (_ctx, detected) =>
+      detected.dependencyPolicy ?? {
+        drupal: true,
+        drupalRoots: ['', 'web', 'docroot', 'public', 'html'],
+        ownedPaths: [],
+      },
+  ),
+}));
+
 import { TaskCancelledError } from '../../step-definition.js';
 import {
   parseValidatorOutput,
@@ -624,6 +636,29 @@ describe('phase4ValidateStep browser bring-up', () => {
 });
 
 describe('validator repair boundary', () => {
+  it('gives a resumed fixer no assignments until repository ownership is known', () => {
+    const prompt = phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: { sandboxWorktreePath: '/ws' },
+      iteration: 1,
+      previousIterations: [
+        {
+          iteration: 0,
+          applyOutput: mkValidateApply({
+            issues: [
+              {
+                severity: 'high',
+                file: 'includes/bootstrap.inc',
+                description: 'rewrite Drupal bootstrap',
+                upstream: null,
+              },
+            ],
+          }),
+        },
+      ],
+    } as never);
+    expect(prompt).not.toContain('rewrite Drupal bootstrap');
+    expect(prompt).toContain('no project-owned repair assignments');
+  });
   it.each([undefined, '../vendor/acme/a.php', '/other/checkout/core/a.php'])(
     'keeps a high finding with an unusable location report-only: %s',
     async (file) => {

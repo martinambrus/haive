@@ -11,6 +11,9 @@ The same default and required clarification apply when the reviewer directly rep
 An unresolved question must be rejected with clarification to regenerate and review the spec.
 It cannot be approved merely by adding feedback: implementation and validators must share the
 revised specification rather than reading different answers to the same question.
+The sprint planner, every DAG coder and the DAG review/recovery dispatches receive the
+original request too. Refuters carry the mandatory task boundary and original brief;
+when an older review resumes, the second-wave dispatch reloads that brief from the task.
 
 Agents may read infrastructure as evidence, but never repair framework core or underlying
 infrastructure. They report defects and their impact; a blocker requires a user decision.

@@ -3,6 +3,7 @@ import { briefFromTaskMeta } from './_spec-artifact.js';
 import {
   findingUpstream,
   loadDependencyPolicy,
+  loadReviewDependencyPolicy,
   upstreamKind,
   type DependencyPolicy,
   type UpstreamKind,
@@ -88,6 +89,7 @@ const REVIEW_TIMEOUT_MS = 30 * 60 * 1000;
 type QaLevel = 'none' | 'poc' | 'standard' | 'enterprise';
 
 interface CodeReviewDetect {
+  worktreePath?: string;
   taskBrief?: string;
   dependencyPolicy?: DependencyPolicy;
   spec: string;
@@ -607,6 +609,8 @@ export function buildRefutePrompt(
     '',
     '=== Spec (the intended behavior) ===',
     d.spec || '(no spec recorded)',
+    '=== Original user request (scope constraints) ===',
+    d.taskBrief ?? '(not recorded — do not expand scope)',
   ]
     .filter(Boolean)
     .join('\n');
@@ -1155,6 +1159,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       taskBrief: briefFromTaskMeta(meta.title, meta.description),
       spec,
       dependencyPolicy: await loadDependencyPolicy(ctx, wt.worktreePath),
+      worktreePath: wt.worktreePath,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       level,
@@ -1356,12 +1361,15 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
     // synthetic findings for an unparseable reviewer, so the blocking decision and
     // the gate-2 finding list can never disagree.
-    const policy = (args.detected as CodeReviewDetect).dependencyPolicy;
-    for (const finding of [
+    const d = args.detected as CodeReviewDetect;
+    const findings = [
       ...peerOut.findings,
       ...securityOut.findings,
       ...extraLenses.flatMap((lens) => lens.findings),
-    ]) {
+    ];
+    const policy =
+      findings.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
+    for (const finding of findings) {
       finding.upstream = upstreamKind(finding.path, policy);
     }
     let blocking = computeBlocking(peerOut, securityOut, extraLenses);
@@ -1414,6 +1422,11 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           { count: wave.length, lenses: refuteLenses.length },
           'dispatching refuters for blocking findings',
         );
+        // A second-wave dispatch may resume detect output from before taskBrief existed.
+        if (d.taskBrief === undefined) {
+          const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+          d.taskBrief = briefFromTaskMeta(meta.title, meta.description);
+        }
         throw new MiningWaveError(
           // The agent id here is per FINDING and unbounded, so it cannot be a seat. The
           // LENS is what repeats across the wave and is what a per-seat model choice is

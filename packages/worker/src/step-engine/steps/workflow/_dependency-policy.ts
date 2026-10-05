@@ -202,6 +202,20 @@ export async function loadDependencyPolicy(
   };
 }
 
+/** Rehydrate pre-policy detect output before deciding which findings can cause edits. */
+export async function loadReviewDependencyPolicy(
+  ctx: StepContext,
+  detected: { dependencyPolicy?: DependencyPolicy; worktreePath?: string },
+): Promise<DependencyPolicy> {
+  if (detected.dependencyPolicy) return detected.dependencyPolicy;
+  const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const worktree = previous?.output as { worktreePath?: string } | null;
+  const workspace = detected.worktreePath ?? worktree?.worktreePath;
+  if (!workspace)
+    throw new Error('Cannot establish the workspace for review dependency ownership.');
+  return loadDependencyPolicy(ctx, workspace);
+}
+
 /** No changed upstream source may enter either a workflow or DAG issue commit. */
 export async function assertDependencyCommitSafe(
   ctx: StepContext,

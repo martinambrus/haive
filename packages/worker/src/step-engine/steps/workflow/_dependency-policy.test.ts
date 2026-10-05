@@ -5,6 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { StepContext } from '../../step-definition.js';
+import { phase4ValidateStep } from './07b-phase-4-validate.js';
+import { codeReviewStep, collectRefutable } from './08c-code-review.js';
 import {
   assertDependencyCommitSafe,
   loadDependencyPolicy,
@@ -28,16 +30,26 @@ async function file(root: string, rel: string, body = 'original\n') {
   await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
   await writeFile(path.join(root, rel), body);
 }
-function context(baseBranch?: string, sandboxWorktreePath?: string): StepContext {
+function context(
+  baseBranch?: string,
+  sandboxWorktreePath?: string,
+  worktreePath?: string,
+): StepContext {
   const query: Record<string, unknown> = {};
   Object.assign(query, {
     from: () => query,
     where: () => query,
     orderBy: () => query,
     limit: async () =>
-      baseBranch || sandboxWorktreePath ? [{ output: { baseBranch, sandboxWorktreePath } }] : [],
+      baseBranch || sandboxWorktreePath || worktreePath
+        ? [{ output: { baseBranch, sandboxWorktreePath, worktreePath } }]
+        : [],
   });
-  return { taskId: 'task', db: { select: () => query } } as unknown as StepContext;
+  return {
+    taskId: 'task',
+    logger: { info() {}, warn() {} },
+    db: { select: () => query },
+  } as unknown as StepContext;
 }
 async function repository(ownedPaths?: string[]) {
   const root = await mkdtemp(path.join(tmpdir(), 'haive-ownership-'));
@@ -63,6 +75,61 @@ afterEach(async () => {
 });
 
 describe('dependency ownership', () => {
+  it.each(['modern', 'legacy'] as const)(
+    'rehydrates %s core protection for a replayed validator and code review',
+    async (layout) => {
+      const root = await repository();
+      const location = layout === 'modern' ? 'core/lib/Drupal.php' : 'includes/bootstrap.inc';
+      if (layout === 'legacy') {
+        await file(root, 'composer.json', '{}');
+        await file(root, location);
+        await git(root, ['add', '-A']);
+        await git(root, ['commit', '-qm', 'legacy Drupal']);
+      }
+      const ctx = context(undefined, '/haive/workdir', root);
+      const validation = await phase4ValidateStep.apply(ctx, {
+        detected: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: {
+          verdict: 'ISSUES_FOUND',
+          issues: [{ severity: 'high', file: location, description: 'core defect' }],
+        },
+      } as never);
+      expect(validation.issues[0]?.upstream).toBe('infrastructure');
+      expect(
+        await phase4ValidateStep.loop!.shouldContinue({
+          applyOutput: validation,
+          iteration: 0,
+        } as never),
+      ).toBe(false);
+      expect(phase4ValidateStep.fixLoop!.evaluate(validation)).toBeNull();
+      const review = await codeReviewStep.apply(ctx, {
+        detected: { implementationFiles: [] },
+        miningWaveExhausted: false,
+        agentMiningResults: [
+          {
+            agentId: 'peer-reviewer',
+            status: 'done',
+            rawOutput: JSON.stringify({
+              verdict: 'REQUEST_CHANGES',
+              findings: [{ severity: 'high', path: location, issue: 'core defect' }],
+            }),
+          },
+          {
+            agentId: 'security-code-reviewer',
+            status: 'done',
+            rawOutput: '{"verdict":"SECURE","findings":[]}',
+          },
+        ],
+      } as never);
+      expect(review.peer.findings[0]?.upstream).toBe('infrastructure');
+      expect(review.blocking).toBe(false);
+      expect(collectRefutable(review.peer, review.security, review.extraLenses)).toEqual([]);
+      expect(codeReviewStep.fixLoop!.evaluate(review)).toBeNull();
+    },
+  );
+
   it.each([
     undefined,
     '',

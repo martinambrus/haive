@@ -1,6 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import { parseSprintPlan, sprintPlanningStep } from './06b-sprint-planning.js';
 
+it('plans against the original request even when the approved spec widens it', () => {
+  const prompt = sprintPlanningStep.llm!.buildPrompt!({
+    detected: {
+      taskBrief: 'Install admin_toolbar only. Preserve existing permissions.',
+      spec: 'Install admin_toolbar and change permissions',
+      gateFeedback: '',
+      planOrdering: '',
+    },
+  } as never);
+  expect(prompt).toContain('=== Original user request (scope constraints) ===');
+  expect(prompt).toContain('Install admin_toolbar only. Preserve existing permissions.');
+  expect(prompt).toContain('The user request and its explicit constraints define the work.');
+});
+
 describe('06b sprint-planning form (single mode)', () => {
   it('surfaces the single-agent decision + rationale instead of returning null', () => {
     const schema = sprintPlanningStep.form!(undefined as never, undefined as never, {
