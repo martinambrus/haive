@@ -59,6 +59,13 @@ const IMPLEMENTATION_STEPS = new Set([
 function failedChecks(output: Row): boolean {
   return CHECKS.some((key) => row(output[key]).ran === true && row(output[key]).passed === false);
 }
+function failedResult(step: HistoryStep, output: Row): boolean {
+  // Browser unavailability carries passed:false without running a check.
+  const failedBrowser =
+    output.passed === false &&
+    (step.stepId !== '08a-browser-verify' || (output.ran === true && output.skipped !== true));
+  return failedChecks(output) || failedBrowser || output.testsPassed === false;
+}
 function findings(output: Row): Row[] {
   return [
     ...list(output.issues).filter((f) => text(row(f).severity)),
@@ -127,7 +134,7 @@ function outcome(
       tone: 'error',
     };
   }
-  if (failedChecks(output) || output.passed === false || output.testsPassed === false) {
+  if (failedResult(step, output)) {
     return { message: 'Verification found failing checks.', tone: 'warning' };
   }
   if (
@@ -153,6 +160,8 @@ function outcome(
     return { message: 'Reviewers raised concerns.', tone: 'warning' };
   if (output.verdict === 'UNPARSEABLE')
     return { message: 'The validation result could not be read.', tone: 'warning' };
+  if (output.verdict === 'ISSUES_FOUND')
+    return { message: 'Validation found issues.', tone: 'warning' };
   if (step.degradedNote || text(output.degradedNote))
     return { message: 'This step finished with incomplete checks or results.', tone: 'warning' };
   if (step.warningMessage)
@@ -184,8 +193,6 @@ function outcome(
       tone: narrowed ? 'warning' : 'success',
     };
   }
-  if (output.verdict === 'ISSUES_FOUND')
-    return { message: 'Validation found issues.', tone: 'warning' };
   // The audit producer also records audited:true for unparseable reports.
   if (output.audited === true)
     return { message: 'The audit recorded no findings.', tone: 'neutral' };
@@ -303,9 +310,7 @@ export function buildTaskHistory(
         (step.stepId === '08d2-adversarial-qa-review' && output.decision === 'fix') ||
         currentEvent ||
         output.blocking === true ||
-        failedChecks(output) ||
-        output.passed === false ||
-        output.testsPassed === false ||
+        failedResult(step, output) ||
         ['ISSUES_FOUND', 'UNPARSEABLE'].includes(text(output.verdict));
       if (!(step.usesCli && step.cliInvocationCount > 0) && !hasError) return [];
       const result = outcome(step, currentEvent);

@@ -265,6 +265,14 @@ describe('implementation overview', () => {
     });
     expect(entry({ output: { verdict: 'VALID', excludedDimensions: [] } }).tone).toBe('success');
   });
+  it('keeps an unresolved validation verdict ahead of partial fixes even without issue details', () => {
+    expect(
+      entry({
+        stepId: '07b-phase-4-validate',
+        output: { verdict: 'ISSUES_FOUND', fixesApplied: ['Partial fix.'], issues: [] },
+      }),
+    ).toMatchObject({ tone: 'warning', message: 'Validation found issues.' });
+  });
   it('does not treat an empty audit as proof that a usable report was clean', () => {
     expect(
       entry({ stepId: '08c2-code-audit', output: { audited: true, findings: [] } }),
@@ -318,6 +326,26 @@ describe('implementation overview', () => {
         message: 'Browser verification passed.',
       });
     }
+  });
+  it('omits unavailable or skipped browser checks rather than interpreting their pass-through flag', () => {
+    for (const cliInvocationCount of [0, 1]) {
+      for (const output of [
+        { ran: false, skipped: true, passed: false },
+        { ran: true, skipped: true, passed: false },
+        { ran: false, skipped: false, passed: false },
+      ]) {
+        expect(
+          buildTaskHistory([step({ stepId: '08a-browser-verify', cliInvocationCount, output })]),
+        ).toEqual([]);
+      }
+    }
+    expect(
+      entry({
+        stepId: '08a-browser-verify',
+        cliInvocationCount: 0,
+        output: { ran: true, skipped: false, passed: false },
+      }),
+    ).toMatchObject({ tone: 'warning', message: 'Verification found failing checks.' });
   });
   it('includes only the implementation-to-gate-2 segment, across all rounds', () => {
     const history = buildTaskHistory([

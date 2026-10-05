@@ -23,6 +23,9 @@ must never turn into a blanket clean-review claim. Validation discloses
 was clean: its producer also writes `audited: true` for an unparseable report. Manual
 browser checklists are neutral, and `verificationIncomplete` prevents a browser pass
 claim even when fixes were applied. Confirmed browser passes require a known test method.
+An unavailable/skipped browser check's `passed: false` is pass-through copy, not a failure;
+it is a verdict only when `ran: true` and the check was not skipped. An `ISSUES_FOUND`
+validation verdict outranks partial applied fixes even when the issue list is empty.
 Fix-round headlines require a recorded request or an explicit gate decision: QA's
 `blocking` severity flag only proposes findings for the developer to accept or send back.
 A `done` row's `errorMessage` alone is not a failure: only the failed status or a current `fix_loop.requested` event proves that
