@@ -6,7 +6,9 @@ earlier issue commits, deletions and both sides of renames. Modified infrastruct
 third-party source refuse the commit. Restoring upstream source to its baseline is allowed.
 Ownership comes from the baseline policy described in [Review scope](review-scope.md), never
 a declaration introduced by the agent. Package manifests, lockfiles, patch files and project
-integration code remain valid commit artifacts. This guard checks Git deliverables; ignored
+integration code remain valid commit artifacts. `.patch` and `.diff` artifacts under the
+project's `patches/` directory may mirror upstream package names; files inside installed
+packages remain upstream even when they themselves are patches. This guard checks Git deliverables; ignored
 installed source and ad-hoc scripts are constrained by the agent rules and review, rather than
 being inspected by this path check.
 Baseline and working Composer manifests are parsed independently, so a repaired manifest can

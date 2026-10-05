@@ -154,34 +154,44 @@ function applyArgs(formValues: Record<string, unknown>) {
 }
 
 describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
-  it.each(['approve', 'reject'])(
-    'requires clarification for a direct blocking ambiguity before %s',
-    async (decision) => {
-      const detected = { ...detectedStub(), qualityVerdict: 'BLOCKING_AMBIGUITY' };
-      const { ctx, events } = makeApplyCtx();
-      const form = gate1SpecApprovalStep.form!(ctx, detected) as FormSchema;
-      expect(form.fields.find((field) => field.id === 'decision')).toMatchObject({
-        default: 'reject',
-      });
-      expect(form.fields.find((field) => field.id === 'feedback')).toMatchObject({
-        required: true,
-      });
-      const args = {
-        detected,
-        formValues: { decision, feedback: '  ' },
-        iteration: 0,
-        previousIterations: [],
-      };
-      await expect(gate1SpecApprovalStep.apply(ctx, args as never)).rejects.toThrow('Clarify');
-      expect(events).toHaveLength(0);
-      args.formValues.feedback = 'Keep the existing permissions and enable only admin_toolbar.';
-      const out = await gate1SpecApprovalStep.apply(ctx, args as never);
-      expect(out).toMatchObject({ decision, feedback: args.formValues.feedback });
-      expect(events[0]?.payload?.feedback).toBe(args.formValues.feedback);
-    },
-  );
+  it.each([
+    { qualityVerdict: 'BLOCKING_AMBIGUITY' },
+    { scopeQuestions: ['May Navigation be removed?'] },
+  ])('requires clarification and redraft for unresolved spec questions: %j', async (conflict) => {
+    const detected = { ...detectedStub(), ...conflict };
+    const { ctx, events } = makeApplyCtx();
+    const form = gate1SpecApprovalStep.form!(ctx, detected) as FormSchema;
+    expect(form.fields.find((field) => field.id === 'decision')).toMatchObject({
+      default: 'reject',
+      options: [{ value: 'reject', label: 'Reject — clarify and re-draft' }],
+    });
+    expect(form.fields.find((field) => field.id === 'feedback')).toMatchObject({
+      required: true,
+    });
+    const args = {
+      detected,
+      formValues: { decision: 'reject', feedback: '  ' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(gate1SpecApprovalStep.apply(ctx, args as never)).rejects.toThrow('Clarify');
+    expect(events).toHaveLength(0);
+    args.formValues.feedback = 'Keep the existing permissions and enable only admin_toolbar.';
+    args.formValues.decision = 'approve';
+    await expect(gate1SpecApprovalStep.apply(ctx, args as never)).rejects.toThrow(
+      'Reject with clarification',
+    );
+    expect(events).toHaveLength(0);
+    args.formValues.decision = 'reject';
+    const out = await gate1SpecApprovalStep.apply(ctx, args as never);
+    expect(out).toMatchObject({ decision: 'reject', feedback: args.formValues.feedback });
+    expect(events[0]?.payload?.feedback).toBe(args.formValues.feedback);
+    expect(gate1SpecApprovalStep.reviseLoop!.evaluate(out)).toEqual({
+      targetStepId: '04-phase-0b-pre-planning',
+    });
+  });
 
-  it('shows unresolved scope conflicts and requires an explicit answer before approval', async () => {
+  it('shows unresolved scope conflicts and records the answer for redrafting', async () => {
     const detected = {
       ...detectedStub(),
       scopeQuestions: ['May Navigation be removed despite the preserve-permissions constraint?'],
@@ -204,7 +214,7 @@ describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
     ).rejects.toThrow();
     const out = await gate1SpecApprovalStep.apply(ctx, {
       detected,
-      formValues: { decision: 'approve', feedback: 'Keep Navigation and preserve permissions.' },
+      formValues: { decision: 'reject', feedback: 'Keep Navigation and preserve permissions.' },
       iteration: 0,
       previousIterations: [],
     } as never);

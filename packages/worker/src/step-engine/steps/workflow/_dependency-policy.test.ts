@@ -95,6 +95,9 @@ describe('dependency ownership', () => {
     );
     expect(upstreamKind('web/modules/contrib/company-other/a.php', policy)).toBe('dependency');
     expect(upstreamKind('web/core/lib/a.php', policy)).toBe('infrastructure');
+    expect(
+      upstreamKind('patches/core/tests/fix.patch', { ...policy, drupalRoots: ['patches'] }),
+    ).toBe('infrastructure');
   });
 
   it('protects Drupal 7 core but preserves custom modules', () => {
@@ -293,6 +296,28 @@ describe('dependency ownership', () => {
     );
     await file(root, 'web/modules/custom/company/company.module', 'project change\n');
     await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    'patches/vendor/acme/fix.patch',
+    'patches/modules/contrib/foo.patch',
+    'patches/node_modules/pkg/fix.diff',
+  ])('allows project patch artifacts that mirror dependency paths: %s', async (rel) => {
+    const root = await repository();
+    await file(root, rel, '--- a/file\n+++ b/file\n');
+    expect(upstreamKind(rel)).toBeNull();
+    await expect(assertDependencyCommitSafe(context(), root)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    'vendor/acme/pkg/patches/fix.patch',
+    'web/modules/contrib/foo/patches/fix.diff',
+    'patches/vendor/acme/source.php',
+  ])('does not exempt upstream-maintained patches or non-patch source: %s', async (rel) => {
+    const root = await repository();
+    await file(root, rel, 'rewritten\n');
+    expect(upstreamKind(rel)).toBe('dependency');
+    await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow('Refusing to commit');
   });
 
   it.each(['vendor/acme/pkg/a\nb.php', 'web/core/lib/a\tb.php', 'node_modules/pkg/a\u0085b.js'])(

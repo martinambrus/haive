@@ -89,6 +89,10 @@ export function upstreamKind(
     }
   }
   if (/(^|\/)vendor\/drupal\/core(?:\/|$)/.test(rel)) return 'infrastructure';
+  // Project patch artifacts can mirror package paths without being installed source.
+  // Restrict the exemption to the project's patch directory, never a package's own patches
+  // or framework core under a configured web root that happens to be named patches.
+  if (rel.startsWith('patches/') && /\.(patch|diff)$/.test(rel)) return null;
   const installed =
     /(^|\/)(vendor|node_modules)(\/|$)/.test(rel) ||
     /(^|\/)(modules|themes|profiles)\/contrib(?:\/|$)/.test(rel) ||

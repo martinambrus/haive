@@ -422,18 +422,21 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     ];
     return {
       title: 'Gate 1: Spec approval',
-      description:
-        'Review the spec drafted in phase 0b and approve it before implementation begins. Reject with feedback to send it back for an automatic re-draft (the spec is regenerated and re-reviewed here).',
+      description: needsClarification
+        ? 'Clarify the questions below and reject to regenerate and review the specification. The revised spec must include your answer before it can be approved.'
+        : 'Review the spec drafted in phase 0b and approve it before implementation begins. Reject with feedback to send it back for an automatic re-draft (the spec is regenerated and re-reviewed here).',
       infoSections,
       fields: [
         {
           type: 'radio',
           id: 'decision',
-          label: 'Approve the specification?',
-          options: [
-            { value: 'approve', label: 'Approve — proceed to implementation' },
-            { value: 'reject', label: 'Reject — request changes and re-draft' },
-          ],
+          label: needsClarification ? 'Revise the specification' : 'Approve the specification?',
+          options: needsClarification
+            ? [{ value: 'reject', label: 'Reject — clarify and re-draft' }]
+            : [
+                { value: 'approve', label: 'Approve — proceed to implementation' },
+                { value: 'reject', label: 'Reject — request changes and re-draft' },
+              ],
           default: needsClarification ? 'reject' : 'approve',
           required: true,
         },
@@ -469,13 +472,17 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     const feedback = typeof values.feedback === 'string' ? values.feedback : '';
-    if (
-      ((args.detected.scopeQuestions?.length ?? 0) > 0 ||
-        args.detected.qualityVerdict === 'BLOCKING_AMBIGUITY') &&
-      !feedback.trim()
-    ) {
+    const needsClarification =
+      (args.detected.scopeQuestions?.length ?? 0) > 0 ||
+      args.detected.qualityVerdict === 'BLOCKING_AMBIGUITY';
+    if (needsClarification && !feedback.trim()) {
       throw new Error(
         'Clarify the blocking ambiguity or scope questions before recording the spec decision.',
+      );
+    }
+    if (needsClarification && decision !== 'reject') {
+      throw new Error(
+        'Reject with clarification to regenerate and review the spec before approval.',
       );
     }
     ctx.logger.info({ decision }, 'spec gate decision recorded');

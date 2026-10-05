@@ -8,6 +8,9 @@ spec cannot authorize extra work or override explicit constraints. A spec correc
 conflicts as `scopeQuestions`; gate 1 shows them, defaults to rejection and requires an answer.
 The same default and required clarification apply when the reviewer directly reports
 `BLOCKING_AMBIGUITY`, even without a corrector-generated question list.
+An unresolved question must be rejected with clarification to regenerate and review the spec.
+It cannot be approved merely by adding feedback: implementation and validators must share the
+revised specification rather than reading different answers to the same question.
 
 Agents may read infrastructure as evidence, but never repair framework core or underlying
 infrastructure. They report defects and their impact; a blocker requires a user decision.
