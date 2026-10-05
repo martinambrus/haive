@@ -180,6 +180,23 @@ function outcome(
   }
   const narrowed = list(output.excludedDimensions).length > 0;
   const fixes = list(output.fixesApplied).map(text).filter(Boolean).length;
+  if (
+    step.stepId === '08a-browser-verify' &&
+    output.ran === true &&
+    output.skipped === false &&
+    output.passed === true &&
+    ['mcp', 'interactive', 'headless'].includes(text(output.method))
+  ) {
+    return {
+      message: fixes
+        ? `Browser verification passed after ${fixes} ${fixes === 1 ? 'fix' : 'fixes'}.`
+        : 'Browser verification passed.',
+      tone: 'success',
+    };
+  }
+  if (step.stepId === '08a-browser-verify' && output.ran === true && output.skipped === false) {
+    return { message: 'No confirmed browser verdict was recorded.', tone: 'warning' };
+  }
   if (fixes)
     return {
       message: `Validation applied ${fixes} ${fixes === 1 ? 'fix' : 'fixes'}${narrowed ? '; some dimensions were excluded' : ''}.`,
@@ -232,18 +249,6 @@ function outcome(
             : 'The agent finished its simplification pass.',
       tone: 'neutral',
     };
-  }
-  if (
-    step.stepId === '08a-browser-verify' &&
-    output.ran === true &&
-    output.skipped === false &&
-    output.passed === true &&
-    ['mcp', 'interactive', 'headless'].includes(text(output.method))
-  ) {
-    return { message: 'Browser verification passed.', tone: 'success' };
-  }
-  if (step.stepId === '08a-browser-verify' && output.ran === true && output.skipped === false) {
-    return { message: 'No confirmed browser verdict was recorded.', tone: 'warning' };
   }
   if (step.stepId === '08d-adversarial-qa' && output.ran === true) {
     return {
@@ -340,4 +345,16 @@ export function historyDividerAfter(
     (entry) => Date.parse(entry.timestamp) <= previousOpenThrough,
   );
   return boundary >= 0 && boundary < entries.length - 1 ? entries[boundary]!.id : null;
+}
+
+/** Freeze the opening snapshot only after historical events arrive. Events
+ * recorded during the visit are live updates, not part of its boundary. */
+export function historyVisitDivider(
+  steps: readonly HistoryStep[],
+  events: readonly TaskEvent[],
+  previousTimestamp: number | null,
+  openedAt: number,
+): string | null {
+  const historical = events.filter((event) => Date.parse(event.createdAt) <= openedAt);
+  return historyDividerAfter(buildTaskHistory(steps, historical), previousTimestamp);
 }

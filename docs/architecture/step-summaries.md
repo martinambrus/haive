@@ -22,7 +22,7 @@ must never turn into a blanket clean-review claim. Validation discloses
 `excludedDimensions` even with a `VALID` verdict or applied fixes. An empty audit records no findings, without claiming the audit
 was clean: its producer also writes `audited: true` for an unparseable report. Manual
 browser checklists are neutral, and `verificationIncomplete` prevents a browser pass
-claim even when fixes were applied. Confirmed browser passes require a known test method.
+claim even when fixes were applied. Confirmed browser passes require a known test method, and their headline includes browser fixes without calling them validation fixes.
 An unavailable/skipped browser check's `passed: false` is pass-through copy, not a failure;
 it is a verdict only when `ran: true` and the check was not skipped. An `ISSUES_FOUND`
 validation verdict outranks partial applied fixes even when the issue list is empty.
@@ -36,8 +36,8 @@ new attempt, so it does not discard that attempt's request. Legacy rows without 
 time fall back to their completion time. The panel follows the same lifetime as step cards: separate fix
 rounds remain separate, but a manual retry replaces that step row's previous result. The
 previous-visit boundary is local to the browser and task: closing stores the last completion
-present in the panel. Reopening snapshots a single horizontal divider after that entry
-when newer entries exist. There is no divider on the first visit or when there are no new
+present in the panel. Reopening captures the current steps and hydrates their historical fix events before showing the list and freezing a single horizontal divider after that entry
+when newer entries exist. While this initial request is pending, the panel shows a loading status; closing it does not mark unseen outcomes as visited. Events recorded after opening cannot create a divider. There is no divider on the first visit or when there are no new
 entries, and live updates never introduce or move it during the current visit. There are
 no read/unread indicators or controls. The panel remembers its scroll position per task when closed
 and reopened, restoring it before paint. A reader at the end stays there as later entries

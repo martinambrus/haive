@@ -6,7 +6,7 @@ import { History, CircleAlert, X } from 'lucide-react';
 import { api, type TaskEvent, type TaskStep } from '@/lib/api-client';
 import {
   buildTaskHistory,
-  historyDividerAfter,
+  historyVisitDivider,
   type HistoryTone,
   type TaskHistoryEntry,
 } from '@/lib/task-history';
@@ -17,6 +17,10 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 export function useTaskHistory(taskId: string, steps: TaskStep[]) {
   const [open, setIsOpen] = useState(false);
   const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [ready, setReady] = useState(false);
+  const visit = useRef<{ steps: TaskStep[]; through: number | null; openedAt: number } | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [dividerAfterId, setDividerAfterId] = useState<string | null>(null);
   const previousOpenThrough = useRef<number | null>(null);
@@ -25,17 +29,21 @@ export function useTaskHistory(taskId: string, steps: TaskStep[]) {
   // panel. It now controls only the separator, with no read/unread states.
   const key = `haive:task-history-seen:${taskId}`;
   const entries = useMemo(() => buildTaskHistory(steps, events), [steps, events]);
-  const current = useRef({ key, entries });
-  current.current = { key, entries };
+  const current = useRef({ key, entries, steps, ready });
+  current.current = { key, entries, steps, ready };
 
   // Stable identity matters: the panel's focus lifecycle must not run again
-  // on every task poll. Snapshot the divider only on an explicit opening.
+  // on every task poll. Snapshot the steps on opening, then hydrate their fix
+  // events before presenting the visit and its frozen divider.
   const setOpen = useCallback((next: boolean) => {
-    const { key, entries } = current.current;
+    const { key, entries, steps, ready } = current.current;
     if (next) {
-      setDividerAfterId(historyDividerAfter(entries, previousOpenThrough.current));
+      visit.current = { steps, through: previousOpenThrough.current, openedAt: Date.now() };
+      setReady(false);
+      setDividerAfterId(null);
     } else {
-      const timestamp = entries.at(-1)?.timestamp;
+      visit.current = null;
+      const timestamp = ready ? entries.at(-1)?.timestamp : undefined;
       if (timestamp) {
         const through = Date.parse(timestamp);
         previousOpenThrough.current = through;
@@ -51,6 +59,8 @@ export function useTaskHistory(taskId: string, steps: TaskStep[]) {
 
   useEffect(() => {
     setIsOpen(false);
+    visit.current = null;
+    setReady(false);
     setDividerAfterId(null);
     setEvents([]);
     setError(null);
@@ -88,6 +98,14 @@ export function useTaskHistory(taskId: string, steps: TaskStep[]) {
       try {
         const next = await reload();
         if (!cancelled) {
+          const opening = visit.current;
+          if (opening) {
+            setDividerAfterId(
+              historyVisitDivider(opening.steps, next, opening.through, opening.openedAt),
+            );
+            visit.current = null;
+            setReady(true);
+          }
           setEvents(next);
           setError(null);
         }
@@ -111,6 +129,7 @@ export function useTaskHistory(taskId: string, steps: TaskStep[]) {
     setOpen,
     panelId,
     entries,
+    ready,
     error,
     dividerAfterId,
   };
@@ -228,7 +247,7 @@ export function TaskHistoryPanel({
     const saved = positions.current.get(history.taskId);
     if (!open || !scroller || !saved) return;
     scroller.scrollTop = saved.atBottom ? scroller.scrollHeight : saved.top;
-  }, [open, history.taskId, history.entries]);
+  }, [open, history.taskId, history.entries, history.ready]);
 
   useEffect(() => {
     if (!open) return;
@@ -303,54 +322,60 @@ export function TaskHistoryPanel({
             {history.error}
           </div>
         )}
-        <div
-          ref={scrollRef}
-          onScroll={rememberScroll}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-          tabIndex={0}
-          role="region"
-          aria-label="Finished step history"
-        >
-          {history.entries.length === 0 ? (
-            <p className="p-6 text-center text-sm text-neutral-400">
-              No implementation outcomes yet. Their outcomes will appear here as the task
-              progresses.
-            </p>
-          ) : (
-            <ol>
-              {history.entries.map((entry) => {
-                const day = new Date(entry.timestamp).toLocaleDateString(undefined, {
-                  weekday: 'short',
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                });
-                const showDay = day !== previousDay;
-                previousDay = day;
-                return (
-                  <HistoryItemWithDate key={entry.id} day={showDay ? day : null}>
-                    <HistoryItem
-                      entry={entry}
-                      roundLabel={roundLabels.get(entry.round)}
-                      onSelect={() => {
-                        close();
-                        onSelectStep(entry.id);
-                      }}
-                    />
-                    {entry.id === history.dividerAfterId && (
-                      <li className="px-4 py-2">
-                        <hr
-                          aria-label="New outcomes since your last visit"
-                          className="border-t border-indigo-500/60"
-                        />
-                      </li>
-                    )}
-                  </HistoryItemWithDate>
-                );
-              })}
-            </ol>
-          )}
-        </div>
+        {!history.ready ? (
+          <p role="status" className="p-6 text-center text-sm text-neutral-400">
+            Loading implementation history…
+          </p>
+        ) : (
+          <div
+            ref={scrollRef}
+            onScroll={rememberScroll}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+            tabIndex={0}
+            role="region"
+            aria-label="Finished step history"
+          >
+            {history.entries.length === 0 ? (
+              <p className="p-6 text-center text-sm text-neutral-400">
+                No implementation outcomes yet. Their outcomes will appear here as the task
+                progresses.
+              </p>
+            ) : (
+              <ol>
+                {history.entries.map((entry) => {
+                  const day = new Date(entry.timestamp).toLocaleDateString(undefined, {
+                    weekday: 'short',
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  });
+                  const showDay = day !== previousDay;
+                  previousDay = day;
+                  return (
+                    <HistoryItemWithDate key={entry.id} day={showDay ? day : null}>
+                      <HistoryItem
+                        entry={entry}
+                        roundLabel={roundLabels.get(entry.round)}
+                        onSelect={() => {
+                          close();
+                          onSelectStep(entry.id);
+                        }}
+                      />
+                      {entry.id === history.dividerAfterId && (
+                        <li className="px-4 py-2">
+                          <hr
+                            aria-label="New outcomes since your last visit"
+                            className="border-t border-indigo-500/60"
+                          />
+                        </li>
+                      )}
+                    </HistoryItemWithDate>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+        )}
       </section>
     </div>,
     document.body,

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildTaskHistory, historyDividerAfter, type HistoryStep } from './task-history';
+import {
+  buildTaskHistory,
+  historyDividerAfter,
+  historyVisitDivider,
+  type HistoryStep,
+} from './task-history';
 import type { TaskEvent } from './api-client';
 
 const endedAt = '2026-10-05T12:32:30.000Z';
@@ -51,6 +56,31 @@ describe('previous-visit divider', () => {
     expect(historyDividerAfter(entries, Date.parse('2026-10-05T12:02:00Z'))).toBeNull();
     expect(historyDividerAfter(entries, Date.parse('2026-10-05T11:59:00Z'))).toBeNull();
     expect(historyDividerAfter([], Date.parse(endedAt))).toBeNull();
+  });
+});
+
+describe('hydrated visit boundary', () => {
+  const through = Date.parse('2026-10-05T12:32:30Z');
+  const openedAt = Date.parse('2026-10-05T13:00:00Z');
+  const steps = [
+    step({ id: 'earlier', endedAt: '2026-10-05T12:00:00Z' }),
+    step({ stepId: '07c-ddev-reconcile', usesCli: false, cliInvocationCount: 0 }),
+    step({ id: 'newer', endedAt: '2026-10-05T12:45:00Z' }),
+  ];
+  it('places the boundary after an already-seen deterministic request once events arrive', () => {
+    expect(historyVisitDivider(steps, [fixEvent()], through, openedAt)).toBe('implement-round-3');
+  });
+  it('does not create a boundary from fix requests recorded during the current visit', () => {
+    const snapshot = steps.slice(0, 2);
+    expect(
+      historyVisitDivider(
+        snapshot,
+        [fixEvent({ createdAt: '2026-10-05T13:00:01Z' })],
+        Date.parse('2026-10-05T12:00:00Z'),
+        openedAt,
+      ),
+    ).toBeNull();
+    expect(historyVisitDivider(steps, [fixEvent()], null, openedAt)).toBeNull();
   });
 });
 
@@ -326,6 +356,28 @@ describe('implementation overview', () => {
         message: 'Browser verification passed.',
       });
     }
+  });
+  it('identifies browser fixes and the confirmed browser-pass outcome', () => {
+    for (const method of ['mcp', 'interactive', 'headless']) {
+      expect(
+        entry({
+          stepId: '08a-browser-verify',
+          output: {
+            ran: true,
+            skipped: false,
+            passed: true,
+            method,
+            fixesApplied: ['Repair one.', 'Repair two.'],
+          },
+        }),
+      ).toMatchObject({ tone: 'success', message: 'Browser verification passed after 2 fixes.' });
+    }
+    expect(
+      entry({
+        stepId: '08a-browser-verify',
+        output: { ran: true, skipped: false, passed: true, fixesApplied: ['Repair.'] },
+      }).tone,
+    ).toBe('warning');
   });
   it('omits unavailable or skipped browser checks rather than interpreting their pass-through flag', () => {
     for (const cliInvocationCount of [0, 1]) {
