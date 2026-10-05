@@ -60,7 +60,7 @@ export function databaseSaveForm(d: Detected): FormSchema | null {
   return {
     title: 'The project database changed during this task',
     description: current
-      ? `Another database snapshot became current after this task was created.\n\nLast saved by task **${current.sourceTaskId ?? '(deleted task)'}**, on ${current.createdAt.toISOString()}.\n\nReplacing it selects this task’s complete database; it does not merge the two databases. Keeping it deletes this task’s candidate snapshot.`
+      ? `Another database snapshot became current after this task was created.\n\nLast saved by task **${current.sourceTaskId ?? '(deleted task)'}**, on ${new Date(current.createdAt).toISOString()}.\n\nReplacing it selects this task’s complete database; it does not merge the two databases. Keeping it deletes this task’s candidate snapshot.`
       : 'The project database selection changed during this task. Keeping the current selection deletes this task’s candidate snapshot.',
     fields: [
       ...(current

@@ -43,6 +43,12 @@ describe('database save decisions', () => {
       ],
     });
   });
+  it('renders the conflict after detect output has been persisted as JSON', () => {
+    const persisted = JSON.parse(JSON.stringify(view())) as View;
+    const form = databaseSaveForm(persisted)!;
+    expect(formSchemaSchema.safeParse(form).success).toBe(true);
+    expect(form.description).toContain('2026-10-05T00:00:00.000Z');
+  });
   it('does not prompt when the revision is unchanged or a decision already committed', () => {
     expect(databaseSaveForm(view({ revision: 1 }))).toBeNull();
     expect(databaseSaveForm(view({ state: { ...view().state, outcome: 'saved' } }))).toBeNull();
