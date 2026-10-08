@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { promptNamesAgentPath } from '@haive/shared';
-import { HOUSE_RULES_END, renderHouseRuleEntry } from '@haive/shared/global-kb';
+import {
+  HOUSE_RULES_ALWAYS_CAP_BYTES,
+  HOUSE_RULES_END,
+  houseRuleBytes,
+  renderHouseRuleEntry,
+} from '@haive/shared/global-kb';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { AGENT_RULES_MARKER, withAgentRules } from './agent-rules.js';
 import {
@@ -333,14 +338,61 @@ describe('selectHouseRules: the budget', () => {
     expect(out.block).toContain('"Huge"');
   });
 
-  it('never drops an always rule, even when the always rules alone are over the budget', () => {
-    const big = [rule({ size: 9000 }), rule({ size: 9000 }), rule({ size: 9000 })];
-    const extra = files(['*.php'], { title: 'Extra', size: 100 });
-    const out = select([...big, extra], { changedFiles: ['a.php'] });
-    expect(out.entries).toHaveLength(3);
-    expect(out.omitted.map((o) => o.title)).toEqual(['Extra']);
-    expect(bytes(out.block!)).toBeGreaterThan(HOUSE_RULES_BUDGET_BYTES);
+  it('leaves out the newest always rule that does not fit, and names it like a files rule', () => {
+    const at = (day: number) => new Date(Date.UTC(2026, 9, day));
+    const newest = rule({ title: 'Newest', size: 7000, enforcedAt: at(3) });
+    const oldest = rule({ title: 'Oldest', size: 7000, enforcedAt: at(1) });
+    const middle = rule({ title: 'Middle', size: 7000, enforcedAt: at(2) });
+    const out = select([newest, middle, oldest]);
+    expect(out.entries.map((e) => e.title)).toEqual(['Oldest', 'Middle']);
+    expect(out.omitted).toEqual([
+      { id: newest.id, hash: newest.hash, title: 'Newest', why: 'budget' },
+    ]);
+    expect(out.block).toContain(
+      '(1 more enforced house rule did not fit this prompt and is not shown: "Newest".)',
+    );
+    expect(bytes(out.block!)).toBeLessThanOrEqual(HOUSE_RULES_BUDGET_BYTES);
   });
+
+  it('keeps an always rule ahead of a smaller files rule when only one of them fits', () => {
+    const always = rule({ title: 'Always', size: 9000 });
+    const smaller = files(['*.php'], { title: 'Smaller', size: 3000 });
+    const out = select([smaller, always], {
+      changedFiles: ['x.php'],
+      budgetBytes: blockBytes([always]) + 400,
+    });
+    expect(out.entries.map((e) => e.title)).toEqual(['Always']);
+    expect(out.omitted.map((o) => [o.title, o.why])).toEqual([['Smaller', 'budget']]);
+  });
+
+  it.each(['write', 'review'] as const)(
+    'keeps every always rule of a set within the api cap, then fits the files rules as before (%s)',
+    (mode) => {
+      const always = [0, 1, 2, 3].map((i) => rule({ title: `Always ${i}`, size: 1800 }));
+      const used = always.reduce(
+        (sum, r) => sum + houseRuleBytes(r, { enforce: r.spec, shortId: r.id.slice(0, 8) }),
+        0,
+      );
+      expect(used).toBeLessThanOrEqual(HOUSE_RULES_ALWAYS_CAP_BYTES);
+      expect(used).toBeGreaterThan(HOUSE_RULES_ALWAYS_CAP_BYTES - 500);
+      const small = files(['*.php'], { title: 'Small', size: 3000 });
+      const large = files(['*.php'], { title: 'Large', size: 9000 });
+      const out = selectHouseRules({
+        mode,
+        rules: [large, small, ...always],
+        changedFiles: ['a.php'],
+      });
+      expect(out.entries.map((e) => e.title)).toEqual([
+        'Always 0',
+        'Always 1',
+        'Always 2',
+        'Always 3',
+        'Small',
+      ]);
+      expect(out.omitted.map((o) => [o.title, o.why])).toEqual([['Large', 'budget']]);
+      expect(bytes(out.block!)).toBeLessThanOrEqual(HOUSE_RULES_BUDGET_BYTES);
+    },
+  );
 
   it('fits the larger rule a written file matched before the smaller one only a plan names', () => {
     const written = files(['*.css'], { title: 'Written', size: 5000 });
@@ -410,13 +462,14 @@ describe('selectHouseRules: the budget', () => {
   it('says it differently to a writer and to a reviewer', () => {
     const keep = rule({ title: 'Kept', size: 100 });
     const big = files(['*.php'], { title: 'Left out', size: 5000 });
-    const input = {
+    const input = (mode: 'write' | 'review') => ({
+      mode,
       rules: [keep, big],
       changedFiles: ['x.php'],
-      budgetBytes: blockBytes([keep]) + 400,
-    };
-    const write = selectHouseRules({ mode: 'write', ...input }).block!;
-    const review = selectHouseRules({ mode: 'review', ...input }).block!;
+      budgetBytes: blockBytes([keep], { mode }) + 400,
+    });
+    const write = selectHouseRules(input('write')).block!;
+    const review = selectHouseRules(input('review')).block!;
     expect(write).toContain(
       '(1 more enforced house rule did not fit this prompt and is not shown: "Left out".)',
     );

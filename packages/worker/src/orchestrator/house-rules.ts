@@ -267,9 +267,10 @@ export const unavailableSelection = (errorClass: GlobalKbErrorClass): HouseRuleS
 /**
  * Which rules a dispatch is shown, and the block that shows them. An unreadable change
  * (`changedFiles` null) puts every `files` rule in unscoped: never narrow on a measurement nobody
- * made. Over budget whole rules are left out, first fit: written-file matches are kept before
- * estimate-only ones and smaller before larger; `always` rules are never left out. If every rule is
- * left out the block is the framing and the notice; it is null only when nothing was left out too.
+ * made. Over budget whole rules are left out, first fit: `always` rules first, oldest approval
+ * first (a set within the API's cap always fits), then written-file matches before estimate-only
+ * ones and smaller before larger. If every rule is left out the block is the framing and the
+ * notice; it is null only when nothing was left out too.
  */
 export function selectHouseRules(input: {
   mode: HouseRuleMode;
@@ -282,15 +283,13 @@ export function selectHouseRules(input: {
   const { mode, changedFiles } = input;
   const budget = input.budgetBytes ?? HOUSE_RULES_BUDGET_BYTES;
   const ranked = rank(input.rules, changedFiles, input.estimatedFiles ?? []);
-  const always = ranked.filter((r) => r.tier === 0);
-  const files = ranked.filter((r) => r.tier !== 0);
 
   // The notice counts against the budget but depends on what is left out, so its room only grows.
   let reserve = 0;
   for (;;) {
-    const kept = [...always];
+    const kept: Ranked[] = [];
     const left: Ranked[] = [];
-    for (const candidate of files) {
+    for (const candidate of ranked) {
       const trial = [...kept, candidate];
       if (bytesOf(renderBlock(mode, trial, '')) <= budget - reserve) kept.push(candidate);
       else left.push(candidate);

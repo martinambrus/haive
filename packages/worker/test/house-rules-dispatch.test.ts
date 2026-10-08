@@ -69,6 +69,15 @@ async function repo(): Promise<string> {
   return dir;
 }
 
+/** The branch adds `protected/a` in a commit, then moves it to `public/a` in the index only. */
+async function stageRenameOfBranchFile(dir: string): Promise<void> {
+  await put(dir, 'protected/a');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'add protected/a');
+  await mkdir(path.join(dir, 'public'));
+  git(dir, 'mv', 'protected/a', 'public/a');
+}
+
 describe('readChangedFiles', () => {
   it('unions what is dirty or untracked with what the branch holds against its fork point', async () => {
     const dir = await repo();
@@ -119,6 +128,15 @@ describe('readChangedFiles', () => {
     const files = (await readChangedFiles(dir, 'main'))!;
     expect(files).toContain('renamed.txt');
     expect(files).toContain('a.txt');
+  });
+
+  it('names both sides of a staged rename of a file the branch itself added, which the fork point never held', async () => {
+    const dir = await repo();
+    await stageRenameOfBranchFile(dir);
+    expect(git(dir, 'diff', '--name-only', 'main', '--', 'protected/a')).toBe('');
+    const files = (await readChangedFiles(dir, 'main'))!;
+    expect(files).toContain('public/a');
+    expect(files).toContain('protected/a');
   });
 
   it('holds only the dirty files when the fork point is unknown, which is all the work of a single agent', async () => {
@@ -285,6 +303,15 @@ describe('selectForDispatch', () => {
       'Deleted in a commit': { scope: 'files', glob: 'docs/**' },
       'Deleted in the working tree': { scope: 'files', glob: 'b.txt' },
     });
+  });
+
+  it('selects a files rule that only the source of a staged rename matches, with that glob', async () => {
+    const dir = await repo();
+    await stageRenameOfBranchFile(dir);
+    h.tree = dir;
+    h.setup = { output: { baseBranch: 'main' } };
+    const out = await select({ mode: 'review' }, kb({ rules: [files(['protected/**'])] }));
+    expect(out.entries.map((e) => e.why)).toEqual([{ scope: 'files', glob: 'protected/**' }]);
   });
 
   it('shows every files rule, unscoped, when the change cannot be read', async () => {
