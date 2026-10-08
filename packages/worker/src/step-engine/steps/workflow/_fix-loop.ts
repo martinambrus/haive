@@ -243,6 +243,21 @@ function cutMiddle(text: string, budget: number, repair: (piece: string) => stri
   return [repair(head), omitted, repair(tail)].join('\n');
 }
 
+/** The first `max` characters of `text`, then `marker` on its own line. A BEGIN banner ending the
+ *  head, or only blank lines after it, goes with them: repaired, it would be an empty fence. */
+export function cutHead(text: string, max: number, marker: string): string {
+  if (text.length <= max) return text;
+  const lines = headPiece(text, max).split('\n');
+  for (;;) {
+    let end = lines.length;
+    while (end > 0 && lines[end - 1]?.trim() === '') end -= 1;
+    if (lines[end - 1] !== UNTRUSTED_OPEN) break;
+    lines.length = end - 1;
+  }
+  const head = balanceFences(lines.join('\n'));
+  return head ? `${head}\n${marker}` : marker;
+}
+
 /** Cut what sits between BEGIN and END banners so the blocks share `budget`, shortest first.
  *  A BEGIN with no END after it is ordinary text. */
 function cutFencedBodies(text: string, budget: number): string {
@@ -685,7 +700,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     // gate-2 constraint carries fences INSIDE it, and a head slice keeps the BEGIN and drops
     // the END — which would swallow the rest of the prompt, this block being unfenced by
     // design (a honored constraint is the developer's).
-    return d.length > room ? `${label}${balanceFences(`${d.slice(0, room)}…`)}` : `${label}${d}`;
+    return `${label}${cutHead(d, room, '…')}`;
   });
   return [header, ...entries].join('\n');
 }

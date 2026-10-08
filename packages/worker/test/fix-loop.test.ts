@@ -28,6 +28,7 @@ import {
   loadSameCheckRepeat,
   recordFixLoopRequest,
   buildGateDirectiveDiagnosis,
+  cutHead,
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
   FIX_LOOP_GATE_SOURCE,
@@ -38,6 +39,7 @@ import {
   fencedAgentBlock,
 } from '../src/step-engine/steps/_untrusted-repo.js';
 import { formatQaFixDiagnosis } from '../src/step-engine/steps/workflow/08d2-adversarial-qa-review.js';
+import { gate2VerifyApprovalStep } from '../src/step-engine/steps/workflow/09-gate-2-verify-approval.js';
 import { ddevGuardFailure, isDdevAgentFixableFailure } from '../src/sandbox/ddev-build-guard.js';
 import { DDEV_CONFIG_YAML_PREFIX } from '../src/sandbox/ddev-config-yaml-guard.js';
 
@@ -1598,6 +1600,96 @@ describe('fix-loop guidance', () => {
         diagnosis: '',
         guidance: '',
       });
+    });
+  });
+});
+
+describe('cutHead', () => {
+  const MARK = '… [cut]';
+
+  /** No empty fence, no banner line carrying other text, banners alternate and all close. */
+  function wellFormed(text: string): boolean {
+    const empty = new RegExp(`${UNTRUSTED_OPEN}\\s*${UNTRUSTED_CLOSE}`);
+    const impure = text
+      .split('\n')
+      .some(
+        (l) =>
+          (l.includes(UNTRUSTED_OPEN) && l !== UNTRUSTED_OPEN) ||
+          (l.includes(UNTRUSTED_CLOSE) && l !== UNTRUSTED_CLOSE),
+      );
+    return fencesAlternate(text) && !empty.test(text) && !impure;
+  }
+
+  const fenced = (gap: string): string =>
+    `Findings:\n${UNTRUSTED_OPEN}${gap}${'evidence line\n'.repeat(40)}${UNTRUSTED_CLOSE}\nafter`;
+
+  it('returns a text within the budget unchanged', () => {
+    const text = `a\n${fencedAgentBlock('b')}`;
+    expect(cutHead(text, text.length, MARK)).toBe(text);
+    expect(cutHead(text, text.length + 50, MARK)).toBe(text);
+  });
+
+  it('puts the marker on its own line after a text holding no fence', () => {
+    const text = `${'alpha beta\n'.repeat(20)}tail`;
+    expect(cutHead(text, 50, MARK)).toBe(`${'alpha beta\n'.repeat(4)}${MARK}`);
+  });
+
+  it.each(['\n', '\n\n', '\n  \n\n', '\n\r\n'])(
+    'never leaves an empty fence wherever the cut lands near a BEGIN (gap %j)',
+    (gap) => {
+      const text = fenced(gap);
+      const open = text.indexOf(UNTRUSTED_OPEN);
+      for (let max = open - 3; max <= open + UNTRUSTED_OPEN.length + gap.length + 30; max += 1) {
+        const out = cutHead(text, max, MARK);
+        expect(wellFormed(out), `max=${max} ${JSON.stringify(out)}`).toBe(true);
+        expect(out.endsWith(`\n${MARK}`) || out === MARK).toBe(true);
+      }
+    },
+  );
+
+  it('drops a BEGIN that ends the head and the blank lines after it', () => {
+    const text = `Findings:\n${UNTRUSTED_OPEN}\n\n${'evidence line\n'.repeat(40)}${UNTRUSTED_CLOSE}`;
+    const at = text.indexOf('evidence line');
+    expect(cutHead(text, at - 1, MARK)).toBe(`Findings:\n${MARK}`);
+    expect(cutHead(text, at, MARK)).toBe(`Findings:\n${MARK}`);
+    expect(cutHead(text, UNTRUSTED_OPEN.length + 10 + 1, MARK)).toBe(`Findings:\n${MARK}`);
+  });
+
+  it('closes a fence the cut leaves open, before the marker', () => {
+    const text = fenced('\n');
+    const out = cutHead(text, text.indexOf('evidence line') + 40, MARK);
+    expect(wellFormed(out)).toBe(true);
+    expect(out.endsWith(`\n${UNTRUSTED_CLOSE}\n${MARK}`)).toBe(true);
+  });
+
+  it('keeps a diagnosis whose only content is a BEGIN as the bare marker', () => {
+    const text = `${UNTRUSTED_OPEN}\n${'x'.repeat(100)}`;
+    expect(cutHead(text, UNTRUSTED_OPEN.length + 1, MARK)).toBe(MARK);
+  });
+
+  describe('honored constraints through the real gate-2 producer', () => {
+    const RUNTIME = 'TypeError: x is undefined at app.js:1';
+    const honoredFor = async (len: number): Promise<string> => {
+      const { diagnosis } = gate2VerifyApprovalStep.restartLoop!.evaluate({
+        decision: 'reject',
+        feedback: 'a'.repeat(len),
+        auditFindings: [],
+        runtimeErrors: RUNTIME,
+      })!;
+      return loadHonoredConstraints(ctxWith([ev('09-gate-2-verify-approval', 5, diagnosis)], 5));
+    };
+
+    it('keeps the runtime evidence fenced when the head cut lands on the BEGIN (L = 1,883)', async () => {
+      for (const len of [1882, 1883, 1884]) {
+        const block = await honoredFor(len);
+        expect(wellFormed(block), `L=${len}`).toBe(true);
+      }
+    });
+
+    it('is well formed at every feedback length', async () => {
+      for (let len = 1; len <= 3000; len += 1) {
+        expect(wellFormed(await honoredFor(len)), `L=${len}`).toBe(true);
+      }
     });
   });
 });
