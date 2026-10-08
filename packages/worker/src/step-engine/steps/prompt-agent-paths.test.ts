@@ -1880,7 +1880,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
 
     // The sequencer's numbered child list: the thing being ORDERED.
     expect(await textFor('03-plan-sequence buildSequencePrompt')).toContain(
-      '0. #1 Session middleware (`node:node-2`)',
+      '0. #1 Session middleware (`node:node-2`, component, todo)',
     );
 
     // Both arms of the merge-fix prompt's two optional arguments.

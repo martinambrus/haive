@@ -96,7 +96,10 @@ export function buildPlanExpansionContext(
   nodes: PlanNodeSkeleton[],
   focus: PlanNodeSkeleton,
   maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
-  { buildOrder }: { buildOrder?: ReadonlyMap<string, number> } = {},
+  {
+    buildOrder,
+    omitChildren = false,
+  }: { buildOrder?: ReadonlyMap<string, number>; omitChildren?: boolean } = {},
 ): string {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const byParent = indexChildren(nodes);
@@ -119,7 +122,7 @@ export function buildPlanExpansionContext(
     ...(byParent.get(focus.parentId) ?? [])
       .filter((sibling) => sibling.id !== focus.id)
       .map((sibling) => exactLine(sibling, 'Sibling', buildOrder)),
-    ...(byParent.get(focus.id) ?? []).map((child) =>
+    ...(omitChildren ? [] : (byParent.get(focus.id) ?? [])).map((child) =>
       exactLine(child, 'Existing child', buildOrder),
     ),
   ];
