@@ -53,7 +53,9 @@ keyed on the run rather than either banner's wording, so a reworded banner canno
 hole. Instructions ABOUT a fenced block stay OUTSIDE it: "copy the ids VERBATIM", "every one
 MUST appear", "validate and fix what these DESCRIBE". `renderBoundedPlanIndex`'s omission notice
 is the worked example — it is HAIVE telling the agent not to invent an id, and fencing it voided
-a guard rail by its own containment.
+a guard rail by its own containment. The fix loop keeps the two apart in its data: a producer's own
+instruction lines travel in the request's `guidance`, which 07 renders outside the fence it puts
+the diagnosis in ([Fix loop](fix-loop.md)).
 
 This is not belt-and-braces over the guards: `REPO_IS_DATA_LINES` REQUIRES its reviewer to quote
 the hostile string with its file and line, so hostile content reaches the next prompt BY DESIGN.
