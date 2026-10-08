@@ -1633,6 +1633,7 @@ export async function handleResult(
               osc.conflictingStepId ?? 'another step',
               osc.conflictingDiagnoses[0],
               osc.conflictingDiagnoses[1],
+              result.guidance,
             ),
             formValues: null,
             endedAt: null,
@@ -1686,7 +1687,12 @@ export async function handleResult(
         // the user accepts or aborts.
         const parked = await writeOwnedRow(db, result.row.id, {
           status: 'waiting_form',
-          formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
+          formSchema: buildFixLoopEscalationSchema(
+            result.sourceStepId,
+            result.diagnosis,
+            cap,
+            result.guidance,
+          ),
           formValues: null,
           endedAt: null,
           waitingStartedAt: new Date(),

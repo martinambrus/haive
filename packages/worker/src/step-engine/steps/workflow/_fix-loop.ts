@@ -57,6 +57,15 @@ function instructionField(): FormSchema['fields'][number] {
   };
 }
 
+/** The fixer's Haive-written instructions as an info section, so the person deciding sees them. */
+function guidanceSections(
+  guidance: string | undefined,
+): { title: string; body: string; defaultOpen: boolean }[] {
+  return guidance?.trim()
+    ? [{ title: 'Instructions Haive gave the fixer', body: guidance, defaultOpen: false }]
+    : [];
+}
+
 /** The escalation gate shown when the fix loop hits the round cap: the diagnosis +
  *  Continue / Accept / Abort. Parked on the source step (the one that found the
  *  defect); resolved by handleAdvanceStep on submit. Mirrors the revise-loop review
@@ -65,6 +74,7 @@ export function buildFixLoopEscalationSchema(
   sourceStepId: string,
   diagnosis: string,
   cap: number,
+  guidance?: string,
 ): FormSchema {
   return {
     title: `Fix loop reached the ${cap}-round limit`,
@@ -74,9 +84,12 @@ export function buildFixLoopEscalationSchema(
     infoSections: [
       {
         title: 'Latest diagnosis',
-        body: diagnosis || '(no diagnosis recorded)',
+        body:
+          excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(sourceStepId)) ||
+          '(no diagnosis recorded)',
         defaultOpen: true,
       },
+      ...guidanceSections(guidance),
     ],
     fields: [
       {
@@ -105,6 +118,7 @@ export function buildOscillationEscalationSchema(
   stepB: string,
   diagA: string,
   diagB: string,
+  guidance?: string,
 ): FormSchema {
   const excerpt = (step: string, diagnosis: string): string =>
     excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(step));
@@ -125,6 +139,7 @@ export function buildOscillationEscalationSchema(
         body: excerpt(stepB, diagB) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
+      ...guidanceSections(guidance),
     ],
     fields: [
       {

@@ -1153,6 +1153,53 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
     for (const body of bodies) expect(body.length).toBeLessThan(800);
   });
 
+  it('shows the round-cap gate both ends of a long agent diagnosis, and a developer rejection whole', () => {
+    const agent = numbered('tool', 260);
+    expect(agent.length).toBeGreaterThan(14_000);
+    const [shown = ''] = (
+      buildFixLoopEscalationSchema('08c-code-review', agent, 5).infoSections ?? []
+    ).map((section) => section.body);
+    expect(shown.startsWith('tool line 0001')).toBe(true);
+    expect(shown.endsWith('tool line 0260 ' + '.'.repeat(40))).toBe(true);
+    expect(shown.split(OMISSION)).toHaveLength(2);
+    expect(shown.length).toBeLessThan(1600);
+
+    const person = numbered('person', 40);
+    const [kept = ''] = (
+      buildFixLoopEscalationSchema('09-gate-2-verify-approval', gate2Diagnosis(person), 5)
+        .infoSections ?? []
+    ).map((section) => section.body);
+    expect(kept).toContain(`Findings to fix (all required):\n${person}\n`);
+    expect(fencesAlternate(kept)).toBe(true);
+    for (const body of fenceBodies(kept)) expect(body.length).toBeLessThan(800);
+  });
+
+  it('still says no diagnosis was recorded on the round-cap gate', () => {
+    const [shown] = buildFixLoopEscalationSchema('08c-code-review', '', 5).infoSections ?? [];
+    expect(shown?.body).toBe('(no diagnosis recorded)');
+  });
+
+  it.each([
+    ['cap gate', (g?: string) => buildFixLoopEscalationSchema('08c-code-review', 'diag', 5, g), 1],
+    [
+      'oscillation gate',
+      (g?: string) => buildOscillationEscalationSchema('07c', '07b', 'a', 'b', g),
+      2,
+    ],
+  ])('%s adds the guidance as one closed section after the diagnoses', (_name, build, n) => {
+    const guidance = 'Validate each finding against the code before you act on it.';
+    const sections = build(guidance).infoSections ?? [];
+    expect(sections).toHaveLength(n + 1);
+    expect(sections.at(-1)).toEqual({
+      title: 'Instructions Haive gave the fixer',
+      body: guidance,
+      defaultOpen: false,
+    });
+    expect(build().infoSections).toHaveLength(n);
+    expect(build('  \n ').infoSections).toHaveLength(n);
+    expect(build('').infoSections).toEqual(build().infoSections);
+  });
+
   it('hands 07 the findings of an adversarial-QA fix request bounded and the reviewer words whole', async () => {
     const feedback = numbered('reviewer', 40);
     const diagnosis = qaDiagnosis(feedback);
