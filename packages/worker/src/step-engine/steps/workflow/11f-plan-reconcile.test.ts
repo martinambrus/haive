@@ -183,11 +183,37 @@ describe('11f plan reconcile — node versions', () => {
         tasks: { findFirst: async () => ({ repositoryId: 'r', changedPaths: ['src/a.ts'] }) },
       },
       select: () => ({ from: () => ({ where: async () => [{ nodeId: NODE }] }) }),
+      transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     } as unknown as Database;
     const d = await planReconcileStep.detect!({ ...ctx, db } as StepContext);
     const prompt = planReconcileStep.llm!.buildPrompt({ detected: d } as never) as string;
     expect(prompt).toContain('`version 3`');
     expect(prompt).toContain(`- Billing (\`node:${NODE}\` · \`version 3\`)`);
+  });
+
+  it('reads the plan text and the versions it lists from one snapshot', async () => {
+    const nodes = [node(NODE, 'Billing', 3)];
+    vi.mocked(findPlanRoot).mockResolvedValueOnce({ id: NODE } as never);
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce(nodes);
+    vi.mocked(renderPlanMarkdown).mockImplementationOnce(async (_db, _repo, opts) =>
+      renderPlanMarkdownFrom(nodes, [], opts),
+    );
+    const tx = { snapshot: true };
+    const configs: unknown[] = [];
+    const db = {
+      query: {
+        tasks: { findFirst: async () => ({ repositoryId: 'r', changedPaths: ['src/a.ts'] }) },
+      },
+      select: () => ({ from: () => ({ where: async () => [{ nodeId: NODE }] }) }),
+      transaction: async (fn: (t: unknown) => unknown, config: unknown) => {
+        configs.push(config);
+        return fn(tx);
+      },
+    } as unknown as Database;
+    await planReconcileStep.detect!({ ...ctx, db } as StepContext);
+    expect(configs).toEqual([{ isolationLevel: 'repeatable read', accessMode: 'read only' }]);
+    expect(vi.mocked(renderPlanMarkdown).mock.lastCall?.[0]).toBe(tx);
+    expect(vi.mocked(loadPlanSkeletons).mock.lastCall?.[0]).toBe(tx);
   });
 
   it('reports a conflict as a done step with nothing applied instead of throwing', async () => {

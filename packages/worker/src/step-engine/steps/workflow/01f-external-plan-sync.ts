@@ -1,11 +1,5 @@
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
-import {
-  applyPlanPatch,
-  findPlanRoot,
-  loadPlanSkeletons,
-  PlanPatchError,
-  renderPlanMarkdown,
-} from '@haive/shared/plan';
+import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
@@ -17,6 +11,7 @@ import {
   describePlanOp,
   describeStrippedLinks,
   proposedOps,
+  readPlanSnapshot,
 } from './_plan-ops.js';
 import {
   externalCommitBlock,
@@ -203,14 +198,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       drift.changedPaths,
     );
 
-    const [planMarkdown, nodes] = await Promise.all([
-      renderPlanMarkdown(ctx.db, drift.repositoryId, {
-        titlesOnly: true,
-        maxDepth: 4,
-        withVersions: true,
-      }),
-      loadPlanSkeletons(ctx.db, drift.repositoryId),
-    ]);
+    const [planMarkdown, nodes] = await readPlanSnapshot(ctx.db, drift.repositoryId);
     return {
       ...empty,
       planMarkdown,

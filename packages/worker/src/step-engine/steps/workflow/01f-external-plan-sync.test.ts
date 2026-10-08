@@ -49,6 +49,7 @@ function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
         },
       }),
     }),
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   } as unknown as Database;
   return { db, stamps };
 }

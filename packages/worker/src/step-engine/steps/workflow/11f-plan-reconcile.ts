@@ -1,13 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
-import {
-  applyPlanPatch,
-  findPlanRoot,
-  loadPlanSkeletons,
-  PlanPatchError,
-  renderPlanMarkdown,
-} from '@haive/shared/plan';
+import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
@@ -18,6 +12,7 @@ import {
   describePlanOp,
   describeStrippedLinks,
   proposedOps,
+  readPlanSnapshot,
 } from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { collectImplementationFiles } from './_impl-changes.js';
@@ -103,14 +98,9 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     }
   }
 
-  const [planMarkdown, spec, nodes] = await Promise.all([
-    renderPlanMarkdown(ctx.db, task.repositoryId, {
-      titlesOnly: true,
-      maxDepth: 4,
-      withVersions: true,
-    }),
+  const [[planMarkdown, nodes], spec] = await Promise.all([
+    readPlanSnapshot(ctx.db, task.repositoryId),
     resolveApprovedSpec(ctx),
-    loadPlanSkeletons(ctx.db, task.repositoryId),
   ]);
 
   // 04-phase-0b resolved this already; it is best-effort because `_step-reset`
