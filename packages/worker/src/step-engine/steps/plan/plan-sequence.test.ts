@@ -429,6 +429,19 @@ describe('foldSequenceResults', () => {
     ]);
   });
 
+  it('does not count an upsert as dropped when only its extra keys were stripped', async () => {
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A, B] }));
+    const { db, stamps } = fakeDb();
+    await foldSequenceResults(ctx(db), 'r', [
+      agentReply([
+        { op: 'upsert', nodeRef: A, ordinal: 0, expectedVersion: 1 },
+        { op: 'upsert', nodeRef: B, ordinal: 1, status: 'done' },
+      ]),
+    ]);
+    expect(vi.mocked(applyAgentPatch).mock.calls[0]![1]).toMatchObject({ ops: ORDER });
+    expect(stamps).toEqual([]);
+  });
+
   it('drops an upsert whose ref can name no node and applies the rest', async () => {
     // The measured shape: a uuid garbled into something no longer uuid-shaped, which
     // the applier would read as a CREATE and fail for want of a title.
