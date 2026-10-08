@@ -1318,9 +1318,11 @@ export async function ingestReviewRun(
     }
     // fix_required
     const previous = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    // A shorter list than last time is not evidence that the omitted criteria passed.
     const progressed =
       verdict.criteria_results.length > 0 &&
       previous.success &&
+      verdict.criteria_results.length >= previous.data.criteria_results.length &&
       failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
     const newStuck = progressed ? 1 : issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;

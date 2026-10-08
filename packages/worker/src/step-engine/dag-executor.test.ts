@@ -1927,6 +1927,12 @@ describe('ingestReviewRun: stuck counts reviews without progress', () => {
     expect(r.rounds).toBe(3);
   });
 
+  it('does not count a shorter criteria list as progress', async () => {
+    const r = await drive([failed(3), failed(1, 1), failed(1, 1), failed(1, 1)]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
   it('keeps the review that failed the issue at the fifth iteration', async () => {
     const r = await drive([failed(5), failed(4), failed(3), failed(2), failed(1)]);
     expect(r.ended).toBe('failed_unrecoverable');
