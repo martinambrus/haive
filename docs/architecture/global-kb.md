@@ -66,6 +66,30 @@ keeps the draft for retry. Body edits use the existing pending-embedding/sync pa
 description or body edit blocks activation, archiving and deletion until saved or cancelled.
 The replacement diff is shown again after a body save, using the corrected text.
 
+## House rules: admin-enforced entries
+
+**Only an admin makes an entry an enforced house rule**, because enforcing will put its full text
+into agent prompts as an instruction (PR6 of `docs/plans/abstract-splashing-owl.md`). The approval
+binds exactly the text the admin saw: `PUT /global-kb/entries/:id/enforcement` takes the entry's
+content token (`houseRuleContentToken`, `house-rules.ts`) and stores an approval hash over the same
+canonical content plus the mode (`always`, or `files` with globs). Both are computed from STORED
+values, so jsonb key order and the boot backfill's array order never change them. Any later edit
+makes the hash stop matching (Lapsed · edited); leaving `active` clears it through a trigger, the
+one clearing mechanism, which also covers an older build sharing an external store; the mode,
+globs and approver stay as the last approval so a superseded entry can offer Re-enforce.
+`enforcementState` reads none, other namespace, superseded, cleared, not active, edited, switched
+off or enforced, and the api attaches it to every entry it returns.
+
+An enforced entry needs a description and may not carry invisible or control characters or Haive
+prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
+the rendered entry (`houseRuleBytes`). Every writer of an entry takes the namespace's advisory
+lock before the row's, with a 30 s wait limit answering 503: MEASURED, a DELETE racing the
+activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. The store settings
+that could switch every rule off at once (Enabled, namespace, mode, connection string) are
+admin-only, the house-rules switch lives in the admin console, and an admin who points the KB at
+an external store trusts every writer of that database: a row it marks enforced is honoured. The
+enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a
