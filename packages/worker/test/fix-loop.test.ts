@@ -583,6 +583,23 @@ describe('detectFixLoopOscillation', () => {
     expect(r.conflictingDiagnoses).toEqual([D07C, D07B]);
   });
 
+  it('says side B is a person only when its person-source row carries the mark', async () => {
+    const qa = (marked: boolean) => ({
+      payload: {
+        sourceStepId: '08d2-adversarial-qa-review',
+        diagnosis: D07B,
+        round: 3,
+        ...(marked ? { machineFenced: true } : {}),
+      },
+    });
+    for (const marked of [false, true]) {
+      const db = eventsDb([ev('07c-ddev-reconcile', 2, D07C), qa(marked)]);
+      const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+      expect(r.tripped).toBe(true);
+      expect(r.conflictingPerson).toBe(marked);
+    }
+  });
+
   it('returns the guidance of the row it returns as side B, and an empty string without one', async () => {
     const db = eventsDb([
       ev('07c-ddev-reconcile', 2, D07C),
@@ -643,6 +660,20 @@ describe('detectFixLoopOscillation', () => {
 });
 
 describe('oscillation escalation gate', () => {
+  it('bounds a person-source side the caller says is machine text', () => {
+    const long = `${'x'.repeat(200)}\n`.repeat(40);
+    const s = buildOscillationEscalationSchema(
+      '08d2-adversarial-qa-review',
+      '07b-phase-4-validate',
+      long,
+      'b',
+      undefined,
+      undefined,
+      { a: false, b: false },
+    );
+    expect(s.infoSections![0]!.body.length).toBeLessThan(3000);
+  });
+
   it('reuses the gate action field and surfaces both conflicting diagnoses', () => {
     const s = buildOscillationEscalationSchema(
       '07c-ddev-reconcile',

@@ -121,6 +121,7 @@ import {
   FIX_LOOP_GATE_SOURCE,
   FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
+  HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import {
@@ -1635,6 +1636,10 @@ export async function handleResult(
               osc.conflictingDiagnoses[1],
               result.guidance,
               osc.conflictingGuidance,
+              {
+                a: HUMAN_REJECT_SOURCES.has(result.sourceStepId) && !result.unfencedLegacy,
+                b: osc.conflictingPerson === true,
+              },
             ),
             formValues: null,
             endedAt: null,

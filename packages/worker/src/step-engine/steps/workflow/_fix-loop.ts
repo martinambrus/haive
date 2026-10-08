@@ -125,9 +125,10 @@ export function buildOscillationEscalationSchema(
   diagB: string,
   guidanceA?: string,
   guidanceB?: string,
+  persons?: { a: boolean; b: boolean },
 ): FormSchema {
-  const excerpt = (step: string, diagnosis: string): string =>
-    excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(step));
+  const excerpt = (step: string, diagnosis: string, person?: boolean): string =>
+    excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(step));
   return {
     title: `Fix loop is oscillating between ${stepA} and ${stepB}`,
     description:
@@ -137,12 +138,12 @@ export function buildOscillationEscalationSchema(
     infoSections: [
       {
         title: `Constraint from ${stepA}`,
-        body: excerpt(stepA, diagA) || '(no diagnosis recorded)',
+        body: excerpt(stepA, diagA, persons?.a) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
       {
         title: `Conflicting change from ${stepB}`,
-        body: excerpt(stepB, diagB) || '(no diagnosis recorded)',
+        body: excerpt(stepB, diagB, persons?.b) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
       ...guidanceSections(guidanceA, `Instructions Haive gave the fixer (${stepA})`),
@@ -441,6 +442,8 @@ export interface OscillationResult {
   conflictingStepId?: string;
   /** The Haive guidance the conflicting side's fix request carried; '' when it had none. */
   conflictingGuidance?: string;
+  /** Whether the conflicting side is a person's words: a person source whose row carries the mark. */
+  conflictingPerson?: boolean;
 }
 
 /** Detect a non-converging fix loop: the SAME source step re-raising a fingerprint-equal
@@ -475,6 +478,7 @@ export async function detectFixLoopOscillation(
     fingerprint?: string;
     fingerprintV2?: string;
     guidance?: string;
+    machineFenced?: boolean;
   };
   const prior = rows
     .map((r) => r.payload as Payload | null)
@@ -510,6 +514,7 @@ export async function detectFixLoopOscillation(
     conflictingDiagnoses: [diagnosis, between[0]?.diagnosis ?? ''],
     conflictingStepId: between[0]?.sourceStepId ?? 'another step',
     conflictingGuidance: between[0]?.guidance ?? '',
+    conflictingPerson: !!between[0] && isFencedPersonRequest(between[0]),
   };
 }
 
