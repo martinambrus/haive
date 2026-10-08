@@ -134,6 +134,8 @@ export function refusedHouseRuleText(text: string): string | null {
 
 const BRACE_EXPANSIONS_MAX = 64;
 const BRACE_GROUP = /\{([^{}]*)\}/;
+// picomatch reads a ".." in any brace group as a range, whether or not a comma sits beside it.
+const BRACE_RANGE = /\{[^{}]*\.\.[^{}]*\}/;
 
 /** Every glob the brace groups stand for, nested ones included; null once there are more than the cap. */
 function braceExpansions(glob: string): string[] | null {
@@ -175,6 +177,9 @@ function globProblem(glob: string): string | null {
   if (glob.includes('\\')) {
     return `glob ${shown} contains a backslash; "/" is the only path separator`;
   }
+  if (glob.includes('"')) {
+    return `glob ${shown} contains a double quote, which the matcher reads as quoting and drops`;
+  }
   if (glob.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
     return `glob ${shown} has an empty, "." or ".." path segment; write it relative to the repository root, with no leading, trailing or doubled "/"`;
   }
@@ -190,6 +195,13 @@ function globProblem(glob: string): string | null {
   }
   if (/[@+*?!]\(/.test(glob)) {
     return `glob ${shown} uses extglob syntax, which is not supported; its alternatives are not checked, so write brace alternatives`;
+  }
+  const grouping = /[()|]/.exec(glob);
+  if (grouping !== null) {
+    return `glob ${shown} uses "${grouping[0]}", which is not supported; write alternatives in braces, like {a,b}`;
+  }
+  if (BRACE_RANGE.test(glob)) {
+    return `glob ${shown} uses a brace range, which is not supported; list the alternatives with commas, like {a,b,c}`;
   }
   return null;
 }

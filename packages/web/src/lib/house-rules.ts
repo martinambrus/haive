@@ -1,4 +1,4 @@
-import type { GlobalKbEnforceSpec, GlobalKbEnforcementState } from './api-client';
+import type { GlobalKbEnforceSpec, GlobalKbEnforcementState, GlobalKbEntry } from './api-client';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error' | 'info';
 
@@ -28,11 +28,8 @@ export function houseRuleBadge(state: GlobalKbEnforcementState | undefined): Hou
   }
 }
 
-// `GlobalKbEntry` does not declare `enforcedHash`, but the api sends it on every entry.
-type MayCarryApproval = object & { enforcedHash?: string | null };
-
 /** An admin's approval is still on the row, in any state or namespace; an edit, archive, delete or replacement ends it. */
-export function carriesLiveApproval(entry: MayCarryApproval): boolean {
+export function carriesLiveApproval(entry: GlobalKbEntry): boolean {
   return entry.enforcedHash != null;
 }
 

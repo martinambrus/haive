@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import type { GlobalKbEnforcementState } from './api-client';
+import type { GlobalKbEnforcementState, GlobalKbEntry } from './api-client';
 import {
   carriesLiveApproval,
   describeEnforceSpec,
@@ -45,10 +45,8 @@ describe('carriesLiveApproval', () => {
     'other_namespace',
     'switched_off',
   ];
-  const entryIn = (state: GlobalKbEnforcementState['state'], enforcedHash?: string | null) => ({
-    enforcementState: { state },
-    enforcedHash,
-  });
+  const entryIn = (state: GlobalKbEnforcementState['state'], enforcedHash?: string | null) =>
+    ({ enforcementState: { state }, enforcedHash }) as GlobalKbEntry;
 
   it('is true for an entry of another namespace that holds a hash', () => {
     expect(carriesLiveApproval(entryIn('other_namespace', 'hr1:abc'))).toBe(true);
@@ -68,7 +66,7 @@ describe('carriesLiveApproval', () => {
 
   it('is false for a row that carries no hash field, as from an older api', () => {
     expect(carriesLiveApproval(entryIn('enforced'))).toBe(false);
-    expect(carriesLiveApproval({})).toBe(false);
+    expect(carriesLiveApproval({} as GlobalKbEntry)).toBe(false);
   });
 });
 
@@ -86,10 +84,14 @@ describe('the global KB page', () => {
   };
 
   it.each([
-    ['the scope, description and body editors', 'This entry is an enforced house rule.', 3],
-    ['the archive confirmation', 'Archiving ends its enforcement', 1],
-    ['the delete confirmation', 'deleting it ends its enforcement', 1],
-    ['the activate confirmation', 'Activating archives it and ends its enforcement', 1],
+    [
+      'the scope, description and body editors',
+      'This entry carries an admin&apos;s approval as a house rule.',
+      3,
+    ],
+    ['the archive confirmation', 'Archiving ends that approval', 1],
+    ['the delete confirmation', 'deleting it ends that approval', 1],
+    ['the activate confirmation', 'Activating archives it and ends that approval', 1],
   ])('warns on %s only for an entry that carriesLiveApproval', (_site, message, sites) => {
     const warnings = positions(message);
     expect(warnings).toHaveLength(sites);
@@ -102,7 +104,7 @@ describe('the global KB page', () => {
 
   it('labels the entry an activated draft replaces from the same predicate', () => {
     expect(positions('carriesApproval: carriesLiveApproval(r.entry)')).toHaveLength(1);
-    expect(positions('(enforced house rule)')).toHaveLength(1);
+    expect(positions("(carries an admin's approval as a house rule)")).toHaveLength(1);
   });
 
   it('has no state-keyed warning gate left', () => {

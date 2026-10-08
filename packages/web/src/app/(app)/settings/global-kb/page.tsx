@@ -778,10 +778,10 @@ export default function GlobalKbPage() {
         `/global-kb/entries/${e.supersedesEntryId}`,
       );
       if (!carriesLiveApproval(res.entry)) return null;
-      return `"${e.title}" replaces "${res.entry.title}", an enforced house rule. Activating archives it and ends its enforcement; an admin has to enforce the replacement. Activate anyway?`;
+      return `"${e.title}" replaces "${res.entry.title}", which carries an admin's approval as a house rule. Activating archives it and ends that approval; an admin has to enforce the replacement. Activate anyway?`;
     } catch (err) {
       if ((err as ApiError).status === 404) return null;
-      return `Could not check whether the entry "${e.title}" replaces is an enforced house rule (${(err as ApiError).message ?? 'lookup failed'}). If it is, activating archives it and ends its enforcement. Activate anyway?`;
+      return `Could not check whether the entry that "${e.title}" replaces carries an admin's approval as a house rule (${(err as ApiError).message ?? 'lookup failed'}). If it does, activating archives it and ends that approval. Activate anyway?`;
     }
   }
 
@@ -808,7 +808,7 @@ export default function GlobalKbPage() {
     if (
       carriesLiveApproval(e) &&
       !window.confirm(
-        `"${e.title}" is an enforced house rule. Archiving ends its enforcement, and reactivating the entry does not bring it back. Archive anyway?`,
+        `"${e.title}" carries an admin's approval as a house rule. Archiving ends that approval, and reactivating the entry does not bring it back. Archive anyway?`,
       )
     ) {
       return;
@@ -1048,10 +1048,10 @@ export default function GlobalKbPage() {
     const msg = cancelsTask
       ? `Delete "${e.title}" permanently and cancel its enrichment task? This cannot be undone.`
       : `Delete "${e.title}" permanently? This cannot be undone.`;
-    const enforcedNote = carriesLiveApproval(e)
-      ? `"${e.title}" is an enforced house rule, and deleting it ends its enforcement. `
+    const approvalNote = carriesLiveApproval(e)
+      ? `"${e.title}" carries an admin's approval as a house rule, and deleting it ends that approval. `
       : '';
-    if (!window.confirm(`${enforcedNote}${msg}`)) return;
+    if (!window.confirm(`${approvalNote}${msg}`)) return;
     setDialogError(null);
     setBusy(true);
     try {
@@ -2173,8 +2173,8 @@ export default function GlobalKbPage() {
                   </Label>
                   {carriesLiveApproval(selected) && (
                     <span className="text-[11px] text-amber-400">
-                      This entry is an enforced house rule. Saving changes the text an admin
-                      approved, so the rule lapses until an admin enforces it again.
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
                     </span>
                   )}
                   <DescriptionField
@@ -2236,8 +2236,8 @@ export default function GlobalKbPage() {
                   </span>
                   {carriesLiveApproval(selected) && (
                     <span className="text-[11px] text-amber-400">
-                      This entry is an enforced house rule. Saving changes the text an admin
-                      approved, so the rule lapses until an admin enforces it again.
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
                     </span>
                   )}
                   {/* Said rather than decided: re-scoping a replacement does not bring its
@@ -2313,8 +2313,8 @@ export default function GlobalKbPage() {
                 <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800 p-3">
                   {carriesLiveApproval(selected) && (
                     <p className="mb-2 text-[11px] text-amber-400">
-                      This entry is an enforced house rule. Saving changes the text an admin
-                      approved, so the rule lapses until an admin enforces it again.
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
                     </p>
                   )}
                   <MarkdownEditor
@@ -2349,7 +2349,9 @@ export default function GlobalKbPage() {
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                     <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
                       Updates existing: {supersededEntry.title}
-                      {supersededEntry.carriesApproval ? ' (enforced house rule)' : ''}
+                      {supersededEntry.carriesApproval
+                        ? " (carries an admin's approval as a house rule)"
+                        : ''}
                     </span>
                     <div className="ml-auto flex overflow-hidden rounded border border-neutral-800">
                       <button

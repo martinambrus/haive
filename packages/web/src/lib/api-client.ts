@@ -1281,6 +1281,7 @@ export interface GlobalKbEntry {
   /** House-rule fields. Optional because a row from an older api carries none of them. `enforce`
    *  is the last settings given and outlives a lapse; `enforcementState` is what is true now. */
   enforce?: GlobalKbEnforceSpec | null;
+  enforcedHash?: string | null;
   enforcedAt?: string | null;
   enforcedBy?: string | null;
   /** Echoed back as `expectedHash` so an approval names exactly the text the admin read. */
