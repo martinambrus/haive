@@ -87,11 +87,12 @@ export function enforcementState(
 ): HouseRuleEnforcement {
   const spec = parseEnforceSpec(row.enforce);
   if (spec === null) return { state: 'none' };
-  if (row.namespace !== ctx.namespace) return { state: 'other_namespace' };
   if (row.status === 'archived' && row.supersededAt != null) return { state: 'superseded' };
   if (row.enforcedHash == null) return { state: 'cleared' };
   if (row.status !== 'active') return { state: 'not_active' };
   if (houseRuleApprovalHash(row, spec) !== row.enforcedHash) return { state: 'edited' };
+  // A pause promises the rule resumes, so it applies only to an approval that is otherwise valid.
+  if (row.namespace !== ctx.namespace) return { state: 'other_namespace' };
   if (!ctx.houseRulesEnabled) return { state: 'switched_off' };
   return spec.mode === 'always'
     ? { state: 'enforced', mode: 'always' }

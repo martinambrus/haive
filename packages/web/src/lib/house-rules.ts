@@ -33,6 +33,17 @@ export function carriesLiveApproval(entry: GlobalKbEntry): boolean {
   return entry.enforcedHash != null;
 }
 
+/** The api answers 409 to enforcing an entry of another namespace, while its DELETE clears an approval wherever the entry lives. */
+export function enforcementOffers(
+  entry: GlobalKbEntry,
+  namespace: string | null,
+): { enforce: boolean; unenforce: boolean } {
+  return {
+    enforce: namespace !== null && entry.namespace === namespace,
+    unenforce: carriesLiveApproval(entry),
+  };
+}
+
 /** One glob per line: a brace glob holds commas, so the list is never split on them. */
 export function globsFromLines(text: string): string[] {
   return text

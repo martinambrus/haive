@@ -4,6 +4,7 @@ import type { GlobalKbEnforcementState, GlobalKbEntry } from './api-client';
 import {
   carriesLiveApproval,
   describeEnforceSpec,
+  enforcementOffers,
   globsFromLines,
   houseRuleBadge,
 } from './house-rules';
@@ -70,6 +71,46 @@ describe('carriesLiveApproval', () => {
   });
 });
 
+describe('enforcementOffers', () => {
+  const entryIn = (namespace: string, enforcedHash?: string | null) =>
+    ({ namespace, enforcedHash }) as GlobalKbEntry;
+
+  it('offers Enforce, Re-enforce and Edit enforcement for an entry of the namespace in use', () => {
+    expect(enforcementOffers(entryIn('default', null), 'default').enforce).toBe(true);
+    expect(enforcementOffers(entryIn('default', 'hr1:abc'), 'default').enforce).toBe(true);
+  });
+
+  it('offers Un-enforce there only with a live approval', () => {
+    expect(enforcementOffers(entryIn('default', 'hr1:abc'), 'default').unenforce).toBe(true);
+    expect(enforcementOffers(entryIn('default', null), 'default').unenforce).toBe(false);
+  });
+
+  it('offers only Un-enforce for an entry of another namespace that holds an approval', () => {
+    expect(enforcementOffers(entryIn('elsewhere', 'hr1:abc'), 'default')).toEqual({
+      enforce: false,
+      unenforce: true,
+    });
+  });
+
+  it('offers nothing for an entry of another namespace that holds none', () => {
+    const nothing = { enforce: false, unenforce: false };
+    expect(enforcementOffers(entryIn('elsewhere', null), 'default')).toEqual(nothing);
+    expect(enforcementOffers(entryIn('elsewhere'), 'default')).toEqual(nothing);
+  });
+
+  it('offers no Enforce until the namespace in use is known', () => {
+    expect(enforcementOffers(entryIn('default', 'hr1:abc'), null)).toEqual({
+      enforce: false,
+      unenforce: true,
+    });
+  });
+
+  it('compares the namespaces as the api does, exactly', () => {
+    expect(enforcementOffers(entryIn('Default', null), 'default').enforce).toBe(false);
+    expect(enforcementOffers(entryIn('default ', null), 'default').enforce).toBe(false);
+  });
+});
+
 describe('the global KB page', () => {
   const page = readFileSync(
     new URL('../app/(app)/settings/global-kb/page.tsx', import.meta.url),
@@ -108,15 +149,36 @@ describe('the global KB page', () => {
   });
 
   it('offers Un-enforce to an admin for every entry that carriesLiveApproval, whatever its state', () => {
-    expect(positions('const unenforceable = canEnforce && carriesLiveApproval(e);')).toHaveLength(
-      1,
-    );
+    expect(positions('const unenforceable = canEnforce && offers.unenforce;')).toHaveLength(1);
     expect(positions('if (!note && !action && !unenforceable) return null;')).toHaveLength(1);
     expect(positions('{unenforceable && (')).toHaveLength(1);
     expect(positions("state === 'enforced' && e.status === 'active'")).toEqual([]);
     const edited = { enforcementState: { state: 'edited' } } as GlobalKbEntry;
     expect(carriesLiveApproval({ ...edited, enforcedHash: 'hr1:abc' })).toBe(true);
     expect(carriesLiveApproval({ ...edited, enforcedHash: null })).toBe(false);
+  });
+
+  it('offers Enforce, Re-enforce and Edit enforcement only for the namespace the config returned', () => {
+    expect(positions('setInstanceNamespace(')).toHaveLength(1);
+    expect(positions('setInstanceNamespace(cc.namespace);')).toHaveLength(1);
+    expect(positions('enforcementOffers(')).toHaveLength(1);
+    expect(positions('enforcementOffers(e, instanceNamespace)')).toHaveLength(1);
+    const gate = page.indexOf('if (!offers.enforce) action = null;');
+    expect(gate, 'no gate on the action').toBeGreaterThan(-1);
+    expect(page.indexOf('action = {', gate), 'an action is set after the gate').toBe(-1);
+  });
+
+  it('shows the title and the description as the prompt carries them, and the body as stored', () => {
+    expect(positions('const title = collapseToLine(entry.title);')).toHaveLength(1);
+    expect(positions('const description = collapseToLine(entry.description);')).toHaveLength(1);
+    expect(positions('content={title}')).toHaveLength(1);
+    expect(positions('content={description}')).toHaveLength(1);
+    expect(positions('content={entry.title}')).toEqual([]);
+    expect(positions('content={entry.description}')).toEqual([]);
+    expect(positions('content={entry.body}')).toHaveLength(1);
+    expect(positions('Title, as agents see it')).toHaveLength(1);
+    expect(positions('Description, as agents see it')).toHaveLength(1);
+    expect(positions('Body, as agents see it')).toHaveLength(1);
   });
 
   it('has no state-keyed warning gate left', () => {

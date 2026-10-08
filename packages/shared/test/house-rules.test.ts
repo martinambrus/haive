@@ -508,13 +508,31 @@ describe('enforcementState', () => {
       ).toBe('none');
     });
 
-    it('other_namespace beats superseded, cleared, edited and switched_off', () => {
-      const off = { ...ctx, houseRulesEnabled: false };
+    it('superseded beats other_namespace', () => {
       expect(
         stateOf({ namespace: 'other', status: 'archived', supersededAt: new Date() }).state,
-      ).toBe('other_namespace');
-      expect(stateOf({ namespace: 'other', enforcedHash: null }).state).toBe('other_namespace');
-      expect(stateOf({ namespace: 'other', body: 'x' }, off).state).toBe('other_namespace');
+      ).toBe('superseded');
+    });
+
+    it('cleared beats other_namespace, since no approval is left to resume', () => {
+      expect(stateOf({ namespace: 'other', enforcedHash: null }).state).toBe('cleared');
+    });
+
+    it('not_active beats other_namespace', () => {
+      expect(stateOf({ namespace: 'other', status: 'draft' }).state).toBe('not_active');
+    });
+
+    it('edited beats other_namespace, since the text is no longer the approved one', () => {
+      expect(stateOf({ namespace: 'other', body: 'x' }).state).toBe('edited');
+    });
+
+    it('other_namespace reads an approval that is otherwise valid', () => {
+      expect(stateOf({ namespace: 'other' }).state).toBe('other_namespace');
+    });
+
+    it('other_namespace beats switched_off', () => {
+      const off = { ...ctx, houseRulesEnabled: false };
+      expect(stateOf({ namespace: 'other' }, off).state).toBe('other_namespace');
     });
 
     it('superseded beats cleared, though the archive that superseded it cleared the hash', () => {

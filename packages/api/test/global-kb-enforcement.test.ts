@@ -48,6 +48,7 @@ import {
   houseRuleApprovalHash,
   houseRuleBytes,
   houseRuleContentToken,
+  renderHouseRuleEntry,
   type EnforceSpec,
   type GlobalKbEntry,
 } from '@haive/shared/global-kb';
@@ -225,6 +226,23 @@ describe('PUT /entries/:id/enforcement', () => {
     });
   });
 
+  it('accepts a title and a description that are not one line, which the prompt carries as one', async () => {
+    const title = ' Never\tinline  SVG\n';
+    expect((await patch({ title })).status).toBe(200);
+    fake.patch(globalKbEntries, ENTRY, {
+      description: 'Reference a file\ninstead  of inlining SVG. ',
+    });
+
+    const res = await enforce(FILES);
+
+    expect(res.status).toBe(200);
+    expect(enforcementOf(ENTRY)).toBe('enforced');
+    expect(stored().title).toBe(title);
+    expect(renderHouseRuleEntry(asEntry())).toBe(
+      `### Anti-pattern — avoid: Never inline SVG\nReference a file instead of inlining SVG.\n\n${BODY}`,
+    );
+  });
+
   it('changes nothing the embedding reads, and queues no sync', async () => {
     expect((await enforce(FILES)).status).toBe(200);
     expect((await unenforce()).status).toBe(200);
@@ -384,7 +402,7 @@ describe('PUT /entries/:id/enforcement', () => {
       expect(stored().enforcedHash).toBeNull();
     });
 
-    it.each([[null], ['']])(
+    it.each([[null], [''], [' \n\t ']])(
       'an entry with no description, since a rule is listed by it (%j)',
       async (description) => {
         fake.patch(globalKbEntries, ENTRY, { description });
@@ -471,6 +489,17 @@ describe('DELETE /entries/:id/enforcement', () => {
     expect((await unenforce()).status).toBe(200);
   });
 
+  it('reads an entry of another namespace as cleared, not paused, once its approval is gone', async () => {
+    approve(ENTRY, FILES);
+    fake.patch(globalKbEntries, ENTRY, { namespace: 'elsewhere' });
+
+    const res = await unenforce();
+
+    expect(res.status).toBe(200);
+    expect(stored().enforcedHash).toBeNull();
+    expect((await asJson(res)).entry.enforcementState).toEqual({ state: 'cleared' });
+  });
+
   it('answers 404 for an entry that was never enforced, and for one that does not exist', async () => {
     const never = await unenforce();
     expect(never.status).toBe(404);
@@ -509,6 +538,9 @@ describe('every entry a route returns carries its token and enforcement state', 
     expect(edited.entry.contentToken).toBe(tokenOf());
 
     fake.patch(globalKbEntries, ENTRY, { namespace: 'elsewhere' });
+    expect((await read()).entry.enforcementState).toEqual({ state: 'edited' });
+
+    approve(ENTRY, FILES);
     expect((await read()).entry.enforcementState).toEqual({ state: 'other_namespace' });
 
     fake.patch(globalKbEntries, ENTRY, {

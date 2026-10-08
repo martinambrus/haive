@@ -20,6 +20,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import {
   carriesLiveApproval,
   describeEnforceSpec,
+  enforcementOffers,
   globsFromLines,
   houseRuleBadge,
 } from '@/lib/house-rules';
@@ -492,6 +493,7 @@ export default function GlobalKbPage() {
   });
   const [cfgSet, setCfgSet] = useState(false);
   const [canEnforce, setCanEnforce] = useState(false);
+  const [instanceNamespace, setInstanceNamespace] = useState<string | null>(null);
   const [houseRulesOn, setHouseRulesOn] = useState(true);
   const [cfgBusy, setCfgBusy] = useState(false);
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
@@ -527,6 +529,7 @@ export default function GlobalKbPage() {
       }));
       setCfgSet(cc.connectionStringSet);
       setCanEnforce(cc.canEnforce === true);
+      setInstanceNamespace(cc.namespace);
       setHouseRulesOn(cc.houseRulesEnabled !== false);
       setCfgLoaded(true);
     } catch {
@@ -618,6 +621,7 @@ export default function GlobalKbPage() {
       if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
       await api.put('/global-kb/config', payload);
       await loadConfig();
+      await load();
       setCfgMsg('Saved.');
     } catch (err) {
       setCfgMsg((err as ApiError).message ?? 'Save failed');
@@ -1246,7 +1250,17 @@ export default function GlobalKbPage() {
           action = { label: 'Enforce…', prefill: null };
         }
     }
-    const unenforceable = canEnforce && carriesLiveApproval(e);
+    const offers = enforcementOffers(e, instanceNamespace);
+    if (!offers.enforce) action = null;
+    if (
+      !offers.enforce &&
+      note &&
+      instanceNamespace !== null &&
+      e.namespace !== instanceNamespace
+    ) {
+      note += ` It belongs to the namespace "${e.namespace}", so only an install using that namespace can enforce it.`;
+    }
+    const unenforceable = canEnforce && offers.unenforce;
     if (!note && !action && !unenforceable) return null;
     return (
       <div className="mt-2 flex flex-col gap-2 text-xs text-neutral-400" data-testid="enforcement">
@@ -1283,6 +1297,8 @@ export default function GlobalKbPage() {
 
   function renderEnforcePanel(panel: EnforcePanel) {
     const entry = panel.entry;
+    const title = collapseToLine(entry.title);
+    const description = collapseToLine(entry.description);
     const total = panel.usedBytes + panel.entryBytes;
     const over = total - panel.capBytes;
     const pct = (bytes: number) =>
@@ -1296,8 +1312,8 @@ export default function GlobalKbPage() {
         <div className="flex flex-col gap-1">
           <span className="text-sm font-medium text-neutral-100">Enforce this house rule</span>
           <p className="text-xs text-neutral-400">
-            Enforcing puts the stored text below into the prompt of every agent the rule applies to,
-            as an instruction. You are approving this exact text, shown as stored and not rendered.
+            Enforcing puts the text below into the prompt of every agent the rule applies to, as an
+            instruction. You are approving this exact text, shown as agents see it and not rendered.
           </p>
           {!houseRulesOn && (
             <p className="text-xs text-amber-400">
@@ -1307,23 +1323,19 @@ export default function GlobalKbPage() {
           )}
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Title</span>
-          <HighlightedSource name="title.txt" content={entry.title} className="max-h-32" />
+          <span className="text-[11px] text-neutral-500">Title, as agents see it</span>
+          <HighlightedSource name="title.txt" content={title} className="max-h-32" />
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Description</span>
-          {entry.description ? (
-            <HighlightedSource
-              name="description.txt"
-              content={entry.description}
-              className="max-h-32"
-            />
+          <span className="text-[11px] text-neutral-500">Description, as agents see it</span>
+          {description ? (
+            <HighlightedSource name="description.txt" content={description} className="max-h-32" />
           ) : (
             <p className="text-xs text-amber-400">None. An enforced rule needs a description.</p>
           )}
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Body</span>
+          <span className="text-[11px] text-neutral-500">Body, as agents see it</span>
           <HighlightedSource name="body.md" content={entry.body} className="max-h-72" />
         </div>
         <div className="flex flex-wrap gap-3">

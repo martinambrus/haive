@@ -1084,7 +1084,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
           'token_mismatch',
         );
       }
-      if (!row.description) {
+      if (!collapseToLine(row.description ?? '')) {
         throw new HttpError(
           400,
           'an enforced rule is listed by its description, so the entry needs one',
