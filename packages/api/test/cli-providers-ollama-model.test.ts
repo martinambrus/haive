@@ -37,6 +37,7 @@ function setup(row?: { name: string; model: string | null }) {
   const fake = createFakeDb({
     cliProviders: schema.cliProviders,
     cliPackageVersions: schema.cliPackageVersions,
+    cliProviderSecrets: schema.cliProviderSecrets,
   });
   if (row) {
     fake.insert(schema.cliProviders, {
@@ -133,5 +134,14 @@ describe('cloning an ollama provider', () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe(MESSAGE);
     expect(fake.rows(schema.cliProviders)).toHaveLength(1);
+  });
+
+  it('still clones one that has a model', async () => {
+    const fake = setup({ name: 'ollama', model: 'qwen3-coder:30b' });
+    const res = await clone();
+    expect(res.status).toBe(201);
+    const rows = fake.rows(schema.cliProviders);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.model)).toEqual(['qwen3-coder:30b', 'qwen3-coder:30b']);
   });
 });
