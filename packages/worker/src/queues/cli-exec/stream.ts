@@ -387,7 +387,7 @@ export function createStreamJsonCollector(
         const errorsDetail = lastResultErrors.join('; ');
         const detail = lastResultError
           ? `: ${lastResultError}`
-          : cls === 'output_truncated' && errorsDetail
+          : errorsDetail
             ? `: ${errorsDetail}`
             : '';
         if (cls === 'output_truncated') {
@@ -399,8 +399,7 @@ export function createStreamJsonCollector(
         if (cls === 'context_overflow') {
           return `LLM stopped: the prompt exceeded the model's context window (subtype "${lastResultSubtype}"${detail}). Reduce the prompt size or clear prior context.`;
         }
-        const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
-        return lastResultError ? `${base}: ${lastResultError}` : base;
+        return `LLM stream ended with result subtype "${lastResultSubtype}"${detail}`;
       }
       // Rate limit FIRST — ahead of the is_error branch below, which would otherwise
       // claim these runs and report them as a generic failure. `rate_limit_info.status`

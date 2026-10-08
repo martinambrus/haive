@@ -76,7 +76,33 @@ describe('result stop_reason is the signal, not the wording', () => {
   it('leaves another stop_reason a generic failure, whatever errors[] says', () => {
     const reason = reasonOf([result({ stop_reason: 'stop_sequence', errors: ['boom'] })]);
     expect(isOutputTruncationMessage(reason)).toBe(false);
-    expect(reason).toBe('LLM stream ended with result subtype "error_during_execution"');
+    expect(capabilityClassFromMessage(reason)).toBeNull();
+    expect(reason).toBe('LLM stream ended with result subtype "error_during_execution": boom');
+  });
+
+  it('puts errors[] in the detail of a result with no error string, for any class', () => {
+    expect(reasonOf([result({ errors: ['one', ' two  words '] })])).toBe(
+      'LLM stream ended with result subtype "error_during_execution": one; two words',
+    );
+    expect(reasonOf([result({ errors: [] })])).toBe(
+      'LLM stream ended with result subtype "error_during_execution"',
+    );
+  });
+
+  it('does not classify on the errors[] prose', () => {
+    const reason = reasonOf([
+      result({ errors: ['prompt is too long', 'cut at max_output_tokens'] }),
+    ]);
+    expect(isOutputTruncationMessage(reason)).toBe(false);
+    expect(reason).toBe(
+      'LLM stream ended with result subtype "error_during_execution": prompt is too long; cut at max_output_tokens',
+    );
+  });
+
+  it('prefers the error string over errors[]', () => {
+    expect(reasonOf([result({ error: 'plain', errors: ['ignored'] })])).toBe(
+      'LLM stream ended with result subtype "error_during_execution": plain',
+    );
   });
 
   it('keeps the error string of a result with no stop_reason (amp shape) unchanged', () => {
