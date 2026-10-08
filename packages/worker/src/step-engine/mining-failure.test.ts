@@ -8,6 +8,10 @@ import {
   shouldRetryMiningTerminalFailure,
 } from './mining-failure.js';
 import { overrideOr } from './dispatch-timeout.js';
+import {
+  MODEL_CAPABILITY_HEADLINES,
+  OUTPUT_TRUNCATION_HEADLINE,
+} from '../queues/cli-exec/failure-class.js';
 import type { AgentMiningResult } from './step-definition.js';
 
 const done = (agentId: string, rawOutput: string | null): AgentMiningResult => ({
@@ -154,6 +158,32 @@ describe('shouldRetryMiningTerminalFailure', () => {
     expect(
       shouldRetryMiningTerminalFailure(
         failed('a', 'CLI process was stopped before it finished: failed to read config file'),
+      ),
+    ).toBe(false);
+  });
+
+  it('retries a reply cut at the output limit, by its headline and not by its wording', () => {
+    expect(
+      shouldRetryMiningTerminalFailure(failed('a', `${OUTPUT_TRUNCATION_HEADLINE} — cut off`)),
+    ).toBe(true);
+    expect(
+      shouldRetryMiningTerminalFailure({
+        ...failed('a', 'the agent produced no parseable output'),
+        rawOutput: `${OUTPUT_TRUNCATION_HEADLINE} — quoted by the agent`,
+      }),
+    ).toBe(false);
+  });
+
+  it('retries each model-capability class, whose learned remedy changes the request', () => {
+    for (const headline of Object.values(MODEL_CAPABILITY_HEADLINES)) {
+      expect(shouldRetryMiningTerminalFailure(failed('a', `${headline} — hint.`))).toBe(true);
+    }
+  });
+
+  it('does not retry a capability or truncation headline a cancel also names', () => {
+    expect(
+      shouldRetryMiningTerminalFailure(
+        failed('a', `${OUTPUT_TRUNCATION_HEADLINE} — task cancelled`),
       ),
     ).toBe(false);
   });

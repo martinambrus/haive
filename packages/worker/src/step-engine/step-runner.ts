@@ -40,6 +40,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
+import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
@@ -617,7 +618,8 @@ async function resolveLlmPhase(
       // Output-truncation retry: a response that hit the model's output-token cap
       // produces no result, so it never reaches apply()'s retry — handle it here by
       // consuming the bad row and re-dispatching a fresh invocation.
-      //  - Non-loop steps: bounded by llm.retry.maxAttempts (total attempts).
+      //  - Non-loop steps with llm.retry: bounded by llm.retry.maxAttempts (total attempts).
+      //  - Non-loop steps without it: one retry, so a second consecutive truncation fails.
       //  - Loop steps (no llm.retry): bounded by MAX_TRUNCATION_RETRIES consecutive
       //    truncations for the CURRENT iteration; each retry shrinks the request via
       //    buildIterationPrompt's truncationRetries (computed in the dispatch path;
@@ -628,7 +630,9 @@ async function resolveLlmPhase(
         const llmRetry = llmSpec.retry;
         const canRetry = stepDef.loop
           ? (await countTrailingTruncations(db, current.id)) < MAX_TRUNCATION_RETRIES
-          : !!llmRetry && (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts;
+          : llmRetry
+            ? (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts
+            : (await countTrailingTruncations(db, current.id)) < 2;
         if (canRetry) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message, loop: !!stepDef.loop },
@@ -667,7 +671,10 @@ async function resolveLlmPhase(
       // declare neither loop nor llm.retry. Supersede rather than consume so the repaired
       // attempt does not burn the genuine retry budget — same as the orphan path.
       if (capabilityClassFromMessage(errTrimmed)) {
-        if ((await countTrailingCapabilityFailures(db, current.id)) < MAX_CAPABILITY_RETRIES) {
+        if (
+          (await countTrailingCapabilityFailures(db, current.id)) < MAX_CAPABILITY_RETRIES &&
+          !repeatsSpentOutputCeiling(errTrimmed, params.providers, invocation.cliProviderId)
+        ) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message },
             'model-capability failure; re-dispatching with the learned remedy',
@@ -1577,6 +1584,8 @@ type MiningRetryTargets = Map<
     /** Read with `cliInvocationId`: the state a dispatch swaps, so two passes send it once. */
     status: MiningRow['status'];
     chargeAttempt?: boolean;
+    /** The prior run was cut at the output limit, so the re-dispatch carries the shrink notice. */
+    truncated?: boolean;
     /** Rung the re-dispatch runs at: the row's stored consecutive-timeout count, already
      *  incremented when the prior run burned its budget and reset to 0 when it did not.
      *  Required, not optional — the one construction site must decide, because defaulting
@@ -1836,11 +1845,15 @@ async function dispatchMiningAgents(
       // would each re-derive what 07/07b/08/08a already established, and could not see what the
       // user attached. Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
       // runtime directive is appended last and governs at prompt scope.
-      const prompt = dispatch.replayVerbatim
+      const augmented = dispatch.replayVerbatim
         ? dispatch.prompt
         : await augmentPromptWithTerseness(
             await augmentPromptWithLedger(db, params.taskId, attachmentsNotice + dispatch.prompt),
           );
+      const prompt =
+        target.truncated && !augmented.includes(TRUNCATION_RETRY_NOTICE)
+          ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}`
+          : augmented;
       const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
         await resolveSeat(dispatch.roleKey ?? 'default');
       const requirements = dispatchRequirements(dispatch);
@@ -3850,6 +3863,7 @@ async function retryMiningAgents(
   // (it got its time and needed more). Re-running a timeout identically is the failure mode
   // CLI_TIMEOUT_HEADLINE exists to name.
   const timedOutInvocationIds = new Set<string>();
+  const truncatedInvocationIds = new Set<string>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
@@ -3863,12 +3877,15 @@ async function retryMiningAgents(
     for (const p of priors) {
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
+      if (isOutputTruncationMessage(p.errorMessage?.trim())) truncatedInvocationIds.add(p.id);
     }
   }
   const runsFree = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && freeInvocationIds.has(r.cliInvocationId);
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
+  const truncated = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && truncatedInvocationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
   // preemption case above: that budget bounds automatic thrash, and a person asking is not
   // thrash. Without the bypass the one control a user has would silently do nothing once the
@@ -3878,7 +3895,14 @@ async function retryMiningAgents(
   const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
     r.userRetryRequestedAt != null;
   const candidates = wantedRows.filter(
-    (r) => r.attempts < maxAttempts || runsFree(r) || userAsked(r),
+    (r) =>
+      userAsked(r) ||
+      ((r.attempts < maxAttempts || runsFree(r)) &&
+        !repeatsSpentOutputCeiling(
+          r.errorMessage?.trim() ?? '',
+          params.providers,
+          r.cliProviderId,
+        )),
   );
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
@@ -3888,6 +3912,7 @@ async function retryMiningAgents(
       cliInvocationId: r.cliInvocationId,
       status: r.status,
       chargeAttempt: !runsFree(r),
+      truncated: truncated(r),
       // Consecutive, so anything that is not a timeout resets the chain. A preemption
       // between two timeouts must not climb a rung — it never spent a budget to justify one.
       timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,
@@ -4239,6 +4264,19 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
  *  output-token ladder can climb at most one rung and then roll back if the provider
  *  rejects it. A third attempt would repeat a request we already know fails. */
 const MAX_CAPABILITY_RETRIES = 2;
+
+/** True when a re-dispatch of this capability failure would send the request that just failed:
+ *  an output-cap failure whose provider has no higher ceiling left to learn. The other classes
+ *  change the request (a rolled-back ceiling, a denied tool and prompt boundary). */
+function repeatsSpentOutputCeiling(
+  message: string,
+  providers: CliProviderRecord[] | undefined,
+  providerId: string | null,
+): boolean {
+  if (capabilityClassFromMessage(message) !== 'output_cap_reached') return false;
+  const provider = providers?.find((p) => p.id === providerId);
+  return !!provider && resolveModelLimits(provider)?.maxOutputTokensExhausted === true;
+}
 
 /** Count the most-recent CONSECUTIVE invocations for a step that failed on a model
  *  capability. Resets at the first row with any other outcome, so an earlier remediated

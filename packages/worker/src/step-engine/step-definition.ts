@@ -152,7 +152,8 @@ export interface LlmInvocationSpec {
    *  or unparseable JSON). On an apply throw the runner re-enqueues a FRESH cli
    *  invocation (the prior one is marked consumed) up to `maxAttempts` TOTAL attempts,
    *  then lets the error fail the step. `retryOn` decides which thrown errors are
-   *  retryable (default: all). Ignored for steps that also declare loop?. */
+   *  retryable (default: all); it does not filter truncation retries, which never reach
+   *  apply(). Ignored for steps that also declare loop?. */
   retry?: {
     maxAttempts: number;
     retryOn?: (err: unknown) => boolean;

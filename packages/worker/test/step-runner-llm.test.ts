@@ -967,6 +967,76 @@ describe('advanceStep LLM phase', () => {
     expect(spec.args.some((a) => a.includes(MODEL_CAPABILITY_BOUNDARY_MARKER))).toBe(true);
   });
 
+  describe('a model-capability failure whose remedy is already spent', () => {
+    async function advanceAfter(
+      cls: keyof typeof MODEL_CAPABILITY_HEADLINES,
+      modelLimits: Record<string, unknown>,
+    ) {
+      const state = freshState();
+      state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+      state.cliInvocationRow = {
+        id: 'inv-1',
+        cliProviderId: 'prov-1',
+        exitCode: 1,
+        rawOutput: null,
+        parsedOutput: null,
+        endedAt: new Date(),
+        errorMessage: `${MODEL_CAPABILITY_HEADLINES[cls]} — hint.`,
+        createdAt: new Date(),
+      };
+      const enqueued: CliExecJobPayload[] = [];
+      const provider = {
+        ...makeProvider(),
+        modelLimits: { model: '', learnedAt: new Date().toISOString(), ...modelLimits },
+      } as CliProviderRecord;
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [provider],
+        deps: {
+          async enqueueCliInvocation(payload: CliExecJobPayload) {
+            enqueued.push(payload);
+          },
+        },
+      });
+      return { result, enqueued };
+    }
+
+    it('does not resend an output-cap failure once the ceiling ladder is spent', async () => {
+      const { result, enqueued } = await advanceAfter('output_cap_reached', {
+        maxOutputTokens: 131072,
+        maxOutputTokensExhausted: true,
+      });
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        MODEL_CAPABILITY_HEADLINES.output_cap_reached,
+      );
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('still re-dispatches an output-cap failure while a higher rung remains', async () => {
+      const { result, enqueued } = await advanceAfter('output_cap_reached', {
+        maxOutputTokens: 131072,
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('still re-dispatches a rejected ceiling, whose rollback changed the request', async () => {
+      const { result, enqueued } = await advanceAfter('max_tokens_too_large', {
+        maxOutputTokens: 65536,
+        maxOutputTokensExhausted: true,
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+  });
+
   it('blocks a local Ollama model on an unsafeForLocalModels step', async () => {
     const state = freshState();
     const db = makeMockDb(state);

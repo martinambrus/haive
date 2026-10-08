@@ -1,5 +1,7 @@
 import {
+  capabilityClassFromMessage,
   fatalClassFromMessage,
+  isOutputTruncationMessage,
   isTransientCliFailure,
   isTransientProviderApiError,
 } from '../queues/cli-exec/failure-class.js';
@@ -158,6 +160,9 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
   // whole budget to reach the same wall.
   if (fatal === 'auth' || fatal === 'rate_limit' || fatal === 'content_filter') return false;
   if (NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(diagnostic)) return false;
+  // A learned capability remedy and the truncation notice each change the next request.
+  const own = result.errorMessage?.trim();
+  if (capabilityClassFromMessage(own) || isOutputTruncationMessage(own)) return true;
   return (
     fatal === 'server_error' ||
     isTransientProviderApiError(diagnostic) ||

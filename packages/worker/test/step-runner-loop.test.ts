@@ -55,8 +55,14 @@ function makeMockDb(state: MockState): Database {
       from: (table: unknown) => {
         const tableName = tableNameOf(table);
         // Every row of the table, for the un-limited/un-ordered form of the query.
-        const allRows = async () =>
-          tableName === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
+        const allRows = async () => {
+          if (tableName === 'cli_invocations') {
+            return state.cliInvocationRows.filter(
+              (r) => r.supersededAt === null && r.mode !== 'agent_mining',
+            );
+          }
+          return tableName === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
+        };
         return {
           where: (_cond: unknown) => ({
             // Drizzle's query builder is a thenable: awaiting .where() directly, with no
@@ -360,7 +366,80 @@ async function dispatchNonLoop(errorMessage: string | null): Promise<string> {
   return String(inserted[0]!.row.prompt);
 }
 
+function plainStep(): StepDefinition {
+  const { loop: _loop, ...rest } = loopStep({ maxIterations: 1, shouldContinue: () => false });
+  return rest;
+}
+
+/** The step has just been told its newest call was cut off, with `earlier` truncated calls
+ *  before it (oldest first); returns what the runner did. */
+async function advanceAfterTruncations(stepDef: StepDefinition, earlier: number) {
+  const state = freshState();
+  state.taskStepRow = {
+    ...state.taskStepRow,
+    status: 'waiting_cli',
+    detectOutput: { ready: true },
+    formValues: {},
+  };
+  state.cliInvocationRows = Array.from({ length: earlier + 1 }, (_, i) => ({
+    id: `inv-${i}`,
+    taskId: 'task-1',
+    taskStepId: 'ts-1',
+    cliProviderId: 'prov-1',
+    mode: 'cli',
+    prompt: 'p',
+    rawOutput: null,
+    parsedOutput: null,
+    exitCode: 1,
+    errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — cut off`,
+    createdAt: new Date(Date.now() - (earlier + 1 - i) * 1000),
+    endedAt: new Date(),
+    supersededAt: null,
+    consumedAt: i < earlier ? new Date() : null,
+  }));
+  const result = await advanceStep({
+    db: makeMockDb(state),
+    taskId: 'task-1',
+    userId: 'user-1',
+    repoPath: '/tmp',
+    workspacePath: '/tmp',
+    cliProviderId: 'prov-1',
+    stepDef,
+    providers: [makeProvider()],
+    deps: { async enqueueCliInvocation() {} },
+  });
+  return { result, inserts: state.inserts.filter((i) => i.table === 'cli_invocations') };
+}
+
 describe('advanceStep loop hook', () => {
+  describe('a truncation of a step that is neither a loop nor declares llm.retry', () => {
+    it('is retried once, with the cut-off notice on the new prompt', async () => {
+      const { result, inserts } = await advanceAfterTruncations(plainStep(), 0);
+      expect(result.status).toBe('waiting_cli');
+      expect(inserts).toHaveLength(1);
+      const prompt = String(inserts[0]!.row.prompt);
+      expect(prompt).toContain('base prompt');
+      expect(prompt.endsWith(TRUNCATION_NOTICE)).toBe(true);
+    });
+
+    it('fails the step when the retry is cut off as well', async () => {
+      const { result, inserts } = await advanceAfterTruncations(plainStep(), 1);
+      expect(result.status).toBe('failed');
+      expect(inserts).toHaveLength(0);
+    });
+  });
+
+  describe('a truncation of a step that declares llm.retry', () => {
+    it('keeps its own attempts bound, whatever the one-retry stance of the others', async () => {
+      const retried = await advanceAfterTruncations(retryingStep(), 1);
+      expect(retried.result.status).toBe('waiting_cli');
+      expect(retried.inserts).toHaveLength(1);
+      const spent = await advanceAfterTruncations(retryingStep(), 2);
+      expect(spent.result.status).toBe('failed');
+      expect(spent.inserts).toHaveLength(0);
+    });
+  });
+
   describe('a truncation retry of a loop step', () => {
     async function retryTruncated(opts: {
       coversFirstPass: boolean;
