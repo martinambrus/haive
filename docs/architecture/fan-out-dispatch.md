@@ -39,7 +39,9 @@ sweep ends those; the rows it now holds keep out any later link.
 **A run's end and its mining result land together, on the row still linked to it.**
 `handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no
 crash can leave a run ended beside an agent row still `running`. Every write it makes to a mining
-row matches the run the row is linked to (`ownMiningRow`): a re-roll moves the row to a new run, and
-a late completion of the old one used to overwrite it. What follows that transaction (learning a
+row matches the run the row is linked to and only while the row is still `pending` or `running`
+(`ownMiningRow`): a re-roll moves the row to a new run, and a late completion of the old one used
+to overwrite it; a failed step's release keeps the link, and a run that had already started would
+otherwise set its row back to `running`. What follows that transaction (learning a
 model limit, the recap, `markCliParkBegin` and handing the step back) sits outside the `try` whose
 catch records a failed run, so a queue error there no longer rewrites a finished run as exit -1.

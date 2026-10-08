@@ -183,6 +183,21 @@ describe('a cli run completion', () => {
     for (const w of miningWrites(writes)) expect(conditionValues(w.where)).toContain(RUN);
   });
 
+  it('moves only a row still in flight, so the release of a failed step is not undone', async () => {
+    for (const run of [
+      () => stubs.executeByKind.mockResolvedValue(ok),
+      () => stubs.executeByKind.mockRejectedValue(new Error('sandbox died')),
+    ]) {
+      run();
+      const { db, writes } = fakeDb({});
+      await handleCliExecJob(db, base).catch(() => undefined);
+      expect(miningWrites(writes).length).toBeGreaterThan(0);
+      for (const w of miningWrites(writes)) {
+        expect(conditionValues(w.where)).toEqual(expect.arrayContaining(['pending', 'running']));
+      }
+    }
+  });
+
   it('fails with its mining row in one transaction, on the row still linked to it', async () => {
     stubs.executeByKind.mockRejectedValue(new Error('sandbox died'));
     const { db, writes } = fakeDb({});
