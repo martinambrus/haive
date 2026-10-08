@@ -40,6 +40,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
+import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -1825,36 +1826,43 @@ async function dispatchMiningAgents(
       const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
         await resolveSeat(dispatch.roleKey ?? 'default');
       const requirements = dispatchRequirements(dispatch);
-      const plan = await resolveTaskDispatch(db, params.taskId, {
-        providers: params.providers!,
-        preferredProviderId,
-        steeringRequested,
-        input: {
-          kind: 'prompt',
-          prompt,
-          // Per-agent when the dispatch says so: a capability that depends on the
-          // task's inputs (the plan builder's `vision`, when a wireframe was
-          // attached) cannot live on the step's static list.
-          capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
-        },
-        preferVision: dispatch.preferVision === true,
-        // A mining agent that IS a persona (03's roster) is an assignment its prompt never
-        // marks; the dispatch names it and the dispatcher unions it with the marker ids.
-        assignedAgentIds: dispatch.personaIds,
-        toolProfile: spec.toolProfile,
-        invokeOpts: {
-          cwd: params.workspacePath,
-          effortLevel: preferredEffort ?? undefined,
-          disallowedTools: miningDisallowedTools(stepDef.metadata.id),
-        },
-      });
+      let plan: Awaited<ReturnType<typeof resolveTaskDispatch>> | undefined;
+      let buildFailure: string | null = null;
+      try {
+        plan = await resolveTaskDispatch(db, params.taskId, {
+          providers: params.providers!,
+          preferredProviderId,
+          steeringRequested,
+          input: {
+            kind: 'prompt',
+            prompt,
+            // Per-agent when the dispatch says so: a capability that depends on the
+            // task's inputs (the plan builder's `vision`, when a wireframe was
+            // attached) cannot live on the step's static list.
+            capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
+          },
+          preferVision: dispatch.preferVision === true,
+          // A mining agent that IS a persona (03's roster) is an assignment its prompt never
+          // marks; the dispatch names it and the dispatcher unions it with the marker ids.
+          assignedAgentIds: dispatch.personaIds,
+          toolProfile: spec.toolProfile,
+          invokeOpts: {
+            cwd: params.workspacePath,
+            effortLevel: preferredEffort ?? undefined,
+            disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+          },
+        });
+      } catch (err) {
+        if (!(err instanceof ProviderBuildError)) throw err;
+        buildFailure = `cannot build a command for ${err.providerName}: ${err.message}`;
+      }
 
-      if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+      if (!plan || plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
         const [refused] = await db
           .update(schema.taskStepAgentMinings)
           .set({
             status: 'failed',
-            errorMessage: `no cli provider available: ${plan.reason}`,
+            errorMessage: buildFailure ?? `no cli provider available: ${plan?.reason}`,
             endedAt: new Date(),
             ...requirements,
             updatedAt: new Date(),

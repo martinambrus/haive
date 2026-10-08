@@ -24,14 +24,27 @@ export const MAX_ARG_BYTES = 131_072;
  */
 export const PROMPT_ARGV_LIMIT_BYTES = 65_536;
 
+/** A provider that cannot build a command for the call. A fan-out fails only the agent on
+ *  that provider and carries on; the dispatcher never falls through to another provider. */
+export class ProviderBuildError extends Error {
+  constructor(
+    readonly providerName: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ProviderBuildError';
+  }
+}
+
 /** Raised instead of letting the spawn fail with a bare `E2BIG`, which names
  *  neither the adapter, the size, nor the limit. */
-export class PromptTooLargeError extends Error {
+export class PromptTooLargeError extends ProviderBuildError {
   constructor(
     readonly adapter: string,
     readonly bytes: number,
   ) {
     super(
+      adapter,
       `prompt is ${bytes} bytes, over the ${PROMPT_ARGV_LIMIT_BYTES}-byte limit for passing it as a command-line argument, and the ${adapter} CLI has no documented way to read a prompt from stdin. Shorten the prompt, or teach the adapter that CLI's stdin form.`,
     );
     this.name = 'PromptTooLargeError';

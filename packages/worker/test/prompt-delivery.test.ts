@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deliverPrompt,
   PromptTooLargeError,
+  ProviderBuildError,
   PROMPT_ARGV_LIMIT_BYTES,
   MAX_ARG_BYTES,
 } from '../src/cli-adapters/prompt-delivery.js';
@@ -34,6 +35,7 @@ describe('deliverPrompt', () => {
       err = e;
     }
     expect(err).toBeInstanceOf(PromptTooLargeError);
+    expect(err).toBeInstanceOf(ProviderBuildError);
     expect((err as PromptTooLargeError).adapter).toBe('grok');
     expect((err as Error).message).toContain(String(PROMPT_ARGV_LIMIT_BYTES));
   });
