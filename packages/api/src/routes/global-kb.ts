@@ -884,6 +884,14 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         (data.title !== undefined && data.title !== current.title) ||
         (data.body !== undefined && data.body !== current.body);
       if (reembed) set.embedStatus = 'pending';
+      // Done here and not by the trigger: a reverted edit must not revive the approval, and the
+      // token is blind to the facet order a backfill rewrites.
+      if (
+        current.enforcedHash != null &&
+        houseRuleContentToken({ ...current, ...set }) !== houseRuleContentToken(current)
+      ) {
+        set.enforcedHash = null;
+      }
       // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
       // draft's article against the entry it would replace; re-scoping it to another technology
       // makes it a different rule, and activating it would then archive an entry it no longer has

@@ -43,6 +43,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   HOUSE_RULES_ALWAYS_CAP_BYTES,
+  enforcementState,
   globalKbEntries,
   houseRuleApprovalHash,
   houseRuleBytes,
@@ -126,6 +127,8 @@ const approve = (id: string, spec: EnforceSpec) =>
   });
 const enforce = (body: Record<string, unknown>, id = ENTRY) =>
   send('PUT', `/entries/${id}/enforcement`, { expectedHash: tokenOf(id), ...body });
+const enforcementOf = (id: string): string =>
+  enforcementState(asEntry(id) as never, { namespace: 'default', houseRulesEnabled: true }).state;
 const unenforce = (id = ENTRY) => send('DELETE', `/entries/${id}/enforcement`);
 const patch = (body: Record<string, unknown>, id = ENTRY) => send('PATCH', `/entries/${id}`, body);
 const addEntry = (id: string, over: Record<string, unknown> = {}) =>
@@ -563,10 +566,76 @@ describe('every entry a route returns carries its token and enforcement state', 
 
     expect(res.status).toBe(200);
     const { entry } = await asJson(res);
-    expect(entry.enforcementState).toEqual({ state: 'edited' });
+    expect(entry.enforcementState).toEqual({ state: 'cleared' });
     expect(entry.contentToken).toBe(tokenOf());
     expect(entry.contentToken).not.toBe(before);
-    expect(stored().enforcedHash).not.toBeNull();
+    expect(stored().enforcedHash).toBeNull();
+  });
+});
+
+describe('an edit ends the approval for good', () => {
+  beforeEach(() => approve(ENTRY, FILES));
+
+  it.each([
+    ['body', { body: `${BODY}\n\nEdited.` }],
+    ['title', { title: 'Never inline any SVG' }],
+    ['description', { description: 'Reference a file, never inline SVG.' }],
+    ['category', { category: 'best_practice' }],
+    ['scope', { facets: { framework: ['drupal'], language: ['php'] } }],
+  ])('on a changed %s, keeping the last settings and who approved', async (_field, change) => {
+    expect((await patch(change)).status).toBe(200);
+
+    expect(stored().enforcedHash).toBeNull();
+    expect(stored().enforce).toEqual(FILES);
+    expect(stored().enforcedBy).toBe(ADMIN);
+    expect(stored().enforcedAt).toEqual(T0);
+  });
+
+  it('so a revert to the approved text stays not enforced', async () => {
+    expect((await patch({ title: 'Edited' })).status).toBe(200);
+
+    const res = await patch({ title: TITLE });
+
+    expect((await asJson(res)).entry.enforcementState).toEqual({ state: 'cleared' });
+    expect(stored().enforcedHash).toBeNull();
+  });
+
+  it('but not on a patch that writes the values it already has', async () => {
+    const hash = stored().enforcedHash;
+
+    const res = await patch({
+      title: TITLE,
+      body: BODY,
+      description: DESCRIPTION,
+      category: 'anti_pattern',
+      facets: { framework: ['drupal'] },
+    });
+
+    expect(res.status).toBe(200);
+    expect(stored().enforcedHash).toBe(hash);
+    expect((await asJson(res)).entry.enforcementState.state).toBe('enforced');
+  });
+
+  it('but not on a status change, which is not content', async () => {
+    const hash = stored().enforcedHash;
+
+    expect((await patch({ status: 'archived' })).status).toBe(200);
+
+    expect(stored().enforcedHash).toBe(hash);
+  });
+
+  it('and cannot be used to get past the always-on cap by reverting', async () => {
+    addEntry(SECOND, { body: HEAVY });
+    fake.patch(globalKbEntries, ENTRY, { body: HEAVY });
+    expect((await enforce(ALWAYS, ENTRY)).status).toBe(200);
+    expect((await patch({ title: 'Lapsed by an edit' })).status).toBe(200);
+    expect((await enforce(ALWAYS, SECOND)).status).toBe(200);
+
+    expect((await patch({ title: TITLE })).status).toBe(200);
+
+    const states = [ENTRY, SECOND].map((id) => enforcementOf(id));
+    expect(states).toEqual(['cleared', 'enforced']);
+    expect((await enforce(ALWAYS, ENTRY)).status).toBe(409);
   });
 });
 

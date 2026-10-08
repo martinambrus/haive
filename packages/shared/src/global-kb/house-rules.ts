@@ -170,6 +170,9 @@ function globProblem(glob: string): string | null {
   if (!hasLiteral(glob) || hasWildcardOnlyAlternative(glob)) {
     return `glob ${shown} would match every file; a files rule has to name something, and mode "always" is for every file`;
   }
+  if (/[@+*?!]\(/.test(glob)) {
+    return `glob ${shown} uses extglob syntax, which is not supported; its alternatives are not checked, so write brace alternatives`;
+  }
   return null;
 }
 
