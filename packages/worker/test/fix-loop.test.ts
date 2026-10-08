@@ -7,7 +7,11 @@ import {
   type AdvanceStepParams,
   type TaskStepRow,
 } from '../src/step-engine/step-runner.js';
-import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import {
+  AdvisedStepError,
+  type StepContext,
+  type StepDefinition,
+} from '../src/step-engine/step-definition.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
 import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 import {
@@ -34,6 +38,8 @@ import {
   fencedAgentBlock,
 } from '../src/step-engine/steps/_untrusted-repo.js';
 import { formatQaFixDiagnosis } from '../src/step-engine/steps/workflow/08d2-adversarial-qa-review.js';
+import { ddevGuardFailure, isDdevAgentFixableFailure } from '../src/sandbox/ddev-build-guard.js';
+import { DDEV_CONFIG_YAML_PREFIX } from '../src/sandbox/ddev-config-yaml-guard.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -1437,6 +1443,80 @@ describe('fix-loop guidance', () => {
       diagnosis: 'developer found: button does nothing',
       sourceStepId: 'test-restartloop',
       uncapped: true,
+    });
+  });
+
+  describe('a thrown failure that carries advice', () => {
+    const MESSAGE = 'DDEV cannot start: DDEV config is not valid YAML: x. Quote it.';
+    const DIAGNOSIS = 'DDEV cannot start: DDEV config is not valid YAML: x.';
+    const advised = () => new AdvisedStepError(MESSAGE, DIAGNOSIS, 'Quote it.');
+    const throwing = (
+      error: Error,
+      fixLoopOnError: true | ((message: string) => boolean) = true,
+    ): StepDefinition => ({
+      metadata: meta('test-fixloop-advised'),
+      async detect() {
+        return { ok: true };
+      },
+      form() {
+        return null;
+      },
+      fixLoopOnError,
+      async apply() {
+        throw error;
+      },
+    });
+    const fresh = (): MockState => ({ taskStepRow: {}, inserts: [], updates: [] });
+
+    it('hands the advice over as guidance, the rest as the diagnosis, and stores the whole message', async () => {
+      const state = fresh();
+      const result = await advanceStep(params(makeMockDb(state), throwing(advised()), 2));
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') {
+        expect(result.diagnosis).toBe(DIAGNOSIS);
+        expect(result.guidance).toBe('Quote it.');
+        expect(result.sourceStepId).toBe('test-fixloop-advised');
+      }
+      expect(state.taskStepRow).toMatchObject({ status: 'done', errorMessage: MESSAGE });
+    });
+
+    it('treats a plain error as it always did: the message is the diagnosis, with no guidance', async () => {
+      const state = fresh();
+      const plain = new Error(MESSAGE);
+      const result = await advanceStep(params(makeMockDb(state), throwing(plain), 2));
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') expect(result.diagnosis).toBe(MESSAGE);
+      expect('guidance' in result).toBe(false);
+      expect(state.taskStepRow).toMatchObject({ errorMessage: MESSAGE });
+    });
+
+    it('still fails a step that does not route the error, with the whole message', async () => {
+      const result = await advanceStep(
+        params(
+          makeMockDb(fresh()),
+          throwing(advised(), () => false),
+          2,
+        ),
+      );
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toBe(MESSAGE);
+    });
+
+    it('routes a guard failure on its whole message, and hands its advice over apart', async () => {
+      const guard = ddevGuardFailure({
+        problem: `${DDEV_CONFIG_YAML_PREFIX} .ddev/config.yaml cannot be parsed.`,
+        advice: 'Quote it.',
+      });
+      const result = await advanceStep(
+        params(makeMockDb(fresh()), throwing(guard, isDdevAgentFixableFailure), 2),
+      );
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') {
+        expect(result.diagnosis).toBe(
+          `DDEV cannot start: ${DDEV_CONFIG_YAML_PREFIX} .ddev/config.yaml cannot be parsed.`,
+        );
+        expect(result.guidance).toBe('Quote it.');
+      }
     });
   });
 

@@ -1,5 +1,6 @@
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import type { DdevGuardFinding } from './ddev-build-guard.js';
 
 /**
  * Pre-flight check that the project's nginx configs do not declare the same `location`
@@ -31,6 +32,11 @@ export const DDEV_NGINX_INCLUDE_PREFIX = 'DDEV nginx config is invalid:';
  *  path rather than the whole line so a change in DDEV's spacing or glob does not silently
  *  disable the check. A conf without it does not receive the snippets and cannot collide. */
 const SNIPPET_INCLUDE_DIR = '/mnt/ddev_config/nginx/';
+
+const LOCATION_ONCE_ADVICE =
+  'Declare each location in exactly ONE of the two files: keep the shared rules in the ' +
+  '.ddev/nginx/ file (DDEV includes it in every server block, so it applies to both) and ' +
+  'delete them from the .ddev/nginx_full/ file.';
 
 export interface NginxConfFile {
   /** File name within its directory, e.g. `nginx-site.conf`. */
@@ -89,7 +95,7 @@ export function findDdevNginxIncludeCollisions(input: {
   siteConfs: NginxConfFile[];
   /** `.ddev/nginx/*.conf` — spliced inside every server block above. */
   snippets: NginxConfFile[];
-}): string | null {
+}): DdevGuardFinding | null {
   const snippetOwner = new Map<string, string>();
   for (const snippet of input.snippets) {
     for (const key of locationKeysAtDepth(snippet.content, 0)) {
@@ -105,16 +111,15 @@ export function findDdevNginxIncludeCollisions(input: {
 
     const unique = [...new Set(clashes)];
     const snippetName = snippetOwner.get(unique[0]!)!;
-    return (
-      `${DDEV_NGINX_INCLUDE_PREFIX} .ddev/nginx_full/${site.name} and .ddev/nginx/${snippetName} ` +
-      `both declare ${unique.map((k) => `\`location ${k}\``).join(', ')}. DDEV ends every ` +
-      `server block with \`include /mnt/ddev_config/nginx/*.conf;\`, so .ddev/nginx/*.conf is ` +
-      `spliced INSIDE .ddev/nginx_full/${site.name}'s own server block and nginx aborts with ` +
-      `"[emerg] duplicate location". The web container then exits and \`ddev start\` fails. ` +
-      `Declare each location in exactly ONE of the two files: keep the shared rules in ` +
-      `.ddev/nginx/${snippetName} (DDEV includes it in every server block, so it applies to ` +
-      `both) and delete them from .ddev/nginx_full/${site.name}.`
-    );
+    return {
+      problem:
+        `${DDEV_NGINX_INCLUDE_PREFIX} .ddev/nginx_full/${site.name} and .ddev/nginx/${snippetName} ` +
+        `both declare ${unique.map((k) => `\`location ${k}\``).join(', ')}. DDEV ends every ` +
+        `server block with \`include /mnt/ddev_config/nginx/*.conf;\`, so .ddev/nginx/*.conf is ` +
+        `spliced INSIDE .ddev/nginx_full/${site.name}'s own server block and nginx aborts with ` +
+        `"[emerg] duplicate location". The web container then exits and \`ddev start\` fails.`,
+      advice: LOCATION_ONCE_ADVICE,
+    };
   }
   return null;
 }
@@ -145,7 +150,7 @@ async function readConfDir(workspace: string, dir: string): Promise<NginxConfFil
  * common case — nothing can be spliced, so nothing can collide), or when the tree cannot be
  * read: an unreadable workspace is the boot's problem to report, not this check's.
  */
-export async function checkDdevNginxIncludes(workspace: string): Promise<string | null> {
+export async function checkDdevNginxIncludes(workspace: string): Promise<DdevGuardFinding | null> {
   const snippets = await readConfDir(workspace, 'nginx');
   if (snippets.length === 0) return null;
   const siteConfs = await readConfDir(workspace, 'nginx_full');

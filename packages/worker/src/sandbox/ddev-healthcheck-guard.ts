@@ -1,6 +1,7 @@
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseDdevConfig } from '../step-engine/steps/_ddev-config.js';
+import type { DdevGuardFinding } from './ddev-build-guard.js';
 
 /**
  * Pre-flight check that DDEV's own web healthcheck can still pass.
@@ -110,7 +111,7 @@ export interface DdevSiteConf {
 export function findDdevHealthcheckBreakage(input: {
   webserverType: string | null | undefined;
   confs: DdevSiteConf[];
-}): string | null {
+}): DdevGuardFinding | null {
   if (!webserverNeedsPhpStatus(input.webserverType)) return null;
 
   const family = (input.webserverType?.trim() || 'nginx-fpm').split('-')[0]!;
@@ -124,14 +125,17 @@ export function findDdevHealthcheckBreakage(input: {
 
   if (active.some((c) => servesHealthcheck(family, withoutComments(c.content)))) return null;
 
-  return (
-    `.ddev/${generated.dir}/${generated.file} was taken over (its \`${DDEV_GENERATED_MARKER}\` marker ` +
-    `was removed) and no config in .ddev/${generated.dir}/ serves \`${HEALTHCHECK_PATH}\`. ` +
-    `DDEV's web container health check requests that path on every start, so it will never ` +
-    `become healthy and \`ddev start\` will fail at its readiness timeout. ` +
-    `Fix: delete .ddev/${generated.dir}/${generated.file} so DDEV regenerates it, and ` +
-    `${generated.customAdvice}.`
-  );
+  return {
+    problem:
+      `.ddev/${generated.dir}/${generated.file} was taken over (its \`${DDEV_GENERATED_MARKER}\` marker ` +
+      `was removed) and no config in .ddev/${generated.dir}/ serves \`${HEALTHCHECK_PATH}\`. ` +
+      `DDEV's web container health check requests that path on every start, so it will never ` +
+      `become healthy and \`ddev start\` will fail at its readiness timeout.`,
+    // `generated` is a row of GENERATED_SITE_CONF, never text read from the repository.
+    advice:
+      `Fix: delete .ddev/${generated.dir}/${generated.file} so DDEV regenerates it, and ` +
+      `${generated.customAdvice}.`,
+  };
 }
 
 /**
@@ -140,7 +144,9 @@ export function findDdevHealthcheckBreakage(input: {
  * Returns null when nothing is wrong, when there is no `.ddev/`, or when the tree cannot
  * be read — an unreadable workspace is the boot's problem to report, not this check's.
  */
-export async function checkDdevHealthcheckConfig(workspace: string): Promise<string | null> {
+export async function checkDdevHealthcheckConfig(
+  workspace: string,
+): Promise<DdevGuardFinding | null> {
   const { anchor, prefix } = workspaceAnchor(workspace);
   const configText = await readTextNoFollow(anchor, `${prefix}.ddev/config.yaml`);
   if (configText === null) return null;

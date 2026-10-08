@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { AdvisedStepError } from '../step-engine/step-definition.js';
 import { DDEV_NGINX_INCLUDE_PREFIX } from './ddev-nginx-include-guard.js';
 import { DDEV_ENTRYPOINT_PREFIX } from './ddev-entrypoint-guard.js';
 import { DDEV_CONFIG_YAML_PREFIX } from './ddev-config-yaml-guard.js';
@@ -35,6 +36,18 @@ import { scanFences } from '@haive/shared/markdown-fences';
 /** Prefix on every message this module produces. Ours, not DDEV's or BuildKit's, so the
  *  fix-loop classifier below can key on it without depending on anyone else's wording. */
 export const DDEV_BUILD_INPUT_PREFIX = 'DDEV image-build inputs are invalid:';
+
+/** `advice` is Haive's own text and never holds a value read from the repository or from DDEV. */
+export interface DdevGuardFinding {
+  problem: string;
+  advice: string;
+}
+
+/** `message` is the whole text, `diagnosis` the same without the `advice` written into it. */
+export function ddevGuardFailure({ problem, advice }: DdevGuardFinding): AdvisedStepError {
+  const diagnosis = `DDEV cannot start: ${problem}`;
+  return new AdvisedStepError(`${diagnosis} ${advice}`, diagnosis, advice);
+}
 
 const PHP_EXTENSION_ADVICE =
   'DDEV builds the web container from `ddev/ddev-webserver` — Debian with ondrej PHP ' +
@@ -158,15 +171,17 @@ function findAbsentCommand(content: string): { command: string; advice: string }
 
 /** Reason the next image build will fail with "command not found", or null when none of
  *  the build inputs reaches for a command the image does not have. */
-export function findDdevBuildBreakage(files: DdevBuildFile[]): string | null {
+export function findDdevBuildBreakage(files: DdevBuildFile[]): DdevGuardFinding | null {
   for (const file of files) {
     const hit = findAbsentCommand(file.content);
     if (hit) {
-      return (
-        `${DDEV_BUILD_INPUT_PREFIX} ${file.name} runs \`${hit.command}\`, which is not installed ` +
-        `in the image DDEV builds from, so the build fails with "command not found" ` +
-        `(exit 127) on every start. ${hit.advice}`
-      );
+      return {
+        problem:
+          `${DDEV_BUILD_INPUT_PREFIX} ${file.name} runs \`${hit.command}\`, which is not installed ` +
+          `in the image DDEV builds from, so the build fails with "command not found" ` +
+          `(exit 127) on every start.`,
+        advice: hit.advice,
+      };
     }
   }
   return null;
@@ -210,7 +225,7 @@ export function findDdevSpecBreakage(specText: string): string | null {
  * Returns null when nothing is wrong, when there are no build directories, or when the tree
  * cannot be read — an unreadable workspace is the boot's problem to report, not this check's.
  */
-export async function checkDdevBuildInputs(workspace: string): Promise<string | null> {
+export async function checkDdevBuildInputs(workspace: string): Promise<DdevGuardFinding | null> {
   // The workspace is a WORKTREE, which sits under `.haive/` and so can never be the anchor;
   // `workspaceAnchor` splits it at the repository root and falls back to the path itself in root
   // mode. Every read stays lenient, which is what the `.catch(() => null)` pairs already meant:

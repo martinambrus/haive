@@ -59,6 +59,7 @@ import {
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
+  AdvisedStepError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -3198,7 +3199,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         { stepId: meta.id, taskId, round },
         'fix-loop: step error routed back to implementation',
       );
-      return { status: 'loop_back', row: finished, diagnosis: errorMessage, sourceStepId: meta.id };
+      const advised = err instanceof AdvisedStepError ? err : null;
+      return {
+        status: 'loop_back',
+        row: finished,
+        diagnosis: advised?.diagnosis ?? errorMessage,
+        sourceStepId: meta.id,
+        ...(advised?.advice ? { guidance: advised.advice } : {}),
+      };
     }
     const failed = await updateRow(db, row.id, {
       status: 'failed',

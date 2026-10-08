@@ -47,8 +47,10 @@ vi.mock('./_impl-changes.js', async (importOriginal) => ({
   collectChangedLineMap,
 }));
 
-import { TaskCancelledError } from '../../step-definition.js';
 import type { ChangedFileLines, ChangedLineMap } from './_impl-changes.js';
+import { AdvisedStepError, TaskCancelledError } from '../../step-definition.js';
+import { ddevGuardFailure } from '../../../sandbox/ddev-build-guard.js';
+import { DDEV_CONFIG_YAML_PREFIX } from '../../../sandbox/ddev-config-yaml-guard.js';
 import {
   buildUnverifiedNote,
   buildVerifyDegradedNote,
@@ -1527,6 +1529,36 @@ process.exitCode = run.exit;
         expect(collectChangedLineMap).not.toHaveBeenCalled();
         expect(await readdir(workspace)).toEqual([]);
       });
+    });
+  });
+
+  // The wrapper's sentence is Haive's too, so it joins the message and the diagnosis alike.
+  describe('a guard failure during the boot keeps its advice apart', () => {
+    const lead = 'DDEV environment could not start for runtime verification: ';
+    const smoke = () => runRuntimeSmoke(smokeCtx, { failOnDdevBootError: true });
+    const apply = () => runApply({ test: PHPUNIT }, { runTest: true });
+
+    it.each([
+      ['runRuntimeSmoke', smoke],
+      ['apply', apply],
+    ])('%s rewraps it as the same kind of error, the sentence on both texts', async (_n, run) => {
+      const guard = ddevGuardFailure({
+        problem: `${DDEV_CONFIG_YAML_PREFIX} .ddev/config.yaml cannot be parsed.`,
+        advice: 'Wrap the whole command in double quotes.',
+      });
+      ensureAppServing.mockRejectedValueOnce(guard);
+
+      const err = await run().then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(AdvisedStepError);
+      const failure = err as AdvisedStepError;
+      expect(failure.message).toBe(`${lead}${guard.message}`);
+      expect(failure.diagnosis).toBe(`${lead}${guard.diagnosis}`);
+      expect(failure.advice).toBe(guard.advice);
+      expect(route(failure.message), 'the wrapped message no longer routes').toBe(true);
     });
   });
 });

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import type { DdevGuardFinding } from './ddev-build-guard.js';
 
 /**
  * Pre-flight check that the project's DDEV web-container entrypoint scripts can run at all.
@@ -413,26 +414,30 @@ export interface DdevEntrypointScript {
  *  The two passes are ordered by WHEN they bite: the first pass finds what kills the very
  *  first start, the second what kills every start after it. Reporting the first-boot cause
  *  first keeps the message pointed at what the agent will actually observe. */
-export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): string | null {
+export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): DdevGuardFinding | null {
   for (const file of files) {
     const where = `${DDEV_ENTRYPOINT_PREFIX} .ddev/${ENTRYPOINT_DIR}/${file.name}`;
     const commands = shellCommands(file.content);
     for (const { command, args, guarded, privileged } of commands) {
       if (privileged) continue;
       if (endsTheEntrypoint(command, args)) {
-        return (
-          `${where} calls \`${command}${args[0] ? ` ${args[0]}` : ''}\`, which ends the web ` +
-          `container's entrypoint. ${CONTROL_FLOW_ADVICE}`
-        );
+        return {
+          problem:
+            `${where} calls \`${command}${args[0] ? ` ${args[0]}` : ''}\`, which ends the web ` +
+            `container's entrypoint.`,
+          advice: CONTROL_FLOW_ADVICE,
+        };
       }
       if (guarded) continue;
       const advice = rootOnlyAdvice(command, args);
       if (!advice) continue;
-      return (
-        `${where} runs \`${command}\`, which needs root, where a failure aborts the ` +
-        `entrypoint. DDEV sources every script in that directory into the web container's ` +
-        `entrypoint on each start. ${advice}`
-      );
+      return {
+        problem:
+          `${where} runs \`${command}\`, which needs root, where a failure aborts the ` +
+          `entrypoint. DDEV sources every script in that directory into the web container's ` +
+          `entrypoint on each start.`,
+        advice,
+      };
     }
 
     // Second pass, and it needs the WHOLE script first: the `chown` that poisons a write can
@@ -447,11 +452,13 @@ export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): strin
       if (guarded || privileged) continue;
       const target = handedAwayWriteTarget(command, args, handedAway);
       if (!target || tested.has(target)) continue;
-      return (
-        `${where} runs \`${command}\` on \`${target}\`, which the same script hands to another ` +
-        `user with \`chown\` — so the write succeeds on the first start and fails on every ` +
-        `one after it. ${IDEMPOTENCE_ADVICE}`
-      );
+      return {
+        problem:
+          `${where} runs \`${command}\` on \`${target}\`, which the same script hands to another ` +
+          `user with \`chown\` — so the write succeeds on the first start and fails on every ` +
+          `one after it.`,
+        advice: IDEMPOTENCE_ADVICE,
+      };
     }
   }
   return null;
@@ -464,7 +471,7 @@ export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): strin
  * tree cannot be read — an unreadable workspace is the boot's problem to report, not this
  * check's.
  */
-export async function checkDdevWebEntrypoints(workspace: string): Promise<string | null> {
+export async function checkDdevWebEntrypoints(workspace: string): Promise<DdevGuardFinding | null> {
   const { anchor, prefix } = workspaceAnchor(workspace);
   const relDir = `${prefix}.ddev/${ENTRYPOINT_DIR}`;
   const entries = await readdirNoFollow(anchor, relDir);

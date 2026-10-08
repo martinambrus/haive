@@ -39,6 +39,19 @@ export class TaskCancelledError extends Error {
   }
 }
 
+/** A failure that carries Haive's own advice apart from the problem: the fix loop hands the
+ *  advice to the fixer as guidance, outside the fence its diagnosis sits in. */
+export class AdvisedStepError extends Error {
+  readonly diagnosis: string;
+  readonly advice: string;
+  constructor(message: string, diagnosis: string, advice: string) {
+    super(message);
+    this.name = 'AdvisedStepError';
+    this.diagnosis = diagnosis;
+    this.advice = advice;
+  }
+}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
