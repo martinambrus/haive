@@ -524,6 +524,12 @@ export const HUMAN_REJECT_SOURCES = new Set([
   FIX_LOOP_GATE_SOURCE,
 ]);
 
+/** A recorded request whose diagnosis is a person's words with the machine text joined to it
+ *  already fenced. A row without the mark is legacy mixed text and reads as machine text. */
+function isFencedPersonRequest(p: { sourceStepId?: string; machineFenced?: boolean }): boolean {
+  return HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '') && p.machineFenced === true;
+}
+
 /** The diagnosis the implementation step should fix on this round, with whether it came from a
  *  human reject gate (authoritative, every item required) vs a machine check. Null on the
  *  original pass (round 0) or when no recorded request matches the current round. */
@@ -547,9 +553,10 @@ export async function loadFixLoopDiagnosis(
       round?: number;
       sourceStepId?: string;
       guidance?: string;
+      machineFenced?: boolean;
     } | null;
     if (p?.round === ctx.round) {
-      const humanSourced = HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '');
+      const humanSourced = isFencedPersonRequest(p);
       const d = excerptDiagnosis((p.diagnosis ?? '').trim(), DIAGNOSIS_BUDGET, humanSourced);
       if (d.length === 0) return null;
       return { diagnosis: d, humanSourced, guidance: p.guidance ?? '' };
@@ -581,7 +588,12 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
-  type Payload = { diagnosis?: string; round?: number; sourceStepId?: string };
+  type Payload = {
+    diagnosis?: string;
+    round?: number;
+    sourceStepId?: string;
+    machineFenced?: boolean;
+  };
   // A gate directive is a person's instruction laid over a check, never a check itself.
   const checks = rows
     .map((r) => r.payload as Payload | null)
@@ -595,7 +607,7 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
     round: ctx.round,
     previousRound: ctx.round - 1,
     report: excerptDiagnosis(previous.diagnosis.trim(), REPEAT_REPORT_LIMIT, false),
-    person: HUMAN_REJECT_SOURCES.has(current.sourceStepId),
+    person: isFencedPersonRequest(previous),
   };
 }
 
@@ -709,11 +721,16 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
-  type Payload = { diagnosis?: string; sourceStepId?: string; round?: number };
+  type Payload = {
+    diagnosis?: string;
+    sourceStepId?: string;
+    round?: number;
+    machineFenced?: boolean;
+  };
   // rows are newest-first → the first diagnosis seen per source is its latest. Include the
   // current round (payload.round === ctx.round is the failure 07 just fixed this round, which
   // 07b is most likely to re-flag).
-  const latestPerSource = new Map<string, string>();
+  const latestPerSource = new Map<string, { text: string; human: boolean }>();
   for (const r of rows) {
     const p = r.payload as Payload | null;
     if (!p?.sourceStepId || typeof p.round !== 'number') continue;
@@ -721,12 +738,11 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     if (!HONORED_CONSTRAINT_SOURCES.has(p.sourceStepId)) continue;
     if (!latestPerSource.has(p.sourceStepId)) {
       const text = (p.diagnosis ?? '').trim();
-      latestPerSource.set(
-        p.sourceStepId,
-        HUMAN_REJECT_SOURCES.has(p.sourceStepId)
-          ? excerptDiagnosis(text, DIAGNOSIS_BUDGET, true)
-          : cleanDiagnosis(text),
-      );
+      const human = isFencedPersonRequest(p);
+      latestPerSource.set(p.sourceStepId, {
+        text: human ? excerptDiagnosis(text, DIAGNOSIS_BUDGET, true) : cleanDiagnosis(text),
+        human,
+      });
     }
   }
   // Priority sources first; everything else keeps its newest-first order (sort is stable, so
@@ -736,7 +752,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     return i >= 0 ? i : PRIORITY_CONSTRAINT_SOURCES.length;
   };
   const ordered = [...latestPerSource.entries()]
-    .filter(([, d]) => d.length > 0)
+    .filter(([, d]) => d.text.length > 0)
     .sort(([a], [b]) => rank(a) - rank(b));
   if (ordered.length === 0) return '';
   const header = [
@@ -754,7 +770,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     HONORED_ENTRY_MIN,
     Math.floor((HONORED_BLOCK_TARGET - header.length) / ordered.length),
   );
-  const entries = ordered.map(([src, d]) => {
+  const entries = ordered.map(([src, { text: d, human }]) => {
     const label = `- ${src}: `;
     const room = Math.max(HONORED_ENTRY_MIN, perEntry - label.length);
     // Head-slice: a constraint states its rule up front (tool output arrives tail-kept by
@@ -762,7 +778,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     // gate-2 constraint carries fences INSIDE it, and a head slice keeps the BEGIN and drops
     // the END — which would swallow the rest of the prompt around a person's entry, which
     // stays unfenced (a honored constraint from a person is the developer's).
-    return { line: `${label}${cutHead(d, room, '…')}`, human: HUMAN_REJECT_SOURCES.has(src) };
+    return { line: `${label}${cutHead(d, room, '…')}`, human };
   });
   const person = entries.filter((e) => e.human).map((e) => e.line);
   const machine = entries.filter((e) => !e.human).map((e) => e.line);
@@ -826,6 +842,7 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
       round?: number;
       fingerprint?: string;
       fingerprintV2?: string;
+      machineFenced?: boolean;
     } | null;
     if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
     const short = excerptDiagnosis((p.diagnosis ?? '').trim(), PRIOR_FIX_ENTRY_LIMIT, false);
@@ -835,7 +852,7 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
     seenFp.add(fp);
     entries.push({
       line: `- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`,
-      human: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? ''),
+      human: isFencedPersonRequest(p),
     });
   }
 
