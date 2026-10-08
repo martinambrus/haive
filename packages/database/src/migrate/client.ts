@@ -5,8 +5,9 @@ import { emit } from './log.js';
  *  at one of them would find none of the expected tables, classify it `fresh`, and build the core
  *  schema inside a vector store. The table quorum cannot catch this — an empty-of-our-tables
  *  database is exactly what `fresh` means — so it is refused by name instead. Three lines against
- *  the one realistic way a misdirected `DATABASE_URL` does damage. */
-const NOT_A_TARGET = [/^haive_rag_/, /^haive_kb_global$/];
+ *  the one realistic way a misdirected `DATABASE_URL` does damage. Any install id, not just
+ *  `haive`: this package cannot import the naming module, and another install's store counts too. */
+const NOT_A_TARGET = [/^[a-z0-9][a-z0-9_]*_rag_/, /^[a-z0-9][a-z0-9_]*_kb_global$/];
 
 export class WrongDatabaseError extends Error {}
 

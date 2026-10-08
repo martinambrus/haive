@@ -24,6 +24,9 @@ const ROOTS = [
   // its one-shot containers joined the DEFAULT install's network on a namespaced install. A guard
   // that does not read a package cannot protect it.
   fileURLToPath(new URL('../../updater/src', import.meta.url)),
+  // Omitted the same way: the migration runner recognised RAG and global-KB stores by the default
+  // install's prefix, so on another install it built the core schema inside that install's store.
+  fileURLToPath(new URL('../../database/src', import.meta.url)),
 ];
 
 /** The naming module is where the shape of a name is allowed to be written down. */
@@ -42,7 +45,8 @@ const NOT_A_RESOURCE = [
   // container per install, so namespacing them would change a key for no isolation gain.
   /haive-(?:cli-exec|task|env-replicate|repo|bundle|runtime-ensure|ide-ensure|ddev-control|usage-poll|pr-poll|plan-mirror|global-kb-sync|kb-author)\b/,
   // Service identity, user agents and a download filename: strings a human or an HTTP peer reads.
-  /haive-(?:api|worker|web|cli-version-fetcher|ddev-rootCA)\b/,
+  /haive-(?:api|worker|web|cli-version-fetcher|ddev-rootCA|migrate)\b/,
+  /haive_(?:build|version)\b/, // column names
   /HAIVE_[A-Z_]+/,
   /haive\.[a-z.]+/, // label KEYS and the haive.local hostname
   /haive-(?:env-build|sandbox-build|compose|net|dump|shots|merge-snapshot)-/, // host temp paths

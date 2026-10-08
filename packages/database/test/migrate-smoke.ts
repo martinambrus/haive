@@ -96,6 +96,14 @@ async function freshDatabase(suffix: string): Promise<string> {
   return name;
 }
 
+// Created only when absent and dropped only if created here: CI's server may hold it for later steps.
+async function ensureDatabase(name: string): Promise<void> {
+  const [row] = await admin`SELECT 1 FROM pg_database WHERE datname = ${name}`;
+  if (row) return;
+  await admin.unsafe(`CREATE DATABASE "${name}"`);
+  created.push(name);
+}
+
 async function withDb<T>(dbName: string, fn: (sql: postgres.Sql) => Promise<T>): Promise<T> {
   const sql = postgres(urlFor(dbName), { max: 1 });
   try {
@@ -391,11 +399,11 @@ async function main(): Promise<void> {
 
   // 10. WRONG DATABASE — this repo creates RAG and global-KB stores on the same server, and the
   //     table quorum cannot catch a misdirected URL because "none of our tables" is what fresh
-  //     means. Refused by name instead.
-  {
-    const name = 'haive_kb_global';
+  //     means. Refused by name instead, whichever install id named the store.
+  for (const name of ['haive_kb_global', 'blank_kb_global', 'blank_rag_demo']) {
+    await ensureDatabase(name);
     const run = await runMigrate(urlFor(name));
-    check('wrong database: refuses a global-KB store by name', run.code === 2, { code: run.code });
+    check(`wrong database: refuses ${name} by name`, run.code === 2, { code: run.code });
   }
 
   // 11. ONE LIVE UPGRADE — the index an older release's rows could hold shut: a `created` upgrade
