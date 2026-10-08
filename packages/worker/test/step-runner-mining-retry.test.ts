@@ -234,6 +234,8 @@ function makeMockDb(state: MockState): Database {
       return {
         set: (v: Record<string, unknown>) => {
           const record = (where: unknown) => {
+            if (state.openTransaction)
+              (state.ops ??= []).push(`update:${tableName}@${state.openTransaction}`);
             state.updates.push({ table: tableName, ...v });
             if (tableName === 'task_steps') {
               state.taskStepRow = { ...state.taskStepRow, ...v };
@@ -280,11 +282,15 @@ function makeMockDb(state: MockState): Database {
       const outer = state.openTransaction;
       state.openTransaction = state.transactions;
       const inserted = state.inserts.length;
+      const updated = state.updates.length;
+      const miningUpdated = state.miningUpdateLog?.length ?? 0;
       try {
         return await fn(db);
       } catch (err) {
-        // A transaction that throws takes back what it inserted.
+        // A transaction that throws takes back what it inserted and updated.
         state.inserts.length = inserted;
+        state.updates.length = updated;
+        if (state.miningUpdateLog) state.miningUpdateLog.length = miningUpdated;
         throw err;
       } finally {
         state.openTransaction = outer;
@@ -2695,5 +2701,142 @@ describe('a person re-runs an agent whose seat no provider now takes', () => {
     expect(enqueued).toHaveLength(1);
     expect(applyCalls).toEqual([]);
     expect(state.miningRows[0]!.errorMessage).toBe(OLD_FAILURE);
+  });
+});
+
+describe('a fan-out step that ends while agents it queued are still live', () => {
+  function threeAgentStep(): StepDefinition {
+    return {
+      metadata: { id: 'test-mining-step', title: 'three', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [1, 2, 3].map((n) => ({
+            agentId: `agent-${n}`,
+            agentTitle: `agent-${n}`,
+            prompt: `review ${n}`,
+          }));
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  /** Enqueue succeeds for the first `okCalls` agents, then `onFail` runs and the enqueue throws. */
+  function runWithEnqueueFailingAfter(state: MockState, okCalls: number, onFail?: () => void) {
+    let calls = 0;
+    return advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: threeAgentStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          calls += 1;
+          if (calls > okCalls) {
+            onFail?.();
+            throw new Error('redis refused the job');
+          }
+        },
+      },
+    });
+  }
+
+  const endedRuns = (state: MockState) =>
+    state.updates.filter((u) => u.table === 'cli_invocations' && u.exitCode === 137);
+  const stepWideAgentWrites = (state: MockState) =>
+    (state.miningUpdateLog ?? []).filter(
+      (u) => u.set.status === 'failed' && conditionValues(u.where).includes('ts-1'),
+    );
+
+  it('ends and supersedes the runs it queued and fails every agent of the step', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 1);
+
+    expect(result.status).toBe('failed');
+    const [ended] = endedRuns(state);
+    expect(endedRuns(state)).toHaveLength(1);
+    expect(ended).toMatchObject({
+      errorMessage: 'cancelled: the step ended',
+      endedAt: expect.any(Date),
+      supersededAt: expect.any(Date),
+    });
+    const [failed] = stepWideAgentWrites(state);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+    expect(conditionValues(failed!.where)).toEqual(
+      expect.arrayContaining(['ts-1', 'pending', 'running']),
+    );
+    expect(String(failed!.set.errorMessage)).toContain('redis refused');
+    expect(state.taskStepRow.status).toBe('failed');
+  });
+
+  it('takes the runs, then the agents, then the step, in one transaction', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const ops = state.ops ?? [];
+    const tx = ops.find((o) => o.startsWith('update:cli_invocations@'))!;
+    const n = tx.slice(tx.indexOf('@') + 1);
+    const inTx = ops.filter((o) => o.endsWith(`@${n}`));
+    expect(inTx).toEqual([
+      `update:cli_invocations@${n}`,
+      `update:task_step_agent_minings@${n}`,
+      `lock:task_steps@${n}`,
+    ]);
+  });
+
+  it('also ends them when the write parking the step after a second wave fails', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.afterStepWrite = (set) => {
+      if (set.status === 'waiting_cli') throw new Error('postgres went away');
+    };
+    const result = await run(makeMockDb(state), waveStep([], ['refute-a']), []);
+
+    expect(result.status).toBe('failed');
+    expect(endedRuns(state)).toHaveLength(1);
+  });
+
+  it('leaves the runs and agents alone when a Retry has taken the step', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 1, () => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    });
+
+    expect(result.status).toBe('superseded');
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+    expect(state.taskStepRow.status).toBe('pending');
+  });
+
+  it('still ends the runs and agents when a Stop has failed the step meanwhile', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1, () => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'failed' };
+    });
+
+    expect(endedRuns(state)).toHaveLength(1);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+  });
+
+  it('touches nothing when every agent dispatches', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 3);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+    expect(state.updates.filter((u) => u.table === 'cli_invocations' && u.endedAt)).toHaveLength(0);
   });
 });

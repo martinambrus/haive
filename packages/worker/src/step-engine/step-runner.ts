@@ -2037,29 +2037,57 @@ async function releaseUnsentAgents(
   }
 }
 
-/** Fail the agents a fan-out reserved and nothing sent, for a pass leaving its step finished or
- *  failed: once the pass is gone nothing would send them, and Resume refuses a step whose agents
- *  read as pending. Best effort, so the step's own error is what is reported. */
-async function failReservedAgents(db: Database, taskStepId: string, reason: string): Promise<void> {
+/** End a fan-out's agents for a pass leaving its step failed: supersede the runs it queued, so each
+ *  stops itself within seconds instead of spending to its timeout, and fail every agent still
+ *  pending or running, which Resume would otherwise refuse as in flight. One transaction in a
+ *  Retry's order (runs, agents, step), rolled back whole when a Retry has reset the step.
+ *  Best effort, so the step's own error is what is reported. */
+async function releaseStepAgents(db: Database, taskStepId: string, reason: string): Promise<void> {
   const now = new Date();
   try {
-    await db
-      .update(schema.taskStepAgentMinings)
-      .set({
-        status: 'failed',
-        errorMessage: `the step ended before the agent was sent: ${reason}`.slice(0, 2000),
-        endedAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
-          eq(schema.taskStepAgentMinings.status, 'pending'),
-          isNull(schema.taskStepAgentMinings.cliInvocationId),
-        ),
-      );
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.cliInvocations)
+        .set({
+          exitCode: 137,
+          errorMessage: 'cancelled: the step ended',
+          statusMessage: 'cancelled: the step ended',
+          endedAt: now,
+          supersededAt: now,
+        })
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, taskStepId),
+            eq(schema.cliInvocations.mode, 'agent_mining'),
+            isNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        );
+      await tx
+        .update(schema.taskStepAgentMinings)
+        .set({
+          status: 'failed',
+          errorMessage: `the step ended before the agent finished: ${reason}`.slice(0, 2000),
+          endedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
+            inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
+          ),
+        );
+      // A Stop also leaves the step failed and still wants these ended; only a Retry's reset is not ours.
+      const [step] = await tx
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, taskStepId))
+        .for('update');
+      if (!step || step.status === 'pending') throw new StepSupersededError(taskStepId);
+    });
   } catch (err) {
-    log.error({ err, taskStepId }, 'could not fail the mining agents a failed step left unsent');
+    if (err instanceof StepSupersededError) return;
+    log.error({ err, taskStepId }, 'could not end the mining agents a failed step left running');
   }
 }
 
@@ -3214,7 +3242,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
-    if (stepDef.agentMining) await failReservedAgents(db, row.id, errorMessage);
+    if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
