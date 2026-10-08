@@ -150,8 +150,8 @@ services:
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
       HOST_USER_HOME: ${HOME}
       BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
-      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-haive-cli-sandbox:latest}
-      SANDBOX_WRAPPER_HOST_VOLUME: ${SANDBOX_WRAPPER_HOST_VOLUME:-haive_wrappers}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-${HAIVE_INSTALL_ID:-haive}-cli-sandbox:latest}
+      SANDBOX_WRAPPER_HOST_VOLUME: ${SANDBOX_WRAPPER_HOST_VOLUME:-${HAIVE_INSTALL_ID:-haive}_wrappers}
 
   web:
     build:

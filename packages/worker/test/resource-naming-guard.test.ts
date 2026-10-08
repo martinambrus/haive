@@ -100,3 +100,37 @@ describe('resource names are never typed at a call site', () => {
     expect(offenders, `typed resource names found:\n${offenders.join('\n')}`).toEqual([]);
   });
 });
+
+const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+const COMPOSE_FILES = [
+  'docker-compose.yml',
+  'docker-compose.dev.yml',
+  'docker-compose.run.yml',
+  'docker-compose.gpu.yml',
+  'docker-compose.vulkan.yml',
+];
+
+describe('compose files and the env template name resources through HAIVE_INSTALL_ID', () => {
+  it('no compose default is a literal haive-/haive_ name', () => {
+    const offenders: string[] = [];
+    for (const name of COMPOSE_FILES) {
+      readFileSync(join(REPO_ROOT, name), 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          if (line.trimStart().startsWith('#')) return;
+          for (const m of line.matchAll(/:-(haive[-_][A-Za-z0-9_.:-]*)/g)) {
+            if (m[1] === 'haive_dev_password') continue;
+            offenders.push(`${name}:${i + 1}  ${line.trim()}`);
+          }
+        });
+    }
+    expect(offenders, `literal resource-name defaults:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('.env.example sets no SANDBOX_* name', () => {
+    const offenders = readFileSync(join(REPO_ROOT, '.env.example'), 'utf8')
+      .split('\n')
+      .filter((line) => /^SANDBOX_[A-Z_]*=/.test(line));
+    expect(offenders, `an exported name pins one install:\n${offenders.join('\n')}`).toEqual([]);
+  });
+});
