@@ -617,9 +617,10 @@ async function resolveLlmPhase(
       //  - Non-loop steps: bounded by llm.retry.maxAttempts (total attempts).
       //  - Loop steps (no llm.retry): bounded by MAX_TRUNCATION_RETRIES consecutive
       //    truncations for the CURRENT iteration; each retry shrinks the request via
-      //    buildIterationPrompt's truncationRetries (computed in the dispatch path),
-      //    so a deterministically-oversized chunk converges to a fitting size
-      //    instead of failing the whole step.
+      //    buildIterationPrompt's truncationRetries (computed in the dispatch path;
+      //    iteration 0 only for a loop with iterationPromptCoversFirstPass), so a
+      //    deterministically-oversized chunk converges to a fitting size instead of
+      //    failing the whole step.
       if (isOutputTruncationMessage(errTrimmed)) {
         const llmRetry = llmSpec.retry;
         const canRetry = stepDef.loop
@@ -747,10 +748,14 @@ async function resolveLlmPhase(
   const upcomingIteration = previousIterations.length;
   // Consecutive output-truncations for the current (pending) iteration. When > 0 a
   // same-iteration retry is underway; route even iteration 0 through the iteration
-  // builder so its shrink hint (truncationRetries) reaches the first pass too.
-  const truncationRetries = stepDef.loop ? await countTrailingTruncations(db, current.id) : 0;
+  // builder, when the step says it covers the first pass, so its shrink hint
+  // (truncationRetries) reaches the first pass too.
+  const trailingTruncations = await countTrailingTruncations(db, current.id);
+  const truncationRetries = stepDef.loop ? trailingTruncations : 0;
   let prompt =
-    (upcomingIteration > 0 || truncationRetries > 0) && stepDef.loop?.buildIterationPrompt
+    (upcomingIteration > 0 ||
+      (truncationRetries > 0 && stepDef.loop?.iterationPromptCoversFirstPass)) &&
+    stepDef.loop?.buildIterationPrompt
       ? stepDef.loop.buildIterationPrompt({
           detected,
           formValues: formValues ?? {},
@@ -779,6 +784,7 @@ async function resolveLlmPhase(
   // Append the global, admin-configured terseness directive (prose only; structured
   // output and reasoning are carved out / untouched). Default level is 'full'.
   prompt = await augmentPromptWithTerseness(prompt);
+  if (trailingTruncations > 0) prompt = `${prompt}\n\n${TRUNCATION_RETRY_NOTICE}`;
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.
   const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';
@@ -4061,6 +4067,10 @@ async function countLlmAttempts(db: Database, taskStepId: string): Promise<numbe
     );
   return rows.length;
 }
+
+/** Appended to the prompt of any step re-dispatched after an output truncation. */
+const TRUNCATION_RETRY_NOTICE =
+  'Your previous attempt was cut off at the output-token limit. Keep each reply and each tool call smaller (write a large file in several edits, keep prose brief), but include every required item and field.';
 
 /** Max consecutive output-truncation re-dispatches tolerated for one loop
  *  iteration before the step fails. Each retry shrinks the request, so this also

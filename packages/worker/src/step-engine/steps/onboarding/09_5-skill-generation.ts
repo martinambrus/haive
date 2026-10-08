@@ -1240,6 +1240,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // skill cap plus in-loop re-rolls of flaky/empty passes. (resolveLoopBudget
     // falls through to this because the form field is `maxSkills`, not maxIterations.)
     maxIterations: HARD_MAX_SKILLS * 2 + 4,
+    iterationPromptCoversFirstPass: true,
     buildIterationPrompt: ({ detected, formValues, previousIterations, truncationRetries }) =>
       buildSkillPrompt(
         detected as SkillGenDetect,

@@ -56,9 +56,10 @@ import { appAuthPromptLines } from './workflow/_app-auth.js';
  * of reach):
  *
  *   1. `llm.buildPrompt(args)`
- *   2. `loop.buildIterationPrompt(args)` — `step-runner.ts:707` routes to it whenever
- *      `upcomingIteration > 0 || truncationRetries > 0`, so it is the prompt for every pass past the
- *      first (05, 07a, 07b, 08a, 09_5 define one).
+ *   2. `loop.buildIterationPrompt(args)` — `step-runner.ts` routes to it whenever
+ *      `upcomingIteration > 0`, or on a truncation retry of a loop that sets
+ *      `iterationPromptCoversFirstPass` (09_5), so it is the prompt for every pass past the first
+ *      (05, 07a, 07b, 08a, 08b, 09_5 define one).
  *   3. `agentMining.selectAgents(args)` — each returned `AgentMiningDispatch.prompt` is dispatched
  *      with `kind: 'prompt'`, so a fan-out's prompts are scanned exactly like a single one. Ten
  *      built-in steps declare mining.
