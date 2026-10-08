@@ -1807,6 +1807,142 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
   );
 });
 
+describe('ingestReviewRun: stuck counts reviews without progress', () => {
+  type Fix = { passed: boolean }[];
+  const verdictOf = (criteria: Fix | null) =>
+    inv({
+      parsedOutput: {
+        verdict: 'fix_required',
+        criteria_results: (criteria ?? []).map((c, i) => ({ criterion: `AC${i + 1}`, ...c })),
+        issues: [{ severity: 'high', file: 'a.ts', description: 'unmet criterion' }],
+      },
+    });
+  const failed = (n: number, total = 7): Fix =>
+    Array.from({ length: total }, (_, i) => ({ passed: i >= n }));
+
+  const actualDispatch = vi.mocked(resolveTaskDispatch).getMockImplementation()!;
+
+  /** Feeds one reviewer verdict per round into a row that keeps what each round wrote. */
+  async function drive(rounds: (Fix | null)[]) {
+    const { db, updates } = makeSpawnDb();
+    const row: Record<string, unknown> = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 0,
+      stuckCount: 0,
+      reviewInfraRetries: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      debtItems: [],
+      errorMessage: null,
+      endedAt: null,
+      reviewerVerdict: null,
+    };
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const stored: { stuckCount: unknown; innerIteration: unknown }[] = [];
+    let ended: string | null = null;
+    for (const criteria of rounds) {
+      const before = updates.length;
+      vi.mocked(resolveTaskDispatch).mockImplementation(async () => workingDispatchPlan());
+      await ingestReviewRun(
+        ra,
+        { ...row } as never,
+        { id: 'run', role: 'reviewer' } as never,
+        verdictOf(criteria),
+      );
+      const patches = updates
+        .slice(before)
+        .filter((u) => u.table === schema.taskDagIssues)
+        .map((u) => u.patch);
+      for (const patch of patches) Object.assign(row, patch);
+      stored.push({ stuckCount: row.stuckCount, innerIteration: row.innerIteration });
+      const last = patches[patches.length - 1] as { resolution?: string } | undefined;
+      if (last?.resolution) {
+        ended = last.resolution;
+        break;
+      }
+    }
+    vi.mocked(resolveTaskDispatch).mockImplementation(actualDispatch);
+    return { row, stored, ended, rounds: stored.length };
+  }
+
+  it('ends in debt at the third reviewer when the failed count never drops', async () => {
+    const r = await drive([failed(2), failed(2), failed(2), failed(2)]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
+  it('keeps going after a drop in the failed count, and ends in debt a round later', async () => {
+    const r = await drive([failed(3), failed(2), failed(2), failed(2), failed(2)]);
+    expect(r.stored.slice(0, 3).map((s) => s.stuckCount)).toEqual([1, 1, 2]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(4);
+  });
+
+  it('fails the issue at the fifth iteration when every round makes progress', async () => {
+    const r = await drive([failed(5), failed(4), failed(3), failed(2), failed(1), failed(0)]);
+    expect(r.stored.map((s) => s.stuckCount).slice(0, 4)).toEqual([1, 1, 1, 1]);
+    expect(r.ended).toBe('failed_unrecoverable');
+    expect(r.rounds).toBe(5);
+  });
+
+  it('counts an empty criteria list as no progress', async () => {
+    const r = await drive([null, null, null, null]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
+  it('starts at 1 when there is no previous verdict', async () => {
+    const r = await drive([failed(2)]);
+    expect(r.stored[0]).toEqual({ stuckCount: 1, innerIteration: 1 });
+  });
+
+  it('keeps the round that ended an issue in debt: counters and endedAt', async () => {
+    const r = await drive([failed(2), failed(2), failed(2)]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.row.stuckCount).toBe(3);
+    expect(r.row.innerIteration).toBe(3);
+    expect(r.row.endedAt).toBeInstanceOf(Date);
+  });
+
+  it('does not count an empty criteria list after failures as progress', async () => {
+    const r = await drive([failed(2), failed(2), null, null]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
+  it('does not count a shorter criteria list as progress', async () => {
+    const r = await drive([failed(3), failed(1, 1), failed(1, 1), failed(1, 1)]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
+  it('keeps the review that failed the issue at the fifth iteration', async () => {
+    const r = await drive([failed(5), failed(4), failed(3), failed(2), failed(1)]);
+    expect(r.ended).toBe('failed_unrecoverable');
+    expect(r.row.innerIteration).toBe(5);
+    expect(r.row.stuckCount).toBe(1);
+    const kept = r.row.reviewerVerdict as { criteria_results: { passed: boolean }[] };
+    expect(kept.criteria_results.filter((c) => !c.passed)).toHaveLength(1);
+  });
+});
+
 describe('ingestReviewRun: a reviewer that started, produced no verdict, and was superseded', () => {
   it('re-dispatches the reviewer without charging reviewInfraRetries', async () => {
     const { db, inserts, updates } = makeSpawnDb();
