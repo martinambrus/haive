@@ -25,10 +25,14 @@ loop). Once is the bound: a pass that loses a second race settles on its second 
 sent nothing still parks while any row is live (`hasLiveMiningAgents`).
 
 A dispatch that throws part-way fails what it reserved or linked and did not queue
-(`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step before
-sending, such as a `selectAgents` that refuses, fails every reservation still unsent
-(`failReservedAgents`). Left `pending`, such a row would make the api's Resume refuse the step as
-still running.
+(`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step, at any
+point (a `selectAgents` that refuses, an enqueue that throws on the second of three agents, a park
+write that fails after a wave), then ends the whole fan-out (`releaseStepAgents`): it supersedes
+every run the step still has live, which stops itself within seconds instead of spending to its
+timeout, and fails every agent row still `pending` or `running`. Left so, such a row would make the
+api's Resume refuse the step as still running. It is one transaction in a Retry's lock order (runs,
+agents, step) and rolls back only when a Retry has reset the step to `pending`; a Stop that failed
+the step meanwhile still wants its agents ended.
 
 **A run's end and its mining result land together, on the row still linked to it.**
 `handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no
