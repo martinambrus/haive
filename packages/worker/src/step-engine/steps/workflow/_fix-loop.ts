@@ -514,7 +514,7 @@ export async function detectFixLoopOscillation(
  *  real error". The implement fix prompt frames the two differently (see 07-phase-2-implement).
  *  08a-browser-verify is intentionally absent: it runs only in automated (mcp) mode, so its
  *  loop-backs are machine console/network dumps, not a person's observations. */
-const HUMAN_REJECT_SOURCES = new Set([
+export const HUMAN_REJECT_SOURCES = new Set([
   '09-gate-2-verify-approval',
   '08d2-adversarial-qa-review',
   // Text the user typed at the escalation gate. Same standing as a hands-on reject: they are

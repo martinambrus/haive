@@ -7,8 +7,8 @@ import {
   severityRank,
 } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
-import { balanceFences } from '../_untrusted-repo.js';
-import { cutHead } from './_fix-loop.js';
+import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
+import { HUMAN_REJECT_SOURCES, cutHead } from './_fix-loop.js';
 
 /* ------------------------------------------------------------------ */
 /* Task-history digest — mines the PERSISTED run history (fix-loop     */
@@ -261,9 +261,10 @@ export function renderTaskHistoryDigest(
   if (diagnoses.length > 0) {
     lines.push('', '## What blocked it (round by round)');
     for (const d of diagnoses) {
-      lines.push(
-        `- round ${d.round} via ${d.source || 'review'}: ${balanceFences(cutHead(d.diagnosis.trim(), DIAGNOSIS_ITEM_CAP[tier], '… [truncated]'))}`,
-      );
+      const head = `- round ${d.round} via ${d.source || 'review'}:`;
+      const cut = cutHead(d.diagnosis.trim(), DIAGNOSIS_ITEM_CAP[tier], '… [truncated]');
+      if (HUMAN_REJECT_SOURCES.has(d.source)) lines.push(`${head} ${balanceFences(cut)}`);
+      else lines.push(head, fencedAgentBlock(cut));
     }
   }
 
@@ -287,19 +288,23 @@ export function renderTaskHistoryDigest(
     const lower = sorted.filter((f) => !isBlockingSeverity(f.severity));
     const lowerShown = lower.slice(0, SOFT_FINDING_CAP[tier]);
     lines.push('', '## Findings (validation / review / QA)');
-    for (const f of [...critHigh, ...lowerShown]) {
-      const fixPart = f.fix ? ` -> ${clip(f.fix, 200)}` : '';
-      lines.push(
-        `- [${f.severity}] ${f.where ? `${f.where}: ` : ''}${clip(f.desc, 300)}${fixPart} (${f.source})`,
-      );
-    }
+    lines.push(
+      fencedAgentBlock(
+        [...critHigh, ...lowerShown]
+          .map((f) => {
+            const fixPart = f.fix ? ` -> ${clip(f.fix, 200)}` : '';
+            return `- [${f.severity}] ${f.where ? `${f.where}: ` : ''}${clip(f.desc, 300)}${fixPart} (${f.source})`;
+          })
+          .join('\n'),
+      ),
+    );
     const dropped = lower.length - lowerShown.length;
     if (dropped > 0) lines.push(`- (+${dropped} more lower-severity findings)`);
   }
 
   if (runtimeErrors.length > 0) {
     lines.push('', '## Runtime / browser errors');
-    for (const e of runtimeErrors) lines.push(`- ${e}`);
+    lines.push(fencedAgentBlock(runtimeErrors.map((e) => `- ${e}`).join('\n')));
   }
 
   let text = lines.join('\n').trim();
