@@ -1278,6 +1278,30 @@ export interface GlobalKbEntry {
    *  that entry is archived. Used to show an "updates existing" diff in review. */
   supersedesEntryId: string | null;
   supersededAt: string | null;
+  /** House-rule fields. Optional because a row from an older api carries none of them. `enforce`
+   *  is the last settings given and outlives a lapse; `enforcementState` is what is true now. */
+  enforce?: GlobalKbEnforceSpec | null;
+  enforcedAt?: string | null;
+  enforcedBy?: string | null;
+  /** Echoed back as `expectedHash` so an approval names exactly the text the admin read. */
+  contentToken?: string;
+  enforcementState?: GlobalKbEnforcementState;
+}
+
+export type GlobalKbEnforceSpec = { mode: 'always' } | { mode: 'files'; globs: string[] };
+
+export interface GlobalKbEnforcementState {
+  state:
+    | 'none'
+    | 'enforced'
+    | 'edited'
+    | 'not_active'
+    | 'superseded'
+    | 'cleared'
+    | 'other_namespace'
+    | 'switched_off';
+  mode?: 'always' | 'files';
+  globs?: string[];
 }
 
 export type CliInvocationMode =

@@ -10,6 +10,7 @@ interface GlobalKbConfig {
   ollamaUrl: string;
   embedModel: string;
   embedDimensions: number;
+  canEnforce: boolean;
 }
 
 interface TestResult {
@@ -17,10 +18,11 @@ interface TestResult {
   message: string;
 }
 
-type RowState = 'pending' | 'ok' | 'fail';
+type RowState = 'pending' | 'ok' | 'fail' | 'unchecked';
 
 function StatusRow({ label, state, detail }: { label: string; state: RowState; detail: string }) {
-  const icon = state === 'pending' ? '…' : state === 'ok' ? '✅' : '❌';
+  const icon =
+    state === 'pending' ? '…' : state === 'unchecked' ? '–' : state === 'ok' ? '✅' : '❌';
   const color =
     state === 'ok' ? 'text-green-300' : state === 'fail' ? 'text-red-300' : 'text-neutral-400';
   return (
@@ -46,6 +48,7 @@ export function GlobalKbStatusPanel({
   const [cfg, setCfg] = useState<GlobalKbConfig | null>(null);
   const [db, setDb] = useState<TestResult | null>(null);
   const [ollama, setOllama] = useState<TestResult | null>(null);
+  const [dbChecked, setDbChecked] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,10 +57,13 @@ export function GlobalKbStatusPanel({
         const config = await api.get<GlobalKbConfig>('/global-kb/config');
         if (cancelled) return;
         setCfg(config);
+        // Only an admin may test the database; for anyone else it is not checked, not failed.
         const [dbRes, ollamaRes] = await Promise.all([
-          api
-            .post<TestResult>('/global-kb/test-db', { mode: config.mode })
-            .catch((e) => ({ ok: false, message: (e as Error).message })),
+          config.canEnforce
+            ? api
+                .post<TestResult>('/global-kb/test-db', { mode: config.mode })
+                .catch((e) => ({ ok: false, message: (e as Error).message }))
+            : Promise.resolve(null),
           api
             .post<TestResult>('/global-kb/test-ollama', {
               ollamaUrl: config.ollamaUrl,
@@ -69,6 +75,7 @@ export function GlobalKbStatusPanel({
         if (cancelled) return;
         setDb(dbRes);
         setOllama(ollamaRes);
+        setDbChecked(config.canEnforce === true);
       } catch (e) {
         if (!cancelled) {
           const message = (e as Error).message || 'failed to load global KB settings';
@@ -82,7 +89,8 @@ export function GlobalKbStatusPanel({
     };
   }, []);
 
-  const allOk = !!cfg?.enabled && !!db?.ok && !!ollama?.ok;
+  const dbUnchecked = !!cfg && !dbChecked;
+  const allOk = !!cfg?.enabled && (!!db?.ok || dbUnchecked) && !!ollama?.ok;
   const params = new URLSearchParams();
   if (repositoryId) params.set('repo', repositoryId);
   if (cliProviderId) params.set('cli', cliProviderId);
@@ -106,8 +114,14 @@ export function GlobalKbStatusPanel({
         />
         <StatusRow
           label="Database"
-          state={!db ? 'pending' : db.ok ? 'ok' : 'fail'}
-          detail={!db ? 'checking…' : db.message}
+          state={dbUnchecked ? 'unchecked' : !db ? 'pending' : db.ok ? 'ok' : 'fail'}
+          detail={
+            dbUnchecked
+              ? 'not checked — only an admin can test the database'
+              : !db
+                ? 'checking…'
+                : db.message
+          }
         />
         <StatusRow
           label="Ollama / model"
