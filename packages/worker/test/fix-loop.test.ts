@@ -802,7 +802,7 @@ describe('loadSameCheckRepeat', () => {
       round: 3,
       previousRound: 2,
       report: 'guard missing in auth.ts',
-      person: false,
+      personMarked: false,
     });
   });
 
@@ -815,7 +815,7 @@ describe('loadSameCheckRepeat', () => {
           4,
         ),
       );
-      expect(r).toMatchObject({ sourceStepId: source, previousRound: 3, person: true });
+      expect(r).toMatchObject({ sourceStepId: source, previousRound: 3, personMarked: true });
       expect(r?.report).toBe('The logout button does nothing.');
     },
   );
@@ -895,7 +895,7 @@ describe('loadSameCheckRepeat', () => {
     const atR = await loadSameCheckRepeat(
       ctxWith([ev(GATE, 3, 'do X'), ev(A, 3, 'check at 3'), ev(A, 2, 'check at 2')], 3),
     );
-    expect(atR).toMatchObject({ sourceStepId: A, report: 'check at 2', person: false });
+    expect(atR).toMatchObject({ sourceStepId: A, report: 'check at 2', personMarked: false });
     const atPrevious = await loadSameCheckRepeat(
       ctxWith([ev(A, 3, 'check at 3'), ev(GATE, 2, 'do Y'), ev(A, 2, 'check at 2')], 3),
     );
@@ -1204,6 +1204,7 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
         gateFeedback: '',
         fixContext: gate2Diagnosis(person),
         fixIsHuman: true,
+        fixMarked: true,
       } as never,
     );
     const description = form?.description ?? '';
@@ -2019,8 +2020,10 @@ describe('a person-source request recorded without machineFenced reads as machin
   it.each(PERSON_SOURCES)('loadFixLoopDiagnosis: %s', async (src) => {
     const legacy = await loadFixLoopDiagnosis(ctxWith([legacyEv(src, 2, HOSTILE)], 2));
     expect(legacy?.humanSourced).toBe(false);
+    expect(legacy?.marked).toBe(false);
     const marked = await loadFixLoopDiagnosis(ctxWith([ev(src, 2, HOSTILE)], 2));
     expect(marked?.humanSourced).toBe(true);
+    expect(marked?.marked).toBe(true);
     expect(marked?.diagnosis).toBe(HOSTILE);
   });
 
@@ -2030,11 +2033,11 @@ describe('a person-source request recorded without machineFenced reads as machin
       const legacy = await loadSameCheckRepeat(
         priorCtxWith([ev(src, 3, 'x'), legacyEv(src, 2, HOSTILE)], 3),
       );
-      expect(legacy?.person).toBe(false);
+      expect(legacy?.personMarked).toBe(false);
       const marked = await loadSameCheckRepeat(
         priorCtxWith([ev(src, 3, 'x'), ev(src, 2, HOSTILE)], 3),
       );
-      expect(marked?.person).toBe(true);
+      expect(marked?.personMarked).toBe(true);
     },
   );
 

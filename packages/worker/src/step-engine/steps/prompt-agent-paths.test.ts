@@ -943,7 +943,12 @@ const DETECT_VARIANTS: Record<
   '07-phase-2-implement': [
     {
       suffix: ', human reject',
-      fields: { fixContext: 'The logout button does nothing.', fixIsHuman: true, fixGuidance: '' },
+      fields: {
+        fixContext: 'The logout button does nothing.',
+        fixIsHuman: true,
+        fixMarked: true,
+        fixGuidance: '',
+      },
     },
     {
       suffix: ', machine diagnosis',
@@ -966,6 +971,7 @@ const DETECT_VARIANTS: Record<
       fields: {
         fixContext: 'The logout button does nothing.',
         fixIsHuman: true,
+        fixMarked: true,
         fixGuidance: FIX_GUIDANCE_FIXTURE,
       },
     },

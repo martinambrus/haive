@@ -533,9 +533,12 @@ function isFencedPersonRequest(p: { sourceStepId?: string; machineFenced?: boole
 /** The diagnosis the implementation step should fix on this round, with whether it came from a
  *  human reject gate (authoritative, every item required) vs a machine check. Null on the
  *  original pass (round 0) or when no recorded request matches the current round. */
-export async function loadFixLoopDiagnosis(
-  ctx: StepContext,
-): Promise<{ diagnosis: string; humanSourced: boolean; guidance: string } | null> {
+export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<{
+  diagnosis: string;
+  humanSourced: boolean;
+  marked: boolean;
+  guidance: string;
+} | null> {
   if (ctx.round <= 0) return null;
   const rows = await ctx.db
     .select()
@@ -559,7 +562,12 @@ export async function loadFixLoopDiagnosis(
       const humanSourced = isFencedPersonRequest(p);
       const d = excerptDiagnosis((p.diagnosis ?? '').trim(), DIAGNOSIS_BUDGET, humanSourced);
       if (d.length === 0) return null;
-      return { diagnosis: d, humanSourced, guidance: p.guidance ?? '' };
+      return {
+        diagnosis: d,
+        humanSourced,
+        marked: p.machineFenced === true,
+        guidance: p.guidance ?? '',
+      };
     }
   }
   return null;
@@ -570,7 +578,8 @@ export interface SameCheckRepeat {
   round: number;
   previousRound: number;
   report: string;
-  person: boolean;
+  /** Not `person`: a detect output persisted before the mark carries that key and must read as unmarked. */
+  personMarked: boolean;
 }
 
 // Bounded where it is loaded: detect() persists it, and the task page polls the step rows.
@@ -607,7 +616,7 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
     round: ctx.round,
     previousRound: ctx.round - 1,
     report: excerptDiagnosis(previous.diagnosis.trim(), REPEAT_REPORT_LIMIT, false),
-    person: isFencedPersonRequest(previous),
+    personMarked: isFencedPersonRequest(previous),
   };
 }
 
