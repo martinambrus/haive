@@ -1920,6 +1920,21 @@ describe('ingestReviewRun: stuck counts reviews without progress', () => {
     expect(r.row.innerIteration).toBe(3);
     expect(r.row.endedAt).toBeInstanceOf(Date);
   });
+
+  it('does not count an empty criteria list after failures as progress', async () => {
+    const r = await drive([failed(2), failed(2), null, null]);
+    expect(r.ended).toBe('completed_with_debt');
+    expect(r.rounds).toBe(3);
+  });
+
+  it('keeps the review that failed the issue at the fifth iteration', async () => {
+    const r = await drive([failed(5), failed(4), failed(3), failed(2), failed(1)]);
+    expect(r.ended).toBe('failed_unrecoverable');
+    expect(r.row.innerIteration).toBe(5);
+    expect(r.row.stuckCount).toBe(1);
+    const kept = r.row.reviewerVerdict as { criteria_results: { passed: boolean }[] };
+    expect(kept.criteria_results.filter((c) => !c.passed)).toHaveLength(1);
+  });
 });
 
 describe('ingestReviewRun: a reviewer that started, produced no verdict, and was superseded', () => {

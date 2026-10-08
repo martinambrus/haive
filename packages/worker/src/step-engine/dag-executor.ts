@@ -1149,10 +1149,12 @@ async function setResolution(
   issue: DagIssueRow,
   resolution: 'approved' | 'failed_unrecoverable',
   errorMessage?: string,
+  round?: { stuckCount: number; innerIteration: number; reviewerVerdict: ReviewerOutput },
 ): Promise<void> {
   await db
     .update(schema.taskDagIssues)
     .set({
+      ...round,
       resolution,
       reviewStatus: resolution,
       errorMessage: errorMessage ?? issue.errorMessage,
@@ -1317,7 +1319,9 @@ export async function ingestReviewRun(
     // fix_required
     const previous = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     const progressed =
-      previous.success && failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
+      verdict.criteria_results.length > 0 &&
+      previous.success &&
+      failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
     const newStuck = progressed ? 1 : issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;
     if (newStuck >= STUCK_LIMIT) {
@@ -1326,7 +1330,13 @@ export async function ingestReviewRun(
         innerIteration: newIter,
       });
     }
-    if (newIter >= MAX_REVIEW_ITERS) return setResolution(ra.db, issue, 'failed_unrecoverable');
+    if (newIter >= MAX_REVIEW_ITERS) {
+      return setResolution(ra.db, issue, 'failed_unrecoverable', undefined, {
+        stuckCount: newStuck,
+        innerIteration: newIter,
+        reviewerVerdict: verdict,
+      });
+    }
     await ra.db
       .update(schema.taskDagIssues)
       .set({
