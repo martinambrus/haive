@@ -837,6 +837,12 @@ describe('phase4ValidateStep fixer prompt', () => {
     expect(fixerPrompt(2, [])).not.toContain('state the root cause');
   });
 
+  it('holds the original user request once', () => {
+    const p = fixerPrompt(1, [high(['src/a.ts:3'])]);
+    expect(p.split(REQUEST)).toHaveLength(2);
+    expect(p.split('THE USER REQUEST')).toHaveLength(2);
+  });
+
   it('says nothing about an earlier review on the first fixer pass', () => {
     expect(fixerPrompt(1, [high(['src/a.ts:3'])])).not.toContain(REPEAT);
   });

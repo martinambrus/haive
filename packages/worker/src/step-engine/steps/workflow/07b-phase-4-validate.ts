@@ -874,8 +874,6 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
             ? '=== Brief (what the document was asked to cover) ==='
             : '=== Spec (the original requirements) ===',
           d.spec || '(no brief recorded)',
-          '=== Original user request (scope constraints) ===',
-          d.taskBrief ?? '(not recorded — do not expand scope)',
         ].join('\n');
       }
       // Validator re-pass after fixes.
