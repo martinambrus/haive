@@ -30,6 +30,9 @@ export interface TaskHistoryDigest {
   findingCount: number;
   /** Mid-run steering events mined from this task (a friction signal). */
   steerCount: number;
+  /** Set by this renderer, which fences agent text where it writes it; a digest persisted
+   *  before it lacks the field and is fenced whole at prompt-build time. */
+  fenced?: true;
 }
 
 const TIER_TOTAL_CAP: Record<DigestTier, number> = { low: 1500, medium: 6000, high: 20000 };
@@ -312,5 +315,5 @@ export function renderTaskHistoryDigest(
     text = cutHead(text, TIER_TOTAL_CAP[tier], `… [digest truncated at ${tier}-tier cap]`);
   }
 
-  return { text, tier, maxRound, fixLoopCount, findingCount, steerCount };
+  return { text, tier, maxRound, fixLoopCount, findingCount, steerCount, fenced: true };
 }
