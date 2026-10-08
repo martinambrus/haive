@@ -98,6 +98,37 @@ function seedStore(rows: Array<Record<string, unknown>>): void {
   h.gdb = fake.db;
 }
 
+type Trace = { events: string[]; columns: string[][]; rows: number };
+
+/** The seeded store with each transaction recorded: its calls, the columns its selects named, the rows it read. */
+function traceStore(): Trace[] {
+  const real = h.gdb as ReturnType<typeof createFakeDb>['db'];
+  const traces: Trace[] = [];
+  h.gdb = {
+    ...real,
+    transaction: (fn: (tx: any) => Promise<unknown>) =>
+      real.transaction(async (tx: any) => {
+        const trace: Trace = { events: [], columns: [], rows: 0 };
+        traces.push(trace);
+        const out = await fn({
+          ...tx,
+          execute: async (query: unknown) => {
+            trace.events.push('execute');
+            return tx.execute(query);
+          },
+          select: (fields: Record<string, unknown>) => {
+            trace.events.push('select');
+            trace.columns.push(Object.keys(fields));
+            return tx.select(fields);
+          },
+        });
+        trace.rows = (out as unknown[]).length;
+        return out;
+      }),
+  };
+  return traces;
+}
+
 const ALWAYS: EnforceSpec = { mode: 'always' };
 const FILES: EnforceSpec = { mode: 'files', globs: ['**/*.tpl.php'] };
 
@@ -193,6 +224,56 @@ describe('resolveGlobalKbContext: the enforced rules', () => {
     expect(out.digest.entries.map((e) => e.title)).not.toContain('Old rule');
   });
 
+  it('reads a rule that follows 200 older rules scoped to other stacks', async () => {
+    const laravel: GlobalKbFacets = { framework: ['laravel'] };
+    seedStore(
+      Array.from({ length: 250 }, (_, i) =>
+        row({
+          n: i + 1,
+          title: `Rule ${i + 1}`,
+          spec: ALWAYS,
+          facets: i === 200 ? {} : laravel,
+        }),
+      ),
+    );
+    const out = await ask();
+    expect(out.status).toBe('ok');
+    expect(out.rules.map((r) => r.title)).toEqual(['Rule 201']);
+  });
+
+  it('reads every rule that reaches the project, however many there are', async () => {
+    seedStore(
+      Array.from({ length: 250 }, (_, i) =>
+        row({ n: i + 1, title: `Rule ${i + 1}`, spec: ALWAYS }),
+      ),
+    );
+    const out = await ask();
+    expect(out.status).toBe('ok');
+    expect(out.rules).toHaveLength(250);
+  });
+
+  it('keeps approval order across the read of the scope and the read of the rows', async () => {
+    const drupal: GlobalKbFacets = { framework: ['drupal'] };
+    const laravel: GlobalKbFacets = { framework: ['laravel'] };
+    h.facets = { framework: ['drupal'] } as unknown as ProjectFacetSet;
+    seedStore([
+      row({ n: 20, title: 'Third', spec: ALWAYS, extra: { enforcedAt: at(3) } }),
+      row({
+        n: 11,
+        title: 'Elsewhere',
+        spec: ALWAYS,
+        facets: laravel,
+        extra: { enforcedAt: at(0) },
+      }),
+      row({ n: 30, title: 'First', spec: FILES, facets: drupal, extra: { enforcedAt: at(1) } }),
+      row({ n: 12, title: 'Elsewhere too', spec: ALWAYS, facets: laravel }),
+      row({ n: 40, title: 'Fourth', spec: ALWAYS, extra: { enforcedAt: at(4) } }),
+      row({ n: 10, title: 'Second', spec: ALWAYS, facets: drupal, extra: { enforcedAt: at(2) } }),
+    ]);
+    const out = await ask();
+    expect(out.rules.map((r) => r.title)).toEqual(['First', 'Second', 'Third', 'Fourth']);
+  });
+
   it('sets aside a row whose text or globs the API would have refused, and says which', async () => {
     seedStore([
       row({ n: 1, title: 'Fine', spec: ALWAYS }),
@@ -232,31 +313,43 @@ describe('resolveGlobalKbContext: one read for the digest and the rules', () => 
   });
 
   it('puts a statement timeout ahead of each query, inside a transaction of its own', async () => {
-    const real = createFakeDb({ globalKbEntries });
-    real.insert(globalKbEntries, row({ n: 1, title: 'Rule', spec: ALWAYS }));
-    const transactions: string[][] = [];
-    h.gdb = {
-      ...real.db,
-      transaction: (fn: (tx: any) => Promise<unknown>) =>
-        real.db.transaction(async (tx: any) => {
-          const events: string[] = [];
-          transactions.push(events);
-          return fn({
-            ...tx,
-            execute: async (query: unknown) => {
-              events.push('execute');
-              return tx.execute(query);
-            },
-            select: (...args: unknown[]) => {
-              events.push('select');
-              return tx.select(...args);
-            },
-          });
-        }),
-    };
+    seedStore([row({ n: 1, title: 'Rule', spec: ALWAYS })]);
+    const transactions = traceStore();
     await ask(true);
-    expect(transactions).toHaveLength(2);
-    for (const events of transactions) expect(events).toEqual(['execute', 'select']);
+    expect(transactions).toHaveLength(3);
+    for (const { events } of transactions) expect(events).toEqual(['execute', 'select']);
+  });
+
+  it('reads the scope from id and facets alone, then the rows of the rules that reach the project', async () => {
+    const laravel: GlobalKbFacets = { framework: ['laravel'] };
+    seedStore([
+      row({ n: 1, title: 'Elsewhere', spec: ALWAYS, facets: laravel }),
+      row({ n: 2, title: 'Here', spec: ALWAYS }),
+      row({ n: 3, title: 'Elsewhere too', spec: FILES, facets: laravel }),
+      row({ n: 4, title: 'Here too', spec: FILES }),
+    ]);
+    h.bools[CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED] = false;
+    const transactions = traceStore();
+    const out = await ask(true);
+    expect(out.rules.map((r) => r.title)).toEqual(['Here', 'Here too']);
+    expect(transactions.map((t) => t.columns)).toEqual([
+      [['id', 'facets']],
+      [expect.arrayContaining(['id', 'title', 'body', 'facets', 'enforcedHash'])],
+    ]);
+    expect(transactions.map((t) => t.rows)).toEqual([4, 2]);
+  });
+
+  it('reads no rows at all when no enforced rule reaches the project', async () => {
+    const laravel: GlobalKbFacets = { framework: ['laravel'] };
+    seedStore([
+      row({ n: 1, title: 'Elsewhere', spec: ALWAYS, facets: laravel }),
+      row({ n: 2, title: 'Elsewhere too', spec: FILES, facets: laravel }),
+    ]);
+    h.bools[CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED] = false;
+    const transactions = traceStore();
+    const out = await ask(true);
+    expect(out).toMatchObject({ status: 'ok', rules: [], refused: [] });
+    expect(transactions.map((t) => t.columns)).toEqual([[['id', 'facets']]]);
   });
 
   it('reads the digest alone when rules are not asked for, and the rules alone when the digest is off', async () => {
@@ -371,5 +464,21 @@ describe('resolveGlobalKbContext: switches and failures', () => {
     const rulesFail = await ask(true);
     expect(rulesFail).toMatchObject({ status: 'unavailable', errorClass: 'timeout', rules: [] });
     expect(rulesFail.digest.entries.map((e) => e.title)).toEqual(['Rule']);
+  });
+
+  it('calls the rules unavailable, never empty, when their rows cannot be read after the scope was', async () => {
+    const real = createFakeDb({ globalKbEntries });
+    real.insert(globalKbEntries, row({ n: 1, title: 'Rule', spec: ALWAYS }));
+    let started = 0;
+    h.gdb = {
+      ...real.db,
+      transaction: (fn: (tx: unknown) => Promise<unknown>) =>
+        started++ === 2
+          ? Promise.reject(Object.assign(new Error('boom'), { code: '57014' }))
+          : real.db.transaction(fn as never),
+    };
+    const out = await ask(true);
+    expect(out).toMatchObject({ status: 'unavailable', errorClass: 'timeout', rules: [] });
+    expect(out.digest.entries.map((e) => e.title)).toEqual(['Rule']);
   });
 });

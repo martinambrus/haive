@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
@@ -32,8 +32,6 @@ export const DISPATCH_KB_BOUNDS: Readonly<GlobalKbCallOptions & { statementTimeo
   statementTimeoutMs: 3_000,
   deadlineMs: 6_000,
 };
-
-const ENFORCED_SCAN_LIMIT = 200;
 
 export interface GlobalKbContext {
   digest: GlobalKbDigest;
@@ -124,8 +122,11 @@ export async function resolveGlobalKbContext(
             : null,
           readRules
             ? settle(
-                timed(gdb, bounds.statementTimeoutMs, (tx) =>
-                  readEnforcedRows(tx, settings.namespace),
+                readApplicableRows(
+                  gdb,
+                  settings.namespace,
+                  projectFacets,
+                  bounds.statementTimeoutMs,
                 ),
               )
             : null,
@@ -159,7 +160,22 @@ export async function resolveGlobalKbContext(
 
 type EnforcedRow = Awaited<ReturnType<typeof readEnforcedRows>>[number];
 
-function readEnforcedRows(gdb: Pick<GlobalKbDb, 'select'>, namespace: string) {
+const enforcedIn = (namespace: string) =>
+  and(
+    eq(globalKbEntries.namespace, namespace),
+    eq(globalKbEntries.status, 'active'),
+    isNull(globalKbEntries.supersededAt),
+    isNotNull(globalKbEntries.enforcedHash),
+  );
+
+function readEnforcedScope(gdb: Pick<GlobalKbDb, 'select'>, namespace: string) {
+  return gdb
+    .select({ id: globalKbEntries.id, facets: globalKbEntries.facets })
+    .from(globalKbEntries)
+    .where(enforcedIn(namespace));
+}
+
+function readEnforcedRows(gdb: Pick<GlobalKbDb, 'select'>, namespace: string, ids: string[]) {
   return gdb
     .select({
       id: globalKbEntries.id,
@@ -176,16 +192,21 @@ function readEnforcedRows(gdb: Pick<GlobalKbDb, 'select'>, namespace: string) {
       enforcedAt: globalKbEntries.enforcedAt,
     })
     .from(globalKbEntries)
-    .where(
-      and(
-        eq(globalKbEntries.namespace, namespace),
-        eq(globalKbEntries.status, 'active'),
-        isNull(globalKbEntries.supersededAt),
-        isNotNull(globalKbEntries.enforcedHash),
-      ),
-    )
-    .orderBy(asc(globalKbEntries.enforcedAt), asc(globalKbEntries.id))
-    .limit(ENFORCED_SCAN_LIMIT);
+    .where(and(enforcedIn(namespace), inArray(globalKbEntries.id, ids)))
+    .orderBy(asc(globalKbEntries.enforcedAt), asc(globalKbEntries.id));
+}
+
+/** The project's scope is judged on `id` and `facets` alone, so no row cap can hide a rule from it. */
+async function readApplicableRows(
+  gdb: GlobalKbDb,
+  namespace: string,
+  projectFacets: ProjectFacetSet,
+  statementTimeoutMs: number,
+): Promise<EnforcedRow[]> {
+  const scope = await timed(gdb, statementTimeoutMs, (tx) => readEnforcedScope(tx, namespace));
+  const ids = scope.filter((r) => facetsMatchProject(r.facets, projectFacets)).map((r) => r.id);
+  if (ids.length === 0) return [];
+  return timed(gdb, statementTimeoutMs, (tx) => readEnforcedRows(tx, namespace, ids));
 }
 
 /** `enforcementState` re-derives the hash from the stored content, so a row edited without clearing it drops. */
