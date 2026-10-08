@@ -301,6 +301,65 @@ function completeLatestInvocation(state: MockState, parsedOutput: unknown): void
   open.rawOutput = JSON.stringify(parsedOutput);
 }
 
+const TRUNCATION_NOTICE =
+  'Your previous attempt was cut off at the output-token limit. Keep each reply and each tool call smaller (write a large file in several edits, keep prose brief), but include every required item and field.';
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+function retryingStep(): StepDefinition {
+  const step = loopStep({ maxIterations: 1, shouldContinue: () => false });
+  const { loop: _loop, ...rest } = step;
+  return { ...rest, llm: { ...step.llm!, retry: { maxAttempts: 3 } } };
+}
+
+async function dispatchNonLoop(errorMessage: string | null): Promise<string> {
+  const state = freshState();
+  state.taskStepRow = {
+    ...state.taskStepRow,
+    status: errorMessage === null ? 'pending' : 'waiting_cli',
+    detectOutput: { ready: true },
+    formValues: {},
+  };
+  state.cliInvocationRows =
+    errorMessage === null
+      ? []
+      : [
+          {
+            id: 'inv-0',
+            taskId: 'task-1',
+            taskStepId: 'ts-1',
+            cliProviderId: 'prov-1',
+            mode: 'cli',
+            prompt: 'p',
+            rawOutput: null,
+            parsedOutput: null,
+            exitCode: 1,
+            errorMessage,
+            createdAt: new Date(Date.now() - 1000),
+            endedAt: new Date(),
+            supersededAt: null,
+            consumedAt: null,
+          },
+        ];
+  const result = await advanceStep({
+    db: makeMockDb(state),
+    taskId: 'task-1',
+    userId: 'user-1',
+    repoPath: '/tmp',
+    workspacePath: '/tmp',
+    cliProviderId: 'prov-1',
+    stepDef: retryingStep(),
+    providers: [makeProvider()],
+    deps: { async enqueueCliInvocation() {} },
+  });
+  expect(result.status).toBe('waiting_cli');
+  const inserted = state.inserts.filter((i) => i.table === 'cli_invocations');
+  expect(inserted).toHaveLength(1);
+  return String(inserted[0]!.row.prompt);
+}
+
 describe('advanceStep loop hook', () => {
   describe('a truncation retry of a loop step', () => {
     async function retryTruncated(opts: {
@@ -377,10 +436,30 @@ describe('advanceStep loop hook', () => {
       },
     );
 
+    it('tells the agent its last reply was cut off, and still hands the builder the retry count', async () => {
+      const prompt = await retryTruncated({ coversFirstPass: true, priorPasses: 0 });
+      expect(prompt).toContain('iter=0 prev=0 trunc=1');
+      expect(countOccurrences(prompt, TRUNCATION_NOTICE)).toBe(1);
+    });
+
     it('is declared by 09_5 and not by 08b', () => {
       expect(skillGenerationStep.loop?.iterationPromptCoversFirstPass).toBe(true);
       expect(testManagementStep.loop?.buildIterationPrompt).toBeDefined();
       expect(testManagementStep.loop?.iterationPromptCoversFirstPass).toBeUndefined();
+    });
+  });
+
+  describe('a truncation retry of a step that is not a loop', () => {
+    it('resends the prompt with the cut-off notice once', async () => {
+      const prompt = await dispatchNonLoop(`${OUTPUT_TRUNCATION_HEADLINE} — cut off`);
+      expect(prompt).toContain('base prompt');
+      expect(countOccurrences(prompt, TRUNCATION_NOTICE)).toBe(1);
+    });
+
+    it('leaves the prompt without the notice when no call was cut off', async () => {
+      const prompt = await dispatchNonLoop(null);
+      expect(prompt).toContain('base prompt');
+      expect(prompt).not.toContain('cut off at the output-token limit');
     });
   });
 
