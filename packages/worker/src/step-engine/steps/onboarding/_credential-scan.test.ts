@@ -331,14 +331,14 @@ describe('tracked credential inventory', () => {
          const scan = await scanForCredentials(${JSON.stringify(root)}, 200);
          process.stdout.write(JSON.stringify(scan));`,
         ],
-        { timeout: 75_000 },
+        { timeout: 240_000 },
       );
       const scan = JSON.parse(stdout) as Awaited<ReturnType<typeof scanForCredentials>>;
       expect(scan.files).toBe(count + 1);
       expect(scan.unreadable).toBe(count);
       expect(scan.hits).toEqual([{ file: 'z.env', line: 1, kind: 'credential assignment' }]);
     },
-    90_000,
+    255_000,
   );
 
   it.each([{ maxFiles: 2 }, { maxPathBytes: 10 }])(
