@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
   getTaskEnvTemplate: vi.fn(),
   resolveDdevWorkspace: vi.fn(),
   loadAppBootOutput: vi.fn(),
+  runnerExec: vi.fn(),
 }));
 
 vi.mock('./_browser-runtime.js', async (importOriginal) => ({
@@ -48,6 +49,10 @@ vi.mock('./_plan-impact.js', async (importOriginal) => ({
 vi.mock('./_app-runtime.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_app-runtime.js')>()),
   ensureAppServing: m.ensureAppServing,
+}));
+vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
+  runnerExec: m.runnerExec,
 }));
 vi.mock('../../task-ledger.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../task-ledger.js')>()),
@@ -466,19 +471,54 @@ describe('08a app-health probe after a tester pass', () => {
     expect(out).toMatchObject({ method: 'mcp', source: 'tester', passed: true, failures: [] });
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
   });
-  it('skips a row parked on the old interactive form instead of probing it into a pass', async () => {
-    const out = await browserVerifyStep.apply(ctx, {
-      detected: { available: true, mode: 'interactive', appUrl: 'https://app.ddev.site' },
-      formValues: { decision: 'reject', feedback: 'the logout button does nothing' },
-      iteration: 0,
-      previousIterations: [],
-      llmOutput: TESTER_PASS,
-    } as never);
+});
 
-    expect(out).toMatchObject({ skipped: true, ran: false, passed: false });
-    expect(m.ensureAppServing).not.toHaveBeenCalled();
-    expect(browserVerifyStep.fixLoop!.evaluate(out as never)).toBeNull();
+// A row an older install parked in a mode `shouldRun` now refuses resumes at apply without being
+// asked again; gate 2 verifies it hands-on, so it is skipped rather than probed into a pass.
+describe('08a rows parked by older code in a non-mcp mode', () => {
+  const ctx = {
+    taskId: 'task-1',
+    taskStepId: 'step-1',
+    round: 0,
+    repoPath: '/repos/u/r',
+    workspacePath: '/repos/u/r',
+    db: {},
+    emitProgress: vi.fn(async () => {}),
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const CLEAN_PROBE = JSON.stringify({
+    pageTitle: 'Home',
+    httpStatus: 200,
+    consoleErrors: [],
+    consoleWarnings: [],
+    networkErrors: [],
+    passed: true,
   });
+
+  beforeEach(() => {
+    m.ensureAppServing
+      .mockReset()
+      .mockResolvedValue({ mode: 'ddev', handle: {}, url: 'https://app.ddev.site' });
+    m.runnerExec.mockReset().mockResolvedValue({ output: CLEAN_PROBE });
+  });
+
+  it.each(['interactive', 'headless'])(
+    'skips a %s row instead of probing it into a pass',
+    async (mode) => {
+      const out = await browserVerifyStep.apply(ctx, {
+        detected: { available: true, mode, appUrl: 'https://app.ddev.site' },
+        formValues: { decision: 'reject', feedback: 'the logout button does nothing' },
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: null,
+      } as never);
+
+      expect(out).toMatchObject({ skipped: true, ran: false, passed: false });
+      expect(m.ensureAppServing).not.toHaveBeenCalled();
+      expect(m.runnerExec).not.toHaveBeenCalled();
+      expect(browserVerifyStep.fixLoop!.evaluate(out as never)).toBeNull();
+    },
+  );
 });
 
 describe('browserVerifyStep.shouldRun', () => {
@@ -494,6 +534,7 @@ describe('browserVerifyStep.shouldRun', () => {
 
   it.each([
     ['mcp', true],
+    ['headless', false],
     ['interactive', false],
     ['direct', false],
     ['skip', false],

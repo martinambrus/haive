@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
@@ -55,8 +53,6 @@ import {
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
-
-const exec = promisify(execFile);
 
 type BrowserMode = 'headless' | 'interactive' | 'direct' | 'mcp' | 'manual' | 'skip';
 const ROLE_TESTER = 'tester';
@@ -176,7 +172,7 @@ interface BrowserVerifyApply {
    *  before this existed have no value. Read it as `=== true`, never as truthy-absent. */
   verificationIncomplete?: boolean;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
-  source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
+  source: 'tester' | 'fixer' | 'manual' | 'skip';
 }
 
 /** One capture the agent claims it took. Descriptive only — the manifest builder takes
@@ -407,37 +403,6 @@ interface BrowserReport {
   passed: boolean;
 }
 
-// Legacy host-side check (non-DDEV projects whose app 01a-app-boot booted). The
-// DDEV path uses the identical check baked into the runner image
-// (packages/worker/docker/ddev-runner/browser-check.js).
-const BROWSER_CHECK_SCRIPT = `
-const puppeteer = require('puppeteer-core');
-async function run() {
-  const url = process.argv[2];
-  if (!url) { console.error('usage: node script.js <url>'); process.exit(1); }
-  const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME_PATH || '/usr/bin/chromium',
-    headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-  });
-  const page = await browser.newPage();
-  const consoleMessages = [];
-  const networkErrors = [];
-  page.on('console', msg => { consoleMessages.push({ level: msg.type(), text: msg.text() }); });
-  page.on('requestfailed', req => { networkErrors.push(req.url() + ' ' + (req.failure()?.errorText || 'unknown')); });
-  let httpStatus = null;
-  try { const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }); httpStatus = resp ? resp.status() : null; }
-  catch (err) { consoleMessages.push({ level: 'error', text: 'Navigation failed: ' + err.message }); }
-  const title = await page.title().catch(() => null);
-  await browser.close();
-  const errors = consoleMessages.filter(m => m.level === 'error').map(m => m.text);
-  const warnings = consoleMessages.filter(m => m.level === 'warning').map(m => m.text);
-  const httpBad = httpStatus !== null && httpStatus >= 400;
-  console.log(JSON.stringify({ pageTitle: title, httpStatus: httpStatus, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 && !httpBad }));
-}
-run().catch(err => { console.error(err.message); process.exit(1); });
-`;
-
 /** Pull the single-line JSON report the browser check prints, ignoring any
  *  surrounding noise (ddev/docker exec banners, stderr). */
 function extractReport(output: string): BrowserReport | null {
@@ -664,7 +629,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       infoSections.push({
         title: 'Live browser unavailable',
         preview: 'bring-up failed',
-        body: `The headed browser could not be brought up:\n\n${lb.reason}\n\nInteractive verification needs the panel — retry the step, or pick automated/skip.`,
+        body: `The headed browser could not be brought up:\n\n${lb.reason}\n\nAgent testing needs it — retry the step. A person verifies hands-on at gate 2.`,
         defaultOpen: true,
       });
     } else if (probe) {
@@ -713,7 +678,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
-    // Only the agent modes dispatch a CLI; the probe modes + skip resolve in apply.
+    // Only the agent modes dispatch a CLI; the other modes resolve in apply.
     skipIf: ({ detected }) => {
       const mode = (detected as BrowserVerifyDetect).mode;
       return mode !== 'mcp' && mode !== 'manual';
@@ -782,7 +747,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
   loop: {
     // mcp mode only: tester <-> fixer up to 10 rounds (legacy cap), then gate-2
-    // escalates. Manual/probe modes never set passed=false from a tester pass,
+    // escalates. Manual mode never sets passed=false from a tester pass,
     // so shouldContinue stays false and they run a single pass.
     maxIterations: 10,
     passesPerRound: 2,
@@ -838,10 +803,6 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       source: 'skip',
     };
     if (!detected.available) return skipped;
-    // A row parked on the old interactive form resumes here without `shouldRun`; gate 2 verifies
-    // it hands-on, so it is skipped rather than probed into a pass.
-    if (mode === 'interactive') return { ...skipped, output: 'verified hands-on at gate 2' };
-
     // User chose to skip browser testing (legacy Option C).
     if (mode === 'skip') {
       ctx.logger.info('browser testing skipped by user');
@@ -871,155 +832,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       return applyMcp(ctx, args, detected);
     }
 
-    // Probe mode (headless) falls through to the probe below.
-
-    const values = args.formValues as {
-      mode?: string;
-      appUrl?: string;
-      checkConsoleErrors?: boolean;
-      checkNetworkErrors?: boolean;
-    };
-    const appUrlOverride = (values.appUrl ?? '').trim();
-    const interactive = values.mode === 'interactive';
-    ctx.logger.info({ ddevMode: detected.ddevMode, interactive }, 'running browser validation');
-
-    let rawOutput: string;
-    // Ensure the app is actually serving — boots the DDEV env, or brings the
-    // app-runner container back AND relaunches a restart-killed dev server — and
-    // resolve its authoritative URL. A DDEV boot failure THROWS → the step fails
-    // and routes back to the developer via the recovery actions (Retry /
-    // Retry-with-AI). A user-entered URL still overrides.
-    const runtime = await ensureAppServing(ctx);
-    const appUrl = appUrlOverride || runtime.url || detected.appUrl || 'http://localhost';
-
-    if (runtime.mode === 'ddev') {
-      if (interactive) {
-        // Headed Chrome on the runner's virtual desktop: the user watches and
-        // interacts via the web Browser (noVNC) panel while the probe runs the
-        // same checks over CDP — and the browser STAYS OPEN afterwards.
-        await ctx.emitProgress('Starting the browser desktop…');
-        await startBrowserDesktop(runtime.handle);
-        await ctx.emitProgress('Running browser validation (interactive)…');
-        rawOutput = (
-          await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      } else {
-        await ctx.emitProgress('Running browser validation…');
-        rawOutput = (
-          await runnerExec(runtime.handle, `node /opt/browser-check.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      }
-    } else if (runtime.mode === 'app-runner') {
-      // Non-DDEV: the app + the headed-browser desktop live in the per-task
-      // app-runner container, so the probe runs INSIDE it (browser hits the app
-      // on localhost). Probe scripts were injected at /opt/browser by the runner.
-      if (interactive) {
-        await ctx.emitProgress('Starting the browser desktop…');
-        await startAppBrowserDesktop(runtime.handle);
-        await ctx.emitProgress('Running browser validation (interactive)…');
-        rawOutput = (
-          await appRunnerExec(
-            runtime.handle,
-            `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
-            { timeoutMs: 90_000 },
-          )
-        ).output;
-      } else {
-        await ctx.emitProgress('Running browser validation…');
-        rawOutput = (
-          await appRunnerExec(runtime.handle, `node /opt/browser/browser-check.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      }
-    } else {
-      // Legacy host boot (or no runtime handle): host-side puppeteer check.
-      try {
-        const r = await exec('node', ['-e', BROWSER_CHECK_SCRIPT, appUrl], {
-          cwd: ctx.workspacePath,
-          timeout: 60_000,
-          maxBuffer: 5 * 1024 * 1024,
-        });
-        rawOutput = r.stdout;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        ctx.logger.warn({ err: message, appUrl }, 'browser validation failed to run');
-        return { ...skipped, ran: true, skipped: false, appUrl, output: message.slice(0, 2000) };
-      }
-    }
-
-    const report = extractReport(rawOutput);
-    if (!report) {
-      return {
-        ...skipped,
-        ran: true,
-        skipped: false,
-        method: mode,
-        appUrl,
-        output: `no report parsed: ${rawOutput.slice(-1500)}`,
-        source: 'probe',
-      };
-    }
-
-    // Explicit environment-failure handling: when the browser got NO HTTP
-    // response (TLS/connection/DNS error or timeout — e.g. an untrusted local
-    // DDEV cert, or the app not serving), the app was never reachable. That is
-    // not a code defect, so FAIL the step (recovery: Retry / Skip) instead of
-    // letting a passed=false route back to implementation via the fix-loop.
-    // Guarded on the field's presence so legacy reports keep their prior behavior.
-    if ('httpStatus' in report && report.httpStatus === null) {
-      throw new Error(
-        `Could not reach the app at ${appUrl}: the browser received no HTTP response ` +
-          `(TLS/connection error or timeout — e.g. an untrusted local cert, or the app is ` +
-          `not serving). This is an environment issue, not a code defect — fix the ` +
-          `environment and Retry, or Skip browser validation.`,
-      );
-    }
-
-    const checkConsole = values.checkConsoleErrors !== false;
-    const checkNetwork = values.checkNetworkErrors !== false;
-    // Any 4xx/5xx at the app ROOT is a hard fail, even when no JS console/network error
-    // fired. The probe only ever navigates to appUrl, so this is always the entry point.
-    //
-    // This used to admit 4xx, justified as "fine for login-gated apps" — true of a PROTECTED
-    // path, false of the front door. MEASURED: a task reached the developer gate with its
-    // root serving 403 because the app was wedged mid-install, and every automated round had
-    // called that a pre-install state and passed. _app-auth.ts logs the browser in per task,
-    // so a 4xx here is a dead app rather than an expected gate.
-    const httpBad = 'httpStatus' in report && report.httpStatus != null && report.httpStatus >= 400;
-    const passed =
-      !httpBad &&
-      (!checkConsole || report.consoleErrors.length === 0) &&
-      (!checkNetwork || report.networkErrors.length === 0);
-
-    ctx.logger.info(
-      {
-        pageTitle: report.pageTitle,
-        consoleErrors: report.consoleErrors.length,
-        networkErrors: report.networkErrors.length,
-        passed,
-      },
-      'browser validation complete',
-    );
-
-    return {
-      ...baseApply,
-      ran: true,
-      skipped: false,
-      method: mode,
-      appUrl,
-      consoleErrors: report.consoleErrors,
-      consoleWarnings: report.consoleWarnings,
-      networkErrors: report.networkErrors,
-      pageTitle: report.pageTitle,
-      passed,
-      output: '',
-      source: 'probe',
-    };
+    // A row parked by older code in another mode resumes here without `shouldRun`; gate 2 verifies
+    // it hands-on, so it is skipped rather than probed into a pass.
+    return { ...skipped, output: 'verified hands-on at gate 2' };
   },
 };
 
