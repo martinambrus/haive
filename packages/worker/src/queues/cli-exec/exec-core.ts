@@ -1058,7 +1058,7 @@ export async function executeCliSpec(
     }
     return {
       exitCode: result.exitCode,
-      rawOutput: proseForClean(text ?? '', result.stdout),
+      rawOutput: proseForClean(turnStatus === 'failed' ? '' : (text ?? ''), result.stdout),
       parsedOutput: null,
       errorMessage:
         result.error ??
