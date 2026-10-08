@@ -922,9 +922,8 @@ const FIX_GUIDANCE_FIXTURE = 'Validate each finding against the code before you 
  * ALTERNATIVE detect values, where one field selects between prompts rather than between lines.
  *
  * `DETECT_OVERRIDES` gives a step ONE payload, which is enough for a guard (`implementationFiles`) or a
- * roster (`personas`). It is not enough when the field picks a different BUILDER: `08a-browser-verify`
- * returns `buildChecklistPrompt` outright for `mode === 'manual'` (`08a:829`), so with a single payload
- * that builder is never reached at all.
+ * roster (`personas`). It is not enough when the field picks a different BUILDER or arm: with a single payload
+ * the other one is never reached at all.
  *
  * Found by a source audit rather than by review: a regex for `d.<field> === '<literal>'` across every
  * step, then filtered to the steps that actually build a prompt. Worth knowing what that audit does NOT
@@ -936,15 +935,10 @@ const DETECT_VARIANTS: Record<
   string,
   Array<{ suffix: string; fields: Record<string, unknown> }>
 > = {
-  '08a-browser-verify': [
-    { suffix: '', fields: { mode: 'mcp' } },
-    // A DIFFERENT builder, not a different branch of one.
-    { suffix: ', manual mode', fields: { mode: 'manual' } },
-  ],
   // The fix-pass framing has TWO arms and the difference is exactly what the fence keys on:
   // a developer's gate-2 rejection is an AUTHORITATIVE DIRECTIVE and must NOT be fenced, a
   // machine diagnosis is agent prose and must be. `fixIsHuman` is truthy through the proxy,
-  // so the machine arm was dark — the same shape as 08a's two builders.
+  // so the machine arm was dark.
   '07-phase-2-implement': [
     {
       suffix: ', human reject',
@@ -1560,7 +1554,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(186);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(184);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -2009,27 +2003,6 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(all).toContain('[[HAIVE_AGENT_DEFINITION:operational-reviewer]]');
   });
 
-  it("RENDERS 08a's manual-mode builder, which is a different function", async () => {
-    const built = (
-      await Promise.all(
-        promptSources()
-          .filter((source) => source.label.startsWith('08a-browser-verify'))
-          .map(async (source) => builtEntries(source, await source.build())),
-      )
-    ).flat();
-    const all = built.map((b) => b.prompt).join('\n\n');
-
-    // `08a:829` returns `buildChecklistPrompt` outright for `mode === 'manual'` — a DIFFERENT builder,
-    // not a branch of the tester prompt, and private. With one detect payload per step it was never
-    // called, so none of its text was scanned.
-    expect(all).toContain(
-      'Generate a structured MANUAL testing checklist for the implemented feature',
-    );
-    // And the mcp arm still renders, so the variant axis ADDED a shape rather than trading one away —
-    // the mistake round twenty-one made with the history fixture.
-    expect(all).toContain('chrome-devtools');
-  });
-
   it('strips ONLY the marker blocks — the prose around them survives', () => {
     // The case above asserts a stripped prompt is non-EMPTY, which Codex correctly called insufficient:
     // a stripper that swallowed most of a prompt but left a few characters would satisfy it while the
@@ -2115,7 +2088,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // enumerated, and each is one of three things, none of them a gap:
     //   - a step's own builder, reached through the registry path that dispatches it — the bulk of them,
     //     including 08c's `buildPeerPrompt`/`buildSecurityPrompt`/`buildLensPrompt` (`08c:1161`/`:1167`/
-    //     `:1173`), 08a's tester/fixer/checklist trio, and `_model-health`'s `PROMPT`, which IS that
+    //     `:1173`), 08a's tester/fixer pair, and `_model-health`'s `PROMPT`, which IS that
     //     step's `buildPrompt` (`_model-health.ts:213`);
     //   - a fragment spliced by a wrapper this file scans directly — `NO_VISION_BOUNDARY_PROMPT`, and
     //     `_retrieval-guidance`'s `PROMPT_VARIANT_TABLE` via `adaptPromptForCliCapabilities`;

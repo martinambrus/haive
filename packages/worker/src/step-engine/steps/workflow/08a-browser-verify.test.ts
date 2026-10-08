@@ -80,7 +80,6 @@ import {
   browserVerifyStep,
   parseBrowserTestOutput,
   parseFixerOutput,
-  parseChecklistOutput,
 } from './08a-browser-verify.js';
 
 describe('parseBrowserTestOutput', () => {
@@ -143,21 +142,6 @@ describe('parseFixerOutput', () => {
         result: 'pass',
       },
     ]);
-  });
-});
-
-describe('parseChecklistOutput', () => {
-  it('extracts checklist_markdown from fenced JSON', () => {
-    const p = parseChecklistOutput(
-      '```json\n{"checklist_markdown":"# Checklist\\n- [ ] step"}\n```',
-    );
-    expect(p).toContain('# Checklist');
-    expect(p).toContain('- [ ] step');
-  });
-
-  it('falls back to raw markdown when not fenced JSON', () => {
-    const md = '# Manual checklist\n- [ ] open the page';
-    expect(parseChecklistOutput(md)).toBe(md);
   });
 });
 
@@ -502,7 +486,7 @@ describe('08a rows parked by older code in a non-mcp mode', () => {
     m.runnerExec.mockReset().mockResolvedValue({ output: CLEAN_PROBE });
   });
 
-  it.each(['interactive', 'headless'])(
+  it.each(['interactive', 'headless', 'manual'])(
     'skips a %s row instead of probing it into a pass',
     async (mode) => {
       const out = await browserVerifyStep.apply(ctx, {
@@ -537,6 +521,7 @@ describe('browserVerifyStep.shouldRun', () => {
     ['headless', false],
     ['interactive', false],
     ['direct', false],
+    ['manual', false],
     ['skip', false],
   ])('for a setup row with mode %s returns %s', async (mode, expected) => {
     m.loadPreviousStepOutput.mockReset().mockResolvedValue({ output: { mode } });

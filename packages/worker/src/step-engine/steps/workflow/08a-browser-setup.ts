@@ -10,8 +10,6 @@ import { resolveBrowserRuntime, type BrowserRuntimeInfo } from './_browser-runti
 export interface BrowserSetupApply {
   mode: 'mcp' | 'interactive' | 'direct' | 'skip';
   appUrl: string | null;
-  checkConsoleErrors: boolean;
-  checkNetworkErrors: boolean;
   skipped: boolean;
 }
 
@@ -67,32 +65,13 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
           label: 'Application URL to validate',
           default: detected.appUrl ?? 'http://localhost',
         },
-        {
-          type: 'checkbox' as const,
-          id: 'checkConsoleErrors',
-          label: 'Check for console errors',
-          default: true,
-          visibleWhen: { field: 'mode', notEquals: 'skip' },
-        },
-        {
-          type: 'checkbox' as const,
-          id: 'checkNetworkErrors',
-          label: 'Check for failed network requests',
-          default: true,
-          visibleWhen: { field: 'mode', notEquals: 'skip' },
-        },
       ],
       submitLabel: 'Continue',
     };
   },
 
   async apply(ctx, args): Promise<BrowserSetupApply> {
-    const v = args.formValues as {
-      mode?: string;
-      appUrl?: string;
-      checkConsoleErrors?: boolean;
-      checkNetworkErrors?: boolean;
-    };
+    const v = args.formValues as { mode?: string; appUrl?: string };
     const mode: BrowserSetupApply['mode'] =
       v.mode === 'interactive'
         ? 'interactive'
@@ -105,8 +84,6 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
     return {
       mode,
       appUrl: (v.appUrl ?? '').trim() || args.detected.appUrl,
-      checkConsoleErrors: v.checkConsoleErrors !== false,
-      checkNetworkErrors: v.checkNetworkErrors !== false,
       skipped: mode === 'skip',
     };
   },

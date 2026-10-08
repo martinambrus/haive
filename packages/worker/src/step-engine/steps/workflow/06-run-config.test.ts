@@ -31,8 +31,6 @@ describe('06-run-config path-aware fields', () => {
   it('omits the browser fields when 08a is filtered out (e.g. plan_tasklist)', () => {
     const ids = fieldIds(detect({ runsBrowserVerify: false, runsAdversarialQa: false }));
     expect(ids).not.toContain('browserMode');
-    expect(ids).not.toContain('browserCheckConsoleErrors');
-    expect(ids).not.toContain('browserCheckNetworkErrors');
   });
 
   it('keeps but relabels the QA-level control when 08d is filtered out', () => {

@@ -75,12 +75,10 @@ interface BrowserVerifyDetect {
    *  exactly like interactive, but the web shows the URL info box, not the VNC panel. */
   directAccess: boolean;
   appBooted: boolean;
-  /** When true the app runs in the per-task DDEV runner, so the headless-Chrome
-   *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
+  /** When true the app runs in the per-task DDEV runner (where <name>.ddev.site resolves). */
   ddevMode: boolean;
   /** When true the app runs in the per-task (non-DDEV) app-runner container,
-   *  which hosts the headed-browser desktop just like the DDEV runner. mcp mode
-   *  stays DDEV-only; this enables headless + interactive here. */
+   *  which hosts the headed-browser desktop just like the DDEV runner. */
   appRunnerMode: boolean;
   /** The env-replicate image tag, needed to (re)start the app-runner. */
   envImageTag: string | null;
@@ -90,7 +88,7 @@ interface BrowserVerifyDetect {
    *  detect_output. A retry re-runs prepare and logs in again, which is right: the
    *  runner (and its cookie jar) may have been recreated in between. */
   appLogin?: AppLoginOutcome;
-  /** Spec + changed files for the MCP tester / manual-checklist prompts. */
+  /** Spec + changed files for the MCP tester prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
   /** What the project plan says stands on the components this change touches, and
@@ -101,8 +99,7 @@ interface BrowserVerifyDetect {
   /** Learned-guidance capture is on for this task: the MCP tester is invited to name an
    *  INSTRUCTION defect behind the failures it found. Resolved in detect() and carried
    *  on the payload because the prompt builders are pure. Only the TESTER carries it —
-   *  the fixer is not the pass that rejects, and the manual checklist is written for a
-   *  human to follow, not parsed for defects. */
+   *  the fixer is not the pass that rejects. */
   promptDefectCapture: boolean;
   /** Live headed browser for the interactive gate: brought up + navigated in
    *  detect (idempotent, mirrors 09-gate-2) so the noVNC panel shows the running
@@ -138,7 +135,7 @@ interface BrowserVerifyApply {
   pageTitle: string | null;
   passed: boolean;
   output: string;
-  // MCP / manual extras (empty/null for the probe modes).
+  // MCP extras (empty/null for the other modes).
   failures: TestFailure[];
   visualVerdict: string | null;
   checklistMarkdown: string | null;
@@ -172,7 +169,7 @@ interface BrowserVerifyApply {
    *  before this existed have no value. Read it as `=== true`, never as truthy-absent. */
   verificationIncomplete?: boolean;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
-  source: 'tester' | 'fixer' | 'manual' | 'skip';
+  source: 'tester' | 'fixer' | 'skip';
 }
 
 /** One capture the agent claims it took. Descriptive only — the manifest builder takes
@@ -204,16 +201,11 @@ const fixerOutputSchema = z.object({
   notes: z.string().default(''),
 });
 
-const checklistOutputSchema = z.object({
-  checklist_markdown: z.string().default(''),
-});
-
 /** Keys naming each agent's own report. The tester's schema already REQUIRES `passed`,
  *  so it needs no key gate — only the candidate scan, so that a JSON payload it printed
  *  while driving the browser cannot stand in for its verdict. `notes` is in the fixer's
  *  gate because a fixer that changed nothing legitimately reports only notes. */
 const FIXER_KEYS = ['fixes_made', 'notes'] as const;
-const CHECKLIST_KEYS = ['checklist_markdown'] as const;
 
 /** Parse the MCP tester verdict; null when unparseable (caller treats a parse
  *  miss as a FAILED test so a broken tester never silently passes). */
@@ -268,20 +260,6 @@ function toReportedScreenshots(
     testCase: s.test_case ?? null,
     result: s.result,
   }));
-}
-
-export function parseChecklistOutput(raw: unknown): string {
-  // A blank checklist rejects the candidate rather than accepting an empty string, so a
-  // plain-markdown agent still reaches the raw-text fallback below.
-  const markdown = parseAgentJson(raw, (candidate) => {
-    if (!hasAnyKey(candidate, CHECKLIST_KEYS)) return null;
-    const parsed = checklistOutputSchema.safeParse(candidate);
-    if (!parsed.success || !parsed.data.checklist_markdown.trim()) return null;
-    return parsed.data.checklist_markdown;
-  });
-  if (markdown !== null) return markdown;
-  // Fall back to the raw text (the agent may have written plain markdown).
-  return typeof raw === 'string' ? raw.slice(0, 16_000) : '';
 }
 
 /** Latest tester (or probe) pass — its failures drive the fixer + final output. */
@@ -478,7 +456,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     workflowType: 'workflow',
     index: 8.5,
     title: 'Phase 5a: Browser validation',
-    description: 'Validates the running application via headless Chrome.',
+    description: 'Validates the running application with an agent driving the live browser.',
     requiresCli: false,
     cliRoles: STEP_CLI_ROLES['08a-browser-verify'],
   },
@@ -615,10 +593,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (!detected.available) return null;
     const lb = detected.liveBrowser;
     const probe = lb?.probe ?? null;
-    // Pre-set the interactive verdict from the auto-probe: clean → approve; any
-    // console/network error or a 4xx/5xx → reject (the user can override after looking).
-    // Same root-is-the-front-door rule as the automated paths — this is the panel that
-    // greeted a developer with "approve" while the app's root was serving 403.
+    // Judge the auto-probe for the "Automated checks" panel: any console/network error
+    // or a 4xx/5xx marks it 'issues found'. Same root-is-the-front-door rule as the
+    // automated paths — a 403 at the app's root is not clean.
     const probeClean =
       probe != null &&
       probe.consoleErrors.length === 0 &&
@@ -678,11 +655,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
-    // Only the agent modes dispatch a CLI; the other modes resolve in apply.
-    skipIf: ({ detected }) => {
-      const mode = (detected as BrowserVerifyDetect).mode;
-      return mode !== 'mcp' && mode !== 'manual';
-    },
+    // Only mcp dispatches a CLI; the other modes resolve in apply.
+    skipIf: ({ detected }) => (detected as BrowserVerifyDetect).mode !== 'mcp',
     // mcp mode needs the runner's headed browser up so chrome-devtools connects
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
     prepare: async ({ ctx, detected }) => {
@@ -735,20 +709,19 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
       const appUrl = d.appUrl || 'the app URL';
-      if (d.mode === 'manual') return buildChecklistPrompt(d, appUrl);
       return buildTesterPrompt(d, appUrl);
     },
-    bypassStub: (args) => {
-      if ((args.detected as BrowserVerifyDetect).mode === 'manual')
-        return { checklist_markdown: '# Test checklist\n- [ ] bypass stub' };
-      return { passed: true, failures: [], visual_verdict: 'SKIPPED', notes: 'bypass stub' };
-    },
+    bypassStub: () => ({
+      passed: true,
+      failures: [],
+      visual_verdict: 'SKIPPED',
+      notes: 'bypass stub',
+    }),
   },
 
   loop: {
     // mcp mode only: tester <-> fixer up to 10 rounds (legacy cap), then gate-2
-    // escalates. Manual mode never sets passed=false from a tester pass,
-    // so shouldContinue stays false and they run a single pass.
+    // escalates.
     maxIterations: 10,
     passesPerRound: 2,
     resolveRole: roleForIteration,
@@ -807,24 +780,6 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (mode === 'skip') {
       ctx.logger.info('browser testing skipped by user');
       return { ...skipped, ran: true, skipped: true, output: 'skipped by user', passed: true };
-    }
-
-    // Manual checklist (legacy Option B): the agent generated it; gate-2 is the
-    // confirmation. A checklist is not a pass/fail — record it, pass through.
-    if (mode === 'manual') {
-      const checklist = parseChecklistOutput(args.llmOutput ?? null);
-      ctx.logger.info({ length: checklist.length }, 'manual test checklist generated');
-      return {
-        ...baseApply,
-        ran: true,
-        skipped: false,
-        method: 'manual',
-        appUrl: detected.appUrl,
-        checklistMarkdown: checklist,
-        passed: true,
-        output: '',
-        source: 'manual',
-      };
     }
 
     // MCP agent testing (legacy Option A): tester/fixer loop.
@@ -1239,28 +1194,6 @@ function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): stri
     'your notes so they need not re-derive it.',
     '',
     '=== Spec (the expected behavior) ===',
-    d.spec || '(no spec recorded)',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function buildChecklistPrompt(d: BrowserVerifyDetect, appUrl: string): string {
-  return [
-    'Generate a structured MANUAL testing checklist for the implemented feature, for a human to',
-    'verify by hand in the browser.',
-    `Application URL: ${appUrl}`,
-    changedFilesBlock(d.implementationFiles, 'Changed files', ''),
-    '',
-    'Cover: 1) pre-test setup (URL, credentials, prerequisites), 2) happy-path tests (step by step),',
-    '3) edge cases, 4) error scenarios, 5) visual/UI checks, 6) data validation. Each test has a',
-    '`- [ ]` checkbox, clear step-by-step instructions, and an expected result.',
-    ...SEARCH_LADDER,
-    '',
-    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "checklist_markdown": "<the full checklist as markdown>" }',
-    '',
-    '=== Spec (acceptance criteria) ===',
     d.spec || '(no spec recorded)',
   ]
     .filter(Boolean)

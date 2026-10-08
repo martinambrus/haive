@@ -263,8 +263,6 @@ describe('06-run-config apply', () => {
         verifyRunLint: true,
         verifyRunTypecheck: true,
         browserMode: 'mcp',
-        browserCheckConsoleErrors: false,
-        browserCheckNetworkErrors: true,
         testAction: 'manage',
         testRunTests: false,
       }),
@@ -282,11 +280,7 @@ describe('06-run-config apply', () => {
       reviewEnabled: false,
     });
     expect(pre['08-phase-5-verify']).toEqual({ runTest: false, runLint: true, runTypecheck: true });
-    expect(pre['08a-browser-verify']).toEqual({
-      mode: 'mcp',
-      checkConsoleErrors: false,
-      checkNetworkErrors: true,
-    });
+    expect(pre['08a-browser-verify']).toEqual({ mode: 'mcp' });
     expect(pre['08b-test-management']).toEqual({ action: 'manage', runTests: false });
     expect(pre['08e-insights-triage']).toEqual({ selectedInsights: [] });
     expect((output as { browserMode: string }).browserMode).toBe('mcp');

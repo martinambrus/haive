@@ -71,8 +71,6 @@ interface RunConfig {
   verifyRunLint: boolean;
   verifyRunTypecheck: boolean;
   browserMode: string;
-  browserCheckConsoleErrors: boolean;
-  browserCheckNetworkErrors: boolean;
   testAction: string;
   testRunTests: boolean;
   exposeDbPort: boolean;
@@ -375,20 +373,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
                 options: browser.options,
                 default: browser.default,
               },
-              {
-                type: 'checkbox' as const,
-                id: 'browserCheckConsoleErrors',
-                label: 'Browser: check for console errors',
-                default: true,
-                visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-              },
-              {
-                type: 'checkbox' as const,
-                id: 'browserCheckNetworkErrors',
-                label: 'Browser: check for failed network requests',
-                default: true,
-                visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-              },
             ]
           : []),
         // Direct database access — an INDEPENDENT opt-in (not tied to the browser mode):
@@ -462,8 +446,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       verifyRunLint: bool(values.verifyRunLint, true),
       verifyRunTypecheck: bool(values.verifyRunTypecheck, true),
       browserMode: str(values.browserMode, 'skip'),
-      browserCheckConsoleErrors: bool(values.browserCheckConsoleErrors, true),
-      browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
       testAction: str(values.testAction, 'manage'),
       testRunTests: bool(values.testRunTests, true),
       exposeDbPort: bool(values.exposeDbPort, false),
@@ -496,16 +478,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       // 08a-verify / Gate-2 read to drive the live browser + the directAccess flag)
       // and the verify step's own form, so 06 is the single browser-mode source of
       // truth. 06 never auto-submits, so this is the user's explicit choice.
-      '08a-browser-setup': {
-        mode: runConfig.browserMode,
-        checkConsoleErrors: runConfig.browserCheckConsoleErrors,
-        checkNetworkErrors: runConfig.browserCheckNetworkErrors,
-      },
-      '08a-browser-verify': {
-        mode: runConfig.browserMode,
-        checkConsoleErrors: runConfig.browserCheckConsoleErrors,
-        checkNetworkErrors: runConfig.browserCheckNetworkErrors,
-      },
+      '08a-browser-setup': { mode: runConfig.browserMode },
+      '08a-browser-verify': { mode: runConfig.browserMode },
       '08b-test-management': {
         action: runConfig.testAction,
         runTests: runConfig.testRunTests,
