@@ -179,4 +179,71 @@ describe('renderTaskHistoryDigest', () => {
     expect(count(d.text, UNTRUSTED_OPEN)).toBe(count(d.text, UNTRUSTED_CLOSE));
     expect(d.text.lastIndexOf(UNTRUSTED_CLOSE)).toBeLessThan(d.text.indexOf('digest truncated'));
   });
+
+  /** No empty fence, no banner line carrying other text, banners alternate and all close. */
+  function wellFormed(text: string): boolean {
+    const banners = text.match(new RegExp(`${UNTRUSTED_OPEN}|${UNTRUSTED_CLOSE}`, 'g')) ?? [];
+    const alternate = banners.every(
+      (b, i) => b === (i % 2 === 0 ? UNTRUSTED_OPEN : UNTRUSTED_CLOSE),
+    );
+    const empty = new RegExp(`${UNTRUSTED_OPEN}\\s*${UNTRUSTED_CLOSE}`);
+    const impure = text
+      .split('\n')
+      .some(
+        (l) =>
+          (l.includes(UNTRUSTED_OPEN) && l !== UNTRUSTED_OPEN) ||
+          (l.includes(UNTRUSTED_CLOSE) && l !== UNTRUSTED_CLOSE),
+      );
+    return banners.length % 2 === 0 && alternate && !empty.test(text) && !impure;
+  }
+
+  const diagnosisRow = (diagnosis: string, round = 1): DigestEventInput =>
+    ev('fix_loop.requested', { round, sourceStepId: 's', diagnosis });
+
+  it('keeps a diagnosis within its cap as it is, and puts the cut marker on its own line', () => {
+    const short = renderTaskHistoryDigest([], [diagnosisRow('short diagnosis')]);
+    expect(short.text).toContain('- round 1 via s: short diagnosis');
+    expect(short.text).not.toContain('[truncated]');
+
+    const lines = 'abcdefghi\n'.repeat(100);
+    const cut = renderTaskHistoryDigest([], [diagnosisRow(lines)]);
+    expect(cut.tier).toBe('low');
+    expect(cut.text).toContain(`- round 1 via s: ${'abcdefghi\n'.repeat(70)}… [truncated]`);
+  });
+
+  it.each(['\n', '\n\n', '\n \n\n'])(
+    'never leaves an empty fence when the per-diagnosis cut lands near a BEGIN (gap %j)',
+    (gap) => {
+      for (let prefix = 640; prefix <= 700; prefix += 1) {
+        const diagnosis = `${'p'.repeat(prefix)}\n${UNTRUSTED_OPEN}${gap}${'evidence line\n'.repeat(40)}${UNTRUSTED_CLOSE}`;
+        const d = renderTaskHistoryDigest([], [diagnosisRow(diagnosis)]);
+        expect(d.tier).toBe('low');
+        expect(wellFormed(d.text), `prefix=${prefix}`).toBe(true);
+        expect(d.text).toContain('\n… [truncated]');
+      }
+    },
+  );
+
+  it.each(['\n', '\n\n'])(
+    'never leaves an empty fence when the tier cut lands near a BEGIN (gap %j)',
+    (gap) => {
+      let cutAtBanner = 0;
+      for (let prefix = 1; prefix <= 2300; prefix += 1) {
+        const events: DigestEventInput[] = [];
+        for (let i = 1; i <= 11; i += 1) events.push(diagnosisRow('f'.repeat(1700), i));
+        events.push(
+          diagnosisRow(
+            `${'p'.repeat(prefix)}\n${UNTRUSTED_OPEN}${gap}${'evidence line\n'.repeat(40)}`,
+            12,
+          ),
+        );
+        const d = renderTaskHistoryDigest([], events);
+        expect(d.tier).toBe('high');
+        expect(wellFormed(d.text), `prefix=${prefix}`).toBe(true);
+        if (d.text.endsWith('\n… [digest truncated at high-tier cap]')) cutAtBanner += 1;
+        else expect(d.text).not.toContain('digest truncated');
+      }
+      expect(cutAtBanner).toBeGreaterThan(0);
+    },
+  );
 });

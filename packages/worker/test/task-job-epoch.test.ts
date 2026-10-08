@@ -712,6 +712,50 @@ describe('the fix request a loop_back records', () => {
     expect('guidance' in requested()[0]!).toBe(false);
   });
 
+  const parkedSections = () => {
+    const park = h.state.stepPatches.filter((p) => p.status === 'waiting_form').at(-1);
+    return (park?.formSchema as { infoSections: { title: string; body: string }[] }).infoSections;
+  };
+  const GUIDANCE_TITLE = 'Instructions Haive gave the fixer';
+
+  it('puts the guidance of the verdict in the form the round-cap park shows', async () => {
+    h.state.readsAnswer = true;
+    h.state.maxFixRounds = 0;
+    await handleResult(
+      db as never,
+      ctx() as never,
+      'epoch-job-step',
+      loopBack({ guidance: GUIDANCE }) as never,
+    );
+    expect(parkedSections().map((s) => s.title)).toEqual(['Latest diagnosis', GUIDANCE_TITLE]);
+    expect(parkedSections().at(-1)?.body).toBe(GUIDANCE);
+    h.state.stepPatches = [];
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', loopBack() as never);
+    expect(parkedSections().map((s) => s.title)).toEqual(['Latest diagnosis']);
+  });
+
+  it('puts the guidance of the verdict in the form the oscillation park shows', async () => {
+    h.state.readsAnswer = true;
+    h.state.requestedEvents = [
+      { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
+      { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
+    ];
+    const repeated = (over: Record<string, unknown> = {}) =>
+      loopBack({ row: { id: 'ts-1', round: 2 }, ...over });
+    await handleResult(
+      db as never,
+      ctx() as never,
+      'epoch-job-step',
+      repeated({ guidance: GUIDANCE }) as never,
+    );
+    expect(h.state.events).toContain('fix_loop.oscillation_detected');
+    expect(parkedSections()).toHaveLength(3);
+    expect(parkedSections().at(-1)).toMatchObject({ title: GUIDANCE_TITLE, body: GUIDANCE });
+    h.state.stepPatches = [];
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', repeated() as never);
+    expect(parkedSections()).toHaveLength(2);
+  });
+
   it('carries the guidance of the verdict on the oscillation park', async () => {
     h.state.readsAnswer = true;
     h.state.requestedEvents = [

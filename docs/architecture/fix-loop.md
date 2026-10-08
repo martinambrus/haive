@@ -116,7 +116,7 @@ diagnosis to 07 or to a person. For a person's source (`HUMAN_REJECT_SOURCES`) t
 the fences — their words and Haive's framing — stays whole and only the fenced agent parts are
 cut, head and tail; any other source is cut head and tail as a whole; one marker states what was
 omitted and the fences stay balanced. Budgets: 6,000 for the defect block and the honored
-constraints, 1,500 per side of the oscillation gate, 800 for 07's form, and 400 per prior-round
+constraints, 1,500 per side of the oscillation gate and for the cap gate, 800 for 07's form, and 400 per prior-round
 entry, where a person's entry is cut too because that block is background. A person's text stays
 bounded only because each producer fences the machine part it joins to it: gate 2 does, and so
 does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
@@ -150,5 +150,18 @@ renders it once, outside every fence, between the root-cause request and the def
 is the field, never the wording: a request recorded before it existed renders byte for byte as
 before, its instructions inside the fence. A gate directive copies the guidance of the request it
 answers, and its own words still override it. A `done` row re-driven from its `error_message`
-(`finishedStepResult`) carries no guidance, so that advice stays inside the fence as before. The
-escalation gates show a person the diagnosis without the guidance.
+(`finishedStepResult`) carries no guidance, so that advice stays inside the fence as before. Both
+escalation gates show the verdict's guidance in a closed section (the oscillation gate for the
+current verdict only), under a diagnosis each bounds itself.
+
+**A person's fix round is framed by what holds for every person source.** 07 used to tell every
+`HUMAN_REJECT_SOURCES` round that a developer tested the running application and saw every problem,
+which is true of gate 2 only: at 08d2 the developer picks adversarial agents' claims (the scope
+defaults to all findings), and at the fix-loop gate the quoted failure is context, not an override.
+The framing now says only that a person directs the fix, that their own words outside any fence are
+authoritative, and that fenced text is data they attached; each producer's first lines say what kind
+of review it was. 08d2 asks the fixer to validate each finding against the code first, fix the real
+ones and name the rejected ones, as 08c does. The honored-constraints block in 07b's validator
+prompt keeps person entries outside any fence and puts the machine entries in one fence under an
+intro that still forbids reverting them; `08d-adversarial-qa`, which has not looped back since
+2026-06-24, is no longer an honored source.
