@@ -22,6 +22,63 @@ export function proposedOps(llmOutput: unknown): ProposedOp[] {
   return patch.ops.slice(0, MAX_PROPOSED_OPS) as ProposedOp[];
 }
 
+/**
+ * Merges the selected upserts that name the same existing node into one op. Each carries the
+ * version the developer was shown, and the applier bumps a node's version on its first write,
+ * so the second would throw a conflict nobody caused. `extras` is how many ops each merged
+ * node absorbed, for `landedCount`.
+ */
+export function coalesceNodeUpserts(ops: ProposedOp[]): {
+  ops: ProposedOp[];
+  extras: Map<string, number>;
+} {
+  const out: ProposedOp[] = [];
+  const at = new Map<string, number>();
+  const extras = new Map<string, number>();
+  for (const op of ops) {
+    const id =
+      op.op === 'upsert' && typeof op.nodeRef === 'string' ? stripNodeRefPrefix(op.nodeRef) : null;
+    if (!isPlanNodeId(id)) {
+      out.push(op);
+      continue;
+    }
+    const key = id.toLowerCase();
+    const first = at.get(key);
+    if (first === undefined) {
+      at.set(key, out.length);
+      out.push(op);
+      continue;
+    }
+    const prior = out[first]!;
+    const merged: ProposedOp = { ...prior };
+    for (const [field, value] of Object.entries(op)) {
+      if (value === undefined || field === 'nodeRef') continue;
+      if (field === 'codeLinks' && Array.isArray(prior.codeLinks) && Array.isArray(value)) {
+        merged.codeLinks = [...prior.codeLinks, ...value];
+      } else if (field === 'expectedVersion' && typeof prior.expectedVersion === 'number') {
+        merged.expectedVersion = Math.min(prior.expectedVersion, Number(value));
+      } else {
+        merged[field] = value;
+      }
+    }
+    out[first] = merged;
+    extras.set(key, (extras.get(key) ?? 0) + 1);
+  }
+  return { ops: out, extras };
+}
+
+/** How many of the selected ops landed: the applier reports one dropped op per merged op,
+ *  and a merged op that did not update its node cost every op it absorbed. */
+export function landedCount(
+  selected: number,
+  extras: ReadonlyMap<string, number>,
+  applied: { dropped: readonly string[]; updated: readonly string[] },
+): number {
+  let lost = applied.dropped.length;
+  for (const [id, n] of extras) if (!applied.updated.includes(id)) lost += n;
+  return selected - lost;
+}
+
 /** What a summary says about approved ops the applier dropped — usually because a
  *  plan chat deleted their node while the form sat parked. Empty when none were, so
  *  a clean apply's summary reads exactly as it always has. */

@@ -320,3 +320,92 @@ describe('node versions', () => {
     ).rejects.toThrow('bad');
   });
 });
+
+describe('agent ops are versioned and one node is written once', () => {
+  const sent = () => vi.mocked(applyPlanPatch).mock.lastCall;
+  const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+    created: [],
+    updated: [],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: {},
+    dropped: [],
+    strippedCodeLinks: [],
+    ...over,
+  });
+
+  it('has the applier drop a field-writing op that carries no expectedVersion', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({}));
+    await apply(detect(), { llmOutput: OPS, formValues: { applyOps: ['0'] } }, fakeDb().db);
+    expect(sent()?.[2]).toMatchObject({ origin: 'user', requireExpectedVersion: true });
+  });
+
+  it('reports an op the applier dropped for want of a version', async () => {
+    const unversioned = `upsert dropped: plan node ${NODE} was changed without its expectedVersion`;
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ dropped: [unversioned] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: OPS, formValues: { applyOps: ['0'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(0);
+    expect(out.summary).toContain(unversioned);
+  });
+
+  const SAME_NODE = {
+    ops: [
+      { op: 'upsert', nodeRef: NODE, status: 'done', expectedVersion: 3 },
+      {
+        op: 'upsert',
+        nodeRef: `node:${NODE}`,
+        codeLinks: [{ repoPath: 'src/a.ts' }],
+        expectedVersion: 3,
+      },
+    ],
+  };
+
+  it('sends two selected upserts for one node as one op, keeping the shared version', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect((sent()?.[1] as { ops: unknown[] }).ops).toEqual([
+      {
+        op: 'upsert',
+        nodeRef: NODE,
+        status: 'done',
+        codeLinks: [{ repoPath: 'src/a.ts' }],
+        expectedVersion: 3,
+      },
+    ]);
+    expect(out.applied).toBe(2);
+  });
+
+  it('counts every merged change as lost when the merged op is dropped', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(
+      outcome({ dropped: [`upsert dropped: plan node '${NODE}' not found`] }),
+    );
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(0);
+  });
+
+  it('leaves a versioned op for a node that changed since detect as a conflict', async () => {
+    vi.mocked(applyPlanPatch).mockRejectedValueOnce(
+      new PlanPatchError('conflict', 'expected version 3, found 4', 0),
+    );
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect(out.decision).toBe('conflict');
+  });
+});

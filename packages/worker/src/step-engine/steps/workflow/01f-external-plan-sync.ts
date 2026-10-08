@@ -13,9 +13,11 @@ import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
 import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
+  coalesceNodeUpserts,
   describeDropped,
   describePlanOp,
   describeStrippedLinks,
+  landedCount,
   proposedOps,
 } from './_plan-ops.js';
 import {
@@ -356,11 +358,12 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     // the exact commit the evidence came from. `onUnresolvableRef: 'drop'` because a node
     // can be deleted by a plan chat while the form sits parked, and one stale id must lose
     // its own op rather than the developer's whole approved set.
+    const merged = coalesceNodeUpserts(chosen);
     let applied;
     try {
       applied = await applyPlanPatch(
         ctx.db,
-        { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
+        { ops: merged.ops, summary: 'plan catch-up for commits made outside the workflow' },
         {
           repositoryId: d.repositoryId,
           origin: 'user',
@@ -369,6 +372,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
           onUnresolvableRef: 'drop',
           // The agent wrote the links, and the form never showed one it could not read.
           onInvalidCodeLink: 'strip',
+          requireExpectedVersion: true,
         },
       );
     } catch (err) {
@@ -400,7 +404,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     await stamp();
     // Counts what LANDED: a count that included a dropped op would tell the
     // developer a change they approved is in the plan when it is not.
-    const landed = chosen.length - applied.dropped.length;
+    const landed = landedCount(chosen.length, merged.extras, applied);
     return {
       decision: 'applied',
       commitsReviewed: d.commits.length,
