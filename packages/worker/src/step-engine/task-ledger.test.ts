@@ -7,13 +7,14 @@ import {
   capSummaryForLedger,
   cleanText,
   contentFingerprint,
+  FINGERPRINT_VERSION,
   loadLedgerEntries,
   recordLedgerEntry,
   type LedgerEntry,
 } from './task-ledger.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from './steps/_untrusted-repo.js';
 
-type StoredPayload = LedgerEntry & { fingerprint?: string };
+type StoredPayload = LedgerEntry & { fingerprint?: string; fingerprintVersion?: number };
 
 /** Mimics the drizzle chain loadLedgerEntries uses: select().from().where().orderBy(). */
 function mockDb(
@@ -67,6 +68,18 @@ describe('contentFingerprint', () => {
   it('namespaces by scope so two steps never collide', () => {
     expect(contentFingerprint('a', 'same')).not.toBe(contentFingerprint('b', 'same'));
   });
+
+  it('tells apart two long texts that share a tail and differ in their opening', () => {
+    const tail = 'z '.repeat(4000);
+    expect(contentFingerprint('s', `first complaint\n${tail}`)).not.toBe(
+      contentFingerprint('s', `second complaint\n${tail}`),
+    );
+  });
+
+  it('keeps the value a text of up to 6000 characters always had', () => {
+    expect(contentFingerprint('07', 'ddev absent')).toBe('07:b762f3a7dd2df4fb');
+    expect(FINGERPRINT_VERSION).toBe(2);
+  });
 });
 
 describe('recordLedgerEntry', () => {
@@ -84,6 +97,7 @@ describe('recordLedgerEntry', () => {
     expect(v.eventType).toBe('ledger.entry');
     expect(v.payload.text).toBe('ddev absent');
     expect(v.payload.fingerprint).toBe(contentFingerprint('07', 'ddev absent'));
+    expect(v.payload.fingerprintVersion).toBe(2);
   });
 
   it('never throws when the insert fails', async () => {
@@ -150,6 +164,27 @@ describe('loadLedgerEntries', () => {
     const { db } = mockDb([entry('a'), entry('b', { kind: 'change' })]);
     const out = await loadLedgerEntries(db, 't1');
     expect(out.map((e) => e.kind)).toEqual(['finding', 'change']);
+  });
+});
+
+describe('loadLedgerEntries fingerprint versions', () => {
+  const tail = 'z '.repeat(4000);
+  const oldFp = contentFingerprint('07-phase-2-implement', tail.slice(-6000));
+
+  it('keeps two untagged rows whose stored fingerprint hashed only a shared tail', async () => {
+    const { db } = mockDb([
+      entry(`first complaint\n${tail}`, { fingerprint: oldFp }),
+      entry(`second complaint\n${tail}`, { fingerprint: oldFp }),
+    ]);
+    expect(await loadLedgerEntries(db, 't1')).toHaveLength(2);
+  });
+
+  it('trusts the stored fingerprint of a row tagged with the current version', async () => {
+    const { db } = mockDb([
+      entry('first complaint', { fingerprint: 'x:1', fingerprintVersion: 2 }),
+      entry('second complaint', { fingerprint: 'x:1', fingerprintVersion: 2 }),
+    ]);
+    expect(await loadLedgerEntries(db, 't1')).toHaveLength(1);
   });
 });
 

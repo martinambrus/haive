@@ -53,10 +53,9 @@ export function cleanText(raw: string, tailLimit: number): string {
   return cleaned.length > tailLimit ? cleaned.slice(-tailLimit) : cleaned;
 }
 
-/** Tail kept when fingerprinting. Matches what cleanDiagnosis has always used, so a
- *  fingerprint computed here equals one computed before this module existed — the
- *  oscillation guard compares stored fingerprints against freshly computed ones. */
-const FINGERPRINT_TAIL_LIMIT = 6000;
+/** Version of the fingerprint rule. Version 1 (rows with no tag) hashed only the last 6000
+ *  cleaned characters; version 2 hashes all of them, which is the same value for a shorter text. */
+export const FINGERPRINT_VERSION = 2;
 
 // Volatile tokens that differ between otherwise-identical texts and must be removed
 // before fingerprinting: uuids (task ids, snapshot names), file paths, and bare numbers
@@ -70,7 +69,7 @@ const FP_DIGITS_RE = /\d+/g;
  *  the SAME source that say the same thing (modulo ids, paths, and numbers) hash equal;
  *  texts from different sources never collide. */
 export function contentFingerprint(scope: string, text: string): string {
-  const normalized = cleanText(text, FINGERPRINT_TAIL_LIMIT)
+  const normalized = cleanText(text, Infinity)
     .toLowerCase()
     .replace(FP_UUID_RE, '')
     .replace(FP_PATH_RE, '')
@@ -79,6 +78,18 @@ export function contentFingerprint(scope: string, text: string): string {
     .trim();
   const hash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
   return `${scope}:${hash}`;
+}
+
+/** The fingerprint a stored payload carries, trusted only when it was written under the current
+ *  rule; an older row is recomputed from its stored text so both sides of a comparison agree. */
+export function storedFingerprint(
+  payload: { fingerprint?: string; fingerprintVersion?: number },
+  scope: string,
+  text: string,
+): string {
+  return payload.fingerprintVersion === FINGERPRINT_VERSION && payload.fingerprint
+    ? payload.fingerprint
+    : contentFingerprint(scope, text);
 }
 
 export interface LedgerEntry {
@@ -119,6 +130,7 @@ export async function recordLedgerEntry(
     // written before this.
     kind: entry.kind ?? 'finding',
     fingerprint: contentFingerprint(entry.stepId, text),
+    fingerprintVersion: FINGERPRINT_VERSION,
   };
   try {
     if (opts.whileStepDone && taskStepId) {
@@ -145,6 +157,7 @@ export async function recordLedgerEntry(
 
 interface StoredEntry extends LedgerEntry {
   fingerprint?: string;
+  fingerprintVersion?: number;
 }
 
 /** Every ledger entry for a task, oldest first, deduped by fingerprint so a fact a step
@@ -163,7 +176,7 @@ export async function loadLedgerEntries(db: Database, taskId: string): Promise<L
     const p = r.payload as StoredEntry | null;
     const text = (p?.text ?? '').trim();
     if (!p?.stepId || text.length === 0) continue;
-    const fp = p.fingerprint ?? contentFingerprint(p.stepId, text);
+    const fp = storedFingerprint(p, p.stepId, text);
     if (seen.has(fp)) continue;
     seen.add(fp);
     out.push({
