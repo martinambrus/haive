@@ -24,30 +24,6 @@ export type DigestTier = 'low' | 'medium' | 'high';
 const HUMAN_REACTIONS_HEADER = '## Human reviewer reactions';
 const USER_STEERING_HEADER = '## User steering (mid-run course-corrections)';
 
-/** A digest rendered before this renderer fenced its own agent text: every `## ` section's body
- *  goes in a fence except the two that quote people, which stay outside. */
-export function fenceLegacyDigest(text: string): string {
-  const out: string[] = [];
-  let body: string[] = [];
-  let fenceBody = false;
-  const flush = (): void => {
-    const content = body.join('\n').trim();
-    if (content) out.push(fenceBody ? fencedAgentBlock(content) : content);
-    body = [];
-  };
-  for (const line of text.split('\n')) {
-    if (line.startsWith('## ')) {
-      flush();
-      out.push(line);
-      fenceBody = line !== HUMAN_REACTIONS_HEADER && line !== USER_STEERING_HEADER;
-    } else {
-      body.push(line);
-    }
-  }
-  flush();
-  return out.join('\n');
-}
-
 export interface TaskHistoryDigest {
   /** Rendered markdown digest to inject into the learning prompt. */
   text: string;
