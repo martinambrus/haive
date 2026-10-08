@@ -255,6 +255,7 @@ export function renderTaskHistoryDigest(
         round: typeof p.round === 'number' ? p.round : 0,
         source: str(p.sourceStepId),
         diagnosis: str(p.diagnosis),
+        machineFenced: p.machineFenced === true,
       };
     })
     .filter((d) => d.diagnosis.trim())
@@ -269,8 +270,9 @@ export function renderTaskHistoryDigest(
     for (const d of diagnoses) {
       const head = `- round ${d.round} via ${d.source || 'review'}:`;
       const cut = cutHead(d.diagnosis.trim(), DIAGNOSIS_ITEM_CAP[tier], '… [truncated]');
-      if (HUMAN_REJECT_SOURCES.has(d.source)) lines.push(`${head} ${balanceFences(cut)}`);
-      else lines.push(head, fencedAgentBlock(cut));
+      if (HUMAN_REJECT_SOURCES.has(d.source) && d.machineFenced) {
+        lines.push(`${head} ${balanceFences(cut)}`);
+      } else lines.push(head, fencedAgentBlock(cut));
     }
   }
 

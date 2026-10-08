@@ -1778,6 +1778,21 @@ describe('fix-loop guidance', () => {
       expect('guidance' in (await recorded(request))).toBe(false);
     });
 
+    it('marks a person-source request machineFenced and no other', async () => {
+      for (const sourceStepId of [
+        '09-gate-2-verify-approval',
+        '08d2-adversarial-qa-review',
+        FIX_LOOP_GATE_SOURCE,
+      ]) {
+        expect(await recorded({ ...request, sourceStepId })).toMatchObject({
+          machineFenced: true,
+        });
+      }
+      expect(
+        'machineFenced' in (await recorded({ ...request, sourceStepId: '08c-code-review' })),
+      ).toBe(false);
+    });
+
     it('fingerprints the diagnosis alone', async () => {
       const guided = await recorded({ ...request, guidance: GUIDANCE });
       expect(guided.fingerprint).toBe(fixLoopFingerprint(request.sourceStepId, request.diagnosis));

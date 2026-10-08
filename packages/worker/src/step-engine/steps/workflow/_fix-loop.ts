@@ -346,6 +346,7 @@ export async function recordFixLoopRequest(
     payload: {
       ...rest,
       ...(guidance?.trim() ? { guidance } : {}),
+      ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) ? { machineFenced: true } : {}),
       fingerprint: legacyContentFingerprint(req.sourceStepId, req.diagnosis),
       fingerprintV2: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
     },
