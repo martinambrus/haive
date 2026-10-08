@@ -151,8 +151,8 @@ is the field, never the wording: a request recorded before it existed renders by
 before, its instructions inside the fence. A gate directive copies the guidance of the request it
 answers, and its own words still override it. A `done` row re-driven from its `error_message`
 (`finishedStepResult`) carries no guidance, so that advice stays inside the fence as before. Both
-escalation gates show the verdict's guidance in a closed section (the oscillation gate for the
-current verdict only), under a diagnosis each bounds itself.
+escalation gates show the verdict's guidance in a closed section (the oscillation gate one per
+side), under a diagnosis each bounds itself.
 
 **A person's fix round is framed by what holds for every person source.** 07 used to tell every
 `HUMAN_REJECT_SOURCES` round that a developer tested the running application and saw every problem,
