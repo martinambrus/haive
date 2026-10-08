@@ -2807,6 +2807,20 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(sql).toContain('"superseded_at" is null');
   });
 
+  it('supersedes the run whose enqueue threw, in case the queue took the job after all', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cleanup = (state.invocationUpdateLog ?? []).filter((u) =>
+      String(u.set.errorMessage).startsWith('dispatch failed before the agent was queued'),
+    );
+    expect(cleanup).toHaveLength(1);
+    expect(cleanup[0]!.set).toMatchObject({
+      endedAt: expect.any(Date),
+      supersededAt: expect.any(Date),
+    });
+  });
+
   it('also cancels a run a concurrent pass linked after the first sweep', async () => {
     const state = freshState([]);
     state.miningReturning = (set) =>

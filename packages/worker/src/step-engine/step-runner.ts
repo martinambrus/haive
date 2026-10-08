@@ -2007,7 +2007,11 @@ async function releaseUnsentAgents(
     if (linking) {
       await db
         .update(schema.cliInvocations)
-        .set(linking.linked ? { endedAt: now, errorMessage } : { supersededAt: now })
+        .set(
+          linking.linked
+            ? { endedAt: now, supersededAt: now, errorMessage }
+            : { supersededAt: now },
+        )
         .where(eq(schema.cliInvocations.id, linking.invocationId));
       if (linking.linked) {
         await db
