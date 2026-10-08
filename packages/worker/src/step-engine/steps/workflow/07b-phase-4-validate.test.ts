@@ -979,10 +979,15 @@ const ownedPolicy = { drupal: false, ownedPaths: [] };
 const runApply = (
   ctx: never,
   llmOutput: unknown,
-  opts: { iteration?: number; previous?: unknown[]; invocationId?: string | null } = {},
+  opts: {
+    iteration?: number;
+    previous?: unknown[];
+    invocationId?: string | null;
+    implementationFiles?: unknown;
+  } = {},
 ) =>
   phase4ValidateStep.apply(ctx, {
-    detected: { dependencyPolicy: ownedPolicy },
+    detected: { dependencyPolicy: ownedPolicy, implementationFiles: opts.implementationFiles },
     formValues: {},
     iteration: opts.iteration ?? 0,
     previousIterations: opts.previous ?? [],
@@ -1197,6 +1202,86 @@ describe('phase4ValidateStep.apply: house rule fields', () => {
     expect(o.source).toBe('fixer');
     expect(o.ruleConflicts).toEqual([]);
     expect(o.validatorInvocationId).toBeNull();
+  });
+});
+
+// The list handed to the validator is capped, and a house rule is matched against the whole change.
+const fileSet = (listed: number, total: number) => ({
+  files: Array.from({ length: listed }, (_, i) => `src/f${i}.php`),
+  total,
+  truncated: listed < total,
+});
+
+describe('phase4ValidateStep.apply: the changed files the validator was given', () => {
+  it('records {listed, total} of the list detect gave its pass, and no other field of that list', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply(), {
+      implementationFiles: fileSet(100, 150),
+    });
+    expect(out.source).toBe('validator');
+    expect(out.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
+  });
+
+  it('records a list that covers the change too, for the gate to compare', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: fileSet(3, 3),
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it.each([
+    ['no list', undefined],
+    ['a list written before the totals were recorded', ['src/a.php']],
+  ])('records nothing for %s, since nobody measured it', async (_name, implementationFiles) => {
+    const out = await runApply(ruleWorld({}).ctx, reply(), { implementationFiles });
+    expect(out.source).toBe('validator');
+    expect('changedFilesCoverage' in out).toBe(false);
+  });
+
+  it('has each fixer pass carry the latest validator pass, not what its own detect holds', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A), [VALIDATOR_2]: stampOf(RULE_B) });
+    const text0 = reply();
+    const o0 = await runApply(w.ctx, text0, {
+      invocationId: VALIDATOR_1,
+      implementationFiles: fileSet(100, 150),
+    });
+    const r0 = passRecord(0, text0, o0);
+    const o1 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [r0],
+      invocationId: FIXER_1,
+      implementationFiles: fileSet(7, 7),
+    });
+    const r1 = passRecord(1, FIXER_REPLY, o1);
+    const text2 = reply();
+    const o2 = await runApply(w.ctx, text2, {
+      iteration: 2,
+      previous: [r0, r1],
+      invocationId: VALIDATOR_2,
+      implementationFiles: fileSet(80, 90),
+    });
+    const r2 = passRecord(2, text2, o2);
+    const o3 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 3,
+      previous: [r0, r1, r2],
+      invocationId: FIXER_2,
+    });
+
+    expect(o1.source).toBe('fixer');
+    expect(o1.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
+    expect(o2.changedFilesCoverage).toEqual({ listed: 80, total: 90 });
+    expect(o3.source).toBe('fixer');
+    expect(o3.changedFilesCoverage).toEqual({ listed: 80, total: 90 });
+  });
+
+  it('has a fixer pass that follows an output written before the field carry none', async () => {
+    const o = await runApply(ruleWorld({}).ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, '', mkValidateApply())],
+      invocationId: FIXER_1,
+      implementationFiles: fileSet(100, 150),
+    });
+    expect(o.source).toBe('fixer');
+    expect('changedFilesCoverage' in o).toBe(false);
   });
 });
 

@@ -18,6 +18,12 @@ export interface RuleConflict {
   reason: string;
 }
 
+/** The validator's file list is capped, while a rule is matched against the whole change. */
+export interface ChangedFilesCoverage {
+  listed: number;
+  total: number;
+}
+
 export interface GateHouseRules {
   mode: HouseRulesStamp['mode'];
   reason?: HouseRulesStamp['reason'];
@@ -26,6 +32,7 @@ export interface GateHouseRules {
   omitted: { title: string; why: HouseRulesStamp['omitted'][number]['why'] }[];
   violations: { shortId: string; title: string; file: string; description: string }[];
   conflicts: RuleConflict[];
+  changedFilesCoverage?: ChangedFilesCoverage;
 }
 
 const RULE_REF_CHARS = 64;
@@ -58,6 +65,11 @@ export function parseRuleConflicts(value: unknown): RuleConflict[] {
       return [{ rule: ref, ...(where === '' ? {} : { file: where }), reason: why }];
     })
     .slice(0, CONFLICTS_MAX);
+}
+
+function parseChangedFilesCoverage(value: unknown): ChangedFilesCoverage | undefined {
+  const { listed, total } = (value ?? {}) as Record<string, unknown>;
+  return typeof listed === 'number' && typeof total === 'number' ? { listed, total } : undefined;
 }
 
 export async function loadInvocationStamp(
@@ -105,6 +117,7 @@ export async function loadGateHouseRules(
       },
     ];
   });
+  const coverage = parseChangedFilesCoverage(output.changedFilesCoverage);
   return {
     mode: stamp.mode,
     ...(stamp.reason === undefined ? {} : { reason: stamp.reason }),
@@ -116,6 +129,7 @@ export async function loadGateHouseRules(
     })),
     violations,
     conflicts: parseRuleConflicts(output.ruleConflicts),
+    ...(coverage === undefined ? {} : { changedFilesCoverage: coverage }),
   };
 }
 
@@ -133,12 +147,20 @@ const CASES: Record<
   enforced: { status: 'pass', label: 'ENFORCED', holdsApprove: false },
 };
 
+/** The validator's list, when rules were given to it and it did not list every changed file. */
+function cappedList(data: GateHouseRules): ChangedFilesCoverage | null {
+  const coverage = data.changedFilesCoverage;
+  return data.entries.length > 0 && coverage !== undefined && coverage.listed < coverage.total
+    ? coverage
+    : null;
+}
+
 function caseOf(data: GateHouseRules): HouseCase | null {
   if (data.conflicts.length > 0) return 'conflict';
   if (data.violations.length > 0) return 'violated';
   if (data.reason === 'unavailable' || data.reason === 'too_large') return 'notChecked';
   if (data.reason === 'switched_off') return 'off';
-  if (data.omitted.length > 0) return 'partial';
+  if (data.omitted.length > 0 || cappedList(data) !== null) return 'partial';
   if (data.entries.length > 0) return 'enforced';
   return null;
 }
@@ -171,11 +193,21 @@ const ruleHead = (shortId: string | null, title: string): string =>
 
 function bodyOf(data: GateHouseRules): string {
   const titles = new Map(data.entries.map((entry) => [entry.shortId, entry.title] as const));
+  const capped = cappedList(data);
   const sections: [string, string[]][] = [
     ['Checked', data.entries.map((e) => bullet(ruleHead(e.shortId, e.title), scopeText(e.why)))],
     [
       'Not checked',
-      data.omitted.map((rule) => bullet(ruleHead(null, rule.title), OMITTED_WHY[rule.why])),
+      [
+        ...data.omitted.map((rule) => bullet(ruleHead(null, rule.title), OMITTED_WHY[rule.why])),
+        ...(capped === null
+          ? []
+          : [
+              bullet(
+                `${capped.total - capped.listed} changed files beyond the validator's list of ${capped.listed}`,
+              ),
+            ]),
+      ],
     ],
     [
       'Conflicts',
@@ -212,9 +244,13 @@ export function houseRulesRow(data: GateHouseRules | null | undefined): StatusSu
   const kind = caseOf(data);
   if (kind === null) return null;
   const { status, label } = CASES[kind];
+  const capped = cappedList(data);
   const counts = [
     data.entries.length > 0 ? `${data.entries.length} rule(s) checked` : '',
     data.omitted.length > 0 ? `${data.omitted.length} not checked` : '',
+    capped === null
+      ? ''
+      : `the validator was given ${capped.listed} of ${capped.total} changed files`,
     data.conflicts.length > 0 ? `${data.conflicts.length} conflict(s)` : '',
     data.violations.length > 0 ? `${data.violations.length} violation(s) open` : '',
   ];

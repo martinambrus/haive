@@ -27,6 +27,7 @@ import {
   assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
+  fileCoverage,
   NO_CHANGE_SET_FALLBACK,
   isDocsOnlyChange,
   type ImplementationFileSet,
@@ -54,6 +55,7 @@ import {
   normalizeRuleRef,
   parseRuleConflicts,
   parseRuleRef,
+  type ChangedFilesCoverage,
   type RuleConflict,
 } from './_gate-house-rules.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -163,6 +165,8 @@ interface ValidateApply {
   ruleConflicts?: RuleConflict[];
   /** The latest validator pass's cli_invocations row, which holds the stamp of the rules it was given. */
   validatorInvocationId?: string | null;
+  /** How many changed files the latest validator pass was given; the gate reads a capped list as PARTIAL. */
+  changedFilesCoverage?: ChangedFilesCoverage;
   /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
    *  validator passes (non-converging). A false value routes the run to a human
    *  decision at gate-2 instead of another fix round. */
@@ -1019,6 +1023,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         excludedDimensions,
         ruleConflicts: prior?.ruleConflicts ?? [],
         validatorInvocationId: prior?.validatorInvocationId ?? null,
+        ...(prior?.changedFilesCoverage === undefined
+          ? {}
+          : { changedFilesCoverage: prior.changedFilesCoverage }),
         converged: prior?.converged ?? true,
         churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
@@ -1042,6 +1049,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
+      const coverage = fileCoverage(d.implementationFiles);
       const policy =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(
@@ -1108,6 +1116,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         excludedDimensions,
         ruleConflicts: parsed.ruleConflicts,
         validatorInvocationId: args.llmInvocationId ?? null,
+        ...(coverage === null
+          ? {}
+          : { changedFilesCoverage: { listed: coverage.listed, total: coverage.total } }),
         converged: churnFiles.length === 0,
         churnFiles,
         fixesApplied: fixesSoFar,

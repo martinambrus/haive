@@ -398,6 +398,41 @@ describe('loadGateHouseRules', () => {
     ]);
   });
 
+  it('carries the count of changed files the validator was given, as 07b stored it', async () => {
+    const w = world();
+    w.step07b(validatorOutput({ changedFilesCoverage: { listed: 100, total: 150 } }));
+    w.invocation(VALIDATOR, stamp({ entries }));
+    expect((await loadGateHouseRules(w.db, TASK))!.changedFilesCoverage).toEqual({
+      listed: 100,
+      total: 150,
+    });
+  });
+
+  it('leaves the coverage out for an output written before 07b recorded it', async () => {
+    const w = world();
+    w.step07b(validatorOutput());
+    w.invocation(VALIDATOR, stamp({ entries }));
+    const loaded = await loadGateHouseRules(w.db, TASK);
+    expect(loaded).not.toBeNull();
+    expect('changedFilesCoverage' in loaded!).toBe(false);
+  });
+
+  it.each([
+    ['a string', 'all of them'],
+    ['an array', [100, 150]],
+    ['no total', { listed: 100 }],
+    ['no listed', { total: 150 }],
+    ['counts written as text', { listed: '100', total: '150' }],
+    ['null', null],
+  ])('reads %s as no coverage and keeps the rest of the stamp', async (_name, stored) => {
+    const w = world();
+    w.step07b(validatorOutput({ changedFilesCoverage: stored }));
+    w.invocation(VALIDATOR, stamp({ entries }));
+    const loaded = await loadGateHouseRules(w.db, TASK);
+    expect(loaded!.entries).toHaveLength(2);
+    expect('changedFilesCoverage' in loaded!).toBe(false);
+  });
+
   it('keeps a violation on one bounded line', async () => {
     const w = world();
     w.step07b(
@@ -475,6 +510,7 @@ const found = {
 };
 const conflict = { rule: '42ac658a', file: 'src/a.php:7', reason: 'the spec requires it' };
 const left = { title: 'Did not fit', why: 'budget' } as const;
+const capped = { listed: 100, total: 150 };
 
 const TABLE = [
   ['a conflict', data({ entries: [rule()], conflicts: [conflict] }), 'warn', 'CONFLICT', true],
@@ -495,7 +531,21 @@ const TABLE = [
   ],
   ['house rules switched off', data({ reason: 'switched_off' }), 'info', 'OFF', false],
   ['a rule left out', data({ entries: [rule()], omitted: [left] }), 'warn', 'PARTIAL', true],
+  [
+    'a file list capped below the change',
+    data({ entries: [rule()], changedFilesCoverage: capped }),
+    'warn',
+    'PARTIAL',
+    true,
+  ],
   ['rules checked', data({ entries: [rule()] }), 'pass', 'ENFORCED', false],
+  [
+    'a file list that covers the change',
+    data({ entries: [rule()], changedFilesCoverage: { listed: 100, total: 100 } }),
+    'pass',
+    'ENFORCED',
+    false,
+  ],
 ] as const;
 
 describe('houseRulesRow', () => {
@@ -541,6 +591,105 @@ describe('houseRulesRow', () => {
       houseRulesRow({ ...all, conflicts: [], violations: [], reason: undefined, omitted: [] })!
         .statusLabel,
     ).toBe('ENFORCED');
+  });
+
+  it('ranks a capped file list like a rule left out: below the other states, above ENFORCED', () => {
+    const all = data({
+      entries: [rule()],
+      violations: [found],
+      conflicts: [conflict],
+      reason: 'unavailable',
+      changedFilesCoverage: capped,
+    });
+    expect(houseRulesRow(all)!.statusLabel).toBe('CONFLICT');
+    expect(houseRulesRow({ ...all, conflicts: [] })!.statusLabel).toBe('VIOLATED');
+    expect(houseRulesRow({ ...all, conflicts: [], violations: [] })!.statusLabel).toBe(
+      'NOT CHECKED',
+    );
+    expect(
+      houseRulesRow({ ...all, conflicts: [], violations: [], reason: 'switched_off' })!.statusLabel,
+    ).toBe('OFF');
+    const rest = { ...all, conflicts: [], violations: [], reason: undefined };
+    expect(houseRulesRow(rest)!.statusLabel).toBe('PARTIAL');
+    expect(houseRulesRow({ ...rest, changedFilesCoverage: undefined })!.statusLabel).toBe(
+      'ENFORCED',
+    );
+  });
+
+  it('says how many changed files the validator was given, and lists the rest as not checked', () => {
+    const row = houseRulesRow(data({ entries: [rule()], changedFilesCoverage: capped }))!;
+    expect(row.detail).toBe('1 rule(s) checked; the validator was given 100 of 150 changed files');
+    expect(row.body).toBe(
+      [
+        '## Checked',
+        '- Rule `42ac658a` No inline SVGs — every change',
+        '',
+        '## Not checked',
+        "- 50 changed files beyond the validator's list of 100",
+      ].join('\n'),
+    );
+  });
+
+  it('puts the cap after the rules left out, in the same section and the same detail', () => {
+    const row = houseRulesRow(
+      data({ entries: [rule()], omitted: [left], changedFilesCoverage: capped }),
+    )!;
+    expect(row.statusLabel).toBe('PARTIAL');
+    expect(row.detail).toBe(
+      '1 rule(s) checked; 1 not checked; the validator was given 100 of 150 changed files',
+    );
+    expect(row.body).toContain(
+      [
+        '## Not checked',
+        '- Rule Did not fit — left out of the prompt: it did not fit the prompt budget',
+        "- 50 changed files beyond the validator's list of 100",
+      ].join('\n'),
+    );
+  });
+
+  it('still names the cap beside a conflict and a violation, which keep the row', () => {
+    const row = houseRulesRow(
+      data({
+        entries: [rule()],
+        conflicts: [conflict],
+        violations: [found],
+        changedFilesCoverage: capped,
+      }),
+    )!;
+    expect(row.statusLabel).toBe('CONFLICT');
+    expect(row.detail).toBe(
+      '1 rule(s) checked; the validator was given 100 of 150 changed files; 1 conflict(s); 1 violation(s) open',
+    );
+    expect(row.body).toContain(
+      "## Not checked\n- 50 changed files beyond the validator's list of 100",
+    );
+  });
+
+  it('renders exactly as before without the field, and with a list that covers the change', () => {
+    const plain = houseRulesRow(data({ entries: [rule()] }))!;
+    expect(plain.detail).toBe('1 rule(s) checked');
+    expect(plain.body).toBe('## Checked\n- Rule `42ac658a` No inline SVGs — every change');
+    const covered = houseRulesRow(
+      data({ entries: [rule()], changedFilesCoverage: { listed: 100, total: 100 } }),
+    );
+    expect(JSON.stringify(covered)).toBe(JSON.stringify(plain));
+  });
+
+  it('has nothing to say about a capped file list when no rule was given to the validator', () => {
+    const none = data({ changedFilesCoverage: capped });
+    expect(houseRulesRow(none)).toBeNull();
+    expect(houseRulesHoldApprove(none)).toBe(false);
+    const off = houseRulesRow(data({ reason: 'switched_off', changedFilesCoverage: capped }))!;
+    expect(off).toMatchObject({ statusLabel: 'OFF', detail: 'house rules are switched off' });
+    expect(off.body).toBeUndefined();
+    const unread = houseRulesRow(
+      data({ reason: 'unavailable', errorClass: 'timeout', changedFilesCoverage: capped }),
+    )!;
+    expect(unread).toMatchObject({
+      statusLabel: 'NOT CHECKED',
+      detail: 'the global KB could not be read (timeout)',
+    });
+    expect(unread.body).toBeUndefined();
   });
 
   it('counts what was checked, what was not, the conflicts and the open violations', () => {
