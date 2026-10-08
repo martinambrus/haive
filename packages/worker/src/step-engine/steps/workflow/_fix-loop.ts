@@ -12,6 +12,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   balanceFences,
+  fenceSafe,
   fencedAgentBlock,
 } from '../_untrusted-repo.js';
 
@@ -407,7 +408,7 @@ export function buildGateDirectiveDiagnosis(instruction: string, priorDiagnosis:
     'conflicting guidance — the spec, review findings, and the diagnosis below included. Where',
     'they disagree, follow this and say in your notes what you overrode:',
     '',
-    instruction.trim(),
+    fenceSafe(instruction.trim()),
   ].join('\n');
   // The instruction above is the developer's and carries the prompt's own voice. What follows
   // is the failure that stopped the loop — agent and tool output, quoted for context — so it
@@ -514,7 +515,7 @@ export async function detectFixLoopOscillation(
  *  real error". The implement fix prompt frames the two differently (see 07-phase-2-implement).
  *  08a-browser-verify is intentionally absent: it runs only in automated (mcp) mode, so its
  *  loop-backs are machine console/network dumps, not a person's observations. */
-const HUMAN_REJECT_SOURCES = new Set([
+export const HUMAN_REJECT_SOURCES = new Set([
   '09-gate-2-verify-approval',
   '08d2-adversarial-qa-review',
   // Text the user typed at the escalation gate. Same standing as a hands-on reject: they are

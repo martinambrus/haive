@@ -35,7 +35,7 @@ import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 import type { FileCoverage } from './_impl-changes.js';
-import { fencedAgentBlock } from '../_untrusted-repo.js';
+import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import type { Insight } from './08e-insights-triage.js';
@@ -454,7 +454,7 @@ function formatRejectDiagnosis(
   auditFindings: string[] = [],
   runtimeErrors = '',
 ): string {
-  const f = feedback.trim();
+  const f = fenceSafe(feedback.trim());
   const parts = [
     'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
     "The findings below are the developer's own observations from using the running app — they",
