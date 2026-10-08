@@ -7,6 +7,7 @@ import {
   type AdvanceStepParams,
   type TaskStepRow,
 } from '../src/step-engine/step-runner.js';
+import { contentFingerprint, legacyContentFingerprint } from '../src/step-engine/task-ledger.js';
 import {
   AdvisedStepError,
   type StepContext,
@@ -434,7 +435,8 @@ function ev(sourceStepId: string, round: number, diagnosis: string, guidance?: s
       sourceStepId,
       diagnosis,
       round,
-      fingerprint: fixLoopFingerprint(sourceStepId, diagnosis),
+      fingerprint: legacyContentFingerprint(sourceStepId, diagnosis),
+      fingerprintV2: fixLoopFingerprint(sourceStepId, diagnosis),
       ...(guidance ? { guidance } : {}),
     },
   };
@@ -495,6 +497,72 @@ describe('fixLoopFingerprint', () => {
     expect(fixLoopFingerprint('07c-ddev-reconcile', '\x1B[31mddev start failed: boom\x1B[0m')).toBe(
       fixLoopFingerprint('07c-ddev-reconcile', 'ddev start failed: boom'),
     );
+  });
+});
+
+describe('fingerprints of a long diagnosis', () => {
+  const tail = 'z '.repeat(4000);
+
+  it('differ when the opening differs and the last 6000 characters are shared', () => {
+    expect(fixLoopFingerprint('08c-code-review', `[high] first finding\n${tail}`)).not.toBe(
+      fixLoopFingerprint('08c-code-review', `[low] second finding\n${tail}`),
+    );
+  });
+
+  it('keep the value a short diagnosis always had', () => {
+    expect(
+      fixLoopFingerprint(
+        '08b-test-management',
+        'ddev start failed at /repos/x/.ddev/config.yaml:5: already contains a project named rs-ollama2',
+      ),
+    ).toBe('08b-test-management:2a3df4bd42cd0ed9');
+  });
+
+  // A row with only `fingerprint` stored the hash of its last 6000 characters.
+  const legacy = (round: number, head: string) => ({
+    payload: {
+      sourceStepId: '08c-code-review',
+      diagnosis: `${head}\n${tail}`,
+      round,
+      fingerprint: contentFingerprint('08c-code-review', tail.slice(-6000)),
+    },
+  });
+
+  it('do not let a legacy-only row with a matching tail trip the oscillation guard', async () => {
+    const db = eventsDb([legacy(2, 'first complaint'), ev('07b-phase-4-validate', 3, D07B)]);
+    const r = await detectFixLoopOscillation(
+      db,
+      't',
+      '08c-code-review',
+      `second complaint\n${tail}`,
+      4,
+    );
+    expect(r.tripped).toBe(false);
+  });
+
+  it('recompute a legacy-only row from its stored text, so an identical long text trips', async () => {
+    const db = eventsDb([legacy(2, 'first complaint'), ev('07b-phase-4-validate', 3, D07B)]);
+    const r = await detectFixLoopOscillation(
+      db,
+      't',
+      '08c-code-review',
+      `first complaint\n${tail}`,
+      4,
+    );
+    expect(r.tripped).toBe(true);
+  });
+
+  it('trust the stored fingerprintV2 of a row that carries one', async () => {
+    const fresh = `second complaint\n${tail}`;
+    const tagged = {
+      payload: {
+        ...legacy(2, 'first complaint').payload,
+        fingerprintV2: fixLoopFingerprint('08c-code-review', fresh),
+      },
+    };
+    const db = eventsDb([tagged, ev('07b-phase-4-validate', 3, D07B)]);
+    const r = await detectFixLoopOscillation(db, 't', '08c-code-review', fresh, 4);
+    expect(r.tripped).toBe(true);
   });
 });
 
@@ -1502,6 +1570,23 @@ describe('loadPriorFixContext', () => {
     expect(block.length).toBeLessThanOrEqual(4000);
   });
 
+  it('keeps both of two untagged long diagnoses that share a tail and differ in their opening', async () => {
+    const tail = 'z '.repeat(4000);
+    const row = (round: number, head: string) => ({
+      payload: {
+        sourceStepId: '08c-code-review',
+        diagnosis: `${head}\n${tail}`,
+        round,
+        fingerprint: contentFingerprint('08c-code-review', tail.slice(-6000)),
+      },
+    });
+    const block = await loadPriorFixContext(
+      priorCtx({ round: 3, events: [row(2, 'second complaint'), row(1, 'first complaint')] }),
+    );
+    expect(block).toContain('first complaint');
+    expect(block).toContain('second complaint');
+  });
+
   it('still dedupes a long diagnosis by its raw fingerprint', async () => {
     const long = numbered('dup', 300);
     const block = await loadPriorFixContext(
@@ -1697,6 +1782,19 @@ describe('fix-loop guidance', () => {
       const guided = await recorded({ ...request, guidance: GUIDANCE });
       expect(guided.fingerprint).toBe(fixLoopFingerprint(request.sourceStepId, request.diagnosis));
       expect(guided.fingerprint).toBe((await recorded(request)).fingerprint);
+      expect(guided.fingerprintV2).toBe(guided.fingerprint);
+      expect(guided).not.toHaveProperty('fingerprintVersion');
+    });
+
+    it('keeps the tail-only hash in fingerprint and the whole-text hash in fingerprintV2', async () => {
+      const long = {
+        ...request,
+        sourceStepId: '08c-code-review',
+        diagnosis: `first complaint\n${'z '.repeat(4000)}`,
+      };
+      const row = await recorded(long);
+      expect(row.fingerprint).toBe('08c-code-review:9de670a9f259fd87');
+      expect(row.fingerprintV2).toBe('08c-code-review:ea98a16d99f7d1e7');
     });
   });
 

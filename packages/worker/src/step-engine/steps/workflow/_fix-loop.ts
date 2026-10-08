@@ -2,7 +2,12 @@ import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
-import { cleanText, contentFingerprint } from '../../task-ledger.js';
+import {
+  cleanText,
+  contentFingerprint,
+  legacyContentFingerprint,
+  storedFingerprint,
+} from '../../task-ledger.js';
 import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
@@ -340,7 +345,8 @@ export async function recordFixLoopRequest(
     payload: {
       ...rest,
       ...(guidance?.trim() ? { guidance } : {}),
-      fingerprint: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
+      fingerprint: legacyContentFingerprint(req.sourceStepId, req.diagnosis),
+      fingerprintV2: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
     },
   });
 }
@@ -358,7 +364,7 @@ export async function recordFixLoopRequest(
  *  non-actionable, which only means the oscillation gate does not trip early — the round cap
  *  still escalates, and with the correct single diagnosis rather than a bogus pairing. */
 function isActionableDiagnosis(raw: string): boolean {
-  const d = cleanDiagnosis(raw);
+  const d = cleanText(raw, Infinity);
   if (d.length === 0) return false;
   return !/\bUNPARSEABLE\b/.test(d);
 }
@@ -461,6 +467,7 @@ export async function detectFixLoopOscillation(
     sourceStepId?: string;
     round?: number;
     fingerprint?: string;
+    fingerprintV2?: string;
     guidance?: string;
   };
   const prior = rows
@@ -472,7 +479,7 @@ export async function detectFixLoopOscillation(
     (p) =>
       p.sourceStepId === sourceStepId &&
       (p.round ?? 0) <= nextRound - 2 &&
-      (p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '')) === fpNow,
+      storedFingerprint(p, p.sourceStepId ?? '', p.diagnosis ?? '') === fpNow,
   );
   if (!repeat) return { tripped: false };
 
@@ -816,11 +823,12 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
       sourceStepId?: string;
       round?: number;
       fingerprint?: string;
+      fingerprintV2?: string;
     } | null;
     if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
     const short = excerptDiagnosis((p.diagnosis ?? '').trim(), PRIOR_FIX_ENTRY_LIMIT, false);
     if (short.length === 0) continue;
-    const fp = p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '');
+    const fp = storedFingerprint(p, p.sourceStepId ?? '', p.diagnosis ?? '');
     if (seenFp.has(fp)) continue;
     seenFp.add(fp);
     entries.push({
