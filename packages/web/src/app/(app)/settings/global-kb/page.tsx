@@ -1189,8 +1189,8 @@ export default function GlobalKbPage() {
     setEnforcePanel(null);
   }
 
-  /** Everyone sees what is enforced and why a rule lapsed or is paused; only an admin gets the
-   *  buttons. A paused rule (switched off, another namespace) gets none: it resumes by itself. */
+  /** Everyone sees what is enforced and why a rule lapsed or is paused; only an admin gets buttons.
+   *  A paused rule gets no Enforce, as it resumes by itself; Un-enforce goes with any approval. */
   function renderEnforcement(e: GlobalKbEntry) {
     const state = e.enforcementState?.state ?? 'none';
     const predecessor = supersededEntry;
@@ -1246,8 +1246,8 @@ export default function GlobalKbPage() {
           action = { label: 'Enforce…', prefill: null };
         }
     }
-    const unenforceable = state === 'enforced' && e.status === 'active';
-    if (!note && !action) return null;
+    const unenforceable = canEnforce && carriesLiveApproval(e);
+    if (!note && !action && !unenforceable) return null;
     return (
       <div className="mt-2 flex flex-col gap-2 text-xs text-neutral-400" data-testid="enforcement">
         {note && <p>{note}</p>}

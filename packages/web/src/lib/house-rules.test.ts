@@ -107,6 +107,18 @@ describe('the global KB page', () => {
     expect(positions("(carries an admin's approval as a house rule)")).toHaveLength(1);
   });
 
+  it('offers Un-enforce to an admin for every entry that carriesLiveApproval, whatever its state', () => {
+    expect(positions('const unenforceable = canEnforce && carriesLiveApproval(e);')).toHaveLength(
+      1,
+    );
+    expect(positions('if (!note && !action && !unenforceable) return null;')).toHaveLength(1);
+    expect(positions('{unenforceable && (')).toHaveLength(1);
+    expect(positions("state === 'enforced' && e.status === 'active'")).toEqual([]);
+    const edited = { enforcementState: { state: 'edited' } } as GlobalKbEntry;
+    expect(carriesLiveApproval({ ...edited, enforcedHash: 'hr1:abc' })).toBe(true);
+    expect(carriesLiveApproval({ ...edited, enforcedHash: null })).toBe(false);
+  });
+
   it('has no state-keyed warning gate left', () => {
     expect(page.match(/\b(?:holdsApproval|lapsesOnEdit)\b/g) ?? []).toEqual([]);
   });

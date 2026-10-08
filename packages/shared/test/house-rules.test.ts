@@ -550,12 +550,38 @@ describe('renderHouseRuleEntry and houseRuleBytes', () => {
     title: 'Use  X\n',
     category: 'best_practice' as const,
     description: 'Why   it\nmatters',
-    body: '\n\n# Use X\n\nBody.\n\n',
+    body: '# Use X\n\nBody.',
   };
+  const NBSP = String.fromCharCode(0xa0);
 
-  it('puts a collapsed title, a collapsed description, a blank line and the trimmed body', () => {
+  it('puts a collapsed title, a collapsed description, a blank line and the body', () => {
     expect(renderHouseRuleEntry(entry)).toBe('### Use X\nWhy it matters\n\n# Use X\n\nBody.');
   });
+
+  it.each([
+    [
+      'an indented code block',
+      '    indented();\n    code();',
+      '### Use X\nWhy it matters\n\n    indented();\n    code();',
+      53,
+    ],
+    ['leading blank lines', '\n\n# Use X', '### Use X\nWhy it matters\n\n\n\n# Use X', 35],
+    ['trailing whitespace', 'Body.  \n \t\n', '### Use X\nWhy it matters\n\nBody.  \n \t\n', 37],
+    [
+      'a no-break space at either end',
+      `${NBSP}Body.${NBSP}`,
+      `### Use X\nWhy it matters\n\n${NBSP}Body.${NBSP}`,
+      35,
+    ],
+  ])(
+    'renders a body with %s byte for byte, and houseRuleBytes counts it',
+    (_name, body, text, bytes) => {
+      const row = { ...entry, body };
+      expect(renderHouseRuleEntry(row)).toBe(text);
+      expect(houseRuleBytes(row)).toBe(bytes);
+      expect(houseRuleBytes(row)).toBe(Buffer.byteLength(renderHouseRuleEntry(row), 'utf8'));
+    },
+  );
 
   it('leaves the description line out when there is none', () => {
     expect(renderHouseRuleEntry({ ...entry, description: null })).toBe(

@@ -227,7 +227,8 @@ export function renderHouseRuleEntry(
     `### ${entry.category === 'anti_pattern' ? `Anti-pattern — avoid: ${title}` : title}`,
     ...(description === '' ? [] : [description]),
     '',
-    entry.body.trim(),
+    // As stored: the admin approved these bytes, and an indented code block begins with spaces.
+    entry.body,
   ].join('\n');
 }
 
