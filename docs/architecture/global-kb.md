@@ -170,9 +170,10 @@ stamp and the one `house_rules.unavailable` event per task (written under an adv
 failure by error class only (`timeout`, `refused`, `auth`, `other`), never its message, which names
 the admin-only host; the worker's own log keeps the error for the operator. With the house-rules
 switch read as off, a store that then fails the digest read leaves the rules `disabled`, not
-`unavailable`. Enforced rows have their own query on the partial index, at most 200 per namespace in
-approval order and before the facet filter, and each is re-vetted, since an external store's
-approvals are trusted unsigned: `enforcementState` re-derives the hash from the stored content, and
+`unavailable`. Enforced rows have their own reads, with no cap: the `id` and `facets` of the
+namespace's enforced rows (the partial index), the project's facets applied, then the full rows of
+the matches in approval order, so a store too large to read in time is `unavailable`, never short.
+Each row is re-vetted, since an external store's approvals are trusted unsigned: `enforcementState` re-derives the hash from the stored content, and
 a missing description, refused text or a glob the grammar refuses moves the row to the stamp's
 `omitted` as `refused`. A call with a deadline never starts the shared schema ensure, whose failure
 every other caller awaiting it would inherit.
