@@ -51,8 +51,8 @@ input from stdin...` and waits for EOF before the first turn), and `codex queue 
 stream-json` and writes an NDJSON prompt on stdin, but as `stdinPrompt`, which CLOSES; its
   docs say to wait for the `result` event before writing again. That is a queued follow-up
   TURN, not a mid-turn steer, and there is no `steer:true` equivalent to queue one.
-- **gemini** — NO. Stdin is never opened at all; mid-run injection is an open upstream
-  feature request.
+- **gemini** — NO. Stdin carries at most a prompt too large for argv, never a later
+  message; mid-run injection is an open upstream feature request.
 
 **codex steers through an EXPERIMENTAL protocol, so each task verifies it before relying on it
 and falls back to `codex exec` the moment it does not hold.** The app-server is marked

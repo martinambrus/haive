@@ -57,8 +57,9 @@ repository copy also loads.
 - **`CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED`** (default on, Admin > CLI execution). ABSENT in
   the pure resolver means off, which keeps every direct `resolveDispatch` caller's prompt
   byte-identical; a failed read means off.
-- **Never a new failure.** gemini takes its prompt only as an argument, so when the rules push a
-  prompt that fits past `PROMPT_ARGV_LIMIT_BYTES` the dispatch is rebuilt without them and says so.
+- **Never a new failure.** When the rules push a prompt that fits past `PROMPT_ARGV_LIMIT_BYTES` for
+  an adapter that takes its prompt only as an argument, the dispatch is rebuilt without them and
+  says so. No shipped adapter is argv-only since gemini moved to stdin; the rebuild stays as a guard.
 - **Recorded per run.** `spec.agentRules` (`{ hash, injected, reason? }`, the hash of the
   normalised effective rules, kept even when they were not injected) rides the job to exec and is
   written by the UPDATE that sets `started_at` into `cli_invocations.agent_rules` (migration 0166).

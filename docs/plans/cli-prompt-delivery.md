@@ -74,7 +74,9 @@ sandbox images:
 
 ## C. The rest fail clearly instead of cryptically
 
-`grok`, `gemini` and `antigravity` document no stdin input. For them an
+`grok`, `gemini` and `antigravity` document no stdin input. (gemini since #438: a probe of
+@google/gemini-cli 0.63.0 showed it reads piped stdin as the whole prompt, so an oversized prompt now
+goes there; the rest of this section holds for the other two.) For them an
 oversized prompt now raises a named error stating the prompt's size, the limit
 and the adapter, instead of `spawn E2BIG` from somewhere inside node.
 
