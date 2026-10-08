@@ -48,6 +48,8 @@ interface MiningRow {
   preferVision?: boolean | null;
   /** The prompt the step wrote for the agent's last dispatch, before any augmentation. */
   dispatchPrompt?: string | null;
+  /** Stamped when a wave-aware step folded the row; cleared when a re-run replaces its result. */
+  consumedAt?: Date | null;
 }
 
 interface MockState {
@@ -2622,12 +2624,16 @@ describe('a person re-runs an agent whose seat no provider now takes', () => {
     } as unknown as StepDefinition;
   }
 
-  function requestedRerun(seatProviderId: string): { state: MockState; db: Database } {
+  function requestedRerun(
+    seatProviderId: string,
+    consumedAt: Date | null = null,
+  ): { state: MockState; db: Database } {
     const state = freshState([
       miningRow('peer-reviewer', 1, {
         status: 'failed',
         errorMessage: OLD_FAILURE,
         userRetryRequestedAt: new Date(),
+        consumedAt,
       }),
     ]);
     state.afterMiningWrite = (set) => {
@@ -2666,6 +2672,17 @@ describe('a person re-runs an agent whose seat no provider now takes', () => {
     expect(String(applyCalls[0]!.agentMiningResults?.[0]?.errorMessage)).toContain(
       'no cli provider available',
     );
+  });
+
+  it('hands a wave-aware step the refusal as new even when the old failure was folded', async () => {
+    const { db } = requestedRerun('prov-ollama', new Date());
+    const applyCalls: StepApplyArgs[] = [];
+    await run(db, seatedStep(applyCalls), [], [makeProvider(), ollamaNoModel()]);
+
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.newAgentMiningResults?.map((r) => r.errorMessage)).toEqual([
+      expect.stringContaining('requires a model'),
+    ]);
   });
 
   it('still parks on a re-run that sent', async () => {

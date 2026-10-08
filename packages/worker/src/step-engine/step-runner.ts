@@ -1874,6 +1874,7 @@ async function dispatchMiningAgents(
             status: 'failed',
             errorMessage: buildFailure ?? `no cli provider available: ${plan?.reason}`,
             endedAt: new Date(),
+            consumedAt: null,
             ...requirements,
             updatedAt: new Date(),
           })
