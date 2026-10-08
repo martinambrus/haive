@@ -30,7 +30,7 @@ import {
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { DdevBootAbortedError } from '../../../sandbox/ddev-boot-cancellation.js';
 import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
-import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
+import { checkDdevBuildInputs, ddevGuardFailure } from '../../../sandbox/ddev-build-guard.js';
 import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
 import { checkDdevWebEntrypoints } from '../../../sandbox/ddev-entrypoint-guard.js';
 import { checkDdevConfigYaml } from '../../../sandbox/ddev-config-yaml-guard.js';
@@ -297,7 +297,7 @@ export async function ensureDdevWithProgress(
   // DDEV's prose (task fcf03ead hard-failed at 11 hours with two fix rounds unspent).
   const workspace = path.join(REPO_STORAGE_ROOT, repoSubpath);
   const yamlBreakage = await checkDdevConfigYaml(workspace);
-  if (yamlBreakage) throw new Error(`DDEV cannot start: ${yamlBreakage}`);
+  if (yamlBreakage) throw ddevGuardFailure(yamlBreakage);
   // A webserver config that can no longer answer DDEV's own /phpstatus health
   // check makes the web container hang in `starting` until `ddev start` gives up at its
   // readiness timeout — six opaque minutes, twice (the cold-boot path retries once), with
@@ -305,7 +305,7 @@ export async function ensureDdevWithProgress(
   // actionable failure. Every DDEV bring-up routes through here, so this is the one place
   // it needs to live.
   const breakage = await checkDdevHealthcheckConfig(workspace);
-  if (breakage) throw new Error(`DDEV cannot start: ${breakage}`);
+  if (breakage) throw ddevGuardFailure(breakage);
   // Same trade for the image-build inputs: `.ddev/web-build/Dockerfile` is spliced verbatim
   // into the Dockerfile DDEV generates, so one line reaching for a command the image does
   // not have (`docker-php-ext-install`, from the official php images) kills the build on
@@ -313,21 +313,21 @@ export async function ensureDdevWithProgress(
   // two build dirs first turns it into an instant failure that names the DDEV-native
   // mechanism — which is also the text the "Retry with AI" fix agent gets to work from.
   const buildBreakage = await checkDdevBuildInputs(workspace);
-  if (buildBreakage) throw new Error(`DDEV cannot start: ${buildBreakage}`);
+  if (buildBreakage) throw ddevGuardFailure(buildBreakage);
   // Third of the same trade: DDEV splices every `.ddev/nginx/*.conf` INSIDE every server
   // block in `.ddev/nginx_full/`, so rules written into both collide with nginx's
   // `[emerg] duplicate location`. That does not merely degrade the boot — nginx goes FATAL,
   // and ddev-webserver's own healthcheck answers a FATAL nginx by shutting supervisord down,
   // so the container EXITS and DDEV reports nothing but "web container exited".
   const nginxBreakage = await checkDdevNginxIncludes(workspace);
-  if (nginxBreakage) throw new Error(`DDEV cannot start: ${nginxBreakage}`);
+  if (nginxBreakage) throw ddevGuardFailure(nginxBreakage);
   // Fourth: DDEV sources every `.ddev/web-entrypoint.d/*.sh` INTO the web container's
   // `/start.sh`, which runs `set -o errexit` as the unprivileged `ddev` user — so one
   // command needing root (task 3b7b8140's `chown -R www-data:www-data`) aborts the
   // entrypoint and the container exits before supervisord starts, with DDEV reporting
   // nothing but "web container exited".
   const entrypointBreakage = await checkDdevWebEntrypoints(workspace);
-  if (entrypointBreakage) throw new Error(`DDEV cannot start: ${entrypointBreakage}`);
+  if (entrypointBreakage) throw ddevGuardFailure(entrypointBreakage);
 
   const handle = await withDdevProgress(
     ctx,

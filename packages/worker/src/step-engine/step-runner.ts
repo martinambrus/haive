@@ -59,6 +59,7 @@ import {
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
+  AdvisedStepError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -289,6 +290,7 @@ export type AdvanceStepResult =
       status: 'loop_back';
       row: TaskStepRow;
       diagnosis: string;
+      guidance?: string;
       sourceStepId: string;
       /** When true the loop_back skips the max_fix_rounds cap + escalation gate (a
        *  human-driven restart, e.g. gate-2 developer reject). Omitted = capped. */
@@ -2157,7 +2159,7 @@ export function routesErrorToFixLoop(stepDef: StepDefinition, errorMessage: stri
 }
 
 export type FinishedRoutingVerdict =
-  | { kind: 'loop_back'; diagnosis: string; uncapped?: boolean }
+  | { kind: 'loop_back'; diagnosis: string; guidance?: string; uncapped?: boolean }
   | { kind: 'revise'; targetStepId: string };
 
 /** The loop_back/revise verdict for this output: fixLoop unless suppressed, then restartLoop,
@@ -2170,7 +2172,13 @@ export async function finishedRoutingVerdict(
 ): Promise<FinishedRoutingVerdict | null> {
   if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
     const verdict = stepDef.fixLoop.evaluate(output);
-    if (verdict?.blocking) return { kind: 'loop_back', diagnosis: verdict.diagnosis };
+    if (verdict?.blocking) {
+      return {
+        kind: 'loop_back',
+        diagnosis: verdict.diagnosis,
+        ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
+      };
+    }
   }
   if (stepDef.restartLoop) {
     const restart = stepDef.restartLoop.evaluate(output);
@@ -2205,6 +2213,7 @@ export async function finishedStepResult(
       row,
       diagnosis: verdict.diagnosis,
       sourceStepId,
+      ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
       ...(verdict.uncapped ? { uncapped: true } : {}),
     };
   }
@@ -3116,6 +3125,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         row: finished,
         diagnosis: verdict.diagnosis,
         sourceStepId: meta.id,
+        ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
         ...(verdict.uncapped ? { uncapped: true } : {}),
       };
     }
@@ -3189,7 +3199,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         { stepId: meta.id, taskId, round },
         'fix-loop: step error routed back to implementation',
       );
-      return { status: 'loop_back', row: finished, diagnosis: errorMessage, sourceStepId: meta.id };
+      const advised = err instanceof AdvisedStepError ? err : null;
+      return {
+        status: 'loop_back',
+        row: finished,
+        diagnosis: advised?.diagnosis ?? errorMessage,
+        sourceStepId: meta.id,
+        ...(advised?.advice ? { guidance: advised.advice } : {}),
+      };
     }
     const failed = await updateRow(db, row.id, {
       status: 'failed',

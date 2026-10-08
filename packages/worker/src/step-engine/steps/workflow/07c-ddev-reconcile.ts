@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { AdvisedStepError, type StepContext, type StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
@@ -393,14 +393,14 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
           (onLine) => ddevMigrateDatabase(handle, drift.migrateTarget!, { onLine }),
         );
         if (mig.exitCode !== 0) {
-          throw new Error(
-            await ddevFailureMessage(
-              handle,
-              `ddev migrate-database ${drift.migrateTarget} failed (DB backed up as snapshot ` +
-                `"${snapshotName}"; restore with: ddev snapshot restore ${snapshotName})`,
-              mig.output,
-            ),
-          );
+          const restore = `restore with: ddev snapshot restore ${snapshotName}`;
+          const lead =
+            `ddev migrate-database ${drift.migrateTarget} failed ` +
+            `(DB backed up as snapshot "${snapshotName}"`;
+          const head = `${lead}; ${restore})`;
+          const message = await ddevFailureMessage(handle, head, mig.output);
+          // The message opens with the head it was given: the output and the logs follow it.
+          throw new AdvisedStepError(message, `${lead})${message.slice(head.length)}`, restore);
         }
         await runnerExec(handle, `touch ${marker}`, { timeoutMs: 15_000 });
       } else {

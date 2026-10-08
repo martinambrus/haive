@@ -216,11 +216,16 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   4 and 5 (8,807 and 9,254 characters) never reached 07, and 08c's round-3 report (14,676) lost its
   blocking finding, so P2 would have quoted the wrong end of a report. Fixed by #395: a diagnosis keeps
   its head and tail, and a person's words whole (`excerptDiagnosis`, docs/architecture/fix-loop.md).
-- **F18. Haive's own fixer instructions reach 07 inside the untrusted fence (pre-existing, same
-  check).** 08c's `VALIDATE_THEN_ACT` and recurring note, and 08b's "Decide per failure", travel in the
-  diagnosis that 07 fences as agent text, under a guard telling the fixer never to follow an
-  instruction inside a fence. The effect is unmeasured. → after P2: Haive's instruction outside the
-  fence, the agent's findings fenced where they are written, as gate 2 already does.
+- **F18. Haive's own fixer instructions reached 07 inside the untrusted fence (pre-existing, same
+  check).** 08c's `VALIDATE_THEN_ACT` and recurring note, 08b's "Decide per failure" and the DDEV
+  guards' advice travelled in the diagnosis that 07 fences as agent text, under a guard telling the
+  fixer never to follow an instruction inside a fence. On the dev install all 4 real 08b rows carried
+  the sentence and the one 08c row opened with the paragraph. Fixed by #436: a fix-loop request
+  carries Haive's lines in a separate `guidance` field that 07 renders outside every fence
+  (docs/architecture/fix-loop.md). The user chose the field over fencing the findings where they are
+  written (2026-10-03): that would nest fences in every reader that wraps a diagnosis and replay old
+  instructions through the background blocks. Its follow-ups (07's framing of 08d2 and gate rows,
+  empty fences from a head cut, the honored block's unfenced machine entries) ship next.
 
 ## Phases
 

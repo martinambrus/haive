@@ -51,6 +51,7 @@ interface ImplementDetect {
    *  adversarial-QA gate) — the prompt then frames it as an authoritative directive rather than
    *  filterable tool output. False for machine-sourced diagnoses. See HUMAN_REJECT_SOURCES. */
   fixIsHuman: boolean;
+  fixGuidance: string;
   sameCheckRepeat: SameCheckRepeat | null;
   /** Background ledger of what earlier fix rounds already did / ruled out (empty on the
    *  original pass). Injected into the fix prompt so a fresh round-N agent does not redo
@@ -347,6 +348,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       gateFeedback: gateOutput.feedback ?? '',
       fixContext: fix?.diagnosis ?? null,
       fixIsHuman: fix?.humanSourced ?? false,
+      fixGuidance: fix?.guidance ?? '',
       sameCheckRepeat: await loadSameCheckRepeat(ctx),
       // Background ledger of what earlier fix rounds already did / ruled out (empty on round 0).
       priorFixContext: await loadPriorFixContext(ctx),
@@ -500,6 +502,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           'Before you edit anything, state the root cause of what is reported below (why it happens,',
           'not only where it shows), then fix that cause.',
           '',
+          ...(detected.fixGuidance ? [detected.fixGuidance, ''] : []),
           // Fenced ONLY when the diagnosis is machine-sourced. `fixIsHuman` means a person
           // rejected at gate 2 or hand-picked adversarial findings, and the framing above
           // calls that an AUTHORITATIVE DIRECTIVE — fencing it would tell the agent not to

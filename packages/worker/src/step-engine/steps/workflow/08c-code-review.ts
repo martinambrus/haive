@@ -992,6 +992,12 @@ const VALIDATE_THEN_ACT = [
   'advisory — fix them only if they are real and cheap.',
 ].join('\n');
 
+const RECURRING_HEADER = [
+  'These complaints survived earlier fix rounds, so whatever was done before did not resolve',
+  'them. Do not repeat that approach — either fix the underlying cause or state plainly why',
+  'the finding is wrong or cannot be fixed here.',
+].join('\n');
+
 /** One finding as the implementer receives it.
  *
  *  Carries the LINE the reviewer already supplied. It used to be dropped here while gate 2
@@ -1045,13 +1051,7 @@ export function buildRecurringNote(
     );
   }
   if (lines.length === 0) return '';
-  return [
-    '### Already tried',
-    'These complaints survived earlier fix rounds, so whatever was done before did not resolve',
-    'them. Do not repeat that approach — either fix the underlying cause or state plainly why',
-    'the finding is wrong or cannot be fixed here.',
-    ...lines,
-  ].join('\n');
+  return ['### Already tried', ...lines].join('\n');
 }
 
 export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> = {
@@ -1081,9 +1081,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       const securityFindings = liveInScope(out.security.findings).filter((f) =>
         isBlockingSeverity(f.severity),
       );
-      // One element: `parts` is joined with a blank line, so the preamble must arrive
-      // as a single block rather than one paragraph per line.
-      const parts: string[] = [VALIDATE_THEN_ACT];
+      const parts: string[] = [];
       if (peerFindings.length) {
         parts.push('### Peer review\n' + peerFindings.map(diagnosisLine).join('\n'));
       }
@@ -1097,10 +1095,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         if (!lensFindings.length) continue;
         parts.push(`### ${lens.title}\n` + lensFindings.map(diagnosisLine).join('\n'));
       }
-      if (parts.length === 1) return null;
+      if (parts.length === 0) return null;
       // Last, so it reads as a caveat on the findings above rather than displacing them.
       if (out.recurringNote) parts.push(out.recurringNote);
-      return { blocking: true, diagnosis: parts.join('\n\n') || 'Code review requested changes.' };
+      return {
+        blocking: true,
+        diagnosis: parts.join('\n\n'),
+        guidance: out.recurringNote
+          ? `${VALIDATE_THEN_ACT}\n\n${RECURRING_HEADER}`
+          : VALIDATE_THEN_ACT,
+      };
     },
   },
 

@@ -916,6 +916,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     'reads a config value; returns the prompt unchanged when unset',
 };
 
+const FIX_GUIDANCE_FIXTURE = 'Validate each finding against the code before you act on it.';
+
 /**
  * ALTERNATIVE detect values, where one field selects between prompts rather than between lines.
  *
@@ -946,11 +948,31 @@ const DETECT_VARIANTS: Record<
   '07-phase-2-implement': [
     {
       suffix: ', human reject',
-      fields: { fixContext: 'The logout button does nothing.', fixIsHuman: true },
+      fields: { fixContext: 'The logout button does nothing.', fixIsHuman: true, fixGuidance: '' },
     },
     {
       suffix: ', machine diagnosis',
-      fields: { fixContext: 'AssertionError: expected 401, got 200.', fixIsHuman: false },
+      fields: {
+        fixContext: 'AssertionError: expected 401, got 200.',
+        fixIsHuman: false,
+        fixGuidance: '',
+      },
+    },
+    {
+      suffix: ', machine diagnosis with guidance',
+      fields: {
+        fixContext: 'AssertionError: expected 401, got 200.',
+        fixIsHuman: false,
+        fixGuidance: FIX_GUIDANCE_FIXTURE,
+      },
+    },
+    {
+      suffix: ', human reject with guidance',
+      fields: {
+        fixContext: 'The logout button does nothing.',
+        fixIsHuman: true,
+        fixGuidance: FIX_GUIDANCE_FIXTURE,
+      },
     },
   ],
   '08b-test-management': [
@@ -1804,11 +1826,19 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       byProvenance.some((a) => !a.human),
       'no machine-diagnosis arm rendered',
     ).toBe(true);
+    for (const human of [true, false]) {
+      expect(
+        byProvenance.some((a) => a.human === human && a.prompt.includes(FIX_GUIDANCE_FIXTURE)),
+        `no guidance arm rendered, human=${human}`,
+      ).toBe(true);
+    }
     for (const { key, prompt, human } of byProvenance) {
       const after = prompt.slice(prompt.indexOf(DEFECT_HEADING) + DEFECT_HEADING.length);
       // Fenced when an agent wrote it; NEVER when the developer did — fencing a person's
       // own directive tells the agent not to follow them.
       expect(after.trimStart().startsWith(UNTRUSTED_OPEN), `${key} human=${human}`).toBe(!human);
+      const guided = prompt.indexOf(FIX_GUIDANCE_FIXTURE);
+      if (guided !== -1) expect(guided, key).toBeLessThan(prompt.indexOf(DEFECT_HEADING));
     }
   });
 

@@ -176,6 +176,7 @@ export interface FixLoopRequest {
   diagnosis: string;
   sourceStepId: string;
   round: number;
+  guidance?: string;
 }
 
 /** Strip ANSI escape codes and normalise whitespace so raw tool output reads cleanly
@@ -300,11 +301,16 @@ export async function recordFixLoopRequest(
   sourceTaskStepId: string,
   req: FixLoopRequest,
 ): Promise<void> {
+  const { guidance, ...rest } = req;
   await db.insert(schema.taskEvents).values({
     taskId,
     taskStepId: sourceTaskStepId,
     eventType: FIX_LOOP_REQUESTED,
-    payload: { ...req, fingerprint: fixLoopFingerprint(req.sourceStepId, req.diagnosis) },
+    payload: {
+      ...rest,
+      ...(guidance?.trim() ? { guidance } : {}),
+      fingerprint: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
+    },
   });
 }
 
@@ -327,13 +333,14 @@ function isActionableDiagnosis(raw: string): boolean {
 }
 
 /** The diagnosis already recorded for `round` — the machine failure the escalation gate was
- *  raised on. Read back so a user directive can carry it along as context instead of replacing
- *  it outright. Empty string when nothing is recorded for that round. */
+ *  raised on — and the guidance recorded with it. Read back so a user directive can carry them
+ *  along as context instead of replacing them outright. Both empty strings when nothing is
+ *  recorded for that round. */
 export async function loadRecordedDiagnosisForRound(
   db: Database,
   taskId: string,
   round: number,
-): Promise<string> {
+): Promise<{ diagnosis: string; guidance: string }> {
   const rows = await db
     .select()
     .from(schema.taskEvents)
@@ -345,10 +352,12 @@ export async function loadRecordedDiagnosisForRound(
     )
     .orderBy(desc(schema.taskEvents.createdAt));
   for (const r of rows) {
-    const p = r.payload as { diagnosis?: string; round?: number } | null;
-    if (p?.round === round) return (p.diagnosis ?? '').trim();
+    const p = r.payload as { diagnosis?: string; round?: number; guidance?: string } | null;
+    if (p?.round === round) {
+      return { diagnosis: (p.diagnosis ?? '').trim(), guidance: p.guidance ?? '' };
+    }
   }
-  return '';
+  return { diagnosis: '', guidance: '' };
 }
 
 /** Compose the next round's diagnosis when the user typed a directive at the escalation gate.
@@ -476,7 +485,7 @@ const HUMAN_REJECT_SOURCES = new Set([
  *  original pass (round 0) or when no recorded request matches the current round. */
 export async function loadFixLoopDiagnosis(
   ctx: StepContext,
-): Promise<{ diagnosis: string; humanSourced: boolean } | null> {
+): Promise<{ diagnosis: string; humanSourced: boolean; guidance: string } | null> {
   if (ctx.round <= 0) return null;
   const rows = await ctx.db
     .select()
@@ -489,12 +498,17 @@ export async function loadFixLoopDiagnosis(
     )
     .orderBy(desc(schema.taskEvents.createdAt));
   for (const r of rows) {
-    const p = r.payload as { diagnosis?: string; round?: number; sourceStepId?: string } | null;
+    const p = r.payload as {
+      diagnosis?: string;
+      round?: number;
+      sourceStepId?: string;
+      guidance?: string;
+    } | null;
     if (p?.round === ctx.round) {
       const humanSourced = HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '');
       const d = excerptDiagnosis((p.diagnosis ?? '').trim(), DIAGNOSIS_BUDGET, humanSourced);
       if (d.length === 0) return null;
-      return { diagnosis: d, humanSourced };
+      return { diagnosis: d, humanSourced, guidance: p.guidance ?? '' };
     }
   }
   return null;

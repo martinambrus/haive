@@ -5,9 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
-const { ensureDdevStarted, ddevPrimaryUrl } = vi.hoisted(() => ({
+const { ensureDdevStarted, ddevPrimaryUrl, passThrough } = vi.hoisted(() => ({
   ensureDdevStarted: vi.fn(),
   ddevPrimaryUrl: vi.fn(),
+  // The real guard until a test hands it a finding.
+  passThrough: (name: string) => async (importOriginal: () => Promise<Record<string, unknown>>) => {
+    const actual = await importOriginal();
+    return { ...actual, [name]: vi.fn(actual[name] as () => unknown) };
+  },
 }));
 
 vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
@@ -15,10 +20,20 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ensureDdevStarted,
   ddevPrimaryUrl,
 }));
+vi.mock('../../../sandbox/ddev-config-yaml-guard.js', passThrough('checkDdevConfigYaml'));
+vi.mock('../../../sandbox/ddev-healthcheck-guard.js', passThrough('checkDdevHealthcheckConfig'));
+vi.mock('../../../sandbox/ddev-build-guard.js', passThrough('checkDdevBuildInputs'));
+vi.mock('../../../sandbox/ddev-nginx-include-guard.js', passThrough('checkDdevNginxIncludes'));
+vi.mock('../../../sandbox/ddev-entrypoint-guard.js', passThrough('checkDdevWebEntrypoints'));
 
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { DdevBootAbortedError } from '../../../sandbox/ddev-boot-cancellation.js';
-import { TaskCancelledError } from '../../step-definition.js';
+import { checkDdevConfigYaml } from '../../../sandbox/ddev-config-yaml-guard.js';
+import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
+import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
+import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
+import { checkDdevWebEntrypoints } from '../../../sandbox/ddev-entrypoint-guard.js';
+import { AdvisedStepError, TaskCancelledError } from '../../step-definition.js';
 import { ensureAppServing, ensureDdevWithProgress } from './_app-runtime.js';
 
 const SUBPATH = 'haive-test-user/haive-test-repo';
@@ -134,6 +149,38 @@ describe('ensureDdevWithProgress', () => {
       expect.objectContaining({ signal: stop.signal }),
     );
   });
+
+  // The message is what the page shows and what `fixLoopOnError` classifies; the advice
+  // Haive wrote into it travels apart, so the step runner can hand it over as guidance.
+  it.each([
+    ['config YAML', checkDdevConfigYaml],
+    ['healthcheck', checkDdevHealthcheckConfig],
+    ['image-build inputs', checkDdevBuildInputs],
+    ['nginx include', checkDdevNginxIncludes],
+    ['web entrypoint', checkDdevWebEntrypoints],
+  ])(
+    'leaves a finding of the %s guard with its advice apart, before any boot',
+    async (_n, guard) => {
+      vi.mocked(guard).mockResolvedValueOnce({
+        problem: 'DDEV config is not valid YAML: x.',
+        advice: 'Quote it.',
+      });
+
+      const err = await ensureDdevWithProgress(ctx, SUBPATH).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(AdvisedStepError);
+      const failure = err as AdvisedStepError;
+      expect(failure.message).toBe(
+        'DDEV cannot start: DDEV config is not valid YAML: x. Quote it.',
+      );
+      expect(failure.diagnosis).toBe('DDEV cannot start: DDEV config is not valid YAML: x.');
+      expect(failure.advice).toBe('Quote it.');
+      expect(ensureDdevStarted, 'a guard failure went on to boot DDEV').not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('ensureAppServing', () => {

@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
-import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import {
+  advanceStep,
+  finishedRoutingVerdict,
+  finishedStepResult,
+  type AdvanceStepParams,
+  type TaskStepRow,
+} from '../src/step-engine/step-runner.js';
+import {
+  AdvisedStepError,
+  type StepContext,
+  type StepDefinition,
+} from '../src/step-engine/step-definition.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
 import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 import {
@@ -14,7 +24,9 @@ import {
   loadHonoredConstraints,
   loadPriorFixContext,
   loadFixLoopDiagnosis,
+  loadRecordedDiagnosisForRound,
   loadSameCheckRepeat,
+  recordFixLoopRequest,
   buildGateDirectiveDiagnosis,
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
@@ -26,6 +38,8 @@ import {
   fencedAgentBlock,
 } from '../src/step-engine/steps/_untrusted-repo.js';
 import { formatQaFixDiagnosis } from '../src/step-engine/steps/workflow/08d2-adversarial-qa-review.js';
+import { ddevGuardFailure, isDdevAgentFixableFailure } from '../src/sandbox/ddev-build-guard.js';
+import { DDEV_CONFIG_YAML_PREFIX } from '../src/sandbox/ddev-config-yaml-guard.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -118,7 +132,7 @@ function meta(id: string) {
   };
 }
 
-function fixLoopStep(blocking: boolean): StepDefinition {
+function fixLoopStep(blocking: boolean, guidance?: string): StepDefinition {
   return {
     metadata: meta('test-fixloop'),
     async detect() {
@@ -128,7 +142,10 @@ function fixLoopStep(blocking: boolean): StepDefinition {
       return null;
     },
     fixLoop: {
-      evaluate: () => (blocking ? { blocking: true, diagnosis: 'boom: bad config' } : null),
+      evaluate: () =>
+        blocking
+          ? { blocking: true, diagnosis: 'boom: bad config', ...(guidance ? { guidance } : {}) }
+          : null,
     },
     async apply() {
       return { verdict: blocking ? 'ISSUES_FOUND' : 'VALID' };
@@ -1379,5 +1396,208 @@ describe('07b validator prompt — honored constraints', () => {
   it('omits the block when there are no honored constraints', () => {
     const prompt = buildPrompt({ detected: { ...base, honoredBlock: '' }, formValues: {} });
     expect(prompt).not.toContain('HONORED CONSTRAINTS');
+  });
+});
+
+describe('fix-loop guidance', () => {
+  const GUIDANCE = 'Validate each finding against the code before you act on it.';
+
+  it('rides the loop_back of a blocking verdict, and a verdict without it carries none', async () => {
+    const fresh = (): MockState => ({ taskStepRow: {}, inserts: [], updates: [] });
+    const guided = await advanceStep(params(makeMockDb(fresh()), fixLoopStep(true, GUIDANCE), 1));
+    expect(guided.status).toBe('loop_back');
+    if (guided.status === 'loop_back') expect(guided.guidance).toBe(GUIDANCE);
+    for (const step of [fixLoopStep(true), restartLoopStep(true)]) {
+      const plain = await advanceStep(params(makeMockDb(fresh()), step, 1));
+      expect(plain.status).toBe('loop_back');
+      expect('guidance' in plain).toBe(false);
+    }
+  });
+
+  it('rides the routing verdict and the result rebuilt from a finished row', async () => {
+    const db = makeMockDb({ taskStepRow: {}, inserts: [], updates: [] });
+    const rowWith = (output: unknown) =>
+      ({ id: 'row-1', round: 0, errorMessage: null, output }) as unknown as TaskStepRow;
+    const row = rowWith({});
+    const guided = fixLoopStep(true, GUIDANCE);
+    expect(await finishedRoutingVerdict(db, 'task-1', guided, {})).toStrictEqual({
+      kind: 'loop_back',
+      diagnosis: 'boom: bad config',
+      guidance: GUIDANCE,
+    });
+    expect(await finishedStepResult(db, 'task-1', guided, row)).toStrictEqual({
+      status: 'loop_back',
+      row,
+      diagnosis: 'boom: bad config',
+      sourceStepId: 'test-fixloop',
+      guidance: GUIDANCE,
+    });
+    expect(await finishedRoutingVerdict(db, 'task-1', fixLoopStep(true), {})).toStrictEqual({
+      kind: 'loop_back',
+      diagnosis: 'boom: bad config',
+    });
+    const rejected = rowWith({ decision: 'reject' });
+    expect(await finishedStepResult(db, 'task-1', restartLoopStep(true), rejected)).toStrictEqual({
+      status: 'loop_back',
+      row: rejected,
+      diagnosis: 'developer found: button does nothing',
+      sourceStepId: 'test-restartloop',
+      uncapped: true,
+    });
+  });
+
+  describe('a thrown failure that carries advice', () => {
+    const MESSAGE = 'DDEV cannot start: DDEV config is not valid YAML: x. Quote it.';
+    const DIAGNOSIS = 'DDEV cannot start: DDEV config is not valid YAML: x.';
+    const advised = () => new AdvisedStepError(MESSAGE, DIAGNOSIS, 'Quote it.');
+    const throwing = (
+      error: Error,
+      fixLoopOnError: true | ((message: string) => boolean) = true,
+    ): StepDefinition => ({
+      metadata: meta('test-fixloop-advised'),
+      async detect() {
+        return { ok: true };
+      },
+      form() {
+        return null;
+      },
+      fixLoopOnError,
+      async apply() {
+        throw error;
+      },
+    });
+    const fresh = (): MockState => ({ taskStepRow: {}, inserts: [], updates: [] });
+
+    it('hands the advice over as guidance, the rest as the diagnosis, and stores the whole message', async () => {
+      const state = fresh();
+      const result = await advanceStep(params(makeMockDb(state), throwing(advised()), 2));
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') {
+        expect(result.diagnosis).toBe(DIAGNOSIS);
+        expect(result.guidance).toBe('Quote it.');
+        expect(result.sourceStepId).toBe('test-fixloop-advised');
+      }
+      expect(state.taskStepRow).toMatchObject({ status: 'done', errorMessage: MESSAGE });
+    });
+
+    it('treats a plain error as it always did: the message is the diagnosis, with no guidance', async () => {
+      const state = fresh();
+      const plain = new Error(MESSAGE);
+      const result = await advanceStep(params(makeMockDb(state), throwing(plain), 2));
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') expect(result.diagnosis).toBe(MESSAGE);
+      expect('guidance' in result).toBe(false);
+      expect(state.taskStepRow).toMatchObject({ errorMessage: MESSAGE });
+    });
+
+    it('still fails a step that does not route the error, with the whole message', async () => {
+      const result = await advanceStep(
+        params(
+          makeMockDb(fresh()),
+          throwing(advised(), () => false),
+          2,
+        ),
+      );
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toBe(MESSAGE);
+    });
+
+    it('routes a guard failure on its whole message, and hands its advice over apart', async () => {
+      const guard = ddevGuardFailure({
+        problem: `${DDEV_CONFIG_YAML_PREFIX} .ddev/config.yaml cannot be parsed.`,
+        advice: 'Quote it.',
+      });
+      const result = await advanceStep(
+        params(makeMockDb(fresh()), throwing(guard, isDdevAgentFixableFailure), 2),
+      );
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') {
+        expect(result.diagnosis).toBe(
+          `DDEV cannot start: ${DDEV_CONFIG_YAML_PREFIX} .ddev/config.yaml cannot be parsed.`,
+        );
+        expect(result.guidance).toBe('Quote it.');
+      }
+    });
+  });
+
+  describe('recordFixLoopRequest', () => {
+    const recorded = async (
+      req: Parameters<typeof recordFixLoopRequest>[3],
+    ): Promise<Record<string, unknown>> => {
+      const rows: { payload: Record<string, unknown> }[] = [];
+      const db = {
+        insert: () => ({
+          values: async (v: { payload: Record<string, unknown> }) => void rows.push(v),
+        }),
+      } as unknown as Database;
+      await recordFixLoopRequest(db, 'task-1', 'step-1', req);
+      return rows[0]!.payload;
+    };
+    const request = {
+      diagnosis: 'webserver_type: apache is invalid',
+      sourceStepId: '07c-ddev-reconcile',
+      round: 2,
+    };
+
+    it('stores the guidance beside the diagnosis only when it has some', async () => {
+      expect(await recorded({ ...request, guidance: GUIDANCE })).toMatchObject({
+        ...request,
+        guidance: GUIDANCE,
+      });
+      for (const guidance of [undefined, '', '  \n ']) {
+        expect('guidance' in (await recorded({ ...request, guidance }))).toBe(false);
+      }
+      expect('guidance' in (await recorded(request))).toBe(false);
+    });
+
+    it('fingerprints the diagnosis alone', async () => {
+      const guided = await recorded({ ...request, guidance: GUIDANCE });
+      expect(guided.fingerprint).toBe(fixLoopFingerprint(request.sourceStepId, request.diagnosis));
+      expect(guided.fingerprint).toBe((await recorded(request)).fingerprint);
+    });
+  });
+
+  describe('what 07 and the gate read back', () => {
+    const recordedRow = (round: number, over: Record<string, unknown>) => ({
+      payload: {
+        sourceStepId: '08c-code-review',
+        diagnosis: `findings of round ${round}`,
+        round,
+        ...over,
+      },
+    });
+
+    it('hands 07 the guidance recorded with the diagnosis it picks', async () => {
+      const r = await loadFixLoopDiagnosis(ctxWith([recordedRow(3, { guidance: GUIDANCE })], 3));
+      expect(r).toMatchObject({ diagnosis: 'findings of round 3', guidance: GUIDANCE });
+    });
+
+    it("hands 07 an empty guidance for a row recorded without one, and never an older row's", async () => {
+      const newest = recordedRow(3, { sourceStepId: FIX_LOOP_GATE_SOURCE });
+      const older = recordedRow(3, { guidance: GUIDANCE });
+      const r = await loadFixLoopDiagnosis(ctxWith([newest, older], 3));
+      expect(r?.guidance).toBe('');
+      expect(r?.humanSourced).toBe(true);
+    });
+
+    it('hands the gate the diagnosis and the guidance of the newest request of the round', async () => {
+      const db = eventsDb([
+        recordedRow(4, { diagnosis: '  newest  ', guidance: GUIDANCE }),
+        recordedRow(4, { diagnosis: 'older', guidance: 'older guidance' }),
+        recordedRow(3, { diagnosis: 'earlier round' }),
+      ]);
+      expect(await loadRecordedDiagnosisForRound(db, 't', 4)).toStrictEqual({
+        diagnosis: 'newest',
+        guidance: GUIDANCE,
+      });
+      expect(await loadRecordedDiagnosisForRound(db, 't', 3)).toStrictEqual({
+        diagnosis: 'earlier round',
+        guidance: '',
+      });
+      expect(await loadRecordedDiagnosisForRound(db, 't', 9)).toStrictEqual({
+        diagnosis: '',
+        guidance: '',
+      });
+    });
   });
 });

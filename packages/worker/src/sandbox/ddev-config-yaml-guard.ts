@@ -1,6 +1,7 @@
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseDocument } from 'yaml';
+import type { DdevGuardFinding } from './ddev-build-guard.js';
 
 /**
  * Pre-flight check that the YAML files DDEV loads at start can be PARSED at all.
@@ -75,7 +76,7 @@ export interface DdevYamlFile {
 /** First parse error in these files that will fail `ddev start`, or null when every file
  *  DDEV loads parses. Files are judged in the order given; one finding is enough, because
  *  it routes the whole `.ddev/` tree back to the agent that wrote it. */
-export function findDdevYamlBreakage(files: DdevYamlFile[]): string | null {
+export function findDdevYamlBreakage(files: DdevYamlFile[]): DdevGuardFinding | null {
   for (const file of files) {
     // The parser collects syntax errors rather than throwing them, but a throw from it would
     // propagate out of the pre-flight and fail a bring-up this guard has no verdict on —
@@ -96,11 +97,13 @@ export function findDdevYamlBreakage(files: DdevYamlFile[]): string | null {
       .split('\n')[0]!
       .replace(/\s+at line \d+, column \d+:?$/, '')
       .replace(/:$/, '');
-    return (
-      `${DDEV_CONFIG_YAML_PREFIX} .ddev/${file.name} cannot be parsed — ${reason}${at}. ` +
-      `DDEV loads that file before it creates a single container, so \`ddev start\` fails ` +
-      `on every attempt until it is fixed. ${SCALAR_QUOTING_ADVICE}`
-    );
+    return {
+      problem:
+        `${DDEV_CONFIG_YAML_PREFIX} .ddev/${file.name} cannot be parsed — ${reason}${at}. ` +
+        `DDEV loads that file before it creates a single container, so \`ddev start\` fails ` +
+        `on every attempt until it is fixed.`,
+      advice: SCALAR_QUOTING_ADVICE,
+    };
   }
   return null;
 }
@@ -111,7 +114,7 @@ export function findDdevYamlBreakage(files: DdevYamlFile[]): string | null {
  * Returns null when nothing is wrong, when there is no `.ddev/`, or when the tree cannot be
  * read — an unreadable workspace is the boot's problem to report, not this check's.
  */
-export async function checkDdevConfigYaml(workspace: string): Promise<string | null> {
+export async function checkDdevConfigYaml(workspace: string): Promise<DdevGuardFinding | null> {
   const { anchor, prefix } = workspaceAnchor(workspace);
   const relDir = `${prefix}.ddev`;
   const entries = await readdirNoFollow(anchor, relDir);

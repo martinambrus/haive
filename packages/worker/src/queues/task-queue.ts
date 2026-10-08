@@ -1643,6 +1643,7 @@ export async function handleResult(
             diagnosis: result.diagnosis,
             sourceStepId: result.sourceStepId,
             round: nextRound,
+            guidance: result.guidance,
           });
           const waiting = await markTaskWaiting(
             db,
@@ -1695,6 +1696,7 @@ export async function handleResult(
           diagnosis: result.diagnosis,
           sourceStepId: result.sourceStepId,
           round: nextRound,
+          guidance: result.guidance,
         });
         const waiting = await markTaskWaiting(
           db,
@@ -1752,6 +1754,7 @@ export async function handleResult(
           diagnosis: result.diagnosis,
           sourceStepId: result.sourceStepId,
           round: nextRound,
+          guidance: result.guidance,
         });
         await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
           sourceStepId: result.sourceStepId,
@@ -1923,9 +1926,10 @@ export async function resolveFixLoopGate(
   if (directive.length > 0) {
     const prior = await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound);
     await recordFixLoopRequest(db, ctx.taskId, gateRow.id, {
-      diagnosis: buildGateDirectiveDiagnosis(directive, prior),
+      diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
       sourceStepId: FIX_LOOP_GATE_SOURCE,
       round: nextRound,
+      guidance: prior.guidance,
     });
   }
   await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.continued', {

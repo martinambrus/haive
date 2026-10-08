@@ -7,6 +7,7 @@ import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import {
+  AdvisedStepError,
   TaskCancelledError,
   type StepContext,
   type StepDefinition,
@@ -574,8 +575,12 @@ function notProbed(url: string | null, reason: string): RuntimeSmoke {
  *  message. A Stop is no boot failure and stays the cancel the step runner knows by its class. */
 function ddevBootError(err: unknown): Error {
   if (err instanceof TaskCancelledError) return err;
+  const lead = 'DDEV environment could not start for runtime verification: ';
+  if (err instanceof AdvisedStepError) {
+    return new AdvisedStepError(`${lead}${err.message}`, `${lead}${err.diagnosis}`, err.advice);
+  }
   const message = err instanceof Error ? err.message : String(err);
-  return new Error(`DDEV environment could not start for runtime verification: ${message}`);
+  return new Error(`${lead}${message}`);
 }
 
 /** Boot the app once (idempotent via ensureAppServing) and curl it from INSIDE its

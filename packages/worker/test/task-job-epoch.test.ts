@@ -89,6 +89,7 @@ const h = vi.hoisted(() => {
     onRead: (() => {}) as () => void,
     taskWrites: [] as { epochs: unknown[]; landed: boolean }[],
     events: [] as unknown[],
+    inserted: [] as { eventType?: unknown; payload?: unknown }[],
     /** What the task queue is asked to enqueue. */
     add: vi.fn(async (..._args: unknown[]) => undefined),
     /** The source row still reads as this pass's, not reset by a Retry. */
@@ -216,8 +217,9 @@ const db = {
     };
   },
   insert: () => ({
-    values: async (v: { eventType?: unknown }) => {
+    values: async (v: { eventType?: unknown; payload?: unknown }) => {
       h.state.events.push(v.eventType);
+      h.state.inserted.push(v);
     },
   }),
   update: (table: unknown) => ({
@@ -360,6 +362,7 @@ afterEach(() => {
   h.state.onRead = () => {};
   h.state.taskWrites = [];
   h.state.events = [];
+  h.state.inserted = [];
   h.state.add.mockClear();
   h.state.sourceOwned = true;
   h.state.maxFixRounds = undefined;
@@ -655,6 +658,114 @@ describe('a job that resets steps itself', () => {
     // requested or started.
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
+  });
+});
+
+describe('the fix request a loop_back records', () => {
+  const GUIDANCE = 'Validate each finding against the code before you act on it.';
+  const ctx = () => ({ taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 });
+  const loopBack = (over: Record<string, unknown> = {}) => ({
+    status: 'loop_back',
+    row: { id: 'ts-1', round: 0 },
+    diagnosis: 'a defect',
+    sourceStepId: 'epoch-job-step',
+    ...over,
+  });
+  const requested = () =>
+    h.state.inserted
+      .filter((v) => v.eventType === 'fix_loop.requested')
+      .map((v) => v.payload as Record<string, unknown>);
+
+  it('carries the guidance of the verdict on the normal path', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    await handleResult(
+      db as never,
+      ctx() as never,
+      'epoch-job-step',
+      loopBack({ guidance: GUIDANCE }) as never,
+    );
+    expect(h.state.events).toEqual(['step.loop_back', 'fix_loop.requested', 'fix_loop.started']);
+    expect(requested()).toEqual([
+      expect.objectContaining({ diagnosis: 'a defect', round: 1, guidance: GUIDANCE }),
+    ]);
+    h.state.inserted = [];
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', loopBack() as never);
+    expect(requested()).toHaveLength(1);
+    expect('guidance' in requested()[0]!).toBe(false);
+  });
+
+  it('carries the guidance of the verdict on the round-cap park', async () => {
+    h.state.readsAnswer = true;
+    h.state.maxFixRounds = 0;
+    await handleResult(
+      db as never,
+      ctx() as never,
+      'epoch-job-step',
+      loopBack({ guidance: GUIDANCE }) as never,
+    );
+    expect(h.state.events).toContain('fix_loop.escalated');
+    expect(requested()).toEqual([expect.objectContaining({ round: 1, guidance: GUIDANCE })]);
+    h.state.inserted = [];
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', loopBack() as never);
+    expect('guidance' in requested()[0]!).toBe(false);
+  });
+
+  it('carries the guidance of the verdict on the oscillation park', async () => {
+    h.state.readsAnswer = true;
+    h.state.requestedEvents = [
+      { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
+      { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
+    ];
+    const repeated = (over: Record<string, unknown> = {}) =>
+      loopBack({ row: { id: 'ts-1', round: 2 }, ...over });
+    await handleResult(
+      db as never,
+      ctx() as never,
+      'epoch-job-step',
+      repeated({ guidance: GUIDANCE }) as never,
+    );
+    expect(h.state.events).toContain('fix_loop.oscillation_detected');
+    expect(requested()).toEqual([expect.objectContaining({ round: 3, guidance: GUIDANCE })]);
+    h.state.inserted = [];
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', repeated() as never);
+    expect('guidance' in requested()[0]!).toBe(false);
+  });
+
+  describe('when a person answers the gate with a directive', () => {
+    const gate = { id: 'ts-1', stepId: 'epoch-job-step', round: 1 };
+    const priorRow = (over: Record<string, unknown>) => ({
+      payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 2, ...over },
+    });
+
+    it("lays it over the diagnosis of the round and carries that row's guidance, if it had any", async () => {
+      h.state.readsAnswer = true;
+      const answer = () =>
+        resolveFixLoopGate(
+          db as never,
+          ctx() as never,
+          gate as never,
+          'continue',
+          1,
+          'use the other flag',
+        );
+      h.state.requestedEvents = [priorRow({ guidance: GUIDANCE })];
+      await answer();
+      const [directive] = requested();
+      expect(directive).toMatchObject({
+        sourceStepId: 'fix-loop-gate',
+        round: 2,
+        guidance: GUIDANCE,
+      });
+      expect(String(directive!.diagnosis)).toContain('use the other flag');
+      expect(String(directive!.diagnosis)).toContain('a defect');
+      h.state.inserted = [];
+      h.state.requestedEvents = [priorRow({})];
+      await answer();
+      expect(requested()).toHaveLength(1);
+      expect('guidance' in requested()[0]!).toBe(false);
+    });
   });
 });
 

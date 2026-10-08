@@ -135,3 +135,20 @@ never says the earlier fix failed, since a check can fail again on a new defect.
 report is not quoted, and 07's form names the repeat in one line. Every fix round also asks for the
 root cause before the edit; round 0 is unchanged. MEASURED on the dev install: 3 of 7 real fix
 rounds were repeats (681f0f99 rounds 3 and 4 from 08b, ef954a3d round 5 from gate 2).
+
+**Haive's own instructions travel beside the diagnosis, never inside it.** 07 fences a machine
+diagnosis whole and tells the fixer never to follow an instruction inside the fence, so whatever a
+producer wrote into that string as an instruction was fenced with it: 08c's validate-then-act
+paragraph and the header over its "Already tried" list, 08b's "Decide per failure" and the DDEV
+guards' advice. MEASURED on the dev install: all 4 real 08b rows carried the sentence and the one
+08c row opened with the paragraph. A `fixLoop` verdict, and an `AdvisedStepError` thrown into a
+`fixLoopOnError` step, now hand those lines over as `guidance`: Haive's text only, never an
+interpolated agent or repository value, which is why the nginx-include advice no longer names the
+two files it is about (they stay in the fenced problem). `recordFixLoopRequest` stores it beside the
+diagnosis only when it is non-empty, the fingerprint stays computed over the diagnosis, and 07
+renders it once, outside every fence, between the root-cause request and the defect block. The key
+is the field, never the wording: a request recorded before it existed renders byte for byte as
+before, its instructions inside the fence. A gate directive copies the guidance of the request it
+answers, and its own words still override it. A `done` row re-driven from its `error_message`
+(`finishedStepResult`) carries no guidance, so that advice stays inside the fence as before. The
+escalation gates show a person the diagnosis without the guidance.

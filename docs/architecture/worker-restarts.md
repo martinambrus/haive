@@ -92,7 +92,7 @@ re-driver above, as any advance is.
 row already `done`, while the task still points at that step and round, re-drives the hand-off from
 the row (`finishedStepResult`, `step-runner.ts`) rather than as a plain `done`. The apply tail writes
 `done` for a fix-loop, restart or revise verdict too, and for a `fixLoopOnError` failure, whose
-diagnosis is the row's `error_message`, so a job that died between that write and its hand-off used
+re-driven diagnosis is the row's `error_message` (with no guidance, see fix-loop.md), so a job that died between that write and its hand-off used
 to walk forward past the round its step had asked for. The verdict is recomputed from the stored
 output by the one function the tail itself routes with (`finishedRoutingVerdict`), so the two
 cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
