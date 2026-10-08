@@ -38,6 +38,7 @@ import {
   type TestPreflightBlock,
 } from './_test-preflight.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
+import { cutHead } from './_fix-loop.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
 // after the implementation chain and BEFORE 08-phase-5-verify, so the suite verify
@@ -660,7 +661,7 @@ export function priorPassNotes(previous: StepLoopPassRecord[]): string {
   const lines: string[] = [];
   previous.forEach((p, i) => {
     const raw = (p.applyOutput as TestManagementApply | undefined)?.notes ?? '';
-    const notes = cleanText(raw, PRIOR_PASS_ENTRY_LIMIT);
+    const notes = cutHead(cleanText(raw, Infinity), PRIOR_PASS_ENTRY_LIMIT, '…');
     if (notes.length === 0) return;
     const fp = contentFingerprint('08b-pass', notes);
     if (seen.has(fp)) return;
@@ -668,13 +669,18 @@ export function priorPassNotes(previous: StepLoopPassRecord[]): string {
     lines.push(`- pass ${i}: ${notes}`);
   });
   if (lines.length === 0) return '';
-  const block = [
+  const header = [
     'WHAT EARLIER PASSES OF THIS STEP ALREADY CONCLUDED (background — do not repeat this',
     'diagnosis work, build on it. If a pass already established the failure is not a test or',
     'code defect, say so plainly and change nothing rather than re-deriving it):',
-    ...lines,
-  ].join('\n');
-  return block.length > PRIOR_PASS_BLOCK_LIMIT ? block.slice(0, PRIOR_PASS_BLOCK_LIMIT) : block;
+  ];
+  let dropped = 0;
+  for (;;) {
+    const omitted = dropped > 0 ? [`- (${dropped} earlier pass(es) omitted for length)`] : [];
+    const block = [...header, ...omitted, ...lines.slice(dropped)].join('\n');
+    if (block.length <= PRIOR_PASS_BLOCK_LIMIT || lines.length - dropped <= 1) return block;
+    dropped += 1;
+  }
 }
 
 /** The three-way framing the tester agent was given, so the implementer does not treat the

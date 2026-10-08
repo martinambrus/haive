@@ -688,4 +688,40 @@ describe('priorPassNotes', () => {
     const many = Array.from({ length: 40 }, (_, i) => pass(`finding ${i} `.repeat(60)));
     expect(priorPassNotes(many).length).toBeLessThanOrEqual(4000);
   });
+
+  it('keeps the head of a long note, where the tester states its verdict', () => {
+    const verdict = 'Verdict: the failure is a missing browser binary, not a test defect.';
+    const block = priorPassNotes([
+      pass(`${verdict} ${'cause detail. '.repeat(90)}final tail line`),
+    ]);
+    expect(block).toContain(`- pass 0: ${verdict}`);
+    expect(block).not.toContain('final tail line');
+  });
+
+  it('collapses two long notes that differ only after the cut', () => {
+    const shared = `Verdict: dotenv tip is noise. ${'same cause sentence. '.repeat(40)}`;
+    const block = priorPassNotes([pass(`${shared}\nlast line A`), pass(`${shared}\nlast line B`)]);
+    expect(block.match(/- pass /g)).toHaveLength(1);
+  });
+
+  it('leaves a note within the entry limit unchanged', () => {
+    const note = 'short finding '.repeat(20).trim();
+    expect(note.length).toBeLessThanOrEqual(400);
+    expect(priorPassNotes([pass(note)]).endsWith(`- pass 0: ${note}`)).toBe(true);
+  });
+
+  it('drops whole oldest entries over the block cap and keeps the newest whole', () => {
+    const names = 'abcdefghijkl';
+    const many = Array.from({ length: 12 }, (_, i) =>
+      pass(`pass${names[i]} ${`${names[i]}word `.repeat(180)}`.trim()),
+    );
+    const block = priorPassNotes(many);
+    expect(block.length).toBeLessThanOrEqual(4000);
+    expect(block).toMatch(/- \(\d+ earlier pass\(es\) omitted for length\)/);
+    expect(block).not.toContain('- pass 0:');
+    const last = block.split('\n- pass ').pop() ?? '';
+    expect(last.startsWith('11: passl ')).toBe(true);
+    expect(last.endsWith('\n…')).toBe(true);
+    for (const entry of block.split('\n- pass ').slice(1)) expect(entry.endsWith('\n…')).toBe(true);
+  });
 });
