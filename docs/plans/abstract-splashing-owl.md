@@ -247,8 +247,9 @@ Decided by the user on 2026-10-03:
   - A stored block is replaced only at position 0. A marker quoted anywhere else must not suppress
     injection.
   - One `stripHaivePreamble()` is used by the isolation scan and by the persona bookkeeping reads.
-  - The closing marker is escaped. Titles and descriptions are collapsed. `anti_pattern` renders as
-    "Anti-pattern — avoid".
+  - The closing marker is escaped. Titles and descriptions are collapsed. An `anti_pattern` entry
+    carries its category on a line of its own, never as a title prefix, which turned "no inline
+    svgs" into its opposite.
 - **Write framing:**
   - Follow the rules in what you write or specify, on the lines you write.
   - Do not rewrite untouched code to fit them; report it as similar sites.
