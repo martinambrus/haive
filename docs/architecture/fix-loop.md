@@ -79,7 +79,10 @@ import it stopped using) counts as pre-existing and does not block.
 **Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
 explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPriorFixContext`
 (`_fix-loop.ts`) does it across rounds; both dedupe with the ledger's `contentFingerprint` and
-share the same budget (400 chars per entry, 4000 per block). That dedupe collapses a verbatim
+share the same budget (400 chars per entry, 4000 per block). 08b keeps the HEAD of each pass's
+notes (`cutHead`), since the tester states its verdict first: MEASURED on the 29 real fix passes,
+the old tail cut kept the verdict in 0 and the cause in 3, the head keeps both in 29; over the
+block cap the oldest entries drop whole under one omission line. That dedupe collapses a verbatim
 repeat but NOT two rewordings of one finding — the same limit `review_findings` measured for
 prose keys — so the cap, not the dedupe, is what bounds a loop that keeps re-deriving itself.
 
@@ -135,6 +138,16 @@ never says the earlier fix failed, since a check can fail again on a new defect.
 report is not quoted, and 07's form names the repeat in one line. Every fix round also asks for the
 root cause before the edit; round 0 is unchanged. MEASURED on the dev install: 3 of 7 real fix
 rounds were repeats (681f0f99 rounds 3 and 4 from 08b, ef954a3d round 5 from gate 2).
+
+The other fixers get the same two lines (`ROOT_CAUSE_LINES`, `_fix-loop.ts`) above their failure
+block: 08b's fix passes, 07b's fixer, the DAG fix coder and 08a's fixer; first passes, validator
+passes and reviewer prompts are unchanged. A repeat is stated only where it can be keyed
+structurally: 08b from fix pass 2 ("the tests still failed after each earlier pass", true by
+construction, since its loop continues only on a failed run), 07b and the DAG fix coder when the
+files flagged now overlap the previous run's (`normalizeIssueFile`), with the agent-written names
+inside a fence. MEASURED on the dev install: 4 of 5 second DAG fix coders and 4 of 5 later 07b
+fixer passes faced a file the previous reviewer had already flagged. 08b's outputs are NOT
+compared as text: 22 of 23 consecutive fix-pass outputs differed only in a rotating dotenv tip.
 
 **Haive's own instructions travel beside the diagnosis, never inside it.** 07 fences a machine
 diagnosis whole and tells the fixer never to follow an instruction inside the fence, so whatever a

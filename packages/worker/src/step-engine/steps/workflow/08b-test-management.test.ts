@@ -688,4 +688,105 @@ describe('priorPassNotes', () => {
     const many = Array.from({ length: 40 }, (_, i) => pass(`finding ${i} `.repeat(60)));
     expect(priorPassNotes(many).length).toBeLessThanOrEqual(4000);
   });
+
+  it('keeps the head of a long note, where the tester states its verdict', () => {
+    const verdict = 'Verdict: the failure is a missing browser binary, not a test defect.';
+    const block = priorPassNotes([
+      pass(`${verdict} ${'cause detail. '.repeat(90)}final tail line`),
+    ]);
+    expect(block).toContain(`- pass 0: ${verdict}`);
+    expect(block).not.toContain('final tail line');
+  });
+
+  it('collapses two long notes that differ only after the cut', () => {
+    const shared = `Verdict: dotenv tip is noise. ${'same cause sentence. '.repeat(40)}`;
+    const block = priorPassNotes([pass(`${shared}\nlast line A`), pass(`${shared}\nlast line B`)]);
+    expect(block.match(/- pass /g)).toHaveLength(1);
+  });
+
+  it('leaves a note within the entry limit unchanged', () => {
+    const note = 'short finding '.repeat(20).trim();
+    expect(note.length).toBeLessThanOrEqual(400);
+    expect(priorPassNotes([pass(note)]).endsWith(`- pass 0: ${note}`)).toBe(true);
+  });
+
+  it('drops whole oldest entries over the block cap and keeps the newest whole', () => {
+    const names = 'abcdefghijkl';
+    const many = Array.from({ length: 12 }, (_, i) =>
+      pass(`pass${names[i]} ${`${names[i]}word `.repeat(180)}`.trim()),
+    );
+    const block = priorPassNotes(many);
+    expect(block.length).toBeLessThanOrEqual(4000);
+    expect(block).toMatch(/- \(\d+ earlier pass\(es\) omitted for length\)/);
+    expect(block).not.toContain('- pass 0:');
+    const last = block.split('\n- pass ').pop() ?? '';
+    expect(last.startsWith('11: passl ')).toBe(true);
+    expect(last.endsWith('\n…')).toBe(true);
+    for (const entry of block.split('\n- pass ').slice(1)) expect(entry.endsWith('\n…')).toBe(true);
+  });
+});
+
+describe('test-management fix pass prompt', () => {
+  const ROOT_CAUSE = [
+    'Before you edit anything, state the root cause of what is reported below (why it happens,',
+    'not only where it shows), then fix that cause.',
+  ].join('\n');
+  const detected = {
+    workspacePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    frameworks: ['jest'],
+    primary: 'jest',
+    testDirs: ['tests'],
+    ddev: false,
+    ddevPlaywrightAddon: false,
+    repoSubpath: null,
+    spec: 'the spec',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    planImpact: '',
+  };
+  const record = (notes: string) => ({
+    iteration: 0,
+    llmOutput: '',
+    continueRequested: true,
+    applyOutput: {
+      notes,
+      testsPassed: false,
+      testRun: { ran: true, passed: false, command: 'npx jest a', output: 'FAIL a' },
+    },
+  });
+  const fixPrompt = (iteration: number) =>
+    testManagementStep.loop!.buildIterationPrompt!({
+      detected: detected as never,
+      formValues: {},
+      iteration,
+      previousIterations: Array.from({ length: iteration }, (_, i) => record(`note ${i}`)) as never,
+    });
+  const writerPrompt = () =>
+    testManagementStep.llm!.buildPrompt({ detected: detected as never, formValues: {} } as never);
+
+  it('asks for the root cause once, above the command and the failure output', () => {
+    const p = fixPrompt(1);
+    expect(p.split(ROOT_CAUSE)).toHaveLength(2);
+    expect(p.indexOf(ROOT_CAUSE)).toBeLessThan(p.indexOf('Command: npx jest a'));
+    expect(p.indexOf(ROOT_CAUSE)).toBeLessThan(p.indexOf('Failure output'));
+  });
+
+  it('does not ask the writer pass for it', () => {
+    expect(writerPrompt()).not.toContain('state the root cause');
+  });
+
+  it('says nothing about an earlier pass on the first fix pass', () => {
+    expect(fixPrompt(1)).not.toMatch(/fix pass \d/);
+  });
+
+  it.each([2, 3, 5])(
+    'names fix pass %i and that the tests still failed after each earlier one',
+    (n) => {
+      const p = fixPrompt(n);
+      const line = `This is fix pass ${n}; the tests still failed after each earlier pass.`;
+      expect(p.split(line)).toHaveLength(2);
+      expect(p.indexOf(line)).toBeGreaterThan(p.indexOf('Failure output'));
+      expect(p).toContain('If this is the same defect');
+    },
+  );
 });

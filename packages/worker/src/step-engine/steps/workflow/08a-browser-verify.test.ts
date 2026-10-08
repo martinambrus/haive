@@ -507,3 +507,48 @@ describe('browserVerifyStep.shouldRun', () => {
     expect(await browserVerifyStep.shouldRun!(ctx)).toBe(true);
   });
 });
+
+describe('08a fixer prompt', () => {
+  const ROOT_CAUSE = [
+    'Before you edit anything, state the root cause of what is reported below (why it happens,',
+    'not only where it shows), then fix that cause.',
+  ].join('\n');
+  const testerRecord = {
+    iteration: 0,
+    llmOutput: '',
+    continueRequested: true,
+    applyOutput: {
+      source: 'tester',
+      failures: [{ description: 'The admin page is blank.', evidence: '03-admin.png' }],
+      fixesApplied: [],
+      screenshots: [],
+    },
+  };
+  const fixerPrompt = (previousIterations: unknown[]) =>
+    browserVerifyStep.loop!.buildIterationPrompt!({
+      detected: { spec: 'the spec', appUrl: 'http://app.test' } as never,
+      formValues: {},
+      iteration: 1,
+      previousIterations: previousIterations as never,
+    });
+
+  it.each([
+    ['with a failure list', [testerRecord], 'Failures to fix'],
+    ['without one', [], '(the tester reported a failure without a list'],
+  ])('asks for the root cause once, above the failures: %s', (_name, previous, failureBlock) => {
+    const p = fixerPrompt(previous);
+    expect(p.split(ROOT_CAUSE)).toHaveLength(2);
+    expect(p.indexOf(failureBlock)).toBeGreaterThan(-1);
+    expect(p.indexOf(ROOT_CAUSE)).toBeLessThan(p.indexOf(failureBlock));
+  });
+
+  it('keeps the root-cause request out of the tester re-pass', () => {
+    const p = browserVerifyStep.loop!.buildIterationPrompt!({
+      detected: { spec: 'the spec', appUrl: 'http://app.test' } as never,
+      formValues: {},
+      iteration: 2,
+      previousIterations: [testerRecord] as never,
+    });
+    expect(p).not.toContain('state the root cause');
+  });
+});

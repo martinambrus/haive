@@ -31,7 +31,12 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadTaskMeta } from './_task-meta.js';
-import { loadHonoredConstraints } from './_fix-loop.js';
+import {
+  ROOT_CAUSE_LINES,
+  loadHonoredConstraints,
+  normalizeIssueFile,
+  repeatedFlagLines,
+} from './_fix-loop.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import {
@@ -241,13 +246,6 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
   }
   const last = previous[previous.length - 1]?.applyOutput as ValidateApply | undefined;
   return last ? last.fixesApplied : fixes;
-}
-
-/** Strip a trailing `:line` (or `:line:col`) so the same file flagged at different
- *  lines across passes is counted as one. */
-function normalizeIssueFile(file?: string): string {
-  if (!file) return '';
-  return file.trim().replace(/:\d+(?::\d+)?$/, '');
 }
 
 /** Files the validator re-flagged in at least CHURN_FILE_THRESHOLD distinct
@@ -795,19 +793,23 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;
       if (roleForIteration(iteration) === ROLE_FIXER) {
-        const prior = latestValidator(previousIterations);
-        const issues = (prior?.issues ?? []).filter(
-          (issue) =>
-            isBlockingSeverity(issue.severity) &&
-            !findingUpstream(issue) &&
-            !!d.dependencyPolicy &&
-            !upstreamKind(issue.file, d.dependencyPolicy),
-        );
+        const repairable = (list: ValidationIssue[]) =>
+          list.filter(
+            (issue) =>
+              isBlockingSeverity(issue.severity) &&
+              !findingUpstream(issue) &&
+              !!d.dependencyPolicy &&
+              !upstreamKind(issue.file, d.dependencyPolicy),
+          );
+        const issueLists = priorValidatorIssueLists(previousIterations);
+        const issues = repairable(issueLists[issueLists.length - 1] ?? []);
+        const earlier = repairable(issueLists[issueLists.length - 2] ?? []);
         return [
           'A validation agent reviewed the implementation in the workspace:',
           d.sandboxWorktreePath,
           'Your current working directory has the workspace mounted; work on the files there.',
           '',
+          ...ROOT_CAUSE_LINES,
           'Fix the following validation issues by editing files directly:',
           // The validator is told by REPO_IS_DATA_LINES to REPORT tree text that tried to
           // steer it, quoting the string with its file and line — so hostile content arrives
@@ -825,6 +827,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
                   )
                   .join('\n')
               : '(no project-owned repair assignments — make no edits and report that result)',
+          ),
+          ...repeatedFlagLines(
+            issues.map((i) => i.file),
+            earlier.map((i) => i.file),
           ),
           '',
           'Make ONLY the fixes needed - do not add unrelated changes.',
@@ -868,8 +874,6 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
             ? '=== Brief (what the document was asked to cover) ==='
             : '=== Spec (the original requirements) ===',
           d.spec || '(no brief recorded)',
-          '=== Original user request (scope constraints) ===',
-          d.taskBrief ?? '(not recorded — do not expand scope)',
         ].join('\n');
       }
       // Validator re-pass after fixes.
