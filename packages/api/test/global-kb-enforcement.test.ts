@@ -587,10 +587,16 @@ describe('every entry a route returns carries its token and enforcement state', 
     expect((await read()).activeSuccessor).toEqual({ id: SECOND, title: 'Rule' });
   });
 
-  it('on GET /entries/:id, counting an anti-pattern by its title alone, as the heading carries no category text', async () => {
+  it('on GET /entries/:id, counting an anti-pattern as a prompt prints it, its category on a line of its own', async () => {
     const { entryBytes } = await read();
 
-    expect(entryBytes).toBe(Buffer.byteLength(`### ${TITLE}\n${DESCRIPTION}\n\n${BODY}`, 'utf8'));
+    expect(entryBytes).toBe(alwaysBytes(ENTRY, [ENTRY]));
+    expect(entryBytes).toBe(
+      Buffer.byteLength(
+        `### Rule 00000000: ${TITLE}\nCategory: Anti-pattern\n${DESCRIPTION}\nApplies to every change.\n\n${BODY}`,
+        'utf8',
+      ),
+    );
   });
 
   it('on POST /entries and POST /enrich, where nothing is enforced yet', async () => {
