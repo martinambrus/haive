@@ -1805,6 +1805,16 @@ describe('fix-loop guidance', () => {
       ).toBe(false);
     });
 
+    it('leaves a person-source request unmarked when its producer stored it unfenced', async () => {
+      const payload = await recorded({
+        ...request,
+        sourceStepId: '08d2-adversarial-qa-review',
+        unfencedLegacy: true,
+      });
+      expect('machineFenced' in payload).toBe(false);
+      expect('unfencedLegacy' in payload).toBe(false);
+    });
+
     it('fingerprints the diagnosis alone', async () => {
       const guided = await recorded({ ...request, guidance: GUIDANCE });
       expect(guided.fingerprint).toBe(fixLoopFingerprint(request.sourceStepId, request.diagnosis));

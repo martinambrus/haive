@@ -293,6 +293,7 @@ export type AdvanceStepResult =
       row: TaskStepRow;
       diagnosis: string;
       guidance?: string;
+      unfencedLegacy?: boolean;
       sourceStepId: string;
       /** When true the loop_back skips the max_fix_rounds cap + escalation gate (a
        *  human-driven restart, e.g. gate-2 developer reject). Omitted = capped. */
@@ -2189,7 +2190,13 @@ export function routesErrorToFixLoop(stepDef: StepDefinition, errorMessage: stri
 }
 
 export type FinishedRoutingVerdict =
-  | { kind: 'loop_back'; diagnosis: string; guidance?: string; uncapped?: boolean }
+  | {
+      kind: 'loop_back';
+      diagnosis: string;
+      guidance?: string;
+      uncapped?: boolean;
+      unfencedLegacy?: boolean;
+    }
   | { kind: 'revise'; targetStepId: string };
 
 /** The loop_back/revise verdict for this output: fixLoop unless suppressed, then restartLoop,
@@ -2212,7 +2219,14 @@ export async function finishedRoutingVerdict(
   }
   if (stepDef.restartLoop) {
     const restart = stepDef.restartLoop.evaluate(output);
-    if (restart) return { kind: 'loop_back', diagnosis: restart.diagnosis, uncapped: true };
+    if (restart) {
+      return {
+        kind: 'loop_back',
+        diagnosis: restart.diagnosis,
+        uncapped: true,
+        ...(restart.unfencedLegacy ? { unfencedLegacy: true } : {}),
+      };
+    }
   }
   if (stepDef.reviseLoop) {
     const target = stepDef.reviseLoop.evaluate(output);
@@ -2244,6 +2258,7 @@ export async function finishedStepResult(
       diagnosis: verdict.diagnosis,
       sourceStepId,
       ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
+      ...(verdict.unfencedLegacy ? { unfencedLegacy: true } : {}),
       ...(verdict.uncapped ? { uncapped: true } : {}),
     };
   }
@@ -3160,6 +3175,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         diagnosis: verdict.diagnosis,
         sourceStepId: meta.id,
         ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
+        ...(verdict.unfencedLegacy ? { unfencedLegacy: true } : {}),
         ...(verdict.uncapped ? { uncapped: true } : {}),
       };
     }

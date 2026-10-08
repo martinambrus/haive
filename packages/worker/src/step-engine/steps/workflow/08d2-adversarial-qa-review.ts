@@ -46,6 +46,8 @@ interface QaReviewDetect {
 interface QaReviewApply {
   decision: 'fix' | 'accept';
   diagnosis: string;
+  /** Set by an apply that fenced its agent findings; an output without it predates that. */
+  diagnosisFenced?: boolean;
   selectedCount: number;
   /** Shown findings a fix round deliberately left out. Stated rather than implied, for the
    *  same reason `filteredCount` is: a set that shrinks with no number beside it reads as
@@ -173,7 +175,12 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
   // returns null so the forward walk continues to insight triage / gate 2.
   restartLoop: {
     evaluate: (out) =>
-      out.decision === 'fix' && out.diagnosis.length > 0 ? { diagnosis: out.diagnosis } : null,
+      out.decision === 'fix' && out.diagnosis.length > 0
+        ? {
+            diagnosis: out.diagnosis,
+            ...(out.diagnosisFenced === true ? {} : { unfencedLegacy: true }),
+          }
+        : null,
   },
 
   // Only when 08d actually ran AND surfaced findings — nothing to review otherwise.
@@ -377,6 +384,12 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       { scope, count: chosen.length, waived: waived.length },
       'adversarial QA findings sent back to implementation',
     );
-    return { decision: 'fix', diagnosis, selectedCount: chosen.length, waivedCount: waived.length };
+    return {
+      decision: 'fix',
+      diagnosis,
+      diagnosisFenced: true,
+      selectedCount: chosen.length,
+      waivedCount: waived.length,
+    };
   },
 };

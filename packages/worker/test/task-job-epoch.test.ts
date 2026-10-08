@@ -14,7 +14,11 @@ import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import { finishedStepResult } from '../src/step-engine/step-runner.js';
+import { adversarialQaReviewStep } from '../src/step-engine/steps/workflow/08d2-adversarial-qa-review.js';
+import { gate2VerifyApprovalStep } from '../src/step-engine/steps/workflow/09-gate-2-verify-approval.js';
+import { loadFixLoopDiagnosis } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 function tableNameOf(table: unknown): string {
   if (table && typeof table === 'object') {
@@ -795,6 +799,102 @@ describe('the fix request a loop_back records', () => {
     expect('guidance' in requested()[0]!).toBe(false);
   });
 
+  describe('a diagnosis a step stored before it fenced its agent text', () => {
+    const QA = '08d2-adversarial-qa-review';
+    const stored = {
+      decision: 'fix',
+      diagnosis: 'Fix these findings:\n- sqli in src/a.ts',
+      selectedCount: 1,
+      waivedCount: 0,
+    };
+    const rowOf = (stepId: string, output: unknown) => ({ id: 'ts-1', round: 0, stepId, output });
+    const recordedThrough = async (
+      stepDef: StepDefinition,
+      output: unknown,
+    ): Promise<Record<string, unknown>> => {
+      const result = await finishedStepResult(
+        {} as never,
+        'task-1',
+        stepDef,
+        rowOf(stepDef.metadata.id, output) as never,
+      );
+      expect(result.status).toBe('loop_back');
+      h.state.readsAnswer = true;
+      vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+      await handleResult(db as never, ctx() as never, 'epoch-job-step', result as never);
+      return requested()[0]!;
+    };
+    const readBack = async (payload: Record<string, unknown>) => {
+      const eventsDb = {
+        select: () => ({ from: () => ({ where: () => ({ orderBy: async () => [{ payload }] }) }) }),
+      };
+      return loadFixLoopDiagnosis({
+        db: eventsDb,
+        taskId: 'task-1',
+        round: 1,
+      } as unknown as StepContext);
+    };
+
+    it('is recorded unmarked and read back as machine text', async () => {
+      const payload = await recordedThrough(adversarialQaReviewStep as never, stored);
+      expect(payload).toMatchObject({ sourceStepId: QA, round: 1 });
+      expect('machineFenced' in payload).toBe(false);
+      expect('unfencedLegacy' in payload).toBe(false);
+      expect((await readBack(payload))?.marked).toBe(false);
+    });
+
+    it('is recorded marked when the output says it was fenced', async () => {
+      const payload = await recordedThrough(adversarialQaReviewStep as never, {
+        ...stored,
+        diagnosisFenced: true,
+      });
+      expect(payload.machineFenced).toBe(true);
+      expect((await readBack(payload))?.marked).toBe(true);
+    });
+
+    it('is recorded marked for the gate-2 reject and the fix-loop gate as before', async () => {
+      const gate2 = await recordedThrough(gate2VerifyApprovalStep as never, {
+        decision: 'reject',
+        feedback: 'the button does nothing',
+      });
+      expect(gate2).toMatchObject({
+        sourceStepId: '09-gate-2-verify-approval',
+        machineFenced: true,
+      });
+    });
+
+    it('is recorded unmarked on the round-cap and oscillation parks too', async () => {
+      const result = await finishedStepResult(
+        {} as never,
+        'task-1',
+        adversarialQaReviewStep as never,
+        rowOf(QA, stored) as never,
+      );
+      h.state.readsAnswer = true;
+      h.state.maxFixRounds = 0;
+      await handleResult(db as never, ctx() as never, 'epoch-job-step', {
+        ...result,
+        uncapped: false,
+      } as never);
+      expect(h.state.events).toContain('fix_loop.escalated');
+      expect('machineFenced' in requested()[0]!).toBe(false);
+      h.state.inserted = [];
+      h.state.events = [];
+      h.state.maxFixRounds = undefined;
+      h.state.requestedEvents = [
+        { payload: { diagnosis: stored.diagnosis, sourceStepId: QA, round: 1 } },
+        { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
+      ];
+      await handleResult(db as never, ctx() as never, 'epoch-job-step', {
+        ...result,
+        row: { id: 'ts-1', round: 2 },
+        uncapped: false,
+      } as never);
+      expect(h.state.events).toContain('fix_loop.oscillation_detected');
+      expect('machineFenced' in requested()[0]!).toBe(false);
+    });
+  });
+
   describe('when a person answers the gate with a directive', () => {
     const gate = { id: 'ts-1', stepId: 'epoch-job-step', round: 1 };
     const priorRow = (over: Record<string, unknown>) => ({
@@ -820,6 +920,7 @@ describe('the fix request a loop_back records', () => {
         round: 2,
         guidance: GUIDANCE,
       });
+      expect(directive!.machineFenced).toBe(true);
       expect(String(directive!.diagnosis)).toContain('use the other flag');
       expect(String(directive!.diagnosis)).toContain('a defect');
       h.state.inserted = [];

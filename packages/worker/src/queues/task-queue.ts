@@ -1646,6 +1646,7 @@ export async function handleResult(
             sourceStepId: result.sourceStepId,
             round: nextRound,
             guidance: result.guidance,
+            unfencedLegacy: result.unfencedLegacy,
           });
           const waiting = await markTaskWaiting(
             db,
@@ -1704,6 +1705,7 @@ export async function handleResult(
           sourceStepId: result.sourceStepId,
           round: nextRound,
           guidance: result.guidance,
+          unfencedLegacy: result.unfencedLegacy,
         });
         const waiting = await markTaskWaiting(
           db,
@@ -1762,6 +1764,7 @@ export async function handleResult(
           sourceStepId: result.sourceStepId,
           round: nextRound,
           guidance: result.guidance,
+          unfencedLegacy: result.unfencedLegacy,
         });
         await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
           sourceStepId: result.sourceStepId,

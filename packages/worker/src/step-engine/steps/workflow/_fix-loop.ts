@@ -199,6 +199,8 @@ export interface FixLoopRequest {
   sourceStepId: string;
   round: number;
   guidance?: string;
+  /** The producer stored this diagnosis before it fenced its agent text; never marked. */
+  unfencedLegacy?: boolean;
 }
 
 /** Strip ANSI escape codes and normalise whitespace so raw tool output reads cleanly
@@ -338,7 +340,7 @@ export async function recordFixLoopRequest(
   sourceTaskStepId: string,
   req: FixLoopRequest,
 ): Promise<void> {
-  const { guidance, ...rest } = req;
+  const { guidance, unfencedLegacy, ...rest } = req;
   await db.insert(schema.taskEvents).values({
     taskId,
     taskStepId: sourceTaskStepId,
@@ -346,7 +348,9 @@ export async function recordFixLoopRequest(
     payload: {
       ...rest,
       ...(guidance?.trim() ? { guidance } : {}),
-      ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) ? { machineFenced: true } : {}),
+      ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) && !unfencedLegacy
+        ? { machineFenced: true }
+        : {}),
       fingerprint: legacyContentFingerprint(req.sourceStepId, req.diagnosis),
       fingerprintV2: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
     },

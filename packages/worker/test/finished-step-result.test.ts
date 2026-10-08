@@ -104,6 +104,23 @@ describe('finishedRoutingVerdict', () => {
     });
   });
 
+  it('carries unfencedLegacy from restartLoop into the loop_back', async () => {
+    const s = step({
+      restartLoop: { evaluate: () => ({ diagnosis: 'old text', unfencedLegacy: true }) },
+    });
+    expect(await finishedRoutingVerdict(fakeDb(false), 't', s, {})).toEqual({
+      kind: 'loop_back',
+      diagnosis: 'old text',
+      uncapped: true,
+      unfencedLegacy: true,
+    });
+    const r = row();
+    expect(await finishedStepResult(fakeDb(false), 't', s, r)).toMatchObject({
+      status: 'loop_back',
+      unfencedLegacy: true,
+    });
+  });
+
   it('returns revise with the target step id', async () => {
     const s = step({
       reviseLoop: { evaluate: () => ({ targetStepId: '03b-business-requirements' }) },
