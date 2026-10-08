@@ -165,6 +165,9 @@ function braceExpansions(glob: string): string[] | null {
 const namesSomething = (expansion: string): boolean =>
   /[^*?[\]{}()!+@|,/]/.test(expansion.replace(/\[[^\]]*\]/g, ''));
 
+const hasBadPathSegment = (glob: string): boolean =>
+  glob.split('/').some((segment) => segment === '' || segment === '.' || segment === '..');
+
 function globProblem(glob: string): string | null {
   const shown = JSON.stringify(glob.length > GLOB_MAX_LENGTH ? `${glob.slice(0, 40)}...` : glob);
   if (glob === '') return `glob ${shown} is empty`;
@@ -181,7 +184,7 @@ function globProblem(glob: string): string | null {
   if (glob.includes('"')) {
     return `glob ${shown} contains a double quote, which the matcher reads as quoting and drops`;
   }
-  if (glob.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+  if (hasBadPathSegment(glob)) {
     return `glob ${shown} has an empty, "." or ".." path segment; write it relative to the repository root, with no leading, trailing or doubled "/"`;
   }
   if (glob.startsWith('!') || glob.includes('!(')) {
@@ -190,6 +193,10 @@ function globProblem(glob: string): string | null {
   const expansions = braceExpansions(glob);
   if (expansions === null) {
     return `glob ${shown} has more than ${BRACE_EXPANSIONS_MAX} brace expansions; split it into separate globs`;
+  }
+  const badExpansion = expansions.find(hasBadPathSegment);
+  if (badExpansion !== undefined) {
+    return `glob ${shown} expands to ${JSON.stringify(badExpansion)}, which has an empty, "." or ".." path segment; every expansion has to be relative to the repository root, with no leading, trailing or doubled "/"`;
   }
   if (!expansions.every(namesSomething)) {
     return `glob ${shown} would match every file; a files rule has to name something, and mode "always" is for every file`;

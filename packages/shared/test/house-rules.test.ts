@@ -275,6 +275,8 @@ describe('validateHouseRuleGlobs', () => {
     ['a root-level wildcard', ['*.md']],
     ['an alternative before the wildcard', ['{src,lib}/**']],
     ['an empty alternative', ['file{,.bak}']],
+    ['an optional directory prefix in a brace group', ['{src/,}*.tpl.php']],
+    ['a brace alternative that holds a nested path', ['{src,lib/x}/**']],
     ['an extension group after a globstar', ['**/*.{twig,css}']],
     ['several brace groups that each name something', ['{src,lib}/**/*.{php,inc}']],
     ['a nested brace group', ['src/{a,{b,c}}/**']],
@@ -303,6 +305,11 @@ describe('validateHouseRuleGlobs', () => {
     ['a doubled slash', 'a//b', 'path segment'],
     ['a parent segment', '../x', 'path segment'],
     ['a parent segment inside', 'a/../b', 'path segment'],
+    ['an absolute path as a brace alternative', '{,src}/README.md', 'path segment'],
+    ['a ./ prefix as a brace alternative', '{.,src}/README.md', 'path segment'],
+    ['a doubled slash from an empty brace alternative', 'src/{a,}/x', 'path segment'],
+    ['a trailing slash inside a brace alternative', 'src/{a/,b}', 'path segment'],
+    ['an absolute path in a nested brace group', '{a,{b,/c}}/x', 'path segment'],
     ['a backslash', 'src\\*.ts', 'backslash'],
     ['a leading negation', '!src/**', 'negation'],
     ['an extglob negation', '!(*.md)', 'negation'],
@@ -345,6 +352,11 @@ describe('validateHouseRuleGlobs', () => {
     const reason = validateHouseRuleGlobs([glob]);
     expect(reason).toContain(fragment);
     if (glob !== '' && !/[\t\n]/.test(glob)) expect(reason).toContain(JSON.stringify(glob));
+  });
+
+  it('names the brace expansion that has the bad path segment', () => {
+    expect(validateHouseRuleGlobs(['{,src}/README.md'])).toContain('expands to "/README.md"');
+    expect(validateHouseRuleGlobs(['{.,src}/README.md'])).toContain('expands to "./README.md"');
   });
 
   it('refuses a glob of more than 200 characters', () => {
