@@ -186,10 +186,13 @@ intro that still forbids reverting them; `08d-adversarial-qa`, which has not loo
 
 **A DAG issue is "stuck" when a review makes no progress, not after a fixed count.** `06c-dag-execute`
 re-reviews an issue after each fix coder pass. A fix_required verdict counts as progress when it has
-fewer acceptance criteria with `passed === false` than the previous verdict; progress resets the
+fewer acceptance criteria with `passed === false` than the previous verdict, and only when its
+criteria list is non-empty and at least as long as the previous one: a reviewer that judged fewer
+criteria would otherwise read as progress while the same failures stood. Progress resets the
 stuck count to 1, anything else (an unparseable or empty criteria list included) adds one. Three
 stuck reviews accept the issue with debt; five iterations mark it `failed_unrecoverable` for the
-advisor. The count is keyed on the schema boolean, never on criterion wording, which varies between
+advisor. Both record the round they ended on, and `failed_unrecoverable` stores that round's review
+verdict, so the advisor reads the last review rather than an earlier one. The count is keyed on the schema boolean, never on criterion wording, which varies between
 rounds; MEASURED on the dev install, the file set a reviewer flags never repeated across rounds
 even when the same criteria kept failing, so a file key would have turned all five debt issues into
 failures. Before this, both counters rose together and the iteration cap was unreachable.
