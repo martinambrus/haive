@@ -110,7 +110,9 @@ function variablePart(prompt: string): { context: string; children: string[] } {
   const close = lines.indexOf(UNTRUSTED_CLOSE, open + 1);
   return {
     context: lines.slice(open + 1, close).join('\n'),
-    children: lines.filter((line) => /^\d+\. #\d+ .* \(`node:[0-9a-f-]{36}`\)$/.test(line)),
+    children: lines.filter((line) =>
+      /^\d+\. #\d+ .* \(`node:[0-9a-f-]{36}`(?:, [^)]*)?\)$/.test(line),
+    ),
   };
 }
 
@@ -536,6 +538,19 @@ describe('a sibling run too wide for one reply', () => {
     expect(prompt).not.toContain('Existing child');
   });
 
+  it('keeps the kind, status and taskable flag of each child in that single listing', () => {
+    const nodes = run('p', 2);
+    const prompt = buildSequencePrompt(
+      { parentId: 'p', parentTitle: 'P', childCount: 2 },
+      nodes,
+      computePlanSequence(nodes, []).sequenceById,
+    );
+    for (const child of nodes.slice(1)) {
+      const flags = [child.kind, child.status, ...(child.taskable ? ['taskable'] : [])].join(', ');
+      expect(prompt).toContain(`(\`node:${child.id}\`, ${flags})`);
+    }
+  });
+
   it('keeps the widest run it sends inside the provider-neutral budget, every title at its cap', () => {
     const nodes = [
       node(PARENT, null, 'P'),
@@ -708,12 +723,12 @@ describe('a sequencing wave', () => {
     expect(vi.mocked(computePlanSequence)).toHaveBeenCalledTimes(1);
     // Post-order over the whole plan: Alpha, Beta, Root, then Gamma, Delta, Other.
     expect(variablePart(dispatches[0]!.prompt).children).toEqual([
-      `0. #1 Alpha (\`node:${A}\`)`,
-      `1. #2 Beta (\`node:${B}\`)`,
+      `0. #1 Alpha (\`node:${A}\`, component, todo)`,
+      `1. #2 Beta (\`node:${B}\`, component, todo)`,
     ]);
     expect(variablePart(dispatches[1]!.prompt).children).toEqual([
-      `0. #4 Gamma (\`node:${C}\`)`,
-      `1. #5 Delta (\`node:${D}\`)`,
+      `0. #4 Gamma (\`node:${C}\`, component, todo)`,
+      `1. #5 Delta (\`node:${D}\`, component, todo)`,
     ]);
   });
 

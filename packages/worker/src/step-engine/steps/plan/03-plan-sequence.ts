@@ -431,7 +431,8 @@ export function buildSequencePrompt(
   };
   const children = childrenByParent(nodes).get(target.parentId) ?? [];
   const childLines = children.map(
-    (child, i) => `${i}. #${orderOf(child)} ${safeTitle(child.title)} (\`node:${child.id}\`)`,
+    (child, i) =>
+      `${i}. #${orderOf(child)} ${safeTitle(child.title)} (\`node:${child.id}\`, ${[child.kind, child.status, ...(child.taskable ? ['taskable'] : [])].join(', ')})`,
   );
   const context = buildPlanExpansionContext(
     nodes,
