@@ -975,6 +975,7 @@ describe('advanceStep LLM phase', () => {
     async function advanceAfter(
       cls: keyof typeof MODEL_CAPABILITY_HEADLINES,
       modelLimits: Record<string, unknown>,
+      createdAt: Date = new Date(),
     ) {
       const state = freshState();
       state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
@@ -987,7 +988,7 @@ describe('advanceStep LLM phase', () => {
         parsedOutput: null,
         endedAt: new Date(),
         errorMessage: `${MODEL_CAPABILITY_HEADLINES[cls]} — hint.`,
-        createdAt: new Date(),
+        createdAt,
       };
       const enqueued: CliExecJobPayload[] = [];
       const provider = {
@@ -1055,6 +1056,16 @@ describe('advanceStep LLM phase', () => {
 
     it('re-dispatches a no-image failure whose flag was learned after the run began', async () => {
       const { result, enqueued } = await advanceAfter('no_image_support', { vision: false });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-dispatches a no-image failure whose request was built before the learn, though the run started after it', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: new Date(Date.now() - 90_000).toISOString() },
+        new Date(Date.now() - 120_000),
+      );
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
     });

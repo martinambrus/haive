@@ -677,7 +677,7 @@ async function resolveLlmPhase(
             errTrimmed,
             params.providers,
             invocation.cliProviderId,
-            invocation.startedAt,
+            invocation.createdAt,
           )
         ) {
           ctx.logger.warn(
@@ -3869,7 +3869,7 @@ async function retryMiningAgents(
   // CLI_TIMEOUT_HEADLINE exists to name.
   const timedOutInvocationIds = new Set<string>();
   const truncatedInvocationIds = new Set<string>();
-  const startedAtByInvocation = new Map<string, Date | null>();
+  const createdAtByInvocation = new Map<string, Date | null>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
@@ -3877,11 +3877,12 @@ async function retryMiningAgents(
         id: schema.cliInvocations.id,
         errorMessage: schema.cliInvocations.errorMessage,
         startedAt: schema.cliInvocations.startedAt,
+        createdAt: schema.cliInvocations.createdAt,
       })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
-      startedAtByInvocation.set(p.id, p.startedAt);
+      createdAtByInvocation.set(p.id, p.createdAt);
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
       if (isOutputTruncationMessage(p.errorMessage?.trim())) truncatedInvocationIds.add(p.id);
@@ -3909,7 +3910,7 @@ async function retryMiningAgents(
           r.errorMessage?.trim() ?? '',
           params.providers,
           r.cliProviderId,
-          r.cliInvocationId ? startedAtByInvocation.get(r.cliInvocationId) : null,
+          r.cliInvocationId ? createdAtByInvocation.get(r.cliInvocationId) : null,
         )),
   );
   const targets: MiningRetryTargets = new Map();
@@ -4274,22 +4275,22 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
 const MAX_CAPABILITY_RETRIES = 2;
 
 /** True when re-dispatching this capability failure would send the request that just failed: the
- *  provider learned nothing since the run began (`learnedAt` is stamped by every learn), or its
- *  output-token ladder is spent, which stamps `learnedAt` but changes nothing. False for any other
- *  failure. */
+ *  provider learned nothing since the request was built (the run's `createdAt`; `learnedAt` is
+ *  stamped by every learn), or its output-token ladder is spent, which stamps `learnedAt` but
+ *  changes nothing. False for any other failure. */
 function repeatsCapabilityRequest(
   message: string,
   providers: CliProviderRecord[] | undefined,
   providerId: string | null,
-  startedAt: Date | null | undefined,
+  createdAt: Date | null | undefined,
 ): boolean {
   const cls = capabilityClassFromMessage(message);
   if (!cls) return false;
   const provider = providers?.find((p) => p.id === providerId);
   const limits = provider ? resolveModelLimits(provider) : null;
   if (cls === 'output_cap_reached' && limits?.maxOutputTokensExhausted === true) return true;
-  if (!limits?.learnedAt || !startedAt) return true;
-  return new Date(limits.learnedAt).getTime() < startedAt.getTime();
+  if (!limits?.learnedAt || !createdAt) return true;
+  return new Date(limits.learnedAt).getTime() < createdAt.getTime();
 }
 
 /** Count the most-recent CONSECUTIVE invocations for a step that failed on a model

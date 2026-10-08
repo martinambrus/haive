@@ -100,6 +100,7 @@ interface MockState {
     prompt: string;
     errorMessage?: string | null;
     startedAt?: Date | null;
+    createdAt?: Date;
     endedAt?: Date | null;
     exitCode?: number | null;
   }[];
@@ -1163,6 +1164,7 @@ describe('advanceStep agentMining output truncation and model capability', () =>
         prompt: 'review',
         errorMessage,
         startedAt: new Date(Date.now() - 60_000),
+        createdAt: new Date(Date.now() - 60_000),
         endedAt: new Date(),
         exitCode: 1,
       },
@@ -1214,6 +1216,21 @@ describe('advanceStep agentMining output truncation and model capability', () =>
         sharedPredicateStep([]),
         enqueued,
         learnedAt(-1000),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-rolls the agent whose request was built before the learn, though its run started after it', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 120_000);
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        learnedAt(-90_000),
       );
 
       expect(result.status).toBe('waiting_cli');
