@@ -32,7 +32,9 @@ every run the step still has live, which stops itself within seconds instead of 
 timeout, and fails every agent row still `pending` or `running`. Left so, such a row would make the
 api's Resume refuse the step as still running. It is one transaction in a Retry's lock order (runs,
 agents, step) and rolls back only when a Retry has reset the step to `pending`; a Stop that failed
-the step meanwhile still wants its agents ended.
+the step meanwhile still wants its agents ended. A concurrent pass can link a run between the run
+sweep and the agent update, so the agent update returns the runs its rows still name and a second
+sweep ends those; the rows it now holds keep out any later link.
 
 **A run's end and its mining result land together, on the row still linked to it.**
 `handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no

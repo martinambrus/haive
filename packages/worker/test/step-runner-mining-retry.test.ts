@@ -91,6 +91,8 @@ interface MockState {
   openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** What a task_step_agent_minings update's returning() yields, in place of one stub id. */
+  miningReturning?: (set: Record<string, unknown>) => unknown[];
   /** Every cli_invocations update with its condition, so a test can say which runs it selects. */
   invocationUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
@@ -274,6 +276,9 @@ function makeMockDb(state: MockState): Database {
                   if (lost() || refused()) return [];
                   record(cond);
                   if (tableName === 'task_steps') return [state.taskStepRow];
+                  if (tableName === 'task_step_agent_minings' && state.miningReturning) {
+                    return state.miningReturning(v);
+                  }
                   return tableName === 'task_step_agent_minings' ? [{ id: 'mock-updated' }] : [];
                 },
               };
@@ -2798,6 +2803,20 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(params).toEqual(expect.arrayContaining(['ts-1', 'agent_mining']));
     expect(sql).toContain('"task_step_id" = $');
     expect(sql).toContain('"mode" = $');
+    expect(sql).toContain('"ended_at" is null');
+    expect(sql).toContain('"superseded_at" is null');
+  });
+
+  it('also cancels a run a concurrent pass linked after the first sweep', async () => {
+    const state = freshState([]);
+    state.miningReturning = (set) =>
+      set.status === 'failed' ? [{ cliInvocationId: 'inv-linked-late' }] : [{ id: 'mock-updated' }];
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(2);
+    const { sql, params } = new PgDialect().sqlToQuery(cancels[1]!.where as SQL);
+    expect(params).toContain('inv-linked-late');
     expect(sql).toContain('"ended_at" is null');
     expect(sql).toContain('"superseded_at" is null');
   });

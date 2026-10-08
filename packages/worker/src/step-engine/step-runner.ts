@@ -2044,17 +2044,18 @@ async function releaseUnsentAgents(
  *  Best effort, so the step's own error is what is reported. */
 async function releaseStepAgents(db: Database, taskStepId: string, reason: string): Promise<void> {
   const now = new Date();
+  const cancelled = {
+    exitCode: 137,
+    errorMessage: 'cancelled: the step ended',
+    statusMessage: 'cancelled: the step ended',
+    endedAt: now,
+    supersededAt: now,
+  };
   try {
     await db.transaction(async (tx) => {
       await tx
         .update(schema.cliInvocations)
-        .set({
-          exitCode: 137,
-          errorMessage: 'cancelled: the step ended',
-          statusMessage: 'cancelled: the step ended',
-          endedAt: now,
-          supersededAt: now,
-        })
+        .set(cancelled)
         .where(
           and(
             eq(schema.cliInvocations.taskStepId, taskStepId),
@@ -2063,7 +2064,7 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
             isNull(schema.cliInvocations.supersededAt),
           ),
         );
-      await tx
+      const released = await tx
         .update(schema.taskStepAgentMinings)
         .set({
           status: 'failed',
@@ -2076,7 +2077,22 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
             eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
             inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
           ),
-        );
+        )
+        .returning({ cliInvocationId: schema.taskStepAgentMinings.cliInvocationId });
+      // A concurrent pass can link a run after the sweep above; the rows now locked keep out any later link.
+      const lateRuns = released.flatMap((r) => (r.cliInvocationId ? [r.cliInvocationId] : []));
+      if (lateRuns.length > 0) {
+        await tx
+          .update(schema.cliInvocations)
+          .set(cancelled)
+          .where(
+            and(
+              inArray(schema.cliInvocations.id, lateRuns),
+              isNull(schema.cliInvocations.endedAt),
+              isNull(schema.cliInvocations.supersededAt),
+            ),
+          );
+      }
       // A Stop also leaves the step failed and still wants these ended; only a Retry's reset is not ours.
       const [step] = await tx
         .select({ status: schema.taskSteps.status })
