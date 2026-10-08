@@ -1,9 +1,9 @@
 # Enforced house rules from the global KB, plus three found-not-fixed fixes
 
-> **In progress** 2026-10-03: approved. PR1 shipped (#398: the Drupal 7 facet family with the
-> major the token implies, plus an inherited-key guard on the facet alias lookup). PR2 shipped (#399:
-> the title list states its omission; global KB titles collapsed in the list and in step 11). PR4's
-> backend built (descriptions); its web half is PR4b. Line numbers are as of writing; resolve by symbol.
+> **In progress**, approved 2026-10-03. Shipped: PR1 (#398: the Drupal 7 facet family with the major
+> the token implies, plus an inherited-key guard on the facet alias lookup), PR2 (#399: the title list
+> states its omission), PR3 (#402), PR4 (#400: descriptions, backend and web) and PR5 (#432,
+> 2026-10-08). PR6 is in review; PR7 and PR8 follow. Line numbers are as of writing; resolve by symbol.
 
 ## Context
 
@@ -214,82 +214,69 @@ Decided by the user on 2026-10-03:
   - a race smoke modelled on `first-admin-race-smoke.ts`: two concurrent enforces give one 409, and
     enforcing against reactivating does not deadlock.
 
-### PR6. Dispatch: who gets which rule, the 07b check, the per-run record (migration 0173)
-- **Roles table.** `HOUSE_RULE_ROLES` goes in `shared/src/step-engine/types.ts` beside
-  `STEP_CLI_ROLES`, and steps reference it the way they reference `cliRoles`.
-  - **write:** 04, 05 corrector, 05a, 07, 07a (simplifier and fixup), 07b fixer, 08a fixer, 08b, 08e,
-    the 06c coder (level coder and fix coder), and retry_ai under a role constant of its own, never
-    `default`.
+### PR6. Dispatch: who gets which rule, the 07b check, the per-run record (migration 0176)
+The topic file `docs/architecture/global-kb.md` ("House rules in prompts") holds the shipped detail;
+this section keeps the decisions.
+- **Roles table.** `HOUSE_RULE_ROLES` sits in `shared/src/step-engine/types.ts` beside
+  `STEP_CLI_ROLES`.
+  - **write:** 04, the 05 corrector, 05a, 06b (sprint planning writes like 04), the 06c coder (level
+    coder and fix coder, both role `coder`), 07, 07a (simplifier and fixup), the 07b fixer, the 08a
+    fixer, 08b and 08e. retry_ai takes the mode of the pass it repairs; an exempt one gets none.
   - **review:** the 07b validator.
-  - Mining dispatches are not opted in.
-  - `HOUSE_RULE_EXEMPT` gives a reason for each exemption: merge fixers, plan merge, 09_5/09_5b, 11d,
-    kb_author, advisor, replanner.
-  - Ratchet: every step that declares `file_write` must be in one table or the other.
-- **Wiring.** Every dispatch site already knows (step, role) for `resolvePreferredCli`, so each sets
-  `DispatchRequest.houseRules` from the table.
-- **Resolver.** One global-KB read per dispatch, `resolveGlobalKbContext`, returns:
-  - the title list;
-  - the enforced candidates from a query of their own, so an enforced rule never falls outside the
-    400-row scan;
-  - a status of ok, disabled or unavailable.
-
-  It never rejects.
-- **Selection** (pure):
-  - `always` rules are in.
-  - A `files` rule is in when a glob matches the dispatch's known files, using picomatch with
-    `dot: true` as secret masking does. Known files are the change collector's git half for the
-    dispatch's worktree, plus a DAG issue's `estimated_files`.
-  - A per-prompt byte budget drops whole entries and says which. The budget is set from the measured
-    p95 prompt size of 07, 07b and 08b.
-- **Injection** (`orchestrator/house-rules.ts`):
-  - The block sits at position 0 directly under the agent-rules block. It is not gated on rag, and it
-    is unwrapped because the text is approved by an admin.
-  - A stored block is replaced only at position 0. A marker quoted anywhere else must not suppress
-    injection.
-  - One `stripHaivePreamble()` is used by the isolation scan and by the persona bookkeeping reads.
-  - The closing marker is escaped. Titles and descriptions are collapsed. An `anti_pattern` entry
-    carries its category on a line of its own, never as a title prefix, which turned "no inline
-    svgs" into its opposite.
-- **Write framing:**
-  - Follow the rules in what you write or specify, on the lines you write.
-  - Do not rewrite untouched code to fit them; report it as similar sites.
-  - A spec never restates the rules as requirements; every implementer and validator receives them.
-  - When the approved spec requires something a rule forbids, follow the spec and report the
-    conflict.
-- **Review framing (07b validator):**
-  - Check the written lines against every rule; a file with no line note counts as wholly written.
-  - A violation is an issue at severity high that names the rule.
-  - Violations elsewhere, and spec/rule conflicts, go to the report.
-  - 07b's `ISSUES_FOUND` then blocks through its own fixer and the fix loop.
-- **Isolation, prompt size, record:**
-  - The injected text is scanned as external text, and only when it is injected.
-  - When the prompt is too large, the fallback drops house rules first, then agent rules.
-  - The stamp `{mode, entries:[{id,hash,why}], omitted, reason?}` is written to
-    `cli_invocations.house_rules` by the `started_at` UPDATE. Migration 0173 declares the column after
-    AIDE²'s `haive_build`. NULL means the run was not opted in or predates this.
-- **Gate 2** gets a row, "House rules: enforced (N) / not enforced (reason)", read from the latest
-  validator invocation's stamp. When the KB cannot be read, one `house_rules.unavailable` event is
-  written per task.
-- **Tests:**
-  - `dispatcher.test.ts`:
-    - both framings;
-    - off or absent gives a `toBe`-identical prompt, digest included;
-    - injection is not gated on rag;
-    - block order;
-    - a replay carries one block, and none after un-enforcing, including when a new adapter applies;
-    - a quoted marker elsewhere does not suppress injection;
-    - the fallback ladder;
-    - isolation ends for a rule that names an agent path, but not for a stored block;
-    - sub-agent kinds get nothing.
-  - `agent-isolation-rule.test.ts`.
-  - `prompt-agent-paths.test.ts`: the named list, and "nine appends, five external".
-  - `house-rules.test.ts`, mirroring `agent-rules.test.ts`.
-  - Resolver: an enforced rule older than 400 rows; lapsed rules are excluded; budget drop order;
-    status values.
-  - The roles ratchet.
-  - DAG roles.
-  - Loop iteration 0 is review and 1 is write.
-  - The `started_at` UPDATE writes both stamps. No test covers `agentRules` there today.
+  - **Exempt, with reasons** (`HOUSE_RULE_EXEMPT`): merge fixers (00a, 12, 13, the 06c level
+    merge), plan merge, 09_5/09_5b/11d, the KB author, the 06c reviewer, issue advisor and
+    replanner, and the 08a tester (its scripts verify the change and are not part of it). The 06c
+    reviewer not seeing the rules is a recorded risk; 07b checks the merged change.
+  - A ratchet keeps every `file_write` (step, role) in one table or the other, and a source guard
+    makes every `resolveTaskDispatch` call pass `houseRulesFor(...)` or a named
+    `houseRulesOptOut(reason)`, since the ratchet cannot see hard-coded capability arrays. Mining
+    dispatches are opted out.
+- **Resolver.** One bounded read per dispatch, `resolveGlobalKbContext`, returns the title list, the
+  enforced candidates from a query of their own and a status (ok, disabled, unavailable); it never
+  rejects. A 3 s connect, a 3 s statement timeout and a 6 s deadline, because a half-open external
+  store stalled each dispatch 30 s (MEASURED). A failure is recorded by error class, never its
+  message (it names the admin-only host). Rows are re-vetted: an external store's approvals are
+  trusted unsigned.
+- **Selection** (pure): `always` rules are in; a `files` rule is in when a glob matches the change
+  (gate 3's `git status -z` plus the branch against its fork point, since a DAG tree is clean at 07b)
+  or a DAG issue's `estimated_files`; a slashless glob matches a name at any depth; an unreadable
+  change puts every `files` rule in unscoped. The budget is 16,384 bytes per prompt: `always` rules
+  are never dropped, written-file matches are kept before estimate-only ones and smaller before
+  larger, and what is left out is named in the block and the stamp.
+- **Injection** (`orchestrator/house-rules.ts`): directly under the agent-rules block, not gated on
+  rag, unfenced; replaced only at position 0 (`stripHaivePreamble` for replays, the isolation scan
+  and persona bookkeeping). Each entry renders as `### Rule <id8>: <title>`, a `Category:` line (never
+  a title prefix: "Anti-pattern — avoid: no inline svgs" read as its opposite), the description, the
+  scope line and the approved body; the closing marker is escaped.
+- **Framings.** Write: follow the rules on the lines you write; untouched breaches go to similar
+  sites; a review finding or a check's diagnosis never licenses a breach; only the approved spec or a
+  person's directive (a fix a person directs included) can require one, then follow it and report
+  the conflict; a spec never restates the rules. Review: check every written line, a `files` rule
+  only on files its globs match; a violation is a `high` issue with `file: "path:line"` and `rule`;
+  debt and a check's diagnosis or honored constraint never waive a rule (a person's counts as a
+  directive); spec- or person-required violations go to a structured `rule_conflicts`, never to the
+  issues or the cut report.
+- **07b.** Parses `rule` and `rule_conflicts` tolerantly, stores `ruleConflicts` and the validator's
+  own `validatorInvocationId` (a fixer pass carries both). Haive raises an issue naming a rule of
+  the pass's own stamp to `high`, and a VALID pass with one to ISSUES_FOUND, so a violation blocks
+  through the fixer and the fix loop.
+- **Isolation, prompt size, record.** Injected text is external text for agent isolation. A prompt
+  too large for an argv-only CLI drops the house block first, then the agent rules; since gemini
+  reads stdin this is a guard. The stamp `{mode, entries:[{id, hash, title, why}], omitted:[{id,
+  hash, title, why}], reason?, errorClass?}` goes to `cli_invocations.house_rules` (migration 0176;
+  0173 was taken) through the `started_at` UPDATE; NULL means not opted in. One
+  `house_rules.unavailable` event per task, under an advisory lock.
+- **The gates.** Gate 2's "House rules" row is read from the stamp of the invocation 07b's output
+  names: CONFLICT, VIOLATED, NOT CHECKED, OFF, PARTIAL or ENFORCED, and all but OFF and ENFORCED
+  hold Approve off its default. `quick_bugfix` runs no gate 2, so gate 3 shows the row when no
+  gate-2 output exists, the rule similar sites and insights already follow.
+- **Panel.** The enforce panel prints the rule through the same render (a browser-safe subpath) for
+  the mode and globs being drafted.
+- **Tests** follow this list: both framings and byte identity when off, not opted or out of scope
+  (also against main's prompts in the harness); block order; replays; a quoted marker; the ladder;
+  isolation; the bounded read on a socket that never answers; the budget order and notice;
+  slashless globs; an unreadable change; retry_ai; the source guard; the once-only event; 07b's
+  parse, carry and backstop; the row table and both gates.
 
 ### PR7. Similarity for writers, record-only
 - **Scoring.** For each write-mode dispatch, every enforced `files` rule not already selected gets a
@@ -327,15 +314,14 @@ Decided by the user on 2026-10-03:
   - Repeat in `ddev/ddev-webserver` as uid 1000.
 - **PR5:** a browser check through Chrome MCP of enforce, lapse and re-enforce, at phone and tablet
   widths too.
-- **PR6:** with "no inline svgs" enforced `files` on templates and stylesheets, run the real
-  `resolveTaskDispatch` against the live DB for a D7 task:
-  - 07 and 07b get the rule when a `.twig`/`.css` file is in the change;
-  - 05's reviewer passes get nothing;
-  - with the switch off the prompt is identical;
-  - the stamp has the right shape.
-
-  Then one real `quick_bugfix` task on a D7 repo whose request invites an inline SVG. It costs tokens,
-  so I'll ask before starting it. Check 07's output, 07b's issue, the stamps and the gate-2 row.
+- **PR6:** the zero-token harness `.claude/tmp/house-rules/t6/harness/` (H1-H14) drives the real
+  dispatch, 07b and gates on a scratch database. Live, once the dev stack carries it: give "no inline
+  svgs" a description, enforce it `files` on `**/*.tpl.php` (a D7 template is `.tpl.php`, not
+  `.twig`) and stylesheets, and declare the site's own theme in `.haive-data/dependency-ownership.json`
+  (a D7 theme outside `custom/` is third-party by default, so a violation there would go to a person
+  rather than the fixer). Then one real `quick_bugfix` task on a D7 repo whose request invites an
+  inline SVG. It costs tokens, so I'll ask before starting it. Check 07's and 07b's stamps, 07b's
+  issue and the House rules row at gate 3 (quick_bugfix runs no gate 2).
 - **PR7:** the recorded scores on the next real writer runs feed the measurement checkpoint.
 
 ## Not in this plan (verified; each becomes its own task)
