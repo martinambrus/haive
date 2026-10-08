@@ -80,10 +80,11 @@ const WRITE_FRAMING = [
 ].join('\n');
 
 const REVIEW_FRAMING = [
-  `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Check every line this change wrote against every rule below; a file listed with no line note counts as wholly written. A rule that lists files applies only to the files its globs match.`,
+  `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Check every line this change wrote, and every file it deleted, against every rule below; a file listed with no line note counts as wholly written. A rule that lists files applies only to the files its globs match.`,
   'Report each violation as an issue with severity exactly "high", "file" as "path:line" and "rule" as the rule\'s id, the code between "### Rule " and the colon in its heading.',
   "A known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check. A diagnosis or an honored constraint that came from a person counts as a person's directive. A violation outside the written lines goes to your report, never to the issues.",
   'When the approved spec or a person\'s directive requires a violation, do not list it as an issue: list it under "rule_conflicts" as {"rule": "<id>", "file": "path:line", "reason": "<why>"}.',
+  'The "rule" field of an issue and the top-level "rule_conflicts" list extend the JSON shape the output contract below gives: add both, even where it says to return exactly that shape.',
 ].join('\n');
 
 const framingOf = (mode: HouseRuleMode): string =>

@@ -19,8 +19,8 @@ import {
 const log = logger.child({ module: 'house-rules-dispatch' });
 
 /** What git reports dirty or untracked (gate 3's argv, NUL separated so no path is quoted) plus what
- *  the branch holds against its fork point, which is all of a DAG task's work. Null when a read
- *  fails: absent is not "unchanged". */
+ *  the branch holds against its fork point, which is all of a DAG task's work. A deleted path counts:
+ *  a rule can cover what a task removes. Null when a read fails: absent is not "unchanged". */
 export async function readChangedFiles(
   tree: string,
   baseBranch: string | null,
@@ -33,11 +33,9 @@ export async function readChangedFiles(
     '--untracked-files=all',
   ]);
   if (status.code !== 0) return null;
-  const committed = await readChangedPaths(tree, baseBranch);
+  const committed = await readChangedPaths(tree, baseBranch, { includeDeleted: true });
   if (committed === null) return null;
-  const dirty = parsePorcelainZ(status.stdout)
-    .filter((entry) => entry.x !== 'D' && entry.y !== 'D')
-    .map((entry) => entry.path);
+  const dirty = parsePorcelainZ(status.stdout).map((entry) => entry.path);
   return [...new Set([...dirty, ...committed])];
 }
 

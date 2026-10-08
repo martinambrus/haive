@@ -19,6 +19,7 @@ const {
   isDocsOnlyChange,
   NO_CHANGE_SET_FALLBACK,
   parseChangedLineRanges,
+  readChangedPaths,
 } = await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
@@ -899,6 +900,36 @@ describe('collectChangedLineMap', () => {
       await writeFile(path.join(dir, 'has space.php'), 'x\n');
 
       expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    });
+  });
+
+  describe('readChangedPaths', () => {
+    const base = { 'kept.php': 'a\nb\n', 'gone.php': 'x\n', 'gone-in-commit.php': 'y\n' };
+
+    async function removeTwoAndEditOne(dir: string): Promise<void> {
+      await rm(path.join(dir, 'gone-in-commit.php'));
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: remove it']);
+      await rm(path.join(dir, 'gone.php'));
+      await writeFile(path.join(dir, 'kept.php'), 'a\nB\n');
+    }
+
+    it('leaves a deleted path out, committed or removed from the working tree', async () => {
+      await inRepo(base, async (dir) => {
+        await removeTwoAndEditOne(dir);
+
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.php']);
+      });
+    });
+
+    it('names a deleted path, committed or removed from the working tree, when asked', async () => {
+      await inRepo(base, async (dir) => {
+        await removeTwoAndEditOne(dir);
+
+        const paths = await readChangedPaths(dir, 'main', { includeDeleted: true });
+
+        expect([...(paths ?? [])].sort()).toEqual(['gone-in-commit.php', 'gone.php', 'kept.php']);
+      });
     });
   });
 });

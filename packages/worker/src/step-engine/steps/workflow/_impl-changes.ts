@@ -334,10 +334,12 @@ async function readChangeDiff(
   }
 }
 
-/** A binary or mode-only change prints no ---/+++ line, so only this list names its path. */
+/** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
+ *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
+  options: { includeDeleted?: boolean } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(worktreePath, baseBranch);
   if (!base) return null;
@@ -348,7 +350,7 @@ export async function readChangedPaths(
     const fields = stdout.split('\0');
     const paths: string[] = [];
     for (let i = 0; i + 1 < fields.length; i += 2) {
-      if (fields[i] !== 'D') paths.push(fields[i + 1]!);
+      if (fields[i] !== 'D' || options.includeDeleted) paths.push(fields[i + 1]!);
     }
     return paths;
   } catch {

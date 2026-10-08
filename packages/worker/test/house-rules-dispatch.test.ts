@@ -76,6 +76,7 @@ describe('readChangedFiles', () => {
     await put(dir, 'new/deep/file.css');
     await put(dir, 'my file.php');
     expect((await readChangedFiles(dir, 'main'))!.sort()).toEqual([
+      'docs/old.md',
       'my file.php',
       'new/deep/file.css',
       'src/committed.php',
@@ -95,22 +96,29 @@ describe('readChangedFiles', () => {
     expect(files.some((f) => f.startsWith('"'))).toBe(false);
   });
 
-  it('leaves out a file the change deleted, staged or not', async () => {
+  it('names a file the change deleted: in a commit on the branch, staged, or in the working tree', async () => {
     const dir = await repo();
     git(dir, 'rm', '-q', 'a.txt');
     await rm(path.join(dir, 'b.txt'));
     const files = (await readChangedFiles(dir, 'main'))!;
-    expect(files).not.toContain('a.txt');
-    expect(files).not.toContain('b.txt');
-    expect(files).not.toContain('docs/old.md');
+    expect(files).toContain('docs/old.md');
+    expect(files).toContain('a.txt');
+    expect(files).toContain('b.txt');
   });
 
-  it('names the destination of a rename', async () => {
+  it('names a file the branch added and the working tree then deleted, which the fork point never held', async () => {
+    const dir = await repo();
+    await rm(path.join(dir, 'src/committed.php'));
+    expect(git(dir, 'diff', '--name-only', 'main', '--', 'src/committed.php')).toBe('');
+    expect(await readChangedFiles(dir, 'main')).toContain('src/committed.php');
+  });
+
+  it('names both sides of a rename, since its source is a deletion', async () => {
     const dir = await repo();
     git(dir, 'mv', 'a.txt', 'renamed.txt');
     const files = (await readChangedFiles(dir, 'main'))!;
     expect(files).toContain('renamed.txt');
-    expect(files).not.toContain('a.txt');
+    expect(files).toContain('a.txt');
   });
 
   it('holds only the dirty files when the fork point is unknown, which is all the work of a single agent', async () => {
@@ -254,6 +262,29 @@ describe('selectForDispatch', () => {
     );
     expect(out.entries.map((e) => e.why)).toEqual([{ scope: 'files', glob: '**/*.tpl.php' }]);
     expect(h.treeCalls).toHaveLength(1);
+  });
+
+  it('selects a files rule that only a deleted file matches, with that glob', async () => {
+    const dir = await repo();
+    await rm(path.join(dir, 'b.txt'));
+    h.tree = dir;
+    h.setup = { output: { baseBranch: 'main' } };
+    const scoped = (title: string, globs: string[]) =>
+      rule({ title, spec: { mode: 'files', globs } });
+    const out = await select(
+      { mode: 'review' },
+      kb({
+        rules: [
+          scoped('Deleted in a commit', ['docs/**']),
+          scoped('Deleted in the working tree', ['b.txt']),
+          scoped('Nothing changed here', ['**/*.twig']),
+        ],
+      }),
+    );
+    expect(Object.fromEntries(out.entries.map((e) => [e.title, e.why]))).toEqual({
+      'Deleted in a commit': { scope: 'files', glob: 'docs/**' },
+      'Deleted in the working tree': { scope: 'files', glob: 'b.txt' },
+    });
   });
 
   it('shows every files rule, unscoped, when the change cannot be read', async () => {

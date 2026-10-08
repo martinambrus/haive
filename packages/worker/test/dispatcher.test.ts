@@ -1171,7 +1171,9 @@ describe('house rules injection', () => {
       }).prompt;
       expect(houseOf(write)).toContain('lines you write or specify');
       expect(houseOf(review)).toContain('Check every line this change wrote');
+      expect(houseOf(review)).toContain('extend the JSON shape the output contract below gives');
       expect(houseOf(review)).not.toContain('lines you write or specify');
+      expect(houseOf(write)).not.toContain('output contract');
     });
 
     it('records what it carries on the spec', () => {

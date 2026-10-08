@@ -551,7 +551,9 @@ describe('the block', () => {
     expect(w).not.toMatch(/severity|rule_conflicts/);
 
     const r = framingOf(review);
-    expect(r).toMatch(/Check every line this change wrote against every rule/);
+    expect(r).toMatch(
+      /Check every line this change wrote, and every file it deleted, against every rule/,
+    );
     expect(r).toMatch(/no line note counts as wholly written/);
     expect(r).toMatch(/applies only to the files its globs match/);
     expect(r).toMatch(/severity exactly "high"/);
@@ -566,6 +568,14 @@ describe('the block', () => {
     expect(r).toMatch(
       /"rule_conflicts" as \{"rule": "<id>", "file": "path:line", "reason": "<why>"\}/,
     );
+    // 07b's output contract says "EXACTLY this shape" and lists neither field, so one sentence must say they extend it.
+    const extension = r.split('\n').filter((line) => line.includes('output contract below'));
+    expect(extension).toHaveLength(1);
+    expect(extension[0]).toMatch(/"rule"/);
+    expect(extension[0]).toMatch(/"rule_conflicts"/);
+    expect(extension[0]).toMatch(/extend the JSON shape the output contract below gives/);
+    expect(extension[0]).toMatch(/even where it says to return exactly that shape/);
+    expect(w).not.toMatch(/output contract/);
     expect(r).not.toMatch(/similar/i);
   });
 
