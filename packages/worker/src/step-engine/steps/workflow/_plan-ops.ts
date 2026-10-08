@@ -113,7 +113,7 @@ export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): 
     case 'unlink':
       return `Remove the ${String(op.kind)} link ${name(op.fromRef)} → ${name(op.toRef)}`;
     case 'delete':
-      return `Delete ${name(op.nodeRef)} and everything under it`;
+      return `Delete ${name(op.nodeRef)} (only if nothing is under it)`;
     default:
       // Never a silent empty label: an op nobody can read is one nobody should
       // be able to approve by accident.

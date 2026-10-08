@@ -57,7 +57,7 @@ describe('describePlanOp', () => {
       describePlanOp({ op: 'unlink', fromRef: KNOWN, toRef: KNOWN, kind: 'affects' }, titles),
     ).toContain('Remove the affects link');
     expect(describePlanOp({ op: 'delete', nodeRef: KNOWN }, titles)).toBe(
-      'Delete **`Auth service`** and everything under it',
+      'Delete **`Auth service`** (only if nothing is under it)',
     );
   });
 
@@ -91,7 +91,7 @@ describe('describePlanOp', () => {
     // ends early, and the rest of the label renders as markdown in the form.
     const withTick = new Map([[KNOWN, 'The `data` blob']]);
     expect(describePlanOp({ op: 'delete', nodeRef: KNOWN }, withTick)).toBe(
-      'Delete **``The `data` blob``** and everything under it',
+      'Delete **``The `data` blob``** (only if nothing is under it)',
     );
   });
 
@@ -113,7 +113,7 @@ describe('describePlanOp', () => {
   it('shortens an id it has no title for rather than printing 36 characters', () => {
     expect(
       describePlanOp({ op: 'delete', nodeRef: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }, titles),
-    ).toBe('Delete **`bbbbbbbb…`** and everything under it');
+    ).toBe('Delete **`bbbbbbbb…`** (only if nothing is under it)');
   });
 });
 
