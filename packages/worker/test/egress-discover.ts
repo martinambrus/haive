@@ -19,7 +19,16 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { configService, secretsService, type CliNetworkPolicy } from '@haive/shared';
+import {
+  CONTAINER_FAMILY,
+  SHARED_VOLUME,
+  configService,
+  containerName,
+  networkName,
+  secretsService,
+  volumeName,
+  type CliNetworkPolicy,
+} from '@haive/shared';
 import { initDatabase } from '../src/db.js';
 import { initRedis, closeRedis } from '../src/redis.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
@@ -32,10 +41,10 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
 const PROMPT = 'Reply with exactly one word: PONG';
 const OFFLINE: CliNetworkPolicy = { mode: 'none', domains: [], ips: [] };
-const CONFIG_VOLUME = 'haive_squid_configs';
+const CONFIG_VOLUME = volumeName(SHARED_VOLUME.squidConfigs);
 const CONFIG_WORKER_ROOT = '/var/lib/haive/squid-configs';
-const SANDBOX_NET = process.env.SANDBOX_NETWORK ?? 'haive-sandbox';
-const UPSTREAM_NET = 'haive-network';
+const SANDBOX_NET = process.env.SANDBOX_NETWORK ?? networkName('sandbox');
+const UPSTREAM_NET = networkName('network');
 
 const PERMISSIVE_CONF = `http_port 3128
 
@@ -80,7 +89,7 @@ async function startLoggingProxy(): Promise<{
   stop: () => Promise<void>;
 }> {
   const id = randomUUID();
-  const name = `haive-egress-discover-${id.slice(0, 8)}`;
+  const name = containerName(CONTAINER_FAMILY.egress, 'discover', id.slice(0, 8));
   const dir = join(CONFIG_WORKER_ROOT, id);
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, 'squid.conf'), PERMISSIVE_CONF, 'utf8');
