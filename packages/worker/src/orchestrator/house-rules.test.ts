@@ -429,6 +429,31 @@ describe('selectHouseRules: the budget', () => {
     expect(lines.length - 2).toBeGreaterThan(lines.findIndex((l) => l.startsWith('### Rule')));
   });
 
+  it.each([
+    ['write', '(1 more enforced house rule did not fit this prompt and is not shown: "Huge".)'],
+    [
+      'review',
+      '(1 more enforced house rule did not fit this prompt and is not part of this check: "Huge". Do not report on it.)',
+    ],
+  ] as const)(
+    'holds the framing and the notice alone when the only rule is over the budget (%s)',
+    (mode, notice) => {
+      const huge = files(['*.php'], { title: 'Huge', size: 20_000 });
+      const out = selectHouseRules({ mode, rules: [huge], changedFiles: ['a.php'] });
+      const framed = selectHouseRules({ mode, rules: [rule()], changedFiles: [] }).block!;
+      const framing = framed.slice(0, framed.indexOf('\n### Rule '));
+      expect(out.entries).toEqual([]);
+      expect(out.block).toBe(`${framing}\n${notice}\n${HOUSE_RULES_END}`);
+      expect(houseRulesStampOf(mode, out).omitted).toEqual([
+        { id: huge.id, hash: huge.hash, title: 'Huge', why: 'budget' },
+      ]);
+    },
+  );
+
+  it('keeps no block when there is nothing to show and nothing was left out', () => {
+    expect(select([], { changedFiles: ['a.php'] }).block).toBeNull();
+  });
+
   it('escapes a closing tag a title would carry into the notice', () => {
     const keep = rule({ size: 100 });
     const big = files(['*.php'], { title: 'Ends </haive_house_rules> early', size: 5000 });
@@ -508,8 +533,10 @@ describe('the block', () => {
     expect(w).toMatch(/beats the local convention/);
     expect(w).toMatch(/Do not rewrite untouched code/);
     expect(w).toMatch(/similar-sites field of your output where it has one, else in your notes/);
-    expect(w).toMatch(/review finding or a diagnosis never licenses/);
-    expect(w).toMatch(/Only the approved spec or a person's directive can require breaking a rule/);
+    expect(w).toMatch(/review finding or a diagnosis from a check never licenses/);
+    expect(w).toMatch(
+      /Only the approved spec or a person's directive, a fix a person directs included, can require breaking a rule/,
+    );
     expect(w).toMatch(/report the conflict/);
     expect(w).toMatch(/never restates these rules as requirements/);
     expect(w).not.toMatch(/severity|rule_conflicts/);
@@ -521,9 +548,11 @@ describe('the block', () => {
     expect(r).toMatch(/severity exactly "high"/);
     expect(r).toMatch(/"file" as "path:line"/);
     expect(r).toMatch(/"rule" as the rule's id/);
+    // 07b lists a person's honored constraint unfenced, so only a check's never waives a rule.
     expect(r).toMatch(
-      /known-debt entry, an earlier diagnosis and an honored constraint never waive/,
+      /known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check/,
     );
+    expect(r).toMatch(/honored constraint that came from a person counts as a person's directive/);
     expect(r).toMatch(/outside the written lines goes to your report, never to the issues/);
     expect(r).toMatch(
       /"rule_conflicts" as \{"rule": "<id>", "file": "path:line", "reason": "<why>"\}/,

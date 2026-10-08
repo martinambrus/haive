@@ -52,15 +52,21 @@ async function openAndRun<T>(
   onOpen?.(conn);
   try {
     const key = storeKey(settings);
-    let ready = schemaReady.get(key);
-    if (!ready) {
-      ready = ensureGlobalKbSchema(conn).catch((err: unknown) => {
+    // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
+    const shared = schemaReady.get(key);
+    if (shared) {
+      await shared;
+    } else if (opts.deadlineMs === undefined) {
+      const ready = ensureGlobalKbSchema(conn).catch((err: unknown) => {
         schemaReady.delete(key);
         throw err;
       });
       schemaReady.set(key, ready);
+      await ready;
+    } else {
+      await ensureGlobalKbSchema(conn);
+      if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }
-    await ready;
     const db = createGlobalKbDb(conn.pg);
     return await fn({ conn, db, settings });
   } finally {

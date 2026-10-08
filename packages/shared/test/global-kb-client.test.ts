@@ -221,3 +221,65 @@ describe('withGlobalKb with limits for one call', () => {
     await vi.waitFor(() => expect(h.ends).toEqual([{ timeout: 0 }]), { timeout: 2000 });
   });
 });
+
+describe('the schema ensure of a call with a deadline', () => {
+  it('does not fail an unbounded call when its own deadline destroys the pool mid-ensure', async () => {
+    let destroyed!: (err: Error) => void;
+    let started!: () => void;
+    const ensureStarted = new Promise<void>((resolve) => (started = resolve));
+    h.ensure
+      .mockImplementationOnce(() => {
+        started();
+        return new Promise<void>((_, reject) => (destroyed = reject));
+      })
+      .mockResolvedValue(undefined);
+    h.onEnd = () => destroyed(new Error('connection destroyed'));
+    const withGlobalKb = await load();
+
+    const bounded = withGlobalKb(haiveDb, async () => 'bounded', { deadlineMs: 60 });
+    await ensureStarted;
+    const unbounded = withGlobalKb(haiveDb, async () => 'unbounded');
+
+    await expect(bounded).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    await expect(unbounded).resolves.toBe('unbounded');
+  });
+
+  it('waits for the ensure another call started and runs none of its own', async () => {
+    let finish!: () => void;
+    h.ensure.mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)));
+    const withGlobalKb = await load();
+    const ran: string[] = [];
+
+    const unbounded = withGlobalKb(haiveDb, async () => void ran.push('unbounded'));
+    await vi.waitFor(() => expect(h.ensure).toHaveBeenCalledTimes(1));
+    const bounded = withGlobalKb(haiveDb, async () => void ran.push('bounded'), {
+      deadlineMs: 5000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(ran).toEqual([]);
+
+    finish();
+    await Promise.all([unbounded, bounded]);
+    expect(ran.sort()).toEqual(['bounded', 'unbounded']);
+    expect(h.ensure).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the ensure it ran itself once it succeeded, so later calls run none', async () => {
+    h.ensure.mockResolvedValue(undefined);
+    const withGlobalKb = await load();
+    await withGlobalKb(haiveDb, async () => undefined, { deadlineMs: 5000 });
+    await withGlobalKb(haiveDb, async () => undefined);
+    await withGlobalKb(haiveDb, async () => undefined, { deadlineMs: 5000 });
+    expect(h.ensure).toHaveBeenCalledTimes(1);
+  });
+
+  it('records nothing when its own ensure failed, so the next call ensures again', async () => {
+    h.ensure.mockRejectedValueOnce(new Error('ensure failed')).mockResolvedValueOnce(undefined);
+    const withGlobalKb = await load();
+    await expect(
+      withGlobalKb(haiveDb, async () => undefined, { deadlineMs: 5000 }),
+    ).rejects.toThrow('ensure failed');
+    await withGlobalKb(haiveDb, async () => undefined, { deadlineMs: 5000 });
+    expect(h.ensure).toHaveBeenCalledTimes(2);
+  });
+});

@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
-import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
+import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
+import { CliAdapterRegistry, cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
-import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
+import type {
+  CliCommandSpec,
+  CliProviderRecord,
+  InvokeOpts,
+  SubAgentSpec,
+} from '../src/cli-adapters/types.js';
 import {
   agentDefinitionGuidance,
   buildRetrievalGuidance,
@@ -24,6 +30,7 @@ import {
 import {
   PROMPT_ARGV_LIMIT_BYTES,
   PromptTooLargeError,
+  deliverPrompt,
 } from '../src/cli-adapters/prompt-delivery.js';
 import {
   HOUSE_RULES_MARKER,
@@ -1176,6 +1183,29 @@ describe('house rules injection', () => {
       });
     });
 
+    it('carries the framing and the omission notice when every rule was left out, and records them', () => {
+      const huge = rule('Huge', {
+        spec: { mode: 'files', globs: ['*.php'] },
+        body: `${'x'.repeat(20_000)}\n`,
+      });
+      const { prompt, spec } = dispatch({
+        ...surroundings,
+        ...mode,
+        houseRuleSelection: selectHouseRules({
+          mode: 'write',
+          rules: [huge],
+          changedFiles: ['a.php'],
+        }),
+      });
+      expect(houseOf(prompt)).toContain('did not fit this prompt and is not shown: "Huge".');
+      expect(prompt).not.toContain('### Rule');
+      expect(spec.houseRules).toEqual({
+        mode: 'write',
+        entries: [],
+        omitted: [{ id: huge.id, hash: huge.hash, title: 'Huge', why: 'budget' }],
+      });
+    });
+
     it('gives the sub-agent kinds nothing, and no stamp', () => {
       const plan = resolveDispatch({
         providers: [
@@ -1375,6 +1405,23 @@ describe('house rules injection', () => {
   });
 
   describe('a prompt too large for an argv-only CLI', () => {
+    // No shipped adapter is argv-only since gemini reads stdin; this keeps the guard under test.
+    class ArgvOnlyGemini extends GeminiAdapter {
+      override buildCliInvocation(
+        _provider: CliProviderRecord,
+        prompt: string,
+        opts: InvokeOpts,
+      ): CliCommandSpec {
+        const { argv } = deliverPrompt(prompt, { adapter: 'argv-only', stdin: false });
+        return { command: 'argv-only', args: ['-p', ...argv], env: {}, cwd: opts.cwd };
+      }
+    }
+    class ArgvOnlyRegistry extends CliAdapterRegistry {
+      override get(): GeminiAdapter {
+        return new ArgvOnlyGemini();
+      }
+    }
+    const argvOnly = { registry: new ArgvOnlyRegistry() };
     const gemini = makeProvider({ id: 'prov-gemini', name: 'gemini', authMode: 'api_key' });
     const rules = [rule('Alpha', { body: `${'x'.repeat(400)}\n` })];
     const house = { ...mode, houseRuleSelection: selection(rules) };
@@ -1392,7 +1439,11 @@ describe('house rules injection', () => {
 
     it('drops the house rules first and keeps the agent rules', () => {
       const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead - agentBytes - 16);
-      const { prompt, spec } = dispatch({ agentRulesInjection: true, ...house }, fits, gemini);
+      const { prompt, spec } = dispatch(
+        { ...argvOnly, agentRulesInjection: true, ...house },
+        fits,
+        gemini,
+      );
       expect(prompt.startsWith(AGENT_RULES_MARKER)).toBe(true);
       expect(prompt).not.toContain(HOUSE_RULES_MARKER);
       expect(spec.houseRules).toEqual({
@@ -1406,7 +1457,11 @@ describe('house rules injection', () => {
 
     it('drops the agent rules next, and says so in both stamps', () => {
       const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead - 16);
-      const { prompt, spec } = dispatch({ agentRulesInjection: true, ...house }, fits, gemini);
+      const { prompt, spec } = dispatch(
+        { ...argvOnly, agentRulesInjection: true, ...house },
+        fits,
+        gemini,
+      );
       expect(prompt).not.toContain(AGENT_RULES_MARKER);
       expect(prompt).not.toContain(HOUSE_RULES_MARKER);
       expect(spec.houseRules?.reason).toBe('too_large');
@@ -1419,7 +1474,7 @@ describe('house rules injection', () => {
 
     it('drops only the house rules when the agent rules are not in the prompt', () => {
       const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead - 16);
-      const { prompt, spec } = dispatch(house, fits, gemini);
+      const { prompt, spec } = dispatch({ ...argvOnly, ...house }, fits, gemini);
       expect(prompt).not.toContain(HOUSE_RULES_MARKER);
       expect(spec.houseRules?.reason).toBe('too_large');
     });
@@ -1427,7 +1482,7 @@ describe('house rules injection', () => {
     it('still fails a prompt that is too large without either', () => {
       expect(() =>
         dispatch(
-          { agentRulesInjection: true, ...house },
+          { ...argvOnly, agentRulesInjection: true, ...house },
           'x'.repeat(PROMPT_ARGV_LIMIT_BYTES + 10),
           gemini,
         ),
@@ -1435,10 +1490,27 @@ describe('house rules injection', () => {
     });
 
     it('does not touch a prompt that fits with everything in it', () => {
-      const { prompt, spec } = dispatch({ agentRulesInjection: true, ...house }, 'small', gemini);
+      const { prompt, spec } = dispatch(
+        { ...argvOnly, agentRulesInjection: true, ...house },
+        'small',
+        gemini,
+      );
       expect(prompt).toContain(HOUSE_RULES_MARKER);
       expect(spec.houseRules?.reason).toBeUndefined();
       expect(spec.houseRules?.entries).toHaveLength(1);
+    });
+
+    it('keeps both blocks on gemini, which sends a prompt the blocks push past the cap on stdin', () => {
+      const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead - 16);
+      const { prompt, spec } = dispatch({ agentRulesInjection: true, ...house }, fits, gemini);
+      expect(prompt.startsWith(AGENT_RULES_MARKER)).toBe(true);
+      expect(prompt).toContain(HOUSE_RULES_MARKER);
+      expect(bytes(prompt)).toBeGreaterThan(PROMPT_ARGV_LIMIT_BYTES);
+      expect(spec.stdinPrompt).toBe(prompt);
+      expect(spec.args).not.toContain('-p');
+      expect(spec.houseRules?.reason).toBeUndefined();
+      expect(spec.houseRules?.entries).toHaveLength(1);
+      expect(spec.agentRules).toEqual({ ...stampedAgent, injected: true });
     });
   });
 });

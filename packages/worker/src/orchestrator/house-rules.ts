@@ -74,15 +74,15 @@ const FRAMING_SCOPE =
 const WRITE_FRAMING = [
   `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Follow every one on the lines you write or specify; a rule beats the local convention of the code around it.`,
   'Do not rewrite untouched code to fit a rule. Report a place that breaks one as a similar site, in the similar-sites field of your output where it has one, else in your notes.',
-  'A review finding or a diagnosis never licenses breaking a rule: fix the finding in a way that keeps the rule, or leave it and say why.',
-  "Only the approved spec or a person's directive can require breaking a rule. Then follow it and report the conflict where you report the above.",
+  'A review finding or a diagnosis from a check never licenses breaking a rule: fix the finding in a way that keeps the rule, or leave it and say why.',
+  "Only the approved spec or a person's directive, a fix a person directs included, can require breaking a rule. Then follow it and report the conflict where you report the above.",
   'A spec you write never restates these rules as requirements.',
 ].join('\n');
 
 const REVIEW_FRAMING = [
   `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Check every line this change wrote against every rule below; a file listed with no line note counts as wholly written. A rule that lists files applies only to the files its globs match.`,
   'Report each violation as an issue with severity exactly "high", "file" as "path:line" and "rule" as the rule\'s id, the code between "### Rule " and the colon in its heading.',
-  'A known-debt entry, an earlier diagnosis and an honored constraint never waive a rule. A violation outside the written lines goes to your report, never to the issues.',
+  "A known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check. A diagnosis or an honored constraint that came from a person counts as a person's directive. A violation outside the written lines goes to your report, never to the issues.",
   'When the approved spec or a person\'s directive requires a violation, do not list it as an issue: list it under "rule_conflicts" as {"rule": "<id>", "file": "path:line", "reason": "<why>"}.',
 ].join('\n');
 
@@ -214,11 +214,11 @@ function omissionLine(mode: HouseRuleMode, omitted: readonly Omitted[]): string 
     .map((o) => `"${o.title}"`)
     .join('; ');
   const more = count > OMITTED_TITLES_NAMED ? `; and ${count - OMITTED_TITLES_NAMED} more` : '';
-  const plural = count === 1;
+  const one = count === 1;
   const line =
     mode === 'review'
-      ? `(${count} more enforced house ${plural ? 'rule' : 'rules'} did not fit this prompt and ${plural ? 'is' : 'are'} not part of this check: ${named}${more}. Do not report on ${plural ? 'it' : 'them'}.)`
-      : `(${count} more enforced house ${plural ? 'rule' : 'rules'} did not fit this prompt and ${plural ? 'is' : 'are'} not shown: ${named}${more}.)`;
+      ? `(${count} more enforced house ${one ? 'rule' : 'rules'} did not fit this prompt and ${one ? 'is' : 'are'} not part of this check: ${named}${more}. Do not report on ${one ? 'it' : 'them'}.)`
+      : `(${count} more enforced house ${one ? 'rule' : 'rules'} did not fit this prompt and ${one ? 'is' : 'are'} not shown: ${named}${more}.)`;
   return escapeEnd(line);
 }
 
@@ -231,7 +231,7 @@ function renderBlock(mode: HouseRuleMode, kept: readonly Ranked[], notice: strin
     HOUSE_RULES_MARKER,
     framingOf(mode),
     '',
-    entries.join('\n\n'),
+    ...(entries.length === 0 ? [] : [entries.join('\n\n')]),
     ...(notice === '' ? [] : [notice]),
     HOUSE_RULES_END,
   ].join('\n');
@@ -266,7 +266,8 @@ export const unavailableSelection = (errorClass: GlobalKbErrorClass): HouseRuleS
  * Which rules a dispatch is shown, and the block that shows them. An unreadable change
  * (`changedFiles` null) puts every `files` rule in unscoped: never narrow on a measurement nobody
  * made. Over budget whole rules are left out, first fit: written-file matches are kept before
- * estimate-only ones and smaller before larger; `always` rules are never left out.
+ * estimate-only ones and smaller before larger; `always` rules are never left out. If every rule is
+ * left out the block is the framing and the notice; it is null only when nothing was left out too.
  */
 export function selectHouseRules(input: {
   mode: HouseRuleMode;
@@ -314,7 +315,7 @@ export function selectHouseRules(input: {
       status: 'ok',
       entries,
       omitted: [...(input.refused ?? []), ...leftOut],
-      block: kept.length === 0 ? null : renderBlock(mode, kept, notice),
+      block: kept.length === 0 && leftOut.length === 0 ? null : renderBlock(mode, kept, notice),
     };
   }
 }
