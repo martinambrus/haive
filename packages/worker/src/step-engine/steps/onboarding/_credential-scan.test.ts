@@ -328,7 +328,7 @@ describe('tracked credential inventory', () => {
           '--input-type=module',
           '--eval',
           `import { scanForCredentials } from ${JSON.stringify(moduleUrl)};
-         const scan = await scanForCredentials(${JSON.stringify(root)}, 200);
+         const scan = await scanForCredentials(${JSON.stringify(root)}, 200, () => {}, { timeoutMs: 600_000 });
          process.stdout.write(JSON.stringify(scan));`,
         ],
         { timeout: 240_000 },
