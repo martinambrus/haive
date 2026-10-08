@@ -10,6 +10,7 @@ import { unobservedToolUsage } from '../../cli-executor/tool-usage.js';
 import { assembleNativePrompt } from '../../sub-agent-emulator/native-mode.js';
 import { type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createSandboxSpawner, executeCliSpec } from './exec-core.js';
+import { buildOutputTruncationMessage } from './failure-class.js';
 import { resolveAppReach } from './app-reach.js';
 import {
   resolveAuthMounts,
@@ -196,8 +197,13 @@ export async function executeSubAgentSequential(
   };
 }
 
-function describeFailedSubAgent(result: SubAgentRunResult): string {
+export function describeFailedSubAgent(result: SubAgentRunResult): string {
   const failedEntry = result.trace.find((t) => (t.exitCode ?? 0) !== 0 || t.error);
   if (!failedEntry) return 'sub-agent script exited non-zero';
+  if (failedEntry.outputLimit !== undefined) {
+    return buildOutputTruncationMessage(
+      `sub-agent step ${failedEntry.id}, codex turn failed: ${failedEntry.outputLimit}`,
+    );
+  }
   return `sub-agent step ${failedEntry.id} failed: ${failedEntry.error ?? failedEntry.stderr.slice(0, 500)}`;
 }

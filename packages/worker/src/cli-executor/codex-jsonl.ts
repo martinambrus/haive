@@ -152,6 +152,7 @@ export interface ExtractedCodexOutput {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
   eventCount: number;
+  turnFailure: string | null;
 }
 
 /** Full-buffer JSONL extraction for the sequential sub-agent runner: feeds
@@ -165,5 +166,6 @@ export function extractCodexJsonlOutput(stdout: string): ExtractedCodexOutput {
     text,
     tokenUsage: collector.getTokenUsage(),
     eventCount: collector.isJsonl() ? 1 : 0,
+    turnFailure: collector.getTurnFailure(),
   };
 }

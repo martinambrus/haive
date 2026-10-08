@@ -147,6 +147,13 @@ describe('extractCodexJsonlOutput', () => {
     expect(out.eventCount).toBeGreaterThan(0);
   });
 
+  it('reports the message of a turn.failed event', () => {
+    const failed = JSON.stringify({ type: 'turn.failed', error: { message: 'boom' } });
+    expect(extractCodexJsonlOutput(`${failed}\n`).turnFailure).toBe('boom');
+    const done = DOCUMENTED_RUN.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    expect(extractCodexJsonlOutput(done).turnFailure).toBeNull();
+  });
+
   it('flags non-JSONL stdout for raw fallback', () => {
     const out = extractCodexJsonlOutput('Plain answer');
     expect(out.eventCount).toBe(0);

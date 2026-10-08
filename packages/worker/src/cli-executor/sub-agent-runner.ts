@@ -5,7 +5,7 @@ import type {
   SubAgentInvocationStep,
 } from '../cli-adapters/types.js';
 import type { CliExecutionResult, CliSpawner, SpawnOptions } from './runner.js';
-import { extractCodexJsonlOutput } from './codex-jsonl.js';
+import { extractCodexJsonlOutput, isCodexOutputLimitMessage } from './codex-jsonl.js';
 import { extractAntigravityStreamOutput } from './antigravity-stream.js';
 import { extractGeminiJsonOutput, sumTokenUsage } from './usage-extract.js';
 
@@ -18,6 +18,8 @@ export interface SubAgentStepTrace {
   parsed: unknown;
   error?: string;
   tokenUsage?: CliTokenUsage | null;
+  /** The codex turn failure that cut this sub-step at the output limit. */
+  outputLimit?: string;
 }
 
 export interface SubAgentRunResult {
@@ -96,10 +98,18 @@ async function runOneStep(
   // raw stdout — exactly the legacy behavior for older binaries.
   let text = result.stdout;
   let tokenUsage: CliTokenUsage | null = null;
+  let outputLimit: string | undefined;
   if (spec.outputFormat === 'codex-jsonl') {
     const extracted = extractCodexJsonlOutput(result.stdout);
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
     tokenUsage = extracted.tokenUsage;
+    if (
+      result.exitCode !== 0 &&
+      extracted.turnFailure !== null &&
+      isCodexOutputLimitMessage(extracted.turnFailure)
+    ) {
+      outputLimit = extracted.turnFailure;
+    }
   } else if (spec.outputFormat === 'antigravity-stream-json') {
     const extracted = extractAntigravityStreamOutput(result.stdout);
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
@@ -111,7 +121,7 @@ async function runOneStep(
       tokenUsage = extracted.tokenUsage;
     }
   }
-  const parsed = safeParse(step.expectJsonOutput, text);
+  const parsed = outputLimit === undefined ? safeParse(step.expectJsonOutput, text) : null;
   return {
     id: step.id,
     exitCode: result.exitCode,
@@ -121,6 +131,7 @@ async function runOneStep(
     parsed,
     tokenUsage,
     ...(result.error ? { error: result.error } : {}),
+    ...(outputLimit === undefined ? {} : { outputLimit }),
   };
 }
 
