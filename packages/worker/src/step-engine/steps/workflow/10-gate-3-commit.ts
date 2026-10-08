@@ -19,6 +19,7 @@ import {
 } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import { houseRulesRow, loadGateHouseRules, type GateHouseRules } from './_gate-house-rules.js';
 import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -55,6 +56,8 @@ interface CommitGateDetect {
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
   outOfScopeInsightsOmitted?: number;
+  /** Only when no gate 2 decided on the house rules. Optional because this payload is persisted. */
+  houseRules?: GateHouseRules | null;
 }
 
 interface CommitGateApply {
@@ -181,6 +184,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const insights = gate2?.output
       ? { insights: [], omitted: 0 }
       : await loadUnactedInsights(ctx.db, ctx.taskId);
+    const houseRules = gate2?.output ? null : await loadGateHouseRules(ctx.db, ctx.taskId);
     // Throws on a present-but-unusable `.git`: reporting corruption as "0 dirty
     // files" defaults the commit checkbox off and drops the whole changeset.
     if (!(await requireUsableGit(workspacePath))) {
@@ -196,6 +200,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         similarSitesOmitted: similar.omitted,
         outOfScopeInsights: insights.insights,
         outOfScopeInsightsOmitted: insights.omitted,
+        houseRules,
       };
     }
     const status = await gitRun(workspacePath, [
@@ -255,6 +260,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
       outOfScopeInsightsOmitted: insights.omitted,
+      houseRules,
     };
   },
 
@@ -312,7 +318,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       detected.outOfScopeInsightsOmitted ?? 0,
       'Anything listed here needs a follow-up task.',
     );
-    const statusRows = [similarRow, insightRow].filter((r) => r !== null);
+    const statusRows = [houseRulesRow(detected.houseRules), similarRow, insightRow].filter(
+      (r) => r !== null,
+    );
     return {
       title: 'Gate 3: Commit',
       description: [

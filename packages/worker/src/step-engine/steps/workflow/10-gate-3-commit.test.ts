@@ -429,3 +429,151 @@ describe('10-gate-3-commit similar sites', () => {
     expect(form.statusSummary).toBeUndefined();
   });
 });
+
+describe('10-gate-3-commit house rules', () => {
+  const VALIDATOR = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const RULE = '42ac658a-3c1d-4e5f-8a9b-0c1d2e3f4a5b';
+  const stamp = {
+    mode: 'review',
+    entries: [
+      {
+        id: RULE,
+        hash: `hr1:${'a'.repeat(64)}`,
+        title: 'No inline SVGs',
+        why: { scope: 'always' },
+      },
+    ],
+    omitted: [],
+  };
+  const output07b = (over: Record<string, unknown> = {}) => ({
+    detectOutput: null,
+    output: {
+      verdict: 'VALID',
+      issues: [],
+      ruleConflicts: [],
+      validatorInvocationId: VALIDATOR,
+      ...over,
+    },
+    iterations: [],
+  });
+  const noted = {
+    stepId: '07-phase-2-implement',
+    raw: '## INSIGHTS\n- INSIGHT: Cache lookup | x.ts:1 | hot path\n',
+  };
+  const site = { path: 'src/other.ts', lines: '3-5', reason: 'same null check' };
+  // In the order detect asks: 01-worktree-setup, 09-gate-2, the DAG issues, 07's rounds, the
+  // insight outputs, 08e's rows, and then 07b's output and the validator invocation it names.
+  const withoutGate2 = (rows07b: unknown[], invocation: unknown[]) => [
+    [],
+    [],
+    [],
+    [{ round: 0, output: { summary: 's', similarSites: [site] } }],
+    [noted],
+    [],
+    rows07b,
+    invocation,
+  ];
+  const labels = (detected: Parameters<NonNullable<typeof gate3CommitStep.form>>[1]) =>
+    (gate3CommitStep.form!({} as never, detected)!.statusSummary ?? []).map((r) => r.label);
+
+  it('lists them first when no gate 2 decided on them (quick_bugfix has none)', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, withoutGate2([output07b()], [{ houseRules: stamp }])),
+    );
+    expect(detected.houseRules?.entries.map((e) => e.title)).toEqual(['No inline SVGs']);
+    expect(labels(detected)).toEqual([
+      'House rules',
+      'Similar code elsewhere — not changed',
+      'Out-of-scope findings — not acted on',
+    ]);
+    const row = gate3CommitStep.form!({} as never, detected)!.statusSummary![0]!;
+    expect(row).toMatchObject({ status: 'pass', statusLabel: 'ENFORCED', defaultOpen: false });
+  });
+
+  it('opens the row on a conflict, and still leaves every form default where it was', async () => {
+    const repo = await seedRepo();
+    await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
+    const conflict = { rule: '42ac658a', file: 'src/a.php:7', reason: 'the spec requires it' };
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(
+        repo,
+        withoutGate2([output07b({ ruleConflicts: [conflict] })], [{ houseRules: stamp }]),
+      ),
+    );
+    const form = gate3CommitStep.form!({} as never, detected, { commitMessage: 'feat: x' })!;
+    expect(form.statusSummary![0]).toMatchObject({
+      label: 'House rules',
+      status: 'warn',
+      statusLabel: 'CONFLICT',
+      defaultOpen: true,
+    });
+    const bare = gate3CommitStep.form!(
+      {} as never,
+      { ...detected, houseRules: null },
+      {
+        commitMessage: 'feat: x',
+      },
+    )!;
+    expect(form.fields).toEqual(bare.fields);
+    expect(form.fields.find((f) => f.id === 'commit')).toMatchObject({ default: true });
+  });
+
+  it('leaves them to gate 2 when gate 2 recorded a decision, without reading them', async () => {
+    const repo = await seedRepo();
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, [
+        [],
+        [{ detectOutput: null, output: { decision: 'approve' }, iterations: [] }],
+        [output07b()],
+        [{ houseRules: stamp }],
+      ]),
+    );
+    expect(detected.houseRules).toBeNull();
+    expect(gate3CommitStep.form!({} as never, detected)!.statusSummary).toBeUndefined();
+  });
+
+  it('lists them too when the workspace has no git, which returns early', async () => {
+    const plain = await tmp('gate3-plain-');
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(plain, withoutGate2([output07b()], [{ houseRules: stamp }])),
+    );
+    expect(detected.hasGit).toBe(false);
+    expect(detected.houseRules?.entries).toHaveLength(1);
+    expect(labels(detected)[0]).toBe('House rules');
+  });
+
+  it('shows no row when 07b named no invocation, the invocation has no stamp, or 07b did not run', async () => {
+    const repo = await seedRepo();
+    const { validatorInvocationId: _id, ...old } = output07b().output;
+    for (const queue of [
+      withoutGate2([{ ...output07b(), output: old }], [{ houseRules: stamp }]),
+      withoutGate2([output07b()], [{ houseRules: null }]),
+      withoutGate2([], []),
+    ]) {
+      const detected = await gate3CommitStep.detect!(mkCtx(repo, queue));
+      expect(detected.houseRules).toBeNull();
+      expect(labels(detected)).not.toContain('House rules');
+    }
+  });
+
+  it('renders a payload persisted before the field existed, or without rules, exactly as before', () => {
+    const detected = {
+      hasGit: true,
+      workspacePath: '/w',
+      diffSummary: '',
+      dirtyFiles: 0,
+      diffArtifactPath: null,
+      changedFileCount: 0,
+      diffArtifactTruncated: false,
+    } as never;
+    const before = JSON.stringify(gate3CommitStep.form!({} as never, detected));
+    for (const houseRules of [null, undefined]) {
+      expect(
+        JSON.stringify(
+          gate3CommitStep.form!({} as never, { ...(detected as object), houseRules } as never),
+        ),
+      ).toBe(before);
+    }
+  });
+});
