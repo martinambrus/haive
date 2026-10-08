@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
-import {
-  PromptTooLargeError,
-  PROMPT_ARGV_LIMIT_BYTES,
-} from '../src/cli-adapters/prompt-delivery.js';
+import { PROMPT_ARGV_LIMIT_BYTES } from '../src/cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
 const SMALL = 'expand this node';
@@ -30,18 +27,25 @@ const build = (name: string, prompt: string) =>
   } as never);
 
 /** Reads a prompt from stdin, per its own --help in the shipped sandbox image. */
-const STDIN_CAPABLE = ['codex', 'amp', 'claude-code', 'zai', 'ollama', 'muse', 'openrouter'];
+const STDIN_CAPABLE = [
+  'codex',
+  'amp',
+  'claude-code',
+  'zai',
+  'ollama',
+  'muse',
+  'openrouter',
+  'gemini',
+];
 /** Takes the prompt from a PATH instead — verified against the real binary. */
 const FILE_CAPABLE = ['grok'];
-/** No documented route for a large prompt yet; must refuse by name. */
-const ARGV_ONLY = ['gemini'];
 /** Takes the prompt as an NDJSON line on stdin at EVERY size, so it is never
  *  exposed to the argv limit in the first place — `--input-format stream-json`
  *  has no argv form to fall back to. */
 const STDIN_ALWAYS = ['antigravity'];
 
 describe('every adapter, ordinary prompt', () => {
-  for (const name of [...STDIN_CAPABLE, ...FILE_CAPABLE, ...ARGV_ONLY]) {
+  for (const name of [...STDIN_CAPABLE, ...FILE_CAPABLE]) {
     it(`${name} still passes it as an argument`, () => {
       // The guard on every existing run: below the threshold nothing changed.
       const spec = build(name, SMALL);
@@ -79,12 +83,6 @@ describe('every adapter, oversized prompt', () => {
     });
   }
 
-  for (const name of ARGV_ONLY) {
-    it(`${name} refuses by name rather than failing as E2BIG`, () => {
-      expect(() => build(name, HUGE)).toThrow(PromptTooLargeError);
-    });
-  }
-
   for (const name of FILE_CAPABLE) {
     it(`${name} writes it to a file and points at the path`, () => {
       // grok's REPL needs a TTY so stdin is not a route (bare `grok` with piped
@@ -98,4 +96,28 @@ describe('every adapter, oversized prompt', () => {
       expect(spec.args.some((a) => a.length > PROMPT_ARGV_LIMIT_BYTES)).toBe(false);
     });
   }
+});
+
+describe('gemini prompt delivery', () => {
+  const AT_CAP = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES);
+
+  it('keeps a prompt exactly at the cap in argv, byte-identical to before', () => {
+    const spec = build('gemini', AT_CAP);
+    expect(spec.args).toEqual(['-p', AT_CAP, '--output-format', 'json', '--yolo']);
+    expect(spec.stdinPrompt).toBeUndefined();
+  });
+
+  it('sends a prompt one byte over the cap on stdin with no prompt in argv', () => {
+    const spec = build('gemini', HUGE);
+    expect(spec.stdinPrompt).toBe(HUGE);
+    expect(spec.args).toEqual(['--output-format', 'json', '--yolo']);
+  });
+
+  it('sizes the cap in bytes, so a multi-byte prompt under the character count still goes to stdin', () => {
+    const wide = '\u2014'.repeat(PROMPT_ARGV_LIMIT_BYTES / 3 + 1);
+    expect(wide.length).toBeLessThan(PROMPT_ARGV_LIMIT_BYTES);
+    const spec = build('gemini', wide);
+    expect(spec.stdinPrompt).toBe(wide);
+    expect(spec.args).not.toContain('-p');
+  });
 });

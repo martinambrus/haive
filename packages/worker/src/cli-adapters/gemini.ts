@@ -41,6 +41,8 @@ export class GeminiAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
+    // Over the argv cap: gemini reads piped stdin as the whole prompt, so no `-p` is passed.
+    const delivery = deliverPrompt(prompt, { adapter: 'gemini', stdin: true });
     return {
       command: this.resolveExecutable(provider),
       // JSON output mode wraps the answer in {response, stats}; exec-core
@@ -59,15 +61,13 @@ export class GeminiAdapter extends BaseCliAdapter {
       // per-invocation output small (e.g. the 09_5 skill loop emits one skill per
       // call). If a large-output gemini step truncates, add the override in the
       // runtime settings.json writer and VERIFY it against the pinned CLI version.
-      // No stdin form documented by `gemini --help`, so an oversized prompt
-      // refuses by name here instead of failing as a bare E2BIG in spawn.
       args: this.mergedArgs(provider, [
-        '-p',
-        ...deliverPrompt(prompt, { adapter: 'gemini', stdin: false }).argv,
+        ...(delivery.stdinPrompt === undefined ? ['-p', ...delivery.argv] : []),
         '--output-format',
         'json',
         '--yolo',
       ]),
+      ...(delivery.stdinPrompt === undefined ? {} : { stdinPrompt: delivery.stdinPrompt }),
       env: { ...GEMINI_HEADLESS_ENV, ...this.mergedEnv(provider, opts) },
       cwd: opts.cwd,
       outputFormat: 'gemini-json',
