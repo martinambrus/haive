@@ -1042,6 +1042,9 @@ export function fixRequiredIsCosmetic(v: ReviewerOutput): boolean {
   );
 }
 
+const failedCriteriaCount = (v: ReviewerOutput): number =>
+  v.criteria_results.filter((c) => c.passed === false).length;
+
 /** Terminal-header names for the review loop's roles. 'coder' here is always the FIX
  *  coder — the initial implementation coder is dispatched by the level fan-out, not by
  *  this function. */
@@ -1163,6 +1166,7 @@ async function acceptWithDebt(
   db: Database,
   issue: DagIssueRow,
   reviewIssues: unknown[],
+  round?: { stuckCount: number; innerIteration: number },
 ): Promise<void> {
   const existing = (issue.debtItems ?? []) as unknown[];
   await db
@@ -1172,6 +1176,8 @@ async function acceptWithDebt(
       outcome: 'completed_with_debt',
       resolution: 'completed_with_debt',
       reviewStatus: 'completed_with_debt',
+      ...round,
+      endedAt: new Date(),
       updatedAt: new Date(),
     })
     .where(eq(schema.taskDagIssues.id, issue.id));
@@ -1309,9 +1315,17 @@ export async function ingestReviewRun(
         : setResolution(ra.db, issue, 'approved');
     }
     // fix_required
-    const newStuck = issue.stuckCount + 1;
+    const previous = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const progressed =
+      previous.success && failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
+    const newStuck = progressed ? 1 : issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;
-    if (newStuck >= STUCK_LIMIT) return acceptWithDebt(ra.db, issue, verdict.issues);
+    if (newStuck >= STUCK_LIMIT) {
+      return acceptWithDebt(ra.db, issue, verdict.issues, {
+        stuckCount: newStuck,
+        innerIteration: newIter,
+      });
+    }
     if (newIter >= MAX_REVIEW_ITERS) return setResolution(ra.db, issue, 'failed_unrecoverable');
     await ra.db
       .update(schema.taskDagIssues)
