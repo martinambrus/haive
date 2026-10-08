@@ -920,6 +920,8 @@ describe('advanceStep LLM phase', () => {
     state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
     state.cliInvocationRow = {
       id: 'inv-1',
+      cliProviderId: 'prov-1',
+      startedAt: new Date(Date.now() - 60_000),
       exitCode: 1,
       rawOutput: null,
       parsedOutput: null,
@@ -968,6 +970,8 @@ describe('advanceStep LLM phase', () => {
   });
 
   describe('a model-capability failure whose remedy is already spent', () => {
+    const beforeRun = (): string => new Date(Date.now() - 120_000).toISOString();
+
     async function advanceAfter(
       cls: keyof typeof MODEL_CAPABILITY_HEADLINES,
       modelLimits: Record<string, unknown>,
@@ -977,6 +981,7 @@ describe('advanceStep LLM phase', () => {
       state.cliInvocationRow = {
         id: 'inv-1',
         cliProviderId: 'prov-1',
+        startedAt: new Date(Date.now() - 60_000),
         exitCode: 1,
         rawOutput: null,
         parsedOutput: null,
@@ -1034,6 +1039,34 @@ describe('advanceStep LLM phase', () => {
       });
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a no-image failure whose flag was learned before the run began', async () => {
+      const { result, enqueued } = await advanceAfter('no_image_support', {
+        vision: false,
+        learnedAt: beforeRun(),
+      });
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        MODEL_CAPABILITY_HEADLINES.no_image_support,
+      );
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('re-dispatches a no-image failure whose flag was learned after the run began', async () => {
+      const { result, enqueued } = await advanceAfter('no_image_support', { vision: false });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a rejected ceiling that was already rolled back before the run began', async () => {
+      const { result, enqueued } = await advanceAfter('max_tokens_too_large', {
+        maxOutputTokens: 65536,
+        maxOutputTokensExhausted: true,
+        learnedAt: beforeRun(),
+      });
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
     });
   });
 

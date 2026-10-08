@@ -1162,7 +1162,7 @@ describe('advanceStep agentMining output truncation and model capability', () =>
         id: 'inv-peer-reviewer',
         prompt: 'review',
         errorMessage,
-        startedAt: new Date(),
+        startedAt: new Date(Date.now() - 60_000),
         endedAt: new Date(),
         exitCode: 1,
       },
@@ -1194,13 +1194,47 @@ describe('advanceStep agentMining output truncation and model capability', () =>
     expect(sentPrompt(state)).not.toContain(TRUNCATION_NOTICE);
   });
 
-  it('re-rolls a model-capability failure, whose remedy the next dispatch carries', async () => {
-    const state = failedAgentState(1, `${MODEL_CAPABILITY_HEADLINES.no_image_support} — hint.`);
-    const enqueued: CliExecJobPayload[] = [];
-    const result = await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
+  describe('a model-capability failure the provider learned from', () => {
+    const noImage = `${MODEL_CAPABILITY_HEADLINES.no_image_support} — hint.`;
+    const learnedAt = (offsetMs: number) => [
+      makeProvider({
+        modelLimits: {
+          model: '',
+          vision: false,
+          learnedAt: new Date(Date.now() + offsetMs).toISOString(),
+        },
+      } as Partial<CliProviderRecord>),
+    ];
 
-    expect(result.status).toBe('waiting_cli');
-    expect(enqueued).toHaveLength(1);
+    it('re-rolls the agent when the learn came after the run began', async () => {
+      const state = failedAgentState(1, noImage);
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        learnedAt(-1000),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not re-roll the agent when the learn came before the run began', async () => {
+      const state = failedAgentState(1, noImage);
+      const applyCalls: StepApplyArgs[] = [];
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep(applyCalls),
+        enqueued,
+        learnedAt(-120_000),
+      );
+
+      expect(result.status).toBe('done');
+      expect(applyCalls).toHaveLength(1);
+      expect(enqueued).toHaveLength(0);
+    });
   });
 
   it('still degrades on the final attempt instead of re-rolling a cut reply again', async () => {
