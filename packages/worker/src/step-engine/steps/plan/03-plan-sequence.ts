@@ -437,7 +437,7 @@ export function buildSequencePrompt(
     nodes,
     parent,
     SEQUENCE_CONTEXT_BUDGET - childLines.join('\n').length,
-    { buildOrder },
+    { buildOrder, omitChildren: true },
   );
   return [
     'You are deciding the ORDER in which one part of a project plan gets built.',
@@ -450,8 +450,8 @@ export function buildSequencePrompt(
     '',
     UNTRUSTED_FENCE_LEGEND.join('\n'),
     '',
-    'Here is the plan around your node, for context on what exists elsewhere: its ancestors, its',
-    'siblings and its children, each with an id, then a sampled outline of the rest of the plan by',
+    'Here is the plan around your node, for context on what exists elsewhere: its ancestors and its',
+    'siblings, each with an id, then a sampled outline of the rest of the plan by',
     'title alone. The lines beside each part say how much of it is shown. Every node shown carries',
     'its current build-order number as `#N`, so you can see where your part sits in the whole. A',
     'node that appears only in the outline has no id, so it cannot be named in a `depends_on`.',
