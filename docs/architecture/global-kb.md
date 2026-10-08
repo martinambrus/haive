@@ -79,8 +79,16 @@ would also let a rule return past the always cap it was no longer counted agains
 clears it through a trigger, which covers every writer, an older build sharing an external store
 included; a content change by any writer other than PATCH shows as Lapsed · edited. The mode,
 globs and approver stay as the last approval so a cleared or superseded entry can offer
-Re-enforce. Rule globs may not use extglob syntax (`@(…)`, `+(…)`…), whose alternatives the
-universal-glob check cannot see.
+Re-enforce.
+
+Rule globs keep to a small grammar: literal characters, `*`, `**`, `?`, `[…]`, `/` and comma
+alternatives in braces. picomatch reads `(`, `)` and `|` as alternation, `..` in any brace group as
+a range and drops a `"`, each a way to match every file while seeming to name something, so all are
+refused (`?app?` still names a directory such as Next.js's `(app)`); every brace expansion, at most
+64, must name something. MEASURED: before the grammar, 535 such wide globs of length 4 passed. The
+check catches mistakes and is not a boundary: only an admin enforces, a deliberately broad glob
+(`**/*.*`) is theirs to write, and what reaches a prompt is bounded by the per-prompt budget
+(PR6), not by this check.
 `enforcementState` reads none, other namespace, superseded, cleared, not active, edited, switched
 off or enforced, and the api attaches it to every entry it returns.
 
