@@ -7,7 +7,7 @@ import {
   severityRank,
 } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
-import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
+import { balanceFences, fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { HUMAN_REJECT_SOURCES, cutHead } from './_fix-loop.js';
 
 /* ------------------------------------------------------------------ */
@@ -240,9 +240,9 @@ export function renderTaskHistoryDigest(
   for (const e of events) {
     const p = (e.payload ?? {}) as Record<string, unknown>;
     if (e.eventType === 'business_requirements.rejected' && str(p.feedback).trim()) {
-      reactions.push(`Requirements rejected: "${clip(str(p.feedback), 500)}"`);
+      reactions.push(`Requirements rejected: "${fenceSafe(clip(str(p.feedback), 500))}"`);
     } else if (e.eventType === 'spec.rejected' && str(p.feedback).trim()) {
-      reactions.push(`Spec rejected: "${clip(str(p.feedback), 500)}"`);
+      reactions.push(`Spec rejected: "${fenceSafe(clip(str(p.feedback), 500))}"`);
     }
   }
 
@@ -283,7 +283,7 @@ export function renderTaskHistoryDigest(
   // never truncated away (human signal), like gate reactions.
   if (steers.length > 0) {
     lines.push('', USER_STEERING_HEADER);
-    for (const s of steers) lines.push(`- round ${s.round}: "${clip(s.text, 500)}"`);
+    for (const s of steers) lines.push(`- round ${s.round}: "${fenceSafe(clip(s.text, 500))}"`);
   }
 
   if (findings.length > 0) {

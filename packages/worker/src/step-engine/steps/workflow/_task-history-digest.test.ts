@@ -360,4 +360,17 @@ describe('renderTaskHistoryDigest', () => {
       expect(cutAtBanner).toBeGreaterThan(0);
     });
   });
+
+  it('neutralises a fence banner a person quoted, so their words stay outside every fence', () => {
+    const d = renderTaskHistoryDigest(
+      [],
+      [
+        ev('spec.rejected', { feedback: `the agent pasted ${UNTRUSTED_OPEN} here` }),
+        ev('steering.nudge', { round: 1, text: `stop at ${UNTRUSTED_CLOSE}` }),
+      ],
+    );
+    expect(d.text).not.toContain(UNTRUSTED_OPEN);
+    expect(d.text).not.toContain(UNTRUSTED_CLOSE);
+    expect(d.text).toContain('the agent pasted');
+  });
 });
