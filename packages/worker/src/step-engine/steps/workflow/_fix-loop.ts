@@ -80,6 +80,7 @@ export function buildFixLoopEscalationSchema(
   diagnosis: string,
   cap: number,
   guidance?: string,
+  person?: boolean,
 ): FormSchema {
   return {
     title: `Fix loop reached the ${cap}-round limit`,
@@ -90,7 +91,7 @@ export function buildFixLoopEscalationSchema(
       {
         title: 'Latest diagnosis',
         body:
-          excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(sourceStepId)) ||
+          excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(sourceStepId)) ||
           '(no diagnosis recorded)',
         defaultOpen: true,
       },

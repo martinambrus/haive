@@ -1699,6 +1699,7 @@ export async function handleResult(
             result.diagnosis,
             cap,
             result.guidance,
+            HUMAN_REJECT_SOURCES.has(result.sourceStepId) && !result.unfencedLegacy,
           ),
           formValues: null,
           endedAt: null,

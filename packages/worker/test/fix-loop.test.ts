@@ -660,6 +660,12 @@ describe('detectFixLoopOscillation', () => {
 });
 
 describe('oscillation escalation gate', () => {
+  it('bounds a round-cap diagnosis from a person source the caller says is machine text', () => {
+    const long = `${'x'.repeat(200)}\n`.repeat(40);
+    const s = buildFixLoopEscalationSchema('08d2-adversarial-qa-review', long, 5, undefined, false);
+    expect(s.infoSections![0]!.body.length).toBeLessThan(3000);
+  });
+
   it('bounds a person-source side the caller says is machine text', () => {
     const long = `${'x'.repeat(200)}\n`.repeat(40);
     const s = buildOscillationEscalationSchema(
