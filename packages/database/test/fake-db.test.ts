@@ -289,6 +289,27 @@ describe('the fake database', () => {
   });
 });
 
+describe('the timeouts a section sets on the fake', () => {
+  const setTimeouts = (db: Database) => [
+    db.execute(sql.raw(`SET LOCAL lock_timeout = '30000ms'`)),
+    db.execute(sql.raw(`SET LOCAL statement_timeout = '3000ms'`)),
+  ];
+
+  it('accepts a lock timeout and a statement timeout inside a transaction', async () => {
+    const { db } = setup();
+    await db.transaction(async (tx) => {
+      await Promise.all(setTimeouts(tx as unknown as Database));
+    });
+  });
+
+  it('refuses either outside one, since SET LOCAL means nothing there', async () => {
+    const { db } = setup();
+    for (const attempt of setTimeouts(db)) {
+      await expect(attempt).rejects.toThrow('fake db: unsupported execute');
+    }
+  });
+});
+
 describe('the attachments lock on the fake', () => {
   it('lets one section in at a time per task, and never blocks another task', async () => {
     const { fake, db } = setup();

@@ -1,12 +1,8 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
-import { type Database } from '@haive/database';
-import { CONFIG_KEYS, configService } from '@haive/shared';
 import {
   globalKbEntries,
   normalizeGlobalKbDescription,
-  resolveGlobalKbEnabled,
-  resolveTaskFacets,
-  withGlobalKb,
+  type GlobalKbDb,
   type GlobalKbFacets,
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
@@ -110,49 +106,35 @@ export function selectDigest(
   };
 }
 
-const emptyDigest = (): GlobalKbDigest => ({ entries: [], omitted: 0, scanSaturated: false });
+export const emptyDigest = (): GlobalKbDigest => ({
+  entries: [],
+  omitted: 0,
+  scanSaturated: false,
+});
 
-/** The stack-matching global KB titles for a task, newest first.
- *
- *  Best-effort by contract: this runs on the dispatch path, where a global KB
- *  that is off, unreachable or empty must cost nothing but the digest. Every
- *  failure returns an empty digest — the same fail-soft the global half of rag_search already
- *  has (api/src/routes/rag.ts), for the same reason: retrieval degrading is
- *  never worth failing the work. */
-export async function resolveGlobalKbDigest(db: Database, taskId: string): Promise<GlobalKbDigest> {
-  try {
-    const [globalEnabled, digestEnabled] = await Promise.all([
-      resolveGlobalKbEnabled(configService),
-      configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
-    ]);
-    if (!globalEnabled || !digestEnabled) return emptyDigest();
-
-    const projectFacets = await resolveTaskFacets(db, taskId);
-
-    return await withGlobalKb(db, async ({ db: gdb, settings }) => {
-      const rows = await gdb
-        .select({
-          title: globalKbEntries.title,
-          category: globalKbEntries.category,
-          facets: globalKbEntries.facets,
-          description: globalKbEntries.description,
-        })
-        .from(globalKbEntries)
-        .where(
-          and(
-            eq(globalKbEntries.namespace, settings.namespace),
-            eq(globalKbEntries.status, 'active'),
-            isNull(globalKbEntries.supersededAt),
-          ),
-        )
-        .orderBy(desc(globalKbEntries.updatedAt))
-        .limit(DIGEST_SCAN_LIMIT);
-
-      return selectDigest(rows, projectFacets);
-    });
-  } catch {
-    return emptyDigest();
-  }
+/** The newest active entries of the namespace, as many as a digest scans. `gdb` is the store's
+ *  database or a transaction on it; `selectDigest` does the rest, the scope filter included. */
+export function readDigestRows(
+  gdb: Pick<GlobalKbDb, 'select'>,
+  namespace: string,
+): Promise<Parameters<typeof selectDigest>[0]> {
+  return gdb
+    .select({
+      title: globalKbEntries.title,
+      category: globalKbEntries.category,
+      facets: globalKbEntries.facets,
+      description: globalKbEntries.description,
+    })
+    .from(globalKbEntries)
+    .where(
+      and(
+        eq(globalKbEntries.namespace, namespace),
+        eq(globalKbEntries.status, 'active'),
+        isNull(globalKbEntries.supersededAt),
+      ),
+    )
+    .orderBy(desc(globalKbEntries.updatedAt))
+    .limit(DIGEST_SCAN_LIMIT);
 }
 
 /** Render the digest block. Grouped by category so an agent can tell a house

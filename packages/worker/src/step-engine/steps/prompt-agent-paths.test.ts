@@ -1949,13 +1949,16 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     );
     expect(promptNamesAgentPath(benign, SANDBOX_WORKDIR)).toBe(false);
 
-    // The MCP names are ONE instance. `adaptPrompt` makes eight appends after the decision and four
+    // The MCP names are ONE instance. `adaptPrompt` makes nine appends after the decision and five
     // carry text Haive did not write: `withMcpSurface` (repository `mcpServers` keys),
-    // `withGlobalKbDigest` (author-written KB titles), `withAppReach` (the resolved app URL) and
-    // `withAgentRules` (the provider's rules, which a person may have written; the final decision
-    // scans them once the provider is known, and `agent-isolation-rule.test.ts` pins that).
+    // `withGlobalKbDigest` (author-written KB titles), `withAppReach` (the resolved app URL),
+    // `withHouseRules` (the titles, descriptions, bodies and globs of the entries an admin enforced)
+    // and `withAgentRules` (the provider's rules, which a person may have written). The house rules
+    // ride on the request, so both passes of the decision scan them when a block is injected; the
+    // provider's rules only the final one, once the provider is known. `agent-isolation-rule.test.ts`
+    // pins both.
     //
-    // Only THREE of those four can express an agent path, and that is traced rather than assumed:
+    // Only FOUR of those five can express an agent path, and that is traced rather than assumed:
     // `appReachPrompt` interpolates `reach.url` ALONE — never `addHosts` — and that url is ddev's
     // `primary_url` (`ddev-runner.ts:1528`), i.e. scheme://host[:port] with no path component. A hostname
     // cannot contain `/`, and `promptNamesAgentPath` matches whole segments from the mount root, so no

@@ -335,7 +335,7 @@ async function readChangeDiff(
 }
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path. */
-async function readChangedPaths(
+export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
 ): Promise<string[] | null> {

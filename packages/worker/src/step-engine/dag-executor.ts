@@ -23,6 +23,7 @@ import {
 } from './steps/_untrusted-repo.js';
 import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
+import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import {
@@ -706,6 +707,9 @@ async function dispatchMergeFixAgent(
     providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
+    houseRules: houseRulesOptOut(
+      'a merge fixer reconciles existing histories, it writes no new code',
+    ),
     invokeOpts: { cwd: integration.sandboxPath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
@@ -1097,6 +1101,7 @@ async function spawnReviewAgent(
     preferredProviderId: preferred,
     worktreeRel,
     input: { kind: 'prompt', prompt: fullPrompt, capabilities },
+    houseRules: houseRulesFor(ra.stepDef.metadata.id, role, issue.estimatedFiles),
     invokeOpts: {
       cwd: issue.sandboxWorktreePath ?? undefined,
       effortLevel: preferredEffort ?? undefined,
@@ -1918,6 +1923,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     providers: ea.providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use'] },
+    houseRules: houseRulesOptOut('the replanner reorders the remaining issues and writes no code'),
     invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
@@ -2355,6 +2361,7 @@ export async function resolveDagPhase(
           preferredProviderId: preferred,
           worktreeRel,
           input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
+          houseRules: houseRulesFor(stepDef.metadata.id, 'coder', issue.estimatedFiles),
           invokeOpts: {
             cwd: issue.sandboxWorktreePath ?? undefined,
             effortLevel: preferredEffort ?? undefined,

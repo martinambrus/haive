@@ -8,6 +8,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
+import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import {
@@ -547,6 +548,9 @@ async function dispatchFixAgent(
     preferredProviderId: preferred,
     worktreeRel,
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
+    houseRules: houseRulesOptOut(
+      'a merge fixer reconciles existing histories, it writes no new code',
+    ),
     invokeOpts: { cwd: state.sandboxMergeDir, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {

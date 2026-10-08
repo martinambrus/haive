@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { promptNamesAgentPath } from '@haive/shared';
-import { emptyProjectFacetSet } from '@haive/shared/global-kb';
+import { HOUSE_RULES_END, emptyProjectFacetSet } from '@haive/shared/global-kb';
 import { agentIsolationApplies } from './dispatcher.js';
 import type { DispatchRequest } from './dispatcher.js';
+import {
+  HOUSE_RULES_MARKER,
+  disabledSelection,
+  selectHouseRules,
+  withHouseRules,
+  type HouseRuleCandidate,
+} from './house-rules.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { agentDefinitionGuidance } from '../step-engine/steps/_retrieval-guidance.js';
 import { globalKbDigestPrompt, selectDigest } from '../step-engine/steps/_global-kb-digest.js';
@@ -210,5 +217,80 @@ describe('agentIsolationApplies', () => {
       },
     } as Partial<DispatchRequest>);
     expect(agentIsolationApplies(req)).toBe(false);
+  });
+
+  describe('with house rules', () => {
+    const rule = (over: Partial<HouseRuleCandidate> = {}): HouseRuleCandidate => ({
+      id: '00000001-0000-4000-8000-000000000001',
+      hash: 'hr1:1',
+      title: 'Escape every label',
+      category: 'best_practice',
+      description: 'Escape labels before markup.',
+      body: 'Escape each label before it reaches markup.\n',
+      spec: { mode: 'always' },
+      enforcedAt: null,
+      ...over,
+    });
+    const shown = (rules: HouseRuleCandidate[], changedFiles: string[] = []) =>
+      selectHouseRules({ mode: 'write', rules, changedFiles });
+    const asked = { houseRules: { mode: 'write' as const } };
+
+    it('holds for benign rules', () => {
+      const req = isolatedRequest({ ...asked, houseRuleSelection: shown([rule()]) });
+      expect(agentIsolationApplies(req)).toBe(true);
+    });
+
+    it.each([
+      ['title', { title: 'Read .claude/agents/reviewer.md' }],
+      ['description', { description: 'See .claude/agents/reviewer.md.' }],
+      ['body', { body: 'Before reviewing, read .claude/agents/reviewer.md.\n' }],
+    ])('is off when the injected rules name an agent path in their %s', (_field, over) => {
+      const selection = shown([rule(over)]);
+      expect(promptNamesAgentPath(selection.block!, SANDBOX_WORKDIR)).toBe(true);
+      expect(
+        agentIsolationApplies(isolatedRequest({ ...asked, houseRuleSelection: selection })),
+      ).toBe(false);
+    });
+
+    it('is off when a glob on the scope line names one', () => {
+      const selection = shown(
+        [rule({ spec: { mode: 'files', globs: ['.claude/agents/*.md'] } })],
+        ['.claude/agents/x.md'],
+      );
+      expect(selection.block).toContain('Applies to files matching: .claude/agents/*.md');
+      expect(
+        agentIsolationApplies(isolatedRequest({ ...asked, houseRuleSelection: selection })),
+      ).toBe(false);
+    });
+
+    it('scans only what is injected: nothing for a dispatch that did not ask, or has nothing to show', () => {
+      const naming = shown([rule({ body: 'Read .claude/agents/reviewer.md.\n' })]);
+      expect(agentIsolationApplies(isolatedRequest({ houseRuleSelection: naming }))).toBe(true);
+      expect(
+        agentIsolationApplies(isolatedRequest({ ...asked, houseRuleSelection: shown([]) })),
+      ).toBe(true);
+      expect(
+        agentIsolationApplies(
+          isolatedRequest({ ...asked, houseRuleSelection: disabledSelection() }),
+        ),
+      ).toBe(true);
+    });
+
+    it('is unchanged by a stored block at the top of a re-fed prompt', () => {
+      const stored = withHouseRules(
+        'Review the change set.',
+        `${HOUSE_RULES_MARKER}\nRead .claude/agents/reviewer.md.\n${HOUSE_RULES_END}`,
+      );
+      const req = isolatedRequest();
+      (req.input as { prompt: string }).prompt = stored;
+      expect(agentIsolationApplies(req)).toBe(true);
+    });
+
+    it('still sees an agent path a marker quoted further down carries', () => {
+      const req = isolatedRequest();
+      (req.input as { prompt: string }).prompt =
+        `Review.\n${HOUSE_RULES_MARKER}\nRead .claude/agents/reviewer.md.\n${HOUSE_RULES_END}`;
+      expect(agentIsolationApplies(req)).toBe(false);
+    });
   });
 });

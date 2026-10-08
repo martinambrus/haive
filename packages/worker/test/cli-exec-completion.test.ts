@@ -160,6 +160,43 @@ describe('a cli run start', () => {
     expect(stubs.executeByKind).toHaveBeenCalledOnce();
   });
 
+  it('records the agent rules and the house rules the job was dispatched with, in the start write', async () => {
+    const { db, writes } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(ok);
+    const agentRules = { hash: 'sha-of-the-rules', injected: true };
+    const houseRules = {
+      mode: 'review',
+      entries: [
+        {
+          id: '42ac658a-0000-4000-8000-000000000001',
+          hash: 'hr1:abc',
+          title: 'No inline svgs',
+          why: { scope: 'files', glob: '**/*.tpl.php' },
+        },
+      ],
+      omitted: [{ id: 'b', hash: 'hr1:def', title: 'Too big', why: 'budget' }],
+    };
+    await handleCliExecJob(db, { ...base, spec: { agentRules, houseRules } });
+
+    const started = runWrites(writes).find((w) => 'startedAt' in w.set);
+    expect(started?.set.agentRules).toEqual(agentRules);
+    expect(started?.set.houseRules).toEqual(houseRules);
+  });
+
+  it('records no house rules for a job dispatched without a stamp, or with a malformed one', async () => {
+    stubs.executeByKind.mockResolvedValue(ok);
+    for (const spec of [
+      { agentRules: { hash: 'h', injected: false, reason: 'opt-out' } },
+      { houseRules: { mode: 'sideways', entries: [], omitted: [] } },
+      { houseRules: 'write' },
+    ]) {
+      const { db, writes } = fakeDb({});
+      await handleCliExecJob(db, { ...base, spec });
+      const started = runWrites(writes).find((w) => 'startedAt' in w.set);
+      expect('houseRules' in started!.set).toBe(false);
+    }
+  });
+
   it('runs nothing once the run was superseded after the job read it', async () => {
     const { db, writes } = fakeDb({ supersededBeforeStart: true });
     await handleCliExecJob(db, base);

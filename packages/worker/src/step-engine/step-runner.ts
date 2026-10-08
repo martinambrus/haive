@@ -43,6 +43,7 @@ import { currentBuildStamp } from '../build-stamp.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
+import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -814,6 +815,7 @@ async function resolveLlmPhase(
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
     skipAgentRules: llmSpec.skipAgentRules,
+    houseRules: houseRulesFor(stepDef.metadata.id, role),
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -1053,6 +1055,11 @@ async function resolveAiFixPhase(
     // Same step, so the same declared surface: a fix agent for a report-only step
     // must not be told it has tools the step never gets.
     toolProfile: stepDef.llm?.toolProfile,
+    // And the same rules: it edits the work of the pass it repairs, so it is shown what that pass is.
+    houseRules: houseRulesFor(
+      stepDef.metadata.id,
+      stepDef.loop?.resolveRole?.(stepIterationsAsRecords(current).length) ?? 'default',
+    ),
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation) {
@@ -1857,6 +1864,9 @@ async function dispatchMiningAgents(
           // marks; the dispatch names it and the dispatcher unions it with the marker ids.
           assignedAgentIds: dispatch.personaIds,
           toolProfile: spec.toolProfile,
+          houseRules: houseRulesOptOut(
+            'mining agents read and report; none is shown the house rules',
+          ),
           invokeOpts: {
             cwd: params.workspacePath,
             effortLevel: preferredEffort ?? undefined,
@@ -3526,6 +3536,7 @@ async function maybeEnqueueStepSummary(
       preferredProviderId,
       toolProfile: 'none',
       skipAgentRules: true,
+      houseRules: houseRulesOptOut('the recap compacts agent text and writes no code'),
       input: { kind: 'prompt', prompt, capabilities: [] },
       invokeOpts: {
         cwd: params.workspacePath,

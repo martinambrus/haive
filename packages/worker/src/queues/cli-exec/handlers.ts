@@ -105,6 +105,7 @@ import {
 } from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import { agentRulesOf } from '../../orchestrator/agent-rules.js';
+import { houseRulesOf } from '../../orchestrator/house-rules.js';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -232,6 +233,7 @@ export async function handleCliExecJob(
   // Decided with the prompt at dispatch, recorded when the run starts: a job that never starts was
   // given nothing.
   const agentRules = agentRulesOf(payload.spec);
+  const houseRules = houseRulesOf(payload.spec);
   // Also covers jobs queued before dispatch-side assignment recording was deployed.
   const assignedAgentIds = assignedAgentIdsOf(payload.spec);
   const [started] = await db
@@ -245,6 +247,7 @@ export async function handleCliExecJob(
       statusMessage: STATUS_DEFAULT_MESSAGE,
       assignedAgentIds,
       ...(agentRules ? { agentRules } : {}),
+      ...(houseRules ? { houseRules } : {}),
     })
     .where(
       and(

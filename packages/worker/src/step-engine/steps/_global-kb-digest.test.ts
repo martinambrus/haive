@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   emptyProjectFacetSet,
   type GlobalKbFacets,
@@ -7,26 +7,11 @@ import {
 import {
   facetsMatchProject,
   globalKbDigestPrompt,
-  resolveGlobalKbDigest,
   selectDigest,
   withGlobalKbDigest,
   type GlobalKbDigest,
   type GlobalKbDigestEntry,
 } from './_global-kb-digest.js';
-
-// The digest runs on the dispatch path, so an unreachable global KB must cost
-// nothing but the digest. Mocked to throw because that is the one behaviour a
-// regression here would break silently across every task.
-vi.mock('@haive/shared/global-kb', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@haive/shared/global-kb')>();
-  return {
-    ...actual,
-    resolveTaskFacets: async () => actual.emptyProjectFacetSet(),
-    withGlobalKb: async () => {
-      throw new Error('global KB unreachable');
-    },
-  };
-});
 
 function projectFacets(overrides: Partial<ProjectFacetSet> = {}): ProjectFacetSet {
   return Object.assign(emptyProjectFacetSet(), overrides);
@@ -248,16 +233,6 @@ describe('selectDigest', () => {
     expect(digest.omitted).toBe(0);
     expect(digest.scanSaturated).toBe(false);
     expect(globalKbDigestPrompt(digest.entries, digest)).toBe(globalKbDigestPrompt(digest.entries));
-  });
-});
-
-describe('resolveGlobalKbDigest', () => {
-  it('returns an empty digest when the global KB throws, never rejecting', async () => {
-    await expect(resolveGlobalKbDigest({} as never, 'task-1')).resolves.toEqual({
-      entries: [],
-      omitted: 0,
-      scanSaturated: false,
-    });
   });
 });
 
