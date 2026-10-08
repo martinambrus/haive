@@ -161,14 +161,17 @@ prompts (`t6/harness`, H1, H4, H5).
 the digest and the enforced rows come from one connection with a 3 s connect timeout, a 3 s
 `statement_timeout` set with `SET LOCAL` in each query's own transaction (a pooler would refuse a
 startup parameter) and a 6 s deadline that destroys the pool. MEASURED before: a store that accepts
-the connection and never answers stalled each dispatch 30,239 ms. A failure is recorded by error
-class only (`timeout`, `refused`, `auth`, `other`), never its message, which names the admin-only
-host; one `house_rules.unavailable` event is written per task under an advisory lock. Enforced rows
-have their own query on the partial index, at most 200 per namespace in approval order and before
-the facet filter, and each is re-vetted, since an external store's approvals are trusted unsigned:
-`enforcementState` re-derives the hash from the stored content, and refused text or a glob the
-grammar refuses moves the row to the stamp's `omitted` as `refused`. A call with a deadline never
-starts the shared schema ensure, whose failure every other caller awaiting it would inherit.
+the connection and never answers stalled each dispatch 30,239 ms. What a task's users can read, the
+stamp and the one `house_rules.unavailable` event per task (written under an advisory lock), names a
+failure by error class only (`timeout`, `refused`, `auth`, `other`), never its message, which names
+the admin-only host; the worker's own log keeps the error for the operator. With the house-rules
+switch read as off, a store that then fails the digest read leaves the rules `disabled`, not
+`unavailable`. Enforced rows have their own query on the partial index, at most 200 per namespace in
+approval order and before the facet filter, and each is re-vetted, since an external store's
+approvals are trusted unsigned: `enforcementState` re-derives the hash from the stored content, and
+a missing description, refused text or a glob the grammar refuses moves the row to the stamp's
+`omitted` as `refused`. A call with a deadline never starts the shared schema ensure, whose failure
+every other caller awaiting it would inherit.
 
 **Each opted run records what it got** in `cli_invocations.house_rules` (migration 0176), written
 with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],
