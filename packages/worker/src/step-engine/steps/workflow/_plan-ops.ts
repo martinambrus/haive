@@ -38,7 +38,8 @@ export function coalesceNodeUpserts(ops: ProposedOp[]): {
   for (const op of ops) {
     const id =
       op.op === 'upsert' && typeof op.nodeRef === 'string' ? stripNodeRefPrefix(op.nodeRef) : null;
-    if (!isPlanNodeId(id)) {
+    // An unversioned op stays apart so the applier's requireExpectedVersion drops and reports it.
+    if (!isPlanNodeId(id) || typeof op.expectedVersion !== 'number') {
       out.push(op);
       continue;
     }

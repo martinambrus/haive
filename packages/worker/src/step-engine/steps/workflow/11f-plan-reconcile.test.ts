@@ -260,6 +260,26 @@ describe('11f plan reconcile — agent ops are versioned and one node is written
     expect(out.applied).toBe(0);
   });
 
+  it.each([
+    ['before', 0],
+    ['after', 1],
+  ])(
+    'leaves an unversioned op %s a versioned one for the same node unmerged, for the applier to drop',
+    async (_where, at) => {
+      const unversioned = { op: 'upsert', nodeRef: NODE, status: 'done' };
+      const versioned = {
+        op: 'upsert',
+        nodeRef: NODE,
+        codeLinks: [{ repoPath: 'src/a.ts' }],
+        expectedVersion: 3,
+      };
+      const ops = at === 0 ? [unversioned, versioned] : [versioned, unversioned];
+      vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE] }));
+      await apply({ llmOutput: { ops }, formValues: { applyOps: ['0', '1'] } });
+      expect((sent()?.[1] as { ops: unknown[] }).ops).toEqual(ops);
+    },
+  );
+
   it('leaves a versioned op for a node that changed since detect as a conflict', async () => {
     vi.mocked(applyPlanPatch).mockRejectedValueOnce(
       new PlanPatchError('conflict', 'expected version 3, found 4', 0),
