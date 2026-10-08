@@ -321,7 +321,7 @@ describe('node versions', () => {
   });
 });
 
-describe('agent ops are versioned and one node is written once', () => {
+describe('agent ops are versioned', () => {
   const sent = () => vi.mocked(applyPlanPatch).mock.lastCall;
   const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
     created: [],
@@ -366,26 +366,18 @@ describe('agent ops are versioned and one node is written once', () => {
     ],
   };
 
-  it('sends two selected upserts for one node as one op, keeping the shared version', async () => {
+  it('sends the chosen ops to the applier unmerged and in order', async () => {
     vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE] }));
     const out = await apply(
       detect(),
       { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
       fakeDb().db,
     );
-    expect((sent()?.[1] as { ops: unknown[] }).ops).toEqual([
-      {
-        op: 'upsert',
-        nodeRef: NODE,
-        status: 'done',
-        codeLinks: [{ repoPath: 'src/a.ts' }],
-        expectedVersion: 3,
-      },
-    ]);
+    expect((sent()?.[1] as { ops: unknown[] }).ops).toEqual(SAME_NODE.ops);
     expect(out.applied).toBe(2);
   });
 
-  it('counts every merged change as lost when the merged op is dropped', async () => {
+  it('counts only the ops the applier did not drop', async () => {
     vi.mocked(applyPlanPatch).mockResolvedValueOnce(
       outcome({ dropped: [`upsert dropped: plan node '${NODE}' not found`] }),
     );
@@ -394,7 +386,7 @@ describe('agent ops are versioned and one node is written once', () => {
       { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
       fakeDb().db,
     );
-    expect(out.applied).toBe(0);
+    expect(out.applied).toBe(1);
   });
 
   it('leaves a versioned op for a node that changed since detect as a conflict', async () => {

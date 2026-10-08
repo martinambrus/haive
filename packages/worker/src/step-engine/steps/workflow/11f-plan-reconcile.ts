@@ -14,11 +14,9 @@ import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
 import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
-  coalesceNodeUpserts,
   describeDropped,
   describePlanOp,
   describeStrippedLinks,
-  landedCount,
   proposedOps,
 } from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
@@ -327,12 +325,11 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // stale id must lose its own op, not the developer's whole approved set.
     // `onInvalidCodeLink: 'strip'` for the same reason: the agent wrote the links,
     // and the form never showed one it could not read.
-    const merged = coalesceNodeUpserts(chosen);
     let applied;
     try {
       applied = await applyPlanPatch(
         ctx.db,
-        { ops: merged.ops, summary: 'plan reconcile after task implementation' },
+        { ops: chosen, summary: 'plan reconcile after task implementation' },
         {
           repositoryId: d.repositoryId,
           origin: 'user',
@@ -350,7 +347,7 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     }
     // Counts what LANDED: a count that included a dropped op would tell the
     // developer a change they approved is in the plan when it is not.
-    result.applied = landedCount(chosen.length, merged.extras, applied);
+    result.applied = chosen.length - applied.dropped.length;
     result.created = applied.created.length;
     result.updated = applied.updated.length;
     result.codeLinked = applied.codeLinked;
