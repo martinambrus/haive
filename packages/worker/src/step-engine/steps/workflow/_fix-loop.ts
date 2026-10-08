@@ -5,7 +5,7 @@ import type { StepContext } from '../../step-definition.js';
 import {
   cleanText,
   contentFingerprint,
-  FINGERPRINT_VERSION,
+  legacyContentFingerprint,
   storedFingerprint,
 } from '../../task-ledger.js';
 import {
@@ -345,8 +345,8 @@ export async function recordFixLoopRequest(
     payload: {
       ...rest,
       ...(guidance?.trim() ? { guidance } : {}),
-      fingerprint: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
-      fingerprintVersion: FINGERPRINT_VERSION,
+      fingerprint: legacyContentFingerprint(req.sourceStepId, req.diagnosis),
+      fingerprintV2: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
     },
   });
 }
@@ -467,7 +467,7 @@ export async function detectFixLoopOscillation(
     sourceStepId?: string;
     round?: number;
     fingerprint?: string;
-    fingerprintVersion?: number;
+    fingerprintV2?: string;
     guidance?: string;
   };
   const prior = rows
@@ -793,7 +793,7 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
       sourceStepId?: string;
       round?: number;
       fingerprint?: string;
-      fingerprintVersion?: number;
+      fingerprintV2?: string;
     } | null;
     if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
     const short = excerptDiagnosis((p.diagnosis ?? '').trim(), PRIOR_FIX_ENTRY_LIMIT, false);

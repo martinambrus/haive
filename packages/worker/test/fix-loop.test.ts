@@ -7,7 +7,7 @@ import {
   type AdvanceStepParams,
   type TaskStepRow,
 } from '../src/step-engine/step-runner.js';
-import { contentFingerprint, FINGERPRINT_VERSION } from '../src/step-engine/task-ledger.js';
+import { contentFingerprint, legacyContentFingerprint } from '../src/step-engine/task-ledger.js';
 import {
   AdvisedStepError,
   type StepContext,
@@ -433,7 +433,8 @@ function ev(sourceStepId: string, round: number, diagnosis: string, guidance?: s
       sourceStepId,
       diagnosis,
       round,
-      fingerprint: fixLoopFingerprint(sourceStepId, diagnosis),
+      fingerprint: legacyContentFingerprint(sourceStepId, diagnosis),
+      fingerprintV2: fixLoopFingerprint(sourceStepId, diagnosis),
       ...(guidance ? { guidance } : {}),
     },
   };
@@ -515,7 +516,7 @@ describe('fingerprints of a long diagnosis', () => {
     ).toBe('08b-test-management:2a3df4bd42cd0ed9');
   });
 
-  // An untagged row stored the hash of its last 6000 characters only.
+  // A row with only `fingerprint` stored the hash of its last 6000 characters.
   const legacy = (round: number, head: string) => ({
     payload: {
       sourceStepId: '08c-code-review',
@@ -525,7 +526,7 @@ describe('fingerprints of a long diagnosis', () => {
     },
   });
 
-  it('do not let an untagged row with a matching tail trip the oscillation guard', async () => {
+  it('do not let a legacy-only row with a matching tail trip the oscillation guard', async () => {
     const db = eventsDb([legacy(2, 'first complaint'), ev('07b-phase-4-validate', 3, D07B)]);
     const r = await detectFixLoopOscillation(
       db,
@@ -537,13 +538,24 @@ describe('fingerprints of a long diagnosis', () => {
     expect(r.tripped).toBe(false);
   });
 
-  it('trust the stored fingerprint of a row tagged with the current version', async () => {
+  it('recompute a legacy-only row from its stored text, so an identical long text trips', async () => {
+    const db = eventsDb([legacy(2, 'first complaint'), ev('07b-phase-4-validate', 3, D07B)]);
+    const r = await detectFixLoopOscillation(
+      db,
+      't',
+      '08c-code-review',
+      `first complaint\n${tail}`,
+      4,
+    );
+    expect(r.tripped).toBe(true);
+  });
+
+  it('trust the stored fingerprintV2 of a row that carries one', async () => {
     const fresh = `second complaint\n${tail}`;
     const tagged = {
       payload: {
         ...legacy(2, 'first complaint').payload,
-        fingerprint: fixLoopFingerprint('08c-code-review', fresh),
-        fingerprintVersion: FINGERPRINT_VERSION,
+        fingerprintV2: fixLoopFingerprint('08c-code-review', fresh),
       },
     };
     const db = eventsDb([tagged, ev('07b-phase-4-validate', 3, D07B)]);
@@ -1768,7 +1780,19 @@ describe('fix-loop guidance', () => {
       const guided = await recorded({ ...request, guidance: GUIDANCE });
       expect(guided.fingerprint).toBe(fixLoopFingerprint(request.sourceStepId, request.diagnosis));
       expect(guided.fingerprint).toBe((await recorded(request)).fingerprint);
-      expect(guided.fingerprintVersion).toBe(2);
+      expect(guided.fingerprintV2).toBe(guided.fingerprint);
+      expect(guided).not.toHaveProperty('fingerprintVersion');
+    });
+
+    it('keeps the tail-only hash in fingerprint and the whole-text hash in fingerprintV2', async () => {
+      const long = {
+        ...request,
+        sourceStepId: '08c-code-review',
+        diagnosis: `first complaint\n${'z '.repeat(4000)}`,
+      };
+      const row = await recorded(long);
+      expect(row.fingerprint).toBe('08c-code-review:9de670a9f259fd87');
+      expect(row.fingerprintV2).toBe('08c-code-review:ea98a16d99f7d1e7');
     });
   });
 

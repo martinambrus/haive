@@ -7,14 +7,14 @@ import {
   capSummaryForLedger,
   cleanText,
   contentFingerprint,
-  FINGERPRINT_VERSION,
+  legacyContentFingerprint,
   loadLedgerEntries,
   recordLedgerEntry,
   type LedgerEntry,
 } from './task-ledger.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from './steps/_untrusted-repo.js';
 
-type StoredPayload = LedgerEntry & { fingerprint?: string; fingerprintVersion?: number };
+type StoredPayload = LedgerEntry & { fingerprint?: string; fingerprintV2?: string };
 
 /** Mimics the drizzle chain loadLedgerEntries uses: select().from().where().orderBy(). */
 function mockDb(
@@ -78,7 +78,15 @@ describe('contentFingerprint', () => {
 
   it('keeps the value a text of up to 6000 characters always had', () => {
     expect(contentFingerprint('07', 'ddev absent')).toBe('07:b762f3a7dd2df4fb');
-    expect(FINGERPRINT_VERSION).toBe(2);
+    expect(legacyContentFingerprint('07', 'ddev absent')).toBe('07:b762f3a7dd2df4fb');
+  });
+
+  it('keeps the tail-only value an older worker computes in the legacy fingerprint', () => {
+    const text = `first complaint\n${'z '.repeat(4000)}`;
+    expect(legacyContentFingerprint('08c-code-review', text)).toBe(
+      '08c-code-review:9de670a9f259fd87',
+    );
+    expect(contentFingerprint('08c-code-review', text)).toBe('08c-code-review:ea98a16d99f7d1e7');
   });
 });
 
@@ -97,7 +105,17 @@ describe('recordLedgerEntry', () => {
     expect(v.eventType).toBe('ledger.entry');
     expect(v.payload.text).toBe('ddev absent');
     expect(v.payload.fingerprint).toBe(contentFingerprint('07', 'ddev absent'));
-    expect(v.payload.fingerprintVersion).toBe(2);
+    expect(v.payload.fingerprintV2).toBe(contentFingerprint('07', 'ddev absent'));
+    expect(v.payload).not.toHaveProperty('fingerprintVersion');
+  });
+
+  it('stores the tail-only hash an older worker reads and the whole-text hash beside it', async () => {
+    const { db, inserted } = mockDb([]);
+    const long = `first complaint\n${'z '.repeat(4000)}`;
+    await recordLedgerEntry(db, 't1', 's1', { stepId: '08c-code-review', round: 1, text: long });
+    const v = inserted[0] as { payload: StoredPayload };
+    expect(v.payload.fingerprint).toBe('08c-code-review:9de670a9f259fd87');
+    expect(v.payload.fingerprintV2).toBe('08c-code-review:ea98a16d99f7d1e7');
   });
 
   it('never throws when the insert fails', async () => {
@@ -135,6 +153,7 @@ describe('recordLedgerEntry', () => {
     );
     expect(payload).toMatchObject({ text: 'what the pass did', kind: 'summary' });
     expect(payload.fingerprint).toBe(contentFingerprint('07', 'what the pass did'));
+    expect(payload.fingerprintV2).toBe(contentFingerprint('07', 'what the pass did'));
   });
 });
 
@@ -171,7 +190,7 @@ describe('loadLedgerEntries fingerprint versions', () => {
   const tail = 'z '.repeat(4000);
   const oldFp = contentFingerprint('07-phase-2-implement', tail.slice(-6000));
 
-  it('keeps two untagged rows whose stored fingerprint hashed only a shared tail', async () => {
+  it('keeps two rows with only the legacy fingerprint whose stored value hashed only a shared tail', async () => {
     const { db } = mockDb([
       entry(`first complaint\n${tail}`, { fingerprint: oldFp }),
       entry(`second complaint\n${tail}`, { fingerprint: oldFp }),
@@ -179,10 +198,10 @@ describe('loadLedgerEntries fingerprint versions', () => {
     expect(await loadLedgerEntries(db, 't1')).toHaveLength(2);
   });
 
-  it('trusts the stored fingerprint of a row tagged with the current version', async () => {
+  it('trusts the stored fingerprintV2 of a row that carries one', async () => {
     const { db } = mockDb([
-      entry('first complaint', { fingerprint: 'x:1', fingerprintVersion: 2 }),
-      entry('second complaint', { fingerprint: 'x:1', fingerprintVersion: 2 }),
+      entry('first complaint', { fingerprint: 'x:1', fingerprintV2: 'x:2' }),
+      entry('second complaint', { fingerprint: 'x:3', fingerprintV2: 'x:2' }),
     ]);
     expect(await loadLedgerEntries(db, 't1')).toHaveLength(1);
   });

@@ -53,9 +53,8 @@ export function cleanText(raw: string, tailLimit: number): string {
   return cleaned.length > tailLimit ? cleaned.slice(-tailLimit) : cleaned;
 }
 
-/** Version of the fingerprint rule. Version 1 (rows with no tag) hashed only the last 6000
- *  cleaned characters; version 2 hashes all of them, which is the same value for a shorter text. */
-export const FINGERPRINT_VERSION = 2;
+/** Tail the legacy fingerprint kept; an older worker still hashes only this much. */
+const LEGACY_FINGERPRINT_TAIL_LIMIT = 6000;
 
 // Volatile tokens that differ between otherwise-identical texts and must be removed
 // before fingerprinting: uuids (task ids, snapshot names), file paths, and bare numbers
@@ -65,11 +64,8 @@ const FP_UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const FP_PATH_RE = /[/\\][^\s'"]+/g;
 const FP_DIGITS_RE = /\d+/g;
 
-/** Stable signature of a piece of agent text, namespaced by its source. Two texts from
- *  the SAME source that say the same thing (modulo ids, paths, and numbers) hash equal;
- *  texts from different sources never collide. */
-export function contentFingerprint(scope: string, text: string): string {
-  const normalized = cleanText(text, Infinity)
+function fingerprintOf(scope: string, text: string, tailLimit: number): string {
+  const normalized = cleanText(text, tailLimit)
     .toLowerCase()
     .replace(FP_UUID_RE, '')
     .replace(FP_PATH_RE, '')
@@ -80,16 +76,29 @@ export function contentFingerprint(scope: string, text: string): string {
   return `${scope}:${hash}`;
 }
 
-/** The fingerprint a stored payload carries, trusted only when it was written under the current
- *  rule; an older row is recomputed from its stored text so both sides of a comparison agree. */
+/** Stable signature of a piece of agent text, namespaced by its source. Two texts from
+ *  the SAME source that say the same thing (modulo ids, paths, and numbers) hash equal;
+ *  texts from different sources never collide. Hashes the whole cleaned text. */
+export function contentFingerprint(scope: string, text: string): string {
+  return fingerprintOf(scope, text, Infinity);
+}
+
+/** The tail-only signature stored in `payload.fingerprint`, which a worker from before the
+ *  whole-text rule trusts and compares against its own tail-only hash. Equals
+ *  `contentFingerprint` for a text of up to 6000 cleaned characters. */
+export function legacyContentFingerprint(scope: string, text: string): string {
+  return fingerprintOf(scope, text, LEGACY_FINGERPRINT_TAIL_LIMIT);
+}
+
+/** The whole-text fingerprint a stored payload carries in `fingerprintV2`; a row without it
+ *  (written before that field) is recomputed from its stored text, so both sides of a
+ *  comparison agree. */
 export function storedFingerprint(
-  payload: { fingerprint?: string; fingerprintVersion?: number },
+  payload: { fingerprintV2?: string },
   scope: string,
   text: string,
 ): string {
-  return payload.fingerprintVersion === FINGERPRINT_VERSION && payload.fingerprint
-    ? payload.fingerprint
-    : contentFingerprint(scope, text);
+  return payload.fingerprintV2 ? payload.fingerprintV2 : contentFingerprint(scope, text);
 }
 
 export interface LedgerEntry {
@@ -129,8 +138,8 @@ export async function recordLedgerEntry(
     // queryable as they stand. loadLedgerEntries keeps coercing null for rows
     // written before this.
     kind: entry.kind ?? 'finding',
-    fingerprint: contentFingerprint(entry.stepId, text),
-    fingerprintVersion: FINGERPRINT_VERSION,
+    fingerprint: legacyContentFingerprint(entry.stepId, text),
+    fingerprintV2: contentFingerprint(entry.stepId, text),
   };
   try {
     if (opts.whileStepDone && taskStepId) {
@@ -157,7 +166,7 @@ export async function recordLedgerEntry(
 
 interface StoredEntry extends LedgerEntry {
   fingerprint?: string;
-  fingerprintVersion?: number;
+  fingerprintV2?: string;
 }
 
 /** Every ledger entry for a task, oldest first, deduped by fingerprint so a fact a step

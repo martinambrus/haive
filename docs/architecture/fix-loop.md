@@ -122,9 +122,11 @@ bounded only because each producer fences the machine part it joins to it: gate 
 does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
 07's prompt before, 8,806 after). The fingerprints hash the whole cleaned text (`contentFingerprint`, `task-ledger.ts`):
 they used to hash its last 6,000 characters, so two long diagnoses that differ only in their
-opening (gate 2's words, 08c's `[high]` finding) hashed equal. A payload stamped
-`fingerprintVersion: 2` is trusted; an older row is recomputed from its stored text
-(`storedFingerprint`), and a text of up to 6,000 characters keeps the value it always had.
+opening (gate 2's words, 08c's `[high]` finding) hashed equal. A payload's
+`fingerprintV2` (the whole-text hash) is trusted; a row without it is recomputed from its stored text
+(`storedFingerprint`), and a text of up to 6,000 characters keeps the value it always had. `payload.fingerprint`
+still holds the old tail-only hash (`legacyContentFingerprint`), because a worker from before this rule
+trusts it and compares it with its own tail-only hash.
 
 **A fix round is told when the same check sent the previous round back.** `loadSameCheckRepeat`
 (`_fix-loop.ts`) compares the newest `fix_loop.requested` row of this round with the newest of the
