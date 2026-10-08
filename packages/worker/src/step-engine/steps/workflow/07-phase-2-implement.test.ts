@@ -420,6 +420,15 @@ describe('phase2ImplementStep root-cause request', () => {
     expect(asked).toMatch(/fix that cause/i);
   });
 
+  it('asks in the two lines it always did', () => {
+    const ls = linesOf({ round: 2, fixContext: 'AssertionError' });
+    const at = ls.indexOf(
+      'Before you edit anything, state the root cause of what is reported below (why it happens,',
+    );
+    expect(at).toBeGreaterThan(-1);
+    expect(ls[at + 1]).toBe('not only where it shows), then fix that cause.');
+  });
+
   it('asks on a fix round and not on the original pass', () => {
     expect(linesOf({ round: 2, fixContext: 'AssertionError' }).join('\n')).toMatch(/root cause/i);
     for (const round of [0, 2]) {

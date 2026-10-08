@@ -40,6 +40,7 @@ import {
   type ReportedScreenshot,
 } from './_screenshots.js';
 import { ensureAppServing } from './_app-runtime.js';
+import { ROOT_CAUSE_LINES } from './_fix-loop.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import {
   ddevContainerFailureLogs,
@@ -1384,6 +1385,7 @@ function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): stri
   return [
     'Browser testing found failures in the implemented feature. Fix them by editing the code',
     'directly.',
+    ...ROOT_CAUSE_LINES,
     failures.length > 0
       ? [
           // Tester-authored prose reaching the fixer, which edits files. The tester read

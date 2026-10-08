@@ -21,6 +21,7 @@ import {
   fenceSafe,
   safeKey,
 } from './steps/_untrusted-repo.js';
+import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
@@ -964,7 +965,12 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
     .join('\n');
 }
 
-export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec: string): string {
+export function fixCoderPrompt(
+  issue: DagIssueRow,
+  reviewIssues: unknown[],
+  spec: string,
+  previousReviewFiles: string[] = [],
+): string {
   const files = (issue.filesModified ?? []) as string[];
   return [
     // Header line, above the guard below: reduced rather than fenced, same as 06c's.
@@ -975,6 +981,7 @@ export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec
     // block's deliberate blank lines.
     REPO_IS_DATA_ACTING_LINES.join('\n'),
     files.length > 0 ? `Files the issue changed so far:\n- ${files.join('\n- ')}` : '',
+    ...ROOT_CAUSE_LINES,
     // Reviewer findings are agent prose that QUOTES repository files, and this prompt
     // dispatches an agent that writes them. The reviewer is now told to report tree text
     // that tries to steer it — naming the injection and giving its file and line — so the
@@ -989,6 +996,12 @@ export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec
     UNTRUSTED_OPEN,
     `Reviewer findings:\n${fenceSafe(JSON.stringify(reviewIssues).slice(0, 4000))}`,
     UNTRUSTED_CLOSE,
+    ...repeatedFlagLines(
+      reviewIssues
+        .map((i) => (i as { file?: unknown } | null)?.file)
+        .filter((f): f is string => typeof f === 'string'),
+      previousReviewFiles,
+    ),
     ...specLines(issue, spec),
     '',
     'If you come across the same code or the same defect in a place this issue does not ask you to change,',
@@ -1003,7 +1016,7 @@ export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec
 }
 
 export function parseReviewerOutput(
-  inv: typeof schema.cliInvocations.$inferSelect,
+  inv: Pick<typeof schema.cliInvocations.$inferSelect, 'parsedOutput' | 'rawOutput'>,
 ): ReviewerOutput | null {
   let candidate: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
@@ -1164,6 +1177,34 @@ async function acceptWithDebt(
     .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
+/** The files the reviewer two iterations back flagged, for a fix coder at `coderIteration`: the
+ *  reviewer whose verdict the previous fix coder worked from. Empty before the second fix coder,
+ *  or when that run left no parseable verdict. */
+async function previousReviewFiles(
+  db: Database,
+  issue: DagIssueRow,
+  coderIteration: number,
+): Promise<string[]> {
+  if (coderIteration < 2) return [];
+  const runs = await db
+    .select()
+    .from(schema.dagAgentRuns)
+    .where(
+      and(
+        eq(schema.dagAgentRuns.dagIssueId, issue.id),
+        eq(schema.dagAgentRuns.role, 'reviewer'),
+        eq(schema.dagAgentRuns.iteration, coderIteration - 2),
+      ),
+    )
+    .orderBy(desc(schema.dagAgentRuns.createdAt));
+  for (const run of runs) {
+    const verdict = parseReviewerOutput({ parsedOutput: null, rawOutput: run.rawOutput });
+    if (verdict)
+      return verdict.issues.map((i) => i.file).filter((f): f is string => typeof f === 'string');
+  }
+  return [];
+}
+
 /** Fold one finished review-loop agent into the issue state, spawning the next
  *  agent (a fix-coder after a reviewer's fix_required, or a re-review after a
  *  fix-coder) until the issue resolves. Exported for the unit test. */
@@ -1196,7 +1237,12 @@ export async function ingestReviewRun(
       issue,
       'coder',
       issue.innerIteration,
-      fixCoderPrompt(issue, storedVerdict.success ? storedVerdict.data.issues : [], spec),
+      fixCoderPrompt(
+        issue,
+        storedVerdict.success ? storedVerdict.data.issues : [],
+        spec,
+        await previousReviewFiles(ra.db, issue, issue.innerIteration),
+      ),
       ['tool_use', 'file_write'],
       consume,
     );
@@ -1282,7 +1328,7 @@ export async function ingestReviewRun(
       issue,
       'coder',
       newIter,
-      fixCoderPrompt(issue, verdict.issues, spec),
+      fixCoderPrompt(issue, verdict.issues, spec, await previousReviewFiles(ra.db, issue, newIter)),
       ['tool_use', 'file_write'],
     );
     if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');

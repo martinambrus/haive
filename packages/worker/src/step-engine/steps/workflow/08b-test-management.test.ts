@@ -725,3 +725,68 @@ describe('priorPassNotes', () => {
     for (const entry of block.split('\n- pass ').slice(1)) expect(entry.endsWith('\n…')).toBe(true);
   });
 });
+
+describe('test-management fix pass prompt', () => {
+  const ROOT_CAUSE = [
+    'Before you edit anything, state the root cause of what is reported below (why it happens,',
+    'not only where it shows), then fix that cause.',
+  ].join('\n');
+  const detected = {
+    workspacePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    frameworks: ['jest'],
+    primary: 'jest',
+    testDirs: ['tests'],
+    ddev: false,
+    ddevPlaywrightAddon: false,
+    repoSubpath: null,
+    spec: 'the spec',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    planImpact: '',
+  };
+  const record = (notes: string) => ({
+    iteration: 0,
+    llmOutput: '',
+    continueRequested: true,
+    applyOutput: {
+      notes,
+      testsPassed: false,
+      testRun: { ran: true, passed: false, command: 'npx jest a', output: 'FAIL a' },
+    },
+  });
+  const fixPrompt = (iteration: number) =>
+    testManagementStep.loop!.buildIterationPrompt!({
+      detected: detected as never,
+      formValues: {},
+      iteration,
+      previousIterations: Array.from({ length: iteration }, (_, i) => record(`note ${i}`)) as never,
+    });
+  const writerPrompt = () =>
+    testManagementStep.llm!.buildPrompt({ detected: detected as never, formValues: {} } as never);
+
+  it('asks for the root cause once, above the command and the failure output', () => {
+    const p = fixPrompt(1);
+    expect(p.split(ROOT_CAUSE)).toHaveLength(2);
+    expect(p.indexOf(ROOT_CAUSE)).toBeLessThan(p.indexOf('Command: npx jest a'));
+    expect(p.indexOf(ROOT_CAUSE)).toBeLessThan(p.indexOf('Failure output'));
+  });
+
+  it('does not ask the writer pass for it', () => {
+    expect(writerPrompt()).not.toContain('state the root cause');
+  });
+
+  it('says nothing about an earlier pass on the first fix pass', () => {
+    expect(fixPrompt(1)).not.toMatch(/fix pass \d/);
+  });
+
+  it.each([2, 3, 5])(
+    'names fix pass %i and that the tests still failed after each earlier one',
+    (n) => {
+      const p = fixPrompt(n);
+      const line = `This is fix pass ${n}; the tests still failed after each earlier pass.`;
+      expect(p.split(line)).toHaveLength(2);
+      expect(p.indexOf(line)).toBeGreaterThan(p.indexOf('Failure output'));
+      expect(p).toContain('If this is the same defect');
+    },
+  );
+});

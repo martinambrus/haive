@@ -20,6 +20,7 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import {
   FIX_LOOP_TARGET_STEP_ID,
+  ROOT_CAUSE_LINES,
   excerptDiagnosis,
   isFixRound,
   loadFixLoopDiagnosis,
@@ -493,8 +494,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
             ];
         return [
           ...fixFraming,
-          'Before you edit anything, state the root cause of what is reported below (why it happens,',
-          'not only where it shows), then fix that cause.',
+          ...ROOT_CAUSE_LINES,
           '',
           ...(detected.fixGuidance ? [detected.fixGuidance, ''] : []),
           // Fenced ONLY when the diagnosis is machine-sourced. `fixIsHuman` means a person
