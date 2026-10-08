@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getTableColumns } from 'drizzle-orm';
+import { getTableColumns, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -90,6 +91,8 @@ interface MockState {
   openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Every cli_invocations update with its condition, so a test can say which runs it selects. */
+  invocationUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
   afterStepWrite?: (set: Record<string, unknown>) => void;
   /** Runs after each mining-row write that matched, to land it in the rows a later read returns. */
@@ -240,6 +243,9 @@ function makeMockDb(state: MockState): Database {
             if (tableName === 'task_steps') {
               state.taskStepRow = { ...state.taskStepRow, ...v };
               state.afterStepWrite?.(v);
+            }
+            if (tableName === 'cli_invocations') {
+              (state.invocationUpdateLog ??= []).push({ set: v, where });
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
@@ -2780,6 +2786,20 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     );
     expect(String(failed!.set.errorMessage)).toContain('redis refused');
     expect(state.taskStepRow.status).toBe('failed');
+  });
+
+  it('cancels only the live fan-out runs of the step', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(1);
+    const { sql, params } = new PgDialect().sqlToQuery(cancels[0]!.where as SQL);
+    expect(params).toEqual(expect.arrayContaining(['ts-1', 'agent_mining']));
+    expect(sql).toContain('"task_step_id" = $');
+    expect(sql).toContain('"mode" = $');
+    expect(sql).toContain('"ended_at" is null');
+    expect(sql).toContain('"superseded_at" is null');
   });
 
   it('takes the runs, then the agents, then the step, in one transaction', async () => {
