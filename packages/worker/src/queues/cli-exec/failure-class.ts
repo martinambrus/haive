@@ -38,6 +38,11 @@ export function classifyStreamFailure(
   return 'generic';
 }
 
+/** The errorMessage for an output-truncation failure; `source` names what reported it. */
+export function buildOutputTruncationMessage(source: string): string {
+  return `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off at the model's output-token limit (${source}). Reduce the requested output or split the task into smaller calls.`;
+}
+
 /** True when an invocation errorMessage was produced for an output-truncation
  *  failure (built with OUTPUT_TRUNCATION_HEADLINE by stream.ts). */
 export function isOutputTruncationMessage(message: string | null | undefined): boolean {
