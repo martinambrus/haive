@@ -120,8 +120,11 @@ constraints, 1,500 per side of the oscillation gate and for the cap gate, 800 fo
 entry, where a person's entry is cut too because that block is background. A person's text stays
 bounded only because each producer fences the machine part it joins to it: gate 2 does, and so
 does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
-07's prompt before, 8,806 after). The fingerprints are untouched (`FINGERPRINT_TAIL_LIMIT`,
-`task-ledger.ts`), so dedupe and the oscillation guard compare exactly as before.
+07's prompt before, 8,806 after). The fingerprints hash the whole cleaned text (`contentFingerprint`, `task-ledger.ts`):
+they used to hash its last 6,000 characters, so two long diagnoses that differ only in their
+opening (gate 2's words, 08c's `[high]` finding) hashed equal. A payload stamped
+`fingerprintVersion: 2` is trusted; an older row is recomputed from its stored text
+(`storedFingerprint`), and a text of up to 6,000 characters keeps the value it always had.
 
 **A fix round is told when the same check sent the previous round back.** `loadSameCheckRepeat`
 (`_fix-loop.ts`) compares the newest `fix_loop.requested` row of this round with the newest of the
