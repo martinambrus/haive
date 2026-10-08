@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
+import { houseRuleShortIds, renderHouseRuleEntry } from '@haive/shared/house-rule-render';
 import { describe, expect, it } from 'vitest';
 import type { GlobalKbEnforcementState, GlobalKbEntry } from './api-client';
 import {
   carriesLiveApproval,
   describeEnforceSpec,
+  draftEnforceSpec,
   enforcementOffers,
   globsFromLines,
   houseRuleBadge,
@@ -168,17 +170,33 @@ describe('the global KB page', () => {
     expect(page.indexOf('action = {', gate), 'an action is set after the gate').toBe(-1);
   });
 
-  it('shows the title and the description as the prompt carries them, and the body as stored', () => {
-    expect(positions('const title = collapseToLine(entry.title);')).toHaveLength(1);
-    expect(positions('const description = collapseToLine(entry.description);')).toHaveLength(1);
-    expect(positions('content={title}')).toHaveLength(1);
-    expect(positions('content={description}')).toHaveLength(1);
-    expect(positions('content={entry.title}')).toEqual([]);
-    expect(positions('content={entry.description}')).toEqual([]);
-    expect(positions('content={entry.body}')).toHaveLength(1);
-    expect(positions('Title, as agents see it')).toHaveLength(1);
-    expect(positions('Description, as agents see it')).toHaveLength(1);
-    expect(positions('Body, as agents see it')).toHaveLength(1);
+  it('shows the rule in one block, printed by renderHouseRuleEntry for the draft mode and globs', () => {
+    expect(positions('<HighlightedSource')).toHaveLength(1);
+    expect(positions('content={rule}')).toHaveLength(1);
+    expect(positions('The rule, as agents see it')).toHaveLength(1);
+    expect(positions('renderHouseRuleEntry(')).toHaveLength(1);
+    expect(positions('draftEnforceSpec(panel.mode, panel.globs)')).toHaveLength(1);
+    expect(positions('houseRuleShortIds([entry.id])')).toHaveLength(1);
+  });
+
+  it('feeds no field to a block on its own any more', () => {
+    for (const raw of [
+      'content={entry.title}',
+      'content={entry.description}',
+      'content={entry.body}',
+      'content={title}',
+      'content={description}',
+      'Title, as agents see it',
+      'Description, as agents see it',
+      'Body, as agents see it',
+    ]) {
+      expect(positions(raw), raw).toEqual([]);
+    }
+  });
+
+  it('keeps the amber line for a rule with no description', () => {
+    expect(positions('None. An enforced rule needs a description.')).toHaveLength(1);
+    expect(positions("collapseToLine(entry.description) === ''")).toHaveLength(1);
   });
 
   it('has no state-keyed warning gate left', () => {
@@ -200,5 +218,78 @@ describe('describeEnforceSpec', () => {
     expect(describeEnforceSpec({ mode: 'files', globs: ['a', 'b'] })).toBe('files: a, b');
     expect(describeEnforceSpec({ mode: 'always' })).toBe('always');
     expect(describeEnforceSpec(null)).toBe('none');
+  });
+});
+
+describe('draftEnforceSpec', () => {
+  it('is the always spec in the always mode, whatever the globs box holds', () => {
+    expect(draftEnforceSpec('always', '')).toEqual({ mode: 'always' });
+    expect(draftEnforceSpec('always', 'src/**\ndocs/**')).toEqual({ mode: 'always' });
+  });
+
+  it('is the files spec of the globs typed, one per line, in the files mode', () => {
+    expect(draftEnforceSpec('files', 'src/**/*.{twig,css}\n\n  docs/** \r\n')).toEqual({
+      mode: 'files',
+      globs: ['src/**/*.{twig,css}', 'docs/**'],
+    });
+  });
+
+  it('is the mode alone, with no glob, while none is typed', () => {
+    const bare = { mode: 'files', globs: [] };
+    expect(draftEnforceSpec('files', '')).toEqual(bare);
+    expect(draftEnforceSpec('files', ' \n\t\r\n  ')).toEqual(bare);
+  });
+
+  it.each([
+    ['an unclosed class', '[abc'],
+    ['an unclosed brace', 'src/{a,b'],
+    ['a negation', '!src/**'],
+    ['a path above the root', '../outside/**'],
+    ['a backslash', 'src\\**'],
+    ['a control character', 'src/\u0000/**'],
+    ['a line of 10000 characters', 'x'.repeat(10_000)],
+  ])('does not throw on %s, and keeps the glob as typed for the api to refuse', (_name, glob) => {
+    expect(() => draftEnforceSpec('files', glob)).not.toThrow();
+    expect(draftEnforceSpec('files', `ok/**\n${glob}\n`)).toEqual({
+      mode: 'files',
+      globs: ['ok/**', glob],
+    });
+  });
+});
+
+describe('the rule the enforce panel previews', () => {
+  const ID = '42ac658a-1111-4111-8111-111111111111';
+  const RULE = {
+    title: 'No  inline\nSVGs',
+    category: 'anti_pattern' as const,
+    description: 'Reference SVG files;\nnever paste <svg> markup.',
+    body: '# No inline SVGs\n\nUse an <img> or a CSS background.\n',
+  };
+  const preview = (mode: 'always' | 'files', globs: string): string =>
+    renderHouseRuleEntry(RULE, {
+      enforce: draftEnforceSpec(mode, globs),
+      shortId: houseRuleShortIds([ID]).get(ID)!,
+    });
+  const AFTER_SCOPE = '\n\n# No inline SVGs\n\nUse an <img> or a CSS background.\n';
+  const HEAD =
+    '### Rule 42ac658a: No inline SVGs\nCategory: Anti-pattern\nReference SVG files; never paste <svg> markup.\n';
+
+  it('opens with the rule heading, the category and the description, as an agent reads them', () => {
+    expect(preview('always', '')).toBe(`${HEAD}Applies to every change.${AFTER_SCOPE}`);
+  });
+
+  it('follows the mode, and the globs of the files mode, in the scope line alone', () => {
+    expect(preview('files', 'src/**/*.php')).toBe(
+      `${HEAD}Applies to files matching: src/**/*.php${AFTER_SCOPE}`,
+    );
+    expect(preview('files', 'b/**\na/**\nb/**')).toBe(
+      `${HEAD}Applies to files matching: a/**, b/**${AFTER_SCOPE}`,
+    );
+    expect(preview('always', 'b/**')).toBe(preview('always', ''));
+  });
+
+  it('prints the scope line of the files mode alone while no glob is typed or one is refused', () => {
+    expect(preview('files', '')).toBe(`${HEAD}Applies to files matching: ${AFTER_SCOPE}`);
+    expect(() => preview('files', '[abc\n!x\n../y')).not.toThrow();
   });
 });

@@ -115,6 +115,10 @@
       "types": "./dist/utils/collapse-line.d.ts",
       "import": "./dist/utils/collapse-line.js"
     },
+    "./house-rule-render": {
+      "types": "./dist/global-kb/house-rule-render.d.ts",
+      "import": "./dist/global-kb/house-rule-render.js"
+    },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"

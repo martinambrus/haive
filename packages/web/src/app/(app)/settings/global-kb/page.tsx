@@ -20,6 +20,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import {
   carriesLiveApproval,
   describeEnforceSpec,
+  draftEnforceSpec,
   enforcementOffers,
   globsFromLines,
   houseRuleBadge,
@@ -43,6 +44,7 @@ import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { IN_STACK_OLLAMA_URL, DEFAULT_EXTERNAL_OLLAMA_URL } from '@haive/shared/constants';
 import { collapseToLine } from '@haive/shared/collapse-line';
+import { houseRuleShortIds, renderHouseRuleEntry } from '@haive/shared/house-rule-render';
 
 function parseList(s: string): string[] {
   return s
@@ -1297,8 +1299,10 @@ export default function GlobalKbPage() {
 
   function renderEnforcePanel(panel: EnforcePanel) {
     const entry = panel.entry;
-    const title = collapseToLine(entry.title);
-    const description = collapseToLine(entry.description);
+    const rule = renderHouseRuleEntry(entry, {
+      enforce: draftEnforceSpec(panel.mode, panel.globs),
+      shortId: houseRuleShortIds([entry.id]).get(entry.id)!,
+    });
     const total = panel.usedBytes + panel.entryBytes;
     const over = total - panel.capBytes;
     const pct = (bytes: number) =>
@@ -1323,20 +1327,11 @@ export default function GlobalKbPage() {
           )}
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Title, as agents see it</span>
-          <HighlightedSource name="title.txt" content={title} className="max-h-32" />
-        </div>
-        <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Description, as agents see it</span>
-          {description ? (
-            <HighlightedSource name="description.txt" content={description} className="max-h-32" />
-          ) : (
+          <span className="text-[11px] text-neutral-500">The rule, as agents see it</span>
+          <HighlightedSource name="rule.txt" content={rule} className="max-h-96" />
+          {collapseToLine(entry.description) === '' && (
             <p className="text-xs text-amber-400">None. An enforced rule needs a description.</p>
           )}
-        </div>
-        <div className="flex flex-col gap-1">
-          <span className="text-[11px] text-neutral-500">Body, as agents see it</span>
-          <HighlightedSource name="body.md" content={entry.body} className="max-h-72" />
         </div>
         <div className="flex flex-wrap gap-3">
           <div className="flex flex-col gap-1.5">
