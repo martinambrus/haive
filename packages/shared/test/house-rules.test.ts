@@ -264,6 +264,9 @@ describe('refusedHouseRuleText', () => {
 });
 
 describe('validateHouseRuleGlobs', () => {
+  const BRACE_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.';
+  const bracedChars = (count: number): string => `{${[...BRACE_CHARS].slice(0, count).join(',')}}`;
+
   it.each([
     ['a glob that matches by extension', ['**/*.twig']],
     ['brace alternatives that name something', ['**/*.{css,scss}']],
@@ -273,6 +276,15 @@ describe('validateHouseRuleGlobs', () => {
     ['an alternative before the wildcard', ['{src,lib}/**']],
     ['an empty alternative', ['file{,.bak}']],
     ['a plain group of characters', ['src/(a)/**']],
+    ['an extension group after a globstar', ['**/*.{twig,css}']],
+    ['several brace groups that each name something', ['{src,lib}/**/*.{php,inc}']],
+    ['a nested brace group', ['src/{a,{b,c}}/**']],
+    ['an empty alternative whose directory names something', ['src/{a,{b,}}*']],
+    ['a nested wildcard alternative inside a named directory', ['src/{a,{b,*}}']],
+    ['a wildcard alternative in a later group, after named directories', ['{a,b}/{c,*}']],
+    ['sixty-four brace expansions', ['{a,b}'.repeat(6)]],
+    ['a group of sixty-four alternatives', [bracedChars(64)]],
+    ['seven nested groups with eight distinct expansions', ['{a,{b,{c,{d,{e,{f,{g,h}}}}}}}']],
     ['two globs', ['**/*.twig', '**/*.css']],
     ['the same glob twice', ['**/*.twig', '**/*.twig']],
     ['twenty globs', Array.from({ length: 20 }, (_, i) => `dir${i}/**`)],
@@ -301,10 +313,15 @@ describe('validateHouseRuleGlobs', () => {
     ['every file', '**/*', 'every file'],
     ['every root-level file', '*', 'every file'],
     ['a wildcard-only brace alternative', '{**,x}', 'every file'],
-    ['a nested wildcard-only brace alternative', 'src/{a,{b,*}}', 'every file'],
-    ['a wildcard-only alternative in a later brace group', '{a,b}/{c,*}', 'every file'],
     ['a wildcard-only alternative once a nested group is resolved', '{{a,b},*}', 'every file'],
     ['a bracket class standing for any letter', '[a-z]*', 'every file'],
+    ['a bracket class after a globstar', '**/[a-z]*', 'every file'],
+    ['an empty alternative beside a literal one', '**/{foo,}*', 'every file'],
+    ['an alternative that expands to a bare globstar', '{src/**,**}', 'every file'],
+    ['a wildcard alternative beside a literal one', '**/{*,x}', 'every file'],
+    ['an empty leading alternative', '{,src/}**', 'every file'],
+    ['an empty alternative in a nested group', '{a,{b,}}*', 'every file'],
+    ['an empty alternative in each of two groups', '{a,}{b,}*', 'every file'],
     ['an extglob around a wildcard', '@(*)', 'every file'],
     ['an extglob alternative that is a wildcard', '**/@(fixed|*)', 'extglob'],
     ['a one-or-more extglob', 'src/+(a|*)', 'extglob'],
@@ -326,6 +343,17 @@ describe('validateHouseRuleGlobs', () => {
   it('refuses a glob of more than 200 characters', () => {
     expect(validateHouseRuleGlobs([`${'a'.repeat(198)}/**`])).toContain('200');
     expect(validateHouseRuleGlobs(['a'.repeat(201)])).toContain('200');
+  });
+
+  it('refuses a glob with more than 64 brace expansions, naming it and without expanding it', () => {
+    const glob = '{a,b}'.repeat(40);
+    expect(glob).toHaveLength(200);
+    const reason = validateHouseRuleGlobs([glob]);
+    expect(reason).toContain('64');
+    expect(reason).toContain(JSON.stringify(glob));
+    expect(reason).not.toContain('every file');
+    expect(validateHouseRuleGlobs(['{a,b}'.repeat(7)])).toContain('64');
+    expect(validateHouseRuleGlobs([bracedChars(65)])).toContain('64');
   });
 
   it('refuses no globs and more than twenty', () => {

@@ -1,10 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import type { GlobalKbEnforcementState } from './api-client';
 import {
+  carriesLiveApproval,
   describeEnforceSpec,
   globsFromLines,
-  holdsApproval,
   houseRuleBadge,
-  lapsesOnEdit,
 } from './house-rules';
 
 describe('houseRuleBadge', () => {
@@ -33,28 +34,79 @@ describe('houseRuleBadge', () => {
   });
 });
 
-describe('holdsApproval', () => {
-  it('is true while the approval is still on the row', () => {
-    for (const state of ['enforced', 'edited', 'not_active', 'switched_off', 'other_namespace']) {
-      expect(holdsApproval({ state } as never)).toBe(true);
-    }
+describe('carriesLiveApproval', () => {
+  const STATES: Array<GlobalKbEnforcementState['state']> = [
+    'none',
+    'enforced',
+    'edited',
+    'not_active',
+    'superseded',
+    'cleared',
+    'other_namespace',
+    'switched_off',
+  ];
+  const entryIn = (state: GlobalKbEnforcementState['state'], enforcedHash?: string | null) => ({
+    enforcementState: { state },
+    enforcedHash,
   });
 
-  it('is false once it is gone or never existed', () => {
-    for (const state of ['none', 'cleared', 'superseded']) {
-      expect(holdsApproval({ state } as never)).toBe(false);
-    }
-    expect(holdsApproval(undefined)).toBe(false);
+  it('is true for an entry of another namespace that holds a hash', () => {
+    expect(carriesLiveApproval(entryIn('other_namespace', 'hr1:abc'))).toBe(true);
+  });
+
+  it('is false for an entry of another namespace that holds none', () => {
+    expect(carriesLiveApproval(entryIn('other_namespace', null))).toBe(false);
+  });
+
+  it('is true while the row holds a hash, whichever state it reads', () => {
+    for (const state of STATES) expect(carriesLiveApproval(entryIn(state, 'hr1:abc'))).toBe(true);
+  });
+
+  it('is false once the hash is gone, whichever state it reads', () => {
+    for (const state of STATES) expect(carriesLiveApproval(entryIn(state, null))).toBe(false);
+  });
+
+  it('is false for a row that carries no hash field, as from an older api', () => {
+    expect(carriesLiveApproval(entryIn('enforced'))).toBe(false);
+    expect(carriesLiveApproval({})).toBe(false);
   });
 });
 
-describe('lapsesOnEdit', () => {
-  it('is true only while the approval is live', () => {
-    expect(lapsesOnEdit({ state: 'enforced', mode: 'always' })).toBe(true);
-    expect(lapsesOnEdit({ state: 'switched_off' })).toBe(true);
-    expect(lapsesOnEdit({ state: 'edited' })).toBe(false);
-    expect(lapsesOnEdit({ state: 'none' })).toBe(false);
-    expect(lapsesOnEdit(undefined)).toBe(false);
+describe('the global KB page', () => {
+  const page = readFileSync(
+    new URL('../app/(app)/settings/global-kb/page.tsx', import.meta.url),
+    'utf8',
+  );
+  const positions = (needle: string): number[] => {
+    const found: number[] = [];
+    for (let at = page.indexOf(needle); at !== -1; at = page.indexOf(needle, at + 1)) {
+      found.push(at);
+    }
+    return found;
+  };
+
+  it.each([
+    ['the scope, description and body editors', 'This entry is an enforced house rule.', 3],
+    ['the archive confirmation', 'Archiving ends its enforcement', 1],
+    ['the delete confirmation', 'deleting it ends its enforcement', 1],
+    ['the activate confirmation', 'Activating archives it and ends its enforcement', 1],
+  ])('warns on %s only for an entry that carriesLiveApproval', (_site, message, sites) => {
+    const warnings = positions(message);
+    expect(warnings).toHaveLength(sites);
+    for (const at of warnings) {
+      const gate = page.lastIndexOf('carriesLiveApproval(', at);
+      expect(gate, `no carriesLiveApproval( before "${message}"`).toBeGreaterThan(-1);
+      expect(at - gate, `"${message}" is far from the call before it`).toBeLessThan(250);
+    }
+  });
+
+  it('labels the entry an activated draft replaces from the same predicate', () => {
+    expect(positions('carriesApproval: carriesLiveApproval(r.entry)')).toHaveLength(1);
+    expect(positions('(enforced house rule)')).toHaveLength(1);
+  });
+
+  it('has no state-keyed warning gate left', () => {
+    expect(page.match(/\b(?:holdsApproval|lapsesOnEdit)\b/g) ?? []).toEqual([]);
   });
 });
 

@@ -18,11 +18,10 @@ import {
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
+  carriesLiveApproval,
   describeEnforceSpec,
   globsFromLines,
-  holdsApproval,
   houseRuleBadge,
-  lapsesOnEdit,
 } from '@/lib/house-rules';
 import {
   Badge,
@@ -313,6 +312,7 @@ export default function GlobalKbPage() {
     description: string | null;
     enforce: GlobalKbEnforceSpec | null;
     enforcementState: GlobalKbEnforcementState | undefined;
+    carriesApproval: boolean;
   } | null>(null);
   const [draftView, setDraftView] = useState<'diff' | 'full'>('diff');
   const [repos, setRepos] = useState<Repository[]>([]);
@@ -750,6 +750,7 @@ export default function GlobalKbPage() {
             description: r.entry.description ?? null,
             enforce: r.entry.enforce ?? null,
             enforcementState: r.entry.enforcementState,
+            carriesApproval: carriesLiveApproval(r.entry),
           });
         }
       })
@@ -776,7 +777,7 @@ export default function GlobalKbPage() {
       const res = await api.get<{ entry: GlobalKbEntry }>(
         `/global-kb/entries/${e.supersedesEntryId}`,
       );
-      if (!holdsApproval(res.entry.enforcementState)) return null;
+      if (!carriesLiveApproval(res.entry)) return null;
       return `"${e.title}" replaces "${res.entry.title}", an enforced house rule. Activating archives it and ends its enforcement; an admin has to enforce the replacement. Activate anyway?`;
     } catch (err) {
       if ((err as ApiError).status === 404) return null;
@@ -805,7 +806,7 @@ export default function GlobalKbPage() {
    *  warning tells a reviewer to do exactly this, and the page had no control to do it with. */
   async function archive(e: GlobalKbEntry) {
     if (
-      holdsApproval(e.enforcementState) &&
+      carriesLiveApproval(e) &&
       !window.confirm(
         `"${e.title}" is an enforced house rule. Archiving ends its enforcement, and reactivating the entry does not bring it back. Archive anyway?`,
       )
@@ -1047,7 +1048,7 @@ export default function GlobalKbPage() {
     const msg = cancelsTask
       ? `Delete "${e.title}" permanently and cancel its enrichment task? This cannot be undone.`
       : `Delete "${e.title}" permanently? This cannot be undone.`;
-    const enforcedNote = holdsApproval(e.enforcementState)
+    const enforcedNote = carriesLiveApproval(e)
       ? `"${e.title}" is an enforced house rule, and deleting it ends its enforcement. `
       : '';
     if (!window.confirm(`${enforcedNote}${msg}`)) return;
@@ -2170,7 +2171,7 @@ export default function GlobalKbPage() {
                     One line: what the rule says and when it applies. Once the entry is active it is
                     listed beside the title in the prompt of every agent the rule applies to.
                   </Label>
-                  {lapsesOnEdit(selected.enforcementState) && (
+                  {carriesLiveApproval(selected) && (
                     <span className="text-[11px] text-amber-400">
                       This entry is an enforced house rule. Saving changes the text an admin
                       approved, so the rule lapses until an admin enforces it again.
@@ -2233,7 +2234,7 @@ export default function GlobalKbPage() {
                   <span className="text-[11px] text-neutral-500">
                     Empty = applies to all values of that dimension. Comma-separated.
                   </span>
-                  {lapsesOnEdit(selected.enforcementState) && (
+                  {carriesLiveApproval(selected) && (
                     <span className="text-[11px] text-amber-400">
                       This entry is an enforced house rule. Saving changes the text an admin
                       approved, so the rule lapses until an admin enforces it again.
@@ -2310,7 +2311,7 @@ export default function GlobalKbPage() {
                 renderEnforcePanel(enforcePanel)
               ) : bodyEdit !== null ? (
                 <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800 p-3">
-                  {lapsesOnEdit(selected.enforcementState) && (
+                  {carriesLiveApproval(selected) && (
                     <p className="mb-2 text-[11px] text-amber-400">
                       This entry is an enforced house rule. Saving changes the text an admin
                       approved, so the rule lapses until an admin enforces it again.
@@ -2348,9 +2349,7 @@ export default function GlobalKbPage() {
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                     <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
                       Updates existing: {supersededEntry.title}
-                      {holdsApproval(supersededEntry.enforcementState)
-                        ? ' (enforced house rule)'
-                        : ''}
+                      {supersededEntry.carriesApproval ? ' (enforced house rule)' : ''}
                     </span>
                     <div className="ml-auto flex overflow-hidden rounded border border-neutral-800">
                       <button

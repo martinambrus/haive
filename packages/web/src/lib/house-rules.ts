@@ -28,22 +28,12 @@ export function houseRuleBadge(state: GlobalKbEnforcementState | undefined): Hou
   }
 }
 
-/** States in which an admin's approval is still on the row, so archiving, deleting or replacing
- *  the entry takes a rule away. */
-export function holdsApproval(state: GlobalKbEnforcementState | undefined): boolean {
-  const name = state?.state;
-  return (
-    name === 'enforced' ||
-    name === 'edited' ||
-    name === 'not_active' ||
-    name === 'switched_off' ||
-    name === 'other_namespace'
-  );
-}
+// `GlobalKbEntry` does not declare `enforcedHash`, but the api sends it on every entry.
+type MayCarryApproval = object & { enforcedHash?: string | null };
 
-/** An edit to text or scope changes what an admin approved, so the rule lapses on save. */
-export function lapsesOnEdit(state: GlobalKbEnforcementState | undefined): boolean {
-  return state?.state === 'enforced' || state?.state === 'switched_off';
+/** An admin's approval is still on the row, in any state or namespace; an edit, archive, delete or replacement ends it. */
+export function carriesLiveApproval(entry: MayCarryApproval): boolean {
+  return entry.enforcedHash != null;
 }
 
 /** One glob per line: a brace glob holds commas, so the list is never split on them. */

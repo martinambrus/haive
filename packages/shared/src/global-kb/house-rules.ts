@@ -132,21 +132,35 @@ export function refusedHouseRuleText(text: string): string | null {
   return null;
 }
 
+const BRACE_EXPANSIONS_MAX = 64;
 const BRACE_GROUP = /\{([^{}]*)\}/;
-const hasLiteral = (part: string): boolean =>
-  /[^*?[\]{}()!+@|,/]/.test(part.replace(/\[[^\]]*\]/g, ''));
 
-function hasWildcardOnlyAlternative(glob: string): boolean {
-  let rest = glob;
-  for (let group = BRACE_GROUP.exec(rest); group; group = BRACE_GROUP.exec(rest)) {
-    const alternatives = group[1]!.split(',');
-    if (alternatives.some((alternative) => alternative !== '' && !hasLiteral(alternative))) {
-      return true;
+/** Every glob the brace groups stand for, nested ones included; null once there are more than the cap. */
+function braceExpansions(glob: string): string[] | null {
+  let pending = new Set([glob]);
+  for (;;) {
+    const next = new Set<string>();
+    let expanded = false;
+    for (const text of pending) {
+      const group = BRACE_GROUP.exec(text);
+      if (group === null) {
+        next.add(text);
+        continue;
+      }
+      expanded = true;
+      const head = text.slice(0, group.index);
+      const tail = text.slice(group.index + group[0].length);
+      for (const alternative of group[1]!.split(',')) next.add(`${head}${alternative}${tail}`);
     }
-    rest = `${rest.slice(0, group.index)}x${rest.slice(group.index + group[0].length)}`;
+    if (next.size > BRACE_EXPANSIONS_MAX) return null;
+    if (!expanded) return [...next];
+    pending = next;
   }
-  return false;
 }
+
+// Wildcards, classes, groups, separators and extglob marks stand for other characters; the rest name themselves.
+const namesSomething = (expansion: string): boolean =>
+  /[^*?[\]{}()!+@|,/]/.test(expansion.replace(/\[[^\]]*\]/g, ''));
 
 function globProblem(glob: string): string | null {
   const shown = JSON.stringify(glob.length > GLOB_MAX_LENGTH ? `${glob.slice(0, 40)}...` : glob);
@@ -167,7 +181,11 @@ function globProblem(glob: string): string | null {
   if (glob.startsWith('!') || glob.includes('!(')) {
     return `glob ${shown} uses "!" negation, which is not supported`;
   }
-  if (!hasLiteral(glob) || hasWildcardOnlyAlternative(glob)) {
+  const expansions = braceExpansions(glob);
+  if (expansions === null) {
+    return `glob ${shown} has more than ${BRACE_EXPANSIONS_MAX} brace expansions; split it into separate globs`;
+  }
+  if (!expansions.every(namesSomething)) {
     return `glob ${shown} would match every file; a files rule has to name something, and mode "always" is for every file`;
   }
   if (/[@+*?!]\(/.test(glob)) {
