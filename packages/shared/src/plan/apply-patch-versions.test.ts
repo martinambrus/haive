@@ -14,7 +14,14 @@ function fakeDb(version: number, afterUpdate?: (row: Record<string, unknown>) =>
     status: 'todo',
   };
   const tx = {
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => [{ ...row }] }) }) }),
+    select: () => ({
+      from: () => ({
+        where: () => {
+          const rows = [{ ...row }];
+          return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+        },
+      }),
+    }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
@@ -67,6 +74,23 @@ describe('applyPlanPatch node versions', () => {
     ).catch((e: unknown) => e);
     expect(err).toMatchObject({ kind: 'conflict' });
     expect((err as Error).message).toContain('expected version 3, found 5');
+  });
+
+  it('lets a later op land when an earlier op on the node was dropped before its write', async () => {
+    const { db, row } = fakeDb(3);
+    const out = await applyPlanPatch(
+      db,
+      {
+        ops: [
+          op({ status: 'done', parentRef: 'tmp-parent', expectedVersion: 3 }),
+          op({ title: 'T', expectedVersion: 3 }),
+          { op: 'upsert', nodeRef: 'tmp-parent', parentRef: NODE, title: 'Parent' },
+        ],
+      },
+      { ...OPTS, onUnresolvableRef: 'drop' },
+    );
+    expect(out.dropped).toHaveLength(1);
+    expect(row).toMatchObject({ title: 'T', version: 4 });
   });
 
   it('still conflicts on a single stale op', async () => {

@@ -710,7 +710,6 @@ async function applyOps(
     }
     assertVersion(row, op.expectedVersion, opIndex);
 
-    versionAfterOwnWrite.set(row.id, row.version + 1);
     const set: Record<string, unknown> = {
       version: row.version + 1,
       updatedAt: new Date(),
@@ -786,6 +785,7 @@ async function applyOps(
     }
 
     await tx.update(schema.planNodes).set(set).where(eq(schema.planNodes.id, row.id));
+    versionAfterOwnWrite.set(row.id, row.version + 1);
     refs.set(op.nodeRef, row.id);
     if (!result.updated.includes(row.id)) result.updated.push(row.id);
     await writeCodeLinks(row.id, op);
