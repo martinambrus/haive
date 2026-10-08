@@ -1,7 +1,7 @@
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { fencedAgentBlock } from '../_untrusted-repo.js';
+import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { dispositionReviewFindings } from './_review-findings.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
@@ -111,7 +111,7 @@ export function formatQaFixDiagnosis(lines: string[], feedback: string): string 
     );
   }
   if (feedback) {
-    parts.push('', 'Reviewer instructions:', feedback);
+    parts.push('', 'Reviewer instructions:', fenceSafe(feedback));
   }
   return parts.join('\n');
 }

@@ -12,6 +12,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   balanceFences,
+  fenceSafe,
   fencedAgentBlock,
 } from '../_untrusted-repo.js';
 
@@ -407,7 +408,7 @@ export function buildGateDirectiveDiagnosis(instruction: string, priorDiagnosis:
     'conflicting guidance — the spec, review findings, and the diagnosis below included. Where',
     'they disagree, follow this and say in your notes what you overrode:',
     '',
-    instruction.trim(),
+    fenceSafe(instruction.trim()),
   ].join('\n');
   // The instruction above is the developer's and carries the prompt's own voice. What follows
   // is the failure that stopped the loop — agent and tool output, quoted for context — so it
