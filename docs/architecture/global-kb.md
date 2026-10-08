@@ -73,10 +73,14 @@ into agent prompts as an instruction (PR6 of `docs/plans/abstract-splashing-owl.
 binds exactly the text the admin saw: `PUT /global-kb/entries/:id/enforcement` takes the entry's
 content token (`houseRuleContentToken`, `house-rules.ts`) and stores an approval hash over the same
 canonical content plus the mode (`always`, or `files` with globs). Both are computed from STORED
-values, so jsonb key order and the boot backfill's array order never change them. Any later edit
-makes the hash stop matching (Lapsed · edited); leaving `active` clears it through a trigger, the
-one clearing mechanism, which also covers an older build sharing an external store; the mode,
-globs and approver stay as the last approval so a superseded entry can offer Re-enforce.
+values, so jsonb key order and the boot backfill's array order never change them. A PATCH that
+changes the content clears the approval for good: a byte-for-byte revert does not revive it, which
+would also let a rule return past the always cap it was no longer counted against. Leaving `active`
+clears it through a trigger, which covers every writer, an older build sharing an external store
+included; a content change by any writer other than PATCH shows as Lapsed · edited. The mode,
+globs and approver stay as the last approval so a cleared or superseded entry can offer
+Re-enforce. Rule globs may not use extglob syntax (`@(…)`, `+(…)`…), whose alternatives the
+universal-glob check cannot see.
 `enforcementState` reads none, other namespace, superseded, cleared, not active, edited, switched
 off or enforced, and the api attaches it to every entry it returns.
 

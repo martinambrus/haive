@@ -181,10 +181,12 @@ Decided by the user on 2026-10-03:
     admin enforces what they saw), and when the always-cap is exceeded. The cap is counted in UTF-8
     bytes of the rendered entry and the response gives the numbers.
   - 400 for refused text, bad globs, or a missing description.
-  - Clearing is ONE mechanism, a trigger that nulls `enforced_hash` whenever an active row leaves
-    `active` (any writer, an older build on a shared store included); `enforce` and at/by stay as
-    the last approved settings, so a superseded entry can offer Re-enforce. Un-enforce nulls the
-    hash only.
+  - Clearing: a trigger nulls `enforced_hash` whenever an active row leaves `active` (any writer,
+    an older build on a shared store included), and a PATCH that changes the content token nulls it
+    in code (not the trigger, which would see the backfill's reordered facets as an edit), so a
+    revert never revives an approval nor slips a rule back past the always cap. `enforce` and at/by
+    stay as the last approved settings, so a cleared or superseded entry can offer Re-enforce.
+    Un-enforce nulls the hash only.
   - An enforce-only change bumps nothing and queues no re-embed; a PATCH re-embeds only when the
     title or body changed or the entry becomes active.
 - **Enrich step:** `01-enrich` refuses to re-enrich an enforced entry; a Retry would demote it and a
