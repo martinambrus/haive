@@ -169,25 +169,39 @@ Decided by the user on 2026-10-03:
   - **Refused text:** C0/C1 control characters (other than newline and tab), zero-width and bidi
     characters, and Haive markers.
   - **Glob shape check:** relative, no `..`, no leading `!`, bounded. picomatch stays in the worker.
-- **`PATCH /global-kb/entries/:id`:**
-  - Enforce and un-enforce require `requireAdmin`.
-  - Every PATCH takes a namespace advisory lock first and the row lock second, so enforcing and
-    reactivating cannot deadlock.
-  - 409 for an entry that is not active, belongs to another namespace, or whose `expectedHash`
-    differs (the admin enforces what they saw), and when the always-cap is exceeded. The cap is
-    counted in UTF-8 bytes and the response gives the numbers.
+- **`PUT`/`DELETE /global-kb/entries/:id/enforcement`**, `requireAdmin` on the route (no field
+  gate inside a route non-admins share):
+  - Every writer of an entry (PATCH, DELETE, both enforcement routes) takes the namespace advisory
+    lock first and the row lock second, with a 30 s `lock_timeout` answering 503, so enforcing,
+    reactivating, deleting and superseding cannot deadlock.
+  - `expectedHash` is the entry's content token (title, category, description, body and scope,
+    no enforce part), which every returned entry carries; the server computes the approval hash
+    itself, since the browser has no canonical form and no `crypto.subtle` off localhost.
+  - 409 for an entry that is not active, belongs to another namespace, or whose token differs (the
+    admin enforces what they saw), and when the always-cap is exceeded. The cap is counted in UTF-8
+    bytes of the rendered entry and the response gives the numbers.
   - 400 for refused text, bad globs, or a missing description.
-  - Enforcement is cleared when the status leaves `active` and when an activation archives a
-    predecessor.
-  - An enforce-only change bumps nothing and queues no re-embed.
+  - Clearing: a trigger nulls `enforced_hash` whenever an active row leaves `active` (any writer,
+    an older build on a shared store included), and a PATCH that changes the content token nulls it
+    in code (not the trigger, which would see the backfill's reordered facets as an edit), so a
+    revert never revives an approval nor slips a rule back past the always cap. `enforce` and at/by
+    stay as the last approved settings, so a cleared or superseded entry can offer Re-enforce.
+    Un-enforce nulls the hash only.
+  - An enforce-only change bumps nothing and queues no re-embed; a PATCH re-embeds only when the
+    title or body changed or the entry becomes active.
 - **Enrich step:** `01-enrich` refuses to re-enrich an enforced entry; a Retry would demote it and a
   Cancel would delete it.
-- **Config:** `GLOBAL_KB_HOUSE_RULES_ENABLED`, seeded true, beside the digest toggle. One resolver
-  reads `GLOBAL_KB_ENABLED`, whose two readers default differently today.
+- **Config:** `GLOBAL_KB_HOUSE_RULES_ENABLED`, seeded true, switched at `/admin/config/house-rules`
+  beside the agent-rules switch (the global KB config route is open to every user). One resolver
+  reads `GLOBAL_KB_ENABLED`, whose four readers defaulted differently. Decided by the user on
+  2026-10-03: the store's Enabled switch, namespace, mode and connection string become admin-only
+  (a non-admin's CHANGE is a 403; each could switch every rule off), and approvals are trusted from
+  whatever store an admin points the KB at (no per-install signing).
 - **UI:**
   - Enforce panel: the raw source, fenced; mode; globs; always-usage meter.
   - Badges: Enforced·always, Enforced·files, Lapsed with its reason. "Superseded" names the successor
-    and offers Re-enforce.
+    and offers Re-enforce. "Paused" for switched off or another namespace, which come back on their
+    own.
   - Warnings on Edit scope, Archive, and on activating a superseding draft.
   - PR5 and PR6 merge in one session with no release tag between them, so "Enforced" never does
     nothing in a release.
@@ -233,8 +247,9 @@ Decided by the user on 2026-10-03:
   - A stored block is replaced only at position 0. A marker quoted anywhere else must not suppress
     injection.
   - One `stripHaivePreamble()` is used by the isolation scan and by the persona bookkeeping reads.
-  - The closing marker is escaped. Titles and descriptions are collapsed. `anti_pattern` renders as
-    "Anti-pattern — avoid".
+  - The closing marker is escaped. Titles and descriptions are collapsed. An `anti_pattern` entry
+    carries its category on a line of its own, never as a title prefix, which turned "no inline
+    svgs" into its opposite.
 - **Write framing:**
   - Follow the rules in what you write or specify, on the lines you write.
   - Do not rewrite untouched code to fit them; report it as similar sites.

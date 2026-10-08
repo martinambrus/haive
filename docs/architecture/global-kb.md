@@ -66,6 +66,51 @@ keeps the draft for retry. Body edits use the existing pending-embedding/sync pa
 description or body edit blocks activation, archiving and deletion until saved or cancelled.
 The replacement diff is shown again after a body save, using the corrected text.
 
+## House rules: admin-enforced entries
+
+**Only an admin makes an entry an enforced house rule**, because enforcing will put its full text
+into agent prompts as an instruction (PR6 of `docs/plans/abstract-splashing-owl.md`). The approval
+binds exactly the text the admin saw: `PUT /global-kb/entries/:id/enforcement` takes the entry's
+content token (`houseRuleContentToken`, `house-rules.ts`) and stores an approval hash over the same
+canonical content plus the mode (`always`, or `files` with globs). Both are computed from STORED
+values, so jsonb key order and the boot backfill's array order never change them. A PATCH that
+changes the content clears the approval for good: a byte-for-byte revert does not revive it, which
+would also let a rule return past the always cap it was no longer counted against. Leaving `active`
+clears it through a trigger, which covers every writer, an older build sharing an external store
+included; a content change by any writer other than PATCH shows as Lapsed · edited. The mode,
+globs and approver stay as the last approval so a cleared or superseded entry can offer
+Re-enforce.
+
+Rule globs keep to a small grammar: literal characters, `*`, `**`, `?`, `[…]`, `/` and comma
+alternatives in braces. picomatch reads `(`, `)` and `|` as alternation, `..` in any brace group as
+a range and drops a `"`, each a way to match every file while seeming to name something, so all are
+refused (`?app?` still names a directory such as Next.js's `(app)`). Every brace expansion, at most
+64, must name something and keep the path rules a glob written out keeps: relative to the repository
+root, with no empty, `.` or `..` segment (`{,src}/README.md` expands to `/README.md`). No brace
+alternative may start or end with whitespace, which picomatch keeps: `{src, lib}` names ` lib` and
+never matches `lib/`. MEASURED: before the grammar, 535 such wide globs of length 4 passed. The
+check catches mistakes and is not a boundary: only an admin enforces, a deliberately broad glob
+(`**/*.*`) is theirs to write, and what reaches a prompt is bounded by the per-prompt budget
+(PR6), not by this check.
+`enforcementState` reads none, superseded, cleared, not active, edited, other namespace, switched
+off or enforced, first match winning, and the api attaches it to every entry it returns. Validity
+comes first: "other namespace" and "switched off" are pauses that promise the rule resumes, so they
+apply only to an approval that is otherwise valid. The enforce panel shows the title and description
+as agents see them (collapsed onto one line) and the body as stored, since that is what is approved;
+Enforce is offered only in the namespace in use, Un-enforce on any live approval.
+
+An enforced entry needs a description and may not carry invisible or control characters or Haive
+prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
+the rendered entry (`houseRuleBytes`). Every writer of an entry takes the namespace's advisory
+lock before the row's, with a 30 s wait limit answering 503: MEASURED, a DELETE racing the
+activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. The store settings
+that could switch every rule off at once (Enabled, namespace, mode, connection string) are
+admin-only. A non-admin's save never writes them: a re-sent value is accepted and skipped, so a
+save that read the page before an admin's change cannot revert it. The house-rules switch lives in
+the admin console, and an admin who points the KB at an external store trusts every writer of that
+database: a row it marks enforced is honoured. The
+enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a

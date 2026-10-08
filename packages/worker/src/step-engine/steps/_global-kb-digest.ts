@@ -4,6 +4,7 @@ import { CONFIG_KEYS, configService } from '@haive/shared';
 import {
   globalKbEntries,
   normalizeGlobalKbDescription,
+  resolveGlobalKbEnabled,
   resolveTaskFacets,
   withGlobalKb,
   type GlobalKbFacets,
@@ -121,7 +122,7 @@ const emptyDigest = (): GlobalKbDigest => ({ entries: [], omitted: 0, scanSatura
 export async function resolveGlobalKbDigest(db: Database, taskId: string): Promise<GlobalKbDigest> {
   try {
     const [globalEnabled, digestEnabled] = await Promise.all([
-      configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true),
+      resolveGlobalKbEnabled(configService),
       configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
     ]);
     if (!globalEnabled || !digestEnabled) return emptyDigest();

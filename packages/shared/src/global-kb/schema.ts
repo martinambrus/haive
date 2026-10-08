@@ -2,6 +2,7 @@ import { pgTable, uuid, text, jsonb, timestamp } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type postgres from 'postgres';
 import { collapseToLine } from '../utils/collapse-line.js';
+import type { EnforceSpec } from './house-rules.js';
 
 // Global cross-task KB schema. Lives in a SEPARATE database (internal
 // haive_kb_global or an external/central Postgres), NOT the main Haive DB, so it
@@ -305,6 +306,12 @@ export const globalKbEntries = pgTable('global_kb_entries', {
   supersededAt: timestamp('superseded_at'),
   // One-line summary shown beside the title in agent title lists. Not embedded.
   description: text('description'),
+  // House rule: the last approved settings, which stay when the approval is cleared.
+  enforce: jsonb('enforce').$type<EnforceSpec | null>(),
+  // The approval; a trigger clears it when the entry leaves `active`.
+  enforcedHash: text('enforced_hash'),
+  enforcedAt: timestamp('enforced_at'),
+  enforcedBy: uuid('enforced_by'),
 });
 
 export type GlobalKbEntry = typeof globalKbEntries.$inferSelect;

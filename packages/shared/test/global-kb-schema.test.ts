@@ -12,7 +12,12 @@ type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), { code });
 
 function fakeConn(
-  opts: { vectorThrows?: string; lockThrowsOnce?: string; hnswThrows?: boolean } = {},
+  opts: {
+    vectorThrows?: string;
+    lockThrowsOnce?: string;
+    hnswThrows?: boolean;
+    triggersExist?: boolean;
+  } = {},
 ): {
   conn: EnsureConn;
   queries: () => string;
@@ -39,6 +44,7 @@ function fakeConn(
       if (opts.hnswThrows && q.includes('USING hnsw')) {
         return Promise.reject(new Error('hnsw unavailable'));
       }
+      if (opts.triggersExist && q.includes('FROM pg_trigger')) return Promise.resolve([{}]);
       return Promise.resolve([]);
     },
   });
@@ -242,8 +248,69 @@ describe('ensureGlobalKbSchema', () => {
     for (const tx of txs) expect(tx[0]).toBe('SELECT pg_advisory_xact_lock(hashtext())');
     expect(txs.filter((tx) => tx.length > 2).map((tx) => tx.slice(1).map(head))).toEqual([
       ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
+      ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_kb_clear_enforced_hash BEFORE'],
       ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_content_tsv BEFORE'],
     ]);
+  });
+
+  // Four columns or none, and no NOT NULL, DEFAULT or CHECK: an older build inserts rows without them.
+  it('adds the four house-rules columns in one statement of their own, and constrains nothing', async () => {
+    const { conn, transactions } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const adding = transactions().filter((tx) =>
+      tx.some((q) => q.includes('ADD COLUMN IF NOT EXISTS enforce ')),
+    );
+
+    expect(adding.map((tx) => tx.length)).toEqual([2]);
+    const statement = adding[0]![1]!;
+    for (const column of [
+      'enforce jsonb',
+      'enforced_hash TEXT',
+      'enforced_at TIMESTAMP',
+      'enforced_by uuid',
+    ]) {
+      expect(statement).toContain(`ADD COLUMN IF NOT EXISTS ${column}`);
+    }
+    expect(statement).not.toMatch(/NOT NULL|DEFAULT|CHECK|REFERENCES/);
+  });
+
+  it('indexes the approved entries of a namespace, keyed on the hash', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+
+    expect(queries()).toContain(
+      'CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_enforced ON global_kb_entries (namespace) WHERE enforced_hash IS NOT NULL',
+    );
+  });
+
+  it('clears the hash when an active entry leaves active, through a function and a trigger', async () => {
+    const { conn, queries, transactions } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+
+    expect(queries()).toContain('CREATE OR REPLACE FUNCTION global_kb_clear_enforced_hash()');
+    expect(queries()).toContain('NEW.enforced_hash := NULL');
+    const creating = transactions().filter((tx) =>
+      tx.some((q) => q.includes('CREATE TRIGGER trg_global_kb_clear_enforced_hash')),
+    );
+    expect(creating).toHaveLength(1);
+    const [lock, check, create] = creating[0]!;
+    expect(lock).toContain('pg_advisory_xact_lock');
+    expect(check).toContain("tgname = 'trg_global_kb_clear_enforced_hash'");
+    expect(check).toContain("tgrelid = 'global_kb_entries'::regclass");
+    expect(create).toContain('BEFORE UPDATE OF status ON global_kb_entries');
+    expect(create).toContain('FOR EACH ROW');
+    expect(create).toContain(
+      "WHEN (OLD.status = 'active' AND NEW.status IS DISTINCT FROM 'active')",
+    );
+    expect(create).toContain('EXECUTE FUNCTION global_kb_clear_enforced_hash()');
+  });
+
+  it('creates neither trigger again when both exist, and still converges the functions', async () => {
+    const { conn, queries } = fakeConn({ triggersExist: true });
+    await ensureGlobalKbSchema(conn);
+
+    expect(queries()).not.toContain('CREATE TRIGGER');
+    expect(queries()).toContain('CREATE OR REPLACE FUNCTION global_kb_clear_enforced_hash()');
   });
 
   it('rolls back only its own step when the HNSW index is refused, and carries on', async () => {

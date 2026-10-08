@@ -107,10 +107,18 @@ function langForName(name: string): string {
  *  same ReactMarkdown + rehype-highlight pipeline the markdown views use (the
  *  `.haive-md` theme in globals.css styles the `.hljs` tokens). Deliberately
  *  bypasses MarkdownView so source files are not collapsed/segmented. */
-function HighlightedSource({ name, content }: { name: string; content: string }) {
+export function HighlightedSource({
+  name,
+  content,
+  className = 'max-h-[600px]',
+}: {
+  name: string;
+  content: string;
+  className?: string;
+}) {
   const fenced = useMemo(() => fencedCode(content, langForName(name)), [name, content]);
   return (
-    <div className="haive-md max-h-[600px] overflow-auto">
+    <div className={`haive-md overflow-auto ${className}`}>
       <Markdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>{fenced}</Markdown>
     </div>
   );

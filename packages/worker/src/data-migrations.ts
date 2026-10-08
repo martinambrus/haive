@@ -4,14 +4,18 @@ import { Queue } from 'bullmq';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_RULES_TEMPLATE_KIND,
-  CONFIG_KEYS,
   configService,
   logger,
   QUEUE_NAMES,
   type OnboardingToolingMirror,
   type RepoJobPayload,
 } from '@haive/shared';
-import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/shared/global-kb';
+import {
+  FACET_VALUE_ALIAS_PAIRS,
+  globalKbEntries,
+  resolveGlobalKbEnabled,
+  withGlobalKb,
+} from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
@@ -804,12 +808,7 @@ const HEADING_ONLY_PREFILTER_CHARS = 1024;
  *  disabled one must not be connected to (that would create its database). */
 async function dropHeadingOnlyGlobalKbChunks(db: Database): Promise<void> {
   try {
-    // The `false` here is the UNSET fallback only, and reads more cautiously than it behaves:
-    // `DEFAULT_CONFIG` seeds this key `'true'` and `configService.initialize()` runs before
-    // any caller, so on a default install the gate is OPEN and the DELETE below does run.
-    // Left as-is deliberately — the protection that matters is that this is now declared
-    // `destructive` and therefore never runs at boot.
-    if (!(await configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, false))) return;
+    if (!(await resolveGlobalKbEnabled(configService))) return;
     await withGlobalKb(db, async ({ conn, settings }) => {
       const rows = (await conn.pg.unsafe(
         `SELECT id, content FROM ai_rag_embeddings WHERE namespace = $1 AND length(content) < $2`,

@@ -178,8 +178,24 @@ describe('normalizeGlobalKbDescription', () => {
 });
 
 describe('the description column', () => {
-  it('is nullable and declared last, in the order ALTER TABLE appends it', () => {
+  it('is nullable and declared before the house-rules columns, in the order ALTER TABLE appends them', () => {
     expect(globalKbEntries.description.notNull).toBe(false);
-    expect(Object.keys(getTableColumns(globalKbEntries)).at(-1)).toBe('description');
+    expect(Object.keys(getTableColumns(globalKbEntries)).slice(-5)).toEqual([
+      'description',
+      'enforce',
+      'enforcedHash',
+      'enforcedAt',
+      'enforcedBy',
+    ]);
+  });
+
+  it('leaves the four house-rules columns nullable, as ALTER TABLE adds them', () => {
+    const columns = [
+      globalKbEntries.enforce,
+      globalKbEntries.enforcedHash,
+      globalKbEntries.enforcedAt,
+      globalKbEntries.enforcedBy,
+    ];
+    expect(columns.map((c) => c.notNull)).toEqual([false, false, false, false]);
   });
 });

@@ -354,6 +354,8 @@ export const CONFIG_KEYS = {
   // it costs prompt tokens on every dispatch. Separate from GLOBAL_KB_ENABLED so
   // the digest can be turned off without disabling global KB retrieval.
   GLOBAL_KB_DIGEST_ENABLED: 'config:globalKb:digestEnabled',
+  // Switch for enforced house rules. Off leaves every approval in place and enforces none.
+  GLOBAL_KB_HOUSE_RULES_ENABLED: 'config:globalKb:houseRulesEnabled',
 
   // RAG embedding budgets. Two timeouts, not one, because the same ollamaEmbed
   // call serves bulk ingestion and the interactive rag_search query embed: a
@@ -692,6 +694,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
+  [CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED]: 'true',
   // 4 min for an ingest batch: past the measured 69s CPU worst case with room for
   // a slower host, and low enough that hitting it still means something is wrong.
   // 20s for a query embed is 45x the measured 0.44s CPU cost of one.

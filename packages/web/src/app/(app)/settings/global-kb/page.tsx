@@ -10,11 +10,20 @@ import {
   releaseGlobalKbEmbedModel,
   type ApiError,
   type CliProvider,
+  type GlobalKbEnforceSpec,
+  type GlobalKbEnforcementState,
   type GlobalKbEntry,
   type GlobalKbFacets,
   type Repository,
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
+import {
+  carriesLiveApproval,
+  describeEnforceSpec,
+  enforcementOffers,
+  globsFromLines,
+  houseRuleBadge,
+} from '@/lib/house-rules';
 import {
   Badge,
   Button,
@@ -27,6 +36,7 @@ import {
   Label,
 } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
+import { HighlightedSource } from '@/components/task-source';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
@@ -157,6 +167,11 @@ const STATUS_VARIANT: Record<string, 'success' | 'error' | 'warning' | 'default'
   failed: 'error',
 };
 
+function HouseRuleBadge({ state }: { state: GlobalKbEnforcementState | undefined }) {
+  const badge = houseRuleBadge(state);
+  return badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : null;
+}
+
 interface GlobalKbConfig {
   enabled: boolean;
   digestEnabled: boolean;
@@ -167,6 +182,30 @@ interface GlobalKbConfig {
   embedDimensions: number;
   archiveRetentionDays: number;
   connectionStringSet: boolean;
+  canEnforce: boolean;
+  houseRulesEnabled: boolean;
+}
+
+/** GET /global-kb/entries/:id: the entry plus what the always-on meter needs. */
+interface EntryDetail {
+  entry: GlobalKbEntry;
+  activeSuccessor: { id: string; title: string } | null;
+  usedBytes: number;
+  capBytes: number;
+  entryBytes: number;
+}
+
+/** The enforce panel: a snapshot of the entry as read, so the approval names exactly that text. */
+interface EnforcePanel {
+  entry: GlobalKbEntry;
+  usedBytes: number;
+  capBytes: number;
+  entryBytes: number;
+  mode: 'always' | 'files';
+  globs: string;
+  busy: boolean;
+  error: string | null;
+  stale: boolean;
 }
 
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
@@ -272,6 +311,9 @@ export default function GlobalKbPage() {
     title: string;
     body: string;
     description: string | null;
+    enforce: GlobalKbEnforceSpec | null;
+    enforcementState: GlobalKbEnforcementState | undefined;
+    carriesApproval: boolean;
   } | null>(null);
   const [draftView, setDraftView] = useState<'diff' | 'full'>('diff');
   const [repos, setRepos] = useState<Repository[]>([]);
@@ -300,6 +342,12 @@ export default function GlobalKbPage() {
   const [bodyEdit, setBodyEdit] = useState<string | null>(null);
   const [bodyBusy, setBodyBusy] = useState(false);
   const [bodyError, setBodyError] = useState<string | null>(null);
+  const [enforcePanel, setEnforcePanel] = useState<EnforcePanel | null>(null);
+  // Failures of Activate, Archive, Delete and the enforcement buttons, shown in the dialog: the
+  // page-level banner sits behind the overlay.
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | undefined>(undefined);
+  selectedIdRef.current = selected?.id;
   // Drop a half-finished edit whenever the modal moves to another entry or
   // closes. Keyed on the entry id and not wired into each close path on purpose: the dialog closes
   // on Escape, on the backdrop and on the X as well as on Cancel, and a leftover editor would show
@@ -311,6 +359,8 @@ export default function GlobalKbPage() {
     setDescError(null);
     setBodyEdit(null);
     setBodyError(null);
+    setEnforcePanel(null);
+    setDialogError(null);
   }, [selected?.id]);
   // The LIVE entry that replaced this one, asked of the SERVER rather than read out of
   // `entries`. That list is filtered and paginated, so a reviewer who filtered to `archived`
@@ -442,6 +492,9 @@ export default function GlobalKbPage() {
     connectionString: '',
   });
   const [cfgSet, setCfgSet] = useState(false);
+  const [canEnforce, setCanEnforce] = useState(false);
+  const [instanceNamespace, setInstanceNamespace] = useState<string | null>(null);
+  const [houseRulesOn, setHouseRulesOn] = useState(true);
   const [cfgBusy, setCfgBusy] = useState(false);
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
   const [dbTest, setDbTest] = useState<{ busy: boolean; ok: boolean | null; msg: string | null }>({
@@ -475,6 +528,9 @@ export default function GlobalKbPage() {
         connectionString: '',
       }));
       setCfgSet(cc.connectionStringSet);
+      setCanEnforce(cc.canEnforce === true);
+      setInstanceNamespace(cc.namespace);
+      setHouseRulesOn(cc.houseRulesEnabled !== false);
       setCfgLoaded(true);
     } catch {
       /* unavailable: the card shows its defaults */
@@ -487,10 +543,11 @@ export default function GlobalKbPage() {
     cfg.ollamaMode === 'internal'
       ? IN_STACK_OLLAMA_URL
       : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
-  const connOk = cfg.enabled && dbTest.ok === true && ollamaTest.ok === true;
+  // The database test is admin-only, so for anyone else the database is simply not checked.
+  const connOk = cfg.enabled && (!canEnforce || dbTest.ok === true) && ollamaTest.ok === true;
   // Null until the first-load check resolves; keeps the collapsed header from
   // flashing a misleading "needs attention" while the test round-trips run.
-  const connChecking = dbTest.ok === null || ollamaTest.ok === null;
+  const connChecking = (canEnforce && dbTest.ok === null) || ollamaTest.ok === null;
 
   // The card starts collapsed — the connection rarely changes once set up, so it
   // stays out of the way. On first load we validate and auto-expand — with the
@@ -504,12 +561,14 @@ export default function GlobalKbPage() {
         message: (e as ApiError).message ?? 'Test failed',
       });
       const [dbR, olR] = await Promise.all([
-        api
-          .post<{ ok: boolean; message: string }>('/global-kb/test-db', {
-            mode: cfg.mode,
-            connectionString: cfg.connectionString.trim() || undefined,
-          })
-          .catch(fail),
+        canEnforce
+          ? api
+              .post<{ ok: boolean; message: string }>('/global-kb/test-db', {
+                mode: cfg.mode,
+                connectionString: cfg.connectionString.trim() || undefined,
+              })
+              .catch(fail)
+          : Promise.resolve(null),
         api
           .post<{ ok: boolean; message: string }>('/global-kb/test-ollama', {
             ollamaUrl: effectiveOllamaUrl,
@@ -518,9 +577,9 @@ export default function GlobalKbPage() {
           })
           .catch(fail),
       ]);
-      setDbTest({ busy: false, ok: dbR.ok, msg: dbR.message });
+      if (dbR) setDbTest({ busy: false, ok: dbR.ok, msg: dbR.message });
       setOllamaTest({ busy: false, ok: olR.ok, msg: olR.message });
-      setConnExpanded(!(cfg.enabled && dbR.ok && olR.ok));
+      setConnExpanded(!(cfg.enabled && (dbR === null || dbR.ok) && olR.ok));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfgLoaded]);
@@ -562,6 +621,7 @@ export default function GlobalKbPage() {
       if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
       await api.put('/global-kb/config', payload);
       await loadConfig();
+      await load();
       setCfgMsg('Saved.');
     } catch (err) {
       setCfgMsg((err as ApiError).message ?? 'Save failed');
@@ -692,6 +752,9 @@ export default function GlobalKbPage() {
             title: r.entry.title,
             body: r.entry.body,
             description: r.entry.description ?? null,
+            enforce: r.entry.enforce ?? null,
+            enforcementState: r.entry.enforcementState,
+            carriesApproval: carriesLiveApproval(r.entry),
           });
         }
       })
@@ -703,14 +766,40 @@ export default function GlobalKbPage() {
     };
   }, [selected]);
 
+  /** From the dialog the failure shows in the dialog, since the banner under the page is behind
+   *  its overlay. */
+  function reportError(message: string) {
+    if (selected) setDialogError(message);
+    else setLoadError(message);
+  }
+
+  /** What to ask before activating a draft that replaces an enforced rule, or null when nothing
+   *  is lost. A failed lookup asks too: activating archives the predecessor and ends its rule. */
+  async function replacedRuleWarning(e: GlobalKbEntry): Promise<string | null> {
+    if (!e.supersedesEntryId) return null;
+    try {
+      const res = await api.get<{ entry: GlobalKbEntry }>(
+        `/global-kb/entries/${e.supersedesEntryId}`,
+      );
+      if (!carriesLiveApproval(res.entry)) return null;
+      return `"${e.title}" replaces "${res.entry.title}", which carries an admin's approval as a house rule. Activating archives it and ends that approval; an admin has to enforce the replacement. Activate anyway?`;
+    } catch (err) {
+      if ((err as ApiError).status === 404) return null;
+      return `Could not check whether the entry that "${e.title}" replaces carries an admin's approval as a house rule (${(err as ApiError).message ?? 'lookup failed'}). If it does, activating archives it and ends that approval. Activate anyway?`;
+    }
+  }
+
   async function activate(e: GlobalKbEntry) {
+    setDialogError(null);
     setBusy(true);
     try {
+      const warning = await replacedRuleWarning(e);
+      if (warning !== null && !window.confirm(warning)) return;
       await api.patch(`/global-kb/entries/${e.id}`, { status: 'active' });
       setSelected((s) => (s?.id === e.id ? null : s));
       await load();
     } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Activate failed');
+      reportError((err as ApiError).message ?? 'Activate failed');
     } finally {
       setBusy(false);
     }
@@ -720,13 +809,22 @@ export default function GlobalKbPage() {
    *  and not a supersession: nothing replaced it, so `supersededAt` stays null. The successor
    *  warning tells a reviewer to do exactly this, and the page had no control to do it with. */
   async function archive(e: GlobalKbEntry) {
+    if (
+      carriesLiveApproval(e) &&
+      !window.confirm(
+        `"${e.title}" carries an admin's approval as a house rule. Archiving ends that approval, and reactivating the entry does not bring it back. Archive anyway?`,
+      )
+    ) {
+      return;
+    }
+    setDialogError(null);
     setBusy(true);
     try {
       await api.patch(`/global-kb/entries/${e.id}`, { status: 'archived' });
       setSelected((s) => (s?.id === e.id ? null : s));
       await load();
     } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Archive failed');
+      reportError((err as ApiError).message ?? 'Archive failed');
     } finally {
       setBusy(false);
     }
@@ -739,7 +837,122 @@ export default function GlobalKbPage() {
       const res = await api.get<{ entry: GlobalKbEntry }>(`/global-kb/entries/${id}`);
       setSelected(res.entry);
     } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Could not open that entry');
+      reportError((err as ApiError).message ?? 'Could not open that entry');
+    }
+  }
+
+  /** Bind a stored entry the server just returned to the dialog and the list. */
+  function adoptEntry(entry: GlobalKbEntry) {
+    setSelected((cur) => (cur && cur.id === entry.id ? entry : cur));
+    setEntries((rows) => rows?.map((r) => (r.id === entry.id ? entry : r)) ?? rows);
+  }
+
+  function panelFrom(detail: EntryDetail, prefill: GlobalKbEnforceSpec | null): EnforcePanel {
+    return {
+      entry: detail.entry,
+      usedBytes: detail.usedBytes,
+      capBytes: detail.capBytes,
+      entryBytes: detail.entryBytes,
+      mode: prefill?.mode ?? 'files',
+      globs: prefill?.mode === 'files' ? prefill.globs.join('\n') : '',
+      busy: false,
+      error: null,
+      stale: false,
+    };
+  }
+
+  /** Open the panel on the entry as the server holds it NOW, so what the admin reads and the
+   *  token they approve it with come from one response. */
+  async function openEnforcePanel(prefill: GlobalKbEnforceSpec | null) {
+    if (!selected) return;
+    const id = selected.id;
+    setDialogError(null);
+    setBusy(true);
+    try {
+      const detail = await api.get<EntryDetail>(`/global-kb/entries/${id}`);
+      if (selectedIdRef.current !== id) return;
+      adoptEntry(detail.entry);
+      setEnforcePanel(panelFrom(detail, prefill));
+    } catch (err) {
+      if (selectedIdRef.current === id) {
+        setDialogError((err as ApiError).message ?? 'Could not read the entry');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reloadEnforcePanel() {
+    if (!enforcePanel) return;
+    const id = enforcePanel.entry.id;
+    const keep = enforcePanel;
+    setEnforcePanel({ ...keep, busy: true });
+    try {
+      const detail = await api.get<EntryDetail>(`/global-kb/entries/${id}`);
+      if (selectedIdRef.current !== id) return;
+      adoptEntry(detail.entry);
+      setEnforcePanel({
+        ...panelFrom(detail, null),
+        mode: keep.mode,
+        globs: keep.globs,
+      });
+    } catch (err) {
+      if (selectedIdRef.current === id) {
+        setEnforcePanel({
+          ...keep,
+          busy: false,
+          error: (err as ApiError).message ?? 'Could not read the entry',
+        });
+      }
+    }
+  }
+
+  async function submitEnforce() {
+    if (!enforcePanel) return;
+    const panel = enforcePanel;
+    const id = panel.entry.id;
+    const expectedHash = panel.entry.contentToken ?? '';
+    setEnforcePanel({ ...panel, busy: true, error: null, stale: false });
+    try {
+      const res = await api.put<{ entry: GlobalKbEntry }>(`/global-kb/entries/${id}/enforcement`, {
+        ...(panel.mode === 'always'
+          ? { mode: 'always' }
+          : { mode: 'files', globs: globsFromLines(panel.globs) }),
+        expectedHash,
+      });
+      adoptEntry(res.entry);
+      if (selectedIdRef.current === id) setEnforcePanel(null);
+    } catch (err) {
+      if (selectedIdRef.current !== id) return;
+      const failure = err as ApiError;
+      const sizes = failure.code === 'always_cap' ? (failure.body as Partial<EnforcePanel>) : {};
+      setEnforcePanel({
+        ...panel,
+        busy: false,
+        stale: failure.code === 'token_mismatch',
+        usedBytes: sizes.usedBytes ?? panel.usedBytes,
+        capBytes: sizes.capBytes ?? panel.capBytes,
+        entryBytes: sizes.entryBytes ?? panel.entryBytes,
+        error:
+          failure.code === 'token_mismatch'
+            ? `${failure.message}. Reload the entry to read its current text, then approve it again.`
+            : (failure.message ?? 'Enforcing failed'),
+      });
+    }
+  }
+
+  async function unenforce(e: GlobalKbEntry) {
+    setDialogError(null);
+    setBusy(true);
+    try {
+      const res = await api.delete<{ entry: GlobalKbEntry }>(
+        `/global-kb/entries/${e.id}/enforcement`,
+      );
+      adoptEntry(res.entry);
+    } catch (err) {
+      reportError((err as ApiError).message ?? 'Could not remove the enforcement');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -839,7 +1052,11 @@ export default function GlobalKbPage() {
     const msg = cancelsTask
       ? `Delete "${e.title}" permanently and cancel its enrichment task? This cannot be undone.`
       : `Delete "${e.title}" permanently? This cannot be undone.`;
-    if (!window.confirm(msg)) return;
+    const approvalNote = carriesLiveApproval(e)
+      ? `"${e.title}" carries an admin's approval as a house rule, and deleting it ends that approval. `
+      : '';
+    if (!window.confirm(`${approvalNote}${msg}`)) return;
+    setDialogError(null);
     setBusy(true);
     try {
       await api.delete(`/global-kb/entries/${e.id}`);
@@ -857,7 +1074,7 @@ export default function GlobalKbPage() {
       setSelected((s) => (s?.id === e.id ? null : s));
       await load();
     } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Delete failed');
+      reportError((err as ApiError).message ?? 'Delete failed');
     } finally {
       setBusy(false);
     }
@@ -958,7 +1175,8 @@ export default function GlobalKbPage() {
     statusFilter !== 'all' ||
     categoryFilter !== 'all' ||
     frameworkFilter !== 'all';
-  const editOpen = scopeEdit !== null || descEdit !== null || bodyEdit !== null;
+  const enforceOpen = enforcePanel !== null;
+  const editOpen = scopeEdit !== null || descEdit !== null || bodyEdit !== null || enforceOpen;
   const editOpenHint = editOpen ? 'Save or cancel the open edit first' : undefined;
 
   /** Escape and the backdrop close an open edit before they close the dialog, so one stray press
@@ -968,10 +1186,243 @@ export default function GlobalKbPage() {
       setSelected(null);
       return;
     }
-    if (scopeBusy || descBusy || bodyBusy) return;
+    if (scopeBusy || descBusy || bodyBusy || enforcePanel?.busy) return;
     setScopeEdit(null);
     setDescEdit(null);
     setBodyEdit(null);
+    setEnforcePanel(null);
+  }
+
+  /** Everyone sees what is enforced and why a rule lapsed or is paused; only an admin gets buttons.
+   *  A paused rule gets no Enforce, as it resumes by itself; Un-enforce goes with any approval. */
+  function renderEnforcement(e: GlobalKbEntry) {
+    const state = e.enforcementState?.state ?? 'none';
+    const predecessor = supersededEntry;
+    const carried =
+      state === 'none' &&
+      e.status === 'active' &&
+      predecessor?.enforce &&
+      predecessor.enforcementState?.state === 'superseded'
+        ? predecessor
+        : null;
+    let note: string | null = null;
+    let action: { label: string; prefill: GlobalKbEnforceSpec | null } | null = null;
+    switch (state) {
+      case 'enforced':
+        note = `Enforced house rule (${describeEnforceSpec(e.enforce)})${e.enforcedAt ? ` since ${e.enforcedAt.slice(0, 10)}` : ''}. Its full text is put into the prompt of every agent it applies to.`;
+        if (e.status === 'active') {
+          action = {
+            label: 'Edit enforcement',
+            prefill:
+              e.enforcementState?.mode === 'files'
+                ? { mode: 'files', globs: e.enforcementState.globs ?? [] }
+                : { mode: 'always' },
+          };
+        }
+        break;
+      case 'edited':
+        note = `Lapsed: the text changed after an admin approved it (${describeEnforceSpec(e.enforce)}), so the rule is not applied. An admin has to read the new text and enforce it again.`;
+        action = { label: 'Re-enforce', prefill: e.enforce ?? null };
+        break;
+      case 'not_active':
+        note = 'Lapsed: this entry is not active, so its rule is not applied.';
+        break;
+      case 'superseded':
+        note = activeSuccessor
+          ? `Superseded: "${activeSuccessor.title}" replaced this entry. An admin can enforce that entry instead.`
+          : 'Superseded: another entry replaced this one, so its rule ended. An admin can enforce the replacement.';
+        break;
+      case 'cleared':
+        note = `Not enforced. Enforcement was removed${e.enforce ? `; the last settings were ${describeEnforceSpec(e.enforce)}` : ''}.`;
+        if (e.status === 'active') action = { label: 'Re-enforce', prefill: e.enforce ?? null };
+        break;
+      case 'switched_off':
+        note = `Paused: house rules are switched off by an administrator (${describeEnforceSpec(e.enforce)}). The rule resumes when they are switched on.`;
+        break;
+      case 'other_namespace':
+        note = `Paused: this entry belongs to the namespace "${e.namespace}", not to the one this instance uses. The rule resumes when that namespace is in use.`;
+        break;
+      default:
+        if (carried) {
+          note = `Replaces "${carried.title}", which had house-rule settings (${describeEnforceSpec(carried.enforce)}); any approval it still held ended when it was archived. An admin has to enforce this entry for the rule to carry over.`;
+          action = { label: 'Re-enforce', prefill: carried.enforce };
+        } else if (e.status === 'active' && canEnforce) {
+          action = { label: 'Enforce…', prefill: null };
+        }
+    }
+    const offers = enforcementOffers(e, instanceNamespace);
+    if (!offers.enforce) action = null;
+    if (
+      !offers.enforce &&
+      note &&
+      instanceNamespace !== null &&
+      e.namespace !== instanceNamespace
+    ) {
+      note += ` It belongs to the namespace "${e.namespace}", so only an install using that namespace can enforce it.`;
+    }
+    const unenforceable = canEnforce && offers.unenforce;
+    if (!note && !action && !unenforceable) return null;
+    return (
+      <div className="mt-2 flex flex-col gap-2 text-xs text-neutral-400" data-testid="enforcement">
+        {note && <p>{note}</p>}
+        {canEnforce && (action || unenforceable) && (
+          <div className="flex flex-wrap items-center gap-2">
+            {action && (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy || editOpen}
+                title={editOpenHint}
+                onClick={() => void openEnforcePanel(action.prefill)}
+              >
+                {action.label}
+              </Button>
+            )}
+            {unenforceable && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy || editOpen}
+                title={editOpenHint}
+                onClick={() => void unenforce(e)}
+              >
+                Un-enforce
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderEnforcePanel(panel: EnforcePanel) {
+    const entry = panel.entry;
+    const title = collapseToLine(entry.title);
+    const description = collapseToLine(entry.description);
+    const total = panel.usedBytes + panel.entryBytes;
+    const over = total - panel.capBytes;
+    const pct = (bytes: number) =>
+      `${Math.min(100, Math.max(0, (bytes / Math.max(1, panel.capBytes)) * 100))}%`;
+    const disabled = panel.busy;
+    return (
+      <div
+        className="mt-3 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto rounded-md border border-neutral-800 p-3"
+        data-testid="enforce-panel"
+      >
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium text-neutral-100">Enforce this house rule</span>
+          <p className="text-xs text-neutral-400">
+            Enforcing puts the text below into the prompt of every agent the rule applies to, as an
+            instruction. You are approving this exact text, shown as agents see it and not rendered.
+          </p>
+          {!houseRulesOn && (
+            <p className="text-xs text-amber-400">
+              House rules are switched off in the admin console, so this rule stays paused until
+              they are switched on.
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[11px] text-neutral-500">Title, as agents see it</span>
+          <HighlightedSource name="title.txt" content={title} className="max-h-32" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[11px] text-neutral-500">Description, as agents see it</span>
+          {description ? (
+            <HighlightedSource name="description.txt" content={description} className="max-h-32" />
+          ) : (
+            <p className="text-xs text-amber-400">None. An enforced rule needs a description.</p>
+          )}
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[11px] text-neutral-500">Body, as agents see it</span>
+          <HighlightedSource name="body.md" content={entry.body} className="max-h-72" />
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enforce-mode">Applies</Label>
+            <select
+              id="enforce-mode"
+              value={panel.mode}
+              disabled={disabled}
+              onChange={(ev) =>
+                setEnforcePanel({ ...panel, mode: ev.target.value as 'always' | 'files' })
+              }
+              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            >
+              <option value="files">when files match</option>
+              <option value="always">always</option>
+            </select>
+          </div>
+        </div>
+        {panel.mode === 'files' ? (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enforce-globs">Globs, one per line</Label>
+            <textarea
+              id="enforce-globs"
+              value={panel.globs}
+              disabled={disabled}
+              onChange={(ev) => setEnforcePanel({ ...panel, globs: ev.target.value })}
+              rows={4}
+              placeholder={'src/**/*.php\ntemplates/**/*.{twig,css}'}
+              className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+            <span className="text-[11px] text-neutral-500">
+              Relative to the repository root. Brace globs may hold commas, so each glob is its own
+              line. The rule applies when a task touches a matching file.
+            </span>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1" data-testid="enforce-meter">
+            <span className="text-xs text-neutral-300">
+              Always-on rules: {panel.usedBytes} bytes in use + this entry {panel.entryBytes} ={' '}
+              {total} of {panel.capBytes} bytes
+            </span>
+            <div
+              role="meter"
+              aria-label="Always-on prompt size"
+              aria-valuemin={0}
+              aria-valuemax={panel.capBytes}
+              aria-valuenow={total}
+              className="flex h-2 w-full overflow-hidden rounded-full bg-neutral-800"
+            >
+              <div className="h-full bg-indigo-500" style={{ width: pct(panel.usedBytes) }} />
+              <div
+                className={`h-full ${over > 0 ? 'bg-red-500' : 'bg-sky-500'}`}
+                style={{ width: pct(Math.min(panel.entryBytes, panel.capBytes - panel.usedBytes)) }}
+              />
+            </div>
+            {over > 0 && (
+              <span className="text-xs text-red-400">Over the cap by {over} bytes.</span>
+            )}
+          </div>
+        )}
+        <FormError message={panel.error} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={disabled} onClick={() => void submitEnforce()}>
+            {panel.busy ? 'Working…' : 'Enforce'}
+          </Button>
+          {panel.stale && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() => void reloadEnforcePanel()}
+            >
+              Reload entry
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={disabled}
+            onClick={() => setEnforcePanel(null)}
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -1007,7 +1458,13 @@ export default function GlobalKbPage() {
                         : 'text-amber-400'
                   }`}
                 >
-                  {connChecking ? '… checking' : connOk ? '✓ connected' : '⚠ needs attention'}
+                  {connChecking
+                    ? '… checking'
+                    : connOk
+                      ? canEnforce
+                        ? '✓ connected'
+                        : '✓ embedding model OK'
+                      : '⚠ needs attention'}
                 </span>
               )}
               <Button size="sm" variant="ghost" onClick={() => setConnExpanded((v) => !v)}>
@@ -1022,10 +1479,12 @@ export default function GlobalKbPage() {
               <input
                 type="checkbox"
                 checked={cfg.enabled}
+                disabled={!canEnforce}
                 onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
                 className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
               />
               Enabled (tasks retrieve global entries)
+              {!canEnforce && <span className="text-[11px] text-neutral-500">Admins only</span>}
             </label>
             <label className="flex items-center gap-2 text-sm text-neutral-100">
               <input
@@ -1036,12 +1495,34 @@ export default function GlobalKbPage() {
               />
               List matching entry titles in agent prompts (costs prompt tokens per run)
             </label>
+            <p className="text-xs text-neutral-400" data-testid="house-rules-switch">
+              House rules in agent prompts:{' '}
+              <span className="font-medium text-neutral-200">{houseRulesOn ? 'on' : 'off'}</span>.{' '}
+              {canEnforce ? (
+                <a
+                  href="/admin?tab=execution"
+                  className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
+                >
+                  Change it in the admin console, CLI execution tab.
+                </a>
+              ) : (
+                'Admins only: it is switched in the admin console.'
+              )}
+            </p>
             <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cfg-mode">Provider</Label>
+                <Label htmlFor="cfg-mode">
+                  Provider
+                  {!canEnforce && (
+                    <span className="ml-2 text-[11px] font-normal text-neutral-500">
+                      Admins only
+                    </span>
+                  )}
+                </Label>
                 <select
                   id="cfg-mode"
                   value={cfg.mode}
+                  disabled={!canEnforce}
                   onChange={(e) =>
                     setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
                   }
@@ -1052,10 +1533,18 @@ export default function GlobalKbPage() {
                 </select>
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cfg-namespace">Namespace</Label>
+                <Label htmlFor="cfg-namespace">
+                  Namespace
+                  {!canEnforce && (
+                    <span className="ml-2 text-[11px] font-normal text-neutral-500">
+                      Admins only
+                    </span>
+                  )}
+                </Label>
                 <Input
                   id="cfg-namespace"
                   maxLength={120}
+                  disabled={!canEnforce}
                   aria-describedby="cfg-namespace-limit"
                   value={cfg.namespace}
                   onChange={(e) => setCfg({ ...cfg, namespace: e.target.value })}
@@ -1070,31 +1559,39 @@ export default function GlobalKbPage() {
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="cfg-conn">
                   External connection string{cfgSet ? ' (set — leave blank to keep)' : ''}
+                  {!canEnforce && (
+                    <span className="ml-2 text-[11px] font-normal text-neutral-500">
+                      Admins only
+                    </span>
+                  )}
                 </Label>
                 <Input
                   id="cfg-conn"
                   type="password"
+                  disabled={!canEnforce}
                   value={cfg.connectionString}
                   onChange={(e) => setCfg({ ...cfg, connectionString: e.target.value })}
                   placeholder="postgres://user:pass@host:5432/db"
                 />
               </div>
             )}
-            <div className="flex items-center gap-3">
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={dbTest.busy}
-                onClick={() => void testDb()}
-              >
-                {dbTest.busy ? 'Testing…' : 'Test DB connection'}
-              </Button>
-              {dbTest.msg && (
-                <span className={`text-xs ${dbTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {dbTest.msg}
-                </span>
-              )}
-            </div>
+            {canEnforce && (
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={dbTest.busy}
+                  onClick={() => void testDb()}
+                >
+                  {dbTest.busy ? 'Testing…' : 'Test DB connection'}
+                </Button>
+                {dbTest.msg && (
+                  <span className={`text-xs ${dbTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {dbTest.msg}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
@@ -1207,7 +1704,7 @@ export default function GlobalKbPage() {
           <p className="text-xs text-neutral-400">
             {cfg.mode === 'internal' ? 'Internal DB' : 'External DB'} ·{' '}
             {cfg.embedModel || 'no model'} · {cfg.embedDimensions} dims ·{' '}
-            {cfg.enabled ? 'enabled' : 'disabled'}
+            {cfg.enabled ? 'enabled' : 'disabled'} · house rules {houseRulesOn ? 'on' : 'off'}
           </p>
         )}
       </Card>
@@ -1488,6 +1985,7 @@ export default function GlobalKbPage() {
                     )}
                     <Badge variant="default">{e.category.replace(/_/g, ' ')}</Badge>
                     {e.source === 'promoted' && <Badge variant="info">promoted</Badge>}
+                    <HouseRuleBadge state={e.enforcementState} />
                     {e.status === 'active' && e.embedStatus !== 'embedded' && (
                       <Badge variant={e.embedStatus === 'failed' ? 'error' : 'default'}>
                         {e.embedStatus}
@@ -1663,6 +2161,7 @@ export default function GlobalKbPage() {
                 </Badge>
                 <Badge variant="default">{selected.category.replace(/_/g, ' ')}</Badge>
                 {selected.source === 'promoted' && <Badge variant="info">promoted</Badge>}
+                <HouseRuleBadge state={selected.enforcementState} />
                 {selected.sourceTaskId && (
                   <a
                     href={`/tasks/${selected.sourceTaskId}`}
@@ -1674,6 +2173,7 @@ export default function GlobalKbPage() {
                   </a>
                 )}
               </div>
+              {renderEnforcement(selected)}
               {descEdit !== null ? (
                 <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
                   <Label
@@ -1683,6 +2183,12 @@ export default function GlobalKbPage() {
                     One line: what the rule says and when it applies. Once the entry is active it is
                     listed beside the title in the prompt of every agent the rule applies to.
                   </Label>
+                  {carriesLiveApproval(selected) && (
+                    <span className="text-[11px] text-amber-400">
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
+                    </span>
+                  )}
                   <DescriptionField
                     id="description-edit"
                     value={descEdit}
@@ -1724,7 +2230,7 @@ export default function GlobalKbPage() {
                   )}
                   <button
                     type="button"
-                    disabled={bodyBusy}
+                    disabled={bodyBusy || enforceOpen}
                     onClick={() => {
                       setDescError(null);
                       setDescEdit(selected.description ?? '');
@@ -1740,6 +2246,12 @@ export default function GlobalKbPage() {
                   <span className="text-[11px] text-neutral-500">
                     Empty = applies to all values of that dimension. Comma-separated.
                   </span>
+                  {carriesLiveApproval(selected) && (
+                    <span className="text-[11px] text-amber-400">
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
+                    </span>
+                  )}
                   {/* Said rather than decided: re-scoping a replacement does not bring its
                       predecessor back, and resurrecting an article somebody retired is not a
                       choice this form should make for them. */}
@@ -1780,7 +2292,7 @@ export default function GlobalKbPage() {
                   {facetsSummary(selected.facets)}
                   <button
                     type="button"
-                    disabled={bodyBusy}
+                    disabled={bodyBusy || enforceOpen}
                     onClick={() => {
                       setScopeError(null);
                       setScopeEdit(fieldsFromFacets(selected.facets));
@@ -1797,7 +2309,7 @@ export default function GlobalKbPage() {
                   <button
                     type="button"
                     className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={busy || scopeBusy || descBusy}
+                    disabled={busy || scopeBusy || descBusy || enforceOpen}
                     onClick={() => {
                       setBodyError(null);
                       setBodyEdit(selected.body);
@@ -1807,8 +2319,16 @@ export default function GlobalKbPage() {
                   </button>
                 )}
               </div>
-              {bodyEdit !== null ? (
+              {enforcePanel ? (
+                renderEnforcePanel(enforcePanel)
+              ) : bodyEdit !== null ? (
                 <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800 p-3">
+                  {carriesLiveApproval(selected) && (
+                    <p className="mb-2 text-[11px] text-amber-400">
+                      This entry carries an admin&apos;s approval as a house rule. Saving a change
+                      ends that approval until an admin enforces the entry again.
+                    </p>
+                  )}
                   <MarkdownEditor
                     key={selected.id}
                     value={bodyEdit}
@@ -1841,6 +2361,9 @@ export default function GlobalKbPage() {
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                     <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
                       Updates existing: {supersededEntry.title}
+                      {supersededEntry.carriesApproval
+                        ? " (carries an admin's approval as a house rule)"
+                        : ''}
                     </span>
                     <div className="ml-auto flex overflow-hidden rounded border border-neutral-800">
                       <button
@@ -1914,7 +2437,12 @@ export default function GlobalKbPage() {
                   </Button>
                 </div>
               )}
-              <div className="mt-4 flex items-center justify-center gap-3">
+              {dialogError && (
+                <div className="mt-3">
+                  <FormError message={dialogError} />
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
                 {/* Activation is blocked while a scope edit is OPEN as well as while one is in
                     flight. They are separate PATCHes, and activating first archives the
                     predecessor the scope edit is about to clear — retiring an entry the reviewer

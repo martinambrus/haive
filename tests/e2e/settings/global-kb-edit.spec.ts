@@ -46,6 +46,8 @@ async function mockKb(page: Page) {
           embedDimensions: 2560,
           archiveRetentionDays: 90,
           connectionStringSet: false,
+          canEnforce: true,
+          houseRulesEnabled: true,
         };
       } else if (pathname === '/global-kb/entries') {
         json = { entries: [entry], total: 1, frameworks: [] };

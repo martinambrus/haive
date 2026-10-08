@@ -190,6 +190,8 @@ function AdminPageInner() {
     null,
   );
   const [savingAgentRulesInjection, setSavingAgentRulesInjection] = useState(false);
+  const [houseRulesEnabled, setHouseRulesEnabled] = useState<boolean | null>(null);
+  const [savingHouseRules, setSavingHouseRules] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
@@ -328,6 +330,7 @@ function AdminPageInner() {
         chromeMcpTimeoutData,
         ragEmbeddingData,
         agentRulesInjectionData,
+        houseRulesData,
       ] = await Promise.all([
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
@@ -371,6 +374,7 @@ function AdminPageInner() {
         api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
         api.get<{ enabled: boolean }>('/admin/config/agent-rules-injection'),
+        api.get<{ enabled: boolean }>('/admin/config/house-rules'),
       ]);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
@@ -380,6 +384,7 @@ function AdminPageInner() {
       setCodexAppServerFailures(codexAppServerData.recentFailures);
       setAgentIsolationEnabled(agentIsolationData.enabled);
       setAgentRulesInjectionEnabled(agentRulesInjectionData.enabled);
+      setHouseRulesEnabled(houseRulesData.enabled);
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
@@ -701,6 +706,21 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update agent rules injection');
     } finally {
       setSavingAgentRulesInjection(false);
+    }
+  }
+
+  async function setHouseRules(next: boolean) {
+    setSavingHouseRules(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/house-rules', {
+        enabled: next,
+      });
+      setHouseRulesEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update house rules');
+    } finally {
+      setSavingHouseRules(false);
     }
   }
 
@@ -1808,6 +1828,31 @@ function AdminPageInner() {
             />
             {agentRulesInjectionEnabled ? 'Enabled' : 'Disabled'}
             {savingAgentRulesInjection && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {tab === 'execution' && houseRulesEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>House rules in every prompt</CardTitle>
+            <CardDescription>
+              Puts the full text of each enforced global KB entry into the prompt of every agent it
+              applies to, as an instruction. Turn this off to pause all of them at once: they stay
+              approved, show as paused on the Global KB page, and resume when this is turned back
+              on. Takes effect within ~30s; a run already queued keeps its prompt.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={houseRulesEnabled}
+              disabled={savingHouseRules}
+              onChange={(e) => void setHouseRules(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {houseRulesEnabled ? 'Enabled' : 'Disabled'}
+            {savingHouseRules && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

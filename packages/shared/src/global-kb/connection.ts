@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 import { type Database } from '@haive/database';
 import { logger } from '../logger/index.js';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
-import { configService, CONFIG_KEYS } from '../config/config.service.js';
+import { configService, CONFIG_KEYS, type ConfigService } from '../config/config.service.js';
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 
 const log = logger.child({ module: 'global-kb-connection' });
@@ -72,6 +72,15 @@ export interface GlobalKbConnection {
   close: () => Promise<void>;
 }
 
+/** An absent key reads on, as the seed has it, for every reader. */
+export const resolveGlobalKbEnabled = (
+  config: Pick<ConfigService, 'getBoolean'>,
+): Promise<boolean> => config.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
+
+export const resolveHouseRulesEnabled = (
+  config: Pick<ConfigService, 'getBoolean'>,
+): Promise<boolean> => config.getBoolean(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED, true);
+
 /** Read the instance-level global KB settings. Non-secret values come from
  *  ConfigService (Redis); the external connection string comes from
  *  SecretsService (encrypted system_secrets). Both singletons must be
@@ -87,7 +96,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     embeddingDimensions,
     archiveRetentionDays,
   ] = await Promise.all([
-    configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, false),
+    resolveGlobalKbEnabled(configService),
     configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
     configService.get(CONFIG_KEYS.GLOBAL_KB_MODE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
