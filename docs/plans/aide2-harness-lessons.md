@@ -224,8 +224,9 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   carries Haive's lines in a separate `guidance` field that 07 renders outside every fence
   (docs/architecture/fix-loop.md). The user chose the field over fencing the findings where they are
   written (2026-10-03): that would nest fences in every reader that wraps a diagnosis and replay old
-  instructions through the background blocks. Its follow-ups (07's framing of 08d2 and gate rows,
-  empty fences from a head cut, the honored block's unfenced machine entries) ship next.
+  instructions through the background blocks. Its follow-ups shipped in #437: 07's framing of
+  08d2 and gate rows, empty fences from a head cut, the honored block's unfenced machine entries and
+  the cap gate's unbounded diagnosis.
 
 ## Phases
 

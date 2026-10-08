@@ -71,7 +71,8 @@ operator's instruction — so the markers travel with the string and every later
 them. _Balance wherever the result is CUT_: `balanceFences` repairs a slice that kept one banner
 and dropped the other. A TAIL slice (`cleanDiagnosis`) drops the BEGIN and leaves the contents
 loose; a HEAD slice (`loadHonoredConstraints`, the learning digest's per-diagnosis and tier caps)
-drops the END, and an unmatched BEGIN swallows the rest of the prompt; `excerptDiagnosis` keeps a
+drops the END, and an unmatched BEGIN swallows the rest of the prompt, so all three cut through
+`cutHead`, which also drops a BEGIN left ending the head (balanced, it would be an empty fence); `excerptDiagnosis` keeps a
 head and a tail and can do either. A block fenced WHOLE whose budget drops WHOLE entries — the
 task ledger — needs no balancing, because nothing can cut one in half.
 
