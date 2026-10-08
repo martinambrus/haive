@@ -17,10 +17,7 @@ import {
   agentRulesHash,
   withAgentRules,
 } from '../src/orchestrator/agent-rules.js';
-import {
-  PROMPT_ARGV_LIMIT_BYTES,
-  PromptTooLargeError,
-} from '../src/cli-adapters/prompt-delivery.js';
+import { PROMPT_ARGV_LIMIT_BYTES } from '../src/cli-adapters/prompt-delivery.js';
 
 function surface(ragEnabled: boolean): McpSurface {
   return {
@@ -920,25 +917,31 @@ describe('agent rules injection', () => {
     expect(masked(isolatedWith('- Read .claude/agents/reviewer.md first.'))).toBe(false);
   });
 
-  it('drops the rules rather than fail a prompt they would push past an argv-only limit', () => {
+  it('keeps the rules on a gemini prompt they push past the argv cap, since it reads stdin', () => {
     const gemini = makeProvider({ id: 'prov-gemini', name: 'gemini', authMode: 'api_key' });
     const overhead = (prompt: string) =>
       Buffer.byteLength(dispatch({}, prompt, gemini).prompt, 'utf8') -
       Buffer.byteLength(prompt, 'utf8');
     const fits = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES - overhead('x') - 16);
     const { prompt, spec } = dispatch({ agentRulesInjection: true }, fits, gemini);
-    expect(prompt).not.toContain(AGENT_RULES_MARKER);
+    expect(prompt).toContain(AGENT_RULES_MARKER);
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(PROMPT_ARGV_LIMIT_BYTES);
+    expect(spec.stdinPrompt).toBe(prompt);
+    expect(spec.args).not.toContain('-p');
     expect(spec.agentRules).toEqual({
       hash: hashOf(DEFAULT_AGENT_RULES),
-      injected: false,
-      reason: 'prompt-too-large',
+      injected: true,
     });
   });
 
-  it('still fails a prompt too large even without the rules', () => {
+  it('sends a gemini prompt far over the cap on stdin instead of refusing it', () => {
     const gemini = makeProvider({ id: 'prov-gemini', name: 'gemini', authMode: 'api_key' });
-    expect(() =>
-      dispatch({ agentRulesInjection: true }, 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES + 10), gemini),
-    ).toThrow(PromptTooLargeError);
+    const { prompt, spec } = dispatch(
+      { agentRulesInjection: true },
+      'x'.repeat(PROMPT_ARGV_LIMIT_BYTES + 10),
+      gemini,
+    );
+    expect(spec.stdinPrompt).toBe(prompt);
+    expect(spec.args.some((a) => a.includes('xxxx'))).toBe(false);
   });
 });
