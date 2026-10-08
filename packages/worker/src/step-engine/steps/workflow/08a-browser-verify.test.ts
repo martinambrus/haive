@@ -466,6 +466,19 @@ describe('08a app-health probe after a tester pass', () => {
     expect(out).toMatchObject({ method: 'mcp', source: 'tester', passed: true, failures: [] });
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
   });
+  it('skips a row parked on the old interactive form instead of probing it into a pass', async () => {
+    const out = await browserVerifyStep.apply(ctx, {
+      detected: { available: true, mode: 'interactive', appUrl: 'https://app.ddev.site' },
+      formValues: { decision: 'reject', feedback: 'the logout button does nothing' },
+      iteration: 0,
+      previousIterations: [],
+      llmOutput: TESTER_PASS,
+    } as never);
+
+    expect(out).toMatchObject({ skipped: true, ran: false, passed: false });
+    expect(m.ensureAppServing).not.toHaveBeenCalled();
+    expect(browserVerifyStep.fixLoop!.evaluate(out as never)).toBeNull();
+  });
 });
 
 describe('browserVerifyStep.shouldRun', () => {

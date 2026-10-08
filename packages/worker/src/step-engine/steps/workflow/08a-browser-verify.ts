@@ -837,6 +837,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       source: 'skip',
     };
     if (!detected.available) return skipped;
+    // A row parked on the old interactive form resumes here without `shouldRun`; gate 2 verifies
+    // it hands-on, so it is skipped rather than probed into a pass.
+    if (mode === 'interactive') return { ...skipped, output: 'verified hands-on at gate 2' };
 
     // User chose to skip browser testing (legacy Option C).
     if (mode === 'skip') {
