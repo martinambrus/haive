@@ -407,6 +407,10 @@ async function applyOps(
   /** Nodes deleted earlier in THIS patch. A later op naming one is a contract
    *  error, not a silent no-op — the model believed it still existed. */
   const dead = new Set<string>();
+  const versionAtStart = new Map<string, number>();
+  /** The version this patch's own last write left on a node, so another writer's change between
+   *  two of its ops still reads as a conflict. */
+  const versionAfterOwnWrite = new Map<string, number>();
 
   async function loadNode(id: string): Promise<NodeRow | null> {
     const [row] = await tx
@@ -420,6 +424,7 @@ async function applyOps(
       .from(schema.planNodes)
       .where(and(eq(schema.planNodes.id, id), eq(schema.planNodes.repositoryId, repositoryId)))
       .limit(1);
+    if (row && !versionAtStart.has(row.id)) versionAtStart.set(row.id, row.version);
     return row ?? null;
   }
 
@@ -447,12 +452,17 @@ async function applyOps(
     return row;
   }
 
+  // Checked against the version the patch began at: an earlier op's own bump is not a conflict.
   function assertVersion(row: NodeRow, expected: number | undefined, opIndex: number): void {
-    if (expected === undefined || row.version === expected) return;
+    const began = versionAtStart.get(row.id) ?? row.version;
+    const ownWrite = versionAfterOwnWrite.get(row.id);
+    if (expected === undefined || (began === expected && (ownWrite ?? began) === row.version)) {
+      return;
+    }
     throw new PlanPatchError(
       'conflict',
       `plan node ${row.id} was modified by someone else ` +
-        `(expected version ${expected}, found ${row.version})`,
+        `(expected version ${expected}, found ${began === expected ? row.version : began})`,
       opIndex,
     );
   }
@@ -700,6 +710,7 @@ async function applyOps(
     }
     assertVersion(row, op.expectedVersion, opIndex);
 
+    versionAfterOwnWrite.set(row.id, row.version + 1);
     const set: Record<string, unknown> = {
       version: row.version + 1,
       updatedAt: new Date(),
