@@ -239,7 +239,7 @@ describe('PUT /entries/:id/enforcement', () => {
     expect(enforcementOf(ENTRY)).toBe('enforced');
     expect(stored().title).toBe(title);
     expect(renderHouseRuleEntry(asEntry())).toBe(
-      `### Anti-pattern — avoid: Never inline SVG\nReference a file instead of inlining SVG.\n\n${BODY}`,
+      `### Never inline SVG\nReference a file instead of inlining SVG.\n\n${BODY}`,
     );
   });
 
@@ -566,6 +566,12 @@ describe('every entry a route returns carries its token and enforcement state', 
     fake.patch(globalKbEntries, ENTRY, { status: 'archived' });
     h.successors = [{ id: SECOND, title: 'Rule' }];
     expect((await read()).activeSuccessor).toEqual({ id: SECOND, title: 'Rule' });
+  });
+
+  it('on GET /entries/:id, counting an anti-pattern by its title alone, as the heading carries no category text', async () => {
+    const { entryBytes } = await read();
+
+    expect(entryBytes).toBe(Buffer.byteLength(`### ${TITLE}\n${DESCRIPTION}\n\n${BODY}`, 'utf8'));
   });
 
   it('on POST /entries and POST /enrich, where nothing is enforced yet', async () => {

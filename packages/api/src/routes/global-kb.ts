@@ -278,10 +278,12 @@ globalKbRoutes.put('/config', async (c) => {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
+  const isAdmin = c.get('userRole') === 'admin';
   const saved = await resolveGlobalKbSettings();
   const given = d.connectionString?.trim() ?? '';
   // The page sends every field on every save, so only a CHANGED value is refused.
-  if (c.get('userRole') !== 'admin') {
+  // An unchanged one is accepted and not written, so it cannot undo a concurrent admin change.
+  if (!isAdmin) {
     const changed = Object.entries({
       enabled: d.enabled !== undefined && d.enabled !== saved.enabled,
       namespace: d.namespace !== undefined && d.namespace !== saved.namespace,
@@ -301,12 +303,12 @@ globalKbRoutes.put('/config', async (c) => {
       'connection_string_required',
     );
   }
-  if (d.enabled !== undefined)
+  if (isAdmin && d.enabled !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
   if (d.digestEnabled !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-  if (d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
-  if (d.namespace !== undefined)
+  if (isAdmin && d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
+  if (isAdmin && d.namespace !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
   if (d.ollamaUrl !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
@@ -319,7 +321,7 @@ globalKbRoutes.put('/config', async (c) => {
       CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
       String(d.archiveRetentionDays),
     );
-  if (d.connectionString !== undefined && d.connectionString.trim().length > 0) {
+  if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
     await secretsService.set(
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
       d.connectionString.trim(),

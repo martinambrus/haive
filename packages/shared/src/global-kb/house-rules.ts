@@ -220,12 +220,12 @@ export function validateHouseRuleGlobs(globs: readonly string[]): string | null 
 }
 
 export function renderHouseRuleEntry(
-  entry: Pick<GlobalKbEntry, 'title' | 'category' | 'description' | 'body'>,
+  entry: Pick<GlobalKbEntry, 'title' | 'description' | 'body'>,
 ): string {
   const title = collapseToLine(entry.title);
   const description = collapseToLine(entry.description);
   return [
-    `### ${entry.category === 'anti_pattern' ? `Anti-pattern — avoid: ${title}` : title}`,
+    `### ${title}`,
     ...(description === '' ? [] : [description]),
     '',
     // As stored: the admin approved these bytes, and an indented code block begins with spaces.
@@ -234,5 +234,5 @@ export function renderHouseRuleEntry(
 }
 
 export const houseRuleBytes = (
-  entry: Pick<GlobalKbEntry, 'title' | 'category' | 'description' | 'body'>,
+  entry: Pick<GlobalKbEntry, 'title' | 'description' | 'body'>,
 ): number => Buffer.byteLength(renderHouseRuleEntry(entry), 'utf8');

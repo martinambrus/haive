@@ -159,6 +159,35 @@ describe('PUT /global-kb/config by a regular user', () => {
     expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']);
   });
 
+  it('writes only the open settings of a full page save, never the protected ones it re-sends', async () => {
+    const res = await put({ ...PAGE, connectionString: STORED_STRING, digestEnabled: false });
+
+    expect(res.status).toBe(200);
+    expect(written().map(([key]) => key)).toEqual(
+      expect.arrayContaining([
+        CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED,
+        CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL,
+        CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL,
+        CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
+        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      ]),
+    );
+    expect(h.set).toHaveBeenCalledTimes(5);
+    expect(h.setSecret).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['enabled', { enabled: true }],
+    ['namespace', { namespace: 'default' }],
+    ['mode', { mode: 'internal' }],
+    ['connectionString', { connectionString: STORED_STRING }],
+  ])('accepts %s re-sent as stored, and writes nothing for it', async (_field, same) => {
+    expect((await put(same)).status).toBe(200);
+
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+  });
+
   it('accepts an untouched connection string, which the page sends as blank', async () => {
     expect((await put({ ...PAGE, connectionString: '  ' })).status).toBe(200);
   });
@@ -190,6 +219,24 @@ describe('PUT /global-kb/config by an admin', () => {
 
     expect(res.status).toBe(200);
     expect(written()).toContainEqual([key, value]);
+  });
+
+  it('writes the protected settings a full page save re-sends, as only a regular user is held back', async () => {
+    const res = await put({ ...PAGE, connectionString: STORED_STRING });
+
+    expect(res.status).toBe(200);
+    expect(written()).toEqual(
+      expect.arrayContaining([
+        [CONFIG_KEYS.GLOBAL_KB_ENABLED, 'true'],
+        [CONFIG_KEYS.GLOBAL_KB_MODE, 'internal'],
+        [CONFIG_KEYS.GLOBAL_KB_NAMESPACE, 'default'],
+      ]),
+    );
+    expect(h.setSecret).toHaveBeenCalledWith(
+      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+      STORED_STRING,
+      expect.any(String),
+    );
   });
 
   it('stores a new connection string, trimmed, and never echoes it', async () => {

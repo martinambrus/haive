@@ -610,10 +610,26 @@ describe('renderHouseRuleEntry and houseRuleBytes', () => {
     );
   });
 
-  it('heads an anti-pattern with what it is', () => {
-    expect(renderHouseRuleEntry({ ...entry, category: 'anti_pattern' })).toBe(
-      '### Anti-pattern — avoid: Use X\nWhy it matters\n\n# Use X\n\nBody.',
-    );
+  it.each<Content['category']>([
+    'general',
+    'tech_pattern',
+    'anti_pattern',
+    'best_practice',
+    'quick_reference',
+  ])(
+    'heads an entry of category %s with its collapsed title alone, as the enforce panel shows it',
+    (category) => {
+      const row = { ...entry, category };
+
+      expect(renderHouseRuleEntry(row)).toBe('### Use X\nWhy it matters\n\n# Use X\n\nBody.');
+      expect(houseRuleBytes(row)).toBe(40);
+    },
+  );
+
+  it('does not turn a title worded as a prohibition into its opposite', () => {
+    const row = { ...entry, title: 'no inline svgs', category: 'anti_pattern' as const };
+
+    expect(renderHouseRuleEntry(row).split('\n')[0]).toBe('### no inline svgs');
   });
 
   it('cannot be turned into more lines by a title or description', () => {
