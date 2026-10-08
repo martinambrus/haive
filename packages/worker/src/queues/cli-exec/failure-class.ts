@@ -15,9 +15,10 @@ export type CliFailureClass = 'output_truncated' | 'context_overflow' | 'generic
  *  upstream/ephemeral string, so matching on it is safe. */
 export const OUTPUT_TRUNCATION_HEADLINE = 'LLM output truncated (max output tokens)';
 
-// stop_reason / error tokens that mean the assistant hit its output cap mid-turn.
-// Covers Anthropic/Amp/Zai/Qwen stream-json ("max_tokens"), and the explicit
-// max_output_tokens spelling. Kept tight — bare "length" is too false-positive.
+// stop_reason / error tokens that mean the assistant hit its output cap mid-turn: the "max_tokens"
+// amp puts on a non-success result, and the explicit max_output_tokens spelling. The claude binary
+// (Anthropic, Zai, ollama) never reaches this: it reports a cut reply as a success-subtype result
+// with is_error, which is output_cap_reached below. Kept tight — bare "length" is too false-positive.
 const OUTPUT_TRUNCATION_RE = /\bmax_tokens\b|max_output_tokens|output[_\s-]?token[_\s-]?limit/i;
 
 // Tokens that mean the INPUT exceeded the model's context window (a different
