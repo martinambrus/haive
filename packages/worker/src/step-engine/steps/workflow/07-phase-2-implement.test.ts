@@ -121,10 +121,18 @@ describe('phase2ImplementStep fix-pass browser guidance', () => {
       fixIsHuman: true,
     });
     expect(p).toContain('AUTHORITATIVE DIRECTIVE');
-    expect(p).toContain('framework-native'); // the exact dismissal we must forbid
-    expect(p).toContain('never silently skip a reported');
+    expect(p).toContain('never silently skip what they require');
     // The machine "extract the real error and ignore the rest" caveat must NOT appear.
     expect(p).not.toContain('raw tool/agent output');
+  });
+
+  it('says only what is true for every person source in the person framing', () => {
+    const p = prompt({ fixContext: 'a directive', round: 1, fixIsHuman: true });
+    expect(p).toContain('AUTHORITATIVE DIRECTIVE');
+    expect(p).toContain('A person reviewed this work and directs the fix below.');
+    expect(p).not.toContain('tested the running application');
+    expect(p).not.toContain('saw it');
+    expect(p).not.toContain('address EVERY problem');
   });
 
   it('keeps the filter-the-noise framing for a machine-sourced diagnosis', () => {

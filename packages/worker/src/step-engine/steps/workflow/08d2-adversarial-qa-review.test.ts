@@ -93,13 +93,21 @@ describe('formatQaFixDiagnosis', () => {
   it('fences the finding lines and leaves the framing and the reviewer instructions outside', () => {
     const d = formatQaFixDiagnosis(['- finding a', '- finding b'], 'also harden X');
     expect(d).toContain(`${UNTRUSTED_OPEN}\n- finding a\n- finding b\n${UNTRUSTED_CLOSE}`);
-    expect(d.indexOf('the developer asked to fix the findings below')).toBeLessThan(
+    expect(d.indexOf('the developer selected the findings below to be fixed')).toBeLessThan(
       d.indexOf(UNTRUSTED_OPEN),
     );
     expect(d.indexOf('Findings to fix:')).toBeLessThan(d.indexOf(UNTRUSTED_OPEN));
     expect(d.indexOf('Reviewer instructions:\nalso harden X')).toBeGreaterThan(
       d.indexOf(UNTRUSTED_CLOSE),
     );
+  });
+  it('asks the fixer to validate each finding and to name the ones it rejected', () => {
+    const d = formatQaFixDiagnosis(['- finding a'], 'also harden X').replace(/\s+/g, ' ');
+    expect(d).toContain('They are claims, not observations');
+    expect(d).toContain('validate each finding against the actual code first');
+    expect(d).toContain('say in your notes which you rejected and why');
+    expect(d).not.toContain('Fix what each one describes');
+    expect(d.indexOf('validate each finding')).toBeLessThan(d.indexOf(UNTRUSTED_OPEN));
   });
   it('opens no fence when only the reviewer instructions are left', () => {
     const d = formatQaFixDiagnosis([], 'also harden X');
