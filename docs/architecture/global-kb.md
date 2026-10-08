@@ -89,8 +89,12 @@ refused (`?app?` still names a directory such as Next.js's `(app)`); every brace
 check catches mistakes and is not a boundary: only an admin enforces, a deliberately broad glob
 (`**/*.*`) is theirs to write, and what reaches a prompt is bounded by the per-prompt budget
 (PR6), not by this check.
-`enforcementState` reads none, other namespace, superseded, cleared, not active, edited, switched
-off or enforced, and the api attaches it to every entry it returns.
+`enforcementState` reads none, superseded, cleared, not active, edited, other namespace, switched
+off or enforced, first match winning, and the api attaches it to every entry it returns. Validity
+comes first: "other namespace" and "switched off" are pauses that promise the rule resumes, so they
+apply only to an approval that is otherwise valid. The enforce panel shows the title and description
+as agents see them (collapsed onto one line) and the body as stored, since that is what is approved;
+Enforce is offered only in the namespace in use, Un-enforce on any live approval.
 
 An enforced entry needs a description and may not carry invisible or control characters or Haive
 prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
