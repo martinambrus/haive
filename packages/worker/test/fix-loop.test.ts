@@ -426,13 +426,14 @@ function eventsDb(events: { payload: Record<string, unknown> }[]): Database {
 
 const D07C = 'ddev start failed: already contains a project named rs-ollama2';
 const D07B = 'Developer Experience: rename rs-ollama2 to redaction-system';
-function ev(sourceStepId: string, round: number, diagnosis: string) {
+function ev(sourceStepId: string, round: number, diagnosis: string, guidance?: string) {
   return {
     payload: {
       sourceStepId,
       diagnosis,
       round,
       fingerprint: fixLoopFingerprint(sourceStepId, diagnosis),
+      ...(guidance ? { guidance } : {}),
     },
   };
 }
@@ -502,6 +503,18 @@ describe('detectFixLoopOscillation', () => {
     expect(r.tripped).toBe(true);
     expect(r.conflictingStepId).toBe('07b-phase-4-validate');
     expect(r.conflictingDiagnoses).toEqual([D07C, D07B]);
+  });
+
+  it('returns the guidance of the row it returns as side B, and an empty string without one', async () => {
+    const db = eventsDb([
+      ev('07c-ddev-reconcile', 2, D07C),
+      ev('07b-phase-4-validate', 3, D07B, 'Rename it.'),
+    ]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.conflictingGuidance).toBe('Rename it.');
+    const bare = eventsDb([ev('07c-ddev-reconcile', 2, D07C), ev('07b-phase-4-validate', 3, D07B)]);
+    const r2 = await detectFixLoopOscillation(bare, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r2.conflictingGuidance).toBe('');
   });
 
   it('does NOT trip when the same source repeats but nothing alternated in', async () => {
@@ -1181,11 +1194,6 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
 
   it.each([
     ['cap gate', (g?: string) => buildFixLoopEscalationSchema('08c-code-review', 'diag', 5, g), 1],
-    [
-      'oscillation gate',
-      (g?: string) => buildOscillationEscalationSchema('07c', '07b', 'a', 'b', g),
-      2,
-    ],
   ])('%s adds the guidance as one closed section after the diagnoses', (_name, build, n) => {
     const guidance = 'Validate each finding against the code before you act on it.';
     const sections = build(guidance).infoSections ?? [];
@@ -1198,6 +1206,35 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
     expect(build().infoSections).toHaveLength(n);
     expect(build('  \n ').infoSections).toHaveLength(n);
     expect(build('').infoSections).toEqual(build().infoSections);
+  });
+
+  describe('oscillation gate guidance', () => {
+    const A = 'Keep the project name pinned.';
+    const B = 'Rename the project to match the repository.\n  - verbatim\n';
+    const build = (a?: string, b?: string) =>
+      buildOscillationEscalationSchema('07c', '07b', 'diag a', 'diag b', a, b);
+
+    it('shows side B its own closed section, verbatim', () => {
+      expect(build(undefined, B).infoSections?.slice(2)).toEqual([
+        { title: 'Instructions Haive gave the fixer (07b)', body: B, defaultOpen: false },
+      ]);
+    });
+
+    it('shows one closed section per side, A first', () => {
+      expect(build(A, B).infoSections?.slice(2)).toEqual([
+        { title: 'Instructions Haive gave the fixer (07c)', body: A, defaultOpen: false },
+        { title: 'Instructions Haive gave the fixer (07b)', body: B, defaultOpen: false },
+      ]);
+    });
+
+    it('is identical to the form without guidance when neither side has any', () => {
+      const bare = JSON.stringify(
+        buildOscillationEscalationSchema('07c', '07b', 'diag a', 'diag b'),
+      );
+      expect(JSON.stringify(build())).toBe(bare);
+      expect(JSON.stringify(build('', '  \n'))).toBe(bare);
+      expect(build().infoSections).toHaveLength(2);
+    });
   });
 
   it('hands 07 the findings of an adversarial-QA fix request bounded and the reviewer words whole', async () => {

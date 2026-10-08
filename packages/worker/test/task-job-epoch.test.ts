@@ -734,14 +734,23 @@ describe('the fix request a loop_back records', () => {
     expect(parkedSections().map((s) => s.title)).toEqual(['Latest diagnosis']);
   });
 
-  it('puts the guidance of the verdict in the form the oscillation park shows', async () => {
-    h.state.readsAnswer = true;
-    h.state.requestedEvents = [
+  it('puts the guidance of both sides in the form the oscillation park shows', async () => {
+    const GUIDANCE_B = 'Treat the other check as authoritative on naming.';
+    const events = (guidance?: string) => [
       { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
-      { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
+      {
+        payload: {
+          diagnosis: 'a different defect',
+          sourceStepId: 'another-step',
+          round: 2,
+          ...(guidance ? { guidance } : {}),
+        },
+      },
     ];
     const repeated = (over: Record<string, unknown> = {}) =>
       loopBack({ row: { id: 'ts-1', round: 2 }, ...over });
+    h.state.readsAnswer = true;
+    h.state.requestedEvents = events(GUIDANCE_B);
     await handleResult(
       db as never,
       ctx() as never,
@@ -749,9 +758,18 @@ describe('the fix request a loop_back records', () => {
       repeated({ guidance: GUIDANCE }) as never,
     );
     expect(h.state.events).toContain('fix_loop.oscillation_detected');
-    expect(parkedSections()).toHaveLength(3);
-    expect(parkedSections().at(-1)).toMatchObject({ title: GUIDANCE_TITLE, body: GUIDANCE });
+    expect(parkedSections()).toHaveLength(4);
+    expect(parkedSections().slice(2)).toEqual([
+      expect.objectContaining({ title: `${GUIDANCE_TITLE} (epoch-job-step)`, body: GUIDANCE }),
+      expect.objectContaining({ title: `${GUIDANCE_TITLE} (another-step)`, body: GUIDANCE_B }),
+    ]);
     h.state.stepPatches = [];
+    await handleResult(db as never, ctx() as never, 'epoch-job-step', repeated() as never);
+    expect(parkedSections().slice(2)).toEqual([
+      expect.objectContaining({ title: `${GUIDANCE_TITLE} (another-step)`, body: GUIDANCE_B }),
+    ]);
+    h.state.stepPatches = [];
+    h.state.requestedEvents = events();
     await handleResult(db as never, ctx() as never, 'epoch-job-step', repeated() as never);
     expect(parkedSections()).toHaveLength(2);
   });

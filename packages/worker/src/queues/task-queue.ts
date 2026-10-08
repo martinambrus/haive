@@ -1634,6 +1634,7 @@ export async function handleResult(
               osc.conflictingDiagnoses[0],
               osc.conflictingDiagnoses[1],
               result.guidance,
+              osc.conflictingGuidance,
             ),
             formValues: null,
             endedAt: null,
