@@ -188,6 +188,15 @@ describe('vetHouseRules', () => {
     });
   });
 
+  it('refuses a rule with no description to list it by, whatever the store left in the column', () => {
+    const empty = [null, '', '   ', ' \n\t '].map((description) => rule({ description }));
+    const oneLine = rule({ description: 'Reference a file instead.' });
+    const vetted = vetHouseRules([...empty, oneLine]);
+    expect(vetted.usable).toEqual([oneLine]);
+    expect(vetted.refused.map((r) => r.id)).toEqual(empty.map((r) => r.id));
+    expect(vetted.refused.every((r) => r.why === 'refused')).toBe(true);
+  });
+
   it('refuses a rule whose globs the API would not have approved', () => {
     const negated = files(['!**/*.php']);
     const parent = files(['../outside/**']);

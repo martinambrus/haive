@@ -292,6 +292,15 @@ describe('resolveGlobalKbContext: switches and failures', () => {
     expect(out.digest.entries.map((e) => e.title)).toEqual(['Plain', 'Rule']);
   });
 
+  it('keeps the switched-off state when the store then fails to open for the digest', async () => {
+    h.bools[CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED] = false;
+    h.storeFails = new Error('global KB unreachable');
+    const out = await ask(true);
+    expect(out).toMatchObject({ status: 'disabled', rules: [], refused: [] });
+    expect(out.errorClass).toBeUndefined();
+    expect(out.digest.entries).toEqual([]);
+  });
+
   it('does not let that switch matter to a dispatch that asked for no rules', async () => {
     h.bools[CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED] = false;
     expect((await ask(false)).status).toBe('ok');

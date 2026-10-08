@@ -92,6 +92,7 @@ export async function resolveGlobalKbContext(
     return settled('unavailable', { errorClass });
   };
 
+  let rulesSwitchedOff = false;
   try {
     const [globalEnabled, digestEnabled, rulesEnabled] = await Promise.all([
       resolveGlobalKbEnabled(configService),
@@ -100,7 +101,8 @@ export async function resolveGlobalKbContext(
     ]);
     if (!globalEnabled) return settled('disabled');
     const readRules = wantRules && rulesEnabled;
-    const idleStatus = wantRules && !rulesEnabled ? 'disabled' : 'ok';
+    rulesSwitchedOff = wantRules && !rulesEnabled;
+    const idleStatus = rulesSwitchedOff ? 'disabled' : 'ok';
     if (!digestEnabled && !readRules) return settled(idleStatus);
 
     const projectFacets = await resolveTaskFacets(db, taskId);
@@ -149,7 +151,9 @@ export async function resolveGlobalKbContext(
     const vetted = vetHouseRules(enforcedRules(read.ruleRows.value, read.namespace, projectFacets));
     return settled('ok', { digest, rules: vetted.usable, refused: vetted.refused });
   } catch (err) {
-    return failed(err);
+    const unavailable = failed(err);
+    // A switch read as off stays off: only the digest's read failed.
+    return rulesSwitchedOff ? settled('disabled') : unavailable;
   }
 }
 

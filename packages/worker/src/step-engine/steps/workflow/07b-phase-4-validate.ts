@@ -314,15 +314,19 @@ async function givenRuleIds(
 function raiseRuleViolations(
   issues: ValidationIssue[],
   given: ReadonlySet<string>,
-): { issues: ValidationIssue[]; raised: number } {
+): { issues: ValidationIssue[]; raised: number; stamped: number } {
+  const names = (issue: ValidationIssue): boolean =>
+    issue.rule !== undefined && given.has(normalizeRuleRef(issue.rule));
   const raised = issues.map((issue) =>
-    issue.rule !== undefined &&
-    !isBlockingSeverity(issue.severity) &&
-    given.has(normalizeRuleRef(issue.rule))
+    names(issue) && !isBlockingSeverity(issue.severity)
       ? { ...issue, severity: 'high' as const }
       : issue,
   );
-  return { issues: raised, raised: raised.filter((issue, i) => issue !== issues[i]).length };
+  return {
+    issues: raised,
+    raised: raised.filter((issue, i) => issue !== issues[i]).length,
+    stamped: issues.filter(names).length,
+  };
 }
 
 /** Bullet-point markdown of the whole run for the done card: the final verdict,
@@ -1049,12 +1053,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         return { ...issue, upstream };
       });
       const upstreamIssues = issues.filter((issue) => issue.upstream);
-      // A raised issue on a VALID pass makes it ISSUES_FOUND: the fixer and the fix loop run on nothing else.
+      // Any issue naming a stamped rule makes a VALID pass ISSUES_FOUND: only that runs the fixer and the fix loop.
       const verdict =
-        upstreamIssues.length > 0 || ruled.raised > 0 ? 'ISSUES_FOUND' : parsed.verdict;
+        upstreamIssues.length > 0 || ruled.stamped > 0 ? 'ISSUES_FOUND' : parsed.verdict;
       // Churn only matters while issues remain; a VALID pass converged by definition.
       const churnFiles =
-        parsed.verdict === 'ISSUES_FOUND' || ruled.raised > 0
+        parsed.verdict === 'ISSUES_FOUND' || ruled.stamped > 0
           ? churnHotspots([...priorValidatorIssueLists(previous), issues])
           : [];
       ctx.logger.info(
@@ -1062,6 +1066,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           verdict: parsed.verdict,
           issues: parsed.issues.length,
           raisedByRule: ruled.raised,
+          stampedRules: ruled.stamped,
           dimensionFails: parsed.dimensions.filter((dim) => dim.status === 'FAIL').length,
           churnFiles: churnFiles.length,
         },

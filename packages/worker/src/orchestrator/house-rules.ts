@@ -1,5 +1,5 @@
 import picomatch from 'picomatch';
-import { HOUSE_RULE_ROLES, type HouseRuleMode } from '@haive/shared';
+import { collapseToLine, HOUSE_RULE_ROLES, type HouseRuleMode } from '@haive/shared';
 import {
   HOUSE_RULES_END,
   houseRuleBytes,
@@ -147,6 +147,7 @@ export function vetHouseRules(rules: readonly HouseRuleCandidate[]): {
 
 function isUsable(rule: HouseRuleCandidate): boolean {
   if (
+    collapseToLine(rule.description) === '' ||
     refusedHouseRuleText(rule.title) !== null ||
     refusedHouseRuleText(rule.description ?? '') !== null ||
     refusedHouseRuleText(rule.body) !== null

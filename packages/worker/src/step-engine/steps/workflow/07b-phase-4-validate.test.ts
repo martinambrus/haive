@@ -1381,6 +1381,41 @@ describe('phase4ValidateStep: the severity of an issue that names an enforced ru
     expect(await continues(out)).toBe(false);
   });
 
+  it.each(['high', 'critical'])(
+    'turns a VALID verdict into ISSUES_FOUND for a %s issue that names a rule of the stamp, though there is nothing to raise',
+    async (severity) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+      const out = await runApply(
+        w.ctx,
+        reply({ verdict: 'VALID', issues: [ladder(SHORT_A, severity)] }),
+        { invocationId: VALIDATOR_1 },
+      );
+      expect(out.issues[0]!.severity).toBe(severity);
+      expect(out.verdict).toBe('ISSUES_FOUND');
+      expect(await continues(out)).toBe(true);
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)?.blocking).toBe(true);
+    },
+  );
+
+  it.each([
+    ['names a rule the stamp does not list', stampOf(RULE_A), 'deadbeef'],
+    ['names a rule on a pass with no stamp', null, SHORT_A],
+  ])(
+    'leaves a VALID verdict alone for a high and a critical issue that %s',
+    async (_name, stamp, rule) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stamp });
+      const out = await runApply(
+        w.ctx,
+        reply({ verdict: 'VALID', issues: [ladder(rule, 'high'), ladder(rule, 'critical')] }),
+        { invocationId: VALIDATOR_1 },
+      );
+      expect(out.verdict).toBe('VALID');
+      expect(out.issues.map((i) => i.severity)).toEqual(['high', 'critical']);
+      expect(await continues(out)).toBe(false);
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+    },
+  );
+
   it('leaves the severity as the model gave it when the invocation has no stamp, or the pass has no invocation', async () => {
     const w = ruleWorld({ [VALIDATOR_1]: null });
     const unstamped = await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'medium')] }), {
@@ -1434,28 +1469,35 @@ describe('phase4ValidateStep: the severity of an issue that names an enforced ru
     expect(out.issues.map((i) => i.severity)).toEqual(['medium', 'high']);
   });
 
-  it('counts a raised issue towards the churn guard even though the model said VALID', async () => {
-    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
-    let previous: ReturnType<typeof passRecord>[] = [];
-    let last = await runApply(w.ctx, 'x');
-    for (const n of [0, 1, 2]) {
-      const text = reply({
-        verdict: 'VALID',
-        issues: [{ ...ladder(SHORT_A, 'medium'), file: `templates/node.tpl.php:${n + 1}` }],
-      });
-      last = await runApply(w.ctx, text, { iteration: n * 2, previous, invocationId: VALIDATOR_1 });
-      previous = [...previous, passRecord(n * 2, text, last)];
-      if (n < 2) {
-        const fixed = await runApply(w.ctx, FIXER_REPLY, {
-          iteration: n * 2 + 1,
-          previous,
-          invocationId: FIXER_1,
+  it.each(['medium', 'high', 'critical'])(
+    'counts a %s issue that names a rule of the stamp towards the churn guard even though the model said VALID',
+    async (severity) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+      let previous: ReturnType<typeof passRecord>[] = [];
+      let last = await runApply(w.ctx, 'x');
+      for (const n of [0, 1, 2]) {
+        const text = reply({
+          verdict: 'VALID',
+          issues: [{ ...ladder(SHORT_A, severity), file: `templates/node.tpl.php:${n + 1}` }],
         });
-        previous = [...previous, passRecord(n * 2 + 1, FIXER_REPLY, fixed)];
+        last = await runApply(w.ctx, text, {
+          iteration: n * 2,
+          previous,
+          invocationId: VALIDATOR_1,
+        });
+        previous = [...previous, passRecord(n * 2, text, last)];
+        if (n < 2) {
+          const fixed = await runApply(w.ctx, FIXER_REPLY, {
+            iteration: n * 2 + 1,
+            previous,
+            invocationId: FIXER_1,
+          });
+          previous = [...previous, passRecord(n * 2 + 1, FIXER_REPLY, fixed)];
+        }
       }
-    }
-    expect(last.verdict).toBe('ISSUES_FOUND');
-    expect(last.churnFiles).toEqual(['templates/node.tpl.php']);
-    expect(last.converged).toBe(false);
-  });
+      expect(last.verdict).toBe('ISSUES_FOUND');
+      expect(last.churnFiles).toEqual(['templates/node.tpl.php']);
+      expect(last.converged).toBe(false);
+    },
+  );
 });
