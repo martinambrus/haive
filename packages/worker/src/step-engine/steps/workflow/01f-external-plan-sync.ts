@@ -3,6 +3,7 @@ import {
   applyPlanPatch,
   findPlanRoot,
   loadPlanSkeletons,
+  PlanPatchError,
   renderPlanMarkdown,
 } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -65,7 +66,8 @@ export interface ExternalPlanSyncDetect {
 }
 
 export interface ExternalPlanSyncApply {
-  decision: 'applied' | 'declined' | 'nothing_to_review' | 'tracking_started' | 'not_measured';
+  decision:
+    'applied' | 'declined' | 'nothing_to_review' | 'tracking_started' | 'not_measured' | 'conflict';
   commitsReviewed: number;
   reviewedThrough: string | null;
   proposed: number;
@@ -202,7 +204,11 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     );
 
     const [planMarkdown, nodes] = await Promise.all([
-      renderPlanMarkdown(ctx.db, drift.repositoryId, { titlesOnly: true, maxDepth: 4 }),
+      renderPlanMarkdown(ctx.db, drift.repositoryId, {
+        titlesOnly: true,
+        maxDepth: 4,
+        withVersions: true,
+      }),
       loadPlanSkeletons(ctx.db, drift.repositoryId),
     ]);
     return {
@@ -350,19 +356,32 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     // the exact commit the evidence came from. `onUnresolvableRef: 'drop'` because a node
     // can be deleted by a plan chat while the form sits parked, and one stale id must lose
     // its own op rather than the developer's whole approved set.
-    const applied = await applyPlanPatch(
-      ctx.db,
-      { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
-      {
-        repositoryId: d.repositoryId,
-        origin: 'user',
-        sourceTaskId: ctx.taskId,
-        derivedAtCommit: d.branchPoint,
-        onUnresolvableRef: 'drop',
-        // The agent wrote the links, and the form never showed one it could not read.
-        onInvalidCodeLink: 'strip',
-      },
-    );
+    let applied;
+    try {
+      applied = await applyPlanPatch(
+        ctx.db,
+        { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
+        {
+          repositoryId: d.repositoryId,
+          origin: 'user',
+          sourceTaskId: ctx.taskId,
+          derivedAtCommit: d.branchPoint,
+          onUnresolvableRef: 'drop',
+          // The agent wrote the links, and the form never showed one it could not read.
+          onInvalidCodeLink: 'strip',
+        },
+      );
+    } catch (err) {
+      if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
+      // Not stamped: the range stays unreviewed, so the next run proposes against the new plan.
+      return {
+        ...base,
+        decision: 'conflict',
+        commitsReviewed: d.commits.length,
+        proposed: ops.length,
+        summary: 'The plan changed since this proposal; nothing applied.',
+      };
+    }
     if (applied.dropped.length > 0) {
       ctx.logger.warn({ dropped: applied.dropped }, 'external plan sync dropped stale ops');
     }

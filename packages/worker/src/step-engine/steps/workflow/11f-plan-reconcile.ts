@@ -5,6 +5,7 @@ import {
   applyPlanPatch,
   findPlanRoot,
   loadPlanSkeletons,
+  PlanPatchError,
   renderPlanMarkdown,
 } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -45,7 +46,7 @@ export interface PlanReconcileDetect {
   changedPaths: string[];
   /** Nodes 04-phase-0b said this task affects, so the agent starts where the
    *  spec already pointed rather than re-deriving it from the diff. */
-  affected: { id: string; title: string }[];
+  affected: { id: string; title: string; version?: number }[];
   /** Every node id to its title, so the form can NAME what each op touches.
    *  form() is synchronous and cannot read the database, so the titles have to
    *  travel in the detect payload. Optional: a payload persisted before this
@@ -61,7 +62,7 @@ export interface PlanReconcileApply {
   created: number;
   updated: number;
   codeLinked: number;
-  decision: 'applied' | 'declined' | 'nothing_to_do';
+  decision: 'applied' | 'declined' | 'nothing_to_do' | 'conflict';
   /** Approved ops the applier dropped, in its own words. Optional: an output
    *  persisted before this existed has none. */
   dropped?: string[];
@@ -103,7 +104,11 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
   }
 
   const [planMarkdown, spec, nodes] = await Promise.all([
-    renderPlanMarkdown(ctx.db, task.repositoryId, { titlesOnly: true, maxDepth: 4 }),
+    renderPlanMarkdown(ctx.db, task.repositoryId, {
+      titlesOnly: true,
+      maxDepth: 4,
+      withVersions: true,
+    }),
     resolveApprovedSpec(ctx),
     loadPlanSkeletons(ctx.db, task.repositoryId),
   ]);
@@ -115,10 +120,11 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     .from(schema.planNodeTasks)
     .where(eq(schema.planNodeTasks.taskId, ctx.taskId))
     .then((rows) => {
-      const byId = new Map(nodes.map((n) => [n.id, n.title]));
-      return rows.flatMap((r) =>
-        byId.has(r.nodeId) ? [{ id: r.nodeId, title: byId.get(r.nodeId)! }] : [],
-      );
+      const byId = new Map(nodes.map((n) => [n.id, n]));
+      return rows.flatMap((r) => {
+        const n = byId.get(r.nodeId);
+        return n ? [{ id: n.id, title: n.title, version: n.version }] : [];
+      });
     })
     .catch(() => []);
 
@@ -156,7 +162,11 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
       ? [
           '## Components this task was expected to affect',
           '',
-          ...d.affected.map((a) => `- ${a.title} (\`node:${a.id}\`)`),
+          ...d.affected.map(
+            (a) =>
+              `- ${a.title} (\`node:${a.id}\`` +
+              (a.version === undefined ? ')' : ` · \`version ${a.version}\`)`),
+          ),
           '',
         ]
       : []),
@@ -315,17 +325,25 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // stale id must lose its own op, not the developer's whole approved set.
     // `onInvalidCodeLink: 'strip'` for the same reason: the agent wrote the links,
     // and the form never showed one it could not read.
-    const applied = await applyPlanPatch(
-      ctx.db,
-      { ops: chosen, summary: 'plan reconcile after task implementation' },
-      {
-        repositoryId: d.repositoryId,
-        origin: 'user',
-        sourceTaskId: ctx.taskId,
-        onUnresolvableRef: 'drop',
-        onInvalidCodeLink: 'strip',
-      },
-    );
+    let applied;
+    try {
+      applied = await applyPlanPatch(
+        ctx.db,
+        { ops: chosen, summary: 'plan reconcile after task implementation' },
+        {
+          repositoryId: d.repositoryId,
+          origin: 'user',
+          sourceTaskId: ctx.taskId,
+          onUnresolvableRef: 'drop',
+          onInvalidCodeLink: 'strip',
+        },
+      );
+    } catch (err) {
+      if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
+      result.decision = 'conflict';
+      result.summary = 'The plan changed since this proposal; nothing applied.';
+      return result;
+    }
     // Counts what LANDED: a count that included a dropped op would tell the
     // developer a change they approved is in the plan when it is not.
     result.applied = chosen.length - applied.dropped.length;
