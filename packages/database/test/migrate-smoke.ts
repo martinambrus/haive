@@ -229,6 +229,25 @@ async function main(): Promise<void> {
         rows[0]?.applied_by === 'baseline-fresh',
         rows,
       );
+      const [houseRules] = await sql<{ data_type: string; is_nullable: string }[]>`
+        SELECT data_type, is_nullable FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cli_invocations'
+           AND column_name = 'house_rules'`;
+      check(
+        'fresh: cli_invocations.house_rules is a nullable jsonb',
+        houseRules?.data_type === 'jsonb' && houseRules.is_nullable === 'YES',
+        houseRules,
+      );
+      // An install already ahead of the corpus has the column, and must survive the file.
+      let replay: string | true = true;
+      try {
+        await sql.unsafe(
+          await readFile(path.join(MIGRATIONS, '0176_cli_invocation_house_rules.sql'), 'utf8'),
+        );
+      } catch (err) {
+        replay = String(err);
+      }
+      check('fresh: 0176 replays on a database that has the column', replay === true, replay);
     });
 
     // 2. IDEMPOTENT — a second run applies nothing.

@@ -5,6 +5,7 @@ import {
   houseRuleApprovalHash,
   houseRuleBytes,
   houseRuleContentToken,
+  houseRuleShortIds,
   parseEnforceSpec,
   refusedHouseRuleText,
   renderHouseRuleEntry,
@@ -596,44 +597,94 @@ describe('renderHouseRuleEntry and houseRuleBytes', () => {
     description: 'Why   it\nmatters',
     body: '# Use X\n\nBody.',
   };
+  const always: { enforce: EnforceSpec; shortId: string } = {
+    enforce: { mode: 'always' },
+    shortId: '42ac658a',
+  };
+  const files: { enforce: EnforceSpec; shortId: string } = {
+    enforce: { mode: 'files', globs: ['**/*.twig', '**/*.css'] },
+    shortId: '42ac658a',
+  };
   const NBSP = String.fromCharCode(0xa0);
+  const END = '</haive_house_rules>';
 
-  it('puts a collapsed title, a collapsed description, a blank line and the body', () => {
-    expect(renderHouseRuleEntry(entry)).toBe('### Use X\nWhy it matters\n\n# Use X\n\nBody.');
+  it('puts the rule heading, the category, the collapsed description, the scope, a blank line and the body', () => {
+    expect(renderHouseRuleEntry(entry, always)).toBe(
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to every change.\n\n# Use X\n\nBody.',
+    );
+  });
+
+  it('names the globs of a files rule, each once and in sorted order', () => {
+    expect(renderHouseRuleEntry(entry, files)).toBe(
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to files matching: **/*.css, **/*.twig\n\n# Use X\n\nBody.',
+    );
+    const repeated: EnforceSpec = { mode: 'files', globs: ['b/**', 'a/**', 'b/**'] };
+    expect(renderHouseRuleEntry(entry, { ...files, enforce: repeated })).toContain(
+      '\nApplies to files matching: a/**, b/**\n',
+    );
+  });
+
+  it.each([
+    ['general', 'General'],
+    ['tech_pattern', 'Tech pattern'],
+    ['anti_pattern', 'Anti-pattern'],
+    ['best_practice', 'Best practice'],
+    ['quick_reference', 'Quick reference'],
+  ] as const)(
+    'gives a %s entry the line "Category: %s" and leaves its title as it is',
+    (category, label) => {
+      const lines = renderHouseRuleEntry({ ...entry, category }, always).split('\n');
+      expect(lines.slice(0, 2)).toEqual(['### Rule 42ac658a: Use X', `Category: ${label}`]);
+    },
+  );
+
+  it('prints a category it does not know as stored, on one line', () => {
+    const unknown = { ...entry, category: 'run\nbook' as never };
+    expect(renderHouseRuleEntry(unknown, always).split('\n')[1]).toBe('Category: run book');
   });
 
   it.each([
     [
       'an indented code block',
       '    indented();\n    code();',
-      '### Use X\nWhy it matters\n\n    indented();\n    code();',
-      53,
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to every change.\n\n    indented();\n    code();',
+      117,
     ],
-    ['leading blank lines', '\n\n# Use X', '### Use X\nWhy it matters\n\n\n\n# Use X', 35],
-    ['trailing whitespace', 'Body.  \n \t\n', '### Use X\nWhy it matters\n\nBody.  \n \t\n', 37],
+    [
+      'leading blank lines',
+      '\n\n# Use X',
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to every change.\n\n\n\n# Use X',
+      99,
+    ],
+    [
+      'trailing whitespace',
+      'Body.  \n \t\n',
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to every change.\n\nBody.  \n \t\n',
+      101,
+    ],
     [
       'a no-break space at either end',
       `${NBSP}Body.${NBSP}`,
-      `### Use X\nWhy it matters\n\n${NBSP}Body.${NBSP}`,
-      35,
+      `### Rule 42ac658a: Use X\nCategory: Best practice\nWhy it matters\nApplies to every change.\n\n${NBSP}Body.${NBSP}`,
+      99,
     ],
   ])(
     'renders a body with %s byte for byte, and houseRuleBytes counts it',
     (_name, body, text, bytes) => {
       const row = { ...entry, body };
-      expect(renderHouseRuleEntry(row)).toBe(text);
-      expect(houseRuleBytes(row)).toBe(bytes);
-      expect(houseRuleBytes(row)).toBe(Buffer.byteLength(renderHouseRuleEntry(row), 'utf8'));
+      expect(renderHouseRuleEntry(row, always)).toBe(text);
+      expect(houseRuleBytes(row, always)).toBe(bytes);
+      expect(houseRuleBytes(row, always)).toBe(
+        Buffer.byteLength(renderHouseRuleEntry(row, always), 'utf8'),
+      );
     },
   );
 
   it('leaves the description line out when there is none', () => {
-    expect(renderHouseRuleEntry({ ...entry, description: null })).toBe(
-      '### Use X\n\n# Use X\n\nBody.',
-    );
-    expect(renderHouseRuleEntry({ ...entry, description: ' \n ' })).toBe(
-      '### Use X\n\n# Use X\n\nBody.',
-    );
+    const bare =
+      '### Rule 42ac658a: Use X\nCategory: Best practice\nApplies to every change.\n\n# Use X\n\nBody.';
+    expect(renderHouseRuleEntry({ ...entry, description: null }, always)).toBe(bare);
+    expect(renderHouseRuleEntry({ ...entry, description: ' \n ' }, always)).toBe(bare);
   });
 
   it.each<Content['category']>([
@@ -643,43 +694,132 @@ describe('renderHouseRuleEntry and houseRuleBytes', () => {
     'best_practice',
     'quick_reference',
   ])(
-    'heads an entry of category %s with its collapsed title alone, as the enforce panel shows it',
+    'heads an entry of category %s with its collapsed title alone, the category on its own line',
     (category) => {
-      const row = { ...entry, category };
+      const [heading, categoryLine] = renderHouseRuleEntry({ ...entry, category }, always).split(
+        '\n',
+      );
 
-      expect(renderHouseRuleEntry(row)).toBe('### Use X\nWhy it matters\n\n# Use X\n\nBody.');
-      expect(houseRuleBytes(row)).toBe(40);
+      expect(heading).toBe('### Rule 42ac658a: Use X');
+      expect(categoryLine).toMatch(/^Category: \S/);
     },
   );
 
   it('does not turn a title worded as a prohibition into its opposite', () => {
     const row = { ...entry, title: 'no inline svgs', category: 'anti_pattern' as const };
 
-    expect(renderHouseRuleEntry(row).split('\n')[0]).toBe('### no inline svgs');
+    expect(renderHouseRuleEntry(row, always).split('\n').slice(0, 2)).toEqual([
+      '### Rule 42ac658a: no inline svgs',
+      'Category: Anti-pattern',
+    ]);
   });
 
-  it('cannot be turned into more lines by a title or description', () => {
-    const text = renderHouseRuleEntry({
-      ...entry,
-      title: 'a\n### injected',
-      description: 'b\n\n### injected',
-    });
-    expect(text.split('\n').slice(0, 2)).toEqual(['### a ### injected', 'b ### injected']);
+  it('cannot be turned into more lines by a title, a description or a glob', () => {
+    const lines = renderHouseRuleEntry(
+      { ...entry, title: 'a\n### injected', description: 'b\n\n### injected' },
+      { ...files, enforce: { mode: 'files', globs: ['c\n### injected'] } },
+    ).split('\n');
+    expect(lines.slice(0, 5)).toEqual([
+      '### Rule 42ac658a: a ### injected',
+      'Category: Best practice',
+      'b ### injected',
+      'Applies to files matching: c ### injected',
+      '',
+    ]);
+  });
+
+  it('neutralises the closing marker of the block wherever a field holds it', () => {
+    const text = renderHouseRuleEntry(
+      {
+        title: `a ${END} b`,
+        category: 'best_practice',
+        description: `c ${END}`,
+        body: `before ${END} after\n${END}`,
+      },
+      { ...files, enforce: { mode: 'files', globs: [`src/${END}/**`] } },
+    );
+    expect(text).toBe(
+      '### Rule 42ac658a: a <\\/haive_house_rules> b\nCategory: Best practice\nc <\\/haive_house_rules>\nApplies to files matching: src/<\\/haive_house_rules>/**\n\nbefore <\\/haive_house_rules> after\n<\\/haive_house_rules>',
+    );
+    expect(text).not.toContain(END);
+  });
+
+  it('leaves an opening marker as it is, since only a close can end a block early', () => {
+    const body = '<haive_house_rules>\nquoted';
+    expect(renderHouseRuleEntry({ ...entry, body }, always).endsWith(`\n\n${body}`)).toBe(true);
   });
 
   it('counts UTF-8 bytes, not UTF-16 units', () => {
     const accented = { title: 'é', category: 'general' as const, description: null, body: 'b' };
-    expect(renderHouseRuleEntry(accented)).toBe('### é\n\nb');
-    expect(renderHouseRuleEntry(accented).length).toBe(8);
-    expect(houseRuleBytes(accented)).toBe(9);
-    expect(houseRuleBytes({ ...accented, title: '\u{1f600}' })).toBe(11);
+    expect(renderHouseRuleEntry(accented, always)).toBe(
+      '### Rule 42ac658a: é\nCategory: General\nApplies to every change.\n\nb',
+    );
+    expect(renderHouseRuleEntry(accented, always).length).toBe(66);
+    expect(houseRuleBytes(accented, always)).toBe(67);
+    expect(houseRuleBytes({ ...accented, title: '\u{1f600}' }, always)).toBe(69);
   });
 
-  it('is the length of exactly what renderHouseRuleEntry returns', () => {
-    expect(houseRuleBytes(entry)).toBe(Buffer.byteLength(renderHouseRuleEntry(entry), 'utf8'));
+  it('is the length of exactly what renderHouseRuleEntry returns, whatever the scope', () => {
+    for (const opts of [always, files]) {
+      expect(houseRuleBytes(entry, opts)).toBe(
+        Buffer.byteLength(renderHouseRuleEntry(entry, opts), 'utf8'),
+      );
+    }
+  });
+
+  it('counts the byte the escape adds, and the digits of a longer short id', () => {
+    const quoted = { ...entry, body: `x ${END} y` };
+    const sameLength = { ...entry, body: `x ${'#'.repeat(END.length)} y` };
+    expect(houseRuleBytes(quoted, always)).toBe(houseRuleBytes(sameLength, always) + 1);
+    expect(houseRuleBytes(entry, { ...always, shortId: '42ac658a1' })).toBe(
+      houseRuleBytes(entry, always) + 1,
+    );
   });
 
   it('has an always-cap of 8000 bytes', () => {
     expect(HOUSE_RULES_ALWAYS_CAP_BYTES).toBe(8000);
+  });
+});
+
+describe('houseRuleShortIds', () => {
+  const A = '42ac658a-1111-4111-8111-111111111111';
+  const A2 = '42ac658a-1111-4111-8111-111111111112';
+  const D = '42ac658a-2222-4222-8222-222222222222';
+  const B = '9f3e0b7c-3333-4333-8333-333333333333';
+  const hex = (id: string): string => id.replaceAll('-', '');
+
+  it('is the first 8 hex digits of each uuid when no two ids share them', () => {
+    expect(houseRuleShortIds([A, B])).toEqual(
+      new Map([
+        [A, '42ac658a'],
+        [B, '9f3e0b7c'],
+      ]),
+    );
+    expect(houseRuleShortIds([A])).toEqual(new Map([[A, '42ac658a']]));
+  });
+
+  it('widens only the ids that collide, by the digits that tell them apart', () => {
+    const ids = houseRuleShortIds([A, D, B]);
+    expect(ids.get(A)).toBe('42ac658a1');
+    expect(ids.get(D)).toBe('42ac658a2');
+    expect(ids.get(B)).toBe('9f3e0b7c');
+  });
+
+  it('widens two ids that differ only in the last digit to all 32', () => {
+    const ids = houseRuleShortIds([A, A2, B]);
+    expect(ids.get(A)).toBe(hex(A));
+    expect(ids.get(A2)).toBe(hex(A2));
+    expect(ids.get(B)).toBe('9f3e0b7c');
+  });
+
+  it('depends on the set it is given, not on every id there is', () => {
+    expect(houseRuleShortIds([A, B]).get(A)).toBe('42ac658a');
+    expect(houseRuleShortIds([A, D]).get(A)).toBe('42ac658a1');
+  });
+
+  it('gives one id given twice its 8 digits, and answers every id it was given', () => {
+    const ids = houseRuleShortIds([A, A, B]);
+    expect([...ids.keys()]).toEqual([A, B]);
+    expect(ids.get(A)).toBe('42ac658a');
   });
 });

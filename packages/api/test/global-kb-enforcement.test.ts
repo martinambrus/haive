@@ -48,6 +48,7 @@ import {
   houseRuleApprovalHash,
   houseRuleBytes,
   houseRuleContentToken,
+  houseRuleShortIds,
   renderHouseRuleEntry,
   type EnforceSpec,
   type GlobalKbEntry,
@@ -119,6 +120,9 @@ const asJson = async (res: Response): Promise<Json> => (await res.json()) as Jso
 const stored = (id = ENTRY) => fake.rows(globalKbEntries).find((r) => r.id === id)!;
 const asEntry = (id = ENTRY) => stored(id) as unknown as GlobalKbEntry;
 const tokenOf = (id = ENTRY) => houseRuleContentToken(asEntry(id));
+// A rule counts as a prompt prints it, with a short id that is longer when `among` shares a prefix.
+const alwaysBytes = (id: string, among: string[]): number =>
+  houseRuleBytes(asEntry(id), { enforce: ALWAYS, shortId: houseRuleShortIds(among).get(id)! });
 const approve = (id: string, spec: EnforceSpec) =>
   fake.patch(globalKbEntries, id, {
     enforce: spec,
@@ -238,8 +242,9 @@ describe('PUT /entries/:id/enforcement', () => {
     expect(res.status).toBe(200);
     expect(enforcementOf(ENTRY)).toBe('enforced');
     expect(stored().title).toBe(title);
-    expect(renderHouseRuleEntry(asEntry())).toBe(
-      `### Never inline SVG\nReference a file instead of inlining SVG.\n\n${BODY}`,
+    const shortId = houseRuleShortIds([ENTRY]).get(ENTRY)!;
+    expect(renderHouseRuleEntry(asEntry(), { enforce: FILES, shortId })).toBe(
+      `### Rule ${shortId}: Never inline SVG\nCategory: Anti-pattern\nReference a file instead of inlining SVG.\nApplies to files matching: **/*.twig, src/**/*.php\n\n${BODY}`,
     );
   });
 
@@ -311,11 +316,25 @@ describe('PUT /entries/:id/enforcement', () => {
       expect(res.status).toBe(409);
       const body = await asJson(res);
       expect(body.code).toBe('always_cap');
-      expect(body.usedBytes).toBe(houseRuleBytes(asEntry(ENTRY)));
-      expect(body.entryBytes).toBe(houseRuleBytes(asEntry(SECOND)));
+      expect(body.usedBytes).toBe(alwaysBytes(ENTRY, [ENTRY, SECOND]));
+      expect(body.entryBytes).toBe(alwaysBytes(SECOND, [ENTRY, SECOND]));
       expect(body.capBytes).toBe(HOUSE_RULES_ALWAYS_CAP_BYTES);
       expect(body.usedBytes + body.entryBytes).toBeGreaterThan(body.capBytes);
       expect(stored(SECOND).enforcedHash).toBeNull();
+    });
+
+    it('counts a short id of 8 digits unless an enforced rule shares them', async () => {
+      const OTHER = 'f0000000-0000-4000-8000-0000000000b9';
+      addEntry(OTHER, { body: HEAVY });
+      expect((await enforce(ALWAYS, ENTRY)).status).toBe(200);
+
+      const body = await asJson(await enforce(ALWAYS, OTHER));
+
+      // SECOND shares ENTRY's prefix but is not enforced, so no prompt prints it beside ENTRY.
+      expect(body.code).toBe('always_cap');
+      expect(body.usedBytes).toBe(alwaysBytes(ENTRY, [ENTRY, OTHER]));
+      expect(body.usedBytes).toBeLessThan(alwaysBytes(ENTRY, [ENTRY, SECOND]));
+      expect(body.entryBytes).toBe(alwaysBytes(OTHER, [OTHER]));
     });
 
     it('refuses one entry that is over the cap alone', async () => {
@@ -558,9 +577,9 @@ describe('every entry a route returns carries its token and enforcement state', 
 
     const body = await read();
 
-    expect(body.usedBytes).toBe(houseRuleBytes(asEntry(SECOND)));
+    expect(body.usedBytes).toBe(alwaysBytes(SECOND, [ENTRY, SECOND]));
     expect(body.capBytes).toBe(HOUSE_RULES_ALWAYS_CAP_BYTES);
-    expect(body.entryBytes).toBe(houseRuleBytes(asEntry()));
+    expect(body.entryBytes).toBe(alwaysBytes(ENTRY, [ENTRY, SECOND]));
     expect(body.activeSuccessor).toBeNull();
 
     fake.patch(globalKbEntries, ENTRY, { status: 'archived' });

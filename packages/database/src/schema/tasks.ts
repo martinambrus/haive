@@ -1118,6 +1118,19 @@ export const cliInvocations = pgTable(
      *  their agent before toolUsage is written at completion. NULL means unrecorded;
      *  an empty array means no persona assigned. Migration 0173. */
     assignedAgentIds: text('assigned_agent_ids').array(),
+    /** Mirrors `HouseRulesStamp` in @haive/shared (circular import); NULL when not recorded. */
+    houseRules: jsonb('house_rules').$type<{
+      mode: 'write' | 'review';
+      entries: Array<{
+        id: string;
+        hash: string;
+        title: string;
+        why: { scope: 'always' } | { scope: 'files'; glob: string | null };
+      }>;
+      omitted: Array<{ id: string; hash: string; title: string; why: 'budget' | 'refused' }>;
+      reason?: 'switched_off' | 'unavailable' | 'too_large';
+      errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
+    }>(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

@@ -7,6 +7,7 @@ import {
   HOUSE_RULES_ALWAYS_CAP_BYTES,
   globalKbEntries,
   houseRuleBytes,
+  houseRuleShortIds,
   withGlobalKb,
 } from '@haive/shared/global-kb';
 import { initDatabase, getDb } from '../src/db.js';
@@ -167,14 +168,17 @@ async function main(): Promise<void> {
         row(b.id),
       ]);
       const statuses = [ra.status, rb.status].sort();
+      const shortIds = houseRuleShortIds([won.id, lost.id]);
+      const counted = (r: typeof wonRow, id: string) =>
+        houseRuleBytes(r!, { enforce: { mode: 'always' }, shortId: shortIds.get(id)! });
       always.push({
         statuses,
         ok:
           statuses[0] === 200 &&
           statuses[1] === 409 &&
           refused.body.code === 'always_cap' &&
-          refused.body.usedBytes === houseRuleBytes(wonRow!) &&
-          refused.body.entryBytes === houseRuleBytes(lostRow!) &&
+          refused.body.usedBytes === counted(wonRow, won.id) &&
+          refused.body.entryBytes === counted(lostRow, lost.id) &&
           [aRow, bRow].filter((r) => r!.enforcedHash !== null).length === 1,
       });
       if (round === 1) {

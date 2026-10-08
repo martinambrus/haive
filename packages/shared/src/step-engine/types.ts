@@ -119,6 +119,44 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
   ],
 };
 
+/** How a dispatch is shown the house rules: to follow in what it writes, or to check against. */
+export const HOUSE_RULE_MODES = ['write', 'review'] as const;
+export type HouseRuleMode = (typeof HOUSE_RULE_MODES)[number];
+
+/** Step id -> role (`default` without roles) -> mode. A dispatch in neither table is shown none. */
+export const HOUSE_RULE_ROLES: Readonly<Record<string, Readonly<Record<string, HouseRuleMode>>>> = {
+  '04-phase-0b-pre-planning': { default: 'write' },
+  '05-phase-0b5-spec-quality': { corrector: 'write' },
+  '05a-resolve-spec-warnings': { default: 'write' },
+  '06b-sprint-planning': { default: 'write' },
+  '06c-dag-execute': { coder: 'write' },
+  '07-phase-2-implement': { default: 'write' },
+  '07a-code-simplify': { simplifier: 'write', fixup: 'write' },
+  '07b-phase-4-validate': { validator: 'review', fixer: 'write' },
+  '08a-browser-verify': { fixer: 'write' },
+  '08b-test-management': { default: 'write' },
+  '08e-insights-triage': { default: 'write' },
+};
+
+/** Step id -> role (`*` for all) -> why it is shown none. A worker test covers file_write roles. */
+export const HOUSE_RULE_EXEMPT: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  '00a-sync-base': { default: 'merge fixer: resolves conflicts between existing histories' },
+  '12-worktree-cleanup': { default: 'merge fixer: resolves conflicts between existing histories' },
+  '13-onboarding-push': { default: 'merge fixer: resolves conflicts between existing histories' },
+  '06c-dag-execute': {
+    default: 'level merge fixer: resolves conflicts between existing histories',
+    reviewer: 'not shown the rules, a risk the plan records; 07b checks the merged change',
+    issue_advisor: 'decides whether to retry or split an issue and writes no code',
+    replanner: 'replans the remaining issues and writes no code',
+  },
+  '08a-browser-verify': { tester: 'its scripts verify the change and are not part of it' },
+  '01-plan-merge': { default: 'resolves plan-mirror conflicts, not project code' },
+  '09_5-skill-generation': { '*': 'writes agent skills, not project code' },
+  '09_5b-skill-repair': { '*': 'repairs agent skills, not project code' },
+  '11d-skill-sync': { '*': 'writes agent skills, not project code' },
+  '01-kb-enrich': { default: 'authors the knowledge base entries that house rules are made from' },
+};
+
 /** Per-step MINING SEATS: the individually addressable agents inside a fan-out step,
  *  keyed by step id. A seat's id is the `roleKey` its dispatch carries, and per-seat
  *  provider choices are stored in the SAME tables the loop roles above use —
