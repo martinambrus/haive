@@ -27,6 +27,7 @@ import {
   createCodexJsonlCollector,
   createAntigravityStreamCollector,
   extractGeminiJsonOutput,
+  isCodexOutputLimitMessage,
   type CliExecutionResult,
   type CliSpawner,
   type SpawnOptions,
@@ -91,6 +92,7 @@ import {
 } from './agent-definition-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
+  buildOutputTruncationMessage,
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
@@ -847,12 +849,13 @@ export async function executeCliSpec(
   // codex and antigravity both speak line-delimited JSON and expose the same
   // collector shape, so they share the branch below. The only per-provider
   // difference is the wording when a stream carries no answer.
+  const codexCollector =
+    outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText, toolUsage) : null;
   const jsonlCollector =
-    outputFormat === 'codex-jsonl'
-      ? createCodexJsonlCollector(onProseText, toolUsage)
-      : outputFormat === 'antigravity-stream-json'
-        ? createAntigravityStreamCollector(onProseText)
-        : null;
+    codexCollector ??
+    (outputFormat === 'antigravity-stream-json'
+      ? createAntigravityStreamCollector(onProseText)
+      : null);
   const jsonlCliName = outputFormat === 'antigravity-stream-json' ? 'antigravity' : 'codex';
 
   // While the CLI streams, persist a running token-usage snapshot on a throttle
@@ -1034,7 +1037,9 @@ export async function executeCliSpec(
     // `codex turn failed: ...`, so provider-fatal classification reads it identically.
     const turnMessage =
       turnStatus !== null && turnStatus !== 'completed'
-        ? `codex turn ${turnStatus}${turnError ? `: ${turnError}` : ''}`
+        ? isCodexOutputLimitMessage(turnError)
+          ? buildOutputTruncationMessage(`codex turn ${turnStatus}: ${turnError}`)
+          : `codex turn ${turnStatus}${turnError ? `: ${turnError}` : ''}`
         : null;
     const codexAppServer = { failure, binaryVersion: appServer.getBinaryVersion() };
     const modelIdentity = modelIdentityFrom({ codexAppServer: appServer.getModelReport() });
@@ -1073,7 +1078,13 @@ export async function executeCliSpec(
   if (jsonlCollector && jsonlCollector.isJsonl()) {
     const jsonlText = jsonlCollector.getResult();
     const tokenUsage = jsonlCollector.getTokenUsage();
-    if (jsonlText !== null) {
+    // A failed codex turn is judged by its own event, and only on a failing exit: a run Haive
+    // killed has no turn.failed, and an exit 0 keeps the answer it printed.
+    const turnFailure = result.exitCode === 0 ? null : (codexCollector?.getTurnFailure() ?? null);
+    const outputLimitMessage = isCodexOutputLimitMessage(turnFailure)
+      ? buildOutputTruncationMessage(`codex turn failed: ${turnFailure}`)
+      : null;
+    if (jsonlText !== null && turnFailure === null) {
       // rawOutput = the model's answer text — the step parsers' fenced-JSON
       // contract (parsedOutput ?? rawOutput) is preserved.
       return {
@@ -1099,14 +1110,15 @@ export async function executeCliSpec(
         providerDiagnosticLog: result.capturedLog ?? undefined,
       };
     }
-    // JSONL stream without an agent message — partial usage is still recorded.
-    // No prose to recover; keep the raw codex JSONL out of the Clean tab.
+    // JSONL stream without an agent message, or a failed turn: partial usage is still recorded
+    // and neither the raw JSONL nor a partial reply (it stays in the Raw stream) is an answer.
     return {
       exitCode: result.exitCode,
       rawOutput: proseForClean('', result.stdout),
       parsedOutput: null,
       errorMessage:
         result.error ??
+        outputLimitMessage ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         jsonlCollector.getNoResultReason() ??
         `${jsonlCliName} emitted no agent message`,
