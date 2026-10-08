@@ -57,7 +57,7 @@ describe('the kb enrich step and an entry that is an enforced house rule', () =>
   it('refuses an entry that carries an approval, and leaves it exactly as it was', async () => {
     const { ctx, stored } = setup({ enforce: { mode: 'always' }, enforcedHash: 'hr1:approved' });
 
-    await expect(kbAuthorEnrichStep.detect!(ctx)).rejects.toThrow(/enforced house rule/);
+    await expect(kbAuthorEnrichStep.detect!(ctx)).rejects.toThrow(/approval as a house rule/);
 
     expect(stored().status).toBe('active');
     expect(stored().enforcedHash).toBe('hr1:approved');
@@ -71,7 +71,7 @@ describe('the kb enrich step and an entry that is an enforced house rule', () =>
       enforcedHash: 'hr1:approved-before-the-edit',
     });
 
-    await expect(kbAuthorEnrichStep.detect!(ctx)).rejects.toThrow(/enforced house rule/);
+    await expect(kbAuthorEnrichStep.detect!(ctx)).rejects.toThrow(/approval as a house rule/);
 
     expect(stored().status).toBe('active');
   });

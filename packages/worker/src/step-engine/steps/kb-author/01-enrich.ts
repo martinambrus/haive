@@ -417,7 +417,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         .returning({ id: globalKbEntries.id });
       if (!demoted) {
         throw new Error(
-          `global KB entry ${entryId} is an enforced house rule; enriching it again would demote it, so an admin has to remove its enforcement first`,
+          `global KB entry ${entryId} carries an admin's approval as a house rule; enriching it again would demote it, so an admin has to remove that approval first`,
         );
       }
       const rows = await db

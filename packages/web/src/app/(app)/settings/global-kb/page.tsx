@@ -1240,7 +1240,7 @@ export default function GlobalKbPage() {
         break;
       default:
         if (carried) {
-          note = `Replaces "${carried.title}", an enforced house rule (${describeEnforceSpec(carried.enforce)}) that ended when this entry took over. An admin has to enforce this entry for the rule to carry over.`;
+          note = `Replaces "${carried.title}", which had house-rule settings (${describeEnforceSpec(carried.enforce)}); any approval it still held ended when it was archived. An admin has to enforce this entry for the rule to carry over.`;
           action = { label: 'Re-enforce', prefill: carried.enforce };
         } else if (e.status === 'active' && canEnforce) {
           action = { label: 'Enforce…', prefill: null };
