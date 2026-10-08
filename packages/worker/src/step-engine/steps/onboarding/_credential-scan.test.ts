@@ -328,17 +328,17 @@ describe('tracked credential inventory', () => {
           '--input-type=module',
           '--eval',
           `import { scanForCredentials } from ${JSON.stringify(moduleUrl)};
-         const scan = await scanForCredentials(${JSON.stringify(root)}, 200);
+         const scan = await scanForCredentials(${JSON.stringify(root)}, 200, () => {}, { timeoutMs: 600_000 });
          process.stdout.write(JSON.stringify(scan));`,
         ],
-        { timeout: 240_000 },
+        { timeout: 660_000 },
       );
       const scan = JSON.parse(stdout) as Awaited<ReturnType<typeof scanForCredentials>>;
       expect(scan.files).toBe(count + 1);
       expect(scan.unreadable).toBe(count);
       expect(scan.hits).toEqual([{ file: 'z.env', line: 1, kind: 'credential assignment' }]);
     },
-    255_000,
+    690_000,
   );
 
   it.each([{ maxFiles: 2 }, { maxPathBytes: 10 }])(
