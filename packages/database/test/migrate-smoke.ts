@@ -400,10 +400,24 @@ async function main(): Promise<void> {
   // 10. WRONG DATABASE — this repo creates RAG and global-KB stores on the same server, and the
   //     table quorum cannot catch a misdirected URL because "none of our tables" is what fresh
   //     means. Refused by name instead, whichever install id named the store.
-  for (const name of ['haive_kb_global', 'blank_kb_global', 'blank_rag_demo']) {
+  for (const name of [
+    'haive_kb_global',
+    'blank_kb_global',
+    'blank_rag_demo',
+    `${'a'.repeat(32)}_kb_global`,
+  ]) {
     await ensureDatabase(name);
     const run = await runMigrate(urlFor(name));
     check(`wrong database: refuses ${name} by name`, run.code === 2, { code: run.code });
+  }
+  // An install id is at most 32 characters, so a longer prefix names no store and must migrate.
+  {
+    const name = `${'a'.repeat(33)}_rag_prod`;
+    await ensureDatabase(name);
+    const run = await runMigrate(urlFor(name));
+    check('a 33-character prefix is not an install id: migrates', run.code === 0, {
+      code: run.code,
+    });
   }
 
   // 11. ONE LIVE UPGRADE — the index an older release's rows could hold shut: a `created` upgrade
