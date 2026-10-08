@@ -60,10 +60,9 @@ function instructionField(): FormSchema['fields'][number] {
 /** The fixer's Haive-written instructions as an info section, so the person deciding sees them. */
 function guidanceSections(
   guidance: string | undefined,
+  title = 'Instructions Haive gave the fixer',
 ): { title: string; body: string; defaultOpen: boolean }[] {
-  return guidance?.trim()
-    ? [{ title: 'Instructions Haive gave the fixer', body: guidance, defaultOpen: false }]
-    : [];
+  return guidance?.trim() ? [{ title, body: guidance, defaultOpen: false }] : [];
 }
 
 /** The escalation gate shown when the fix loop hits the round cap: the diagnosis +
@@ -118,7 +117,8 @@ export function buildOscillationEscalationSchema(
   stepB: string,
   diagA: string,
   diagB: string,
-  guidance?: string,
+  guidanceA?: string,
+  guidanceB?: string,
 ): FormSchema {
   const excerpt = (step: string, diagnosis: string): string =>
     excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(step));
@@ -139,7 +139,8 @@ export function buildOscillationEscalationSchema(
         body: excerpt(stepB, diagB) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
-      ...guidanceSections(guidance),
+      ...guidanceSections(guidanceA, `Instructions Haive gave the fixer (${stepA})`),
+      ...guidanceSections(guidanceB, `Instructions Haive gave the fixer (${stepB})`),
     ],
     fields: [
       {
@@ -426,6 +427,8 @@ export interface OscillationResult {
   conflictingDiagnoses?: [string, string];
   /** The other source step that alternated in (for the gate title + event). */
   conflictingStepId?: string;
+  /** The Haive guidance the conflicting side's fix request carried; '' when it had none. */
+  conflictingGuidance?: string;
 }
 
 /** Detect a non-converging fix loop: the SAME source step re-raising a fingerprint-equal
@@ -458,6 +461,7 @@ export async function detectFixLoopOscillation(
     sourceStepId?: string;
     round?: number;
     fingerprint?: string;
+    guidance?: string;
   };
   const prior = rows
     .map((r) => r.payload as Payload | null)
@@ -492,6 +496,7 @@ export async function detectFixLoopOscillation(
     tripped: true,
     conflictingDiagnoses: [diagnosis, between[0]?.diagnosis ?? ''],
     conflictingStepId: between[0]?.sourceStepId ?? 'another step',
+    conflictingGuidance: between[0]?.guidance ?? '',
   };
 }
 
