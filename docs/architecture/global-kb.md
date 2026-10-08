@@ -84,8 +84,11 @@ Re-enforce.
 Rule globs keep to a small grammar: literal characters, `*`, `**`, `?`, `[…]`, `/` and comma
 alternatives in braces. picomatch reads `(`, `)` and `|` as alternation, `..` in any brace group as
 a range and drops a `"`, each a way to match every file while seeming to name something, so all are
-refused (`?app?` still names a directory such as Next.js's `(app)`); every brace expansion, at most
-64, must name something. MEASURED: before the grammar, 535 such wide globs of length 4 passed. The
+refused (`?app?` still names a directory such as Next.js's `(app)`). Every brace expansion, at most
+64, must name something and keep the path rules a glob written out keeps: relative to the repository
+root, with no empty, `.` or `..` segment (`{,src}/README.md` expands to `/README.md`). No brace
+alternative may start or end with whitespace, which picomatch keeps: `{src, lib}` names ` lib` and
+never matches `lib/`. MEASURED: before the grammar, 535 such wide globs of length 4 passed. The
 check catches mistakes and is not a boundary: only an admin enforces, a deliberately broad glob
 (`**/*.*`) is theirs to write, and what reaches a prompt is bounded by the per-prompt budget
 (PR6), not by this check.
