@@ -277,6 +277,9 @@ describe('validateHouseRuleGlobs', () => {
     ['an empty alternative', ['file{,.bak}']],
     ['an optional directory prefix in a brace group', ['{src/,}*.tpl.php']],
     ['a brace alternative that holds a nested path', ['{src,lib/x}/**']],
+    ['whitespace inside a brace alternative', ['{My Docs,lib}/**']],
+    ['whitespace outside any brace group', ['docs/My File.md']],
+    ['a comma outside any brace group', ['a, b/**']],
     ['an extension group after a globstar', ['**/*.{twig,css}']],
     ['several brace groups that each name something', ['{src,lib}/**/*.{php,inc}']],
     ['a nested brace group', ['src/{a,{b,c}}/**']],
@@ -299,6 +302,11 @@ describe('validateHouseRuleGlobs', () => {
     ['a leading space', ' **/*.twig', 'whitespace'],
     ['a trailing space', '**/*.twig ', 'whitespace'],
     ['a leading no-break space', '\u{A0}**/*.twig', 'whitespace'],
+    ['a space after a comma in a brace group', '{src, lib}/**', 'has the brace alternative'],
+    ['a space before a comma in a brace group', '{src ,lib}/**', 'has the brace alternative'],
+    ['a space after the opening brace', '{ src,lib}/**', 'has the brace alternative'],
+    ['a space in a nested brace group', 'src/{a,{b, c}}/x', 'has the brace alternative'],
+    ['a no-break space in a brace alternative', '{a,\u{A0}b}/x', 'has the brace alternative'],
     ['an absolute path', '/src/**', 'path segment'],
     ['a ./ prefix', './src/**', 'path segment'],
     ['a trailing slash', 'src/', 'path segment'],
@@ -357,6 +365,12 @@ describe('validateHouseRuleGlobs', () => {
   it('names the brace expansion that has the bad path segment', () => {
     expect(validateHouseRuleGlobs(['{,src}/README.md'])).toContain('expands to "/README.md"');
     expect(validateHouseRuleGlobs(['{.,src}/README.md'])).toContain('expands to "./README.md"');
+  });
+
+  it('names the brace alternative that starts or ends with whitespace', () => {
+    expect(validateHouseRuleGlobs(['{src, lib}/**'])).toContain(
+      'has the brace alternative " lib",',
+    );
   });
 
   it('refuses a glob of more than 200 characters', () => {
