@@ -2,6 +2,7 @@ import { isOllamaCloudModel, IN_STACK_OLLAMA_URL } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { ProviderBuildError } from './prompt-delivery.js';
 import { OLLAMA_CLOUD_URL, resolveOllamaBaseUrl } from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
@@ -116,7 +117,10 @@ export class OllamaAdapter extends BaseCliAdapter {
     };
     const model = provider.model ?? this.defaultModel;
     if (!model) {
-      throw new Error('ollama provider requires a model (set the provider model field)');
+      throw new ProviderBuildError(
+        provider.label,
+        'ollama provider requires a model (set the provider model field)',
+      );
     }
     env.ANTHROPIC_BASE_URL = resolveOllamaBaseUrl(env, {
       model,

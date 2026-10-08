@@ -48,6 +48,8 @@ interface MiningRow {
   preferVision?: boolean | null;
   /** The prompt the step wrote for the agent's last dispatch, before any augmentation. */
   dispatchPrompt?: string | null;
+  /** Stamped when a wave-aware step folded the row; cleared when a re-run replaces its result. */
+  consumedAt?: Date | null;
 }
 
 interface MockState {
@@ -90,6 +92,8 @@ interface MockState {
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
   afterStepWrite?: (set: Record<string, unknown>) => void;
+  /** Runs after each mining-row write that matched, to land it in the rows a later read returns. */
+  afterMiningWrite?: (set: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -237,6 +241,7 @@ function makeMockDb(state: MockState): Database {
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
+              state.afterMiningWrite?.(v);
             }
           };
           const lost = (): boolean => {
@@ -2442,5 +2447,253 @@ describe('a fan-out a Retry took before it sent anything', () => {
     expect(result.status).toBe('superseded');
     expect(state.inserts).toEqual([]);
     expect(enqueued).toEqual([]);
+  });
+});
+
+describe('a fan-out agent whose provider cannot build a command', () => {
+  const ollamaNoModel = () =>
+    makeProvider({
+      id: 'prov-ollama',
+      name: 'ollama',
+      label: 'Ollama',
+      authMode: 'api_key',
+      model: null,
+    });
+
+  function seatedStep(): StepDefinition {
+    return {
+      metadata: { id: 'test-seat-step', title: 'seats', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [1, 2, 3].map((n) => ({
+            agentId: `seat-${n}`,
+            agentTitle: `seat-${n}`,
+            prompt: `review ${n}`,
+            roleKey: `seat-${n}`,
+          }));
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  function seatTwoOnOllama(state: MockState): Database {
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliRolePreferences = {
+      findFirst: async ({ where }: { where: unknown }) =>
+        conditionValues(where).includes('seat-2')
+          ? { cliProviderId: 'prov-ollama', effortLevel: null }
+          : undefined,
+    };
+    return db as unknown as Database;
+  }
+
+  const rowOf = (state: MockState, agentId: string) =>
+    state.inserts.find((i) => i.table === 'task_step_agent_minings' && i.row.agentId === agentId)!
+      .row.id as string;
+
+  it('fails only its own agent and sends the ones around it', async () => {
+    const state = freshState([]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(seatTwoOnOllama(state), seatedStep(), enqueued, [
+      makeProvider(),
+      ollamaNoModel(),
+    ]);
+
+    expect(enqueued.map((p) => p.agentMiningId)).toEqual([
+      rowOf(state, 'seat-1'),
+      rowOf(state, 'seat-3'),
+    ]);
+    const refused = writesTo(state, rowOf(state, 'seat-2')).filter(
+      (u) => u.set.status === 'failed',
+    );
+    expect(refused).toHaveLength(1);
+    expect(String(refused[0]!.set.errorMessage)).toBe(
+      'cannot build a command for Ollama: ollama provider requires a model (set the provider model field)',
+    );
+    expect(writesTo(state, rowOf(state, 'seat-3')).map((u) => u.set.status)).not.toContain(
+      'failed',
+    );
+    expect(result.status).not.toBe('failed');
+  });
+
+  it('fails the step, each row naming its reason, when no agent can be sent', async () => {
+    const state = freshState([]);
+    const enqueued: CliExecJobPayload[] = [];
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliRolePreferences = {
+      findFirst: async () => ({ cliProviderId: 'prov-ollama', effortLevel: null }),
+    };
+    const result = await run(db as unknown as Database, seatedStep(), enqueued, [
+      makeProvider(),
+      ollamaNoModel(),
+    ]);
+    expect(enqueued).toEqual([]);
+    expect(result.status).toBe('failed');
+    for (const agentId of ['seat-1', 'seat-2', 'seat-3']) {
+      expect(
+        writesTo(state, rowOf(state, agentId)).filter(
+          (u) =>
+            u.set.status === 'failed' && String(u.set.errorMessage).includes('requires a model'),
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
+  it('still releases the unsent agents and fails the step on any other error', async () => {
+    const state = freshState([]);
+    let calls = 0;
+    const result = await advanceStep({
+      db: seatTwoOnOllama(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: seatedStep(),
+      providers: [makeProvider(), ollamaNoModel()],
+      deps: {
+        async enqueueCliInvocation() {
+          calls += 1;
+          if (calls === 1) throw new Error('redis refused the job');
+        },
+      },
+    }).catch((err: unknown) => err);
+
+    const message =
+      result instanceof Error ? result.message : String((result as { error?: unknown }).error);
+    expect(message).toContain('redis refused');
+    for (const agentId of ['seat-2', 'seat-3']) {
+      expect(
+        writesTo(state, rowOf(state, agentId)).filter(
+          (u) =>
+            u.set.status === 'failed' &&
+            String(u.set.errorMessage).startsWith('dispatch failed before the agent was queued'),
+        ),
+      ).toHaveLength(1);
+    }
+  });
+});
+
+describe('a person re-runs an agent whose seat no provider now takes', () => {
+  const ollamaNoModel = () =>
+    makeProvider({
+      id: 'prov-ollama',
+      name: 'ollama',
+      label: 'Ollama',
+      authMode: 'api_key',
+      model: null,
+    });
+  const OLD_FAILURE = 'CLI process exceeded its time budget (30m).';
+
+  function seatedStep(applyCalls: StepApplyArgs[]): StepDefinition {
+    return {
+      metadata: { id: 'test-mining-step', title: 'seats', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [
+            {
+              agentId: 'peer-reviewer',
+              agentTitle: 'peer-reviewer',
+              prompt: 'review',
+              roleKey: 'peer-seat',
+            },
+          ];
+        },
+      },
+      async apply(_ctx: unknown, args: StepApplyArgs) {
+        applyCalls.push(args);
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  function requestedRerun(
+    seatProviderId: string,
+    consumedAt: Date | null = null,
+  ): { state: MockState; db: Database } {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: OLD_FAILURE,
+        userRetryRequestedAt: new Date(),
+        consumedAt,
+      }),
+    ]);
+    state.afterMiningWrite = (set) => {
+      if (set.status === 'failed') {
+        state.miningRows = state.miningRows.map((r) => ({ ...r, ...(set as Partial<MiningRow>) }));
+      }
+    };
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliRolePreferences = {
+      findFirst: async () => ({ cliProviderId: seatProviderId, effortLevel: null }),
+    };
+    return { state, db: db as unknown as Database };
+  }
+
+  it('hands apply the refusal the re-run met, not the failure it read before', async () => {
+    const { db } = requestedRerun('prov-ollama');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(db, seatedStep(applyCalls), enqueued, [makeProvider(), ollamaNoModel()]);
+
+    expect(enqueued).toEqual([]);
+    expect(applyCalls).toHaveLength(1);
+    expect(String(applyCalls[0]!.agentMiningResults?.[0]?.errorMessage)).toContain(
+      'requires a model',
+    );
+  });
+
+  it('hands apply the refusal when no provider fits the seat at all', async () => {
+    const { db } = requestedRerun('prov-1');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(db, seatedStep(applyCalls), enqueued, []);
+
+    expect(enqueued).toEqual([]);
+    expect(applyCalls).toHaveLength(1);
+    expect(String(applyCalls[0]!.agentMiningResults?.[0]?.errorMessage)).toContain(
+      'no cli provider available',
+    );
+  });
+
+  it('hands a wave-aware step the refusal as new even when the old failure was folded', async () => {
+    const { db } = requestedRerun('prov-ollama', new Date());
+    const applyCalls: StepApplyArgs[] = [];
+    await run(db, seatedStep(applyCalls), [], [makeProvider(), ollamaNoModel()]);
+
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.newAgentMiningResults?.map((r) => r.errorMessage)).toEqual([
+      expect.stringContaining('requires a model'),
+    ]);
+  });
+
+  it('still parks on a re-run that sent', async () => {
+    const { state, db } = requestedRerun('prov-1');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(db, seatedStep(applyCalls), enqueued, [makeProvider()]);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(applyCalls).toEqual([]);
+    expect(state.miningRows[0]!.errorMessage).toBe(OLD_FAILURE);
   });
 });
