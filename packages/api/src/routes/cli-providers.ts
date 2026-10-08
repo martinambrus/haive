@@ -155,6 +155,16 @@ async function resolveCliVersionForSave(
   return row?.latestVersion ?? null;
 }
 
+function assertOllamaHasModel(name: CliProviderName, model: string | null | undefined): void {
+  if (name === 'ollama' && !model?.trim()) {
+    throw new HttpError(
+      400,
+      'An ollama provider needs a model (set the model field).',
+      'ollama_model_required',
+    );
+  }
+}
+
 // Drops any value the adapter does not declare. Adapters with no effort knob
 // always store null so a stale UI cannot poison the column.
 function resolveEffortLevelForSave(name: CliProviderName, requested: string | null): string | null {
@@ -377,6 +387,7 @@ cliProviderRoutes.post('/', async (c) => {
   const body = createCliProviderRequestSchema.parse(await c.req.json());
   const meta = CLI_PROVIDER_CATALOG[body.name];
   assertAuthModeSupported(body.name, body.authMode);
+  assertOllamaHasModel(body.name, body.model);
 
   const db = getDb();
   const resolvedVersion = await resolveCliVersionForSave(
@@ -449,6 +460,8 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.authMode !== undefined) {
     assertAuthModeSupported(existing.name, body.authMode);
   }
+
+  if (body.model !== undefined) assertOllamaHasModel(existing.name, body.model);
 
   const updates: Partial<typeof schema.cliProviders.$inferInsert> = { updatedAt: new Date() };
   if (body.label !== undefined) updates.label = body.label;
@@ -697,6 +710,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
   });
   if (!source) throw new HttpError(404, 'CLI provider not found');
+  assertOllamaHasModel(source.name, source.model);
 
   const newLabel = await nextAvailableCloneLabel(db, userId, source.label);
 
