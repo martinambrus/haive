@@ -7,6 +7,9 @@ import type {
   StepLoopShouldContinueArgs,
 } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import { OUTPUT_TRUNCATION_HEADLINE } from '../src/queues/cli-exec/failure-class.js';
+import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { testManagementStep } from '../src/step-engine/steps/workflow/08b-test-management.js';
 
 interface CliInvocationMockRow {
   id: string;
@@ -79,6 +82,12 @@ function makeMockDb(state: MockState): Database {
                         r.mode !== 'agent_mining',
                     )
                     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+                  if (_n > 1) {
+                    return state.cliInvocationRows
+                      .filter((r) => r.supersededAt === null && r.mode !== 'agent_mining')
+                      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+                      .slice(0, _n);
+                  }
                   if (cols && filtered[0]) {
                     return [{ id: filtered[0].id }];
                   }
@@ -235,6 +244,7 @@ interface LoopStepOpts {
   shouldContinue: (args: StepLoopShouldContinueArgs) => boolean | Promise<boolean>;
   applyReturns?: (iter: number) => unknown;
   buildIterationPrompt?: boolean;
+  iterationPromptCoversFirstPass?: boolean;
   passLabel?: (iteration: number) => string | null;
 }
 
@@ -263,9 +273,11 @@ function loopStep(opts: LoopStepOpts): StepDefinition {
       shouldContinue: opts.shouldContinue,
       ...(opts.buildIterationPrompt
         ? {
-            buildIterationPrompt: (a) => `iter=${a.iteration} prev=${a.previousIterations.length}`,
+            buildIterationPrompt: (a) =>
+              `iter=${a.iteration} prev=${a.previousIterations.length} trunc=${a.truncationRetries}`,
           }
         : {}),
+      ...(opts.iterationPromptCoversFirstPass ? { iterationPromptCoversFirstPass: true } : {}),
       ...(opts.passLabel ? { passLabel: opts.passLabel } : {}),
     },
     async apply(_ctx, args) {
@@ -290,6 +302,88 @@ function completeLatestInvocation(state: MockState, parsedOutput: unknown): void
 }
 
 describe('advanceStep loop hook', () => {
+  describe('a truncation retry of a loop step', () => {
+    async function retryTruncated(opts: {
+      coversFirstPass: boolean;
+      priorPasses: number;
+    }): Promise<string> {
+      const state = freshState();
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        status: 'waiting_cli',
+        detectOutput: { ready: true },
+        formValues: {},
+        iterations: Array.from({ length: opts.priorPasses }, (_, i) => ({
+          iteration: i,
+          continueRequested: true,
+        })),
+      };
+      state.cliInvocationRows = [
+        {
+          id: 'inv-0',
+          taskId: 'task-1',
+          taskStepId: 'ts-1',
+          cliProviderId: 'prov-1',
+          mode: 'cli',
+          prompt: 'p',
+          rawOutput: null,
+          parsedOutput: null,
+          exitCode: 1,
+          errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — cut off`,
+          createdAt: new Date(Date.now() - 1000),
+          endedAt: new Date(),
+          supersededAt: null,
+          consumedAt: null,
+        },
+      ];
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: loopStep({
+          maxIterations: 3,
+          shouldContinue: () => false,
+          buildIterationPrompt: true,
+          iterationPromptCoversFirstPass: opts.coversFirstPass,
+        }),
+        providers: [makeProvider()],
+        deps: { async enqueueCliInvocation() {} },
+      });
+      expect(result.status).toBe('waiting_cli');
+      const inserted = state.inserts.filter((i) => i.table === 'cli_invocations');
+      expect(inserted).toHaveLength(1);
+      return String(inserted[0]!.row.prompt);
+    }
+
+    it('gives the first pass of a step whose iteration builder assumes an earlier pass its own prompt', async () => {
+      const prompt = await retryTruncated({ coversFirstPass: false, priorPasses: 0 });
+      expect(prompt).toContain('base prompt');
+      expect(prompt).not.toContain('iter=');
+    });
+
+    it('gives the first pass of a step whose iteration builder covers it the iteration prompt with the retry count', async () => {
+      const prompt = await retryTruncated({ coversFirstPass: true, priorPasses: 0 });
+      expect(prompt).toContain('iter=0 prev=0 trunc=1');
+    });
+
+    it.each([false, true])(
+      'routes a later pass through the iteration builder whatever the flag (%s)',
+      async (coversFirstPass) => {
+        const prompt = await retryTruncated({ coversFirstPass, priorPasses: 1 });
+        expect(prompt).toContain('iter=1 prev=1 trunc=1');
+      },
+    );
+
+    it('is declared by 09_5 and not by 08b', () => {
+      expect(skillGenerationStep.loop?.iterationPromptCoversFirstPass).toBe(true);
+      expect(testManagementStep.loop?.buildIterationPrompt).toBeDefined();
+      expect(testManagementStep.loop?.iterationPromptCoversFirstPass).toBeUndefined();
+    });
+  });
+
   it('finishes after one pass when shouldContinue returns false', async () => {
     const state = freshState();
     state.taskStepRow = {

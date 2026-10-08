@@ -617,9 +617,10 @@ async function resolveLlmPhase(
       //  - Non-loop steps: bounded by llm.retry.maxAttempts (total attempts).
       //  - Loop steps (no llm.retry): bounded by MAX_TRUNCATION_RETRIES consecutive
       //    truncations for the CURRENT iteration; each retry shrinks the request via
-      //    buildIterationPrompt's truncationRetries (computed in the dispatch path),
-      //    so a deterministically-oversized chunk converges to a fitting size
-      //    instead of failing the whole step.
+      //    buildIterationPrompt's truncationRetries (computed in the dispatch path;
+      //    iteration 0 only for a loop with iterationPromptCoversFirstPass), so a
+      //    deterministically-oversized chunk converges to a fitting size instead of
+      //    failing the whole step.
       if (isOutputTruncationMessage(errTrimmed)) {
         const llmRetry = llmSpec.retry;
         const canRetry = stepDef.loop
@@ -747,10 +748,13 @@ async function resolveLlmPhase(
   const upcomingIteration = previousIterations.length;
   // Consecutive output-truncations for the current (pending) iteration. When > 0 a
   // same-iteration retry is underway; route even iteration 0 through the iteration
-  // builder so its shrink hint (truncationRetries) reaches the first pass too.
+  // builder, when the step says it covers the first pass, so its shrink hint
+  // (truncationRetries) reaches the first pass too.
   const truncationRetries = stepDef.loop ? await countTrailingTruncations(db, current.id) : 0;
   let prompt =
-    (upcomingIteration > 0 || truncationRetries > 0) && stepDef.loop?.buildIterationPrompt
+    (upcomingIteration > 0 ||
+      (truncationRetries > 0 && stepDef.loop?.iterationPromptCoversFirstPass)) &&
+    stepDef.loop?.buildIterationPrompt
       ? stepDef.loop.buildIterationPrompt({
           detected,
           formValues: formValues ?? {},

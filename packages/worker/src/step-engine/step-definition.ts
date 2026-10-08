@@ -516,9 +516,12 @@ export interface StepLoopSpec<TApply = unknown> {
      *  normally). When > 0 a same-iteration re-dispatch is underway after the
      *  model hit its output cap, so the builder should request a SMALLER response
      *  (fewer/shorter items) to fit. The runner re-routes iteration-0 retries
-     *  through this builder too so the shrink hint reaches the first pass. */
+     *  through this builder too, when iterationPromptCoversFirstPass is set. */
     truncationRetries?: number;
   }): string;
+  /** True when buildIterationPrompt also renders a sound iteration-0 prompt; only then does a
+   *  truncation retry of the first pass use it rather than llm.buildPrompt. */
+  iterationPromptCoversFirstPass?: boolean;
   /** Optional. Returns the CLI role to use for the given iteration so the runner
    *  resolves a per-role provider (e.g. spec-quality: even iterations review,
    *  odd iterations correct). Null/omitted uses the step's single 'default'
