@@ -526,7 +526,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           ...(detected.sameCheckRepeat ? repeatBlockLines(detected.sameCheckRepeat) : []),
           // Not fenced here: `loadPriorFixContext` fences its agent entries itself and leaves a
           // person's own outside, so a fence at this call site would wrap the developer's words.
-          ...(detected.priorFixContext
+          // Rendered by detect(); one stored before the mark (no fixMarked) fenced by source alone.
+          ...(detected.priorFixContext && typeof detected.fixMarked === 'boolean'
             ? ['=== Prior fix rounds (background) ===', detected.priorFixContext, '']
             : []),
           ...common,

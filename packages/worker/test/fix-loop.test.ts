@@ -1618,6 +1618,7 @@ describe('07b validator prompt — honored constraints', () => {
     spec: 'SPEC',
     implementationFiles: ['a.php'],
     debtBlock: '',
+    honoredFenced: true,
   };
 
   it('injects the honored-constraints block when present', () => {

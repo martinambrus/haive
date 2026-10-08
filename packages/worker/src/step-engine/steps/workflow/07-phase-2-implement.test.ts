@@ -241,6 +241,7 @@ describe('phase2ImplementStep prior-fix-rounds ledger', () => {
       fixContext: 'DB error on homepage',
       round: 2,
       priorFixContext: 'round 1: tried X; ddev not on PATH in sandbox',
+      fixMarked: false,
     });
     expect(p).toContain('Prior fix rounds (background)');
     expect(p).toContain('round 1: tried X; ddev not on PATH in sandbox');
@@ -308,7 +309,11 @@ describe('phase2ImplementStep same-check repeat', () => {
   });
 
   it('sits after the defect block and ahead of the prior-rounds block, outside the defect fence', () => {
-    const p = prompt({ sameCheckRepeat: repeat(), priorFixContext: 'round 1: tried X' });
+    const p = prompt({
+      sameCheckRepeat: repeat(),
+      priorFixContext: 'round 1: tried X',
+      fixMarked: false,
+    });
     const fact = p.indexOf(FACT);
     const prior = p.indexOf('=== Prior fix rounds (background) ===');
     expect(fact).toBeGreaterThan(p.indexOf(DEFECT_HEADING));
@@ -723,6 +728,12 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
     phase2ImplementStep.llm!.buildPrompt({ detected: detect(over), formValues: {} } as never);
   const form = (over: Record<string, unknown>) =>
     phase2ImplementStep.form!({} as StepContext, detect(over) as never)?.description ?? '';
+
+  it('drops prior rounds a detect output stored before the mark rendered', () => {
+    const prior = 'PRIOR-ROUNDS-MARK';
+    expect(prompt({ priorFixContext: prior })).not.toContain(prior);
+    expect(prompt({ priorFixContext: prior, fixMarked: false })).toContain(prior);
+  });
 
   it('fences a replayed person detect output that lacks fixMarked', () => {
     const p = prompt({});
