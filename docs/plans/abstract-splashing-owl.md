@@ -240,9 +240,10 @@ this section keeps the decisions.
 - **Selection** (pure): `always` rules are in; a `files` rule is in when a glob matches the change
   (gate 3's `git status -z` plus the branch against its fork point, since a DAG tree is clean at 07b)
   or a DAG issue's `estimated_files`; a slashless glob matches a name at any depth; an unreadable
-  change puts every `files` rule in unscoped. The budget is 16,384 bytes per prompt: `always` rules
-  are never dropped, written-file matches are kept before estimate-only ones and smaller before
-  larger, and what is left out is named in the block and the stamp.
+  change puts every `files` rule in unscoped; deleted paths and a rename's source count as changed.
+  The budget is 16,384 bytes per prompt: `always` rules are kept first, oldest approval first (a set
+  within the api's cap always fits), then written-file matches before estimate-only ones and smaller
+  before larger, and what is left out is named in the block and the stamp.
 - **Injection** (`orchestrator/house-rules.ts`): directly under the agent-rules block, not gated on
   rag, unfenced; replaced only at position 0 (`stripHaivePreamble` for replays, the isolation scan
   and persona bookkeeping). Each entry renders as `### Rule <id8>: <title>`, a `Category:` line (never

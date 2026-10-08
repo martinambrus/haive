@@ -146,15 +146,16 @@ two fields extend the shape 07b's own output contract calls exact.
 **Selection** (`selectHouseRules`, `orchestrator/house-rules.ts`): `always` rules always go in. A
 `files` rule goes in when a glob matches a file of the dispatch's change, read as gate 3 reads it
 (`git status --porcelain -z`, never `_impl-changes`' quoted status) plus the branch against its fork
-point, since a DAG task's tree is clean at 07b, deleted paths included: a rule can cover what a task
-removes; a DAG coder also matches its issue's `estimated_files`. A glob with no `/` matches a file
-name at any depth, as in a gitignore
-(picomatch `basename`), and `dot: true` as secret masking uses it. A change that cannot be read
+point, since a DAG task's tree is clean at 07b, with deleted paths and a rename's source: a rule can
+cover what a task removes or moves out. A DAG coder also matches its issue's `estimated_files`. A
+glob with no `/` matches a file name at any depth, as in a gitignore (picomatch `basename`), and
+`dot: true` as secret masking uses it. A change that cannot be read
 puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement nobody made.
 One 07 round 0 dispatch never gets a `files` rule, since nothing is written yet; similarity
 (PR7) is for that. Each prompt spends at most 16,384 bytes on the block, markers, framing and
-notice included: `always` rules are never left out (their own cap is 8,000), and `files` rules are
-kept first-fit, written-file matches before estimate-only ones and smaller before larger. What is
+notice included. Rules are kept first-fit: `always` rules first, oldest approval first (a set within
+the api's 8,000-byte cap always fits, so only an external store's writers can push one out), then
+`files` rules, written-file matches before estimate-only ones and smaller before larger. What is
 left out is named inside the block (up to 8 titles and a count) and in the stamp; when everything
 is left out the block is the framing and that notice alone. Off, not opted in, or nothing in scope,
 the prompt is byte-identical to one without house rules: MEASURED on 23 dispatches against main's
