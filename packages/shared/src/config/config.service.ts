@@ -1,4 +1,3 @@
-import { networkName } from '../naming/index.js';
 import { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { createRedisConnection } from '../utils/redis-factory.js';
@@ -138,7 +137,6 @@ export const CONFIG_KEYS = {
   EXTERNAL_SYNC_ENABLED: 'config:workflow:externalSyncEnabled',
 
   CLAWKER_BIN: 'config:sandbox:clawkerBin',
-  SANDBOX_NETWORK: 'config:sandbox:network',
   // Global kill-switch for secret-file masking (hides deny-listed files from AI
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
@@ -657,7 +655,6 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
-  [CONFIG_KEYS.SANDBOX_NETWORK]: networkName('network'),
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
   [CONFIG_KEYS.REGISTRATION_MODE]: 'closed',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
