@@ -90,6 +90,8 @@ interface MockState {
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
   afterStepWrite?: (set: Record<string, unknown>) => void;
+  /** Runs after each mining-row write that matched, to land it in the rows a later read returns. */
+  afterMiningWrite?: (set: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -237,6 +239,7 @@ function makeMockDb(state: MockState): Database {
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
+              state.afterMiningWrite?.(v);
             }
           };
           const lost = (): boolean => {
@@ -2576,5 +2579,104 @@ describe('a fan-out agent whose provider cannot build a command', () => {
         ),
       ).toHaveLength(1);
     }
+  });
+});
+
+describe('a person re-runs an agent whose seat no provider now takes', () => {
+  const ollamaNoModel = () =>
+    makeProvider({
+      id: 'prov-ollama',
+      name: 'ollama',
+      label: 'Ollama',
+      authMode: 'api_key',
+      model: null,
+    });
+  const OLD_FAILURE = 'CLI process exceeded its time budget (30m).';
+
+  function seatedStep(applyCalls: StepApplyArgs[]): StepDefinition {
+    return {
+      metadata: { id: 'test-mining-step', title: 'seats', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [
+            {
+              agentId: 'peer-reviewer',
+              agentTitle: 'peer-reviewer',
+              prompt: 'review',
+              roleKey: 'peer-seat',
+            },
+          ];
+        },
+      },
+      async apply(_ctx: unknown, args: StepApplyArgs) {
+        applyCalls.push(args);
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  function requestedRerun(seatProviderId: string): { state: MockState; db: Database } {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: OLD_FAILURE,
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.afterMiningWrite = (set) => {
+      if (set.status === 'failed') {
+        state.miningRows = state.miningRows.map((r) => ({ ...r, ...(set as Partial<MiningRow>) }));
+      }
+    };
+    const db = makeMockDb(state) as unknown as { query: Record<string, unknown> };
+    db.query.userStepCliRolePreferences = {
+      findFirst: async () => ({ cliProviderId: seatProviderId, effortLevel: null }),
+    };
+    return { state, db: db as unknown as Database };
+  }
+
+  it('hands apply the refusal the re-run met, not the failure it read before', async () => {
+    const { db } = requestedRerun('prov-ollama');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(db, seatedStep(applyCalls), enqueued, [makeProvider(), ollamaNoModel()]);
+
+    expect(enqueued).toEqual([]);
+    expect(applyCalls).toHaveLength(1);
+    expect(String(applyCalls[0]!.agentMiningResults?.[0]?.errorMessage)).toContain(
+      'requires a model',
+    );
+  });
+
+  it('hands apply the refusal when no provider fits the seat at all', async () => {
+    const { db } = requestedRerun('prov-1');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(db, seatedStep(applyCalls), enqueued, []);
+
+    expect(enqueued).toEqual([]);
+    expect(applyCalls).toHaveLength(1);
+    expect(String(applyCalls[0]!.agentMiningResults?.[0]?.errorMessage)).toContain(
+      'no cli provider available',
+    );
+  });
+
+  it('still parks on a re-run that sent', async () => {
+    const { state, db } = requestedRerun('prov-1');
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(db, seatedStep(applyCalls), enqueued, [makeProvider()]);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(applyCalls).toEqual([]);
+    expect(state.miningRows[0]!.errorMessage).toBe(OLD_FAILURE);
   });
 });

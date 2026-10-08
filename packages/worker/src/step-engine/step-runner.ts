@@ -1253,7 +1253,11 @@ async function resolveAgentMiningPhase(
     // never re-fan-out by itself.
     const userRequested = existing.filter((r) => r.userRetryRequestedAt != null);
     if (userRequested.length > 0 && params.providers && params.deps) {
-      const { sent: requeued, lost } = await retryMiningAgents(
+      const {
+        sent: requeued,
+        lost,
+        refused,
+      } = await retryMiningAgents(
         db,
         stepDef,
         current,
@@ -1289,7 +1293,7 @@ async function resolveAgentMiningPhase(
       }
       // Another pass re-ran what this one was asked to, and may already have finished it, so
       // every row read above can be stale: settle on a fresh read rather than on the old failure.
-      if (lost > 0 && !reread) {
+      if ((lost > 0 || refused > 0) && !reread) {
         return resolveAgentMiningPhase(
           db,
           stepDef,
@@ -1384,7 +1388,11 @@ async function resolveAgentMiningPhase(
         return result && retryOnInvocationFailure(result) ? [row.agentId] : [];
       });
       if (retryableAgentIds.length > 0) {
-        const { sent: requeued, lost } = await retryMiningAgents(
+        const {
+          sent: requeued,
+          lost,
+          refused,
+        } = await retryMiningAgents(
           db,
           stepDef,
           current,
@@ -1412,7 +1420,7 @@ async function resolveAgentMiningPhase(
           });
           return { resolved: false, result: { status: 'waiting_cli', row: parked } };
         }
-        if (lost > 0 && !reread) {
+        if ((lost > 0 || refused > 0) && !reread) {
           return resolveAgentMiningPhase(
             db,
             stepDef,
@@ -1728,11 +1736,12 @@ async function reserveMiningAgents(
   );
 }
 
-/** What one dispatch did: the agents it `sent`, and the ones it `lost` because another pass had
- *  already reserved or re-linked their rows, which leaves every row this pass read possibly stale. */
-type MiningDispatchOutcome = { sent: number; lost: number };
+/** What one dispatch did: the agents it `sent`, the ones it `lost` because another pass had
+ *  already reserved or re-linked their rows, and the ones it `refused` by failing their rows
+ *  because no provider would take them. Either leaves every row this pass read possibly stale. */
+type MiningDispatchOutcome = { sent: number; lost: number; refused: number };
 
-const NOTHING_SENT: MiningDispatchOutcome = { sent: 0, lost: 0 };
+const NOTHING_SENT: MiningDispatchOutcome = { sent: 0, lost: 0, refused: 0 };
 
 /** Enqueue one cli invocation per dispatch.
  *
@@ -1756,6 +1765,7 @@ async function dispatchMiningAgents(
   );
   const taken = dispatches.filter((d) => !targets.has(d.agentId)).map((d) => d.agentId);
   let lost = taken.length;
+  let refusedRows = 0;
   if (taken.length > 0) {
     ctx.logger.warn(
       { agentIds: taken, taskStepId: current.id },
@@ -1870,7 +1880,8 @@ async function dispatchMiningAgents(
           .where(sameMiningState(target))
           .returning({ id: schema.taskStepAgentMinings.id });
         targets.delete(dispatch.agentId);
-        if (!refused) lost++;
+        if (refused) refusedRows++;
+        else lost++;
         continue;
       }
 
@@ -1970,7 +1981,7 @@ async function dispatchMiningAgents(
       targets.delete(dispatch.agentId);
       enqueued++;
     }
-    return { sent: enqueued, lost };
+    return { sent: enqueued, lost, refused: refusedRows };
   } catch (err) {
     await releaseUnsentAgents(db, linking, [...targets.values()], err, ctx);
     throw err;
@@ -2910,7 +2921,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepDef.loop &&
           applyArgs.isFinalMiningAttempt !== true
         ) {
-          const { sent: requeued, lost } = await retryMiningAgents(
+          const {
+            sent: requeued,
+            lost,
+            refused,
+          } = await retryMiningAgents(
             db,
             stepDef,
             current,
@@ -2929,7 +2944,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             });
             return { status: 'waiting_cli', row: parked };
           }
-          if (lost > 0 && !reread) {
+          if ((lost > 0 || refused > 0) && !reread) {
             const settled = await rereadMiningBarrier();
             if (settled) return settled;
             continue;
