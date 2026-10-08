@@ -136,16 +136,19 @@ in every field. The write framing tells a writer to follow every rule on the lin
 report untouched code that breaks one as a similar site, that a review finding or a check's
 diagnosis never licenses a breach, and that only the approved spec or a person's directive can
 require one, which it then follows and reports. The review framing tells the 07b validator to check
-every written line, to apply a `files` rule only to the files its globs match, to report a
+every written line and every deleted file, to apply a `files` rule only to the files its globs
+match, to report a
 violation as a `high` issue with `file` as `path:line` and `rule` as the id, that debt and a check's
 diagnosis or honored constraint never waive a rule (a person's counts as a directive), and to list
-a spec- or person-required violation under `rule_conflicts`, never as an issue.
+a spec- or person-required violation under `rule_conflicts`, never as an issue; it also says those
+two fields extend the shape 07b's own output contract calls exact.
 
 **Selection** (`selectHouseRules`, `orchestrator/house-rules.ts`): `always` rules always go in. A
 `files` rule goes in when a glob matches a file of the dispatch's change, read as gate 3 reads it
 (`git status --porcelain -z`, never `_impl-changes`' quoted status) plus the branch against its fork
-point, since a DAG task's tree is clean at 07b; a DAG coder also matches its issue's
-`estimated_files`. A glob with no `/` matches a file name at any depth, as in a gitignore
+point, since a DAG task's tree is clean at 07b, deleted paths included: a rule can cover what a task
+removes; a DAG coder also matches its issue's `estimated_files`. A glob with no `/` matches a file
+name at any depth, as in a gitignore
 (picomatch `basename`), and `dot: true` as secret masking uses it. A change that cannot be read
 puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement nobody made.
 One 07 round 0 dispatch never gets a `files` rule, since nothing is written yet; similarity
