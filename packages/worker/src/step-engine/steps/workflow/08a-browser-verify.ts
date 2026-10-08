@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
@@ -56,8 +54,6 @@ import {
 } from '../../../sandbox/app-runner.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 
-const exec = promisify(execFile);
-
 type BrowserMode = 'headless' | 'interactive' | 'direct' | 'mcp' | 'manual' | 'skip';
 const ROLE_TESTER = 'tester';
 const ROLE_FIXER = 'fixer';
@@ -79,12 +75,10 @@ interface BrowserVerifyDetect {
    *  exactly like interactive, but the web shows the URL info box, not the VNC panel. */
   directAccess: boolean;
   appBooted: boolean;
-  /** When true the app runs in the per-task DDEV runner, so the headless-Chrome
-   *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
+  /** When true the app runs in the per-task DDEV runner (where <name>.ddev.site resolves). */
   ddevMode: boolean;
   /** When true the app runs in the per-task (non-DDEV) app-runner container,
-   *  which hosts the headed-browser desktop just like the DDEV runner. mcp mode
-   *  stays DDEV-only; this enables headless + interactive here. */
+   *  which hosts the headed-browser desktop just like the DDEV runner. */
   appRunnerMode: boolean;
   /** The env-replicate image tag, needed to (re)start the app-runner. */
   envImageTag: string | null;
@@ -94,7 +88,7 @@ interface BrowserVerifyDetect {
    *  detect_output. A retry re-runs prepare and logs in again, which is right: the
    *  runner (and its cookie jar) may have been recreated in between. */
   appLogin?: AppLoginOutcome;
-  /** Spec + changed files for the MCP tester / manual-checklist prompts. */
+  /** Spec + changed files for the MCP tester prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
   /** What the project plan says stands on the components this change touches, and
@@ -105,8 +99,7 @@ interface BrowserVerifyDetect {
   /** Learned-guidance capture is on for this task: the MCP tester is invited to name an
    *  INSTRUCTION defect behind the failures it found. Resolved in detect() and carried
    *  on the payload because the prompt builders are pure. Only the TESTER carries it —
-   *  the fixer is not the pass that rejects, and the manual checklist is written for a
-   *  human to follow, not parsed for defects. */
+   *  the fixer is not the pass that rejects. */
   promptDefectCapture: boolean;
   /** Live headed browser for the interactive gate: brought up + navigated in
    *  detect (idempotent, mirrors 09-gate-2) so the noVNC panel shows the running
@@ -142,7 +135,7 @@ interface BrowserVerifyApply {
   pageTitle: string | null;
   passed: boolean;
   output: string;
-  // MCP / manual extras (empty/null for the probe modes).
+  // MCP extras (empty/null for the other modes).
   failures: TestFailure[];
   visualVerdict: string | null;
   checklistMarkdown: string | null;
@@ -176,7 +169,7 @@ interface BrowserVerifyApply {
    *  before this existed have no value. Read it as `=== true`, never as truthy-absent. */
   verificationIncomplete?: boolean;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
-  source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
+  source: 'tester' | 'fixer' | 'skip';
 }
 
 /** One capture the agent claims it took. Descriptive only — the manifest builder takes
@@ -208,16 +201,11 @@ const fixerOutputSchema = z.object({
   notes: z.string().default(''),
 });
 
-const checklistOutputSchema = z.object({
-  checklist_markdown: z.string().default(''),
-});
-
 /** Keys naming each agent's own report. The tester's schema already REQUIRES `passed`,
  *  so it needs no key gate — only the candidate scan, so that a JSON payload it printed
  *  while driving the browser cannot stand in for its verdict. `notes` is in the fixer's
  *  gate because a fixer that changed nothing legitimately reports only notes. */
 const FIXER_KEYS = ['fixes_made', 'notes'] as const;
-const CHECKLIST_KEYS = ['checklist_markdown'] as const;
 
 /** Parse the MCP tester verdict; null when unparseable (caller treats a parse
  *  miss as a FAILED test so a broken tester never silently passes). */
@@ -272,20 +260,6 @@ function toReportedScreenshots(
     testCase: s.test_case ?? null,
     result: s.result,
   }));
-}
-
-export function parseChecklistOutput(raw: unknown): string {
-  // A blank checklist rejects the candidate rather than accepting an empty string, so a
-  // plain-markdown agent still reaches the raw-text fallback below.
-  const markdown = parseAgentJson(raw, (candidate) => {
-    if (!hasAnyKey(candidate, CHECKLIST_KEYS)) return null;
-    const parsed = checklistOutputSchema.safeParse(candidate);
-    if (!parsed.success || !parsed.data.checklist_markdown.trim()) return null;
-    return parsed.data.checklist_markdown;
-  });
-  if (markdown !== null) return markdown;
-  // Fall back to the raw text (the agent may have written plain markdown).
-  return typeof raw === 'string' ? raw.slice(0, 16_000) : '';
 }
 
 /** Latest tester (or probe) pass — its failures drive the fixer + final output. */
@@ -407,37 +381,6 @@ interface BrowserReport {
   passed: boolean;
 }
 
-// Legacy host-side check (non-DDEV projects whose app 01a-app-boot booted). The
-// DDEV path uses the identical check baked into the runner image
-// (packages/worker/docker/ddev-runner/browser-check.js).
-const BROWSER_CHECK_SCRIPT = `
-const puppeteer = require('puppeteer-core');
-async function run() {
-  const url = process.argv[2];
-  if (!url) { console.error('usage: node script.js <url>'); process.exit(1); }
-  const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME_PATH || '/usr/bin/chromium',
-    headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-  });
-  const page = await browser.newPage();
-  const consoleMessages = [];
-  const networkErrors = [];
-  page.on('console', msg => { consoleMessages.push({ level: msg.type(), text: msg.text() }); });
-  page.on('requestfailed', req => { networkErrors.push(req.url() + ' ' + (req.failure()?.errorText || 'unknown')); });
-  let httpStatus = null;
-  try { const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }); httpStatus = resp ? resp.status() : null; }
-  catch (err) { consoleMessages.push({ level: 'error', text: 'Navigation failed: ' + err.message }); }
-  const title = await page.title().catch(() => null);
-  await browser.close();
-  const errors = consoleMessages.filter(m => m.level === 'error').map(m => m.text);
-  const warnings = consoleMessages.filter(m => m.level === 'warning').map(m => m.text);
-  const httpBad = httpStatus !== null && httpStatus >= 400;
-  console.log(JSON.stringify({ pageTitle: title, httpStatus: httpStatus, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 && !httpBad }));
-}
-run().catch(err => { console.error(err.message); process.exit(1); });
-`;
-
 /** Pull the single-line JSON report the browser check prints, ignoring any
  *  surrounding noise (ddev/docker exec banners, stderr). */
 function extractReport(output: string): BrowserReport | null {
@@ -513,7 +456,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     workflowType: 'workflow',
     index: 8.5,
     title: 'Phase 5a: Browser validation',
-    description: 'Validates the running application via headless Chrome.',
+    description: 'Validates the running application with an agent driving the live browser.',
     requiresCli: false,
     cliRoles: STEP_CLI_ROLES['08a-browser-verify'],
   },
@@ -650,10 +593,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (!detected.available) return null;
     const lb = detected.liveBrowser;
     const probe = lb?.probe ?? null;
-    // Pre-set the interactive verdict from the auto-probe: clean → approve; any
-    // console/network error or a 4xx/5xx → reject (the user can override after looking).
-    // Same root-is-the-front-door rule as the automated paths — this is the panel that
-    // greeted a developer with "approve" while the app's root was serving 403.
+    // Judge the auto-probe for the "Automated checks" panel: any console/network error
+    // or a 4xx/5xx marks it 'issues found'. Same root-is-the-front-door rule as the
+    // automated paths — a 403 at the app's root is not clean.
     const probeClean =
       probe != null &&
       probe.consoleErrors.length === 0 &&
@@ -664,7 +606,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       infoSections.push({
         title: 'Live browser unavailable',
         preview: 'bring-up failed',
-        body: `The headed browser could not be brought up:\n\n${lb.reason}\n\nInteractive verification needs the panel — retry the step, or pick automated/skip.`,
+        body: `The headed browser could not be brought up:\n\n${lb.reason}\n\nAgent testing needs it — retry the step. A person verifies hands-on at gate 2.`,
         defaultOpen: true,
       });
     } else if (probe) {
@@ -713,11 +655,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
-    // Only the agent modes dispatch a CLI; the probe modes + skip resolve in apply.
-    skipIf: ({ detected }) => {
-      const mode = (detected as BrowserVerifyDetect).mode;
-      return mode !== 'mcp' && mode !== 'manual';
-    },
+    // Only mcp dispatches a CLI; the other modes resolve in apply.
+    skipIf: ({ detected }) => (detected as BrowserVerifyDetect).mode !== 'mcp',
     // mcp mode needs the runner's headed browser up so chrome-devtools connects
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
     prepare: async ({ ctx, detected }) => {
@@ -770,20 +709,19 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
       const appUrl = d.appUrl || 'the app URL';
-      if (d.mode === 'manual') return buildChecklistPrompt(d, appUrl);
       return buildTesterPrompt(d, appUrl);
     },
-    bypassStub: (args) => {
-      if ((args.detected as BrowserVerifyDetect).mode === 'manual')
-        return { checklist_markdown: '# Test checklist\n- [ ] bypass stub' };
-      return { passed: true, failures: [], visual_verdict: 'SKIPPED', notes: 'bypass stub' };
-    },
+    bypassStub: () => ({
+      passed: true,
+      failures: [],
+      visual_verdict: 'SKIPPED',
+      notes: 'bypass stub',
+    }),
   },
 
   loop: {
     // mcp mode only: tester <-> fixer up to 10 rounds (legacy cap), then gate-2
-    // escalates. Manual/probe modes never set passed=false from a tester pass,
-    // so shouldContinue stays false and they run a single pass.
+    // escalates.
     maxIterations: 10,
     passesPerRound: 2,
     resolveRole: roleForIteration,
@@ -838,32 +776,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       source: 'skip',
     };
     if (!detected.available) return skipped;
-    // A row parked on the old interactive form resumes here without `shouldRun`; gate 2 verifies
-    // it hands-on, so it is skipped rather than probed into a pass.
-    if (mode === 'interactive') return { ...skipped, output: 'verified hands-on at gate 2' };
-
     // User chose to skip browser testing (legacy Option C).
     if (mode === 'skip') {
       ctx.logger.info('browser testing skipped by user');
       return { ...skipped, ran: true, skipped: true, output: 'skipped by user', passed: true };
-    }
-
-    // Manual checklist (legacy Option B): the agent generated it; gate-2 is the
-    // confirmation. A checklist is not a pass/fail — record it, pass through.
-    if (mode === 'manual') {
-      const checklist = parseChecklistOutput(args.llmOutput ?? null);
-      ctx.logger.info({ length: checklist.length }, 'manual test checklist generated');
-      return {
-        ...baseApply,
-        ran: true,
-        skipped: false,
-        method: 'manual',
-        appUrl: detected.appUrl,
-        checklistMarkdown: checklist,
-        passed: true,
-        output: '',
-        source: 'manual',
-      };
     }
 
     // MCP agent testing (legacy Option A): tester/fixer loop.
@@ -871,155 +787,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       return applyMcp(ctx, args, detected);
     }
 
-    // Probe mode (headless) falls through to the probe below.
-
-    const values = args.formValues as {
-      mode?: string;
-      appUrl?: string;
-      checkConsoleErrors?: boolean;
-      checkNetworkErrors?: boolean;
-    };
-    const appUrlOverride = (values.appUrl ?? '').trim();
-    const interactive = values.mode === 'interactive';
-    ctx.logger.info({ ddevMode: detected.ddevMode, interactive }, 'running browser validation');
-
-    let rawOutput: string;
-    // Ensure the app is actually serving — boots the DDEV env, or brings the
-    // app-runner container back AND relaunches a restart-killed dev server — and
-    // resolve its authoritative URL. A DDEV boot failure THROWS → the step fails
-    // and routes back to the developer via the recovery actions (Retry /
-    // Retry-with-AI). A user-entered URL still overrides.
-    const runtime = await ensureAppServing(ctx);
-    const appUrl = appUrlOverride || runtime.url || detected.appUrl || 'http://localhost';
-
-    if (runtime.mode === 'ddev') {
-      if (interactive) {
-        // Headed Chrome on the runner's virtual desktop: the user watches and
-        // interacts via the web Browser (noVNC) panel while the probe runs the
-        // same checks over CDP — and the browser STAYS OPEN afterwards.
-        await ctx.emitProgress('Starting the browser desktop…');
-        await startBrowserDesktop(runtime.handle);
-        await ctx.emitProgress('Running browser validation (interactive)…');
-        rawOutput = (
-          await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      } else {
-        await ctx.emitProgress('Running browser validation…');
-        rawOutput = (
-          await runnerExec(runtime.handle, `node /opt/browser-check.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      }
-    } else if (runtime.mode === 'app-runner') {
-      // Non-DDEV: the app + the headed-browser desktop live in the per-task
-      // app-runner container, so the probe runs INSIDE it (browser hits the app
-      // on localhost). Probe scripts were injected at /opt/browser by the runner.
-      if (interactive) {
-        await ctx.emitProgress('Starting the browser desktop…');
-        await startAppBrowserDesktop(runtime.handle);
-        await ctx.emitProgress('Running browser validation (interactive)…');
-        rawOutput = (
-          await appRunnerExec(
-            runtime.handle,
-            `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
-            { timeoutMs: 90_000 },
-          )
-        ).output;
-      } else {
-        await ctx.emitProgress('Running browser validation…');
-        rawOutput = (
-          await appRunnerExec(runtime.handle, `node /opt/browser/browser-check.js '${appUrl}'`, {
-            timeoutMs: 90_000,
-          })
-        ).output;
-      }
-    } else {
-      // Legacy host boot (or no runtime handle): host-side puppeteer check.
-      try {
-        const r = await exec('node', ['-e', BROWSER_CHECK_SCRIPT, appUrl], {
-          cwd: ctx.workspacePath,
-          timeout: 60_000,
-          maxBuffer: 5 * 1024 * 1024,
-        });
-        rawOutput = r.stdout;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        ctx.logger.warn({ err: message, appUrl }, 'browser validation failed to run');
-        return { ...skipped, ran: true, skipped: false, appUrl, output: message.slice(0, 2000) };
-      }
-    }
-
-    const report = extractReport(rawOutput);
-    if (!report) {
-      return {
-        ...skipped,
-        ran: true,
-        skipped: false,
-        method: mode,
-        appUrl,
-        output: `no report parsed: ${rawOutput.slice(-1500)}`,
-        source: 'probe',
-      };
-    }
-
-    // Explicit environment-failure handling: when the browser got NO HTTP
-    // response (TLS/connection/DNS error or timeout — e.g. an untrusted local
-    // DDEV cert, or the app not serving), the app was never reachable. That is
-    // not a code defect, so FAIL the step (recovery: Retry / Skip) instead of
-    // letting a passed=false route back to implementation via the fix-loop.
-    // Guarded on the field's presence so legacy reports keep their prior behavior.
-    if ('httpStatus' in report && report.httpStatus === null) {
-      throw new Error(
-        `Could not reach the app at ${appUrl}: the browser received no HTTP response ` +
-          `(TLS/connection error or timeout — e.g. an untrusted local cert, or the app is ` +
-          `not serving). This is an environment issue, not a code defect — fix the ` +
-          `environment and Retry, or Skip browser validation.`,
-      );
-    }
-
-    const checkConsole = values.checkConsoleErrors !== false;
-    const checkNetwork = values.checkNetworkErrors !== false;
-    // Any 4xx/5xx at the app ROOT is a hard fail, even when no JS console/network error
-    // fired. The probe only ever navigates to appUrl, so this is always the entry point.
-    //
-    // This used to admit 4xx, justified as "fine for login-gated apps" — true of a PROTECTED
-    // path, false of the front door. MEASURED: a task reached the developer gate with its
-    // root serving 403 because the app was wedged mid-install, and every automated round had
-    // called that a pre-install state and passed. _app-auth.ts logs the browser in per task,
-    // so a 4xx here is a dead app rather than an expected gate.
-    const httpBad = 'httpStatus' in report && report.httpStatus != null && report.httpStatus >= 400;
-    const passed =
-      !httpBad &&
-      (!checkConsole || report.consoleErrors.length === 0) &&
-      (!checkNetwork || report.networkErrors.length === 0);
-
-    ctx.logger.info(
-      {
-        pageTitle: report.pageTitle,
-        consoleErrors: report.consoleErrors.length,
-        networkErrors: report.networkErrors.length,
-        passed,
-      },
-      'browser validation complete',
-    );
-
-    return {
-      ...baseApply,
-      ran: true,
-      skipped: false,
-      method: mode,
-      appUrl,
-      consoleErrors: report.consoleErrors,
-      consoleWarnings: report.consoleWarnings,
-      networkErrors: report.networkErrors,
-      pageTitle: report.pageTitle,
-      passed,
-      output: '',
-      source: 'probe',
-    };
+    // A row parked by older code in another mode resumes here without `shouldRun`; gate 2 verifies
+    // it hands-on, so it is skipped rather than probed into a pass.
+    return { ...skipped, output: 'verified hands-on at gate 2' };
   },
 };
 
@@ -1424,28 +1194,6 @@ function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): stri
     'your notes so they need not re-derive it.',
     '',
     '=== Spec (the expected behavior) ===',
-    d.spec || '(no spec recorded)',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function buildChecklistPrompt(d: BrowserVerifyDetect, appUrl: string): string {
-  return [
-    'Generate a structured MANUAL testing checklist for the implemented feature, for a human to',
-    'verify by hand in the browser.',
-    `Application URL: ${appUrl}`,
-    changedFilesBlock(d.implementationFiles, 'Changed files', ''),
-    '',
-    'Cover: 1) pre-test setup (URL, credentials, prerequisites), 2) happy-path tests (step by step),',
-    '3) edge cases, 4) error scenarios, 5) visual/UI checks, 6) data validation. Each test has a',
-    '`- [ ]` checkbox, clear step-by-step instructions, and an expected result.',
-    ...SEARCH_LADDER,
-    '',
-    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "checklist_markdown": "<the full checklist as markdown>" }',
-    '',
-    '=== Spec (acceptance criteria) ===',
     d.spec || '(no spec recorded)',
   ]
     .filter(Boolean)

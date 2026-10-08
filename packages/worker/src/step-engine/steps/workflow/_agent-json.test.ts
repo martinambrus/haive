@@ -7,7 +7,7 @@ import {
   parseValidatorOutput,
   parseFixerOutput as parseValidateFixerOutput,
 } from './07b-phase-4-validate.js';
-import { parseBrowserTestOutput, parseChecklistOutput } from './08a-browser-verify.js';
+import { parseBrowserTestOutput } from './08a-browser-verify.js';
 import { parseTesterOutput } from './08b-test-management.js';
 
 /** The JSON an agent quotes as evidence before emitting its own report. Anchoring on the
@@ -116,12 +116,6 @@ describe('an agent’s quoted JSON never stands in for its report', () => {
     );
     expect(t!.passed).toBe(false);
     expect(t!.failures).toHaveLength(1);
-  });
-
-  it('08a checklist prefers its own markdown but still falls back to raw prose', () => {
-    expect(parseChecklistOutput(quoted('{"checklist_markdown":"# steps"}'))).toBe('# steps');
-    // no JSON at all -> the agent wrote plain markdown; the fallback must survive
-    expect(parseChecklistOutput('# plain markdown')).toBe('# plain markdown');
   });
 
   it('08b tester reports the tests it wrote, not "no tests"', () => {

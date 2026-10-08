@@ -565,7 +565,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     }
 
     // Phase 5a browser testing: surface the verdict (mcp fail / manual checklist
-    // to confirm); skipped/headless probe contributes nothing blocking.
+    // to confirm); a skipped step contributes nothing blocking.
     const phase5a = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');
     const pa = phase5a?.output as Phase5aOutput | null;
     let browser: VerifyGateDetect['browser'] = null;
