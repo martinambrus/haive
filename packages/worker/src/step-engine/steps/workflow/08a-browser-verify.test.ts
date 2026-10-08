@@ -12,6 +12,9 @@ const m = vi.hoisted(() => ({
   recordLedgerEntry: vi.fn(),
   resolveScreenshotRoot: vi.fn(),
   buildScreenshotManifest: vi.fn(),
+  getTaskEnvTemplate: vi.fn(),
+  resolveDdevWorkspace: vi.fn(),
+  loadAppBootOutput: vi.fn(),
 }));
 
 vi.mock('./_browser-runtime.js', async (importOriginal) => ({
@@ -54,6 +57,16 @@ vi.mock('./_screenshots.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_screenshots.js')>()),
   resolveScreenshotRoot: m.resolveScreenshotRoot,
   buildScreenshotManifest: m.buildScreenshotManifest,
+}));
+
+vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../env-replicate/_shared.js')>()),
+  getTaskEnvTemplate: m.getTaskEnvTemplate,
+}));
+vi.mock('./_task-meta.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_task-meta.js')>()),
+  resolveDdevWorkspace: m.resolveDdevWorkspace,
+  loadAppBootOutput: m.loadAppBootOutput,
 }));
 
 import { TaskCancelledError } from '../../step-definition.js';
@@ -452,5 +465,32 @@ describe('08a app-health probe after a tester pass', () => {
     expect(m.ensureAppServing).toHaveBeenCalledTimes(1);
     expect(out).toMatchObject({ method: 'mcp', source: 'tester', passed: true, failures: [] });
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ err: boom }), expect.any(String));
+  });
+});
+
+describe('browserVerifyStep.shouldRun', () => {
+  const ctx = { taskId: 'task-1', repoPath: '/repos/u/r', db: {} } as never;
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate
+      .mockReset()
+      .mockResolvedValue({ status: 'ready', declaredDeps: { browserTesting: true } });
+    m.resolveDdevWorkspace.mockReset().mockResolvedValue(null);
+    m.loadAppBootOutput.mockReset().mockResolvedValue({ booted: true, skipped: false });
+  });
+
+  it.each([
+    ['mcp', true],
+    ['interactive', false],
+    ['direct', false],
+    ['skip', false],
+  ])('for a setup row with mode %s returns %s', async (mode, expected) => {
+    m.loadPreviousStepOutput.mockReset().mockResolvedValue({ output: { mode } });
+    expect(await browserVerifyStep.shouldRun!(ctx)).toBe(expected);
+  });
+
+  it('treats a missing setup row as mcp', async () => {
+    m.loadPreviousStepOutput.mockReset().mockResolvedValue(null);
+    expect(await browserVerifyStep.shouldRun!(ctx)).toBe(true);
   });
 });

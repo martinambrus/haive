@@ -118,7 +118,7 @@ export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '08b-test-management': '07-phase-2-implement', // fixLoop (still red after its own budget) + fixLoopOnError
   '08-phase-5-verify': '07-phase-2-implement', // fixLoop + fixLoopOnError (DDEV boot)
   '08c-code-review': '07-phase-2-implement', // fixLoop
-  '08a-browser-verify': '07-phase-2-implement', // fixLoop + restartLoop + fixLoopOnError
+  '08a-browser-verify': '07-phase-2-implement', // fixLoop + fixLoopOnError
   '09-gate-2-verify-approval': '07-phase-2-implement', // restartLoop
   '06-gate-1-spec-approval': '04-phase-0b-pre-planning', // reviseLoop
   '03c-business-requirements-review': '03b-business-requirements', // reviseLoop

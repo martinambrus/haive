@@ -505,37 +505,6 @@ async function bringUpLiveBrowser(
   }
 }
 
-/** Build the implementer's diagnosis from an interactive REJECT: the developer's
- *  feedback plus the auto-probe's console/network findings. */
-function formatInteractiveReject(out: BrowserVerifyApply): string {
-  const parts = [
-    'Interactive browser verification was REJECTED by the developer after hands-on testing.',
-  ];
-  if (out.output.trim()) {
-    parts.push('', 'Feedback to address:', out.output.trim());
-  } else {
-    parts.push(
-      '',
-      '(no specific feedback given — re-check the implementation against the spec and the errors below)',
-    );
-  }
-  if (out.consoleErrors.length > 0) {
-    parts.push(
-      '',
-      'Console errors observed:',
-      ...out.consoleErrors.slice(0, 20).map((e) => `- ${e}`),
-    );
-  }
-  if (out.networkErrors.length > 0) {
-    parts.push(
-      '',
-      'Network errors observed:',
-      ...out.networkErrors.slice(0, 20).map((e) => `- ${e}`),
-    );
-  }
-  return parts.join('\n');
-}
-
 export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerifyApply> = {
   needsRuntime: 'if-serving',
   metadata: {
@@ -559,9 +528,6 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   // observed failures + console/network errors as the diagnosis. Skipped runs pass.
   fixLoop: {
     evaluate: (out) => {
-      // Interactive verification is a HUMAN gate: a reject routes via restartLoop
-      // (uncapped) below, not the automated fix loop — don't double-fire here.
-      if (out.method === 'interactive') return null;
       if (out.skipped || !out.ran || out.passed) return null;
       const parts: string[] = [];
       if (out.failures.length) {
@@ -595,16 +561,6 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         diagnosis: parts.join('\n\n') || out.output.slice(-2000) || 'Browser verification failed.',
       };
     },
-  },
-
-  // Restart-loop: an interactive (human) REJECT restarts from implementation with the
-  // developer's feedback + observed errors attached — UNCAPPED, like Gate 2. fixLoop
-  // above returns null for interactive, so only one of the two ever fires.
-  restartLoop: {
-    evaluate: (out) =>
-      out.method === 'interactive' && out.ran && !out.passed
-        ? { diagnosis: formatInteractiveReject(out) }
-        : null,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
@@ -750,32 +706,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         submitLabel: 'Run agent testing',
       };
     }
-    // Interactive: the human approve/reject gate (the live browser shows above).
-    return {
-      title: 'Browser validation',
-      description: `App URL: ${detected.appUrl ?? '(unknown)'}\nDrive the app in the Browser panel, then Approve or Reject. The automated checks summarized above ran during bring-up.`,
-      ...(infoSections.length > 0 ? { infoSections } : {}),
-      fields: [
-        {
-          type: 'radio' as const,
-          id: 'decision',
-          label: 'Your verdict',
-          options: [
-            { value: 'approve', label: 'Approve — the app works, proceed' },
-            { value: 'reject', label: 'Reject — re-run implementation with my feedback' },
-          ],
-          default: probeClean ? 'approve' : 'reject',
-          required: true,
-        },
-        {
-          type: 'textarea' as const,
-          id: 'feedback',
-          label: 'Feedback for the implementer (used when you Reject)',
-          rows: 4,
-        },
-      ],
-      submitLabel: 'Submit',
-    };
+    return null;
   },
 
   llm: {
@@ -936,30 +867,6 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       return applyMcp(ctx, args, detected);
     }
 
-    // Interactive (human gate): detect already brought the browser up + probed, and
-    // the user drove it in the panel. The submitted verdict decides — approve
-    // advances, reject routes back to implementation via restartLoop. No re-probe;
-    // carry detect's probe so gate-2 + the reject diagnosis have the findings.
-    if (mode === 'interactive') {
-      const decision =
-        (args.formValues as { decision?: string }).decision === 'reject' ? 'reject' : 'approve';
-      const feedback = ((args.formValues as { feedback?: string }).feedback ?? '').trim();
-      const probe = detected.liveBrowser?.probe ?? null;
-      ctx.logger.info({ decision }, 'interactive browser verification decision');
-      return {
-        ...baseApply,
-        ran: true,
-        skipped: false,
-        method: 'interactive',
-        appUrl: detected.liveBrowser?.appUrl ?? detected.appUrl,
-        consoleErrors: probe?.consoleErrors ?? [],
-        networkErrors: probe?.networkErrors ?? [],
-        pageTitle: probe?.pageTitle ?? null,
-        passed: decision === 'approve',
-        output: decision === 'reject' ? feedback : '',
-        source: 'probe',
-      };
-    }
     // Probe mode (headless) falls through to the probe below.
 
     const values = args.formValues as {
