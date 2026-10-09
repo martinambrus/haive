@@ -27,6 +27,8 @@ export interface ChangedFilesCoverage {
   total: number;
   /** The check the list was given to; the validator where absent. */
   givenTo?: 'code review';
+  /** The re-read of the change after the latest fix failed, so the list may lack what it added. */
+  scanFailed?: true;
 }
 
 export interface GateHouseRules {
@@ -45,6 +47,7 @@ export interface GateHouseRules {
 const RULE_REF_CHARS = 64;
 const TEXT_CHARS = 500;
 const CONFLICTS_MAX = 20;
+export const REREAD_FAILED = 'the change could not be re-read after a fix';
 
 // Cut by character, not by UTF-16 unit, so a pair is never split.
 function oneLine(value: unknown, max: number): string {
@@ -78,9 +81,14 @@ function parseChangedFilesCoverage(
   value: unknown,
   givenTo?: ChangedFilesCoverage['givenTo'],
 ): ChangedFilesCoverage | undefined {
-  const { listed, total } = (value ?? {}) as Record<string, unknown>;
+  const { listed, total, scanFailed } = (value ?? {}) as Record<string, unknown>;
   return typeof listed === 'number' && typeof total === 'number'
-    ? { listed, total, ...(givenTo === undefined ? {} : { givenTo }) }
+    ? {
+        listed,
+        total,
+        ...(givenTo === undefined ? {} : { givenTo }),
+        ...(scanFailed === true ? { scanFailed } : {}),
+      }
     : undefined;
 }
 
@@ -316,12 +324,21 @@ function cappedList(data: GateHouseRules): ChangedFilesCoverage | null {
     : null;
 }
 
+/** A check given rules whose list may lack what a fix added: the re-read after it failed. */
+const unreadAfterFix = (data: GateHouseRules): boolean =>
+  data.entries.length > 0 && data.changedFilesCoverage?.scanFailed === true;
+
 function caseOf(data: GateHouseRules): HouseCase | null {
   if (data.conflicts.length > 0) return 'conflict';
   if (data.violations.length > 0) return 'violated';
   if (data.reason === 'unavailable' || data.reason === 'too_large') return 'notChecked';
   if (data.reason === 'switched_off') return 'off';
-  if (data.omitted.length > 0 || cappedList(data) !== null || data.modifiedAfterCheck === true) {
+  if (
+    data.omitted.length > 0 ||
+    cappedList(data) !== null ||
+    unreadAfterFix(data) ||
+    data.modifiedAfterCheck === true
+  ) {
     return 'partial';
   }
   if (data.entries.length > 0) return 'enforced';
@@ -373,6 +390,7 @@ function bodyOf(data: GateHouseRules): string {
                 `${capped.total - capped.listed} changed files beyond ${checkName(capped)}'s list of ${capped.listed}`,
               ),
             ]),
+        ...(unreadAfterFix(data) ? [bullet('files a fix added, if any', REREAD_FAILED)] : []),
         ...(data.modifiedAfterCheck === true
           ? [bullet('changes made after the last house-rules check')]
           : []),
@@ -420,6 +438,7 @@ export function houseRulesRow(data: GateHouseRules | null | undefined): StatusSu
     capped === null
       ? ''
       : `${checkName(capped)} was given ${capped.listed} of ${capped.total} changed files`,
+    unreadAfterFix(data) ? REREAD_FAILED : '',
     data.modifiedAfterCheck === true
       ? 'the change was modified after the last house-rules check'
       : '',

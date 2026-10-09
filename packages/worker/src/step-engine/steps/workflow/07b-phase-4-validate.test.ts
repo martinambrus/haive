@@ -2004,6 +2004,12 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
   });
 
+  it('stores no flag on the coverage of a list the fixer re-read', async () => {
+    const { first, second } = await validateFixValidate();
+    expect('scanFailed' in first.changedFilesCoverage!).toBe(false);
+    expect('scanFailed' in second.changedFilesCoverage!).toBe(false);
+  });
+
   it('has the fixer pass hand the change on, and keep carrying the validator values', async () => {
     const { fixer } = await validateFixValidate();
     expect(fixer.source).toBe('fixer');
@@ -2154,7 +2160,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     const prompt = validatorPrompt(detected, previous);
     const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
     const passes = [...previous, passRecord(2, reply({ verdict: 'VALID' }), second)];
-    return { fixer, prompt, second, detected, passes };
+    return { ctx, fixer, prompt, second, detected, passes };
   }
 
   it("lists detect's files to the validator after a fixer whose scan failed", async () => {
@@ -2165,10 +2171,27 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(prompt).toContain('recorded BEFORE the fix agent edited');
   });
 
-  it("stores the coverage of detect's list for the validator after a fixer whose scan failed", async () => {
+  it("stores the counts of detect's list as unknown for the validator after a fixer whose scan failed", async () => {
     const { fixer, second } = await validateBrokenFixValidate();
     expect(fixer.implementationFiles?.total).toBe(2);
-    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('has the next fixer pass carry the unknown coverage, as it carries the rest of the validator pass', async () => {
+    const { ctx, detected, passes } = await validateBrokenFixValidate();
+    const next = await pass(ctx, detected, 3, passes, FIXER_REPLY);
+    expect(next.source).toBe('fixer');
+    expect(next.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('stores the coverage without the flag once a later fixer pass has re-read the change', async () => {
+    const { ctx, detected, passes } = await validateBrokenFixValidate();
+    const fixer = await pass(ctx, detected, 3, passes, FIXER_REPLY);
+    expect(fixer.implementationFiles?.scanError).toBeNull();
+    const previous = [...passes, passRecord(3, FIXER_REPLY, fixer)];
+    const third = await pass(ctx, detected, 4, previous, reply({ verdict: 'VALID' }));
+    expect(third.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect('scanFailed' in third.changedFilesCoverage!).toBe(false);
   });
 
   it('runs the code protocol on the validator pass after a fixer whose scan failed on a docs-only change', async () => {
@@ -2178,7 +2201,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(prompt).not.toContain('Documentation Validator');
     expect(prompt).toContain('=== Spec (what the implementation must deliver) ===');
     expect(prompt).toContain('- docs/extra.md');
-    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
   });
 
   it('takes the next fixer off the documentation protocol too, after a fixer whose scan failed', async () => {

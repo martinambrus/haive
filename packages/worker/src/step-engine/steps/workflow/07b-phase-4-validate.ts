@@ -167,7 +167,7 @@ interface ValidateApply {
   ruleConflicts?: RuleConflict[];
   /** The latest validator pass's cli_invocations row, which holds the stamp of the rules it was given. */
   validatorInvocationId?: string | null;
-  /** How many changed files the latest validator pass was given; the gate reads a capped list as PARTIAL. */
+  /** How many changed files the latest validator pass was given; the gate reads a cap, or scanFailed, as PARTIAL. */
   changedFilesCoverage?: ChangedFilesCoverage;
   /** The change as the latest validator pass left it; the gate reads a change that differs as PARTIAL. */
   changeFingerprint?: string;
@@ -1065,7 +1065,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
-      const coverage = fileCoverage(fixerFiles(previous).files ?? d.implementationFiles);
+      const { files: given, scanFailed } = fixerFiles(previous);
+      const coverage = fileCoverage(given ?? d.implementationFiles);
       const policy =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(
@@ -1136,7 +1137,13 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         validatorInvocationId: args.llmInvocationId ?? null,
         ...(coverage === null
           ? {}
-          : { changedFilesCoverage: { listed: coverage.listed, total: coverage.total } }),
+          : {
+              changedFilesCoverage: {
+                listed: coverage.listed,
+                total: coverage.total,
+                ...(scanFailed ? { scanFailed } : {}),
+              },
+            }),
         ...(fingerprint === null ? {} : { changeFingerprint: fingerprint }),
         converged: churnFiles.length === 0,
         churnFiles,

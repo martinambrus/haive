@@ -976,6 +976,8 @@ describe('gate-2 validation row: how much of the change the validator was given'
   } as never;
   const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
   const GIVEN = 'only 2 of 3 changed files were given to the agents — 1 were not looked at';
+  const UNREAD =
+    'the change could not be re-read after a fix — files the fix added, if any, were not looked at';
 
   const stored07b = {
     valid: {
@@ -1108,7 +1110,10 @@ describe('gate-2 validation row: how much of the change the validator was given'
   });
 
   /** The gate over a green verification and the 07b output a task stored, from detect to the form. */
-  async function gate(which: keyof typeof stored07b, coverage?: { listed: number; total: number }) {
+  async function gate(
+    which: keyof typeof stored07b,
+    coverage?: { listed: number; total: number; scanFailed?: true },
+  ) {
     const { output, iterations } = stored07b[which];
     m.loadPreviousStepOutput.mockImplementation(
       async (_db: unknown, _task: unknown, id: string) => {
@@ -1170,6 +1175,39 @@ describe('gate-2 validation row: how much of the change the validator was given'
     const body = row?.body ?? '';
     expect(body.indexOf('## Not reviewed')).toBeLessThan(body.indexOf('## Coverage'));
     expect(body.indexOf('## Coverage')).toBeLessThan(body.indexOf('## Open issues'));
+    expect(decision).toBe('reject');
+  });
+
+  it('reads the flag 07b stored into the payload, and none where 07b stored none', async () => {
+    expect(
+      (await gate('valid', { listed: 3, total: 3, scanFailed: true })).detected.validation
+        ?.coverage,
+    ).toEqual({ listed: 3, total: 3, truncated: false, scanFailed: true });
+    const plain = (await gate('valid', { listed: 3, total: 3 })).detected.validation?.coverage;
+    expect(plain).toEqual({ listed: 3, total: 3, truncated: false });
+    expect('scanFailed' in plain!).toBe(false);
+  });
+
+  it('calls a VALID verdict over a change a fix left unread PARTIAL, says so, and does not default to approve', async () => {
+    const { row, decision } = await gate('valid', { listed: 3, total: 3, scanFailed: true });
+    expect(row).toMatchObject({ status: 'warn', statusLabel: 'PARTIAL', defaultOpen: true });
+    expect(row?.detail).toBe(UNREAD);
+    expect(row?.body).toContain(`## Coverage\n- ${UNREAD}`);
+    expect(decision).toBe('reject');
+  });
+
+  it('keeps the verdict as the label when that pass also found issues, and names the unread change beside the flags', async () => {
+    const { row, decision } = await gate('issues', { listed: 3, total: 3, scanFailed: true });
+    expect(row).toMatchObject({ status: 'fail', statusLabel: 'ISSUES_FOUND' });
+    expect(row?.detail).toBe(`budget exhausted • did not converge; ${UNREAD}`);
+    expect(decision).toBe('reject');
+  });
+
+  it('names the cap and the unread change together when the list was capped too', async () => {
+    const { row, decision } = await gate('valid', { listed: 2, total: 3, scanFailed: true });
+    expect(row).toMatchObject({ status: 'warn', statusLabel: 'PARTIAL' });
+    expect(row?.detail).toBe(`${GIVEN}; ${UNREAD}`);
+    expect(row?.body).toContain(`## Coverage\n- ${GIVEN}; ${UNREAD}`);
     expect(decision).toBe('reject');
   });
 

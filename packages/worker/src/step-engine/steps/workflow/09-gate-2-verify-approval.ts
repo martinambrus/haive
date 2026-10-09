@@ -40,6 +40,7 @@ import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import {
+  REREAD_FAILED,
   houseRulesHoldApprove,
   houseRulesRow,
   loadGateHouseRules,
@@ -70,6 +71,17 @@ function readCoverage(raw: CoverageOutput | undefined): FileCoverage | null {
 function coverageNote(c: FileCoverage | null): string {
   if (!c?.truncated) return '';
   return `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`;
+}
+
+/** 07b's coverage adds a flag: its list was taken before a fix whose re-read failed. */
+type ValidationCoverage = FileCoverage & { scanFailed?: true };
+
+function validationCoverageNote(c: ValidationCoverage | null): string {
+  const unread =
+    c?.scanFailed === true
+      ? `${REREAD_FAILED} — files the fix added, if any, were not looked at`
+      : '';
+  return [coverageNote(c), unread].filter(Boolean).join('; ');
 }
 
 interface LiteCheck {
@@ -112,7 +124,7 @@ interface VerifyGateDetect {
     report: string;
     /** How much of the change the last validator pass was given. Optional for the same reason as
      *  `excludedDimensions`; null when 07b stored no coverage. */
-    coverage?: FileCoverage | null;
+    coverage?: ValidationCoverage | null;
   } | null;
   /** Phase 5b test management summary line (null when the step didn't run). */
   testManagement: { line: string; testsPassed: boolean | null } | null;
@@ -375,7 +387,7 @@ interface Phase4Output {
   reportChars?: number;
   converged?: boolean;
   churnFiles?: string[];
-  changedFilesCoverage?: CoverageOutput;
+  changedFilesCoverage?: CoverageOutput & { scanFailed?: true };
 }
 
 const REPORT_EXCERPT_CHARS = 8000;
@@ -583,7 +595,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // A report with its reply length was cut once by 07b, at this size; one without it predates that and is cut here.
         report:
           typeof p4.reportChars === 'number' ? (p4.report ?? '') : reportExcerpt(p4.report ?? ''),
-        coverage: given && { ...given, truncated: given.listed < given.total },
+        coverage: given && {
+          ...given,
+          truncated: given.listed < given.total,
+          ...(p4.changedFilesCoverage?.scanFailed === true ? { scanFailed: true } : {}),
+        },
       };
     }
 
@@ -862,7 +878,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   form(_ctx, detected): FormSchema {
     const v = detected.validation;
     // A validator given only part of the change has said nothing about the rest, whatever it returned.
-    const validationPartial = v?.coverage?.truncated === true;
+    const validationPartial = v?.coverage?.truncated === true || v?.coverage?.scanFailed === true;
     const validationOk = v === null || (v.verdict === 'VALID' && !validationPartial);
     const testsOk =
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
@@ -1015,7 +1031,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           'repository or task. No finding above covers them, and their absence is not a pass.',
         );
       }
-      const vCoverage = coverageNote(v.coverage ?? null);
+      const vCoverage = validationCoverageNote(v.coverage ?? null);
       if (vCoverage) lines.push('', '## Coverage', `- ${vCoverage}`);
       if (v.openIssues.length > 0) {
         lines.push('', '## Open issues');
