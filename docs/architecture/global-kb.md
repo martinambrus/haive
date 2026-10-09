@@ -158,13 +158,16 @@ s counts) puts every `files` rule in unscoped (`why.glob` null): never narrow on
 nobody made. A writer's first dispatch has an empty change, so a write-mode dispatch that is not a
 DAG coder also matches the paths the task NAMES (`named-files.ts`): its title, description and
 freshest spec (the highest round, then 05a, 05, 04; never `resolveApprovedSpec`, which takes each
-step's latest round apart), read as backtick spans, markdown link targets and bare tokens with a `/`
-or an extension (letters of any script; a `#anchor` after a file name dropped), glob characters
-refused, and parentheses only as a whole segment such as a route group `(app)` (a call like
+step's latest round apart), each read to its first 262,144 characters (none has a length limit; the
+install's longest spec is 80,811), split at white space, backticks and a markdown link's `](`, and
+keeping the tokens with a `/` or an extension (letters of any script; a `#anchor` after a file name
+dropped), glob characters refused, and parentheses only as a whole segment such as a route group `(app)` (a call like
 `require(a/b.inc` is no name: 46 such tokens in the install's specs), each resolved to the one
 tracked file it ends on a `/` boundary (one `git ls-files -z`, under the same 30 s bound), else kept
 as written when it has a `/`, since a named file may not exist yet; a bare word that no tracked file
-carries is prose (`Node.js`), not a path. MEASURED on a live quick_bugfix: 07 round 0 stamped
+carries is prose (`Node.js`), not a path. A path with white space in it is never read: 20 of the
+82,527 tracked paths across the install's three repositories have one, all fonts, text and data
+files, none code, and 07b still checks such a file through the change. MEASURED on a live quick_bugfix: 07 round 0 stamped
 `filesRulesUnmatched: 1`, wrote the inline `<svg>` the rule forbids, and its description named both
 files it then wrote. A DAG coder keeps its issue's own estimate: task-wide names gave 65 selections
 over 29 coders, 4 of them relevant. Each prompt spends at most 16,384 bytes on the block, markers,
