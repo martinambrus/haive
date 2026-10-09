@@ -1075,6 +1075,8 @@ const failedCriteriaCount = (v: ReviewerOutput): number =>
 /** Terminal-header names for the review loop's roles. 'coder' here is always the FIX
  *  coder — the initial implementation coder is dispatched by the level fan-out, not by
  *  this function. */
+type ClaimDb = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+
 const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> = {
   reviewer: 'Reviewer',
   coder: 'Fix coder',
@@ -1105,7 +1107,7 @@ async function spawnReviewAgent(
   iteration: number,
   prompt: string,
   capabilities: StepCapability[],
-  claim?: (invocationId: string) => Promise<void>,
+  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
   afterTruncation = false,
   timeoutMs?: number,
 ): Promise<string | null> {
@@ -1158,16 +1160,20 @@ async function spawnReviewAgent(
     ),
     prompt: plan.effectivePrompt ?? fullPrompt,
   });
-  await ra.db.insert(schema.dagAgentRuns).values({
-    dagIssueId: issue.id,
-    taskId: ra.taskId,
-    role,
-    iteration,
-    status: 'running',
-    cliInvocationId: invId,
-    startedAt: new Date(),
+  await ra.db.transaction(async (tx) => {
+    await tx.insert(schema.dagAgentRuns).values({
+      dagIssueId: issue.id,
+      taskId: ra.taskId,
+      role,
+      iteration,
+      status: 'running',
+      cliInvocationId: invId,
+      startedAt: new Date(),
+    });
+    if (claim) await claim(invId, tx);
+    // Step last, as a Retry takes it: one that reset the step meanwhile rolls the claim back.
+    await assertOwnsStep(tx, ra.current.id);
   });
-  if (claim) await claim(invId);
   await ra.deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: ra.taskId,
@@ -1262,8 +1268,8 @@ export async function ingestReviewRun(
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
   const spec = (await issueSpecText(ra.specView, issue)).text;
-  const consume = async (): Promise<void> => {
-    await ra.db
+  const consume = async (_id?: string, db: ClaimDb = ra.db): Promise<void> => {
+    await db
       .update(schema.dagAgentRuns)
       .set({
         status: 'done',
@@ -1958,8 +1964,8 @@ export async function ingestAdvisor(
     // `running` + the invocation id is exactly what a LEVEL coder carries, so the ingest that
     // already handles a coder — parseCoderResult, the transient/genuine split, the timeout
     // ladder, the concerns ledger entry — handles this one too.
-    async (id) => {
-      await ea.db
+    async (id, db) => {
+      await db
         .update(schema.taskDagIssues)
         .set({
           outcome: 'running',
@@ -1998,8 +2004,8 @@ async function redispatchFixCoder(
       (await issueSpecText(ra.specView, issue)).text,
     ),
     ['tool_use', 'file_write'],
-    async (id) => {
-      await ra.db
+    async (id, db) => {
+      await db
         .update(schema.taskDagIssues)
         .set({
           outcome: 'running',
@@ -2013,7 +2019,7 @@ async function redispatchFixCoder(
           updatedAt: new Date(),
         })
         .where(eq(schema.taskDagIssues.id, issue.id));
-      await ra.db
+      await db
         .update(schema.dagAgentRuns)
         .set({
           status: 'done',
@@ -2609,6 +2615,8 @@ export async function resolveDagPhase(
     const running = issues.filter((i) => i.outcome === 'running');
     if (running.length > 0) {
       let anyInFlight = false;
+      // The highest budget this pass has raised: `current` was read before any of them.
+      let passLearnedMs = 0;
       for (const issue of running) {
         if (!issue.cliInvocationId) {
           // Claimed but the dispatch crashed before enqueue — wait for recovery.
@@ -2643,13 +2651,11 @@ export async function resolveDagPhase(
           // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three
           // times). Written to the STEP so the whole level shares one budget and the fan-out's
           // ceiling stays computable; DAG_MAX_INFRA_RETRIES bounds it to two doublings.
-          // The budget raised just now, which `current` read before it was written.
-          let learnedNow: number | null = null;
           if (isCliTimeoutFailure({ errorMessage: inv.errorMessage })) {
             const failedMs = (cliTimeoutBudgetMinutes(inv.errorMessage) ?? 0) * 60_000;
             const next = escalatedTimeoutMs(failedMs);
             if (next) {
-              learnedNow = next;
+              passLearnedMs = Math.max(passLearnedMs, next);
               await db
                 .update(schema.taskSteps)
                 .set({ cliTimeoutLearnedMs: next, updatedAt: new Date() })
@@ -2710,7 +2716,7 @@ export async function resolveDagPhase(
                   {
                     ...current,
                     cliTimeoutLearnedMs:
-                      Math.max(current.cliTimeoutLearnedMs ?? 0, learnedNow ?? 0) || null,
+                      Math.max(current.cliTimeoutLearnedMs ?? 0, passLearnedMs) || null,
                   },
                   spec.timeoutMs,
                 ),

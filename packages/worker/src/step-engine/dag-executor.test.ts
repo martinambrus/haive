@@ -1883,6 +1883,66 @@ const workingDispatchPlan = () =>
 const NEVER_STARTED = 'never started';
 const STARTED_THEN_SUPERSEDED = 'started, then superseded by a Retry';
 
+describe('a review-loop agent whose step a Retry reset before its claim', () => {
+  it('rolls the claim back and enqueues nothing', async () => {
+    const { db } = makeSpawnDb();
+    let ownershipProbes = 0;
+    (db as unknown as { select: unknown }).select = () => ({
+      from: () => ({
+        where: () => ({
+          // The run's insert still owns the step; the claim, after a Retry's reset, does not.
+          for: async () => (++ownershipProbes === 1 ? [{ id: 'step1' }] : []),
+          orderBy: async () => [],
+        }),
+      }),
+    });
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const enqueued: unknown[] = [];
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async (job: unknown) => void enqueued.push(job) },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      stuckCount: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    const neverStarted = inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: null,
+      startedAt: null,
+    });
+
+    const err = await ingestReviewRun(
+      ra,
+      issue,
+      { id: 'run-1', role: 'coder' } as never,
+      neverStarted,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StepSupersededError);
+    expect(enqueued).toHaveLength(0);
+  });
+});
+
 describe('ingestReviewRun: a fix coder that never answered', () => {
   it.each([
     [NEVER_STARTED, inv({ rawOutput: null, parsedOutput: null, exitCode: null, startedAt: null })],
