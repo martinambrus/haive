@@ -1,6 +1,10 @@
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 
-const MAX_NAME_CHARS = 255;
+// Linux's NAME_MAX and PATH_MAX, counted in UTF-16 units, which never outnumber UTF-8 bytes.
+const MAX_SEGMENT_CHARS = 255;
+const MAX_PATH_CHARS = 4096;
+// A path and its wrapping fit; a longer piece (a pasted blob) is skipped before any work on it.
+const MAX_PIECE_CHARS = 2 * MAX_PATH_CHARS;
 const WRAP_OPEN = '[{<"\'';
 const WRAP_CLOSE = ']}>"\',;:!?.';
 const EMPHASIS = ['**', '__', '*', '_'];
@@ -75,7 +79,7 @@ function withoutAnchor(token: string): string {
 function isName(token: string): boolean {
   return (
     (token.includes('/') || EXTENSION.test(token)) &&
-    token.length <= MAX_NAME_CHARS &&
+    token.length <= MAX_PATH_CHARS &&
     PATH_CHARS.test(token) &&
     !WWW_URL.test(token) &&
     !token.startsWith('/') &&
@@ -84,7 +88,11 @@ function isName(token: string): boolean {
       .split('/')
       .some(
         (segment) =>
-          segment === '' || segment === '.' || segment === '..' || !SEGMENT.test(segment),
+          segment === '' ||
+          segment === '.' ||
+          segment === '..' ||
+          segment.length > MAX_SEGMENT_CHARS ||
+          !SEGMENT.test(segment),
       )
   );
 }
@@ -94,6 +102,7 @@ export function namedFiles(text: string): string[] {
   const found = new Set<string>();
   // A markdown link `[text](target)` reads as two tokens, its text and its target.
   for (const piece of text.split(/[\s`]+|\]\(/)) {
+    if (piece.length > MAX_PIECE_CHARS) continue;
     let token = withoutAnchor(unwrap(piece).replace(LINE_REF, ''));
     if (token.startsWith(`${SANDBOX_WORKDIR}/`)) token = token.slice(SANDBOX_WORKDIR.length + 1);
     while (token.startsWith('./')) token = token.slice(2);

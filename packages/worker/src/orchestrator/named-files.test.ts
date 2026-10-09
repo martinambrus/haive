@@ -15,7 +15,7 @@ const LIVE_DESCRIPTION = [
   'The attached design notes give the colour and the size.',
 ].join('\n');
 
-const PATH_255 = `css/${'x'.repeat(255 - 'css/'.length - '/a.css'.length)}/a.css`;
+const SEGMENT_255 = `css/${'x'.repeat(255)}/a.css`;
 
 describe('namedFiles', () => {
   it('reads exactly the two paths the description of a live quick_bugfix names', () => {
@@ -107,7 +107,7 @@ describe('namedFiles', () => {
     ['a markdown link in parentheses', '([label](css/a.css))', 'css/a.css'],
     ['a name that starts with an underscore', 'src/_helpers.ts', 'src/_helpers.ts'],
     ['a bare name that starts with an underscore', '_helpers.ts', '_helpers.ts'],
-    ['a name of exactly 255 characters', PATH_255, PATH_255],
+    ['a segment of exactly 255 characters', SEGMENT_255, SEGMENT_255],
     ['an extension of ten characters', 'a.abcdefghij', 'a.abcdefghij'],
   ])('reads a name written with %s', (_form, text, name) => {
     expect(namedFiles(`Look at ${text} now.`)).toEqual([name]);
@@ -166,12 +166,20 @@ describe('namedFiles', () => {
     expect(namedFiles(`Look at ${text} now.`)).toEqual([]);
   });
 
-  it('is a name of exactly 255 characters and not one of 256', () => {
-    expect(PATH_255).toHaveLength(255);
-    expect(namedFiles(PATH_255)).toEqual([PATH_255]);
-    expect(namedFiles(`css/${'x'.repeat(256 - 'css/'.length - '/a.css'.length)}/a.css`)).toEqual(
-      [],
-    );
+  it('bounds a segment at 255 characters and a path at 4096, not a path at 255', () => {
+    const pathOf = (length: number) =>
+      `${'abcdefg/'.repeat(Math.floor((length - 5) / 8))}${'y'.repeat((length - 5) % 8)}a.css`;
+    expect(pathOf(4096)).toHaveLength(4096);
+    expect(namedFiles(pathOf(300))).toEqual([pathOf(300)]);
+    expect(namedFiles(`Look at "${pathOf(4096)}".`)).toEqual([pathOf(4096)]);
+    expect(namedFiles(pathOf(4097))).toEqual([]);
+    expect(namedFiles(SEGMENT_255)).toEqual([SEGMENT_255]);
+    expect(namedFiles(`css/${'x'.repeat(256)}/a.css`)).toEqual([]);
+  });
+
+  it('skips a piece longer than twice the longest path, even one whose wrapping hides a name', () => {
+    expect(namedFiles(`${'('.repeat(100)}css/a.css${')'.repeat(100)}`)).toEqual(['css/a.css']);
+    expect(namedFiles(`${'('.repeat(4096)}css/a.css${')'.repeat(4096)}`)).toEqual([]);
   });
 
   it('splits a text on white space and on backticks, keeps the order, and names a path once', () => {
@@ -249,13 +257,21 @@ describe('namedFiles', () => {
   });
 
   it('stays linear on long runs of punctuation, since the text can be agent output', () => {
-    // 40,000 dots then a letter took a trailing-punctuation regex over 2 s: it is quadratic.
-    const long = (unit: string, tail: string) => `${unit.repeat(40_000)}${tail}`;
+    // 40,000 dots then a letter took a trailing-punctuation regex over 2 s: it is quadratic. A piece
+    // past 8192 characters is skipped, so each run is cut to 8000 and repeated 25 times.
+    const long = (unit: string, tail: string) =>
+      Array(25)
+        .fill(`${unit.repeat(Math.floor(8000 / unit.length))}${tail}`)
+        .join(' ');
     const started = performance.now();
     namedFiles([long('.', 'x'), long(')', 'a'), long('*', '/a.css'), long(':1', 'y')].join(' '));
     namedFiles([long('(', 'a.php'), long('.a#', '/'), long('()', 'a.md#x')].join(' '));
-    namedFiles(`${'('.repeat(40_000)}a.php${')'.repeat(40_000)}`);
-    namedFiles(long('](', 'a'));
+    namedFiles(
+      Array(25)
+        .fill(`${'('.repeat(4000)}a.php${')'.repeat(4000)}`)
+        .join(' '),
+    );
+    namedFiles(`${']('.repeat(40_000)}a`);
     expect(performance.now() - started).toBeLessThan(1000);
   });
 });
