@@ -13,6 +13,7 @@ const m = vi.hoisted(() => ({
   ddevSnapshot: vi.fn(),
   ddevMigrateDatabase: vi.fn(),
   ddevFailureMessage: vi.fn(),
+  ddevRestart: vi.fn(),
 }));
 
 vi.mock('./_app-runtime.js', () => ({
@@ -29,6 +30,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ddevSnapshot: m.ddevSnapshot,
   ddevMigrateDatabase: m.ddevMigrateDatabase,
   ddevFailureMessage: m.ddevFailureMessage,
+  ddevRestart: m.ddevRestart,
 }));
 
 import { appliedBaselineOf, classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
@@ -197,6 +199,7 @@ describe('classifyDrift', () => {
 
 // The database block of .ddev/config.yaml is repository text that ends up in a command line.
 describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => {
+  const NBSP = String.fromCharCode(0xa0);
   const classify = (over: Partial<DdevConfigFields>) =>
     classifyDrift(baseline(), target(over), HASH_B);
 
@@ -214,14 +217,57 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
     });
   });
 
+  // YAML reads these as the plain value, and the unquoted splice they replaced let bash do the same.
+  it.each([
+    ['mariadb', "'10.11'", 'mariadb:10.11'],
+    ['mariadb', '"10.11"', 'mariadb:10.11'],
+    ['mariadb', '10.11 # lts', 'mariadb:10.11'],
+    ['mariadb', '10.11\t# lts', 'mariadb:10.11'],
+    ['mariadb', "'10.11' # lts", 'mariadb:10.11'],
+    ['mariadb', '10.11 # $(id)', 'mariadb:10.11'],
+    ["'mariadb'", '10.11', 'mariadb:10.11'],
+    ['"mysql"', '"8.0"', 'mysql:8.0'],
+    ['mysql # engine', "'8.0'", 'mysql:8.0'],
+  ])('plans a migration to the YAML value of %s:%s', (dbType, dbVersion, migrateTarget) => {
+    expect(classify({ dbType, dbVersion })).toEqual({
+      kind: 'db-migrate',
+      migrateTarget,
+      unsupportedReason: null,
+    });
+  });
+
+  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts"])(
+    'plans mariadb:10.11 for a config file written with version: %s',
+    (written) => {
+      const parsed = parseDdevConfig(
+        `name: app\ndatabase:\n  type: mariadb\n  version: ${written}\n`,
+      );
+      expect(classifyDrift(baseline(), parsed, HASH_B)).toEqual({
+        kind: 'db-migrate',
+        migrateTarget: 'mariadb:10.11',
+        unsupportedReason: null,
+      });
+    },
+  );
+
   it.each([
     ['mariadb', '10.11; id'],
     ['mysql', '$(id)'],
     ['mysql', '8.0 x'],
     ['mariadb', '`id`'],
     ['mariadb', "10.11'"],
-    ['mariadb', '10.11 # comment'],
-    ['mariadb', "'10.11'"],
+    ['mariadb', "'10.11"],
+    ['mariadb', '\'10.11"'],
+    ['mariadb', "''10.11''"],
+    ['mariadb', "'10.11' x"],
+    ['mariadb', "'10.11'; id"],
+    ['mariadb', "'10.11; id'"],
+    ['mariadb', '"$(id)"'],
+    ['mariadb', "'10.11 # lts'"],
+    ['mariadb', '10.11#lts'],
+    ['mariadb', `10.11${NBSP}# lts`],
+    ['mariadb', "''"],
+    ['mariadb', '# lts'],
     ['mariadb', '10.'],
     ['mariadb', '.5'],
     ['mariadb', '10..11'],
@@ -475,4 +521,82 @@ describe('07c-ddev-reconcile: a database block whose version is shell syntax', (
     expect(m.ddevSnapshot).not.toHaveBeenCalled();
     expect(m.ddevMigrateDatabase).not.toHaveBeenCalled();
   });
+});
+
+describe('07c-ddev-reconcile: a database version YAML reads as 10.11', () => {
+  let workspace = '';
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-yaml-'));
+    await mkdir(path.join(workspace, '.ddev'));
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+  const writeConfig = (version: string) =>
+    writeFile(
+      path.join(workspace, '.ddev/config.yaml'),
+      `name: app\ndatabase:\n  type: mariadb\n  version: ${version}\n`,
+    );
+
+  beforeEach(() => {
+    m.ensureDdevWithProgress.mockReset().mockResolvedValue({ container: 'c', projectDir: '/r' });
+    m.runnerExec.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevSnapshot.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevMigrateDatabase.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevRestart.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({
+      output: {
+        baseline: { phpVersion: '8.1', dbType: 'mariadb', dbVersion: '10.4', configHash: 'h0' },
+      },
+    });
+    m.hashDdevInputs.mockResolvedValue('h1');
+  });
+
+  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts"])(
+    'migrates to mariadb:10.11 for version: %s',
+    async (written) => {
+      await writeConfig(written);
+      const detected = await ddevReconcileStep.detect!(ctx);
+      expect(detected).toMatchObject({
+        driftKind: 'db-migrate',
+        migrateTarget: 'mariadb:10.11',
+        unsupportedReason: null,
+      });
+
+      const out = await ddevReconcileStep.apply(ctx, {
+        formValues: { confirmDbMigration: true },
+      } as never);
+      expect(out).toMatchObject({ action: 'migrate', reconciled: true, to: 'mariadb:10.11' });
+      expect(m.ddevMigrateDatabase).toHaveBeenCalledTimes(1);
+      expect(m.ddevMigrateDatabase.mock.calls[0]![1]).toBe('mariadb:10.11');
+    },
+  );
+
+  it.each(['10.11; id', '$(id)', "'10.11; id'"])(
+    'still stops at version: %s, before the runner is touched',
+    async (written) => {
+      await writeConfig(written);
+      const detected = await ddevReconcileStep.detect!(ctx);
+      expect(detected).toMatchObject({ driftKind: 'unsupported', migrateTarget: null });
+
+      await expect(
+        ddevReconcileStep.apply(ctx, { formValues: { confirmDbMigration: true } } as never),
+      ).rejects.toThrow(/database\.version/);
+      expect(m.ensureDdevWithProgress).not.toHaveBeenCalled();
+      expect(m.ddevMigrateDatabase).not.toHaveBeenCalled();
+    },
+  );
 });

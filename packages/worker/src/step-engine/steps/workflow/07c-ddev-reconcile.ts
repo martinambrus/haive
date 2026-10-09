@@ -74,12 +74,18 @@ function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
   return { anchor, rel: `${prefix}.ddev/config.yaml` };
 }
 
+/** A captured scalar as YAML reads it: one pair of quotes, or a trailing " # comment", removed. */
+function yamlScalar(raw: string | null): string {
+  const text = (raw ?? '').replace(/[ \t]#.*$/, '').trim();
+  return /^(["'])(.*)\1$/.exec(text)?.[2] ?? text;
+}
+
 /** The database field migrate-database cannot take: its target reaches the runner's shell. */
-function refusedMigrateField(target: DdevConfigFields): string | null {
-  if (target.dbType !== 'mysql' && target.dbType !== 'mariadb') {
+function refusedMigrateField(dbType: string, dbVersion: string): string | null {
+  if (dbType !== 'mysql' && dbType !== 'mariadb') {
     return 'database.type must be mysql or mariadb';
   }
-  if (!/^\d+(\.\d+)*$/.test(target.dbVersion ?? '')) {
+  if (!/^\d+(\.\d+)*$/.test(dbVersion)) {
     return 'database.version must be digits and dots, such as 10.11';
   }
   return null;
@@ -112,7 +118,9 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    const refused = refusedMigrateField(target);
+    const dbType = yamlScalar(target.dbType);
+    const dbVersion = yamlScalar(target.dbVersion);
+    const refused = refusedMigrateField(dbType, dbVersion);
     if (refused) {
       return {
         kind: 'unsupported',
@@ -122,7 +130,7 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    return { kind: 'db-migrate', migrateTarget: targetDb, unsupportedReason: null };
+    return { kind: 'db-migrate', migrateTarget: `${dbType}:${dbVersion}`, unsupportedReason: null };
   }
 
   if (targetHash !== baseline.configHash) {
