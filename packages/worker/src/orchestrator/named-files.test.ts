@@ -293,19 +293,25 @@ describe('resolveNamedFiles', () => {
     expect(resolve('includes/new.inc')).toEqual(['includes/new.inc']);
   });
 
-  it('keeps a name whose end is not on a "/" boundary', () => {
+  it('keeps a name whose end is not on a "/" boundary, and drops a bare word no file carries', () => {
     expect(resolve('ss/hr6_badges.css')).toEqual(['ss/hr6_badges.css']);
-    expect(resolve('r6_badges.css')).toEqual(['r6_badges.css']);
+    expect(resolve('r6_badges.css')).toEqual([]);
+  });
+
+  it('drops a dotted technology name, which names no tracked file', () => {
+    expect(resolveNamedFiles(namedFiles('Upgrade Node.js and migrate from Vue.js.'), TREE)).toEqual(
+      [],
+    );
   });
 
   it('keeps a directory as written and resolves each name on its own, in order', () => {
     expect(
       resolve('sites/all/modules/custom/hr6_badges', 'css/hr6_badges.css', 'nope.css'),
-    ).toEqual(['sites/all/modules/custom/hr6_badges', TREE[3], 'nope.css']);
+    ).toEqual(['sites/all/modules/custom/hr6_badges', TREE[3]]);
   });
 
-  it('keeps every name when nothing is tracked', () => {
-    expect(resolveNamedFiles(['css/a.css', 'b.php'], [])).toEqual(['css/a.css', 'b.php']);
+  it('keeps every path with a "/" when nothing is tracked, and no bare word', () => {
+    expect(resolveNamedFiles(['css/a.css', 'b.php'], [])).toEqual(['css/a.css']);
   });
 
   it('resolves a route-group name to the one tracked file, which an anchored glob then matches', () => {

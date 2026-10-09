@@ -102,7 +102,8 @@ export function namedFiles(text: string): string[] {
   return [...found];
 }
 
-/** A name that ends exactly one tracked file on a "/" boundary becomes that file; others stay. */
+/** A name that ends exactly one tracked file on a "/" boundary becomes that file; a bare word no
+ *  tracked file carries is dropped; others stay as written. */
 export function resolveNamedFiles(names: readonly string[], tracked: readonly string[]): string[] {
   const byBase = new Map<string, string[]>();
   for (const file of tracked) {
@@ -111,11 +112,13 @@ export function resolveNamedFiles(names: readonly string[], tracked: readonly st
     if (same === undefined) byBase.set(base, [file]);
     else same.push(file);
   }
-  return names.map((name) => {
+  return names.flatMap((name) => {
     const base = name.slice(name.lastIndexOf('/') + 1);
     const ends = (byBase.get(base) ?? []).filter(
       (file) => file === name || file.endsWith(`/${name}`),
     );
-    return ends.length === 1 ? ends[0]! : name;
+    if (ends.length === 1) return [ends[0]!];
+    // A bare word that no tracked file carries is prose ("Node.js"), not a path.
+    return ends.length === 0 && !name.includes('/') ? [] : [name];
   });
 }
