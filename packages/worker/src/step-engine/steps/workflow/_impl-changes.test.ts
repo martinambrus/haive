@@ -721,6 +721,9 @@ describe('collectChangedLineMap', () => {
     }
   }
 
+  /** Names `git status` C-quotes unless it runs with `-z`: a non-ASCII byte, a space, a quote. */
+  const QUOTED_NAMES = ['café.php', 'has space.php', 'a"b.php'];
+
   it('keeps every hunk, where the prompt notes stop at 20', async () => {
     const lines = Array.from({ length: 50 }, (_, i) => `l${i}`);
     await inRepo({ 'app.php': `${lines.join('\n')}\n` }, async (dir) => {
@@ -916,13 +919,39 @@ describe('collectChangedLineMap', () => {
     });
   });
 
-  it('is null when git quotes a path, which would never match a tool report', async () => {
-    await inRepo({ 'app.php': 'a\n' }, async (dir) => {
-      await writeFile(path.join(dir, 'has space.php'), 'x\n');
+  it('is null when the diff quotes a path, which would never match a tool report', async () => {
+    await inRepo({ 'a"b.php': 'a\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'a"b.php'), 'b\n');
 
       expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
     });
   });
+
+  it.each(['café.php', 'has space.php'])(
+    'reads the edited %s under its literal name, which is how a tool reports it',
+    async (name) => {
+      await inRepo({ [name]: 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, name), 'a\nB\n');
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.get(name)).toEqual({ whole: false, ranges: [[2, 2]] });
+      });
+    },
+  );
+
+  it.each([...QUOTED_NAMES, '"lead".php'])(
+    'counts the untracked %s whole, under its literal name',
+    async (name) => {
+      await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, name), 'fresh\n');
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.get(name)).toEqual({ whole: true, ranges: [] });
+      });
+    },
+  );
 
   describe('readChangedPaths', () => {
     const base = { 'kept.php': 'a\nb\n', 'gone.php': 'x\n', 'gone-in-commit.php': 'y\n' };
@@ -1180,6 +1209,70 @@ describe('collectChangedLineMap', () => {
         const out = await collectImplementationFiles(ctxFor(), dir);
 
         expect(out.total).toBe(1);
+      });
+    });
+
+    it.each([
+      ['café.php', 'lines 1-2'],
+      ['has space.php', 'lines 1-2'],
+      ['a"b.php', undefined],
+    ])(
+      'lists %s once, under its literal name, when it is committed and dirty again',
+      async (name, note) => {
+        await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+          await writeFile(path.join(dir, name), 'a\nb\n');
+          await commitAll(dir);
+          await writeFile(path.join(dir, name), 'a\nB\n');
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([name]);
+          expect(out.total).toBe(1);
+          expect(out.changedLines?.[name]).toBe(note);
+        });
+      },
+    );
+
+    it.each(QUOTED_NAMES)(
+      'notes the untracked %s as a new file, under its literal name',
+      async (name) => {
+        await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+          await writeFile(path.join(dir, name), 'fresh\n');
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([name]);
+          expect(out.changedLines).toEqual({ [name]: 'new file' });
+        });
+      },
+    );
+
+    it.each(['plain.php', 'café.php', 'x -> y.php'])(
+      'lists the destination of a staged rename to %s, and not its source',
+      async (to) => {
+        await inRepo({ 'old name.php': 'one\ntwo\n' }, async (dir) => {
+          await git(dir, ['mv', 'old name.php', to]);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([to]);
+          expect(out.total).toBe(1);
+        });
+      },
+    );
+
+    it('keeps the real paths when the cap cuts, and counts each changed file once', async () => {
+      await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+        for (const name of QUOTED_NAMES) await writeFile(path.join(dir, name), 'a\nb\n');
+        await commitAll(dir);
+        for (const name of QUOTED_NAMES) await writeFile(path.join(dir, name), 'a\nB\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: names(98) }), dir);
+
+        const real = new Set([...names(98), ...QUOTED_NAMES]);
+        expect(out.files.filter((f) => !real.has(f))).toEqual([]);
+        expect(out.total).toBe(101);
+        expect(out.truncated).toBe(true);
       });
     });
 

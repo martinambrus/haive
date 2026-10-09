@@ -4,6 +4,7 @@ import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
+import { parsePorcelainZ } from './_commit-diff.js';
 
 /** How many changed files a prompt lists. The cap is for prompt size; what matters
  *  is that a list cut down to it says so — see changedFilesBlock. */
@@ -125,20 +126,16 @@ interface DirtyScan {
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
 async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
-    const { stdout } = await gitExec(['--no-optional-locks', 'status', '--porcelain', '-uall'], {
-      cwd: worktreePath,
-      maxBuffer: GIT_MAX_BUFFER,
-    });
+    // -z keeps a name literal; plain porcelain C-quotes one with a space or a non-ASCII byte.
+    const { stdout } = await gitExec(
+      ['--no-optional-locks', 'status', '--porcelain', '-z', '-uall'],
+      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER },
+    );
     const files: string[] = [];
     const untracked: string[] = [];
-    for (const line of stdout.toString().split('\n')) {
-      const name = line.slice(3).trim();
-      if (!name) continue;
-      // A rename record is `R  new -> old` in the non-`-z` format; the destination is the
-      // path that exists on disk, which is the one a reviewer can open.
-      const resolved = name.includes(' -> ') ? name.split(' -> ')[1]! : name;
-      files.push(resolved);
-      if (line.startsWith('??')) untracked.push(resolved);
+    for (const entry of parsePorcelainZ(stdout)) {
+      files.push(entry.path);
+      if (entry.x === '?' && entry.y === '?') untracked.push(entry.path);
     }
     return { files, untracked, error: null };
   } catch (err) {
@@ -436,8 +433,7 @@ export async function collectImplementationFiles(
     files.add(p);
     measured[p] ??= 'deleted';
   }
-  // Last, so a capped list keeps the reported and dirty files. Committed only: git status spells a
-  // name with a space or a non-ASCII byte quoted, so a dirty file named here too would count twice.
+  // Last, so a capped list keeps the reported and dirty files.
   const committed = await readChangedPaths(worktreePath, baseBranch, { committedOnly: true });
   for (const p of committed ?? []) files.add(p);
   const all = [...files];
@@ -510,7 +506,7 @@ export async function collectChangedLineMap(
   if (named === null) return null;
   const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);
   // A path git quoted never matches a tool's report, so it would read as untouched.
-  if ([...diffed.keys(), ...scan.files].some((p) => p.startsWith('"'))) return null;
+  if ([...diffed.keys()].some((p) => p.startsWith('"'))) return null;
 
   const map: ChangedLineMap = new Map();
   for (const [path, file] of diffed) {
