@@ -3304,8 +3304,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         errorMessage,
         endedAt: new Date(),
       }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
-      // After the step's own write, so a Resume never finds the agents ended on a step still running.
-      if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
+      // After the step's own write, so a Resume never finds the agents ended on a step still running;
+      // not when that write errored (the catch hands back the stale row) and the step is not terminal.
+      if (stepDef.agentMining && finished !== row)
+        await releaseStepAgents(db, row.id, errorMessage);
       if (!finished) return supersededPass(row);
       log.info(
         { stepId: meta.id, taskId, round },
@@ -3326,7 +3328,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage,
       endedAt: new Date(),
     }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
-    if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
+    if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, errorMessage);
     if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };
   } finally {

@@ -2887,6 +2887,17 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(stepWideAgentWrites(state)).toHaveLength(1);
   });
 
+  it('leaves the agents alone when the failure write of the step errors', async () => {
+    const state = freshState([]);
+    state.afterStepWrite = (set) => {
+      if (set.status === 'failed') throw new Error('could not serialize access');
+    };
+    await runWithEnqueueFailingAfter(state, 1).catch(() => undefined);
+
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+  });
+
   it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
     const state = freshState([]);
     state.deadlockOnce = true;
