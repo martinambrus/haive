@@ -271,6 +271,12 @@ this section keeps the decisions.
   names: CONFLICT, VIOLATED, NOT CHECKED, OFF, PARTIAL or ENFORCED, and all but OFF and ENFORCED
   hold Approve off its default. `quick_bugfix` runs no gate 2, so gate 3 shows the row when no
   gate-2 output exists, the rule similar sites and insights already follow.
+- **Late writers (user, 2026-10-09).** 08b and the 08a fixer write after 07b. 08c's peer reviewer
+  gets the review framing (a findings wording) and re-checks them: a finding naming a stamped rule
+  is raised to high, skips the refuter and blocks through the fix loop; gate 2 merges both checks,
+  its state from 08c. 08e runs after 08c and quick_bugfix runs no 08c, so every check also records
+  a fingerprint of the change it checked, and a gate that finds the change moved since the last
+  check (with rules in play) shows PARTIAL and holds Approve.
 - **Panel.** The enforce panel prints the rule through the same render (a browser-safe subpath) for
   the mode and globs being drafted.
 - **Tests** follow this list: both framings and byte identity when off, not opted or out of scope
