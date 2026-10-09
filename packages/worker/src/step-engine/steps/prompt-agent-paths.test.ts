@@ -1549,19 +1549,10 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 173 clean + 13 named = 186 built, 3 unreachable. The loop path is
-    // role x truncation-retry x history x detect-variant, which is why it dominates the count. The loop path alone is now
-    // role x truncation-retry x history, which is why it dominates the count. The unreachable count walked
-    // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
-    // and discovery got a persona roster; the built count then grew again with the truncation-retry
-    // axis, which doubles every loop role. The floor sat at 40 when
-    // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
-    // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
-    // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
-    // half the real number is a ratchet that never catches anything, so it is re-measured whenever
-    // sources are added — and it has already caught one regression, an invalid loop-history fixture
-    // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(184);
+    expect(
+      clean.length + named.length,
+      'built prompt count changed: update the expected count when sources are added or removed',
+    ).toBe(184);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
