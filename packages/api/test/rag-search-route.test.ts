@@ -56,7 +56,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
       return fn({
         conn: { embeddingDimensions: DIMS, pg: h.pg },
         db: {},
-        settings: await actual.resolveGlobalKbSettings(),
+        settings: options?.settings ?? (await actual.resolveGlobalKbSettings()),
       } as unknown as GlobalKbContext);
     },
   };
@@ -335,7 +335,29 @@ describe('rag_search, the global store', () => {
     await search();
 
     expect(h.events.filter((event) => event !== 'embed:local')).toEqual(['embed:global', 'open']);
-    expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, deadlineMs: DEADLINE_MS }]);
+    expect(h.openOptions).toEqual([
+      {
+        connectTimeoutSeconds: 3,
+        deadlineMs: DEADLINE_MS,
+        settings: expect.objectContaining({ ollamaUrl: GLOBAL_OLLAMA, embedModel: 'global-model' }),
+      },
+    ]);
+  });
+
+  it('searches the store the query was embedded for, when the settings change in between', async () => {
+    const read = vi.mocked(configService.get).getMockImplementation()!;
+    let namespaceReads = 0;
+    vi.mocked(configService.get).mockImplementation(async (key) => {
+      if (key !== CONFIG_KEYS.GLOBAL_KB_NAMESPACE) return read(key);
+      namespaceReads += 1;
+      return namespaceReads === 1 ? 'embedded-for' : 'switched-to';
+    });
+
+    await search();
+
+    expect(searches().global.map((call) => call.filter)).toEqual([
+      expect.objectContaining({ namespace: 'embedded-for' }),
+    ]);
   });
 
   it('reads the store in one transaction, under a server-side statement timeout', async () => {

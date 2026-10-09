@@ -152,6 +152,23 @@ describe('withGlobalKb with limits for one call', () => {
     ]);
   });
 
+  it('opens the store from the settings a caller already read, without reading them again', async () => {
+    h.ensure.mockResolvedValue(undefined);
+    const withGlobalKb = await load();
+    const read = { mode: 'external', connectionString: 'postgres://read-before' } as never;
+
+    const seen = await withGlobalKb(
+      haiveDb,
+      async ({ conn, settings }) => ({
+        store: (conn as unknown as { store: string }).store,
+        settings,
+      }),
+      { settings: read },
+    );
+
+    expect(seen).toEqual({ store: 'postgres://read-before', settings: read });
+  });
+
   it('returns what fn returns, closes once and never destroys the pool when fn finishes first', async () => {
     h.ensure.mockResolvedValue(undefined);
     const withGlobalKb = await load();

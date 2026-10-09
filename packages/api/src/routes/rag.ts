@@ -451,6 +451,8 @@ ragRoutes.post('/search', async (c) => {
         {
           connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
           deadlineMs: RAG_SEARCH_DEADLINE_MS,
+          // The store is searched with a vector from this snapshot's model, so it opens the same one.
+          settings: embedSettings,
         },
       );
       globalHits = result.scoped;
