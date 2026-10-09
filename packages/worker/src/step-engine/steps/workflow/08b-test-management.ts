@@ -150,17 +150,17 @@ export function parseTesterOutput(raw: unknown): {
 const TEST_FILE_RE =
   /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
-const CONTROL_CHAR_RE = /\p{Cc}/u;
+const PLAIN_PATH_RE = /^[A-Za-z0-9._/@+-]+$/;
 
-/** Created/updated paths that look like runnable test files, less any the agent reported as
- *  absolute, climbing out with `..`, or carrying a control character. */
+/** Created/updated paths that look like runnable test files and read as one plain word in every
+ *  shell a ddev run passes through: relative, only `[A-Za-z0-9._/@+-]`, no `..` or `-` segment. */
 export function filterTestFiles(files: string[]): string[] {
   return files.filter(
     (f) =>
       TEST_FILE_RE.test(f) &&
+      PLAIN_PATH_RE.test(f) &&
       !f.startsWith('/') &&
-      !f.split('/').includes('..') &&
-      !CONTROL_CHAR_RE.test(f),
+      !f.split('/').some((segment) => segment === '..' || segment.startsWith('-')),
   );
 }
 
@@ -565,8 +565,7 @@ async function runTestCommand(
 ): Promise<{ exitCode: number; command: string; output: string }> {
   const joined = cmd.args.join(' ');
   if (cmd.kind === 'ddev') {
-    // ddevExec splices this into a `bash -lc` in the runner, so each word is quoted. `ddev exec`
-    // without --raw still re-reads its words in the web container's bash; that shell is not covered.
+    // Quoted for the runner's bash -lc; filterTestFiles keeps paths plain for ddev exec's re-read.
     const quoted = cmd.args.map(shellQuote).join(' ');
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath!);
     // `onLine` switches ddevExec to its streaming path, so the caller can surface the
@@ -1037,7 +1036,9 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     let degradedNote: string | undefined;
 
     if (values.runTests !== false && changed) {
-      const targets = filterTestFiles([...acc.created, ...acc.updated]);
+      const reported = [...acc.created, ...acc.updated];
+      const targets = filterTestFiles(reported);
+      const dropped = new Set(reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)));
       const root = primaryFrameworkRoot(d);
       const buildOpts = { ddev: d.ddev, ddevPlaywrightAddon: d.ddevPlaywrightAddon, root };
       const cmd = buildSelectiveCommand(d.primary, targets, buildOpts);
@@ -1161,6 +1162,14 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
               `\n\n${listed.output}`;
           }
         }
+      }
+
+      if (dropped.size > 0) {
+        const note =
+          `${dropped.size} reported test file${dropped.size === 1 ? ' was' : 's were'} dropped ` +
+          'and did not run. A test path may hold only letters, digits and the characters ' +
+          '"._/@+-", must be relative, and may not have a ".." segment or one starting with "-".';
+        degradedNote = degradedNote === undefined ? note : `${note}\n\n${degradedNote}`;
       }
     }
 

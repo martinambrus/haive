@@ -831,12 +831,15 @@ describe('the ddev command a reported test path ends up in', () => {
     m.ensureAppServing.mockReset();
   });
 
-  /** The words bash makes of the string ddevExec was handed: the runner reads it with `bash -lc`. */
-  const bashWords = (sent: string): string[] => {
-    const out = execFileSync('bash', ['-c', `printf '%s\\0' ${sent}`], { cwd, encoding: 'utf8' });
-    const words = out.split(NUL);
+  const readWords = (script: string): string[] => {
+    const words = execFileSync('bash', ['-c', script], { cwd, encoding: 'utf8' }).split(NUL);
     return words.at(-1) === '' ? words.slice(0, -1) : words;
   };
+  /** The words bash makes of the string ddevExec was handed: the runner reads it with `bash -lc`. */
+  const bashWords = (sent: string): string[] => readWords(`printf '%s\\0' ${sent}`);
+  /** The words the web container's bash makes of those words once `ddev exec` joins them with spaces. */
+  const webWords = (words: string[]): string[] =>
+    readWords(`set -eu && ( printf '%s\\0' ${words.join(' ')} )`);
   const sentToRunner = (call = 0): string => m.ddevExec.mock.calls[call]![1] as string;
 
   const detected = (over: Record<string, unknown> = {}) => ({
@@ -862,14 +865,19 @@ describe('the ddev command a reported test path ends up in', () => {
   const apply = (
     reported: string[],
     over: Record<string, unknown> = {},
-    pass: { iteration?: number } = {},
+    pass: { iteration?: number; updated?: string[]; runTests?: boolean } = {},
   ) =>
     testManagementStep.apply(ctx, {
       detected: detected(over),
-      formValues: { action: 'manage', runTests: true },
+      formValues: { action: 'manage', runTests: pass.runTests ?? true },
       iteration: pass.iteration ?? 0,
       previousIterations: [],
-      llmOutput: { tests_created: reported, tests_updated: [], tests_deleted: [], notes: '' },
+      llmOutput: {
+        tests_created: reported,
+        tests_updated: pass.updated ?? [],
+        tests_deleted: [],
+        notes: '',
+      },
     } as never);
   const playwright = (root: string, addon = false) => ({
     primary: 'playwright',
@@ -878,84 +886,23 @@ describe('the ddev command a reported test path ends up in', () => {
     ddevPlaywrightAddon: addon,
   });
 
-  const HOSTILE: Array<[string, string]> = [
+  const REFUSED: Array<[string, string]> = [
     ['a command substitution', 'tests/$(id)Test.php'],
-    ['a space, a separator and a comment', 'tests/a b;echo x #Test.php'],
     ['a backtick substitution', 'tests/`echo hi`Test.php'],
     ['a single quote', "tests/it's'; echo pwned; 'Test.php"],
+    ['a space', 'tests/a bTest.php'],
+    ['a semicolon', 'tests/a;bTest.php'],
+    ['a space, a separator and a comment', 'tests/a b;echo x #Test.php'],
+    ['parentheses', 'tests/a(b)Test.php'],
     ['a glob', 'tests/*Test.php'],
     ['a variable', 'tests/${HOME}Test.php'],
     ['a tilde', '~/x.spec.ts'],
     ['a leading comment mark', '#tests/a.spec.ts'],
     ['a pipe, a redirect and a background mark', 'tests/a|b&c>d<eTest.php'],
-    ['parentheses', 'tests/a(b)Test.php'],
     ['a backslash', 'tests/a\\ bTest.php'],
-  ];
-
-  // The control: the check below has to be able to fail, or a green run proves nothing.
-  it('sees the words the runner would make of an unquoted path, and they are not the path', () => {
-    const args = ['exec', 'vendor/bin/phpunit', 'tests/a b;echo x #Test.php'];
-    expect(bashWords(args.join(' '))).not.toEqual(args);
-    expect(bashWords("'exec' 'tests/a b;echo x #Test.php'")).toEqual([
-      'exec',
-      'tests/a b;echo x #Test.php',
-    ]);
-  });
-
-  it.each(HOSTILE)('hands bash one word per path for a reported path with %s', async (_n, bad) => {
-    const reported = [bad, 'tests/BenignTest.php'];
-    await apply(reported);
-    const expected = buildSelectiveCommand('phpunit', filterTestFiles(reported), {
-      ddev: true,
-      ddevPlaywrightAddon: false,
-      root: '',
-    })!.args;
-    expect(expected).toContain(bad);
-    expect(m.ddevExec).toHaveBeenCalledTimes(1);
-    expect(bashWords(sentToRunner())).toEqual(expected);
-  });
-
-  it('records the command it ran, in the form that was run', async () => {
-    const out = await apply(['tests/a b;echo x #Test.php']);
-    expect(out.testRun?.command).toBe(`ddev ${sentToRunner()}`);
-  });
-
-  it('quotes the directory the runner moves into, which is named by the repository', async () => {
-    const root = "sub dir;echo 'x'";
-    const bad = `${root}/tests/a.spec.ts`;
-    await apply([bad], playwright(root));
-    const expected = buildSelectiveCommand('playwright', [bad], {
-      ddev: true,
-      ddevPlaywrightAddon: false,
-      root,
-    })!.args;
-    expect(expected).toContain(`/var/www/html/${root}`);
-    expect(bashWords(sentToRunner())).toEqual(expected);
-  });
-
-  it('quotes the words of the ddev playwright addon command', async () => {
-    const bad = 'tests/a b$(id).spec.ts';
-    await apply([bad], playwright('', true));
-    expect(bashWords(sentToRunner())).toEqual(['playwright', 'test', bad]);
-  });
-
-  it('quotes the enumerate-only command a failed run is followed by', async () => {
-    const bad = 'tests/a b;echo x #.spec.ts';
-    m.ddevExec
-      .mockResolvedValueOnce({ exitCode: 1, output: 'failed' })
-      .mockResolvedValueOnce({ exitCode: 0, output: 'listed' });
-    await apply([bad], playwright(''), { iteration: 1 });
-    const expected = buildCollectCommand('playwright', [bad], {
-      ddev: true,
-      ddevPlaywrightAddon: false,
-      root: '',
-    })!.args;
-    expect(m.ddevExec).toHaveBeenCalledTimes(2);
-    expect(expected).toContain('--list');
-    expect(bashWords(sentToRunner(1))).toEqual(expected);
-  });
-
-  const UNSAFE: Array<[string, string]> = [
+    ['a segment starting with a dash', 'tests/-x/a.spec.ts'],
+    ['a first segment starting with a dash', '-tests/a.spec.ts'],
+    ['a file name starting with two dashes', 'tests/--update-snapshots.spec.ts'],
     ['an absolute path', '/etc/cron.d/x.spec.ts'],
     ['a parent segment in the middle', 'tests/../../outside/x.spec.ts'],
     ['a leading parent segment', '../x.spec.ts'],
@@ -965,28 +912,153 @@ describe('the ddev command a reported test path ends up in', () => {
     ['a delete character', `tests/a${String.fromCharCode(127)}b.spec.ts`],
     ['a line-feed look-alike from the C1 range', `tests/a${String.fromCharCode(133)}b.spec.ts`],
   ];
+  const PLAIN = [
+    'tests/Unit/FooTest.php',
+    'src/a.spec.ts',
+    'web/modules/custom/x/tests/src/Kernel/BarTest.php',
+    'tests/test_feature.py',
+    '@scope/pkg/e2e/flow.test.js',
+    'tests/a+b_c-d.spec.ts',
+    'tests/a..b.spec.ts',
+    './tests/c.spec.ts',
+    'tests/..hidden/d.spec.ts',
+  ];
 
-  it.each(UNSAFE)('drops a reported path with %s', (_n, bad) => {
+  // The controls: the checks below have to be able to fail, or a green run proves nothing.
+  it('sees the words the runner would make of an unquoted path, and they are not the path', () => {
+    const args = ['exec', 'vendor/bin/phpunit', 'tests/a b;echo x #Test.php'];
+    expect(bashWords(args.join(' '))).not.toEqual(args);
+    expect(bashWords("'exec' 'tests/a b;echo x #Test.php'")).toEqual([
+      'exec',
+      'tests/a b;echo x #Test.php',
+    ]);
+  });
+
+  it('sees what the web container makes of syntax in a word, and it is not the word', () => {
+    expect(webWords(['tests/$(echo hi)Test.php'])).toEqual(['tests/hiTest.php']);
+  });
+
+  it.each(REFUSED)('drops a reported path with %s', (_n, bad) => {
     expect(filterTestFiles([bad, 'tests/ok.spec.ts'])).toEqual(['tests/ok.spec.ts']);
   });
 
-  it('keeps a name that merely contains two dots, and a leading ./', () => {
-    const kept = ['tests/a..b.spec.ts', './tests/c.spec.ts', 'tests/..hidden/d.spec.ts'];
-    expect(filterTestFiles(kept)).toEqual(kept);
+  it('keeps ordinary test paths, which both shells read as one word each', () => {
+    expect(filterTestFiles(PLAIN)).toEqual(PLAIN);
+    expect(bashWords(PLAIN.join(' '))).toEqual(PLAIN);
+    expect(webWords(PLAIN)).toEqual(PLAIN);
   });
 
-  it.each(UNSAFE)('builds no command from a reported path with %s', async (_n, bad) => {
-    const out = await apply([bad, 'tests/OkTest.php']);
-    expect(sentToRunner()).not.toContain(bad);
-    expect(sentToRunner()).toContain('tests/OkTest.php');
-    expect(out.testsCreated).toContain(bad);
+  it('keeps exactly the characters both shells read as part of a plain word', () => {
+    const codes = [...Array(256).keys(), 0x2028, 0x202e, 0xff0e, 0x1f600];
+    const pathWith = (code: number) => `tests/a${String.fromCodePoint(code)}bTest.php`;
+    const kept = codes.filter((code) => filterTestFiles([pathWith(code)]).length === 1);
+    expect(String.fromCodePoint(...kept)).toBe(
+      '+-./0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz',
+    );
+    const paths = kept.map(pathWith);
+    expect(bashWords(paths.join(' '))).toEqual(paths);
+    expect(webWords(paths)).toEqual(paths);
   });
 
-  it('runs nothing when every reported path was dropped', async () => {
-    const out = await apply(['/etc/x.spec.ts', 'tests/../x.spec.ts']);
+  it('hands bash the words of the command it built, one per argument, in both shells', async () => {
+    const reported = ['tests/Unit/FooTest.php', 'src/BarTest.php'];
+    await apply(reported);
+    const expected = buildSelectiveCommand('phpunit', reported, {
+      ddev: true,
+      ddevPlaywrightAddon: false,
+      root: '',
+    })!.args;
+    expect(m.ddevExec).toHaveBeenCalledTimes(1);
+    expect(bashWords(sentToRunner())).toEqual(expected);
+    expect(webWords(expected)).toEqual(expected);
+  });
+
+  it('records the command it ran, in the form that was run', async () => {
+    const out = await apply(['tests/Unit/FooTest.php']);
+    expect(out.testRun?.command).toBe(`ddev ${sentToRunner()}`);
+  });
+
+  it('quotes the words of the ddev playwright addon command', async () => {
+    await apply(['tests/a.spec.ts'], playwright('', true));
+    expect(bashWords(sentToRunner())).toEqual(['playwright', 'test', 'tests/a.spec.ts']);
+  });
+
+  it('quotes the enumerate-only command a failed run is followed by', async () => {
+    const files = ['tests/a.spec.ts'];
+    m.ddevExec
+      .mockResolvedValueOnce({ exitCode: 1, output: 'failed' })
+      .mockResolvedValueOnce({ exitCode: 0, output: 'listed' });
+    await apply(files, playwright(''), { iteration: 1 });
+    const expected = buildCollectCommand('playwright', files, {
+      ddev: true,
+      ddevPlaywrightAddon: false,
+      root: '',
+    })!.args;
+    expect(m.ddevExec).toHaveBeenCalledTimes(2);
+    expect(expected).toContain('--list');
+    expect(bashWords(sentToRunner(1))).toEqual(expected);
+  });
+
+  it.each(REFUSED)(
+    'builds no command from a reported path with %s, and says it did not run',
+    async (_n, bad) => {
+      const out = await apply([bad, 'tests/OkTest.php']);
+      expect(sentToRunner()).not.toContain(bad);
+      expect(sentToRunner()).toContain('tests/OkTest.php');
+      expect(out.testsCreated).toContain(bad);
+      expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
+    },
+  );
+
+  it('runs nothing when every reported path was dropped, and says so', async () => {
+    const out = await apply(['/etc/x.spec.ts', 'tests/../x.spec.ts', 'tests/a b.spec.ts']);
     expect(m.ddevExec).not.toHaveBeenCalled();
+    expect(out.testsPassed).toBeNull();
     expect(out.testRun?.output).toBe(
       'no runnable test files among the changes — selective run skipped',
     );
+    expect(out.degradedNote).toContain('3 reported test files were dropped and did not run');
+  });
+
+  it('notes a dropped file although the files that stayed ran and passed', async () => {
+    const out = await apply(['tests/a b.spec.ts', 'tests/OkTest.php']);
+    expect(out.testRun).toMatchObject({ ran: true, passed: true });
+    expect(out.testsPassed).toBe(true);
+    expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
+  });
+
+  it('puts the dropped files ahead of another reason the written tests did not run', async () => {
+    const out = await apply(['tests/a b.spec.ts', 'tests/OkTest.php'], { repoSubpath: null });
+    expect(m.ddevExec).not.toHaveBeenCalled();
+    expect(out.degradedNote).toMatch(/^1 reported test file was dropped and did not run\./);
+    expect(out.degradedNote).toContain('DDEV runner unavailable');
+  });
+
+  it('counts a dropped file once, however many times it was reported', async () => {
+    const out = await apply(
+      ['tests/a b.spec.ts', 'tests/c d.spec.ts', 'tests/OkTest.php'],
+      {},
+      { updated: ['tests/a b.spec.ts'] },
+    );
+    expect(out.degradedNote).toContain('2 reported test files were dropped and did not run');
+  });
+
+  it('does not count a reported file that was never a test file', async () => {
+    const out = await apply(['tests/fixtures/a b.json', 'tests/helpers/login helper.ts']);
+    expect(out.testRun?.output).toBe(
+      'no runnable test files among the changes — selective run skipped',
+    );
+    expect('degradedNote' in out).toBe(false);
+  });
+
+  it('adds no note when nothing was dropped', async () => {
+    const out = await apply(['tests/OkTest.php']);
+    expect('degradedNote' in out).toBe(false);
+  });
+
+  it('adds no note when the user asked for the tests not to run', async () => {
+    const out = await apply(['tests/a b.spec.ts'], {}, { runTests: false });
+    expect(m.ddevExec).not.toHaveBeenCalled();
+    expect('degradedNote' in out).toBe(false);
   });
 });
