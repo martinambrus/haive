@@ -291,6 +291,11 @@ function pgTextArrayLiteral(values: string[]): string {
   return `{${escaped.join(',')}}`;
 }
 
+/** The float8[] twin of `pgTextArrayLiteral`, bound and cast the same way. */
+function pgFloatArrayLiteral(values: number[]): string {
+  return `{${values.join(',')}}`;
+}
+
 /** Namespace + per-dimension facet predicate shared by the dense and lexical
  *  candidate CTEs, plus its positional params beginning at `$startIdx`. The same
  *  param indexes are referenced from both CTEs (Postgres allows reuse). */
@@ -350,7 +355,7 @@ async function identifierIdfs(
              (SELECT total FROM n) AS total
         FROM unnest($1::text[]) AS t(term)
       `,
-      [terms, ...(fc?.params ?? []), ...(repositoryId ? [repositoryId] : [])],
+      [pgTextArrayLiteral(terms), ...(fc?.params ?? []), ...(repositoryId ? [repositoryId] : [])],
     )) as unknown as Array<{ term: string; df: number | string; total: number | string }>;
     const byTerm = new Map(rows.map((r) => [r.term, { df: num(r.df), total: num(r.total) }]));
     return terms.map((t) => {
@@ -539,7 +544,9 @@ export async function ragHybridSearch(
       ...(fc?.params ?? []),
       cfg.runbookBoost,
       ...(repositoryId ? [repositoryId] : []),
-      ...(useIdent ? [identTerms, identIdfs, identQuery as string] : []),
+      ...(useIdent
+        ? [pgTextArrayLiteral(identTerms), pgFloatArrayLiteral(identIdfs), identQuery as string]
+        : []),
     ];
     rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
   } else {

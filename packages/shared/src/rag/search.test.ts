@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_RAG_SEARCH_CONFIG, applyKnowledgeReserve, type RagSearchHit } from './search.js';
+import type { RagConnection } from './connection.js';
+import {
+  DEFAULT_RAG_SEARCH_CONFIG,
+  applyKnowledgeReserve,
+  ragHybridSearch,
+  type RagSearchHit,
+} from './search.js';
 
 const OPTS = {
   topK: 8,
@@ -164,5 +170,61 @@ describe('applyKnowledgeReserve', () => {
 
   it('returns nothing for a non-positive topK', () => {
     expect(applyKnowledgeReserve([hit('code', 0.5)], { ...OPTS, topK: 0 })).toEqual([]);
+  });
+});
+
+/** Keeps every statement with its parameters, and answers the identifier statistics so the ranker runs. */
+function recordingConn(): {
+  conn: RagConnection;
+  calls: Array<{ statement: string; params: unknown[] }>;
+} {
+  const calls: Array<{ statement: string; params: unknown[] }> = [];
+  const pg = {
+    unsafe: async (statement: string, params: unknown[] = []) => {
+      calls.push({ statement, params });
+      if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+      if (statement.includes('AS t(term)')) return [{ term: 'getuserbyid', df: 1, total: 10 }];
+      return [];
+    },
+  };
+  return {
+    conn: { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never,
+    calls,
+  };
+}
+
+describe('ragHybridSearch parameters', () => {
+  const QUERY = 'getUserById validation';
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
+
+  it.each([
+    ['a facet filter, the global KB', FILTER, undefined],
+    ['a repository scope', undefined, 'repo-1'],
+  ])(
+    'binds no JS array, which a connection that fetched no array types cannot send: %s',
+    async (_scope, filter, repositoryId) => {
+      const { conn, calls } = recordingConn();
+
+      await ragHybridSearch(conn, VEC, QUERY, {}, filter, repositoryId);
+
+      expect(calls.some((c) => c.statement.includes('ident AS ('))).toBe(true);
+      expect(calls.flatMap((c) => c.params).filter(Array.isArray)).toEqual([]);
+    },
+  );
+
+  it('binds the identifier terms and their weights as array literals', async () => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, QUERY, {}, FILTER);
+
+    const stats = calls.find((c) => c.statement.includes('AS t(term)'))!;
+    expect(stats.params[0]).toBe('{"getuserbyid"}');
+    const main = calls.find((c) => c.statement.includes('ident AS ('))!;
+    expect(main.params.slice(-3)).toEqual([
+      '{"getuserbyid"}',
+      `{${Math.log(10)}}`,
+      "'getuserbyid'",
+    ]);
   });
 });
