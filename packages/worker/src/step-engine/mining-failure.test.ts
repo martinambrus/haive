@@ -180,6 +180,17 @@ describe('shouldRetryMiningTerminalFailure', () => {
     }
   });
 
+  it('retries a truncation whose partial reply discusses cancellation or a fatal error', () => {
+    for (const prose of ['the task cancelled branch never runs', 'HTTP 401 Unauthorized here']) {
+      expect(
+        shouldRetryMiningTerminalFailure({
+          ...failed('a', `${OUTPUT_TRUNCATION_HEADLINE} — cut off`),
+          rawOutput: prose,
+        }),
+      ).toBe(true);
+    }
+  });
+
   it('does not retry a capability or truncation headline a cancel also names', () => {
     expect(
       shouldRetryMiningTerminalFailure(
