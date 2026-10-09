@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -195,6 +195,79 @@ describe('classifyDrift', () => {
   });
 });
 
+// The database block of .ddev/config.yaml is repository text that ends up in a command line.
+describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => {
+  const classify = (over: Partial<DdevConfigFields>) =>
+    classifyDrift(baseline(), target(over), HASH_B);
+
+  it.each([
+    ['mariadb', '10.11'],
+    ['mysql', '8.0'],
+    ['mysql', '5.7'],
+    ['mariadb', '10.6.12'],
+    ['mariadb', '11'],
+  ])('plans a migration to %s:%s', (dbType, dbVersion) => {
+    expect(classify({ dbType, dbVersion })).toEqual({
+      kind: 'db-migrate',
+      migrateTarget: `${dbType}:${dbVersion}`,
+      unsupportedReason: null,
+    });
+  });
+
+  it.each([
+    ['mariadb', '10.11; id'],
+    ['mysql', '$(id)'],
+    ['mysql', '8.0 x'],
+    ['mariadb', '`id`'],
+    ['mariadb', "10.11'"],
+    ['mariadb', '10.11 # comment'],
+    ['mariadb', "'10.11'"],
+    ['mariadb', '10.'],
+    ['mariadb', '.5'],
+    ['mariadb', '10..11'],
+    ['mysql', 'v8'],
+    ['mysql', '8.0-beta'],
+    ['mysql', '١٠'],
+  ])('refuses %s:%s and names database.version', (dbType, dbVersion) => {
+    const r = classify({ dbType, dbVersion });
+    expect(r.kind).toBe('unsupported');
+    expect(r.migrateTarget).toBeNull();
+    expect(r.unsupportedReason).toContain('database.version');
+  });
+
+  it.each([
+    ['mariadb; id', '10.11'],
+    ['mysql$(id)', '8.0'],
+    ['mariadb x', '10.11'],
+    ['sqlite', '3'],
+    ['mongodb', '4'],
+    ['MariaDB', '10.11'],
+  ])('refuses %s:%s and names database.type', (dbType, dbVersion) => {
+    const r = classify({ dbType, dbVersion });
+    expect(r.kind).toBe('unsupported');
+    expect(r.migrateTarget).toBeNull();
+    expect(r.unsupportedReason).toContain('database.type');
+  });
+
+  it('leaves the repository text out of the reason', () => {
+    const r = classify({ dbType: 'mysql', dbVersion: '$(id)' });
+    expect(r.unsupportedReason).not.toContain('$(id)');
+  });
+
+  it('keeps its own reason for a PostgreSQL target', () => {
+    const r = classify({ dbType: 'postgres', dbVersion: '16; id' });
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+  });
+
+  it('does not look at a database block that did not change', () => {
+    const same = { dbType: 'mysql; id', dbVersion: '8.0 x' };
+    const r = classifyDrift(baseline(same), target(same), HASH_B);
+    expect(r.kind).toBe('restart');
+    expect(r.migrateTarget).toBeNull();
+  });
+});
+
 describe('parseDdevProjectListForApproot (Slice C name-drift detection)', () => {
   // The registry retains the OLD name (rs-ollama9) after the config was renamed to calypso —
   // exactly the drift that must trigger a rename. Mirrors a real ~/.ddev/project_list.yaml.
@@ -345,5 +418,61 @@ describe('07c-ddev-reconcile apply: a database migration that fails', () => {
         `${RESTORE}): ${DDEV_OUTPUT}\n\n${LOGS}`,
     );
     expect((ddevReconcileStep.fixLoopOnError as (m: string) => boolean)(err.message)).toBe(true);
+  });
+});
+
+describe('07c-ddev-reconcile: a database block whose version is shell syntax', () => {
+  let workspace = '';
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-syntax-'));
+    await mkdir(path.join(workspace, '.ddev'));
+    await writeFile(
+      path.join(workspace, '.ddev/config.yaml'),
+      'name: app\ndatabase:\n  type: mariadb\n  version: "10.11; id"\n',
+    );
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+
+  beforeEach(() => {
+    m.ensureDdevWithProgress.mockClear();
+    m.ddevSnapshot.mockClear();
+    m.ddevMigrateDatabase.mockClear();
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({
+      output: {
+        baseline: { phpVersion: '8.1', dbType: 'mariadb', dbVersion: '10.4', configHash: 'h0' },
+      },
+    });
+    m.hashDdevInputs.mockResolvedValue('h1');
+  });
+
+  it('is unsupported at detect, with no migrate target and no form', async () => {
+    const detected = await ddevReconcileStep.detect!(ctx);
+    expect(detected).toMatchObject({ driftKind: 'unsupported', migrateTarget: null });
+    expect(detected.unsupportedReason).toContain('database.version');
+    expect(ddevReconcileStep.form!(undefined as never, detected)).toBeNull();
+  });
+
+  it('stops at apply with a reason naming the field, before the runner is touched', async () => {
+    await expect(
+      ddevReconcileStep.apply(ctx, { formValues: { confirmDbMigration: true } } as never),
+    ).rejects.toThrow(/database\.version/);
+    expect(m.ensureDdevWithProgress).not.toHaveBeenCalled();
+    expect(m.ddevSnapshot).not.toHaveBeenCalled();
+    expect(m.ddevMigrateDatabase).not.toHaveBeenCalled();
   });
 });

@@ -74,6 +74,17 @@ function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
   return { anchor, rel: `${prefix}.ddev/config.yaml` };
 }
 
+/** The database field migrate-database cannot take: its target reaches the runner's shell. */
+function refusedMigrateField(target: DdevConfigFields): string | null {
+  if (target.dbType !== 'mysql' && target.dbType !== 'mariadb') {
+    return 'database.type must be mysql or mariadb';
+  }
+  if (!/^\d+(\.\d+)*$/.test(target.dbVersion ?? '')) {
+    return 'database.version must be digits and dots, such as 10.11';
+  }
+  return null;
+}
+
 /** Classify config drift between the booted baseline and the on-disk target.
  *  DB type/version change wins (it needs a migration, not a restart). `ddev
  *  migrate-database` is MySQL/MariaDB only; a null baseline db type means the
@@ -98,6 +109,16 @@ export function classifyDrift(
         unsupportedReason:
           `Automatic database change ${baseDb ?? '(default)'} -> ${targetDb} is not supported ` +
           `(ddev migrate-database handles MySQL/MariaDB only, not PostgreSQL). ` +
+          `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
+      };
+    }
+    const refused = refusedMigrateField(target);
+    if (refused) {
+      return {
+        kind: 'unsupported',
+        migrateTarget: null,
+        unsupportedReason:
+          `Automatic database change is not supported: .ddev/config.yaml ${refused}. ` +
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }

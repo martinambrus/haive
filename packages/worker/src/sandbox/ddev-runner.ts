@@ -65,6 +65,7 @@ import { runnerSubpathVerdict } from './app-runner.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
+import { shellQuote } from './shell-quote.js';
 import {
   DdevBootAbortedError,
   DdevBoots,
@@ -1867,7 +1868,7 @@ export async function ddevMigrateDatabase(
   target: string,
   opts: { onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  return ddevExec(handle, `utility migrate-database ${target}`, {
+  return ddevExec(handle, `utility migrate-database ${shellQuote(target)}`, {
     timeoutMs: 1_800_000,
     onLine: opts.onLine,
   });
