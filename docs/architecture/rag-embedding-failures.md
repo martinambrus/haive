@@ -130,7 +130,10 @@ and 0.0000 with it off. The api reaches that branch by two routes and both skip 
 than hashing one: the repo flag, and `embedQueryOrNull` returning null for a single query that could
 not be embedded or came back at the wrong width (a model or dimension change reached pgvector as
 SQLSTATE 22000, a 500). The global half of `rag_search`, global KB promotion
-(`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null the same way.
+(`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null the same way. The
+global half embeds before it opens the store, so the embed stays outside the store's deadline, and
+opens it with the settings it embedded with (`GlobalKbCallOptions.settings`): a model or store
+switched in between never meets a vector made for the other.
 `embedQuery` keeps its hash fallback for callers that must have a vector of the right width. The
 lexical-only branch has no identifier ranker, so a degraded search also loses identifier matches
 (MEASURED: an article naming `getUserById` ranks 2nd with a vector and drops out without one). Both
