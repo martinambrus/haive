@@ -1974,6 +1974,68 @@ export async function ingestAdvisor(
   return 'retry';
 }
 
+/** Re-sends a fix coder the advisor's retry started (it carries a dag_agent_runs row, a level coder
+ *  does not) as a fix coder again, with the advisor's retry_context and the stored findings. */
+async function redispatchFixCoder(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  failedRun: typeof schema.dagAgentRuns.$inferSelect,
+  failedInv: typeof schema.cliInvocations.$inferSelect,
+  charged: boolean,
+  afterTruncation: boolean,
+): Promise<void> {
+  const note = (issue.retryContext as { note?: unknown } | null)?.note;
+  const invId = await spawnReviewAgent(
+    ra,
+    issue,
+    'coder',
+    issue.innerIteration,
+    fixCoderPrompt(
+      issue,
+      [{ retry_context: typeof note === 'string' ? note : '', findings: issue.reviewerVerdict }],
+      (await issueSpecText(ra.specView, issue)).text,
+    ),
+    ['tool_use', 'file_write'],
+    async (id) => {
+      await ra.db
+        .update(schema.taskDagIssues)
+        .set({
+          outcome: 'running',
+          cliInvocationId: id,
+          infraRetries: issue.infraRetries + (charged ? 1 : 0),
+          concerns: null,
+          errorMessage: null,
+          rawOutput: null,
+          startedAt: new Date(),
+          endedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+      await ra.db
+        .update(schema.dagAgentRuns)
+        .set({
+          status: 'done',
+          consumedAt: new Date(),
+          endedAt: new Date(),
+          rawOutput: failedInv.rawOutput ?? null,
+        })
+        .where(eq(schema.dagAgentRuns.id, failedRun.id));
+    },
+    afterTruncation,
+  );
+  if (!invId) {
+    await ra.db
+      .update(schema.taskDagIssues)
+      .set({
+        outcome: 'failed_unrecoverable',
+        errorMessage: 'no cli provider available for the fix coder re-dispatch',
+        endedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskDagIssues.id, issue.id));
+  }
+}
+
 async function spawnReplanner(
   ea: EscalationArgs,
   failed: DagIssueRow[],
@@ -2604,20 +2666,56 @@ export async function resolveDagPhase(
             (cls === 'transient' && (free || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) ||
             (cls === 'truncated' && truncationRetryable(inv))
           ) {
-            await db
-              .update(schema.taskDagIssues)
-              .set({
-                outcome: 'pending',
-                cliInvocationId: null,
-                infraRetries: issue.infraRetries + (free || cls === 'truncated' ? 0 : 1),
-                concerns: null,
-                errorMessage: cls === 'truncated' ? inv.errorMessage : null,
-                rawOutput: null,
-                startedAt: null,
-                endedAt: null,
-                updatedAt: new Date(),
-              })
-              .where(eq(schema.taskDagIssues.id, issue.id));
+            // An advisor retry's fix coder has an agent-run row; step (B) would re-send it as a level coder.
+            const [fixRun] = await db
+              .select()
+              .from(schema.dagAgentRuns)
+              .where(
+                and(
+                  eq(schema.dagAgentRuns.dagIssueId, issue.id),
+                  eq(schema.dagAgentRuns.role, 'coder'),
+                  eq(schema.dagAgentRuns.cliInvocationId, inv.id),
+                ),
+              )
+              .limit(1);
+            if (fixRun) {
+              await ensureArchivesExpanded(db, ctx.taskId);
+              await redispatchFixCoder(
+                {
+                  db,
+                  issues,
+                  level: curLevel,
+                  current,
+                  params,
+                  stepDef,
+                  providers,
+                  deps,
+                  taskId: ctx.taskId,
+                  specView: await resolveSpecView(ctx),
+                  attachmentsNotice: await augmentPromptWithAttachments(db, ctx.taskId, ''),
+                },
+                issue,
+                fixRun,
+                inv,
+                !(free || cls === 'truncated'),
+                cls === 'truncated',
+              );
+            } else {
+              await db
+                .update(schema.taskDagIssues)
+                .set({
+                  outcome: 'pending',
+                  cliInvocationId: null,
+                  infraRetries: issue.infraRetries + (free || cls === 'truncated' ? 0 : 1),
+                  concerns: null,
+                  errorMessage: cls === 'truncated' ? inv.errorMessage : null,
+                  rawOutput: null,
+                  startedAt: null,
+                  endedAt: null,
+                  updatedAt: new Date(),
+                })
+                .where(eq(schema.taskDagIssues.id, issue.id));
+            }
             await db
               .update(schema.cliInvocations)
               .set({ consumedAt: new Date() })
