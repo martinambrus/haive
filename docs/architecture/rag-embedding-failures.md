@@ -123,18 +123,26 @@ the flag. A failed or hashed check retains degradation and the step warning; a h
 check permits recovery without requiring a source edit.
 
 **`rag_embed_lexical_only` is the accepted verdict, and it is NOT "keep hashing".** It forces
-`ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes),
-so an accepted repo gets honest full-text ranking instead of full-text plus noise — VERIFIED
-on a live 9,197-row index: the same query returns 5 hits either way, `maxDense` 0.7233 with
-the dense half on and 0.0000 with it off. The api reaches that branch by two routes and both
-skip the vector rather than hashing one: the repo flag, and `embedQueryOrNull` returning null
-for a single query that could not be embedded or came back at the wrong width (a model or
-dimension change reached pgvector as SQLSTATE 22000, a 500). The global half of `rag_search`,
-global KB promotion (`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null
-the same way. `embedQuery` keeps its hash fallback for callers that must have a vector of the
-right width. The lexical-only branch has no identifier ranker, so a degraded search also loses
-identifier matches (MEASURED: an article naming `getUserById` ranks 2nd with a vector and drops
-out without one).
+`ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes), so an
+accepted repo gets honest full-text ranking instead of full-text plus noise — VERIFIED on a live
+9,197-row index: the same query returns 5 hits either way, `maxDense` 0.7233 with the dense half on
+and 0.0000 with it off. The api reaches that branch by two routes and both skip the vector rather
+than hashing one: the repo flag, and `embedQueryOrNull` returning null for a single query that could
+not be embedded or came back at the wrong width (a model or dimension change reached pgvector as
+SQLSTATE 22000, a 500). The global half of `rag_search`, global KB promotion
+(`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null the same way.
+`embedQuery` keeps its hash fallback for callers that must have a vector of the right width. The
+lexical-only branch has no identifier ranker, so a degraded search also loses identifier matches
+(MEASURED: an article naming `getUserById` ranks 2nd with a vector and drops out without one). Both
+halves of `rag_search` run their search in a transaction for the server-side statement bound, so the
+identifier-statistics query runs in a SAVEPOINT: its failure costs only the identifier ranker, never
+the whole search (MEASURED: an injected failure answered 500 locally until the savepoint). The local
+half takes the same bounds as the global one: 3 s to connect, 3 s per statement, a 6 s deadline that
+destroys the pool, and a failure answers the loud local 500 rather than holding the request (a
+silent store held it the full 30 s connect default). Forcing a re-embed (`tooling-upgrades.ts`) gets
+the connect bound only: resetting the hashes of a large store legitimately takes seconds (MEASURED
+9.4-11.3 s for 4,000 chunks, the content trigger re-running on each row), so a 3 s statement bound
+would fail every healthy store past about 1,000 chunks.
 
 Recovery re-embeds only where hash rows can actually exist — leaving lexical-only mode, or
 the explicit Rebuild action for a repo indexed before this existed (those carry no
