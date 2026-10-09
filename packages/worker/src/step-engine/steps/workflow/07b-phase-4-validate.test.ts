@@ -1736,3 +1736,84 @@ describe('phase4ValidateStep: the severity of an issue that names an enforced ru
     },
   );
 });
+
+describe('phase4ValidateStep.apply: the report it keeps of the validator reply', () => {
+  const CAP = 16_000;
+  const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
+  const FIRST = '## Validation report: FIRST LINE';
+  const LAST = 'LAST LINE: nothing else to report';
+  const prose = (chars: number): string => {
+    const lines = [FIRST];
+    let size = FIRST.length + LAST.length + 2;
+    while (size < chars) {
+      const line = `${lines.length}. requirement ${lines.length} is met by src/app.ts:${lines.length}`;
+      lines.push(line);
+      size += line.length + 1;
+    }
+    return [...lines, LAST].join('\n');
+  };
+  const keptOf = async (output: unknown) => (await runApply(ruleWorld({}).ctx, output)).report;
+
+  it('keeps the first and the last line of a reply over the cap, and says what it left out', async () => {
+    const text = prose(40_000);
+    expect(text.length).toBeGreaterThanOrEqual(40_000);
+    const out = await runApply(ruleWorld({}).ctx, text);
+    expect(out.verdict).toBe('UNPARSEABLE');
+    const lines = out.report.split('\n');
+    expect(lines[0]).toBe(FIRST);
+    expect(lines.at(-1)).toBe(LAST);
+    expect(out.report).toMatch(OMISSION);
+    expect(out.report.length).toBeLessThanOrEqual(CAP + 100);
+  });
+
+  it('keeps the start of a reply over the cap and the verdict block that ends it, whole', async () => {
+    const verdict = reply({ verdict: 'VALID' });
+    const out = await runApply(ruleWorld({}).ctx, `${prose(40_000)}\n${verdict}`);
+    expect(out.source).toBe('validator');
+    expect(out.report.startsWith(`${FIRST}\n`)).toBe(true);
+    expect(out.report.endsWith(`${LAST}\n${verdict}`)).toBe(true);
+    expect(out.report).toMatch(OMISSION);
+  });
+
+  it('cuts a reply only once it is over the cap', async () => {
+    const text = prose(CAP + 500);
+    expect(await keptOf(text.slice(0, CAP))).toBe(text.slice(0, CAP));
+    const over = await keptOf(text.slice(0, CAP + 1));
+    expect(over).toMatch(OMISSION);
+    expect(over.length).toBeLessThanOrEqual(CAP + 100);
+  });
+
+  it.each([
+    ['plain text', 5_000],
+    ['text of exactly the cap', CAP],
+  ])('stores %s as it came', async (_name, chars) => {
+    const text = prose(chars + 100).slice(0, chars);
+    expect(text).toHaveLength(chars);
+    expect(await keptOf(text)).toBe(text);
+  });
+
+  it('stores a reply under the cap byte for byte: trailing blanks, blank runs and escape codes stay', async () => {
+    const red = `${String.fromCharCode(27)}[31mfailed${String.fromCharCode(27)}[0m`;
+    const text = `\n  ${FIRST}  \n\n\n\n${red}\t \nrow\t\n${LAST}\n\n`;
+    expect(await keptOf(text)).toBe(text);
+  });
+
+  it('stores an output that is not text as its JSON', async () => {
+    const stub = { verdict: 'VALID', summary: 'bypass stub', issues: [], dimensions: [] };
+    expect(await keptOf(stub)).toBe(JSON.stringify(stub));
+  });
+
+  it('has a fixer pass carry the report of the validator pass as stored', async () => {
+    const text = `${prose(40_000)}\n${reply()}`;
+    const w = ruleWorld({});
+    const validated = await runApply(w.ctx, text);
+    expect(validated.source).toBe('validator');
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, validated)],
+    });
+    expect(fixed.source).toBe('fixer');
+    expect(fixed.report).toBe(validated.report);
+    expect(fixed.report.endsWith(reply())).toBe(true);
+  });
+});

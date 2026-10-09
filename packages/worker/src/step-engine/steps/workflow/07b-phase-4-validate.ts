@@ -34,6 +34,7 @@ import {
 import { loadTaskMeta } from './_task-meta.js';
 import {
   ROOT_CAUSE_LINES,
+  excerptDiagnosis,
   loadHonoredConstraints,
   normalizeIssueFile,
   repeatedFlagLines,
@@ -180,7 +181,7 @@ interface ValidateApply {
   /** Bullet-point markdown of the run's outcome (verdict + all fixes applied across
    *  iterations + any remaining issues), shown read-only on the done card. */
   findingsSummary: string;
-  /** Tail of the latest validator pass's raw output (the markdown report). */
+  /** The latest validator pass's raw output (the report); over REPORT_CAP, its start and end. */
   report: string;
   validatorPasses: number;
   source: 'validator' | 'fixer' | 'stub';
@@ -1016,10 +1017,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     }
 
     // Validator pass.
-    const report =
-      typeof args.llmOutput === 'string'
-        ? args.llmOutput.slice(-REPORT_CAP)
-        : JSON.stringify(args.llmOutput ?? '').slice(-REPORT_CAP);
+    const reply =
+      typeof args.llmOutput === 'string' ? args.llmOutput : JSON.stringify(args.llmOutput ?? '');
+    const report = reply.length > REPORT_CAP ? excerptDiagnosis(reply, REPORT_CAP, false) : reply;
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;

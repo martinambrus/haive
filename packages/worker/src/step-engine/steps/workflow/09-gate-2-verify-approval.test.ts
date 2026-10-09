@@ -54,6 +54,7 @@ import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { formatQaFixDiagnosis } from './08d2-adversarial-qa-review.js';
 import { buildGateDirectiveDiagnosis } from './_fix-loop.js';
+import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
 describe('gate-2 restartLoop diagnosis', () => {
@@ -1191,6 +1192,122 @@ describe('gate-2 verification results read from 08', () => {
       { label: 'Typecheck', status: 'pass' },
     ]);
     expect(schema.fields.find((f) => f.id === 'decision')).toMatchObject({ default: 'approve' });
+  });
+});
+
+describe('gate-2 shows a long validator report from both ends', () => {
+  const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
+  const HEADING = '## Validator report (excerpt)';
+  const FIRST = '## Validation report: FIRST LINE';
+  const LAST = 'LAST LINE: nothing else to report';
+  const prose = (chars: number): string => {
+    const lines = [FIRST];
+    let size = FIRST.length + LAST.length + 2;
+    while (size < chars) {
+      const line = `${lines.length}. requirement ${lines.length} is met by src/app.ts:${lines.length}`;
+      lines.push(line);
+      size += line.length + 1;
+    }
+    return [...lines, LAST].join('\n');
+  };
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/repos/u/r',
+    round: 0,
+    db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.hasWorkspaceEntry.mockReset().mockResolvedValue(false);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
+    m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+    m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  async function shown(report: string | undefined) {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '07b-phase-4-validate'
+        ? {
+            output: {
+              verdict: 'ISSUES_FOUND',
+              summary: 'two problems',
+              issues: [],
+              dimensions: [],
+              ...(report === undefined ? {} : { report }),
+            },
+            iterations: [],
+          }
+        : null,
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const row = (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).find(
+      (r) => r.label === 'Implementation validation',
+    );
+    return { excerpt: detected.validation?.report ?? '', body: row?.body ?? '' };
+  }
+
+  it('shows the first and the last line of a report over its limit, and says what it left out', async () => {
+    const { excerpt, body } = await shown(prose(12_000));
+    const lines = excerpt.split('\n');
+    expect(lines[0]).toBe(FIRST);
+    expect(lines.at(-1)).toBe(LAST);
+    expect(excerpt).toMatch(OMISSION);
+    expect(excerpt.length).toBeLessThanOrEqual(8_000 + 100);
+    expect(body.endsWith(`${HEADING}\n\n${excerpt}`)).toBe(true);
+  });
+
+  it('shows both ends of what 07b keeps of a reply of 40,000 characters', async () => {
+    const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+    const { report } = await phase4ValidateStep.apply(
+      { logger: quiet } as never,
+      {
+        detected: {},
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: prose(40_000),
+      } as never,
+    );
+    const { excerpt, body } = await shown(report);
+    const lines = excerpt.split('\n');
+    expect(lines[0]).toBe(FIRST);
+    expect(lines.at(-1)).toBe(LAST);
+    expect(excerpt).toMatch(OMISSION);
+    expect(excerpt.length).toBeLessThanOrEqual(8_000 + 100);
+    expect(body).toContain(`${HEADING}\n\n${FIRST}\n`);
+  });
+
+  it('cuts a report only once it is over its limit', async () => {
+    const text = prose(8_500);
+    expect((await shown(text.slice(0, 8_000))).excerpt).toBe(text.slice(0, 8_000));
+    expect((await shown(text.slice(0, 8_001))).excerpt).toMatch(OMISSION);
+  });
+
+  it.each([
+    ['5,000 characters', 5_000],
+    ['8,000 characters', 8_000],
+  ])('shows a report of %s as stored', async (_name, chars) => {
+    const stored = prose(chars + 100).slice(0, chars);
+    const { excerpt, body } = await shown(stored);
+    expect(excerpt).toBe(stored);
+    expect(body.endsWith(`${HEADING}\n\n${stored}`)).toBe(true);
+  });
+
+  it('shows a report within its limit byte for byte: trailing blanks, blank runs and escape codes stay', async () => {
+    const red = `${String.fromCharCode(27)}[31mfailed${String.fromCharCode(27)}[0m`;
+    const stored = `\n  ${FIRST}  \n\n\n\n${red}\t \nrow\t\n${LAST}\n\n`;
+    expect((await shown(stored)).excerpt).toBe(stored);
+  });
+
+  it('has no report section when 07b stored none', async () => {
+    const { excerpt, body } = await shown(undefined);
+    expect(excerpt).toBe('');
+    expect(body).not.toContain(HEADING);
   });
 });
 

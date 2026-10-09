@@ -14,6 +14,7 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
+import { excerptDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -372,6 +373,15 @@ interface Phase4Output {
   churnFiles?: string[];
 }
 
+const REPORT_EXCERPT_CHARS = 8000;
+
+// A report opens with its findings and ends with its verdict block, so a cut keeps both ends.
+function reportExcerpt(report: string): string {
+  return report.length > REPORT_EXCERPT_CHARS
+    ? excerptDiagnosis(report, REPORT_EXCERPT_CHARS, false)
+    : report;
+}
+
 interface VerifyGateApply {
   decision: 'approve' | 'reject';
   feedback: string;
@@ -553,7 +563,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
         converged: p4.converged !== false,
         churnFiles: p4.churnFiles ?? [],
-        report: (p4.report ?? '').slice(0, 8000),
+        report: reportExcerpt(p4.report ?? ''),
       };
     }
 
