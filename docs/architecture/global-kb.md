@@ -155,16 +155,25 @@ cover what a task removes or moves out. A DAG coder also matches its issue's `es
 glob with no `/` matches a file name at any depth, as in a gitignore (picomatch `basename`), and
 `dot: true` as secret masking uses it. A change that cannot be read (a git read unanswered after
 30 s counts) puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement
-nobody made.
-One 07 round 0 dispatch never gets a `files` rule, since nothing is written yet; similarity
-(PR7) is for that. Each prompt spends at most 16,384 bytes on the block, markers, framing and
-notice included. Rules are kept first-fit: `always` rules first, oldest approval first (a set within
-the api's 8,000-byte cap always fits, so only an external store's writers can push one out), then
-`files` rules, written-file matches before estimate-only ones and smaller before larger. What is
-left out is named inside the block (up to 8 titles and a count) and in the stamp; when everything
-is left out the block is the framing and that notice alone. Off, not opted in, or nothing in scope,
-the prompt is byte-identical to one without house rules: MEASURED on 23 dispatches against main's
-prompts (`t6/harness`, H1, H4, H5).
+nobody made. A writer's first dispatch has an empty change, so a write-mode dispatch that is not a
+DAG coder also matches the paths the task NAMES (`named-files.ts`): its title, description and
+freshest spec (the highest round, then 05a, 05, 04; never `resolveApprovedSpec`, which takes each
+step's latest round apart), read as backtick spans, markdown link targets and bare tokens with a `/`
+or an extension (letters of any script; a `#anchor` after a file name dropped), glob characters
+refused, and parentheses only as a whole segment such as a route group `(app)` (a call like
+`require(a/b.inc` is no name: 46 such tokens in the install's specs), each resolved to the one
+tracked file it ends on a `/` boundary (one `git ls-files -z`), else kept as written, since a named
+file may not exist yet. MEASURED on a live quick_bugfix: 07 round 0 stamped `filesRulesUnmatched:
+1`, wrote the inline `<svg>` the rule forbids, and its description named both files it then wrote. A
+DAG coder keeps its issue's own estimate: task-wide names gave 65 selections over 29 coders, 4 of
+them relevant. Each prompt spends at most 16,384 bytes on the block, markers, framing and notice
+included. Rules are kept first-fit: `always` rules first, oldest approval first (a set within the
+api's 8,000-byte cap always fits, so only an external store's writers can push one out), then
+`files` rules, written-file matches before estimate-only and named-path ones and smaller before
+larger. What is left out is named inside the block (up to 8 titles and a count) and in the stamp;
+when everything is left out the block is the framing and that notice alone. Off, not opted in, or
+nothing in scope, the prompt is byte-identical to one without house rules: MEASURED on 23 dispatches
+against main's prompts (`t6/harness`, H1, H4, H5).
 
 **One bounded read per dispatch** (`resolveGlobalKbContext`) replaces the title digest's own read:
 the digest and the enforced rows come from one connection with a 3 s connect timeout, a 3 s
@@ -188,9 +197,9 @@ every other caller awaiting it would inherit.
 with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],
 omitted: [{id, hash, title, why: 'budget' | 'refused'}], reason?, errorClass?,
 filesRulesUnmatched?}`, where `why` is
-`{scope: 'always'}` or `{scope: 'files', glob}`. `reason` is `switched_off`, `unavailable` or
-`too_large`; `filesRulesUnmatched` counts the project's `files` rules that matched nothing yet
-(absent when 0). NULL means the run was not opted in or predates the column. `stripHaivePreamble`
+`{scope: 'always'}` or `{scope: 'files', glob, via?}`, `via: 'named'` when only a named path
+selected the rule. `reason` is `switched_off`, `unavailable` or `too_large`; `filesRulesUnmatched`
+counts the project's `files` rules that matched no written, estimated or named path (absent when 0). NULL means the run was not opted in or predates the column. `stripHaivePreamble`
 removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
 agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
 or duplicates the injection. An injected block counts as external text for agent isolation. When an
