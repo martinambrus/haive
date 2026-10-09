@@ -629,7 +629,7 @@ async function resolveLlmPhase(
       if (isOutputTruncationMessage(errTrimmed)) {
         const llmRetry = llmSpec.retry;
         const canRetry = stepDef.loop
-          ? (await countTrailingTruncations(db, current.id)) < MAX_TRUNCATION_RETRIES
+          ? (await countTrailingTruncations(db, current.id)) <= MAX_TRUNCATION_RETRIES
           : llmRetry
             ? (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts
             : (await countTrailingTruncations(db, current.id)) < 2;
@@ -4246,7 +4246,8 @@ export const TRUNCATION_RETRY_NOTICE =
 
 /** Max consecutive output-truncation re-dispatches tolerated for one loop
  *  iteration before the step fails. Each retry shrinks the request, so this also
- *  bounds how small a single chunk is asked to get. */
+ *  bounds how small a single chunk is asked to get. The trailing count includes the
+ *  call that was just cut off, so a count of up to this many still re-dispatches. */
 const MAX_TRUNCATION_RETRIES = 3;
 
 /** Count the most-recent CONSECUTIVE invocations for a step whose error is an

@@ -440,6 +440,22 @@ describe('advanceStep loop hook', () => {
     });
   });
 
+  describe('a truncation of a loop step', () => {
+    const looping = () => loopStep({ maxIterations: 3, shouldContinue: () => true });
+
+    it('is re-dispatched a third time, so the third shrink is reached', async () => {
+      const { result, inserts } = await advanceAfterTruncations(looping(), 2);
+      expect(result.status).toBe('waiting_cli');
+      expect(inserts).toHaveLength(1);
+    });
+
+    it('fails the step once the third re-dispatch is cut off too', async () => {
+      const { result, inserts } = await advanceAfterTruncations(looping(), 3);
+      expect(result.status).toBe('failed');
+      expect(inserts).toHaveLength(0);
+    });
+  });
+
   describe('a truncation retry of a loop step', () => {
     async function retryTruncated(opts: {
       coversFirstPass: boolean;
