@@ -10,6 +10,8 @@ import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
+import { OUTPUT_TRUNCATION_HEADLINE } from '../../../queues/cli-exec/failure-class.js';
+import { TRUNCATION_RETRY_NOTICE } from '../../step-runner.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
@@ -167,6 +169,7 @@ function makeDb(
       exitCode?: number | null;
       errorMessage?: string | null;
       rawOutput?: string;
+      prompt?: string;
       /** Set by a Retry that superseded this run before it ever started. */
       supersededAt?: Date | null;
     };
@@ -187,6 +190,7 @@ function makeDb(
   let errorMessage: string | null = null;
   let warningMessage: string | null = null;
   const events: { eventType: string; payload: unknown }[] = [];
+  const invocationInserts: { prompt?: string }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
     if ('status' in patch) status = patch.status as string;
@@ -224,6 +228,7 @@ function makeDb(
     insert: (table?: unknown) => ({
       values: (v: { eventType: string; payload: unknown }) => {
         if (table === schema.taskEvents) events.push(v);
+        if (table === schema.cliInvocations) invocationInserts.push(v as { prompt?: string });
         return {
           returning: async () => {
             if (opts.insertRejects) throw opts.insertRejects;
@@ -266,6 +271,7 @@ function makeDb(
     getStatus: () => status,
     getWarning: () => warningMessage,
     events,
+    invocationInserts,
   };
 }
 
@@ -769,7 +775,13 @@ describe('12 merge fix-agent dispatch', () => {
     parent: string,
     detected: Det,
     fix: (mergeDir: string) => Promise<void>,
-    run: { endedAt: Date | null; exitCode?: number; supersededAt?: Date | null },
+    run: {
+      endedAt: Date | null;
+      exitCode?: number;
+      errorMessage?: string | null;
+      prompt?: string;
+      supersededAt?: Date | null;
+    },
   ) {
     const dbOpts: NonNullable<Parameters<typeof makeDb>[0]> = {};
     const h = makeDb(dbOpts);
@@ -795,6 +807,74 @@ describe('12 merge fix-agent dispatch', () => {
     );
     return { h, second };
   }
+
+  describe('a fixer cut at the output limit', () => {
+    const cut = {
+      endedAt: new Date(),
+      exitCode: 1,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+    };
+    const halfResolve = async (dir: string) => {
+      await writeFile(path.join(dir, 'base.txt'), 'half-resolved\n', 'utf8');
+    };
+
+    it('is discarded without charging an attempt, and one fixer is sent with the notice', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const { h, second } = await fixerRound(parent, det(wt), halfResolve, {
+          ...cut,
+          prompt: 'resolve the merge',
+        });
+        expect(second.resolved).toBe(false);
+        if (!second.resolved) expect(second.result.status).toBe('waiting_cli');
+        expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toContain('<<<<<<<');
+        expect(h.getState()?.conflictRetries).toBe(1);
+        expect(h.getState()?.fixInvocationId).toBe('inv1');
+        expect(h.invocationInserts).toHaveLength(2);
+        expect(h.invocationInserts[1]!.prompt).toContain(TRUNCATION_RETRY_NOTICE);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('whose prompt already carried the notice, even wrapped, is a spent attempt and gets no notice', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const { h, second } = await fixerRound(parent, det(wt), halfResolve, {
+          ...cut,
+          prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}\n\n## Boundary added at dispatch`,
+        });
+        expect(second.resolved).toBe(false);
+        expect(h.getState()?.conflictRetries).toBe(2);
+        expect(h.invocationInserts).toHaveLength(2);
+        expect(h.invocationInserts[1]!.prompt).not.toContain(TRUNCATION_RETRY_NOTICE);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a fixer that finished cleanly still commits its merge, with nothing re-sent', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const { h, second } = await fixerRound(
+          parent,
+          det(wt),
+          async (dir) => {
+            await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+          },
+          { endedAt: new Date(), exitCode: 0, errorMessage: null, prompt: 'resolve the merge' },
+        );
+        expect(second.resolved).toBe(true);
+        expect(await git(parent, ['show', 'HEAD:base.txt'])).toBe('resolved\n');
+        expect(h.invocationInserts).toHaveLength(1);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+  });
 
   it("a fixer's changes outside the conflict are moved aside, and the merge commit holds only the merge", async () => {
     const { parent, wt } = await setupWorktree();
