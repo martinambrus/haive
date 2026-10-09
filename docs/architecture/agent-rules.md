@@ -52,7 +52,13 @@ repository copy also loads.
   vision) would otherwise bury the old block and leave two. The isolation scan reads the prompt
   with that block removed for the same reason. A marker anywhere else is text the prompt carries
   and can neither suppress nor replace the injection. `stripHaivePreamble` removes this block and
-  then a stored house-rules block, each only at position 0.
+  then a stored house-rules block, each only at position 0. The six blocks the adapters prepend
+  below them (model capability, global KB titles, app reach, MCP surface, the DDEV-generated and
+  worktree git boundaries) follow the same rule: each counts as present only within the run of
+  `<haive_*>` blocks that opens the prompt, each closed on a line of its own
+  (`hasLeadingHaiveBlock`), so a marker quoted in a diff or an earlier prompt never suppresses one
+  and a re-fed prompt gains no second copy. An MCP server name that is not one line, or that the
+  fence would rewrite, is counted rather than listed: it could close its block early.
 - **Unfenced**, because providers are per-user and edited by their owner: this is operator text.
 - **Opt-outs** (`skipAgentRules`): the step recap, `01-env-detect` and the model-health canary,
   whose prompts carry their whole task and whose replies are parsed as they are. The sub-agent
