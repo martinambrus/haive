@@ -91,6 +91,8 @@ interface MockState {
   openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Abort the next in-transaction mining-row update as Postgres does to break a lock cycle. */
+  deadlockOnce?: boolean;
   /** What a task_step_agent_minings update's returning() yields, in place of one stub id. */
   miningReturning?: (set: Record<string, unknown>) => unknown[];
   /** Every cli_invocations update with its condition, so a test can say which runs it selects. */
@@ -248,6 +250,14 @@ function makeMockDb(state: MockState): Database {
             }
             if (tableName === 'cli_invocations') {
               (state.invocationUpdateLog ??= []).push({ set: v, where });
+            }
+            if (
+              tableName === 'task_step_agent_minings' &&
+              state.openTransaction &&
+              state.deadlockOnce
+            ) {
+              state.deadlockOnce = false;
+              throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
@@ -2833,6 +2843,25 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(params).toContain('inv-linked-late');
     expect(sql).toContain('"ended_at" is null');
     expect(sql).toContain('"superseded_at" is null');
+    // The retry sweeps the late run before it touches an agent row: runs, agents, step.
+    const ops = state.ops ?? [];
+    const last = ops.filter((o) => o.startsWith('update:cli_invocations@')).at(-1)!;
+    const n = last.slice(last.indexOf('@') + 1);
+    expect(ops.filter((o) => o.endsWith(`@${n}`))).toEqual([
+      `update:cli_invocations@${n}`,
+      `update:task_step_agent_minings@${n}`,
+      `lock:task_steps@${n}`,
+    ]);
+  });
+
+  it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
+    const state = freshState([]);
+    state.deadlockOnce = true;
+    await runWithEnqueueFailingAfter(state, 1);
+
+    expect(state.deadlockOnce).toBe(false);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+    expect(state.taskStepRow.status).toBe('failed');
   });
 
   it('takes the runs, then the agents, then the step, in one transaction', async () => {

@@ -2055,59 +2055,78 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
     endedAt: now,
     supersededAt: now,
   };
-  try {
-    await db.transaction(async (tx) => {
-      await tx
-        .update(schema.cliInvocations)
-        .set(cancelled)
-        .where(
-          and(
-            eq(schema.cliInvocations.taskStepId, taskStepId),
-            eq(schema.cliInvocations.mode, 'agent_mining'),
-            isNull(schema.cliInvocations.endedAt),
-            isNull(schema.cliInvocations.supersededAt),
-          ),
-        );
-      const released = await tx
-        .update(schema.taskStepAgentMinings)
-        .set({
-          status: 'failed',
-          errorMessage: `the step ended before the agent finished: ${reason}`.slice(0, 2000),
-          endedAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
-            inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
-          ),
-        )
-        .returning({ cliInvocationId: schema.taskStepAgentMinings.cliInvocationId });
-      // A concurrent pass can link a run after the sweep above; the rows now locked keep out any later link.
-      const lateRuns = released.flatMap((r) => (r.cliInvocationId ? [r.cliInvocationId] : []));
-      if (lateRuns.length > 0) {
-        await tx
+  // A run a concurrent pass linked after the first sweep: the next attempt sweeps it first.
+  let carried: string[] = [];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await db.transaction(async (tx) => {
+        const swept = await tx
           .update(schema.cliInvocations)
           .set(cancelled)
           .where(
             and(
-              inArray(schema.cliInvocations.id, lateRuns),
               isNull(schema.cliInvocations.endedAt),
               isNull(schema.cliInvocations.supersededAt),
+              or(
+                and(
+                  eq(schema.cliInvocations.taskStepId, taskStepId),
+                  eq(schema.cliInvocations.mode, 'agent_mining'),
+                ),
+                carried.length > 0 ? inArray(schema.cliInvocations.id, carried) : undefined,
+              ),
             ),
-          );
+          )
+          .returning({ id: schema.cliInvocations.id });
+        const released = await tx
+          .update(schema.taskStepAgentMinings)
+          .set({
+            status: 'failed',
+            errorMessage: `the step ended before the agent finished: ${reason}`.slice(0, 2000),
+            endedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.taskStepAgentMinings.taskStepId, taskStepId),
+              inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
+            ),
+          )
+          .returning({ cliInvocationId: schema.taskStepAgentMinings.cliInvocationId });
+        const sweptIds = new Set(swept.map((r) => r.id));
+        const missed = released.flatMap((r) =>
+          r.cliInvocationId && !sweptIds.has(r.cliInvocationId) ? [r.cliInvocationId] : [],
+        );
+        if (attempt === 0 && missed.length > 0) throw new LateLinkedRunsError(missed);
+        // A Stop also leaves the step failed and still wants these ended; only a Retry's reset is not ours.
+        const [step] = await tx
+          .select({ status: schema.taskSteps.status })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, taskStepId))
+          .for('update');
+        if (!step || step.status === 'pending') throw new StepSupersededError(taskStepId);
+      });
+      return;
+    } catch (err) {
+      if (err instanceof StepSupersededError) return;
+      if (err instanceof LateLinkedRunsError) {
+        carried = err.invocationIds;
+        continue;
       }
-      // A Stop also leaves the step failed and still wants these ended; only a Retry's reset is not ours.
-      const [step] = await tx
-        .select({ status: schema.taskSteps.status })
-        .from(schema.taskSteps)
-        .where(eq(schema.taskSteps.id, taskStepId))
-        .for('update');
-      if (!step || step.status === 'pending') throw new StepSupersededError(taskStepId);
-    });
-  } catch (err) {
-    if (err instanceof StepSupersededError) return;
-    log.error({ err, taskStepId }, 'could not end the mining agents a failed step left running');
+      if (attempt === 0 && (err as { code?: unknown } | null)?.code === PG_DEADLOCK_DETECTED) {
+        continue;
+      }
+      log.error({ err, taskStepId }, 'could not end the mining agents a failed step left running');
+      return;
+    }
+  }
+}
+
+/** Postgres' SQLSTATE for a transaction it aborted to break a lock cycle. */
+const PG_DEADLOCK_DETECTED = '40P01';
+
+class LateLinkedRunsError extends Error {
+  constructor(readonly invocationIds: string[]) {
+    super('a run was linked after the release swept the step');
   }
 }
 
