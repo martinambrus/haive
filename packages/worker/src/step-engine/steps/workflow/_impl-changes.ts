@@ -27,10 +27,10 @@ export interface ImplementationFileSet {
    *  kept explicit because this set is persisted to `task_steps.output` and read
    *  back by the gate. */
   truncated: boolean;
-  /** Why the dirty-worktree scan contributed nothing, when it failed outright; null
-   *  when it ran. Optional because the shape is persisted and replayed: a row written
-   *  before this field existed carries neither the flag nor its meaning, and absent
-   *  must not read as "the scan ran cleanly". */
+  /** Why the scan of the change contributed nothing, the dirty worktree or the committed
+   *  half, when one failed outright; null when both ran. Optional because the shape is
+   *  persisted and replayed: a row written before this field existed carries neither the
+   *  flag nor its meaning, and absent must not read as "the scan ran cleanly". */
   scanError?: string | null;
   /** Which lines of each file this change actually wrote. Keyed by the same paths as
    *  `files`; a path with NO entry has none recorded, which is not the same as "the whole
@@ -96,6 +96,9 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
 
 /** How much of a failed scan's own error text is quoted back. */
 const MAX_SCAN_ERROR_CHARS = 300;
+
+/** What a set records when the committed half could not be read; git's own message is not quoted. */
+const COMMITTED_CHANGE_UNREAD = 'the change committed since the fork point could not be read';
 
 /** What the dirty-worktree scan produced, and whether it ran at all.
  *
@@ -289,6 +292,7 @@ async function resolveDiffBase(
   worktreePath: string,
   baseBranch: string | null,
   timeout?: number,
+  forkPointOnly = false,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
@@ -304,6 +308,7 @@ async function resolveDiffBase(
       // base branch renamed, deleted, or unrelated history — fall through to HEAD
     }
   }
+  if (forkPointOnly) return null;
   try {
     await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout });
     return 'HEAD';
@@ -343,13 +348,19 @@ async function readChangeDiff(
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
  *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. A git that
- *  outlives `timeoutMs` is killed and the list is null. */
+ *  outlives `timeoutMs` is killed and the list is null. `forkPointOnly` makes an unresolved fork
+ *  point null too, where HEAD would otherwise stand in. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean; timeoutMs?: number } = {},
+  options: { includeDeleted?: boolean; timeoutMs?: number; forkPointOnly?: boolean } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch, options.timeoutMs);
+  const base = await resolveDiffBase(
+    worktreePath,
+    baseBranch,
+    options.timeoutMs,
+    options.forkPointOnly,
+  );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
@@ -371,8 +382,9 @@ export async function readChangedPaths(
 async function readCommittedDeletions(
   worktreePath: string,
   baseBranch: string | null,
+  options: { forkPointOnly?: boolean } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch);
+  const base = await resolveDiffBase(worktreePath, baseBranch, undefined, options.forkPointOnly);
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
@@ -426,12 +438,13 @@ export async function collectImplementationFiles(
   const measured = await changedLineNotes(worktreePath, baseBranch);
   for (const p of scan.untracked) measured[p] ??= 'new file';
   // A committed deletion may be unreported, and the sandbox masks git: only this list names it.
-  for (const p of (await readCommittedDeletions(worktreePath, baseBranch)) ?? []) {
+  const deletions = await readCommittedDeletions(worktreePath, baseBranch, { forkPointOnly: true });
+  for (const p of deletions ?? []) {
     files.add(p);
     measured[p] ??= 'deleted';
   }
   // Last, so a capped list keeps the reported and dirty files.
-  const committed = await readChangedPaths(worktreePath, baseBranch);
+  const committed = await readChangedPaths(worktreePath, baseBranch, { forkPointOnly: true });
   for (const p of committed ?? []) files.add(p);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
@@ -447,7 +460,10 @@ export async function collectImplementationFiles(
     files: listed,
     total: all.length,
     truncated: listed.length < all.length,
-    scanError: scan.error,
+    scanError:
+      deletions === null || committed === null
+        ? [scan.error, COMMITTED_CHANGE_UNREAD].filter(Boolean).join('; ')
+        : scan.error,
     changedLines,
   };
 }
@@ -642,7 +658,7 @@ const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc', '.txt'];
  * a bare pre-coverage array or a missing set (no coverage was recorded, so nothing
  * can be concluded), a `truncated` set (the unlisted files are unknown, and calling a
  * partial list docs-only is exactly the silent-cap failure `changedFilesBlock`'s
- * coverage notice exists to prevent), a set whose dirty-worktree scan failed (the files
+ * coverage notice exists to prevent), a set whose scan of the change failed (the files
  * it would have named are unknown too), and an empty list (a claim about no files).
  *
  * The cost of a wrong true is a code change reviewed by a documentation protocol, so

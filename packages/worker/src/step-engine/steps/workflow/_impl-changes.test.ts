@@ -295,7 +295,14 @@ describe('collectImplementationFiles — scan provenance', () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'impl-clean-'));
     try {
       await exec2('git', ['init', '-b', 'main'], { cwd: dir });
-      const set = await collectImplementationFiles(ctxWith(['src/a.ts']), dir);
+      const identity = ['-c', 'user.name=T', '-c', 'user.email=t@haive.local', '-c', 'gc.auto=0'];
+      await exec2('git', [...identity, 'commit', '--allow-empty', '-m', 'base'], { cwd: dir });
+      const ctx = ctxWith(['src/a.ts']);
+      // Every step lookup gets this one output, so it also records the fork point the committed half needs.
+      loadPreviousStepOutput.mockResolvedValue({
+        output: { filesTouched: ['src/a.ts'], baseBranch: 'main' },
+      });
+      const set = await collectImplementationFiles(ctx, dir);
       // A clean tree is a RESULT. Reporting it as a failed scan would send a human
       // looking at git instead of at the implementation step.
       expect(set.scanError).toBeNull();
@@ -797,10 +804,13 @@ describe('collectChangedLineMap', () => {
   const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
 
   /** The agents' own account of the change: 07's `filesTouched`, else the DAG issues' files. */
-  function ctxFor(reported: { touched?: string[]; dag?: string[] } = {}): StepContextLike {
+  function ctxFor(
+    reported: { touched?: string[]; dag?: string[] } = {},
+    baseBranch: string | null = 'main',
+  ): StepContextLike {
     loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
       id === '01-worktree-setup'
-        ? { output: { baseBranch: 'main' } }
+        ? { output: { baseBranch } }
         : { output: { filesTouched: reported.touched ?? [] } },
     );
     return {
@@ -1417,6 +1427,100 @@ describe('collectChangedLineMap', () => {
         expect(out.files).not.toContain('edited.php');
         expect(out.total).toBe(101);
         expect(out.truncated).toBe(true);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — a committed change that cannot be read', () => {
+    const UNREAD = 'the change committed since the fork point could not be read';
+
+    /** `c.js` committed on the task branch and reported by nobody, with a clean tree. */
+    async function inCommittedRepo(run: (dir: string) => Promise<void>): Promise<void> {
+      await inRepo({ 'kept.js': 'a\n', 'gone.js': 'x\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'c.js'), 'new\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: add c.js']);
+        const clean = await git(dir, ['status', '--porcelain']);
+        expect(clean.stdout.trim()).toBe('');
+        await run(dir);
+      });
+    }
+
+    it('lists the committed file and records no failure while the fork point resolves', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['c.js']);
+        expect(out.total).toBe(1);
+        expect(out.scanError).toBeNull();
+      });
+    });
+
+    it('marks the scan failed when the recorded base branch is gone, rather than reading the change against HEAD', async () => {
+      await inCommittedRepo(async (dir) => {
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.total).toBe(0);
+        expect(out.scanError).toBe(UNREAD);
+      });
+    });
+
+    it('marks the scan failed when no base branch was recorded', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor({}, null), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.scanError).toBe(UNREAD);
+      });
+    });
+
+    it('marks the scan failed for a committed deletion nobody reported, and says so once', async () => {
+      await inRepo({ 'gone.js': 'x\n', 'kept.js': 'a\n' }, async (dir) => {
+        await rm(path.join(dir, 'gone.js'));
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: remove it']);
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.scanError).toBe(UNREAD);
+      });
+    });
+
+    it("states the dirty scan's own error first when that failed too", async () => {
+      const out = await collectImplementationFiles(
+        ctxFor({ touched: ['a.js'] }),
+        '/nonexistent-worktree',
+      );
+
+      expect(out.files).toEqual(['a.js']);
+      expect(out.scanError?.endsWith(`; ${UNREAD}`)).toBe(true);
+      expect(out.scanError?.startsWith(UNREAD)).toBe(false);
+      expect(out.scanError?.split(UNREAD)).toHaveLength(2);
+    });
+
+    it('reads against HEAD when the fork point is gone, unless the caller asks for the fork point only', async () => {
+      await inRepo({ 'kept.js': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'kept.js'), 'b\n');
+        await git(dir, ['branch', '-D', 'main']);
+
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, null)).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, 'main', { forkPointOnly: true })).toBeNull();
+        expect(await readChangedPaths(dir, null, { forkPointOnly: true })).toBeNull();
+      });
+    });
+
+    it('names the same paths with or without forkPointOnly while the fork point resolves', async () => {
+      await inRepo({ 'kept.js': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'kept.js'), 'b\n');
+
+        expect(await readChangedPaths(dir, 'main', { forkPointOnly: true })).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.js']);
       });
     });
   });
