@@ -1040,9 +1040,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     if (values.runTests !== false && changed) {
       const reported = [...acc.created, ...acc.updated];
       const targets = filterTestFiles(reported, { ddev: d.ddev });
-      const dropped = new Set(
-        d.ddev ? reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)) : [],
-      );
+      const dropped = new Set(reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)));
       const root = primaryFrameworkRoot(d);
       const buildOpts = { ddev: d.ddev, ddevPlaywrightAddon: d.ddevPlaywrightAddon, root };
       const cmd = buildSelectiveCommand(d.primary, targets, buildOpts);
@@ -1169,10 +1167,12 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       }
 
       if (dropped.size > 0) {
+        const rule = d.ddev
+          ? 'may hold only letters, digits and the characters "._/@+-", must be relative, and may not have a ".." segment or one starting with "-"'
+          : 'must be relative, and may not have a ".." segment, a segment starting with "-", or a control character';
         const note =
           `${dropped.size} reported test file${dropped.size === 1 ? ' was' : 's were'} dropped ` +
-          'and did not run. A test path may hold only letters, digits and the characters ' +
-          '"._/@+-", must be relative, and may not have a ".." segment or one starting with "-".';
+          `and did not run. A test path ${rule}.`;
         degradedNote = degradedNote === undefined ? note : `${note}\n\n${degradedNote}`;
       }
     }

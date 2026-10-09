@@ -43,13 +43,18 @@ describe('08b: the reported test paths a selective run is built from, by how the
     planImpact: '',
     ...over,
   });
-  const apply = (ddev: boolean, reported: string[], over: Record<string, unknown> = {}) =>
+  const apply = (
+    ddev: boolean,
+    reported: string[],
+    over: Record<string, unknown> = {},
+    updated: string[] = [],
+  ) =>
     testManagementStep.apply(ctx, {
       detected: detected(ddev, over),
       formValues: { action: 'manage', runTests: true },
       iteration: 0,
       previousIterations: [],
-      llmOutput: { tests_created: reported, tests_updated: [], tests_deleted: [], notes: '' },
+      llmOutput: { tests_created: reported, tests_updated: updated, tests_deleted: [], notes: '' },
     } as never);
 
   const SYNTAX = ['app/[id]/page.test.tsx', 'app/(group)/x.spec.ts', 'tests/a b Test.php'];
@@ -122,7 +127,7 @@ describe('08b: the reported test paths a selective run is built from, by how the
   });
 
   it('still keeps an absolute, parent-segment or control-character path out of a host run', async () => {
-    await apply(false, [
+    const out = await apply(false, [
       '/etc/x.spec.ts',
       'tests/../x.spec.ts',
       '../y.spec.ts',
@@ -134,6 +139,7 @@ describe('08b: the reported test paths a selective run is built from, by how the
       ['vitest', 'run', 'tests/ok.spec.ts'],
       expect.anything(),
     );
+    expect(out.degradedNote).toContain('4 reported test files were dropped and did not run');
   });
 
   // A runner parses options out of its arguments whether or not a shell sits in front of it.
@@ -169,5 +175,52 @@ describe('08b: the reported test paths a selective run is built from, by how the
     await apply(true, ORDINARY);
     expect(m.ddevExec).toHaveBeenCalledTimes(1);
     for (const p of ORDINARY) expect(m.ddevExec.mock.calls[0]![1]).toContain(p);
+  });
+
+  it('says one file was dropped on a host run, and runs the other', async () => {
+    const out = await apply(false, ['/etc/x.spec.ts', 'tests/ok.spec.ts']);
+    expect(m.run).toHaveBeenCalledTimes(1);
+    expect(m.run).toHaveBeenCalledWith(
+      'npx',
+      ['vitest', 'run', 'tests/ok.spec.ts'],
+      expect.anything(),
+    );
+    expect(out.testRun).toMatchObject({ ran: true, passed: true });
+    expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
+  });
+
+  it('says the same on a ddev run', async () => {
+    const out = await apply(true, ['/etc/x.spec.ts', 'tests/ok.spec.ts']);
+    expect(m.ddevExec).toHaveBeenCalledTimes(1);
+    expect(m.ddevExec.mock.calls[0]![1]).toContain('tests/ok.spec.ts');
+    expect(m.ddevExec.mock.calls[0]![1]).not.toContain('/etc/x.spec.ts');
+    expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
+  });
+
+  it('runs nothing and still says so when a host run dropped every reported file', async () => {
+    const out = await apply(false, ['/etc/x.spec.ts', '../y.spec.ts']);
+    expect(m.run).not.toHaveBeenCalled();
+    expect(out.testRun).toMatchObject({ ran: false });
+    expect(out.testsPassed).toBeNull();
+    expect(out.degradedNote).toContain('2 reported test files were dropped and did not run');
+  });
+
+  it('counts a host-dropped file once, however many times it was reported', async () => {
+    const out = await apply(false, ['/etc/x.spec.ts', 'tests/ok.spec.ts'], {}, ['/etc/x.spec.ts']);
+    expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
+  });
+
+  it('does not count a reported file that was never a test file', async () => {
+    const out = await apply(false, ['/etc/passwd', 'tests/ok.spec.ts']);
+    expect(m.run).toHaveBeenCalledTimes(1);
+    expect('degradedNote' in out).toBe(false);
+  });
+
+  it('gives each kind of run the rule that applies to it', async () => {
+    const host = await apply(false, ['/etc/x.spec.ts']);
+    const ddev = await apply(true, ['/etc/x.spec.ts']);
+    expect(host.degradedNote).toContain('relative');
+    expect(host.degradedNote).not.toContain('"._/@+-"');
+    expect(ddev.degradedNote).toContain('"._/@+-"');
   });
 });
