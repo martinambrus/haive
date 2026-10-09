@@ -236,7 +236,7 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
     });
   });
 
-  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts"])(
+  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts", '"10.11" # lts'])(
     'plans mariadb:10.11 for a config file written with version: %s',
     (written) => {
       const parsed = parseDdevConfig(
@@ -314,8 +314,7 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
   });
 });
 
-// A baseline is stored as the parser captured it, so a row written by an earlier release can hold
-// `'10.11'` or `10.11 # lts`: both sides are compared as YAML reads them.
+// A stored baseline holds the text an earlier parser captured, so both sides are read as YAML does.
 describe('classifyDrift: the same database restated', () => {
   const same = { dbType: 'mariadb', dbVersion: '10.11' };
 
@@ -665,7 +664,7 @@ describe('07c-ddev-reconcile: a database version YAML reads as 10.11', () => {
     m.hashDdevInputs.mockResolvedValue('h1');
   });
 
-  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts"])(
+  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts", '"10.11" # lts'])(
     'migrates to mariadb:10.11 for version: %s',
     async (written) => {
       await writeConfig(written);
