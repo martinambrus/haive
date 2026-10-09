@@ -38,6 +38,48 @@ function canonicalJson(value: unknown): string {
   );
 }
 
+type Orderable = number | bigint | string | null;
+
+/** Postgres's default order: NULL is the largest, and text compares as `compareText` says. */
+function orderable(v: unknown): Orderable {
+  if (v == null) return null;
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === 'boolean') return Number(v);
+  if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'string') return v;
+  throw new Error('fake db: unsupported orderBy value');
+}
+
+const textCollator = new Intl.Collator('en-US');
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+
+// en_US.utf8, the deployed database's collation: letters and digits decide (case and accents after
+// them), and any other character only breaks a tie, ranking below every letter and digit.
+function compareText(a: string, b: string): number {
+  const significant = (s: string) => [...s].filter((c) => LETTER_OR_DIGIT.test(c)).join('');
+  const bySignificant = textCollator.compare(significant(a), significant(b));
+  if (bySignificant !== 0) return bySignificant;
+  const x = [...a];
+  const y = [...b];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const p = x[i] as string;
+    const q = y[i] as string;
+    if (p === q) continue;
+    const pSignificant = LETTER_OR_DIGIT.test(p);
+    if (pSignificant !== LETTER_OR_DIGIT.test(q)) return pSignificant ? 1 : -1;
+    return (p.codePointAt(0) ?? 0) - (q.codePointAt(0) ?? 0);
+  }
+  return x.length - y.length;
+}
+
+function compareOrderable(a: Orderable, b: Orderable): number {
+  if (a === null || b === null) return Number(a === null) - Number(b === null);
+  if (typeof a === 'string' && typeof b === 'string') return compareText(a, b);
+  if (typeof a === 'string' || typeof b === 'string') {
+    throw new Error('fake db: unsupported orderBy value');
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function text(chunk: unknown): string | null {
   return chunk instanceof StringChunk ? chunk.value.join('') : null;
 }
@@ -89,7 +131,7 @@ export interface FakeTableApi {
 
 interface SelectQuery extends PromiseLike<FakeRow[]> {
   where(cond: unknown): SelectQuery;
-  orderBy(order: unknown): SelectQuery;
+  orderBy(...orders: unknown[]): SelectQuery;
   limit(n: number): SelectQuery;
   /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
   for(strength: string, config?: unknown): SelectQuery;
@@ -255,11 +297,10 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       throw new Error(`fake db: unsupported orderBy on ${getTableName(table)}`);
     }
     const sign = dir === ' asc' ? 1 : -1;
-    const value = (row: FakeRow): number => {
-      const v = row[key];
-      return v instanceof Date ? v.getTime() : Number(v);
-    };
-    return [...rows].sort((a, b) => sign * (value(a) - value(b)));
+    return rows
+      .map((row) => ({ row, value: orderable(row[key]) }))
+      .sort((a, b) => sign * compareOrderable(a.value, b.value))
+      .map(({ row }) => row);
   }
 
   function select(table: PgTable, opts: Record<string, unknown> = {}): FakeRow[] {
@@ -291,7 +332,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select(table, opts).map((row) => (fields === undefined ? row : project(table, fields, row)));
     const query: SelectQuery = {
       where: (cond) => ((opts.where = cond), query),
-      orderBy: (order) => ((opts.orderBy = order), query),
+      orderBy: (...orders) => ((opts.orderBy = orders), query),
       limit: (n) => ((opts.limit = n), query),
       for: () => query,
       then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),

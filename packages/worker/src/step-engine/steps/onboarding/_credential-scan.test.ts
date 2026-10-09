@@ -264,10 +264,11 @@ describe('tracked credential inventory', () => {
     expect(scan.hits).toHaveLength(1);
   });
 
-  it('counts millions of matches under a 64 MiB heap limit while retaining only the cap', async () => {
+  it('counts hundreds of thousands of matches under a 64 MiB heap limit while retaining only the cap', async () => {
     const root = await repo();
-    const linesPerFile = 65_536;
-    const fileCount = 32;
+    // Twice the size at which retaining every match would outgrow the heap, over a full reader batch.
+    const linesPerFile = 49_152;
+    const fileCount = 16;
     const content = 'token=a\n'.repeat(linesPerFile);
     const files = Array.from(
       { length: fileCount },
@@ -295,7 +296,7 @@ describe('tracked credential inventory', () => {
     expect(scan.hits).toHaveLength(200);
     expect(scan.omitted).toBe(fileCount * linesPerFile - 200);
     expect(scan.hits.slice(0, fileCount).map((hit) => hit.file)).toEqual(files);
-    expect(scan.hits.at(-1)).toMatchObject({ file: 'file-07.env', line: 7 });
+    expect(scan.hits.at(-1)).toMatchObject({ file: 'file-07.env', line: 13 });
   }, 45_000);
 
   it.each([

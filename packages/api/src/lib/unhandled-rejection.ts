@@ -1,4 +1,4 @@
-import { logger } from '@haive/shared';
+import { logger } from '@haive/shared/logger';
 
 // Node exits on a stray rejection by default; log it and keep serving, as the worker does.
 export function installUnhandledRejectionLogger(
