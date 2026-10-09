@@ -488,6 +488,9 @@ interface LevelMergeState {
   conflictRetries: Record<string, number>;
   /** The tree the in-flight fixer was sent into (null = none recorded). */
   fixBaseline: FixBaseline | FixBaselineUnavailable | null;
+  /** The last fixer was cut at the output limit: the next one, automatic or a person's
+   *  retry_ai, carries the shrink notice. Cleared when that fixer is dispatched. */
+  lastFixerCut: boolean;
 }
 
 function readMergeState(level: DagLevelRow): LevelMergeState {
@@ -497,6 +500,7 @@ function readMergeState(level: DagLevelRow): LevelMergeState {
     fixInvocationId: ms?.fixInvocationId ?? null,
     conflictRetries: ms?.conflictRetries ?? {},
     fixBaseline: ms?.fixBaseline ?? null,
+    lastFixerCut: ms?.lastFixerCut ?? false,
   };
 }
 
@@ -644,6 +648,7 @@ async function startConflictFix(
   );
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
+  const withNotice = afterTruncation || state.lastFixerCut;
   const dispatched = await dispatchMergeFixAgent(
     m,
     target,
@@ -652,9 +657,10 @@ async function startConflictFix(
       state.fixInvocationId = invId;
       state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
       state.fixBaseline = fixBaseline;
+      state.lastFixerCut = false;
       await saveMergeState(m.db, m.level.id, state);
     },
-    afterTruncation,
+    withNotice,
   );
   if (dispatched.kind === 'already_live') {
     // A concurrent advance already dispatched the fix agent for this step (the
@@ -776,8 +782,6 @@ async function runLevelMerge(
   const state = readMergeState(level);
 
   // 1. A fix agent is in flight — ingest its result.
-  // The ingested fixer was cut at the output limit: any fixer sent after it carries the notice.
-  let lastFixerCut = false;
   if (state.fixInvocationId) {
     const inv = await db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, state.fixInvocationId),
@@ -816,10 +820,12 @@ async function runLevelMerge(
       return haltMerge(m, `Merge halted on ${branch}. ${fixerIndexHeldNote(leftovers.indexHeld)}`);
     }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
-    lastFixerCut =
+    const lastFixerCut =
       !runNeverAnswered(inv) &&
       classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
         'truncated';
+    // Saved with the merge state below, so a person's later retry_ai keeps the shrink notice.
+    if (lastFixerCut) state.lastFixerCut = true;
     const fixerCut = lastFixerCut && truncationRetryable(inv);
     if (runNeverAnswered(inv) || fixerCut) {
       // A fixer that never answered, or was cut at the output limit, may have left the merge
@@ -897,7 +903,7 @@ async function runLevelMerge(
     const target = conflicts.find(
       (c) => (state.conflictRetries[c.issueKey] ?? 0) < MAX_AUTO_CONFLICT_RETRIES,
     );
-    if (target) return startConflictFix(m, state, target, lastFixerCut);
+    if (target) return startConflictFix(m, state, target);
     return haltConflicts(
       m,
       conflicts,

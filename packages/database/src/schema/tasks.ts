@@ -702,6 +702,9 @@ export interface MergeResolveState {
       }
     | { unavailable: string }
     | null;
+  /** The last fixer was cut at the output limit: the next one, automatic or a person's retry,
+   *  carries the shrink notice. Cleared when that fixer is dispatched. */
+  lastFixerCut?: boolean;
 }
 
 export const taskEvents = pgTable(

@@ -1362,6 +1362,8 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         ).not.toBe(0);
         expect(state.conflictRetries['ISSUE-1']).toBe(1);
         expect(state.fixInvocationId).toBeNull();
+        // Kept for the person's retry_ai, whose fixer then carries the shrink notice.
+        expect(state.lastFixerCut).toBe(true);
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
       }
