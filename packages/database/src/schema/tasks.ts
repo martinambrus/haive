@@ -1135,9 +1135,13 @@ export const cliInvocations = pgTable(
       errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
       filesRulesUnmatched?: number;
     }>(),
-    /** The `learnedAt` of the provider's model limits the request was built with (the epoch when
-     *  it had none); NULL on rows written before the column. Migration 0177. */
-    limitsLearnedAt: timestamp('limits_learned_at'),
+    /** The capability remedies the request was built with (nulls when the provider had no limits);
+     *  NULL on rows written before the column. Migration 0177. */
+    limitsSnapshot: jsonb('limits_snapshot').$type<{
+      vision: boolean | null;
+      maxOutputTokens: number | null;
+      maxOutputTokensExhausted: boolean;
+    }>(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

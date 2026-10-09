@@ -908,7 +908,7 @@ async function resolveLlmPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
-      limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
+      limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
       mode,
       prompt: plan.effectivePrompt ?? prompt,
       agentTitle: roleLabel,
@@ -1114,7 +1114,7 @@ async function resolveAiFixPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
-      limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
+      limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
       mode: fixMode,
       prompt: plan.effectivePrompt ?? prompt,
     }),
@@ -1921,7 +1921,7 @@ async function dispatchMiningAgents(
         cliProviderId: plan.providerId,
         effort: plan.effort ?? null,
         assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
-        limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
+        limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
         mode: 'agent_mining',
         prompt: plan.effectivePrompt ?? prompt,
         steerable: plan.invocation.spec.steerable === true,
@@ -3883,7 +3883,7 @@ async function retryMiningAgents(
         prompt: schema.cliInvocations.prompt,
         startedAt: schema.cliInvocations.startedAt,
         createdAt: schema.cliInvocations.createdAt,
-        limitsLearnedAt: schema.cliInvocations.limitsLearnedAt,
+        limitsSnapshot: schema.cliInvocations.limitsSnapshot,
       })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
@@ -4287,15 +4287,20 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
  *  rejects it. A third attempt would repeat a request we already know fails. */
 const MAX_CAPABILITY_RETRIES = 2;
 
-type FailedRunStamp = { createdAt: Date | null; limitsLearnedAt: Date | null };
+type LimitsSnapshot = NonNullable<typeof schema.cliInvocations.$inferSelect.limitsSnapshot>;
+type FailedRunStamp = { createdAt: Date | null; limitsSnapshot: LimitsSnapshot | null };
 
-function limitsLearnedAtOf(
+function limitsSnapshotOf(
   providers: CliProviderRecord[] | undefined,
   providerId: string | null,
-): Date | null {
+): LimitsSnapshot {
   const provider = providers?.find((p) => p.id === providerId);
-  const at = provider ? resolveModelLimits(provider)?.learnedAt : null;
-  return at ? new Date(at) : NO_LIMITS_LEARNED;
+  const limits = provider ? resolveModelLimits(provider) : null;
+  return {
+    vision: limits?.vision ?? null,
+    maxOutputTokens: limits?.maxOutputTokens ?? null,
+    maxOutputTokensExhausted: limits?.maxOutputTokensExhausted === true,
+  };
 }
 
 /** Whether the limits carry the remedy for this failure's own capability class. */
@@ -4308,13 +4313,27 @@ function remedyLearned(
   return limits.maxOutputTokensExhausted === true;
 }
 
-/** Stamped on a run built while its provider had learned no limits, so null keeps meaning a row
- *  written before runs recorded this at all. */
-const NO_LIMITS_LEARNED = new Date(0);
+/** Whether the limits now hold a remedy for this class that the failed request was not built with. */
+function remedyChangedSince(
+  cls: NonNullable<ReturnType<typeof capabilityClassFromMessage>>,
+  limits: NonNullable<ReturnType<typeof resolveModelLimits>>,
+  built: LimitsSnapshot,
+): boolean {
+  if (cls === 'no_image_support') return limits.vision === false && built.vision !== false;
+  if (cls === 'output_cap_reached') {
+    return limits.maxOutputTokens !== undefined && limits.maxOutputTokens !== built.maxOutputTokens;
+  }
+  if (limits.maxOutputTokensExhausted === true && !built.maxOutputTokensExhausted) return true;
+  return (
+    limits.maxOutputTokens !== undefined &&
+    built.maxOutputTokens !== null &&
+    limits.maxOutputTokens < built.maxOutputTokens
+  );
+}
 
 /** True when re-dispatching this capability failure would send the request that just failed: the
- *  provider learned nothing since the limits the run was built with (`limitsLearnedAt`; a run
- *  without one is judged by its `createdAt`), or its output-token ladder is spent, which stamps
+ *  remedy for its class is unchanged since the limits the run was built with (`limitsSnapshot`; a
+ *  run without one is judged by its `createdAt`), or its output-token ladder is spent, which stamps
  *  `learnedAt` but changes nothing. False for any other failure. */
 function repeatsCapabilityRequest(
   message: string,
@@ -4327,13 +4346,13 @@ function repeatsCapabilityRequest(
   const provider = providers?.find((p) => p.id === providerId);
   const limits = provider ? resolveModelLimits(provider) : null;
   if (cls === 'output_cap_reached' && limits?.maxOutputTokensExhausted === true) return true;
-  if (!limits?.learnedAt) return true;
+  if (!limits) return true;
+  if (run?.limitsSnapshot) return !remedyChangedSince(cls, limits, run.limitsSnapshot);
+  if (!limits.learnedAt) return true;
   // A newer learn for another capability does not change this request.
   if (!remedyLearned(cls, limits)) return true;
-  const learned = new Date(limits.learnedAt).getTime();
-  if (run?.limitsLearnedAt) return learned <= run.limitsLearnedAt.getTime();
   if (!run?.createdAt) return true;
-  return learned < run.createdAt.getTime();
+  return new Date(limits.learnedAt).getTime() < run.createdAt.getTime();
 }
 
 /** Count the most-recent CONSECUTIVE invocations for a step that failed on a model

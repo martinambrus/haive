@@ -101,7 +101,11 @@ interface MockState {
     errorMessage?: string | null;
     startedAt?: Date | null;
     createdAt?: Date;
-    limitsLearnedAt?: Date | null;
+    limitsSnapshot?: {
+      vision: boolean | null;
+      maxOutputTokens: number | null;
+      maxOutputTokensExhausted: boolean;
+    } | null;
     endedAt?: Date | null;
     exitCode?: number | null;
   }[];
@@ -1240,7 +1244,11 @@ describe('advanceStep agentMining output truncation and model capability', () =>
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
       const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
-      expect(sent.limitsLearnedAt).toEqual(new Date(providers[0]!.modelLimits!.learnedAt));
+      expect(sent.limitsSnapshot).toEqual({
+        vision: false,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      });
     });
 
     it('re-rolls the agent whose request was built before the learn, though its run started after it', async () => {
@@ -1258,10 +1266,14 @@ describe('advanceStep agentMining output truncation and model capability', () =>
       expect(enqueued).toHaveLength(1);
     });
 
-    it('re-rolls the agent whose run was built with older limits than the learn that preceded its insert', async () => {
+    it('re-rolls the agent whose run was built before vision:false was learned', async () => {
       const state = failedAgentState(1, noImage);
       state.invocationRows![0]!.createdAt = new Date(Date.now() - 60_000);
-      state.invocationRows![0]!.limitsLearnedAt = new Date(Date.now() - 150_000);
+      state.invocationRows![0]!.limitsSnapshot = {
+        vision: null,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      };
       const enqueued: CliExecJobPayload[] = [];
       const result = await run(
         makeMockDb(state),
@@ -1274,10 +1286,14 @@ describe('advanceStep agentMining output truncation and model capability', () =>
       expect(enqueued).toHaveLength(1);
     });
 
-    it('does not re-roll the agent whose run was built with the current limits', async () => {
+    it('does not re-roll the agent whose run was built with vision:false already set', async () => {
       const state = failedAgentState(1, noImage);
       state.invocationRows![0]!.createdAt = new Date(Date.now() - 120_000);
-      state.invocationRows![0]!.limitsLearnedAt = new Date(Date.now() - 90_000);
+      state.invocationRows![0]!.limitsSnapshot = {
+        vision: false,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      };
       const applyCalls: StepApplyArgs[] = [];
       const enqueued: CliExecJobPayload[] = [];
       const result = await run(
