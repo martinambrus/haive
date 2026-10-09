@@ -2847,6 +2847,23 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         expect(enqueued).toHaveLength(1);
       });
 
+      it('re-sends one killed at its time budget with the raised budget, not the review default', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        const enqueued: { timeoutMs?: number }[] = [];
+        await ingestCoder(
+          'running',
+          {
+            ...killedOnce,
+            supersededAt: null,
+            exitCode: 137,
+            errorMessage: 'CLI process exceeded its time budget (30m).',
+          },
+          { agentRuns: [fixRun], issue: { ...advisorRetry, infraRetries: 0 }, enqueued },
+        );
+        expect(enqueued).toHaveLength(1);
+        expect(enqueued[0]!.timeoutMs).toBe(60 * 60_000);
+      });
+
       it('re-sends one cut off at the output limit with the notice, charging nothing', async () => {
         vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
         const { issueUpdates, h } = await ingestCoder('running', truncatedCoder('fix it'), {

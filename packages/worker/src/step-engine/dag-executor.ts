@@ -1107,6 +1107,7 @@ async function spawnReviewAgent(
   capabilities: StepCapability[],
   claim?: (invocationId: string) => Promise<void>,
   afterTruncation = false,
+  timeoutMs?: number,
 ): Promise<string | null> {
   const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
@@ -1177,7 +1178,7 @@ async function spawnReviewAgent(
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: overrideOr(ra.current, REVIEW_TIMEOUT_MS),
+    timeoutMs: timeoutMs ?? overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
   return invId;
 }
@@ -1983,6 +1984,7 @@ async function redispatchFixCoder(
   failedInv: typeof schema.cliInvocations.$inferSelect,
   charged: boolean,
   afterTruncation: boolean,
+  timeoutMs: number | undefined,
 ): Promise<void> {
   const note = (issue.retryContext as { note?: unknown } | null)?.note;
   const invId = await spawnReviewAgent(
@@ -2022,6 +2024,7 @@ async function redispatchFixCoder(
         .where(eq(schema.dagAgentRuns.id, failedRun.id));
     },
     afterTruncation,
+    timeoutMs,
   );
   if (!invId) {
     await ra.db
@@ -2640,10 +2643,13 @@ export async function resolveDagPhase(
           // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three
           // times). Written to the STEP so the whole level shares one budget and the fan-out's
           // ceiling stays computable; DAG_MAX_INFRA_RETRIES bounds it to two doublings.
+          // The budget raised just now, which `current` read before it was written.
+          let learnedNow: number | null = null;
           if (isCliTimeoutFailure({ errorMessage: inv.errorMessage })) {
             const failedMs = (cliTimeoutBudgetMinutes(inv.errorMessage) ?? 0) * 60_000;
             const next = escalatedTimeoutMs(failedMs);
             if (next) {
+              learnedNow = next;
               await db
                 .update(schema.taskSteps)
                 .set({ cliTimeoutLearnedMs: next, updatedAt: new Date() })
@@ -2699,6 +2705,15 @@ export async function resolveDagPhase(
                 inv,
                 !(free || cls === 'truncated'),
                 cls === 'truncated',
+                // The budget section (B) would give it, with this pass's raised one counted.
+                overrideOrLearned(
+                  {
+                    ...current,
+                    cliTimeoutLearnedMs:
+                      Math.max(current.cliTimeoutLearnedMs ?? 0, learnedNow ?? 0) || null,
+                  },
+                  spec.timeoutMs,
+                ),
               );
             } else {
               await db
