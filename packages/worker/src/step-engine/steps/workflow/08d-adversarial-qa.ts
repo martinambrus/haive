@@ -19,7 +19,7 @@ import {
 } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES, fencedDebtBlock } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
@@ -33,7 +33,7 @@ import {
   type FileCoverage,
   type ImplementationFileSet,
 } from './_impl-changes.js';
-import { loadAppBootOutput } from './_task-meta.js';
+import { loadAppBootOutput, loadTaskMeta } from './_task-meta.js';
 import { resolveAppReach } from '../../../queues/cli-exec/app-reach.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
@@ -919,7 +919,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
-    const spec = (await resolveSpecView(ctx)).text;
+    let spec = (await resolveSpecView(ctx)).text;
+    if (spec.trim().length === 0) {
+      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      spec = briefFromTaskMeta(meta.title, meta.description);
+    }
 
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
     const browser = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');

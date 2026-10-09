@@ -10,7 +10,8 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from '../_untrusted-repo.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
+import { loadTaskMeta } from './_task-meta.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
@@ -231,7 +232,12 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
-    const spec = (await resolveSpecView(ctx)).text;
+    let spec = (await resolveSpecView(ctx)).text;
+    if (spec.trim().length === 0) {
+      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      spec = briefFromTaskMeta(meta.title, meta.description);
+    }
 
     const dag = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06c-dag-execute');
     // A skipped step writes no output, so single-agent tasks land on null here.

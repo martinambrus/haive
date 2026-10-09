@@ -17,7 +17,7 @@ import {
 } from '../_untrusted-repo.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
@@ -28,7 +28,7 @@ import {
   collectImplementationFiles,
   type ImplementationFileSet,
 } from './_impl-changes.js';
-import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
+import { loadAppBootOutput, loadTaskMeta, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
 import {
   buildScreenshotManifest,
@@ -572,7 +572,12 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full. Plus the changed files for
     // the tester prompts.
-    const spec = (await resolveSpecView(ctx)).text;
+    let spec = (await resolveSpecView(ctx)).text;
+    if (spec.trim().length === 0) {
+      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      spec = briefFromTaskMeta(meta.title, meta.description);
+    }
     const implementationFiles = await collectImplementationFiles(
       ctx,
       rt.workspace ?? ctx.workspacePath,
