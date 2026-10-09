@@ -163,8 +163,9 @@ export function filterTestFiles(files: string[], opts: { ddev: boolean }): strin
       TEST_FILE_RE.test(f) &&
       !f.startsWith('/') &&
       !segments.includes('..') &&
+      !segments.some((s) => s.startsWith('-')) &&
       !CONTROL_CHAR_RE.test(f) &&
-      (!opts.ddev || (PLAIN_PATH_RE.test(f) && !segments.some((s) => s.startsWith('-'))))
+      (!opts.ddev || PLAIN_PATH_RE.test(f))
     );
   });
 }

@@ -135,4 +135,39 @@ describe('08b: the reported test paths a selective run is built from, by how the
       expect.anything(),
     );
   });
+
+  // A runner parses options out of its arguments whether or not a shell sits in front of it.
+  const OPTION_LIKE: Array<[string, string]> = [
+    ['an option with a value', '--config=x.spec.ts'],
+    ['a segment starting with a dash', 'tests/-x/FooTest.php'],
+  ];
+  const ORDINARY = ['tests/Unit/FooTest.php', 'tests/e2e-flows/login-flow.spec.ts'];
+
+  it.each(OPTION_LIKE)('keeps a path with %s out of a host run', async (_n, bad) => {
+    await apply(false, [bad, 'tests/ok.spec.ts']);
+    expect(m.run).toHaveBeenCalledTimes(1);
+    expect(m.run).toHaveBeenCalledWith(
+      'npx',
+      ['vitest', 'run', 'tests/ok.spec.ts'],
+      expect.anything(),
+    );
+  });
+
+  it.each(OPTION_LIKE)('keeps a path with %s out of a ddev run', async (_n, bad) => {
+    await apply(true, [bad, 'tests/ok.spec.ts']);
+    expect(m.ddevExec).toHaveBeenCalledTimes(1);
+    expect(m.ddevExec.mock.calls[0]![1]).not.toContain(bad);
+    expect(m.ddevExec.mock.calls[0]![1]).toContain('tests/ok.spec.ts');
+  });
+
+  it('keeps ordinary paths on a host run, a dash inside a name included', async () => {
+    await apply(false, ORDINARY);
+    expect(m.run).toHaveBeenCalledWith('npx', ['vitest', 'run', ...ORDINARY], expect.anything());
+  });
+
+  it('keeps ordinary paths on a ddev run, a dash inside a name included', async () => {
+    await apply(true, ORDINARY);
+    expect(m.ddevExec).toHaveBeenCalledTimes(1);
+    for (const p of ORDINARY) expect(m.ddevExec.mock.calls[0]![1]).toContain(p);
+  });
 });
