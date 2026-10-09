@@ -113,13 +113,16 @@ export function plannedFiles(files: readonly string[] | undefined): string[] {
 const SPEC_STEP_04 = '04-phase-0b-pre-planning';
 const SPEC_STEP_05 = '05-phase-0b5-spec-quality';
 const SPEC_STEP_05A = '05a-resolve-spec-warnings';
+// Task text has no length limit, so each part is read up to this; a name past it is not read.
+const TASK_TEXT_READ_CHARS = 262_144;
 
 /** The task's title and description, then its freshest spec: the highest round, then 05a, 05, 04. */
 async function readTaskText(db: Database, taskId: string): Promise<string> {
   const { tasks, taskSteps } = schema;
   const rows = (await db.execute(sql`
-    select ${tasks.title} as title, ${tasks.description} as description,
-      (select ${taskSteps.output}->>'spec' from ${taskSteps}
+    select left(${tasks.title}, ${TASK_TEXT_READ_CHARS}::int) as title,
+      left(${tasks.description}, ${TASK_TEXT_READ_CHARS}::int) as description,
+      (select left(${taskSteps.output}->>'spec', ${TASK_TEXT_READ_CHARS}::int) from ${taskSteps}
         where ${taskSteps.taskId} = ${tasks.id}
           and ${taskSteps.stepId} in (${SPEC_STEP_04}, ${SPEC_STEP_05}, ${SPEC_STEP_05A})
           and coalesce(${taskSteps.output}->>'spec', '') <> ''

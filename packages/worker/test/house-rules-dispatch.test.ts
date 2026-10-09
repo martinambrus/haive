@@ -769,15 +769,29 @@ describe('selectForDispatch', () => {
       expect(lsFiles()).toEqual([['ls-files', '-z']]);
     });
 
+    it('reads each part of the task text up to a bound, since none of them has a length limit', async () => {
+      await emptyTree();
+      task({ description: 'Make the badge look right.' });
+      await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.css'])] }));
+      const { sql: text } = new PgDialect().sqlToQuery(queries[0]!);
+      const read = text.replace(/\s+/g, ' ');
+      expect(read).toContain('select left("tasks"."title", $1::int) as title,');
+      expect(read).toContain('left("tasks"."description", $2::int) as description,');
+      expect(read).toContain(`(select left("task_steps"."output"->>'spec', $3::int) from`);
+    });
+
     it('asks for the freshest spec: the highest round, then 05a over 05 over 04', async () => {
       await emptyTree();
       task({ description: 'Make the badge look right.' });
       await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.css'])] }));
       const { sql: text, params } = new PgDialect().sqlToQuery(queries[0]!);
       expect(text.replace(/\s+/g, ' ')).toContain(
-        'order by "task_steps"."round" desc, case "task_steps"."step_id" when $4 then 3 when $5 then 2 else 1 end desc limit 1',
+        'order by "task_steps"."round" desc, case "task_steps"."step_id" when $7 then 3 when $8 then 2 else 1 end desc limit 1',
       );
       expect(params).toEqual([
+        262_144,
+        262_144,
+        262_144,
         '04-phase-0b-pre-planning',
         '05-phase-0b5-spec-quality',
         '05a-resolve-spec-warnings',
