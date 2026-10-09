@@ -960,6 +960,8 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued).toHaveLength(1);
     // Superseded, not consumed: a remediated attempt must not burn llm.retry budget.
     expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+    expect(sent.limitsLearnedAt).toEqual(new Date(provider.modelLimits!.learnedAt!));
 
     const spec = enqueued[0]!.spec as { args: string[]; env: Record<string, string> };
     expect(spec.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('131072');
@@ -969,6 +971,24 @@ describe('advanceStep LLM phase', () => {
     expect(spec.args.some((a) => a.includes(MODEL_CAPABILITY_BOUNDARY_MARKER))).toBe(true);
   });
 
+  it('records the epoch, not null, for a run built while the provider had learned no limits', async () => {
+    const state = freshState();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: { async enqueueCliInvocation() {} },
+    });
+    expect(result.status).toBe('waiting_cli');
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+    expect(sent.limitsLearnedAt).toEqual(new Date(0));
+  });
+
   describe('a model-capability failure whose remedy is already spent', () => {
     const beforeRun = (): string => new Date(Date.now() - 120_000).toISOString();
 
@@ -976,6 +996,7 @@ describe('advanceStep LLM phase', () => {
       cls: keyof typeof MODEL_CAPABILITY_HEADLINES,
       modelLimits: Record<string, unknown>,
       createdAt: Date = new Date(),
+      limitsLearnedAt?: Date,
     ) {
       const state = freshState();
       state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
@@ -989,6 +1010,7 @@ describe('advanceStep LLM phase', () => {
         endedAt: new Date(),
         errorMessage: `${MODEL_CAPABILITY_HEADLINES[cls]} — hint.`,
         createdAt,
+        limitsLearnedAt,
       };
       const enqueued: CliExecJobPayload[] = [];
       const provider = {
@@ -1042,6 +1064,17 @@ describe('advanceStep LLM phase', () => {
       expect(enqueued).toHaveLength(1);
     });
 
+    it('re-dispatches a run built when the provider had learned nothing, created after the learn', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: beforeRun() },
+        new Date(),
+        new Date(0),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
     it('does not resend a no-image failure whose flag was learned before the run began', async () => {
       const { result, enqueued } = await advanceAfter('no_image_support', {
         vision: false,
@@ -1068,6 +1101,29 @@ describe('advanceStep LLM phase', () => {
       );
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-dispatches a no-image failure whose run was built with older limits than the learn that preceded its insert', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: new Date(Date.now() - 90_000).toISOString() },
+        new Date(Date.now() - 60_000),
+        new Date(Date.now() - 150_000),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a no-image failure whose run was built with the current limits', async () => {
+      const learned = new Date(Date.now() - 90_000);
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: learned.toISOString() },
+        new Date(Date.now() - 120_000),
+        learned,
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
     });
 
     it('does not resend a rejected ceiling that was already rolled back before the run began', async () => {

@@ -1135,6 +1135,9 @@ export const cliInvocations = pgTable(
       errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
       filesRulesUnmatched?: number;
     }>(),
+    /** The `learnedAt` of the provider's model limits the request was built with (the epoch when
+     *  it had none); NULL on rows written before the column. Migration 0177. */
+    limitsLearnedAt: timestamp('limits_learned_at'),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

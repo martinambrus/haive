@@ -677,7 +677,7 @@ async function resolveLlmPhase(
             errTrimmed,
             params.providers,
             invocation.cliProviderId,
-            invocation.createdAt,
+            invocation,
           )
         ) {
           ctx.logger.warn(
@@ -908,6 +908,7 @@ async function resolveLlmPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+      limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
       mode,
       prompt: plan.effectivePrompt ?? prompt,
       agentTitle: roleLabel,
@@ -1113,6 +1114,7 @@ async function resolveAiFixPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+      limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
       mode: fixMode,
       prompt: plan.effectivePrompt ?? prompt,
     }),
@@ -1919,6 +1921,7 @@ async function dispatchMiningAgents(
         cliProviderId: plan.providerId,
         effort: plan.effort ?? null,
         assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+        limitsLearnedAt: limitsLearnedAtOf(params.providers, plan.providerId),
         mode: 'agent_mining',
         prompt: plan.effectivePrompt ?? prompt,
         steerable: plan.invocation.spec.steerable === true,
@@ -3870,7 +3873,7 @@ async function retryMiningAgents(
   const timedOutInvocationIds = new Set<string>();
   const truncatedInvocationIds = new Set<string>();
   const retriedTruncationIds = new Set<string>();
-  const createdAtByInvocation = new Map<string, Date | null>();
+  const runsById = new Map<string, FailedRunStamp>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
@@ -3880,11 +3883,12 @@ async function retryMiningAgents(
         prompt: schema.cliInvocations.prompt,
         startedAt: schema.cliInvocations.startedAt,
         createdAt: schema.cliInvocations.createdAt,
+        limitsLearnedAt: schema.cliInvocations.limitsLearnedAt,
       })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
-      createdAtByInvocation.set(p.id, p.createdAt);
+      runsById.set(p.id, p);
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
       if (isOutputTruncationMessage(p.errorMessage?.trim())) {
@@ -3918,7 +3922,7 @@ async function retryMiningAgents(
           r.errorMessage?.trim() ?? '',
           params.providers,
           r.cliProviderId,
-          r.cliInvocationId ? createdAtByInvocation.get(r.cliInvocationId) : null,
+          r.cliInvocationId ? runsById.get(r.cliInvocationId) : null,
         )),
   );
   const targets: MiningRetryTargets = new Map();
@@ -4283,23 +4287,41 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
  *  rejects it. A third attempt would repeat a request we already know fails. */
 const MAX_CAPABILITY_RETRIES = 2;
 
+type FailedRunStamp = { createdAt: Date | null; limitsLearnedAt: Date | null };
+
+function limitsLearnedAtOf(
+  providers: CliProviderRecord[] | undefined,
+  providerId: string | null,
+): Date | null {
+  const provider = providers?.find((p) => p.id === providerId);
+  const at = provider ? resolveModelLimits(provider)?.learnedAt : null;
+  return at ? new Date(at) : NO_LIMITS_LEARNED;
+}
+
+/** Stamped on a run built while its provider had learned no limits, so null keeps meaning a row
+ *  written before runs recorded this at all. */
+const NO_LIMITS_LEARNED = new Date(0);
+
 /** True when re-dispatching this capability failure would send the request that just failed: the
- *  provider learned nothing since the request was built (the run's `createdAt`; `learnedAt` is
- *  stamped by every learn), or its output-token ladder is spent, which stamps `learnedAt` but
- *  changes nothing. False for any other failure. */
+ *  provider learned nothing since the limits the run was built with (`limitsLearnedAt`; a run
+ *  without one is judged by its `createdAt`), or its output-token ladder is spent, which stamps
+ *  `learnedAt` but changes nothing. False for any other failure. */
 function repeatsCapabilityRequest(
   message: string,
   providers: CliProviderRecord[] | undefined,
   providerId: string | null,
-  createdAt: Date | null | undefined,
+  run: FailedRunStamp | null | undefined,
 ): boolean {
   const cls = capabilityClassFromMessage(message);
   if (!cls) return false;
   const provider = providers?.find((p) => p.id === providerId);
   const limits = provider ? resolveModelLimits(provider) : null;
   if (cls === 'output_cap_reached' && limits?.maxOutputTokensExhausted === true) return true;
-  if (!limits?.learnedAt || !createdAt) return true;
-  return new Date(limits.learnedAt).getTime() < createdAt.getTime();
+  if (!limits?.learnedAt) return true;
+  const learned = new Date(limits.learnedAt).getTime();
+  if (run?.limitsLearnedAt) return learned <= run.limitsLearnedAt.getTime();
+  if (!run?.createdAt) return true;
+  return learned < run.createdAt.getTime();
 }
 
 /** Count the most-recent CONSECUTIVE invocations for a step that failed on a model

@@ -101,6 +101,7 @@ interface MockState {
     errorMessage?: string | null;
     startedAt?: Date | null;
     createdAt?: Date;
+    limitsLearnedAt?: Date | null;
     endedAt?: Date | null;
     exitCode?: number | null;
   }[];
@@ -1233,15 +1234,13 @@ describe('advanceStep agentMining output truncation and model capability', () =>
     it('re-rolls the agent when the learn came after the run began', async () => {
       const state = failedAgentState(1, noImage);
       const enqueued: CliExecJobPayload[] = [];
-      const result = await run(
-        makeMockDb(state),
-        sharedPredicateStep([]),
-        enqueued,
-        learnedAt(-1000),
-      );
+      const providers = learnedAt(-1000);
+      const result = await run(makeMockDb(state), sharedPredicateStep([]), enqueued, providers);
 
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
+      const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+      expect(sent.limitsLearnedAt).toEqual(new Date(providers[0]!.modelLimits!.learnedAt));
     });
 
     it('re-rolls the agent whose request was built before the learn, though its run started after it', async () => {
@@ -1257,6 +1256,39 @@ describe('advanceStep agentMining output truncation and model capability', () =>
 
       expect(result.status).toBe('waiting_cli');
       expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-rolls the agent whose run was built with older limits than the learn that preceded its insert', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 60_000);
+      state.invocationRows![0]!.limitsLearnedAt = new Date(Date.now() - 150_000);
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        learnedAt(-90_000),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not re-roll the agent whose run was built with the current limits', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 120_000);
+      state.invocationRows![0]!.limitsLearnedAt = new Date(Date.now() - 90_000);
+      const applyCalls: StepApplyArgs[] = [];
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep(applyCalls),
+        enqueued,
+        learnedAt(-90_000),
+      );
+
+      expect(result.status).toBe('done');
+      expect(enqueued).toHaveLength(0);
     });
 
     it('does not re-roll the agent when the learn came before the run began', async () => {
