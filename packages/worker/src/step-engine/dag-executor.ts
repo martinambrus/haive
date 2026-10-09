@@ -1075,6 +1075,8 @@ const failedCriteriaCount = (v: ReviewerOutput): number =>
 /** Terminal-header names for the review loop's roles. 'coder' here is always the FIX
  *  coder — the initial implementation coder is dispatched by the level fan-out, not by
  *  this function. */
+type ClaimDb = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+
 const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> = {
   reviewer: 'Reviewer',
   coder: 'Fix coder',
@@ -1105,8 +1107,9 @@ async function spawnReviewAgent(
   iteration: number,
   prompt: string,
   capabilities: StepCapability[],
-  claim?: (invocationId: string) => Promise<void>,
+  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
   afterTruncation = false,
+  timeoutMs?: number,
 ): Promise<string | null> {
   const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
@@ -1157,16 +1160,20 @@ async function spawnReviewAgent(
     ),
     prompt: plan.effectivePrompt ?? fullPrompt,
   });
-  await ra.db.insert(schema.dagAgentRuns).values({
-    dagIssueId: issue.id,
-    taskId: ra.taskId,
-    role,
-    iteration,
-    status: 'running',
-    cliInvocationId: invId,
-    startedAt: new Date(),
+  await ra.db.transaction(async (tx) => {
+    await tx.insert(schema.dagAgentRuns).values({
+      dagIssueId: issue.id,
+      taskId: ra.taskId,
+      role,
+      iteration,
+      status: 'running',
+      cliInvocationId: invId,
+      startedAt: new Date(),
+    });
+    if (claim) await claim(invId, tx);
+    // Step last, as a Retry takes it: one that reset the step meanwhile rolls the claim back.
+    await assertOwnsStep(tx, ra.current.id);
   });
-  if (claim) await claim(invId);
   await ra.deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: ra.taskId,
@@ -1177,7 +1184,7 @@ async function spawnReviewAgent(
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: overrideOr(ra.current, REVIEW_TIMEOUT_MS),
+    timeoutMs: timeoutMs ?? overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
   return invId;
 }
@@ -1261,8 +1268,8 @@ export async function ingestReviewRun(
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
   const spec = (await issueSpecText(ra.specView, issue)).text;
-  const consume = async (): Promise<void> => {
-    await ra.db
+  const consume = async (_id?: string, db: ClaimDb = ra.db): Promise<void> => {
+    await db
       .update(schema.dagAgentRuns)
       .set({
         status: 'done',
@@ -1957,8 +1964,8 @@ export async function ingestAdvisor(
     // `running` + the invocation id is exactly what a LEVEL coder carries, so the ingest that
     // already handles a coder — parseCoderResult, the transient/genuine split, the timeout
     // ladder, the concerns ledger entry — handles this one too.
-    async (id) => {
-      await ea.db
+    async (id, db) => {
+      await db
         .update(schema.taskDagIssues)
         .set({
           outcome: 'running',
@@ -1972,6 +1979,70 @@ export async function ingestAdvisor(
   );
   if (!invId) await setResolution(ea.db, issue, 'failed_unrecoverable');
   return 'retry';
+}
+
+/** Re-sends a fix coder the advisor's retry started (it carries a dag_agent_runs row, a level coder
+ *  does not) as a fix coder again, with the advisor's retry_context and the stored findings. */
+async function redispatchFixCoder(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  failedRun: typeof schema.dagAgentRuns.$inferSelect,
+  failedInv: typeof schema.cliInvocations.$inferSelect,
+  charged: boolean,
+  afterTruncation: boolean,
+  timeoutMs: number | undefined,
+): Promise<void> {
+  const note = (issue.retryContext as { note?: unknown } | null)?.note;
+  const invId = await spawnReviewAgent(
+    ra,
+    issue,
+    'coder',
+    issue.innerIteration,
+    fixCoderPrompt(
+      issue,
+      [{ retry_context: typeof note === 'string' ? note : '', findings: issue.reviewerVerdict }],
+      (await issueSpecText(ra.specView, issue)).text,
+    ),
+    ['tool_use', 'file_write'],
+    async (id, db) => {
+      await db
+        .update(schema.taskDagIssues)
+        .set({
+          outcome: 'running',
+          cliInvocationId: id,
+          infraRetries: issue.infraRetries + (charged ? 1 : 0),
+          concerns: null,
+          errorMessage: null,
+          rawOutput: null,
+          startedAt: new Date(),
+          endedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+      await db
+        .update(schema.dagAgentRuns)
+        .set({
+          status: 'done',
+          consumedAt: new Date(),
+          endedAt: new Date(),
+          rawOutput: failedInv.rawOutput ?? null,
+        })
+        .where(eq(schema.dagAgentRuns.id, failedRun.id));
+    },
+    afterTruncation,
+    timeoutMs,
+  );
+  if (!invId) {
+    await ra.db
+      .update(schema.taskDagIssues)
+      .set({
+        outcome: 'failed_unrecoverable',
+        errorMessage: 'no cli provider available for the fix coder re-dispatch',
+        endedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskDagIssues.id, issue.id));
+  }
 }
 
 async function spawnReplanner(
@@ -2544,6 +2615,8 @@ export async function resolveDagPhase(
     const running = issues.filter((i) => i.outcome === 'running');
     if (running.length > 0) {
       let anyInFlight = false;
+      // The highest budget this pass has raised: `current` was read before any of them.
+      let passLearnedMs = 0;
       for (const issue of running) {
         if (!issue.cliInvocationId) {
           // Claimed but the dispatch crashed before enqueue — wait for recovery.
@@ -2582,6 +2655,7 @@ export async function resolveDagPhase(
             const failedMs = (cliTimeoutBudgetMinutes(inv.errorMessage) ?? 0) * 60_000;
             const next = escalatedTimeoutMs(failedMs);
             if (next) {
+              passLearnedMs = Math.max(passLearnedMs, next);
               await db
                 .update(schema.taskSteps)
                 .set({ cliTimeoutLearnedMs: next, updatedAt: new Date() })
@@ -2604,20 +2678,65 @@ export async function resolveDagPhase(
             (cls === 'transient' && (free || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) ||
             (cls === 'truncated' && truncationRetryable(inv))
           ) {
-            await db
-              .update(schema.taskDagIssues)
-              .set({
-                outcome: 'pending',
-                cliInvocationId: null,
-                infraRetries: issue.infraRetries + (free || cls === 'truncated' ? 0 : 1),
-                concerns: null,
-                errorMessage: cls === 'truncated' ? inv.errorMessage : null,
-                rawOutput: null,
-                startedAt: null,
-                endedAt: null,
-                updatedAt: new Date(),
-              })
-              .where(eq(schema.taskDagIssues.id, issue.id));
+            // An advisor retry's fix coder has an agent-run row; step (B) would re-send it as a level coder.
+            const [fixRun] = await db
+              .select()
+              .from(schema.dagAgentRuns)
+              .where(
+                and(
+                  eq(schema.dagAgentRuns.dagIssueId, issue.id),
+                  eq(schema.dagAgentRuns.role, 'coder'),
+                  eq(schema.dagAgentRuns.cliInvocationId, inv.id),
+                ),
+              )
+              .limit(1);
+            if (fixRun) {
+              await ensureArchivesExpanded(db, ctx.taskId);
+              await redispatchFixCoder(
+                {
+                  db,
+                  issues,
+                  level: curLevel,
+                  current,
+                  params,
+                  stepDef,
+                  providers,
+                  deps,
+                  taskId: ctx.taskId,
+                  specView: await resolveSpecView(ctx),
+                  attachmentsNotice: await augmentPromptWithAttachments(db, ctx.taskId, ''),
+                },
+                issue,
+                fixRun,
+                inv,
+                !(free || cls === 'truncated'),
+                cls === 'truncated',
+                // The budget section (B) would give it, with this pass's raised one counted.
+                overrideOrLearned(
+                  {
+                    ...current,
+                    cliTimeoutLearnedMs:
+                      Math.max(current.cliTimeoutLearnedMs ?? 0, passLearnedMs) || null,
+                  },
+                  spec.timeoutMs,
+                ),
+              );
+            } else {
+              await db
+                .update(schema.taskDagIssues)
+                .set({
+                  outcome: 'pending',
+                  cliInvocationId: null,
+                  infraRetries: issue.infraRetries + (free || cls === 'truncated' ? 0 : 1),
+                  concerns: null,
+                  errorMessage: cls === 'truncated' ? inv.errorMessage : null,
+                  rawOutput: null,
+                  startedAt: null,
+                  endedAt: null,
+                  updatedAt: new Date(),
+                })
+                .where(eq(schema.taskDagIssues.id, issue.id));
+            }
             await db
               .update(schema.cliInvocations)
               .set({ consumedAt: new Date() })
@@ -2643,7 +2762,8 @@ export async function resolveDagPhase(
           .update(schema.taskDagIssues)
           .set({
             outcome: result.outcome,
-            filesModified: result.filesModified,
+            // A coder that left no result reported no files; the worktree still holds earlier edits.
+            filesModified: result.parsed ? result.filesModified : (issue.filesModified ?? []),
             debtItems: result.debtItems,
             concerns: result.concerns,
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),

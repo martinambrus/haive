@@ -941,7 +941,13 @@ function makeDagMergeWaitDb(opts: {
     infraRetries: number;
     mergeStatus: string | null;
     errorMessage: string | null;
+    innerIteration: number;
+    retryContext: unknown;
+    reviewerVerdict: unknown;
+    filesModified: string[];
   }>;
+  /** The dag_agent_runs rows a select of that table returns. */
+  agentRuns?: unknown[];
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
   /** The same after this many reads, for a test that drives the phase more than once. */
@@ -981,6 +987,8 @@ function makeDagMergeWaitDb(opts: {
   const issueUpdates: Record<string, unknown>[] = [];
   const events: { eventType?: string }[] = [];
   const invocationInserts: Record<string, unknown>[] = [];
+  const agentRunInserts: Record<string, unknown>[] = [];
+  const agentRunUpdates: Record<string, unknown>[] = [];
   let levelReads = 0;
 
   function chain(result: unknown) {
@@ -1011,6 +1019,7 @@ function makeDagMergeWaitDb(opts: {
       ];
     }
     if (table === schema.taskDagIssues) return [issueRow];
+    if (table === schema.dagAgentRuns) return opts.agentRuns ?? [];
     if (table === schema.taskSteps) {
       // loadPreviousStepOutput('01-worktree-setup'): the integration worktree.
       return [
@@ -1059,6 +1068,7 @@ function makeDagMergeWaitDb(opts: {
       values: (v: { eventType?: string }) => {
         if (table === schema.taskEvents) events.push(v);
         if (table === schema.cliInvocations) invocationInserts.push(v);
+        if (table === schema.dagAgentRuns) agentRunInserts.push(v);
         return {
           returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
           then: (resolve: (v: unknown) => void) => resolve(undefined),
@@ -1075,6 +1085,7 @@ function makeDagMergeWaitDb(opts: {
             issueMergeStatus = patch.mergeStatus as string;
           }
           if (table === schema.taskDagIssues) issueUpdates.push(patch);
+          if (table === schema.dagAgentRuns) agentRunUpdates.push(patch);
           if (table === schema.taskSteps) {
             if ('status' in patch) stepStatus = patch.status as string;
             if ('errorMessage' in patch) {
@@ -1112,6 +1123,8 @@ function makeDagMergeWaitDb(opts: {
     getIssueMergeStatus: () => issueMergeStatus,
     issueUpdates,
     invocationInserts,
+    agentRunInserts,
+    agentRunUpdates,
     events,
   };
 }
@@ -1869,6 +1882,66 @@ const workingDispatchPlan = () =>
 
 const NEVER_STARTED = 'never started';
 const STARTED_THEN_SUPERSEDED = 'started, then superseded by a Retry';
+
+describe('a review-loop agent whose step a Retry reset before its claim', () => {
+  it('rolls the claim back and enqueues nothing', async () => {
+    const { db } = makeSpawnDb();
+    let ownershipProbes = 0;
+    (db as unknown as { select: unknown }).select = () => ({
+      from: () => ({
+        where: () => ({
+          // The run's insert still owns the step; the claim, after a Retry's reset, does not.
+          for: async () => (++ownershipProbes === 1 ? [{ id: 'step1' }] : []),
+          orderBy: async () => [],
+        }),
+      }),
+    });
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const enqueued: unknown[] = [];
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async (job: unknown) => void enqueued.push(job) },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      stuckCount: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    const neverStarted = inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: null,
+      startedAt: null,
+    });
+
+    const err = await ingestReviewRun(
+      ra,
+      issue,
+      { id: 'run-1', role: 'coder' } as never,
+      neverStarted,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StepSupersededError);
+    expect(enqueued).toHaveLength(0);
+  });
+});
 
 describe('ingestReviewRun: a fix coder that never answered', () => {
   it.each([
@@ -2683,6 +2756,11 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
     async function ingestCoder(
       stepRowStatus: string,
       invocation: Parameters<typeof makeDagMergeWaitDb>[0]['invocation'] = killedCoder,
+      extra: {
+        agentRuns?: unknown[];
+        issue?: Parameters<typeof makeDagMergeWaitDb>[0]['issue'];
+        enqueued?: unknown[];
+      } = {},
     ) {
       const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-c-'));
       try {
@@ -2691,7 +2769,13 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           integrationDir,
           autoResolveConflicts: false,
           stepRowStatus,
-          issue: { outcome: 'running', cliInvocationId: killedCoder.id, infraRetries: 1 },
+          issue: {
+            outcome: 'running',
+            cliInvocationId: killedCoder.id,
+            infraRetries: 1,
+            ...extra.issue,
+          },
+          agentRuns: extra.agentRuns,
           checkpointAfterFirstRead: true,
         });
         const ctx = {
@@ -2701,6 +2785,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           sandboxWorkdir: integrationDir,
           logger: logger.child({ test: 'dag-section-c' }),
           emitProgress: async () => {},
+          db: h.db,
         } as unknown as StepContext;
         const params = {
           userId: 'user1',
@@ -2708,7 +2793,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           cliProviderId: null,
           ignoreSavedStepClis: false,
           providers: [{ id: 'p1', enabled: true }],
-          deps: { enqueueCliInvocation: async () => {} },
+          deps: { enqueueCliInvocation: async (job: unknown) => void extra.enqueued?.push(job) },
         };
         const outcome = await resolveDagPhase(
           h.db as never,
@@ -2720,7 +2805,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           (result) => ({ result }),
           (error: unknown) => ({ error }),
         );
-        return { outcome, issueUpdates: h.issueUpdates };
+        return { outcome, issueUpdates: h.issueUpdates, h };
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
       }
@@ -2762,6 +2847,139 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           errorMessage: expect.stringContaining(OUTPUT_TRUNCATION_HEADLINE),
         }),
       ]);
+    });
+
+    it('keeps the files an earlier coder recorded when a coder fails with no result', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        { ...killedCoder, supersededAt: null, exitCode: 1, errorMessage: 'the agent gave up' },
+        { issue: { infraRetries: 0, filesModified: ['src/cache.ts'] } },
+      );
+      const failed = issueUpdates.find(
+        (u) => (u as { outcome?: string }).outcome === 'failed_unrecoverable',
+      );
+      expect(failed).toMatchObject({ filesModified: ['src/cache.ts'] });
+    });
+
+    describe('a fix coder the advisor started (it has an agent-run row)', () => {
+      const RETRY_CONTEXT = 'keep the cache key stable across writes';
+      const advisorRetry = {
+        outcome: 'running',
+        cliInvocationId: killedCoder.id,
+        infraRetries: 0,
+        innerIteration: 2,
+        retryContext: { note: RETRY_CONTEXT },
+        reviewerVerdict: {
+          verdict: 'fix_required',
+          criteria_results: [],
+          issues: [{ severity: 'high', file: 'a.ts', description: 'stale cache bug' }],
+        },
+      };
+      const fixRun = { id: 'run-fix-1', role: 'coder', iteration: 2, cliInvocationId: 'coder-1' };
+      const killedOnce = { ...killedCoder, supersededAt: null };
+
+      it('re-sends a transiently killed one as a fix coder with the retry context, charging one retry', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        const enqueued: unknown[] = [];
+        const { outcome, issueUpdates, h } = await ingestCoder('running', killedOnce, {
+          agentRuns: [fixRun],
+          issue: advisorRetry,
+          enqueued,
+        });
+        expect('result' in outcome && outcome.result.resolved).toBe(true);
+        const prompt = h.invocationInserts[0]!.prompt as string;
+        expect(prompt).toContain(RETRY_CONTEXT);
+        expect(prompt).toContain('stale cache bug');
+        expect(prompt).toContain('You are addressing reviewer findings');
+        expect(prompt).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.agentRunInserts).toEqual([
+          expect.objectContaining({ role: 'coder', iteration: 2, dagIssueId: 'issue1' }),
+        ]);
+        expect(issueUpdates).toEqual([
+          expect.objectContaining({
+            outcome: 'running',
+            cliInvocationId: 'fix-inv-1',
+            infraRetries: 1,
+          }),
+        ]);
+        expect(issueUpdates.some((u) => u.outcome === 'pending')).toBe(false);
+        expect(h.agentRunUpdates).toEqual([expect.objectContaining({ status: 'done' })]);
+        expect(enqueued).toHaveLength(1);
+      });
+
+      it('re-sends one killed at its time budget with the raised budget, not the review default', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        const enqueued: { timeoutMs?: number }[] = [];
+        await ingestCoder(
+          'running',
+          {
+            ...killedOnce,
+            supersededAt: null,
+            exitCode: 137,
+            errorMessage: 'CLI process exceeded its time budget (30m).',
+          },
+          { agentRuns: [fixRun], issue: { ...advisorRetry, infraRetries: 0 }, enqueued },
+        );
+        expect(enqueued).toHaveLength(1);
+        expect(enqueued[0]!.timeoutMs).toBe(60 * 60_000);
+      });
+
+      it('re-sends one cut off at the output limit with the notice, charging nothing', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        const { issueUpdates, h } = await ingestCoder('running', truncatedCoder('fix it'), {
+          agentRuns: [fixRun],
+          issue: advisorRetry,
+        });
+        const prompt = h.invocationInserts[0]!.prompt as string;
+        expect(prompt.endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+        expect(prompt).toContain(RETRY_CONTEXT);
+        expect(issueUpdates).toEqual([
+          expect.objectContaining({
+            outcome: 'running',
+            cliInvocationId: 'fix-inv-1',
+            infraRetries: 0,
+          }),
+        ]);
+      });
+
+      it('re-sends a run a Retry superseded for free', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        const { issueUpdates, h } = await ingestCoder('running', killedCoder, {
+          agentRuns: [fixRun],
+          issue: advisorRetry,
+        });
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(issueUpdates).toEqual([
+          expect.objectContaining({ outcome: 'running', infraRetries: 0 }),
+        ]);
+      });
+
+      it('fails the issue when no provider can take the re-dispatch', async () => {
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+          async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
+        );
+        const { issueUpdates, h } = await ingestCoder('running', killedOnce, {
+          agentRuns: [fixRun],
+          issue: advisorRetry,
+        });
+        expect(h.invocationInserts).toHaveLength(0);
+        expect(issueUpdates).toEqual([
+          expect.objectContaining({ outcome: 'failed_unrecoverable' }),
+        ]);
+      });
+    });
+
+    it('still resets a transiently killed level coder to pending for step (B)', async () => {
+      const { issueUpdates, h } = await ingestCoder(
+        'running',
+        { ...killedCoder, supersededAt: null },
+        { agentRuns: [] },
+      );
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({ outcome: 'pending', cliInvocationId: null, infraRetries: 2 }),
+      ]);
+      expect(h.invocationInserts).toHaveLength(0);
+      expect(h.agentRunInserts).toHaveLength(0);
     });
 
     it('handles a cut-off coder whose prompt already carries the notice as a failure', async () => {
