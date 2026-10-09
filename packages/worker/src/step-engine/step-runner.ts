@@ -3869,6 +3869,7 @@ async function retryMiningAgents(
   // CLI_TIMEOUT_HEADLINE exists to name.
   const timedOutInvocationIds = new Set<string>();
   const truncatedInvocationIds = new Set<string>();
+  const retriedTruncationIds = new Set<string>();
   const createdAtByInvocation = new Map<string, Date | null>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
@@ -3876,6 +3877,7 @@ async function retryMiningAgents(
       .select({
         id: schema.cliInvocations.id,
         errorMessage: schema.cliInvocations.errorMessage,
+        prompt: schema.cliInvocations.prompt,
         startedAt: schema.cliInvocations.startedAt,
         createdAt: schema.cliInvocations.createdAt,
       })
@@ -3885,7 +3887,10 @@ async function retryMiningAgents(
       createdAtByInvocation.set(p.id, p.createdAt);
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
-      if (isOutputTruncationMessage(p.errorMessage?.trim())) truncatedInvocationIds.add(p.id);
+      if (isOutputTruncationMessage(p.errorMessage?.trim())) {
+        truncatedInvocationIds.add(p.id);
+        if (p.prompt.trimEnd().endsWith(TRUNCATION_RETRY_NOTICE)) retriedTruncationIds.add(p.id);
+      }
     }
   }
   const runsFree = (r: { cliInvocationId: string | null }): boolean =>
@@ -3894,6 +3899,8 @@ async function retryMiningAgents(
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
   const truncated = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && truncatedInvocationIds.has(r.cliInvocationId);
+  const truncatedAgain = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && retriedTruncationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
   // preemption case above: that budget bounds automatic thrash, and a person asking is not
   // thrash. Without the bypass the one control a user has would silently do nothing once the
@@ -3906,6 +3913,7 @@ async function retryMiningAgents(
     (r) =>
       userAsked(r) ||
       ((r.attempts < maxAttempts || runsFree(r)) &&
+        !truncatedAgain(r) &&
         !repeatsCapabilityRequest(
           r.errorMessage?.trim() ?? '',
           params.providers,
