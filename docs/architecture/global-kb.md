@@ -220,8 +220,9 @@ ladder is a guard.
 carry `rule` on an issue and a top-level `rule_conflicts: [{rule, file, reason}]`, both parsed
 tolerantly: a malformed one drops only itself and never makes a pass unparseable. A validator pass
 stores its conflicts, its own `cli_invocations` id (`validatorInvocationId`) and how many changed
-files its list held of how many changed (`changedFilesCoverage`, capped at 100); a fixer pass carries
-all three from the validator it follows. A conflict is never an issue, so no fixer, fix loop or
+files its list held of how many changed (`changedFilesCoverage`, capped at 100; a re-validation counts
+the list its fixer re-collected, files the fixer created included); a fixer pass carries all three
+from the validator it follows. A conflict is never an issue, so no fixer, fix loop or
 churn count acts on it: it waits for a person. Haive backs the block: an issue whose `rule` names an
 entry of the pass's own stamp is raised to `high` when the model said less, and a VALID pass with
 such an issue becomes ISSUES_FOUND so the fixer and the fix loop run. The fixer's issue lines and

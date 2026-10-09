@@ -32,14 +32,23 @@ and existing project contracts; they do not mandate new translation or other sub
 Every reviewing step (07a, 07b, 08a, 08b, 08c, 08c2, 08d) is scoped by ONE collector,
 `collectImplementationFiles` (`_impl-changes.ts`). It unions 07's agent-reported
 `filesTouched`, the DAG issues' `filesModified`, the dirty worktree, and every file a commit since
-the fork point deleted (`git diff --name-status -z <base> HEAD`: a DAG coder may not report a
-removal, and a house rule can cover it), caps the list at 100
+the fork point added, changed or deleted (`git diff --name-status -z <base> HEAD`: a DAG coder
+commits and merges each issue, so a file it did not report is in no other source, and a house rule
+can cover a removal), caps the list at 100
 and REPORTS the cap (`changedFilesBlock`'s COVERAGE notice orders the agent to state what it
 was not given) — a silent cap once had a reviewer approve 100 of 150 files as though it had
 seen all of them. The list is not a convenience: `worktreeGitfileMask` bind-mounts an empty
 file over the worktree's `.git` for every cli-exec invocation, so inside the sandbox there is
 no `git status` and no `git diff`, and everything an agent knows about the change has to
 arrive in its prompt.
+
+A pass after a fix is given the change as it stands, not as detect saw it: the 07b and 08a fix
+passes re-collect it and carry the list on their output, so the next validator or re-tester lists
+the files the fixer created, 07b's stored coverage is that pass's, and 07b re-decides the
+documentation protocol from it (MEASURED on a live run: a fixer's new `images/icon-check.svg` was
+missing from the re-validator's list and coverage read 2/2 of 3). A list from a failed scan never
+stands in for detect's. Gate 2's Implementation validation row reads 07b's coverage the way the
+review rows read theirs, and holds Approve when 07b was given a capped list.
 
 Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
 `no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base
