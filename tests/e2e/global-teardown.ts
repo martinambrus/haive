@@ -7,7 +7,11 @@ import { getSql, removeUser } from './helpers/db.js';
  *  crashed before its own cleanup leaves its user, and whatever the user owns, behind. */
 export default async function globalTeardown(): Promise<void> {
   const file = process.env[REGISTERED_USERS_FILE_ENV];
-  if (!file) return;
+  if (!file) {
+    throw new Error(
+      `${REGISTERED_USERS_FILE_ENV} is unset, so the accounts this run registered were not removed`,
+    );
+  }
   const users = readFileSync(file, 'utf8')
     .split('\n')
     .filter(Boolean)
