@@ -6,7 +6,6 @@ import {
   DEFAULT_RAG_SEARCH_CONFIG,
   RUNBOOK_BOOST_BUGFIX,
   RUNBOOK_BOOST_FEATURE,
-  embedQuery,
   applyKnowledgeReserve,
   embedQueryOrNull,
   ragHybridSearch,
@@ -370,16 +369,17 @@ ragRoutes.post('/search', async (c) => {
   if (globalEnabled) {
     try {
       const result = await withGlobalKb(db, async ({ conn, settings }) => {
-        const gvec = await embedQuery(query, {
+        const gvec = await embedQueryOrNull(query, {
           ollamaUrl: settings.ollamaUrl,
           model: settings.embedModel,
           dimensions: settings.embeddingDimensions,
         });
+        // Same rule as the local half: no query vector means full text only, never a hash vector.
         const raw = await ragHybridSearch(
           conn,
-          gvec,
+          gvec ?? [],
           query,
-          { identifierSearch, ...(topK ? { topK } : {}) },
+          { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
           { namespace: settings.namespace, facets },
         );
         const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
