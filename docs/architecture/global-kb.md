@@ -162,7 +162,7 @@ step's latest round apart), read as backtick spans, markdown link targets and ba
 or an extension (letters of any script; a `#anchor` after a file name dropped), glob characters
 refused, and parentheses only as a whole segment such as a route group `(app)` (a call like
 `require(a/b.inc` is no name: 46 such tokens in the install's specs), each resolved to the one
-tracked file it ends on a `/` boundary (one `git ls-files -z`), else kept as written, since a named
+tracked file it ends on a `/` boundary (one `git ls-files -z`, under the same 30 s bound), else kept as written, since a named
 file may not exist yet. MEASURED on a live quick_bugfix: 07 round 0 stamped `filesRulesUnmatched:
 1`, wrote the inline `<svg>` the rule forbids, and its description named both files it then wrote. A
 DAG coder keeps its issue's own estimate: task-wide names gave 65 selections over 29 coders, 4 of
