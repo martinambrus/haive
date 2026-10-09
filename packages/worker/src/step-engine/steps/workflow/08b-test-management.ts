@@ -149,9 +149,18 @@ export function parseTesterOutput(raw: unknown): {
 const TEST_FILE_RE =
   /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
-/** Created/updated paths that look like runnable test files. */
+const CONTROL_CHAR_RE = /\p{Cc}/u;
+
+/** Created/updated paths that look like runnable test files, less any the agent reported as
+ *  absolute, climbing out with `..`, or carrying a control character. */
 export function filterTestFiles(files: string[]): string[] {
-  return files.filter((f) => TEST_FILE_RE.test(f));
+  return files.filter(
+    (f) =>
+      TEST_FILE_RE.test(f) &&
+      !f.startsWith('/') &&
+      !f.split('/').includes('..') &&
+      !CONTROL_CHAR_RE.test(f),
+  );
 }
 
 export interface TestCommand {
@@ -539,6 +548,10 @@ export function actionInstructions(): string[] {
   ];
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Run one built command through whichever path its `kind` names, so the selective run and the
  *  enumerate-only classifier below cannot diverge in how they reach the runner. The ddev branch
  *  requires a resolved `repoSubpath`; the caller checks that before it gets here. */
@@ -551,11 +564,14 @@ async function runTestCommand(
 ): Promise<{ exitCode: number; command: string; output: string }> {
   const joined = cmd.args.join(' ');
   if (cmd.kind === 'ddev') {
+    // ddevExec splices this into a `bash -lc` in the runner, so each word is quoted. `ddev exec`
+    // without --raw still re-reads its words in the web container's bash; that shell is not covered.
+    const quoted = cmd.args.map(shellQuote).join(' ');
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath!);
     // `onLine` switches ddevExec to its streaming path, so the caller can surface the
     // runner's latest line. Absent for the enumerate probe, which is bounded and silent.
-    const res = await ddevExec(handle, joined, { timeoutMs, ...(onLine ? { onLine } : {}) });
-    return { exitCode: res.exitCode, command: `ddev ${joined}`, output: res.output.slice(-4000) };
+    const res = await ddevExec(handle, quoted, { timeoutMs, ...(onLine ? { onLine } : {}) });
+    return { exitCode: res.exitCode, command: `ddev ${quoted}`, output: res.output.slice(-4000) };
   }
   const [bin, ...rest] = cmd.args;
   try {
