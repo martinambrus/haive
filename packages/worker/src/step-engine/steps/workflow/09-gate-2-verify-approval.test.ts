@@ -53,7 +53,7 @@ import { recurrenceTag } from './09-gate-2-verify-approval.js';
 import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { formatQaFixDiagnosis } from './08d2-adversarial-qa-review.js';
-import { buildGateDirectiveDiagnosis } from './_fix-loop.js';
+import { buildGateDirectiveDiagnosis, excerptDiagnosis } from './_fix-loop.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
@@ -1196,7 +1196,7 @@ describe('gate-2 verification results read from 08', () => {
 });
 
 describe('gate-2 shows a long validator report from both ends', () => {
-  const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
+  const OMISSION = /\[… ([\d,]+) characters? omitted …\]/;
   const HEADING = '## Validator report (excerpt)';
   const FIRST = '## Validation report: FIRST LINE';
   const LAST = 'LAST LINE: nothing else to report';
@@ -1229,7 +1229,7 @@ describe('gate-2 shows a long validator report from both ends', () => {
     m.changeFingerprint.mockReset().mockResolvedValue(null);
   });
 
-  async function shown(report: string | undefined) {
+  async function shown(report: string | undefined, reportChars?: number) {
     m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
       id === '07b-phase-4-validate'
         ? {
@@ -1239,6 +1239,7 @@ describe('gate-2 shows a long validator report from both ends', () => {
               issues: [],
               dimensions: [],
               ...(report === undefined ? {} : { report }),
+              ...(reportChars === undefined ? {} : { reportChars }),
             },
             iterations: [],
           }
@@ -1251,6 +1252,25 @@ describe('gate-2 shows a long validator report from both ends', () => {
     return { excerpt: detected.validation?.report ?? '', body: row?.body ?? '' };
   }
 
+  async function storedBy07b(llmOutput: string) {
+    const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+    const { report, reportChars } = await phase4ValidateStep.apply(
+      { logger: quiet } as never,
+      { detected: {}, formValues: {}, iteration: 0, previousIterations: [], llmOutput } as never,
+    );
+    return { report, reportChars };
+  }
+
+  const omittedOf = (text: string) => {
+    const lines = text.split('\n');
+    const at = lines.findIndex((line) => OMISSION.test(line));
+    return {
+      count: Number(OMISSION.exec(lines[at] ?? '')?.[1]?.replaceAll(',', '')),
+      head: lines.slice(0, at).join('\n'),
+      tail: lines.slice(at + 1).join('\n'),
+    };
+  };
+
   it('shows the first and the last line of a report over its limit, and says what it left out', async () => {
     const { excerpt, body } = await shown(prose(12_000));
     const lines = excerpt.split('\n');
@@ -1261,25 +1281,40 @@ describe('gate-2 shows a long validator report from both ends', () => {
     expect(body.endsWith(`${HEADING}\n\n${excerpt}`)).toBe(true);
   });
 
-  it('shows both ends of what 07b keeps of a reply of 40,000 characters', async () => {
-    const quiet = { info() {}, warn() {}, error() {}, debug() {} };
-    const { report } = await phase4ValidateStep.apply(
-      { logger: quiet } as never,
-      {
-        detected: {},
-        formValues: {},
-        iteration: 0,
-        previousIterations: [],
-        llmOutput: prose(40_000),
-      } as never,
-    );
-    const { excerpt, body } = await shown(report);
-    const lines = excerpt.split('\n');
+  it('states in its omission line how many characters of a 40,000-character reply the report leaves out', async () => {
+    const reply = prose(40_000);
+    const stored = await storedBy07b(reply);
+    const { body } = await shown(stored.report, stored.reportChars);
+    const section = body.slice(body.indexOf(`${HEADING}\n\n`) + HEADING.length + 2);
+    const lines = section.split('\n');
     expect(lines[0]).toBe(FIRST);
     expect(lines.at(-1)).toBe(LAST);
+    expect(section.length).toBeLessThanOrEqual(8_000 + 100);
+    const { count, head, tail } = omittedOf(section);
+    expect(count).toBe(reply.length - head.length - tail.length);
+    expect(stored.reportChars).toBe(reply.length);
+  });
+
+  it('shows what 07b kept of an 8,000-character reply byte for byte', async () => {
+    const reply = prose(8_100).slice(0, 8_000);
+    const stored = await storedBy07b(reply);
+    expect(stored.report).toBe(reply);
+    const { excerpt, body } = await shown(stored.report, stored.reportChars);
+    expect(excerpt).toBe(reply);
+    expect(body.endsWith(`${HEADING}\n\n${reply}`)).toBe(true);
+  });
+
+  it('shows a report that carries its reply length exactly as stored, even a few characters over the limit', async () => {
+    const stored = prose(8_100).slice(0, 8_017);
+    expect((await shown(stored, 40_014)).excerpt).toBe(stored);
+  });
+
+  it('excerpts a report stored without its reply length as before: the last 16,000 characters of a reply', async () => {
+    const stored = prose(40_000).slice(-16_000);
+    const { excerpt } = await shown(stored);
+    expect(excerpt).toBe(excerptDiagnosis(stored, 8_000, false));
     expect(excerpt).toMatch(OMISSION);
     expect(excerpt.length).toBeLessThanOrEqual(8_000 + 100);
-    expect(body).toContain(`${HEADING}\n\n${FIRST}\n`);
   });
 
   it('cuts a report only once it is over its limit', async () => {

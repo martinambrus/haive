@@ -369,6 +369,7 @@ interface Phase4Output {
   excludedDimensions?: string[];
   fixesApplied?: string[];
   report?: string;
+  reportChars?: number;
   converged?: boolean;
   churnFiles?: string[];
 }
@@ -563,7 +564,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
         converged: p4.converged !== false,
         churnFiles: p4.churnFiles ?? [],
-        report: reportExcerpt(p4.report ?? ''),
+        // A report with its reply length was cut once by 07b, at this size; one without it predates that and is cut here.
+        report:
+          typeof p4.reportChars === 'number' ? (p4.report ?? '') : reportExcerpt(p4.report ?? ''),
       };
     }
 

@@ -84,7 +84,8 @@ import {
 
 const ROLE_VALIDATOR = 'validator';
 const ROLE_FIXER = 'fixer';
-const REPORT_CAP = 16_000;
+// Gate 2 shows the report at this size, so it is cut once here and not again there.
+const REPORT_CAP = 8_000;
 // A file the validator re-flags across this many distinct validator passes is
 // treated as non-converging churn: the fixer keeps touching it without the
 // validator clearing it (the ext/mysql-enablement thrash that ran all 5 rounds).
@@ -183,6 +184,8 @@ interface ValidateApply {
   findingsSummary: string;
   /** The latest validator pass's raw output (the report); over REPORT_CAP, its start and end. */
   report: string;
+  /** The length of the reply `report` was kept from; a report that has it is already cut to gate 2's size. */
+  reportChars?: number;
   validatorPasses: number;
   source: 'validator' | 'fixer' | 'stub';
 }
@@ -1011,6 +1014,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           prior?.churnFiles ?? [],
         ),
         report: prior?.report ?? '',
+        ...(prior?.reportChars === undefined ? {} : { reportChars: prior.reportChars }),
         validatorPasses,
         source: 'fixer',
       };
@@ -1101,6 +1105,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         fixesApplied: fixesSoFar,
         findingsSummary: buildFindingsSummary(verdict, fixesSoFar, issues, churnFiles),
         report,
+        reportChars: reply.length,
         validatorPasses: validatorPasses + 1,
         source: 'validator',
       };
@@ -1118,6 +1123,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       fixesApplied: fixesSoFar,
       findingsSummary: buildFindingsSummary('UNPARSEABLE', fixesSoFar, []),
       report,
+      reportChars: reply.length,
       validatorPasses: validatorPasses + 1,
       source: 'stub',
     };
