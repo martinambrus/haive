@@ -1,6 +1,7 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupTaskFixture, cleanupUser, getSql, seedTaskFixture } from '../helpers/db.js';
-import { API_BASE, registerUser } from '../helpers/auth.js';
+import type { APIRequestContext } from '@playwright/test';
+import { seedTaskFixture } from '../helpers/db.js';
+import { API_BASE } from '../helpers/auth.js';
+import { expect, test } from '../helpers/fixtures.js';
 import { seedSpend } from '../helpers/spend.js';
 
 /**
@@ -29,33 +30,24 @@ const OBSERVED = {
 };
 
 test.describe('task page tool usage', () => {
-  test('the disclosure renders the seeded usage once opened', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture = null as Awaited<ReturnType<typeof seedTaskFixture>> | null;
-    try {
-      userId = (await registerUser(sql, page.request, { prefix: 'task-tools' })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'task-tools');
-      const cliProviderId = await createProvider(page.request);
-      await seedSpend(
-        sql,
-        { taskId: fixture.taskId, taskStepId: fixture.failedStepId, cliProviderId },
-        [{ durationMs: 10 * 60_000, costUsd: 0.1, totalTokens: 1_000, toolUsage: OBSERVED }],
-      );
+  test('the disclosure renders the seeded usage once opened', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-tools' });
+    const fixture = await seedTaskFixture(sql, userId, 'task-tools');
+    const cliProviderId = await createProvider(page.request);
+    await seedSpend(
+      sql,
+      { taskId: fixture.taskId, taskStepId: fixture.failedStepId, cliProviderId },
+      [{ durationMs: 10 * 60_000, costUsd: 0.1, totalTokens: 1_000, toolUsage: OBSERVED }],
+    );
 
-      await page.goto(`/tasks/${fixture.taskId}`);
-      const summary = page.getByText('Agents, skills and tools used').first();
-      await expect(summary).toBeVisible({ timeout: 15_000 });
-      // Closed by default: nothing fetched, nothing rendered, until the user asks.
-      await expect(page.getByText('code-reviewer (2)')).toHaveCount(0);
-      await summary.click();
-      await expect(page.getByText('code-reviewer (2)').first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText('project-context (4)').first()).toBeVisible();
-      await expect(page.getByText('haive-rag/rag_search (3)').first()).toBeVisible();
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    await page.goto(`/tasks/${fixture.taskId}`);
+    const summary = page.getByText('Agents, skills and tools used').first();
+    await expect(summary).toBeVisible({ timeout: 15_000 });
+    // Closed by default: nothing fetched, nothing rendered, until the user asks.
+    await expect(page.getByText('code-reviewer (2)')).toHaveCount(0);
+    await summary.click();
+    await expect(page.getByText('code-reviewer (2)').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('project-context (4)').first()).toBeVisible();
+    await expect(page.getByText('haive-rag/rag_search (3)').first()).toBeVisible();
   });
 });

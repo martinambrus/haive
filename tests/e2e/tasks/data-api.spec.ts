@@ -1,240 +1,168 @@
-import { expect, test } from '@playwright/test';
 import {
-  cleanupTaskFixture,
-  cleanupUser,
-  getSql,
   seedTaskFixture,
-  type TaskFixture,
   FIXTURE_FAILED_STEP_ID,
   FIXTURE_LAST_STEP_ID,
   FIXTURE_MIDDLE_STEP_ID,
 } from '../helpers/db.js';
-import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
+import { API_BASE } from '../helpers/auth.js';
+import { expect, test } from '../helpers/fixtures.js';
 
 const FAKE_UUID = '00000000-0000-4000-8000-000000000000';
 
 test.describe('task data API', () => {
-  test('GET /tasks/:id returns task + 3 seeded steps in order', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-get');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'get');
+  test('GET /tasks/:id returns task + 3 seeded steps in order', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-get' });
+    const fixture = await seedTaskFixture(sql, userId, 'get');
 
-      const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}`);
-      expect(res.status()).toBe(200);
-      const body = (await res.json()) as {
-        task: { id: string; status: string };
-        steps: Array<{ stepId: string; stepIndex: number; title: string }>;
-      };
-      expect(body.task.id).toBe(fixture.taskId);
-      expect(body.task.status).toBe('failed');
-      expect(body.steps).toHaveLength(3);
-      expect(body.steps.map((s) => s.stepId)).toEqual([
-        FIXTURE_FAILED_STEP_ID,
-        FIXTURE_MIDDLE_STEP_ID,
-        FIXTURE_LAST_STEP_ID,
-      ]);
-      expect(body.steps.map((s) => s.stepIndex)).toEqual([0, 1, 2]);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}`);
+    expect(res.status()).toBe(200);
+    const body = (await res.json()) as {
+      task: { id: string; status: string };
+      steps: Array<{ stepId: string; stepIndex: number; title: string }>;
+    };
+    expect(body.task.id).toBe(fixture.taskId);
+    expect(body.task.status).toBe('failed');
+    expect(body.steps).toHaveLength(3);
+    expect(body.steps.map((s) => s.stepId)).toEqual([
+      FIXTURE_FAILED_STEP_ID,
+      FIXTURE_MIDDLE_STEP_ID,
+      FIXTURE_LAST_STEP_ID,
+    ]);
+    expect(body.steps.map((s) => s.stepIndex)).toEqual([0, 1, 2]);
   });
 
-  test('GET /tasks/:id/steps returns only steps subtree', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-steps');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'steps');
+  test('GET /tasks/:id/steps returns only steps subtree', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-steps' });
+    const fixture = await seedTaskFixture(sql, userId, 'steps');
 
-      const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/steps`);
-      expect(res.status()).toBe(200);
-      const body = (await res.json()) as {
-        steps: Array<{ stepId: string; status: string; errorMessage: string | null }>;
-      };
-      expect(body.steps).toHaveLength(3);
-      const failing = body.steps.find((s) => s.stepId === FIXTURE_FAILED_STEP_ID);
-      expect(failing?.status).toBe('failed');
-      expect(failing?.errorMessage).toBe('kaboom');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/steps`);
+    expect(res.status()).toBe(200);
+    const body = (await res.json()) as {
+      steps: Array<{ stepId: string; status: string; errorMessage: string | null }>;
+    };
+    expect(body.steps).toHaveLength(3);
+    const failing = body.steps.find((s) => s.stepId === FIXTURE_FAILED_STEP_ID);
+    expect(failing?.status).toBe('failed');
+    expect(failing?.errorMessage).toBe('kaboom');
   });
 
-  test('GET /tasks/:id/events returns empty array for fresh fixture', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('task-events');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'events');
+  test('GET /tasks/:id/events returns empty array for fresh fixture', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const { userId } = await users.register(page.request, { prefix: 'task-events' });
+    const fixture = await seedTaskFixture(sql, userId, 'events');
 
-      const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/events`);
-      expect(res.status()).toBe(200);
-      const body = (await res.json()) as { events: unknown[] };
-      expect(body.events).toEqual([]);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/events`);
+    expect(res.status()).toBe(200);
+    const body = (await res.json()) as { events: unknown[] };
+    expect(body.events).toEqual([]);
   });
 
-  test('nonexistent task ids return 404 on get, steps, events', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    try {
-      const email = uniqueEmail('task-404');
-      userId = (await registerUser(sql, page.request, { email })).userId;
+  test('nonexistent task ids return 404 on get, steps, events', async ({ page, users }) => {
+    await users.register(page.request, { prefix: 'task-404' });
 
-      const get = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}`);
-      expect(get.status()).toBe(404);
+    const get = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}`);
+    expect(get.status()).toBe(404);
 
-      const steps = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}/steps`);
-      expect(steps.status()).toBe(404);
+    const steps = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}/steps`);
+    expect(steps.status()).toBe(404);
 
-      const events = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}/events`);
-      expect(events.status()).toBe(404);
-    } finally {
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const events = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}/events`);
+    expect(events.status()).toBe(404);
   });
 
   test('POST step retry on failed step transitions step to pending, task to running, emits event', async ({
     page,
+    sql,
+    users,
   }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-retry');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-retry');
+    const { userId } = await users.register(page.request, { prefix: 'step-retry' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-retry');
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(200);
-      expect((await res.json()).status).toBe('pending');
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(200);
+    expect((await res.json()).status).toBe('pending');
 
-      const stepRows = await sql<{ status: string; error_message: string | null }[]>`
-        select status, error_message from task_steps
-        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
-      `;
-      expect(stepRows[0]!.status).toBe('pending');
-      expect(stepRows[0]!.error_message).toBeNull();
+    const stepRows = await sql<{ status: string; error_message: string | null }[]>`
+      select status, error_message from task_steps
+      where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
+    `;
+    expect(stepRows[0]!.status).toBe('pending');
+    expect(stepRows[0]!.error_message).toBeNull();
 
-      // task.currentStepId is set synchronously in the retry transaction and
-      // is not touched by markTaskFailed, so it survives any worker race.
-      const taskRows = await sql<{ current_step_id: string | null }[]>`
-        select current_step_id from tasks where id = ${fixture.taskId}
-      `;
-      expect(taskRows[0]!.current_step_id).toBe(FIXTURE_FAILED_STEP_ID);
+    // task.currentStepId is set synchronously in the retry transaction and
+    // is not touched by markTaskFailed, so it survives any worker race.
+    const taskRows = await sql<{ current_step_id: string | null }[]>`
+      select current_step_id from tasks where id = ${fixture.taskId}
+    `;
+    expect(taskRows[0]!.current_step_id).toBe(FIXTURE_FAILED_STEP_ID);
 
-      const eventRows = await sql<{ event_type: string }[]>`
-        select event_type from task_events where task_id = ${fixture.taskId}
-      `;
-      expect(eventRows.map((e) => e.event_type)).toContain('step.retry');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const eventRows = await sql<{ event_type: string }[]>`
+      select event_type from task_events where task_id = ${fixture.taskId}
+    `;
+    expect(eventRows.map((e) => e.event_type)).toContain('step.retry');
   });
 
-  test('POST step skip marks the step skipped and records the event', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-skip');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-skip');
+  test('POST step skip marks the step skipped and records the event', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-skip' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-skip');
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'skip' } },
-      );
-      expect(res.status()).toBe(200);
-      const body = (await res.json()) as { status: string; nextStepId: string | null };
-      expect(body.status).toBe('skipped');
-      // ALWAYS null, by design: "The api can't see unmaterialized future steps, so it can't
-      // compute the next step." It enqueues an ADVANCE_STEP job and the worker walks the run list.
-      expect(body.nextStepId).toBeNull();
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'skip' } },
+    );
+    expect(res.status()).toBe(200);
+    const body = (await res.json()) as { status: string; nextStepId: string | null };
+    expect(body.status).toBe('skipped');
+    // ALWAYS null, by design: "The api can't see unmaterialized future steps, so it can't
+    // compute the next step." It enqueues an ADVANCE_STEP job and the worker walks the run list.
+    expect(body.nextStepId).toBeNull();
 
-      const stepRows = await sql<{ status: string }[]>`
-        select status from task_steps
-        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
-      `;
-      expect(stepRows[0]!.status).toBe('skipped');
+    const stepRows = await sql<{ status: string }[]>`
+      select status from task_steps
+      where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
+    `;
+    expect(stepRows[0]!.status).toBe('skipped');
 
-      // What the task's current_step_id becomes is NOT asserted, and deliberately. Advancing is
-      // the worker's job off an enqueued ADVANCE_STEP, so this would be racing it — and on a
-      // fixture task it is a race with a guaranteed loser: the worker fails the task with "has no
-      // resolvable repo path", because the fixture has no repository. Measured, not assumed.
-      const eventRows = await sql<{ event_type: string }[]>`
-        select event_type from task_events where task_id = ${fixture.taskId}
-      `;
-      expect(eventRows.map((e) => e.event_type)).toContain('step.skip');
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    // What the task's current_step_id becomes is NOT asserted, and deliberately. Advancing is
+    // the worker's job off an enqueued ADVANCE_STEP, so this would be racing it — and on a
+    // fixture task it is a race with a guaranteed loser: the worker fails the task with "has no
+    // resolvable repo path", because the fixture has no repository. Measured, not assumed.
+    const eventRows = await sql<{ event_type: string }[]>`
+      select event_type from task_events where task_id = ${fixture.taskId}
+    `;
+    expect(eventRows.map((e) => e.event_type)).toContain('step.skip');
   });
 
-  test('POST step action on nonexistent step returns 404', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-404');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-404');
+  test('POST step action on nonexistent step returns 404', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-404' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-404');
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/does-not-exist/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(res.status()).toBe(404);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/does-not-exist/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(res.status()).toBe(404);
   });
 
-  test('POST step submit on non-waiting_form step returns 409', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let fixture: TaskFixture | null = null;
-    try {
-      const email = uniqueEmail('step-submit-409');
-      userId = (await registerUser(sql, page.request, { email })).userId;
-      fixture = await seedTaskFixture(sql, userId, 'step-submit-409');
+  test('POST step submit on non-waiting_form step returns 409', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'step-submit-409' });
+    const fixture = await seedTaskFixture(sql, userId, 'step-submit-409');
 
-      // failing-step is in status 'failed', not 'waiting_form'
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
-        { data: { values: { foo: 'bar' } } },
-      );
-      expect(res.status()).toBe(409);
-    } finally {
-      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    // failing-step is in status 'failed', not 'waiting_form'
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
+      { data: { values: { foo: 'bar' } } },
+    );
+    expect(res.status()).toBe(409);
   });
 });

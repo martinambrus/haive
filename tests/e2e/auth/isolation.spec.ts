@@ -1,163 +1,150 @@
-import { expect, test } from '@playwright/test';
-import {
-  cleanupRepoFixture,
-  cleanupTaskFixture,
-  cleanupUser,
-  getSql,
-  seedRepoFixture,
-  seedTaskFixture,
-  type RepoFixture,
-  type TaskFixture,
-  FIXTURE_FAILED_STEP_ID,
-} from '../helpers/db.js';
-import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
+import type { APIRequestContext } from '@playwright/test';
+import { seedRepoFixture, seedTaskFixture, FIXTURE_FAILED_STEP_ID } from '../helpers/db.js';
+import { API_BASE } from '../helpers/auth.js';
+import { expect, test as base } from '../helpers/fixtures.js';
+
+const test = base.extend<{ ctxA: APIRequestContext; ctxB: APIRequestContext }>({
+  ctxA: async ({ playwright }, use) => {
+    const ctx = await playwright.request.newContext();
+    await use(ctx);
+    await ctx.dispose();
+  },
+  ctxB: async ({ playwright }, use) => {
+    const ctx = await playwright.request.newContext();
+    await use(ctx);
+    await ctx.dispose();
+  },
+});
 
 test.describe('multi-user isolation', () => {
-  test('user B cannot see, fetch, mutate, or delete user A resources', async ({ playwright }) => {
-    const sql = getSql();
-    const ctxA = await playwright.request.newContext();
-    const ctxB = await playwright.request.newContext();
+  test('user B cannot see, fetch, mutate, or delete user A resources', async ({
+    ctxA,
+    ctxB,
+    sql,
+    users,
+  }) => {
+    const { userId: userAId } = await users.register(ctxA, { prefix: 'iso-a' });
+    await users.register(ctxB, { prefix: 'iso-b' });
 
-    let userAId = '';
-    let userBId = '';
-    let repoFixture: RepoFixture | null = null;
-    let taskFixture: TaskFixture | null = null;
-    let providerAId = '';
+    const repoFixture = await seedRepoFixture(sql, userAId, 'iso-a-repo');
+    const taskFixture = await seedTaskFixture(sql, userAId, 'iso-a-task');
 
-    try {
-      const emailA = uniqueEmail('iso-a');
-      const emailB = uniqueEmail('iso-b');
-      userAId = (await registerUser(sql, ctxA, { email: emailA })).userId;
-      userBId = (await registerUser(sql, ctxB, { email: emailB })).userId;
+    const createProviderRes = await ctxA.post(`${API_BASE}/cli-providers`, {
+      data: {
+        name: 'claude-code',
+        label: 'A Claude Code',
+        authMode: 'api_key',
+      },
+    });
+    expect(createProviderRes.status()).toBe(201);
+    const providerBody = (await createProviderRes.json()) as {
+      provider: { id: string };
+    };
+    const providerAId = providerBody.provider.id;
 
-      repoFixture = await seedRepoFixture(sql, userAId, 'iso-a-repo');
-      taskFixture = await seedTaskFixture(sql, userAId, 'iso-a-task');
+    const setSecretRes = await ctxA.post(`${API_BASE}/cli-providers/${providerAId}/secrets`, {
+      data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-iso-a-only' },
+    });
+    expect(setSecretRes.status()).toBe(201);
 
-      const createProviderRes = await ctxA.post(`${API_BASE}/cli-providers`, {
-        data: {
-          name: 'claude-code',
-          label: 'A Claude Code',
-          authMode: 'api_key',
-        },
-      });
-      expect(createProviderRes.status()).toBe(201);
-      const providerBody = (await createProviderRes.json()) as {
-        provider: { id: string };
-      };
-      providerAId = providerBody.provider.id;
+    // --- User B sees nothing in their own lists ---
 
-      const setSecretRes = await ctxA.post(`${API_BASE}/cli-providers/${providerAId}/secrets`, {
-        data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-iso-a-only' },
-      });
-      expect(setSecretRes.status()).toBe(201);
+    const bRepos = await ctxB.get(`${API_BASE}/repos`);
+    expect(bRepos.status()).toBe(200);
+    expect((await bRepos.json()).repositories).toEqual([]);
 
-      // --- User B sees nothing in their own lists ---
+    const bTasks = await ctxB.get(`${API_BASE}/tasks`);
+    expect(bTasks.status()).toBe(200);
+    expect((await bTasks.json()).tasks).toEqual([]);
 
-      const bRepos = await ctxB.get(`${API_BASE}/repos`);
-      expect(bRepos.status()).toBe(200);
-      expect((await bRepos.json()).repositories).toEqual([]);
+    const bProviders = await ctxB.get(`${API_BASE}/cli-providers`);
+    expect(bProviders.status()).toBe(200);
+    expect((await bProviders.json()).providers).toEqual([]);
 
-      const bTasks = await ctxB.get(`${API_BASE}/tasks`);
-      expect(bTasks.status()).toBe(200);
-      expect((await bTasks.json()).tasks).toEqual([]);
+    // --- User B cannot fetch A's resources by id ---
 
-      const bProviders = await ctxB.get(`${API_BASE}/cli-providers`);
-      expect(bProviders.status()).toBe(200);
-      expect((await bProviders.json()).providers).toEqual([]);
+    const bRepoFetch = await ctxB.get(`${API_BASE}/repos/${repoFixture.repoId}`);
+    expect(bRepoFetch.status()).toBe(404);
 
-      // --- User B cannot fetch A's resources by id ---
+    const bTaskFetch = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}`);
+    expect(bTaskFetch.status()).toBe(404);
 
-      const bRepoFetch = await ctxB.get(`${API_BASE}/repos/${repoFixture.repoId}`);
-      expect(bRepoFetch.status()).toBe(404);
+    const bTaskSteps = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}/steps`);
+    expect(bTaskSteps.status()).toBe(404);
 
-      const bTaskFetch = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}`);
-      expect(bTaskFetch.status()).toBe(404);
+    const bTaskEvents = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}/events`);
+    expect(bTaskEvents.status()).toBe(404);
 
-      const bTaskSteps = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}/steps`);
-      expect(bTaskSteps.status()).toBe(404);
+    const bProviderFetch = await ctxB.get(`${API_BASE}/cli-providers/${providerAId}`);
+    expect(bProviderFetch.status()).toBe(404);
 
-      const bTaskEvents = await ctxB.get(`${API_BASE}/tasks/${taskFixture.taskId}/events`);
-      expect(bTaskEvents.status()).toBe(404);
+    const bSecrets = await ctxB.get(`${API_BASE}/cli-providers/${providerAId}/secrets`);
+    expect(bSecrets.status()).toBe(404);
 
-      const bProviderFetch = await ctxB.get(`${API_BASE}/cli-providers/${providerAId}`);
-      expect(bProviderFetch.status()).toBe(404);
+    // --- User B cannot mutate or delete A's resources ---
 
-      const bSecrets = await ctxB.get(`${API_BASE}/cli-providers/${providerAId}/secrets`);
-      expect(bSecrets.status()).toBe(404);
+    const bPatch = await ctxB.patch(`${API_BASE}/cli-providers/${providerAId}`, {
+      data: { label: 'hijacked' },
+    });
+    expect(bPatch.status()).toBe(404);
 
-      // --- User B cannot mutate or delete A's resources ---
+    const bDelProvider = await ctxB.delete(`${API_BASE}/cli-providers/${providerAId}`);
+    expect(bDelProvider.status()).toBe(404);
 
-      const bPatch = await ctxB.patch(`${API_BASE}/cli-providers/${providerAId}`, {
-        data: { label: 'hijacked' },
-      });
-      expect(bPatch.status()).toBe(404);
+    const bDelRepo = await ctxB.delete(`${API_BASE}/repos/${repoFixture.repoId}`);
+    expect(bDelRepo.status()).toBe(404);
 
-      const bDelProvider = await ctxB.delete(`${API_BASE}/cli-providers/${providerAId}`);
-      expect(bDelProvider.status()).toBe(404);
+    const bRetryStep = await ctxB.post(
+      `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'retry' } },
+    );
+    expect(bRetryStep.status()).toBe(404);
 
-      const bDelRepo = await ctxB.delete(`${API_BASE}/repos/${repoFixture.repoId}`);
-      expect(bDelRepo.status()).toBe(404);
+    const bSkipStep = await ctxB.post(
+      `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
+      { data: { action: 'skip' } },
+    );
+    expect(bSkipStep.status()).toBe(404);
 
-      const bRetryStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'retry' } },
-      );
-      expect(bRetryStep.status()).toBe(404);
+    const bSubmitStep = await ctxB.post(
+      `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
+      { data: { values: { hijack: true } } },
+    );
+    expect(bSubmitStep.status()).toBe(404);
 
-      const bSkipStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
-        { data: { action: 'skip' } },
-      );
-      expect(bSkipStep.status()).toBe(404);
+    const bTaskAction = await ctxB.post(`${API_BASE}/tasks/${taskFixture.taskId}/action`, {
+      data: { action: 'cancel' },
+    });
+    expect(bTaskAction.status()).toBe(404);
 
-      const bSubmitStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
-        { data: { values: { hijack: true } } },
-      );
-      expect(bSubmitStep.status()).toBe(404);
+    // --- User A's resources are still intact ---
 
-      const bTaskAction = await ctxB.post(`${API_BASE}/tasks/${taskFixture.taskId}/action`, {
-        data: { action: 'cancel' },
-      });
-      expect(bTaskAction.status()).toBe(404);
+    const aReposAfter = await ctxA.get(`${API_BASE}/repos`);
+    const aReposBody = (await aReposAfter.json()) as {
+      repositories: Array<{ id: string }>;
+    };
+    expect(aReposBody.repositories.map((r) => r.id)).toContain(repoFixture.repoId);
 
-      // --- User A's resources are still intact ---
+    const aTasksAfter = await ctxA.get(`${API_BASE}/tasks`);
+    const aTasksBody = (await aTasksAfter.json()) as {
+      tasks: Array<{ id: string; status: string }>;
+    };
+    const aTaskRow = aTasksBody.tasks.find((t) => t.id === taskFixture.taskId);
+    expect(aTaskRow).toBeDefined();
+    expect(aTaskRow!.status).toBe('failed');
 
-      const aReposAfter = await ctxA.get(`${API_BASE}/repos`);
-      const aReposBody = (await aReposAfter.json()) as {
-        repositories: Array<{ id: string }>;
-      };
-      expect(aReposBody.repositories.map((r) => r.id)).toContain(repoFixture.repoId);
+    const aProviderAfter = await ctxA.get(`${API_BASE}/cli-providers/${providerAId}`);
+    expect(aProviderAfter.status()).toBe(200);
+    const aProviderBody = (await aProviderAfter.json()) as {
+      provider: { label: string };
+    };
+    expect(aProviderBody.provider.label).toBe('A Claude Code');
 
-      const aTasksAfter = await ctxA.get(`${API_BASE}/tasks`);
-      const aTasksBody = (await aTasksAfter.json()) as {
-        tasks: Array<{ id: string; status: string }>;
-      };
-      const aTaskRow = aTasksBody.tasks.find((t) => t.id === taskFixture!.taskId);
-      expect(aTaskRow).toBeDefined();
-      expect(aTaskRow!.status).toBe('failed');
-
-      const aProviderAfter = await ctxA.get(`${API_BASE}/cli-providers/${providerAId}`);
-      expect(aProviderAfter.status()).toBe(200);
-      const aProviderBody = (await aProviderAfter.json()) as {
-        provider: { label: string };
-      };
-      expect(aProviderBody.provider.label).toBe('A Claude Code');
-
-      const aSecretsAfter = await ctxA.get(`${API_BASE}/cli-providers/${providerAId}/secrets`);
-      expect(aSecretsAfter.status()).toBe(200);
-      const aSecretsBody = (await aSecretsAfter.json()) as {
-        secrets: Array<{ secretName: string }>;
-      };
-      expect(aSecretsBody.secrets.map((s) => s.secretName)).toContain('ANTHROPIC_API_KEY');
-    } finally {
-      if (taskFixture) await cleanupTaskFixture(sql, taskFixture.taskId);
-      if (repoFixture) await cleanupRepoFixture(sql, repoFixture.repoId);
-      if (userAId) await cleanupUser(sql, userAId);
-      if (userBId) await cleanupUser(sql, userBId);
-      await sql.end({ timeout: 5 });
-      await ctxA.dispose();
-      await ctxB.dispose();
-    }
+    const aSecretsAfter = await ctxA.get(`${API_BASE}/cli-providers/${providerAId}/secrets`);
+    expect(aSecretsAfter.status()).toBe(200);
+    const aSecretsBody = (await aSecretsAfter.json()) as {
+      secrets: Array<{ secretName: string }>;
+    };
+    expect(aSecretsBody.secrets.map((s) => s.secretName)).toContain('ANTHROPIC_API_KEY');
   });
 });
