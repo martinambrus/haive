@@ -95,7 +95,10 @@ test.describe('task page on a phone', () => {
 
     await page.goto(`/tasks/${fx.taskId}`);
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-    await expect(page.locator('[title*="subscription usage"]')).toHaveCount(2);
+    // Header meters only: the strip mounts its own pair once the page scrolls itself to the step.
+    await expect(
+      page.locator('[title*="subscription usage"]:not([data-fixed-title-strip] *)'),
+    ).toHaveCount(2);
 
     const main = page.locator('main');
     expect(
