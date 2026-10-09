@@ -22,6 +22,13 @@ const h = vi.hoisted(() => ({
   pg: {} as unknown,
   realStore: false,
   connectionString: '',
+  localOpenOptions: [] as unknown[],
+  localStatements: [] as string[],
+  localTx: {} as { unsafe: (statement: string) => Promise<unknown[]> },
+  localPg: {} as unknown,
+  localEnds: [] as unknown[],
+  realLocalStore: false,
+  localConnectionString: '',
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -32,7 +39,8 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
     resolveTaskStackContext: async () => ({
       repositoryId: 'repo-1',
       tooling: {
-        ragMode: 'internal',
+        ragMode: h.realLocalStore ? 'external' : 'internal',
+        ragConnectionString: h.localConnectionString,
         ollamaUrl: LOCAL_OLLAMA,
         embeddingModel: 'local-model',
         embeddingDimensions: DIMS,
@@ -53,11 +61,18 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
     },
   };
 });
-vi.mock('@haive/shared/rag', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/shared/rag')>()),
-  resolveRagConnection: async () => ({ embeddingDimensions: DIMS, close: async () => {} }),
-  ragHybridSearch: (...args: unknown[]) => h.search(...args),
-}));
+vi.mock('@haive/shared/rag', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/rag')>();
+  return {
+    ...actual,
+    resolveRagConnection: async (...args: Parameters<typeof actual.resolveRagConnection>) => {
+      h.localOpenOptions.push(args[3]);
+      if (h.realLocalStore) return actual.resolveRagConnection(...args);
+      return { embeddingDimensions: DIMS, pg: h.localPg, close: async () => {} };
+    },
+    ragHybridSearch: (...args: unknown[]) => h.search(...args),
+  };
+});
 
 import net from 'node:net';
 import { Hono } from 'hono';
@@ -146,6 +161,30 @@ beforeEach(() => {
   };
   h.realStore = false;
   h.connectionString = 'postgres://kb:kb@127.0.0.1:1/kb';
+  h.localOpenOptions = [];
+  h.localEnds = [];
+  h.localStatements = [];
+  h.localTx = {
+    unsafe: async (statement) => {
+      h.localStatements.push(statement);
+      return [];
+    },
+  };
+  h.localPg = {
+    unsafe: async (statement: string) => {
+      h.localStatements.push(`outside a transaction: ${statement}`);
+      return [];
+    },
+    begin: async (run: (tx: unknown) => Promise<unknown>) => {
+      h.localStatements.push('begin');
+      return run(h.localTx);
+    },
+    end: async (options: unknown) => {
+      h.localEnds.push(options);
+    },
+  };
+  h.realLocalStore = false;
+  h.localConnectionString = 'postgres://rag:rag@127.0.0.1:1/rag';
   h.search.mockReset();
   h.search.mockImplementation(
     async (
@@ -366,5 +405,114 @@ describe('rag_search, the global store', () => {
     expect(paths).toEqual(['src/session.ts']);
     expect(store.seen.queries).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(DEADLINE_MS + 2_000);
+  }, 20_000);
+});
+
+describe('rag_search, the local store', () => {
+  const EMBED_MS = 1_500;
+  const DEADLINE_MS = 6_000;
+
+  const failLocal = (error: Error): void => {
+    h.search.mockImplementation(async (_conn, _vec, _text, _config, filter) => {
+      if (filter === undefined) throw error;
+      return h.globalHits;
+    });
+  };
+
+  // The stubbed search never touches its store, so make it ask the way the real one's first statement does.
+  const searchAsksStore = (): void => {
+    h.search.mockImplementation(
+      async (conn: { pg: { unsafe: (statement: string) => Promise<unknown> } }) => {
+        await conn.pg.unsafe('SELECT 1');
+        return h.localHits;
+      },
+    );
+  };
+
+  it('opens the store with a connect timeout and without the driver type fetch', async () => {
+    await search();
+
+    expect(h.localOpenOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
+  });
+
+  it('reads the store in one transaction, under a server-side statement timeout', async () => {
+    await search();
+
+    expect(h.localStatements).toEqual(['begin', "SET LOCAL statement_timeout = '3000ms'"]);
+    const { local } = searches();
+    expect(local).toHaveLength(1);
+    expect(local[0]!.pg).toBe(h.localTx);
+    const call = h.search.mock.calls.find(([, , , , filter]) => filter === undefined)!;
+    expect(call[5]).toBe('repo-1');
+    expect(h.localEnds).toEqual([]);
+  });
+
+  it('answers 500, and destroys the pool at once, when the server cancels a statement', async () => {
+    failLocal(
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }),
+    );
+
+    const { status } = await search();
+
+    expect(status).toBe(500);
+    expect(h.localEnds).toEqual([{ timeout: 0 }]);
+  });
+
+  it('answers with the global hits when the index is not built yet', async () => {
+    failLocal(
+      Object.assign(new Error('relation "ai_rag_embeddings" does not exist'), { code: '42P01' }),
+    );
+
+    const { status, paths } = await search();
+
+    expect(status).toBe(200);
+    expect(paths).toEqual(['global_kb/cookies-11111111.md']);
+  });
+
+  it('answers 500 when the store goes silent, a deadline after the embed', async () => {
+    const store = await fakePostgres('silent');
+    h.realLocalStore = true;
+    h.localConnectionString = store.url;
+    searchAsksStore();
+    h.localEmbed = { vector: Array(DIMS).fill(0.1), delayMs: EMBED_MS };
+
+    const started = Date.now();
+    const { status } = await search();
+    const elapsed = Date.now() - started;
+
+    expect(status).toBe(500);
+    expect(store.seen.queries).toBeGreaterThan(0);
+    expect(elapsed).toBeGreaterThanOrEqual(EMBED_MS + DEADLINE_MS - 100);
+    expect(elapsed).toBeLessThan(EMBED_MS + DEADLINE_MS + 2_000);
+  }, 20_000);
+
+  it('answers 500 when the store accepts the connection and never speaks', async () => {
+    const store = await fakePostgres('mute');
+    h.realLocalStore = true;
+    h.localConnectionString = store.url;
+    searchAsksStore();
+
+    const started = Date.now();
+    const { status } = await search();
+    const elapsed = Date.now() - started;
+
+    expect(status).toBe(500);
+    expect(store.seen.connections).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(DEADLINE_MS);
+  }, 20_000);
+
+  it('answers 500 when the store hangs up on its first query', async () => {
+    const store = await fakePostgres('hang-up');
+    h.realLocalStore = true;
+    h.localConnectionString = store.url;
+    searchAsksStore();
+
+    const started = Date.now();
+    const { status } = await search();
+    const elapsed = Date.now() - started;
+
+    expect(status).toBe(500);
+    expect(store.seen.queries).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(DEADLINE_MS);
   }, 20_000);
 });

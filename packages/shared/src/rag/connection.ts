@@ -118,6 +118,22 @@ export function ragDatabaseName(projectName: string): string {
 /* Connection resolvers                                                */
 /* ------------------------------------------------------------------ */
 
+/** Limits for one connection; left out, postgres.js keeps its own, which the indexing steps rely on. */
+export interface RagConnectOptions {
+  connectTimeoutSeconds?: number;
+  /** False skips the query that teaches the driver the array types of the store. */
+  fetchTypes?: boolean;
+}
+
+const poolOptions = (opts: RagConnectOptions) => ({
+  max: 5,
+  onnotice,
+  ...(opts.connectTimeoutSeconds === undefined
+    ? {}
+    : { connect_timeout: opts.connectTimeoutSeconds }),
+  ...(opts.fetchTypes === undefined ? {} : { fetch_types: opts.fetchTypes }),
+});
+
 /** The per-project database's connection string: DATABASE_URL with the path swapped.
  *  `url.search` is preserved deliberately — an install that carries `sslmode` or any
  *  other parameter there must carry it to the per-project store too. */
@@ -170,6 +186,7 @@ async function resolveInternal(
   haiveDb: Database,
   projectName: string,
   embeddingDimensions: number,
+  opts: RagConnectOptions,
 ): Promise<RagConnection> {
   const dbName = ragDatabaseName(projectName);
 
@@ -185,7 +202,7 @@ async function resolveInternal(
     }
   }
 
-  const pg = postgres(internalRagUrl(dbName), { max: 5, onnotice });
+  const pg = postgres(internalRagUrl(dbName), poolOptions(opts));
   return {
     mode: 'internal',
     pg,
@@ -196,8 +213,12 @@ async function resolveInternal(
   };
 }
 
-function resolveExternal(connectionString: string, embeddingDimensions: number): RagConnection {
-  const pg = postgres(connectionString, { max: 5, onnotice });
+function resolveExternal(
+  connectionString: string,
+  embeddingDimensions: number,
+  opts: RagConnectOptions,
+): RagConnection {
+  const pg = postgres(connectionString, poolOptions(opts));
   return {
     mode: 'external',
     pg,
@@ -212,15 +233,16 @@ export async function resolveRagConnection(
   prefs: RagToolingPrefs,
   haiveDb: Database,
   projectName: string,
+  opts: RagConnectOptions = {},
 ): Promise<RagConnection | null> {
   switch (prefs.ragMode) {
     case 'internal':
-      return resolveInternal(haiveDb, projectName, prefs.embeddingDimensions);
+      return resolveInternal(haiveDb, projectName, prefs.embeddingDimensions, opts);
     case 'external':
       if (!prefs.ragConnectionString) {
         throw new Error('external ragMode requires ragConnectionString');
       }
-      return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions);
+      return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions, opts);
     case 'ddev':
       // No fallback DSN. This used to guess `db:db@host.docker.internal:5432/db`
       // — DDEV's in-container credentials — which cannot reach a DDEV database
@@ -233,7 +255,7 @@ export async function resolveRagConnection(
           "ddev ragMode requires ragConnectionString — DDEV publishes its database on a random loopback port, so there is no address to guess (`ddev describe` prints it). Use RAG mode 'internal' to store embeddings in haive's own postgres instead.",
         );
       }
-      return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions);
+      return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions, opts);
     case 'none':
       return null;
     default:

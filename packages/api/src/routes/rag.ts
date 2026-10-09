@@ -190,10 +190,10 @@ export function mergeHits(
  *  slot it reserves. */
 const GLOBAL_KB_EXPAND_BUDGET_CHARS = 12_000;
 
-// The bounds of the worker's dispatch reads; the query embed runs before the store opens, outside them.
-const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 3;
-const GLOBAL_KB_DEADLINE_MS = 6_000;
-const GLOBAL_KB_STATEMENT_TIMEOUT_MS = 3_000;
+// The worker's dispatch-read bounds, for each store; a query embed runs before its store is queried.
+const RAG_SEARCH_CONNECT_TIMEOUT_SECONDS = 3;
+const RAG_SEARCH_DEADLINE_MS = 6_000;
+const RAG_SEARCH_STATEMENT_TIMEOUT_MS = 3_000;
 
 /** One global KB entry, keyed by the source path its chunks carry. */
 export interface GlobalKbEntryBody {
@@ -265,6 +265,28 @@ export function expandGlobalHits(
   });
 }
 
+/** Destroys the pool at the deadline and on failure: a graceful close waits out its own timeout. */
+async function withinDeadline<T>(
+  conn: RagConnection,
+  work: (conn: RagConnection) => Promise<T>,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`local rag search exceeded ${RAG_SEARCH_DEADLINE_MS} ms`)),
+      RAG_SEARCH_DEADLINE_MS,
+    );
+  });
+  try {
+    return await Promise.race([work(conn), deadline]);
+  } catch (err) {
+    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** RAG retrieval for sandbox CLI agents via the haive-rag MCP proxy.
  *  Auth is a task-scoped bearer token (not a user session): the proxy holds
  *  no DB credentials and can only query its own task's project + the global KB. */
@@ -300,14 +322,18 @@ ragRoutes.post('/search', async (c) => {
     true,
   );
 
-  // --- Local (per-repo) search: unchanged behaviour. ragMode 'none' contributes
-  // no local hits; a local failure is still a hard 500 (no facet filter here, so
-  // the per-repo SQL is identical to before). ---
+  // --- Local (per-repo) search: bounded like the global half, otherwise unchanged.
+  // ragMode 'none' contributes no local hits; a local failure is still a hard 500
+  // (no facet filter here, so the per-repo SQL is identical to before). ---
   let localHits: RagSearchHit[] = [];
   if (prefs.ragMode !== 'none') {
     let conn: RagConnection | null = null;
     try {
-      conn = await resolveRagConnection(prefs, db, projectName);
+      // No type fetch: its query would reject with no caller once the deadline destroys the pool.
+      conn = await resolveRagConnection(prefs, db, projectName, {
+        connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
+        fetchTypes: false,
+      });
       if (conn) {
         // Three ways to end up ranking on full text alone, and all must skip the
         // dense half rather than feed it a hash vector: the repo's owner accepted
@@ -339,13 +365,18 @@ ragRoutes.post('/search', async (c) => {
         // shared by co-tenant repos never returns another repo's chunks. External/
         // ddev stores are the user's own schema (may lack repository_id) — unscoped.
         const localRepoId = prefs.ragMode === 'internal' ? (repositoryId ?? undefined) : undefined;
-        const hits = await ragHybridSearch(
-          conn,
-          vec,
-          query,
-          { runbookBoost, lexicalOnly, identifierSearch, ...(topK ? { topK } : {}) },
-          undefined,
-          localRepoId,
+        const hits = await withinDeadline(conn, (store) =>
+          store.pg.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_SEARCH_STATEMENT_TIMEOUT_MS}ms'`);
+            return ragHybridSearch(
+              { ...store, pg: tx as unknown as RagConnection['pg'] },
+              vec,
+              query,
+              { runbookBoost, lexicalOnly, identifierSearch, ...(topK ? { topK } : {}) },
+              undefined,
+              localRepoId,
+            );
+          }),
         );
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
@@ -385,7 +416,7 @@ ragRoutes.post('/search', async (c) => {
         async ({ conn, settings }) =>
           conn.pg.begin(async (tx) => {
             // As the dispatch reads do: the server stops a statement the deadline gave up on.
-            await tx.unsafe(`SET LOCAL statement_timeout = '${GLOBAL_KB_STATEMENT_TIMEOUT_MS}ms'`);
+            await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_SEARCH_STATEMENT_TIMEOUT_MS}ms'`);
             // Same rule as the local half: no query vector means full text only, never a hash vector.
             const raw = await ragHybridSearch(
               { ...conn, pg: tx as unknown as RagConnection['pg'] },
@@ -418,8 +449,8 @@ ragRoutes.post('/search', async (c) => {
             return { scoped, bodies };
           }),
         {
-          connectTimeoutSeconds: GLOBAL_KB_CONNECT_TIMEOUT_SECONDS,
-          deadlineMs: GLOBAL_KB_DEADLINE_MS,
+          connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
+          deadlineMs: RAG_SEARCH_DEADLINE_MS,
         },
       );
       globalHits = result.scoped;
