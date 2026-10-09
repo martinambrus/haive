@@ -274,16 +274,20 @@ function latestValidator(previous: StepLoopPassRecord[]): ValidateApply | null {
 }
 
 /** The change the latest fixer collected, given to the validator after it in place of detect's. */
-function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
+function fixerFiles(previous: StepLoopPassRecord[]): {
+  files: ImplementationFileSet | null;
+  scanFailed: boolean;
+} {
   for (let i = previous.length - 1; i >= 0; i -= 1) {
     const out = previous[i]?.applyOutput as ValidateApply | undefined;
     if (out?.source === 'fixer') {
       const collected = out.implementationFiles ?? null;
+      if (!collected?.scanError) return { files: collected, scanFailed: false };
       // A failed scan lacks the dirty files, so detect's list stands; an empty one fails the guard.
-      return collected?.scanError && collected.files.length > 0 ? null : collected;
+      return { files: collected.files.length > 0 ? null : collected, scanFailed: true };
     }
   }
-  return null;
+  return { files: null, scanFailed: false };
 }
 
 function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
@@ -844,10 +848,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     },
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;
-      const collected = fixerFiles(previousIterations);
-      // A fixer can add code to a documentation change: a list it measured beats detect's decision.
+      const { files: collected, scanFailed } = fixerFiles(previousIterations);
+      // A fixer can add code to a docs change: its list decides, and a failed scan rules docs out.
       const docsOnly =
-        collected !== null && !collected.scanError ? isDocsOnlyChange(collected) : d.docsOnly;
+        !scanFailed && (collected === null ? d.docsOnly : isDocsOnlyChange(collected));
       if (roleForIteration(iteration) === ROLE_FIXER) {
         const repairable = (list: ValidationIssue[]) =>
           list.filter(
@@ -1061,7 +1065,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
-      const coverage = fileCoverage(fixerFiles(previous) ?? d.implementationFiles);
+      const coverage = fileCoverage(fixerFiles(previous).files ?? d.implementationFiles);
       const policy =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(

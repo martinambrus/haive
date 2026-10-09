@@ -2108,7 +2108,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(validatorPrompt(detected, previous)).toContain('You are the Documentation Validator');
   });
 
-  it("keeps detect's protocol when the fixer's scan failed, whatever its list holds", () => {
+  it("runs the code protocol when the fixer's scan failed, whatever its list holds", () => {
     const previous = [
       passRecord(0, reply(), mkValidateApply()),
       passRecord(
@@ -2128,20 +2128,20 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     const detected = {
       sandboxWorktreePath: '/ws',
       spec: 'spec',
-      implementationFiles: fileSet(2, 2),
+      implementationFiles: { files: ['README.md'], total: 1, truncated: false, scanError: null },
       debtBlock: '',
       honoredBlock: '',
       browserTesting: false,
-      docsOnly: false,
+      docsOnly: true,
     };
     expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
   });
 
-  // detect's scan names c.php, which 07 never reported; the fixer's failed scan names only 07's files.
-  async function validateBrokenFixValidate() {
-    const dir = await checkout();
-    await put(dir, 'c.php', 'new\n');
-    const { ctx, detected } = await task(dir);
+  // detect's scan names an unreported file (c.php); the fixer's failed scan names only 07's files.
+  async function validateBrokenFixValidate(changed?: string[], unreported = 'c.php') {
+    const dir = await checkout(changed);
+    await put(dir, unreported, 'new\n');
+    const { ctx, detected } = await task(dir, changed);
     const first = await pass(ctx, detected, 0, [], reply());
     const fixer = await pass(
       ctx,
@@ -2153,7 +2153,8 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
     const prompt = validatorPrompt(detected, previous);
     const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
-    return { fixer, prompt, second };
+    const passes = [...previous, passRecord(2, reply({ verdict: 'VALID' }), second)];
+    return { fixer, prompt, second, detected, passes };
   }
 
   it("lists detect's files to the validator after a fixer whose scan failed", async () => {
@@ -2168,6 +2169,23 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     const { fixer, second } = await validateBrokenFixValidate();
     expect(fixer.implementationFiles?.total).toBe(2);
     expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('runs the code protocol on the validator pass after a fixer whose scan failed on a docs-only change', async () => {
+    const { detected, prompt, second } = await validateBrokenFixValidate(DOCS, 'docs/extra.md');
+    expect(detected.docsOnly).toBe(true);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
+    expect(prompt).toContain('=== Spec (what the implementation must deliver) ===');
+    expect(prompt).toContain('- docs/extra.md');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('takes the next fixer off the documentation protocol too, after a fixer whose scan failed', async () => {
+    const { detected, passes } = await validateBrokenFixValidate(DOCS, 'docs/extra.md');
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).not.toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Spec (the original requirements) ===');
   });
 
   it("still refuses to build the validator prompt when the fixer's scan failed and left no changed file", () => {
