@@ -9,8 +9,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from '../_untrusted-repo.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
-import { loadTaskMeta } from './_task-meta.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
@@ -134,12 +133,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
-    let spec = (await resolveSpecView(ctx)).text;
-    if (spec.trim().length === 0) {
-      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
-      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-      spec = briefFromTaskMeta(meta.title, meta.description);
-    }
+    const spec = (await resolveSpecView(ctx)).text;
     return {
       worktreePath: wt?.worktreePath ?? ctx.workspacePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
@@ -176,6 +170,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as TriageDetect),
     requiredCapabilities: ['tool_use', 'file_write'],
     // Triage sorts existing findings into buckets. It writes files, but nothing
     // it writes needs a browser or a container to determine.

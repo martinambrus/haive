@@ -2,8 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
-import { loadTaskMeta } from './_task-meta.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { INVARIANT_CITATION } from '../_invariant-citation.js';
@@ -142,12 +141,7 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
-    let spec = (await resolveSpecView(ctx)).text;
-    if (spec.trim().length === 0) {
-      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
-      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-      spec = briefFromTaskMeta(meta.title, meta.description);
-    }
+    const spec = (await resolveSpecView(ctx)).text;
     return {
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
@@ -155,6 +149,7 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as CodeAuditDetect),
     requiredCapabilities: ['tool_use'],
     // Report-only audit: reads code, writes findings. See 04a-spec-audit.
     toolProfile: 'rag_only',
