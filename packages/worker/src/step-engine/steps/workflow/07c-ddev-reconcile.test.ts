@@ -314,6 +314,106 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
   });
 });
 
+// A baseline is stored as the parser captured it, so a row written by an earlier release can hold
+// `'10.11'` or `10.11 # lts`: both sides are compared as YAML reads them.
+describe('classifyDrift: the same database restated', () => {
+  const same = { dbType: 'mariadb', dbVersion: '10.11' };
+
+  it.each([
+    ['mariadb', "'10.11'"],
+    ['mariadb', '10.11 # lts'],
+    ['mariadb', '"10.11" # lts'],
+    ["'mariadb'", '"10.11"'],
+    ['mariadb # engine', "'10.11' # lts"],
+  ])('a target %s:%s is no database change', (dbType, dbVersion) => {
+    const stored = baseline(same);
+    expect(classifyDrift(stored, target({ dbType, dbVersion }), HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, target({ dbType, dbVersion }), HASH_B)).toEqual({
+      kind: 'restart',
+      migrateTarget: null,
+      unsupportedReason: null,
+    });
+  });
+
+  it.each([
+    ["'mariadb'", "'10.11'"],
+    ['mariadb', '10.11 # lts'],
+    ['"mariadb"', '"10.11" # lts'],
+  ])('a baseline stored as %s:%s is no database change', (dbType, dbVersion) => {
+    const stored = baseline({ dbType, dbVersion });
+    expect(classifyDrift(stored, target(same), HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, target(same), HASH_B).kind).toBe('restart');
+  });
+
+  it.each([{ dbVersion: null }, { dbType: null }, { dbType: null, dbVersion: null }])(
+    'a database field the config does not declare is no change (%o)',
+    (over) => {
+      expect(classifyDrift(baseline(), target(over), HASH_A).kind).toBe('none');
+    },
+  );
+});
+
+describe('classifyDrift: PostgreSQL written with quotes or a comment', () => {
+  const POSTGRES = ["'postgres'", '"postgres"', 'postgres # engine'];
+
+  it.each(POSTGRES)('a target type %s keeps the PostgreSQL guard', (dbType) => {
+    const r = classifyDrift(baseline(), target({ dbType, dbVersion: '16' }), HASH_B);
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+    expect(r.unsupportedReason).toContain('mariadb:10.4 -> postgres:16');
+    expect(r.migrateTarget).toBeNull();
+  });
+
+  it.each(POSTGRES)('a baseline type %s moving to mariadb is refused, not migrated', (dbType) => {
+    const r = classifyDrift(
+      baseline({ dbType, dbVersion: '15' }),
+      target({ dbType: 'mariadb', dbVersion: '10.11' }),
+      HASH_B,
+    );
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+    expect(r.migrateTarget).toBeNull();
+  });
+
+  it.each(POSTGRES)('a PostgreSQL project restated as %s is no change', (dbType) => {
+    const stored = baseline({ dbType: 'postgres', dbVersion: '16' });
+    const restated = target({ dbType, dbVersion: '"16"' });
+    expect(classifyDrift(stored, restated, HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, restated, HASH_B).kind).toBe('restart');
+  });
+});
+
+describe('classifyDrift: a real database change written with quotes or a comment', () => {
+  it.each([
+    [
+      { dbType: 'mariadb', dbVersion: '10.11' },
+      { dbType: 'mariadb', dbVersion: '"11.4" # lts' },
+      'mariadb:11.4',
+    ],
+    [
+      { dbType: "'mariadb'", dbVersion: "'10.11'" },
+      { dbType: 'mariadb', dbVersion: '11.4' },
+      'mariadb:11.4',
+    ],
+    [
+      { dbType: 'mariadb', dbVersion: '10.11 # lts' },
+      { dbType: "'mysql'", dbVersion: "'8.0'" },
+      'mysql:8.0',
+    ],
+    [
+      { dbType: null, dbVersion: null },
+      { dbType: "'mariadb'", dbVersion: '"10.11" # lts' },
+      'mariadb:10.11',
+    ],
+  ])('plans the migration from %o to %o', (from, to, migrateTarget) => {
+    expect(classifyDrift(baseline(from), target(to), HASH_B)).toEqual({
+      kind: 'db-migrate',
+      migrateTarget,
+      unsupportedReason: null,
+    });
+  });
+});
+
 describe('parseDdevProjectListForApproot (Slice C name-drift detection)', () => {
   // The registry retains the OLD name (rs-ollama9) after the config was renamed to calypso —
   // exactly the drift that must trigger a rename. Mirrors a real ~/.ddev/project_list.yaml.

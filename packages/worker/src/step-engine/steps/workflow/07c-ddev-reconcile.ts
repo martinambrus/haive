@@ -75,9 +75,17 @@ function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
 }
 
 /** A captured scalar as YAML reads it: one pair of quotes, or a trailing " # comment", removed. */
-function yamlScalar(raw: string | null): string {
-  const text = (raw ?? '').replace(/[ \t]#.*$/, '').trim();
+function yamlScalar(raw: string): string {
+  const text = raw.replace(/[ \t]#.*$/, '').trim();
   return /^(["'])(.*)\1$/.exec(text)?.[2] ?? text;
+}
+
+/** A database type and version as YAML reads them, or null when either is missing. */
+function yamlDatabase(
+  type: string | null,
+  version: string | null,
+): { type: string; version: string } | null {
+  return type && version ? { type: yamlScalar(type), version: yamlScalar(version) } : null;
 }
 
 /** The database field migrate-database cannot take: its target reaches the runner's shell. */
@@ -102,13 +110,13 @@ export function classifyDrift(
   target: DdevConfigFields,
   targetHash: string,
 ): { kind: DriftKind; migrateTarget: string | null; unsupportedReason: string | null } {
-  const targetDb =
-    target.dbType && target.dbVersion ? `${target.dbType}:${target.dbVersion}` : null;
-  const baseDb =
-    baseline.dbType && baseline.dbVersion ? `${baseline.dbType}:${baseline.dbVersion}` : null;
+  const targetBlock = yamlDatabase(target.dbType, target.dbVersion);
+  const baseBlock = yamlDatabase(baseline.dbType, baseline.dbVersion);
+  const targetDb = targetBlock ? `${targetBlock.type}:${targetBlock.version}` : null;
+  const baseDb = baseBlock ? `${baseBlock.type}:${baseBlock.version}` : null;
 
-  if (targetDb && targetDb !== baseDb) {
-    if (target.dbType === 'postgres' || baseline.dbType === 'postgres') {
+  if (targetBlock && targetDb !== baseDb) {
+    if (targetBlock.type === 'postgres' || baseBlock?.type === 'postgres') {
       return {
         kind: 'unsupported',
         migrateTarget: null,
@@ -118,9 +126,7 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    const dbType = yamlScalar(target.dbType);
-    const dbVersion = yamlScalar(target.dbVersion);
-    const refused = refusedMigrateField(dbType, dbVersion);
+    const refused = refusedMigrateField(targetBlock.type, targetBlock.version);
     if (refused) {
       return {
         kind: 'unsupported',
@@ -130,7 +136,7 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    return { kind: 'db-migrate', migrateTarget: `${dbType}:${dbVersion}`, unsupportedReason: null };
+    return { kind: 'db-migrate', migrateTarget: targetDb, unsupportedReason: null };
   }
 
   if (targetHash !== baseline.configHash) {
