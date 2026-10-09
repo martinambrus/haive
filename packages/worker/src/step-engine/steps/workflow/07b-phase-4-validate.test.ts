@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -42,6 +42,7 @@ import {
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
+import { collectImplementationFiles } from './_impl-changes.js';
 import { houseRuleShortIds } from '@haive/shared/global-kb';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
@@ -967,6 +968,7 @@ function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unkno
   const fake = createFakeDb({
     cliInvocations: schema.cliInvocations,
     taskSteps: schema.taskSteps,
+    taskDagIssues: schema.taskDagIssues,
   });
   for (const [id, houseRules] of Object.entries(stamps)) {
     fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
@@ -1007,7 +1009,12 @@ const runApply = (
   } = {},
 ) =>
   phase4ValidateStep.apply(ctx, {
-    detected: { dependencyPolicy: ownedPolicy, implementationFiles: opts.implementationFiles },
+    detected: {
+      dependencyPolicy: ownedPolicy,
+      implementationFiles: opts.implementationFiles,
+      // A fixer pass scans this path; it does not exist, so every test fails the scan alike.
+      worktreePath: '/nonexistent-worktree',
+    },
     formValues: {},
     iteration: opts.iteration ?? 0,
     previousIterations: opts.previous ?? [],
@@ -1271,13 +1278,13 @@ describe('phase4ValidateStep.apply: the changed files the validator was given', 
       invocationId: FIXER_1,
       implementationFiles: fileSet(7, 7),
     });
-    const r1 = passRecord(1, FIXER_REPLY, o1);
+    // Pass 2 is given the list its fixer pass collected, not detect's.
+    const r1 = passRecord(1, FIXER_REPLY, { ...o1, implementationFiles: fileSet(80, 90) });
     const text2 = reply();
     const o2 = await runApply(w.ctx, text2, {
       iteration: 2,
       previous: [r0, r1],
       invocationId: VALIDATOR_2,
-      implementationFiles: fileSet(80, 90),
     });
     const r2 = passRecord(2, text2, o2);
     const o3 = await runApply(w.ctx, FIXER_REPLY, {
@@ -1866,5 +1873,181 @@ describe('phase4ValidateStep.apply: the report it keeps of the validator reply',
     });
     expect(fixed.report).toBe(older.report);
     expect(fixed.reportChars).toBeUndefined();
+  });
+});
+
+// Detect takes the change once, when the step starts. A fixer pass can add to it, so the validator
+// that follows has to be given the change as the fixer left it, and the gate told how much of that
+// it was.
+describe('phase4ValidateStep: the change each validator pass is given', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  /** A task branch on which the agent edited a.php and b.php, the two files 07 reported. */
+  async function checkout(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-validate-pass-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    await writeFile(path.join(dir, 'a.php'), '<?php\n');
+    await writeFile(path.join(dir, 'b.php'), '<?php\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
+    await writeFile(path.join(dir, 'b.php'), '<?php // changed\n');
+    return dir;
+  }
+
+  /** The step's ctx over that branch, and the detect output the step would have stored for it. */
+  async function task(dir: string) {
+    const fake = createFakeDb({
+      cliInvocations: schema.cliInvocations,
+      taskEvents: schema.taskEvents,
+      taskSteps: schema.taskSteps,
+      taskDagIssues: schema.taskDagIssues,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '01-worktree-setup',
+      round: 0,
+      output: { worktreePath: dir, baseBranch: 'main' },
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '07-phase-2-implement',
+      round: 0,
+      output: { filesTouched: ['a.php', 'b.php'] },
+    });
+    const ctx = {
+      logger: stubLogger,
+      db: fake.db,
+      taskId: TASK,
+      taskStepId: STEP,
+      round: 0,
+    } as never;
+    const detected = {
+      worktreePath: dir,
+      sandboxWorktreePath: '/ws',
+      spec: 'spec',
+      dependencyPolicy: ownedPolicy,
+      implementationFiles: await collectImplementationFiles(ctx, dir),
+      debtBlock: '',
+      honoredBlock: '',
+      browserTesting: false,
+      docsOnly: false,
+    };
+    return { ctx, detected };
+  }
+
+  const pass = (
+    ctx: never,
+    detected: unknown,
+    iteration: number,
+    previousIterations: unknown[],
+    llmOutput: string,
+  ) =>
+    phase4ValidateStep.apply(ctx, {
+      detected,
+      formValues: {},
+      iteration,
+      previousIterations,
+      llmOutput,
+    } as never);
+  const validatorPrompt = (detected: unknown, previousIterations: unknown[]) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: detected as never,
+      formValues: {},
+      iteration: previousIterations.length,
+      previousIterations: previousIterations as never,
+    });
+
+  /** A validator pass, a fixer pass that creates images/icon-check.svg, and the validator pass after it. */
+  async function validateFixValidate() {
+    const dir = await checkout();
+    const { ctx, detected } = await task(dir);
+    const first = await pass(ctx, detected, 0, [], reply());
+    await mkdir(path.join(dir, 'images'));
+    await writeFile(path.join(dir, 'images', 'icon-check.svg'), '<svg/>\n');
+    const fixer = await pass(ctx, detected, 1, [passRecord(0, reply(), first)], FIXER_REPLY);
+    const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+    return { first, fixer, prompt, second };
+  }
+
+  it('lists a file the fixer created in the next validator prompt, beside the files detect took', async () => {
+    const { prompt } = await validateFixValidate();
+    expect(prompt).toContain('- images/icon-check.svg — new file');
+    expect(prompt).toContain('- a.php');
+    expect(prompt).toContain('- b.php');
+  });
+
+  it('stores the coverage of the list the last validator pass was given, not the one detect took', async () => {
+    const { first, second } = await validateFixValidate();
+    expect(first.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('has the fixer pass hand the change on, and keep carrying the validator values', async () => {
+    const { fixer } = await validateFixValidate();
+    expect(fixer.source).toBe('fixer');
+    expect(fixer.implementationFiles?.files).toEqual(['a.php', 'b.php', 'images/icon-check.svg']);
+    expect(fixer.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+  });
+
+  it('does not tell the validator its line notes predate the fixer, since it measured them after it', async () => {
+    const { prompt } = await validateFixValidate();
+    expect(prompt).not.toContain('recorded BEFORE the fix agent edited');
+  });
+
+  it("gives a validator pass detect's list, with the caveat, after a fixer output stored without a change", async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await task(dir);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const previous = [
+      passRecord(0, reply(), first),
+      passRecord(1, FIXER_REPLY, mkValidateApply({ source: 'fixer' })),
+    ];
+
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+
+    expect(prompt).toContain('- a.php');
+    expect(prompt).toContain('recorded BEFORE the fix agent edited');
+    expect(second.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+  });
+
+  it('refuses to build the validator prompt when the fixer left no changed file', () => {
+    const previous = [
+      passRecord(0, '', mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
+        }),
+      ),
+    ];
+    expect(() =>
+      validatorPrompt(
+        {
+          sandboxWorktreePath: '/ws',
+          spec: 'spec',
+          implementationFiles: fileSet(2, 2),
+          debtBlock: '',
+          honoredBlock: '',
+          browserTesting: false,
+          docsOnly: false,
+        },
+        previous,
+      ),
+    ).toThrow(/07b-phase-4-validate has no changed files to review/);
   });
 });

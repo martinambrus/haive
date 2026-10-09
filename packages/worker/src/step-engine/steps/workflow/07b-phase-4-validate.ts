@@ -171,6 +171,9 @@ interface ValidateApply {
   changedFilesCoverage?: ChangedFilesCoverage;
   /** The change as the latest validator pass left it; the gate reads a change that differs as PARTIAL. */
   changeFingerprint?: string;
+  /** The change as the latest fixer pass left it, collected when that pass ended: the list the next
+   *  validator pass is given. Only a fixer pass sets it; detect's list is the first pass's. */
+  implementationFiles?: ImplementationFileSet;
   /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
    *  validator passes (non-converging). A false value routes the run to a human
    *  decision at gate-2 instead of another fix round. */
@@ -268,6 +271,14 @@ function latestValidator(previous: StepLoopPassRecord[]): ValidateApply | null {
     if (out && (out.source === 'validator' || out.source === 'stub')) return out;
   }
   return null;
+}
+
+/** The change the latest pass collected, when that pass was a fixer: the list the validator pass after
+ *  it is given in place of the one detect took. Null before a fixer has run and for a fixer output
+ *  stored before it collected one. */
+function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
+  const last = previous[previous.length - 1]?.applyOutput as ValidateApply | undefined;
+  return last?.source === 'fixer' ? (last.implementationFiles ?? null) : null;
 }
 
 function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
@@ -768,8 +779,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     buildPrompt: (args) => {
       const d = args.detected as ValidateDetect;
       // Here rather than in detect() so a replayed detect_output is guarded too, and still
-      // before dispatch. The re-validation prompt below needs no guard: it cannot be reached
-      // without this pass having run. See assertReviewableChange.
+      // before dispatch. The re-validation prompt guards the list its fixer collected the same
+      // way. See assertReviewableChange.
       assertReviewableChange('07b-phase-4-validate', d.implementationFiles);
       return [
         ...validatorDefinition(d.docsOnly, dimensionsFor(d)),
@@ -914,6 +925,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       }
       // Validator re-pass after fixes.
       const fixes = accumulatedFixes(previousIterations);
+      const collected = fixerFiles(previousIterations);
+      const files = collected ?? d.implementationFiles;
+      assertReviewableChange('07b-phase-4-validate', files);
       return [
         ...validatorDefinition(d.docsOnly, dimensionsFor(d)),
         '',
@@ -930,14 +944,19 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
               fencedAgentBlock(fixes.map((f) => `- ${f}`).join('\n')),
             ].join('\n')
           : '',
-        changedFilesBlock(d.implementationFiles, 'Changed files (your validation scope)', ''),
-        // The notes were measured before the fix agent ran, so its edits have shifted them.
+        changedFilesBlock(files, 'Changed files (your validation scope)', ''),
+        // detect's notes were measured before the fix agent ran, so its edits have shifted them.
         // They still say which PART of a file this change is, which is what they are for —
         // but an exact line number from them is no longer exact, and a reviewer told
-        // otherwise would report a defect at the wrong location.
-        'The line notes above were recorded BEFORE the fix agent edited these files, so treat',
-        'them as approximate now: they still show which part of each file this change is, but',
-        'take exact line numbers from the file in front of you, not from the list.',
+        // otherwise would report a defect at the wrong location. A list the fixer collected
+        // after its edits has no such caveat.
+        ...(collected === null
+          ? [
+              'The line notes above were recorded BEFORE the fix agent edited these files, so treat',
+              'them as approximate now: they still show which part of each file this change is, but',
+              'take exact line numbers from the file in front of you, not from the list.',
+            ]
+          : []),
         d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
         d.honoredBlock && d.honoredFenced === true ? `\n${d.honoredBlock}` : '',
         '',
@@ -989,6 +1008,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         round: ctx.round,
         text: fixer.notes,
       });
+      // The next validator pass is given the change as this one left it. buildIterationPrompt
+      // cannot await, so the set is collected here and carried on this pass's output.
+      const implementationFiles = await collectImplementationFiles(
+        ctx,
+        (args.detected as ValidateDetect).worktreePath,
+      );
       return {
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
         summary: prior?.summary ?? '',
@@ -1004,6 +1029,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         ...(prior?.changeFingerprint === undefined
           ? {}
           : { changeFingerprint: prior.changeFingerprint }),
+        implementationFiles,
         converged: prior?.converged ?? true,
         churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
@@ -1027,7 +1053,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
-      const coverage = fileCoverage(d.implementationFiles);
+      const coverage = fileCoverage(fixerFiles(previous) ?? d.implementationFiles);
       const policy =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(
