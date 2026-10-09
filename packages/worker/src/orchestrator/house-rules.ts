@@ -23,11 +23,15 @@ export const HOUSE_RULES_BUDGET_BYTES = 16_384;
 
 const OMITTED_TITLES_NAMED = 8;
 
-/** The framing a dispatch is shown, and the files its DAG issue plans to touch (`estimated_files`). */
+/** The framing a dispatch is shown, and the files its DAG issue plans to touch (`estimated_files`).
+ *  `findings` words the review framing for a reviewer that answers with a list of findings. */
 export interface HouseRulesRequest {
   mode: HouseRuleMode;
   estimatedFiles?: readonly string[];
+  findings?: boolean;
 }
+
+const FINDINGS_STEPS: ReadonlySet<string> = new Set(['08c-code-review']);
 
 export function houseRulesFor(
   stepId: string,
@@ -37,7 +41,12 @@ export function houseRulesFor(
   if (!Object.hasOwn(HOUSE_RULE_ROLES, stepId)) return undefined;
   const roles = HOUSE_RULE_ROLES[stepId]!;
   if (!Object.hasOwn(roles, role)) return undefined;
-  return { mode: roles[role]!, ...(estimatedFiles ? { estimatedFiles } : {}) };
+  const mode = roles[role]!;
+  return {
+    mode,
+    ...(estimatedFiles ? { estimatedFiles } : {}),
+    ...(mode === 'review' && FINDINGS_STEPS.has(stepId) ? { findings: true } : {}),
+  };
 }
 
 /** Marks a dispatch that is shown no house rules; the source guard wants every call to say why. */
@@ -79,16 +88,33 @@ const WRITE_FRAMING = [
   'A spec you write never restates these rules as requirements.',
 ].join('\n');
 
+const REVIEW_SCOPE = `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Check every line this change wrote, and every file it deleted, against every rule below; a file listed with no line note counts as wholly written. A rule that lists files applies only to the files its globs match.`;
+
+const REVIEW_RULE_ID = `"rule" as the rule's id, the code between "### Rule " and the colon in its heading`;
+
+const REVIEW_WAIVER =
+  "A known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check. A diagnosis or an honored constraint that came from a person counts as a person's directive.";
+
 const REVIEW_FRAMING = [
-  `House rules an administrator has enforced on this install. ${FRAMING_SCOPE} Check every line this change wrote, and every file it deleted, against every rule below; a file listed with no line note counts as wholly written. A rule that lists files applies only to the files its globs match.`,
-  'Report each violation as an issue with severity exactly "high", "file" as "path:line" and "rule" as the rule\'s id, the code between "### Rule " and the colon in its heading.',
-  "A known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check. A diagnosis or an honored constraint that came from a person counts as a person's directive. A violation outside the written lines goes to your report, never to the issues.",
+  REVIEW_SCOPE,
+  `Report each violation as an issue with severity exactly "high", "file" as "path:line" and ${REVIEW_RULE_ID}.`,
+  `${REVIEW_WAIVER} A violation outside the written lines goes to your report, never to the issues.`,
   'When the approved spec or a person\'s directive requires a violation, do not list it as an issue: list it under "rule_conflicts" as {"rule": "<id>", "file": "path:line", "reason": "<why>"}.',
   'The "rule" field of an issue and the top-level "rule_conflicts" list extend the JSON shape the output contract below gives: add both, even where it says to return exactly that shape.',
 ].join('\n');
 
-const framingOf = (mode: HouseRuleMode): string =>
-  mode === 'review' ? REVIEW_FRAMING : WRITE_FRAMING;
+const FINDINGS_REVIEW_FRAMING = [
+  REVIEW_SCOPE,
+  `Report each violation as a finding with severity exactly "high", "path" as the file, "lines" as the line range and ${REVIEW_RULE_ID}.`,
+  `${REVIEW_WAIVER} A violation outside the written lines is never a finding: put it in your \`## INSIGHTS\` section.`,
+  'When the approved spec or a person\'s directive requires a violation, do not list it as a finding: list it under "rule_conflicts" as {"rule": "<id>", "path": "path:line", "reason": "<why>"}.',
+  'The "rule" field of a finding and the top-level "rule_conflicts" list extend the JSON shape the output contract below gives: add both, even where it says EXACTLY that shape.',
+].join('\n');
+
+const framingOf = (mode: HouseRuleMode, findings: boolean): string => {
+  if (mode !== 'review') return WRITE_FRAMING;
+  return findings ? FINDINGS_REVIEW_FRAMING : REVIEW_FRAMING;
+};
 
 export interface HouseRuleCandidate extends Pick<
   GlobalKbEntry,
@@ -224,14 +250,14 @@ function omissionLine(mode: HouseRuleMode, omitted: readonly Omitted[]): string 
   return escapeEnd(line);
 }
 
-function renderBlock(mode: HouseRuleMode, kept: readonly Ranked[], notice: string): string {
+function renderBlock(framing: string, kept: readonly Ranked[], notice: string): string {
   const ids = houseRuleShortIds(kept.map((k) => k.rule.id));
   const entries = kept.map((k) =>
     renderHouseRuleEntry(k.rule, { enforce: k.rule.spec, shortId: ids.get(k.rule.id)! }),
   );
   return [
     HOUSE_RULES_MARKER,
-    framingOf(mode),
+    framing,
     '',
     ...(entries.length === 0 ? [] : [entries.join('\n\n')]),
     ...(notice === '' ? [] : [notice]),
@@ -274,6 +300,7 @@ export const unavailableSelection = (errorClass: GlobalKbErrorClass): HouseRuleS
  */
 export function selectHouseRules(input: {
   mode: HouseRuleMode;
+  findings?: boolean;
   rules: readonly HouseRuleCandidate[];
   refused?: readonly Omitted[];
   changedFiles: readonly string[] | null;
@@ -281,6 +308,7 @@ export function selectHouseRules(input: {
   budgetBytes?: number;
 }): HouseRuleSelection {
   const { mode, changedFiles } = input;
+  const framing = framingOf(mode, input.findings === true);
   const budget = input.budgetBytes ?? HOUSE_RULES_BUDGET_BYTES;
   const ranked = rank(input.rules, changedFiles, input.estimatedFiles ?? []);
 
@@ -291,7 +319,7 @@ export function selectHouseRules(input: {
     const left: Ranked[] = [];
     for (const candidate of ranked) {
       const trial = [...kept, candidate];
-      if (bytesOf(renderBlock(mode, trial, '')) <= budget - reserve) kept.push(candidate);
+      if (bytesOf(renderBlock(framing, trial, '')) <= budget - reserve) kept.push(candidate);
       else left.push(candidate);
     }
     const leftOut: Omitted[] = left.map((r) => ({
@@ -316,7 +344,7 @@ export function selectHouseRules(input: {
       status: 'ok',
       entries,
       omitted: [...(input.refused ?? []), ...leftOut],
-      block: kept.length === 0 && leftOut.length === 0 ? null : renderBlock(mode, kept, notice),
+      block: kept.length === 0 && leftOut.length === 0 ? null : renderBlock(framing, kept, notice),
     };
   }
 }

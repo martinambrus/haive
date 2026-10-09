@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, type HouseRuleMode } from '@haive/shared';
+import { logger } from '@haive/shared';
 import type { GlobalKbErrorClass } from '@haive/shared/global-kb';
 import { gitRun } from '../repo/git-exec.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
@@ -14,6 +14,7 @@ import {
   selectHouseRules,
   unavailableSelection,
   type HouseRuleSelection,
+  type HouseRulesRequest,
 } from './house-rules.js';
 
 const log = logger.child({ module: 'house-rules-dispatch' });
@@ -78,7 +79,7 @@ export function plannedFiles(files: readonly string[] | undefined): string[] {
 export async function selectForDispatch(
   db: Database,
   taskId: string,
-  request: { mode: HouseRuleMode; estimatedFiles?: readonly string[] },
+  request: HouseRulesRequest,
   worktreeRel: string | undefined,
   kb: Pick<GlobalKbContext, 'status' | 'errorClass' | 'rules' | 'refused'>,
 ): Promise<HouseRuleSelection> {
@@ -87,6 +88,7 @@ export async function selectForDispatch(
   const scoped = kb.rules.some((rule) => rule.spec.mode === 'files');
   return selectHouseRules({
     mode: request.mode,
+    findings: request.findings,
     rules: kb.rules,
     refused: kb.refused,
     changedFiles: scoped ? await readDispatchChange(db, taskId, worktreeRel) : [],

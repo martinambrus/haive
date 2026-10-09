@@ -107,7 +107,7 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
 
   it('gives every opt-out a reason', () => {
     const optOuts = calls.flatMap((c) => [...c.args.matchAll(/\bhouseRulesOptOut\(([^)]*)\)/g)]);
-    expect(optOuts.length).toBeGreaterThanOrEqual(5);
+    expect(optOuts.length).toBeGreaterThanOrEqual(4);
     for (const [, argument] of optOuts) {
       expect(argument).toMatch(/^\s*(['"`])[^'"`]{10,}\1,?\s*$/);
     }
@@ -121,7 +121,7 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
     expect(offenders).toEqual([]);
   });
 
-  it('asks the table for the roles the plan names: the step runner, the retry and the DAG agents', () => {
+  it('asks the table for the roles the plan names: the step runner, the retry, the fan-out seats and the DAG agents', () => {
     const at = (file: string) => calls.filter((c) => c.file === file).map((c) => c.args);
     const stepRunner = at('step-engine/step-runner.ts');
     expect(
@@ -132,6 +132,13 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
         /resolveRole\?\.\(stepIterationsAsRecords\(current\)\.length\)/.test(a),
       ),
     ).toHaveLength(1);
+    expect(
+      stepRunner.filter((a) =>
+        /houseRulesFor\(\s*stepDef\.metadata\.id,\s*dispatch\.roleKey \?\? 'default'\s*\)/.test(a),
+      ),
+    ).toHaveLength(1);
+    // Only the step recap is still opted out.
+    expect(stepRunner.filter((a) => /houseRulesOptOut\(/.test(a))).toHaveLength(1);
     const dag = at('step-engine/dag-executor.ts');
     expect(
       dag.filter((a) =>

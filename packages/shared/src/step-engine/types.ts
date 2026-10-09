@@ -123,7 +123,8 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
 export const HOUSE_RULE_MODES = ['write', 'review'] as const;
 export type HouseRuleMode = (typeof HOUSE_RULE_MODES)[number];
 
-/** Step id -> role (`default` without roles) -> mode. A dispatch in neither table is shown none. */
+/** Step id -> role (`default` without roles; a fan-out step's seat id) -> mode. A dispatch in
+ *  neither table is shown none. */
 export const HOUSE_RULE_ROLES: Readonly<Record<string, Readonly<Record<string, HouseRuleMode>>>> = {
   '04-phase-0b-pre-planning': { default: 'write' },
   '05-phase-0b5-spec-quality': { corrector: 'write' },
@@ -135,6 +136,7 @@ export const HOUSE_RULE_ROLES: Readonly<Record<string, Readonly<Record<string, H
   '07b-phase-4-validate': { validator: 'review', fixer: 'write' },
   '08a-browser-verify': { fixer: 'write' },
   '08b-test-management': { default: 'write' },
+  '08c-code-review': { 'peer-reviewer': 'review' },
   '08e-insights-triage': { default: 'write' },
 };
 

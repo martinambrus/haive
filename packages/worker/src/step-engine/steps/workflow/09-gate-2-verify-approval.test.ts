@@ -1002,11 +1002,52 @@ describe('gate-2 verification results read from 08', () => {
     expect(m.loadGateHouseRules).toHaveBeenLastCalledWith(
       (ctx as { db: unknown }).db,
       (ctx as { taskId: string }).taskId,
+      { withCodeReview: true },
     );
     expect(detected.houseRules).toEqual(rules);
     expect(
       (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).map((r) => r.label),
     ).toContain('House rules');
+  });
+
+  it('names the rule on a peer finding that carries one, and writes the others as it always did', async () => {
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        if (id === '08-phase-5-verify') {
+          return { output: { test: passedRun, passed: true, runtimeSmoke: null } };
+        }
+        if (id !== '08c-code-review') return null;
+        return {
+          output: {
+            reviewed: true,
+            blocking: true,
+            peer: {
+              verdict: 'REQUEST_CHANGES',
+              findings: [
+                {
+                  severity: 'high',
+                  path: 'templates/node.tpl.php',
+                  lines: '12-12',
+                  issue: 'inline svg in a template',
+                  fix: 'move it',
+                  rule: '42ac658a',
+                },
+                { severity: 'low', path: 'src/a.php', lines: '3-3', issue: 'a naming nit' },
+                { severity: 'high', path: 'src/b.php', issue: 'no lines', rule: 'deadbeef' },
+              ],
+              positives: [],
+            },
+            security: { verdict: 'SECURE', findings: [] },
+          },
+        };
+      },
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(detected.codeReview?.peerFindings).toEqual([
+      '[high] templates/node.tpl.php:12-12 (rule 42ac658a) inline svg in a template → move it',
+      '[low] src/a.php:3-3 a naming nit',
+      '[high] src/b.php (rule deadbeef) no lines',
+    ]);
   });
 
   it('carries the scope and the note of a check through to the gate row', async () => {

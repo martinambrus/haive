@@ -38,6 +38,14 @@ import {
 } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
+  givenRuleIds,
+  namesGivenRule,
+  parseRuleConflicts,
+  parseRuleRef,
+  raiseRuleViolations,
+  type RuleConflict,
+} from './_gate-house-rules.js';
+import {
   assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
@@ -115,6 +123,8 @@ interface PeerFinding {
   issue: string;
   snippet?: string;
   fix?: string;
+  /** The house rule this finding violates, as the peer reviewer referred to it. */
+  rule?: string;
   /** Set by the refutation pass: a refuter disproved this finding with a cited
    *  file:line. It stops blocking and stops reaching the implementer, but stays
    *  visible at gate 2 as advisory. Never set by a reviewer. */
@@ -173,6 +183,11 @@ interface CodeReviewApply {
    *  next fix round. Computed in apply() because fixLoop.evaluate is synchronous and has
    *  no ctx, and empty on round 0 and whenever nothing repeats. */
   recurringNote: string;
+  /** House rules the approved spec or a person requires breaking, as the peer reviewer reported
+   *  them. Never findings: no fix round is spent on them. Only when the peer's output parsed. */
+  ruleConflicts?: RuleConflict[];
+  /** The peer reviewer's cli_invocations row, which holds the stamp of the rules it was given. */
+  peerInvocationId?: string | null;
 }
 
 // Severity is coerced, not enum-validated: a repo's checked-in reviewer persona may
@@ -192,10 +207,12 @@ const peerSchema = z.object({
         issue: z.string(),
         snippet: z.string().optional(),
         fix: z.string().optional(),
+        rule: z.unknown().optional().transform(parseRuleRef),
       }),
     )
     .default([]),
   positives: z.array(z.string()).default([]),
+  rule_conflicts: z.unknown().optional().transform(parseRuleConflicts),
 });
 
 const securitySchema = z.object({
@@ -249,9 +266,12 @@ const reviewLensSchema = z.object({
 });
 
 /** Parse the peer-reviewer JSON; null when unparseable. */
-export function parsePeerReview(
-  raw: unknown,
-): { verdict: string; findings: PeerFinding[]; positives: string[] } | null {
+export function parsePeerReview(raw: unknown): {
+  verdict: string;
+  findings: PeerFinding[];
+  positives: string[];
+  ruleConflicts: RuleConflict[];
+} | null {
   return parseReviewJson(raw, (candidate) => {
     const parsed = peerSchema.safeParse(candidate);
     if (!parsed.success) return null;
@@ -259,6 +279,7 @@ export function parsePeerReview(
       verdict: parsed.data.verdict ?? 'DISCUSS',
       findings: parsed.data.findings,
       positives: parsed.data.positives,
+      ruleConflicts: parsed.data.rule_conflicts,
     };
   });
 }
@@ -495,14 +516,19 @@ export function refuterTitle(
 
 /** Every critical/high finding across all reviewers — exactly the ones that cost a fix
  *  round — collapsed to one entry per distinct bug. Medium/low are advisory already and
- *  are never refuted: the invocation would buy nothing. */
+ *  are never refuted: the invocation would buy nothing. A peer finding that names a rule
+ *  in `given` is never refuted either: Haive decides that a violation blocks, and a refuter
+ *  cannot see the rule. */
 export function collectRefutable(
   peer: { findings: PeerFinding[] },
   security: { findings: SecurityFinding[] },
   lenses: ReviewLensResult[],
+  given: ReadonlySet<string> = new Set(),
 ): RefutableFinding[] {
   const rows: { reviewerId: string; f: PeerFinding | SecurityFinding }[] = [
-    ...peer.findings.map((f) => ({ reviewerId: 'peer-reviewer', f: f as PeerFinding })),
+    ...peer.findings
+      .filter((f) => !namesGivenRule(f, given))
+      .map((f) => ({ reviewerId: 'peer-reviewer', f: f as PeerFinding })),
     ...security.findings.map((f) => ({ reviewerId: 'security-code-reviewer', f })),
     ...lenses.flatMap((l) => l.findings.map((f) => ({ reviewerId: l.id, f: f as PeerFinding }))),
   ];
@@ -653,9 +679,10 @@ export function applyRefutations(
   security: { verdict: string; findings: SecurityFinding[] },
   lenses: ReviewLensResult[],
   refuteLenses: (RefuteLens | null)[] = refuteLensesFor(REFUTE_LENSES.length),
+  given: ReadonlySet<string> = new Set(),
 ): number {
   const dismissed = new Set<string>();
-  for (const f of collectRefutable(peer, security, lenses)) {
+  for (const f of collectRefutable(peer, security, lenses, given)) {
     if (!isRefutedByPanel(results, f, refuteLenses)) continue;
     // One panel answered for the bug, so every reviewer that raised it is answered.
     for (const fingerprint of f.fingerprints) dismissed.add(fingerprint);
@@ -1016,13 +1043,15 @@ function diagnosisLine(f: {
   issue: string;
   fix?: string;
   cwe?: string;
+  rule?: string;
   lines?: string;
   line?: string | number;
 }): string {
   const at = f.lines ?? (f.line != null && f.line !== '' ? String(f.line) : '');
   const loc = `${f.path ?? ''}${at ? `:${at}` : ''}`;
   const cwe = f.cwe ? ` (${f.cwe})` : '';
-  return `- [${f.severity}]${cwe} ${loc}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`;
+  const rule = f.rule ? ` (rule ${f.rule})` : '';
+  return `- [${f.severity}]${cwe}${rule} ${loc}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`;
 }
 
 /** The "you have tried this before" block handed to the next fix round.
@@ -1296,11 +1325,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // purpose: a reviewer that failed to emit JSON is not evidence the CODE is
     // wrong, so it must not route the change back to the implementer. It is
     // non-approving, and the developer decides at gate 2.
-    const peerOut: { verdict: string; findings: PeerFinding[]; positives: string[] } = peer ?? {
-      verdict: peerIssue ? 'DISCUSS' : 'APPROVE',
-      findings: peerIssue ? [{ severity: 'medium', issue: peerIssue }] : [],
-      positives: [],
-    };
+    const peerOut: { verdict: string; findings: PeerFinding[]; positives: string[] } = peer
+      ? { verdict: peer.verdict, findings: peer.findings, positives: peer.positives }
+      : {
+          verdict: peerIssue ? 'DISCUSS' : 'APPROVE',
+          findings: peerIssue ? [{ severity: 'medium', issue: peerIssue }] : [],
+          positives: [],
+        };
     const securityOut: { verdict: string; findings: SecurityFinding[] } = security ?? {
       verdict: securityIssue ? 'NEEDS_FIXES' : 'SECURE',
       findings: securityIssue ? [{ severity: 'medium', issue: securityIssue }] : [],
@@ -1363,6 +1394,12 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // OK at gate 2, which is what reviewIncomplete carries.
     const reviewIncomplete = unreadable.length > 0;
 
+    // A violation of a rule the peer reviewer was given blocks, whatever severity it gave it.
+    const peerInvocationId = miningInvocationId(results, 'peer-reviewer');
+    const given = await givenRuleIds(ctx.db, peerOut.findings, peerInvocationId);
+    const ruled = raiseRuleViolations(peerOut.findings, given);
+    peerOut.findings = ruled.items;
+
     // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
     // synthetic findings for an unparseable reviewer, so the blocking decision and
     // the gate-2 finding list can never disagree.
@@ -1397,14 +1434,21 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       const refuteLenses = refuteLensesFor(
         await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
       );
-      refutedCount = applyRefutations(results, peerOut, securityOut, extraLenses, refuteLenses);
+      refutedCount = applyRefutations(
+        results,
+        peerOut,
+        securityOut,
+        extraLenses,
+        refuteLenses,
+        given,
+      );
       blocking = computeBlocking(
         { findings: live(peerOut.findings) },
         { findings: live(securityOut.findings) },
         extraLenses.map((l) => ({ findings: live(l.findings) })),
       );
     } else if (args.miningWaveExhausted !== true) {
-      const refutable = collectRefutable(peerOut, securityOut, extraLenses);
+      const refutable = collectRefutable(peerOut, securityOut, extraLenses, given);
       if (
         refutable.length > 0 &&
         (await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true))
@@ -1514,6 +1558,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         peerVerdict: peerOut.verdict,
         securityVerdict: securityOut.verdict,
         peerFindings: peerOut.findings.length,
+        raisedByRule: ruled.raised,
+        stampedRules: ruled.stamped,
         securityCriticalHigh,
         securityOutOfScope,
         lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
@@ -1562,6 +1608,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       refutedCount,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
       recurringNote,
+      ...(peer === null ? {} : { ruleConflicts: peer.ruleConflicts, peerInvocationId }),
     };
   },
 };

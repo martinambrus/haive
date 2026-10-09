@@ -19,6 +19,9 @@ vi.mock('./_task-meta.js', async (importOriginal) => ({
   })),
 }));
 import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
+import { houseRuleShortIds, type HouseRulesStamp } from '@haive/shared/global-kb';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import {
   parsePeerReview,
   parseSecurityReview,
@@ -1844,5 +1847,485 @@ describe('upstream ownership routing', () => {
     } as never);
     expect(owned.blocking).toBe(true);
     expect(owned.peer.findings[0]!.upstream).toBeNull();
+  });
+});
+
+describe('08c re-checks the house rules the peer reviewer was given', () => {
+  const TASK = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const PEER_INVOCATION = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const SECURITY_INVOCATION = 'bbbbbbbb-0000-4000-8000-000000000002';
+  const NEWER_INVOCATION = 'bbbbbbbb-0000-4000-8000-000000000003';
+  const RULE_A = '42ac658a-3c1d-4e5f-8a9b-0c1d2e3f4a5b';
+  const RULE_B = '9d1f0b7c-5e6f-4a7b-9c8d-1e2f3a4b5c6d';
+  const shortA = houseRuleShortIds([RULE_A]).get(RULE_A)!;
+  const shortB = houseRuleShortIds([RULE_B]).get(RULE_B)!;
+  const stampOf = (ids: string[]): HouseRulesStamp => ({
+    mode: 'review',
+    entries: ids.map((id) => ({
+      id,
+      hash: `hr1:${'a'.repeat(64)}`,
+      title: `Rule ${id.slice(0, 4)}`,
+      why: { scope: 'always' as const },
+    })),
+    omitted: [],
+  });
+  const policy = { drupal: false, drupalRoots: [], ownedPaths: [] };
+
+  /** The peer's invocation holds rule A, a newer invocation of the step holds rule B. */
+  function world(stored: Record<string, unknown> = {}) {
+    const fake = createFakeDb({ cliInvocations: schema.cliInvocations });
+    const rows = {
+      [PEER_INVOCATION]: stampOf([RULE_A]),
+      [SECURITY_INVOCATION]: null,
+      [NEWER_INVOCATION]: stampOf([RULE_B]),
+      ...stored,
+    };
+    for (const [id, houseRules] of Object.entries(rows)) {
+      fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+    }
+    const recorded: Record<string, unknown>[] = [];
+    const db = {
+      ...fake.db,
+      insert: () => ({
+        values: (found: Record<string, unknown>[]) => {
+          recorded.push(...found);
+          return { onConflictDoNothing: async () => undefined };
+        },
+      }),
+    };
+    const ctx = {
+      logger: logger.child({ test: '08c-rules' }),
+      taskId: TASK,
+      taskStepId: 's1',
+      round: 0,
+      db,
+    } as unknown as StepContext;
+    return { ctx, recorded };
+  }
+
+  const withInvocation = (
+    m: AgentMiningResult,
+    invocationId: string | null,
+  ): AgentMiningResult => ({
+    ...m,
+    invocationId,
+  });
+  const fenced = (value: unknown): string => `\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
+  const finding = (over: Record<string, unknown> = {}) => ({
+    severity: 'medium',
+    path: 'templates/node.tpl.php',
+    lines: '12-12',
+    issue: 'inline svg in a template',
+    fix: 'move it to a file',
+    ...over,
+  });
+  const peerText = (findings: unknown[], extra: Record<string, unknown> = {}): string =>
+    fenced({ verdict: 'REQUEST_CHANGES', findings, positives: [], ...extra });
+  const peerResult = (text: string, invocationId: string | null = PEER_INVOCATION) =>
+    withInvocation(mining('peer-reviewer', text), invocationId);
+  const securityResult = (findings: unknown[] = []) =>
+    withInvocation(
+      mining(
+        'security-code-reviewer',
+        fenced({ verdict: findings.length > 0 ? 'VULNERABLE' : 'SECURE', findings }),
+      ),
+      SECURITY_INVOCATION,
+    );
+  const secFinding = (over: Record<string, unknown> = {}) => ({
+    severity: 'high',
+    in_scope: 'yes',
+    path: 'src/a.php',
+    line: 3,
+    cwe: 'CWE-79',
+    issue: 'unescaped echo',
+    fix: 'escape it',
+    ...over,
+  });
+
+  function applyReview(
+    ctx: StepContext,
+    results: AgentMiningResult[],
+    { exhausted = true }: { exhausted?: boolean } = {},
+  ) {
+    return codeReviewStep.apply(ctx, {
+      detected: {
+        spec: 's',
+        implementationFiles: [],
+        debtBlock: '',
+        level: 'none',
+        dependencyPolicy: policy,
+      },
+      agentMiningResults: results,
+      isFinalMiningAttempt: true,
+      miningWaveExhausted: exhausted,
+    } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+  }
+
+  describe('the peer output is parsed tolerantly', () => {
+    const conflict = { rule: shortA, path: 'src/a.php:7', reason: 'the approved spec requires it' };
+
+    it('keeps the rule of a finding, trimmed and on one line, and leaves the others without one', () => {
+      const parsed = parsePeerReview(
+        peerText([
+          finding({ rule: `  ${shortA}\n` }),
+          finding({ issue: 'no rule here' }),
+          finding({ issue: 'long', rule: 'r'.repeat(80) }),
+        ]),
+      )!;
+      expect(parsed.findings.map((f) => f.rule)).toEqual([shortA, undefined, 'r'.repeat(64)]);
+    });
+
+    it.each([[7], [null], [true], [{ id: shortA }], [[shortA]], [''], ['  ']])(
+      'drops a rule that is %j and keeps the finding',
+      (rule) => {
+        const parsed = parsePeerReview(peerText([finding({ rule }), finding({ rule: shortA })]))!;
+        expect(parsed.findings).toHaveLength(2);
+        expect(parsed.findings[0]!.rule).toBeUndefined();
+        expect(parsed.findings[1]!.rule).toBe(shortA);
+      },
+    );
+
+    it('reads rule_conflicts into {rule, file, reason}, the location taken from path or from file', () => {
+      const parsed = parsePeerReview(
+        peerText([], {
+          rule_conflicts: [
+            conflict,
+            { rule: shortA, file: 'src/b.php:9', reason: 'a person asked for it' },
+          ],
+        }),
+      )!;
+      expect(parsed.ruleConflicts).toEqual([
+        { rule: shortA, file: 'src/a.php:7', reason: 'the approved spec requires it' },
+        { rule: shortA, file: 'src/b.php:9', reason: 'a person asked for it' },
+      ]);
+    });
+
+    it.each([
+      ['a string', 'none'],
+      ['an object', conflict],
+      ['a number', 7],
+      ['null', null],
+    ])('reads rule_conflicts that is %s as none, and still parses the review', (_name, value) => {
+      const parsed = parsePeerReview(
+        peerText([finding({ rule: shortA })], { rule_conflicts: value }),
+      )!;
+      expect(parsed.ruleConflicts).toEqual([]);
+      expect(parsed.findings).toHaveLength(1);
+      expect(parsed.verdict).toBe('REQUEST_CHANGES');
+    });
+
+    it('drops a conflict without a rule or a reason, and nothing else', () => {
+      const parsed = parsePeerReview(
+        peerText([], {
+          rule_conflicts: [{ rule: shortA }, { reason: 'no rule' }, 7, null, 'text', conflict],
+        }),
+      )!;
+      expect(parsed.ruleConflicts).toEqual([
+        { rule: shortA, file: 'src/a.php:7', reason: 'the approved spec requires it' },
+      ]);
+    });
+
+    it('reads a review that says nothing of rules as it always did', () => {
+      const parsed = parsePeerReview(peerText([finding()]))!;
+      expect(parsed.ruleConflicts).toEqual([]);
+      expect(parsed.findings[0]!.rule).toBeUndefined();
+    });
+
+    it('does not ask the other seats for a rule: their schemas drop one', () => {
+      const lens = parseReviewLens(
+        fenced({ verdict: 'APPROVE', findings: [finding({ rule: shortA })] }),
+      )!;
+      expect('rule' in lens.findings[0]!).toBe(false);
+      const security = parseSecurityReview(
+        fenced({ verdict: 'VULNERABLE', findings: [secFinding({ rule: shortA })] }),
+      )!;
+      expect('rule' in security.findings[0]!).toBe(false);
+    });
+  });
+
+  describe('a finding that names a rule of the peer own stamp blocks', () => {
+    it('raises a medium finding to high, keeps its rule, and blocks', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(
+          peerText([
+            finding({ rule: shortA }),
+            finding({ issue: 'a naming nit', severity: 'low', path: 'src/a.php', lines: '3-3' }),
+          ]),
+        ),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]).toMatchObject({ severity: 'high', rule: shortA });
+      expect(out.peer.findings[1]).toMatchObject({ severity: 'low' });
+      expect(out.peer.findings[1]!.rule).toBeUndefined();
+      expect(out.blocking).toBe(true);
+    });
+
+    it('reads the rule however it is written: prefix, capitals, spaces', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(
+          peerText([finding({ severity: 'low', rule: `  RULE ${shortA.toUpperCase()}  ` })]),
+        ),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('high');
+      expect(out.blocking).toBe(true);
+    });
+
+    it('never lowers a critical finding', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ severity: 'critical', rule: shortA })])),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('critical');
+      expect(out.blocking).toBe(true);
+    });
+
+    it('records the raised severity and the blocking flag', async () => {
+      const { ctx, recorded } = world();
+      await applyReview(ctx, [peerResult(peerText([finding({ rule: shortA })])), securityResult()]);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({
+        severity: 'high',
+        blocking: true,
+        reviewerId: 'peer-reviewer',
+      });
+      expect(recorded[0]!.cliInvocationId).toBe(PEER_INVOCATION);
+    });
+
+    it('sends the finding back with its rule on the line the implementer reads', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ rule: shortA })])),
+        securityResult(),
+      ]);
+      const verdict = codeReviewStep.fixLoop!.evaluate(out)!;
+      expect(verdict.blocking).toBe(true);
+      expect(verdict.diagnosis).toBe(
+        `### Peer review\n- [high] (rule ${shortA}) templates/node.tpl.php:12-12: inline svg in a template — fix: move it to a file`,
+      );
+    });
+
+    it.each([
+      ['an unknown rule', 'deadbeef'],
+      ['a rule only another invocation was given', shortB],
+      ['no rule', undefined],
+    ])('does not raise a finding that names %s', async (_name, rule) => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ rule })])),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('medium');
+      expect(out.blocking).toBe(false);
+    });
+
+    it.each([
+      ['the invocation holds no stamp', { [PEER_INVOCATION]: null }],
+      ['the stamp is not one', { [PEER_INVOCATION]: { mode: 'bogus', entries: 'x' } }],
+    ])('does not raise anything when %s', async (_name, stored) => {
+      const { ctx } = world(stored);
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ rule: shortA })])),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('medium');
+      expect(out.blocking).toBe(false);
+    });
+
+    it('does not raise anything when the result names no invocation', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ rule: shortA })]), null),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('medium');
+      expect(out.blocking).toBe(false);
+    });
+
+    it('reads no stamp when no finding names a rule', async () => {
+      const { ctx } = world();
+      (ctx as unknown as { db: Record<string, unknown> }).db.select = () => {
+        throw new Error('the store was read');
+      };
+      const out = await applyReview(ctx, [peerResult(peerText([finding()])), securityResult()]);
+      expect(out.blocking).toBe(false);
+    });
+
+    it('reads the stamp of the peer own invocation, not the newest one of the step', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([finding({ rule: shortB })])),
+        securityResult(),
+      ]);
+      expect(out.peer.findings[0]!.severity).toBe('medium');
+    });
+  });
+
+  describe('a finding that names a stamped rule is never refuted', () => {
+    beforeEach(() => {
+      vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+      vi.spyOn(configService, 'getNumber').mockResolvedValue(3);
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const ruleFinding = finding({ severity: 'high', rule: shortA });
+    const refuterIdsOf = (path: string, issue: string): string[] => {
+      const base = collectRefutable(
+        { findings: [{ severity: 'high', path, issue }] },
+        { findings: [] },
+        [],
+      )[0]!.agentId;
+      return ['reach', 'impact', 'defense'].map((lens) => `${base}-${lens}`);
+    };
+    const refuted = (ids: string[]) =>
+      ids.map((id) => mining(id, '```json\n{"refuted":true,"evidence":"src/a.php:3"}\n```'));
+
+    it('dispatches no wave when only findings that name a stamped rule block', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [peerResult(peerText([ruleFinding])), securityResult()], {
+        exhausted: false,
+      });
+      expect(out.blocking).toBe(true);
+      expect(out.refutedCount).toBe(0);
+    });
+
+    it('dispatches the wave for an ordinary blocking finding and asks nothing of the rule finding', async () => {
+      const { ctx } = world();
+      const err = await applyReview(
+        ctx,
+        [peerResult(peerText([ruleFinding])), securityResult([secFinding()])],
+        { exhausted: false },
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(MiningWaveError);
+      const prompts = (err as MiningWaveError).dispatches.map((d) => d.prompt);
+      expect(prompts.length).toBeGreaterThan(0);
+      expect(prompts.every((p) => p.includes('unescaped echo'))).toBe(true);
+      expect(prompts.some((p) => p.includes('inline svg in a template'))).toBe(false);
+    });
+
+    it('does not mark it refuted when the wave answers, whatever the refuters said', async () => {
+      const { ctx } = world();
+      const out = await applyReview(
+        ctx,
+        [
+          peerResult(peerText([ruleFinding])),
+          securityResult([secFinding()]),
+          ...refuted(refuterIdsOf('src/a.php', 'unescaped echo')),
+          ...refuted(refuterIdsOf(ruleFinding.path, ruleFinding.issue)),
+        ],
+        { exhausted: false },
+      );
+      expect(out.security.findings[0]!.refuted).toBe(true);
+      expect(out.peer.findings[0]!.refuted).toBeUndefined();
+      expect(out.refutedCount).toBe(1);
+      expect(out.blocking).toBe(true);
+    });
+
+    it('does not let a refuter of the same bug, raised by the security reviewer, dismiss it', async () => {
+      const { ctx } = world();
+      const same = { path: ruleFinding.path, issue: ruleFinding.issue };
+      const out = await applyReview(
+        ctx,
+        [
+          peerResult(peerText([ruleFinding])),
+          securityResult([secFinding(same)]),
+          ...refuted(refuterIdsOf(same.path, same.issue)),
+        ],
+        { exhausted: false },
+      );
+      expect(out.security.findings[0]!.refuted).toBe(true);
+      expect(out.peer.findings[0]!.refuted).toBeUndefined();
+      expect(out.blocking).toBe(true);
+    });
+
+    it('still refutes a high finding that names a rule the peer was not given', async () => {
+      const { ctx } = world();
+      const err = await applyReview(
+        ctx,
+        [peerResult(peerText([finding({ severity: 'high', rule: 'deadbeef' })])), securityResult()],
+        { exhausted: false },
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(MiningWaveError);
+    });
+
+    it('collects every other blocking finding as before', () => {
+      const given = new Set([shortA]);
+      const peer = {
+        findings: [{ severity: 'high' as const, path: 'a.ts', issue: 'x', rule: shortA }],
+      };
+      expect(collectRefutable(peer, { findings: [] }, [], given)).toEqual([]);
+      expect(collectRefutable(peer, { findings: [] }, [])).toHaveLength(1);
+      expect(collectRefutable(peer, { findings: [] }, [], new Set([shortB]))).toHaveLength(1);
+    });
+  });
+
+  describe('what the output stores', () => {
+    const conflict = { rule: shortA, path: 'src/a.php:7', reason: 'the approved spec requires it' };
+
+    it("stores the conflicts and the peer seat's own invocation id", async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([], { rule_conflicts: [conflict, { rule: shortA }] })),
+        securityResult(),
+      ]);
+      expect(out.ruleConflicts).toEqual([
+        { rule: shortA, file: 'src/a.php:7', reason: 'the approved spec requires it' },
+      ]);
+      expect(out.peerInvocationId).toBe(PEER_INVOCATION);
+    });
+
+    it('keeps a conflict out of the findings, the blocking decision and the fix loop', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([], { rule_conflicts: [conflict] })),
+        securityResult(),
+      ]);
+      expect(out.peer.findings).toEqual([]);
+      expect(out.blocking).toBe(false);
+      expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+    });
+
+    it('stores an empty list, and the id, for a parsed review with no conflict', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [peerResult(peerText([finding()])), securityResult()]);
+      expect(out.ruleConflicts).toEqual([]);
+      expect(out.peerInvocationId).toBe(PEER_INVOCATION);
+    });
+
+    it('stores a null id when the peer result names no invocation', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [peerResult(peerText([]), null), securityResult()]);
+      expect(out.peerInvocationId).toBeNull();
+    });
+
+    it('does not nest the conflicts in the peer review it stores', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [
+        peerResult(peerText([], { rule_conflicts: [conflict] })),
+        securityResult(),
+      ]);
+      expect(Object.keys(out.peer).sort()).toEqual(['findings', 'positives', 'verdict']);
+    });
+
+    it('stores neither when the peer output could not be read', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, [peerResult('prose, no json at all'), securityResult()]);
+      expect(out.reviewIncomplete).toBe(true);
+      expect('ruleConflicts' in out).toBe(false);
+      expect('peerInvocationId' in out).toBe(false);
+    });
+
+    it('stores neither when no reviewer was dispatched', async () => {
+      const { ctx } = world();
+      const out = await applyReview(ctx, []);
+      expect(out.reviewed).toBe(false);
+      expect('ruleConflicts' in out).toBe(false);
+      expect('peerInvocationId' in out).toBe(false);
+    });
   });
 });

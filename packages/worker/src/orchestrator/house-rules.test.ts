@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { promptNamesAgentPath } from '@haive/shared';
+import { promptNamesAgentPath, STEP_MINING_SEATS } from '@haive/shared';
 import {
   HOUSE_RULES_ALWAYS_CAP_BYTES,
   HOUSE_RULES_END,
@@ -167,6 +167,44 @@ describe('houseRulesFor', () => {
 
   it('is what an opt-out is not: an opt-out is none', () => {
     expect(houseRulesOptOut('mining agents are shown nothing')).toBeUndefined();
+  });
+
+  it("opts in 08c's peer reviewer in review mode, worded for findings, and 07b's request stays as it was", () => {
+    expect(houseRulesFor('08c-code-review', 'peer-reviewer')).toStrictEqual({
+      mode: 'review',
+      findings: true,
+    });
+    expect(houseRulesFor('07b-phase-4-validate', 'validator')).toStrictEqual({ mode: 'review' });
+  });
+
+  it('shows no other seat of 08c anything: security, the lenses, the refuter panel, the retry', () => {
+    const seats = STEP_MINING_SEATS['08c-code-review']!.map((seat) => seat.id);
+    expect(seats).toContain('peer-reviewer');
+    for (const seat of seats.filter((id) => id !== 'peer-reviewer')) {
+      expect(houseRulesFor('08c-code-review', seat), seat).toBeUndefined();
+    }
+    for (const seat of ['refuter', 'default', 'validator', 'reviewer']) {
+      expect(houseRulesFor('08c-code-review', seat), seat).toBeUndefined();
+    }
+  });
+
+  it('shows no seat of another fan-out step anything, whatever it calls it', () => {
+    for (const [stepId, seats] of Object.entries(STEP_MINING_SEATS)) {
+      if (stepId === '08c-code-review') continue;
+      for (const seat of ['default', 'peer-reviewer', ...seats.map((s) => s.id)]) {
+        expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toBeUndefined();
+      }
+    }
+    for (const stepId of [
+      '03-phase-0a-discovery',
+      '09_6_4-global-kb-merge',
+      '09_5-skill-generation',
+      '01-plan-build',
+      '02-plan-coverage',
+    ]) {
+      expect(houseRulesFor(stepId, 'default'), stepId).toBeUndefined();
+      expect(houseRulesFor(stepId, 'peer-reviewer'), stepId).toBeUndefined();
+    }
   });
 });
 
@@ -632,13 +670,105 @@ describe('the block', () => {
     expect(r).not.toMatch(/similar/i);
   });
 
+  describe("08c's findings variant of the review framing", () => {
+    const framingIn = (block: string): string => block.slice(0, block.indexOf('\n### Rule '));
+    const request = houseRulesFor('08c-code-review', 'peer-reviewer')!;
+    const issues = framingIn(
+      selectHouseRules({ mode: 'review', rules: [rule()], changedFiles: [] }).block!,
+    );
+    const findings = framingIn(
+      selectHouseRules({ ...request, rules: [rule()], changedFiles: [] }).block!,
+    );
+
+    it('asks for a finding with severity "high", a path, lines and the rule, not for an issue', () => {
+      expect(findings).toMatch(/Report each violation as a finding with severity exactly "high"/);
+      expect(findings).toMatch(/"path" as the file/);
+      expect(findings).toMatch(/"lines" as the line range/);
+      expect(findings).toMatch(
+        /"rule" as the rule's id, the code between "### Rule " and the colon in its heading/,
+      );
+      expect(findings).not.toMatch(/\bissues?\b/i);
+      expect(findings).not.toMatch(/"file" as "path:line"/);
+    });
+
+    it('sends a violation outside the written lines to the INSIGHTS section, not to a report', () => {
+      expect(findings).toMatch(
+        /A violation outside the written lines is never a finding: put it in your `## INSIGHTS` section\./,
+      );
+      expect(findings).not.toMatch(/goes to your report/);
+    });
+
+    it('sends a violation the spec or a person requires to a top-level rule_conflicts, located by path', () => {
+      expect(findings).toMatch(
+        /do not list it as a finding: list it under "rule_conflicts" as \{"rule": "<id>", "path": "path:line", "reason": "<why>"\}/,
+      );
+    });
+
+    it('says the two fields extend the output contract even where it says EXACTLY', () => {
+      const extension = findings
+        .split('\n')
+        .filter((line) => line.includes('output contract below'));
+      expect(extension).toHaveLength(1);
+      expect(extension[0]).toMatch(/"rule"/);
+      expect(extension[0]).toMatch(/"rule_conflicts"/);
+      expect(extension[0]).toMatch(/extend the JSON shape the output contract below gives/);
+      expect(extension[0]).toMatch(/even where it says EXACTLY that shape/);
+    });
+
+    it('is not the write framing and not a copy of the issues one', () => {
+      expect(findings).not.toBe(issues);
+      expect(findings).not.toMatch(/lines you write or specify|similar/i);
+    });
+
+    it('shares its scope sentence and its waiver sentences with the issues framing', () => {
+      const scope = (text: string) => text.split('\n')[1];
+      expect(scope(findings)).toBe(scope(issues));
+      expect(scope(findings)).toMatch(/^House rules an administrator has enforced/);
+      const waiver =
+        "A known-debt entry never waives a rule, nor does a diagnosis or an honored constraint that came from a check. A diagnosis or an honored constraint that came from a person counts as a person's directive.";
+      expect(findings).toContain(waiver);
+      expect(issues).toContain(waiver);
+    });
+
+    it('keeps the stamp mode review and leaves the issues framing to a request without findings', () => {
+      const out = selectHouseRules({ ...request, rules: [rule()], changedFiles: [] });
+      expect(houseRulesStampOf(request.mode, out).mode).toBe('review');
+      const plain = selectHouseRules({
+        mode: 'review',
+        findings: false,
+        rules: [rule()],
+        changedFiles: [],
+      });
+      expect(framingIn(plain.block!)).toBe(issues);
+    });
+
+    it('does not reword the notice of a rule that did not fit', () => {
+      const keep = rule({ title: 'Kept', size: 100 });
+      const big = files(['*.php'], { title: 'Left out', size: 5000 });
+      const kept = selectHouseRules({ ...request, rules: [keep], changedFiles: ['x.php'] });
+      const out = selectHouseRules({
+        ...request,
+        rules: [keep, big],
+        changedFiles: ['x.php'],
+        budgetBytes: bytes(kept.block!) + 400,
+      });
+      expect(out.block).toContain(
+        '(1 more enforced house rule did not fit this prompt and is not part of this check: "Left out". Do not report on it.)',
+      );
+    });
+  });
+
   it('names no agent path in the text Haive wrote, so only an admin text can end isolation', () => {
-    for (const mode of ['write', 'review'] as const) {
-      const block = selectHouseRules({ mode, rules: [rule()], changedFiles: [] }).block!;
+    for (const request of [
+      { mode: 'write' },
+      { mode: 'review' },
+      { mode: 'review', findings: true },
+    ] as const) {
+      const block = selectHouseRules({ ...request, rules: [rule()], changedFiles: [] }).block!;
       const framing = block.slice(0, block.indexOf('\n### Rule '));
       expect(promptNamesAgentPath(framing, SANDBOX_WORKDIR)).toBe(false);
       const left = selectHouseRules({
-        mode,
+        ...request,
         rules: [
           rule({ size: 100 }),
           files(['*.php'], { size: 9000 }),

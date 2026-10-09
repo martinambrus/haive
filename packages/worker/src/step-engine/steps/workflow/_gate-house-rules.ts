@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StatusSummaryItem } from '@haive/shared';
+import { isBlockingSeverity, type ReviewSeverity } from '@haive/shared/review';
 import {
   houseRuleShortIds,
   parseHouseRulesStamp,
@@ -57,11 +58,11 @@ export function parseRuleConflicts(value: unknown): RuleConflict[] {
   if (!Array.isArray(value)) return [];
   return value
     .flatMap((item: unknown) => {
-      const { rule, file, reason } = (item ?? {}) as Record<string, unknown>;
+      const { rule, file, path, reason } = (item ?? {}) as Record<string, unknown>;
       const ref = parseRuleRef(rule);
       const why = oneLine(reason, TEXT_CHARS);
       if (ref === undefined || why === '') return [];
-      const where = oneLine(file, TEXT_CHARS);
+      const where = oneLine(file, TEXT_CHARS) || oneLine(path, TEXT_CHARS);
       return [{ rule: ref, ...(where === '' ? {} : { file: where }), reason: why }];
     })
     .slice(0, CONFLICTS_MAX);
@@ -84,18 +85,53 @@ export async function loadInvocationStamp(
   return parseHouseRulesStamp(row?.houseRules);
 }
 
-/** From the stamp of the invocation 07b's latest output names, never one picked by title, message or age. */
-export async function loadGateHouseRules(
-  db: Database,
-  taskId: string,
-): Promise<GateHouseRules | null> {
-  const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
-  const output = (validation?.output ?? {}) as Record<string, unknown>;
-  const invocationId = output.validatorInvocationId;
-  if (typeof invocationId !== 'string' || invocationId === '') return null;
-  const stamp = await loadInvocationStamp(db, invocationId);
-  if (stamp === null) return null;
+/** True when the item's `rule` names one of the short ids a pass was given. */
+export const namesGivenRule = (item: { rule?: string }, given: ReadonlySet<string>): boolean =>
+  item.rule !== undefined && given.has(normalizeRuleRef(item.rule));
 
+/** Short ids of the house rules a pass was given, from the stamp of its own invocation. Read only
+ *  when an item names a rule. */
+export async function givenRuleIds(
+  db: Database,
+  items: readonly { rule?: string }[],
+  invocationId: string | null | undefined,
+): Promise<Set<string>> {
+  if (!invocationId || !items.some((item) => item.rule !== undefined)) return new Set();
+  const stamp = await loadInvocationStamp(db, invocationId);
+  return new Set(stamp ? houseRuleShortIds(stamp.entries.map((entry) => entry.id)).values() : []);
+}
+
+/** A violation of a rule the pass was given blocks, whatever severity the model gave it. */
+export function raiseRuleViolations<T extends { severity: ReviewSeverity; rule?: string }>(
+  items: T[],
+  given: ReadonlySet<string>,
+): { items: T[]; raised: number; stamped: number } {
+  const raised = items.map((item) =>
+    namesGivenRule(item, given) && !isBlockingSeverity(item.severity)
+      ? { ...item, severity: 'high' as const }
+      : item,
+  );
+  return {
+    items: raised,
+    raised: raised.filter((item, i) => item !== items[i]).length,
+    stamped: items.filter((item) => namesGivenRule(item, given)).length,
+  };
+}
+
+/** What one check found against its rules, as its step stored it. */
+interface StoredFinding {
+  rule: unknown;
+  file: unknown;
+  description: unknown;
+}
+
+/** One check's row data: the rules its invocation was given and what it found against them. */
+function checkOf(
+  stamp: HouseRulesStamp,
+  found: StoredFinding[],
+  conflicts: unknown,
+  coverage: unknown,
+): GateHouseRules {
   const shortIds = houseRuleShortIds(stamp.entries.map((entry) => entry.id));
   const entries = stamp.entries.map((entry) => ({
     shortId: shortIds.get(entry.id)!,
@@ -103,21 +139,19 @@ export async function loadGateHouseRules(
     why: entry.why,
   }));
   const named = new Map(entries.map((entry) => [entry.shortId, entry] as const));
-  const issues: unknown[] = Array.isArray(output.issues) ? output.issues : [];
-  const violations = issues.flatMap((item) => {
-    const issue = (item ?? {}) as Record<string, unknown>;
-    const entry = typeof issue.rule === 'string' ? named.get(normalizeRuleRef(issue.rule)) : null;
+  const violations = found.flatMap((item) => {
+    const entry = typeof item.rule === 'string' ? named.get(normalizeRuleRef(item.rule)) : null;
     if (!entry) return [];
     return [
       {
         shortId: entry.shortId,
         title: entry.title,
-        file: oneLine(issue.file, TEXT_CHARS),
-        description: oneLine(issue.description, TEXT_CHARS),
+        file: oneLine(item.file, TEXT_CHARS),
+        description: oneLine(item.description, TEXT_CHARS),
       },
     ];
   });
-  const coverage = parseChangedFilesCoverage(output.changedFilesCoverage);
+  const listed = parseChangedFilesCoverage(coverage);
   return {
     mode: stamp.mode,
     ...(stamp.reason === undefined ? {} : { reason: stamp.reason }),
@@ -128,7 +162,72 @@ export async function loadGateHouseRules(
       why: rule.why,
     })),
     violations,
-    conflicts: parseRuleConflicts(output.ruleConflicts),
+    conflicts: parseRuleConflicts(conflicts),
+    ...(listed === undefined ? {} : { changedFilesCoverage: listed }),
+  };
+}
+
+const recordsOf = (value: unknown): Record<string, unknown>[] =>
+  (Array.isArray(value) ? value : []).map((item) => (item ?? {}) as Record<string, unknown>);
+
+async function stampNamedBy(db: Database, invocationId: unknown): Promise<HouseRulesStamp | null> {
+  if (typeof invocationId !== 'string' || invocationId === '') return null;
+  return loadInvocationStamp(db, invocationId);
+}
+
+async function validationCheck(db: Database, taskId: string): Promise<GateHouseRules | null> {
+  const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
+  const output = (validation?.output ?? {}) as Record<string, unknown>;
+  const stamp = await stampNamedBy(db, output.validatorInvocationId);
+  if (stamp === null) return null;
+  return checkOf(
+    stamp,
+    recordsOf(output.issues).map((issue) => ({
+      rule: issue.rule,
+      file: issue.file,
+      description: issue.description,
+    })),
+    output.ruleConflicts,
+    output.changedFilesCoverage,
+  );
+}
+
+async function codeReviewCheck(db: Database, taskId: string): Promise<GateHouseRules | null> {
+  const review = await loadPreviousStepOutput(db, taskId, '08c-code-review');
+  const output = (review?.output ?? {}) as Record<string, unknown>;
+  const stamp = await stampNamedBy(db, output.peerInvocationId);
+  if (stamp === null) return null;
+  const peer = (output.peer ?? {}) as Record<string, unknown>;
+  return checkOf(
+    stamp,
+    recordsOf(peer.findings).map((finding) => ({
+      rule: finding.rule,
+      file: [oneLine(finding.path, TEXT_CHARS), oneLine(finding.lines, TEXT_CHARS)]
+        .filter(Boolean)
+        .join(':'),
+      description: finding.issue,
+    })),
+    output.ruleConflicts,
+    output.coverage,
+  );
+}
+
+/** From the stamp of the invocation 07b's latest output names, never one picked by title, message or age.
+ *  `withCodeReview` adds 08c's peer reviewer, the later check: its state replaces 07b's, both lists merge. */
+export async function loadGateHouseRules(
+  db: Database,
+  taskId: string,
+  { withCodeReview = false }: { withCodeReview?: boolean } = {},
+): Promise<GateHouseRules | null> {
+  const validation = await validationCheck(db, taskId);
+  if (!withCodeReview) return validation;
+  const review = await codeReviewCheck(db, taskId);
+  if (review === null || validation === null) return review ?? validation;
+  const coverage = review.changedFilesCoverage ?? validation.changedFilesCoverage;
+  return {
+    ...review,
+    violations: [...validation.violations, ...review.violations],
+    conflicts: [...validation.conflicts, ...review.conflicts],
     ...(coverage === undefined ? {} : { changedFilesCoverage: coverage }),
   };
 }

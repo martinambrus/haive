@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HOUSE_RULE_EXEMPT, HOUSE_RULE_ROLES } from '@haive/shared';
+import { HOUSE_RULE_EXEMPT, HOUSE_RULE_ROLES, STEP_MINING_SEATS } from '@haive/shared';
 import { StepRegistry } from '../src/step-engine/registry.js';
 import { registerAllSteps } from '../src/step-engine/steps/index.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -16,8 +16,14 @@ const declaresFileWrite = (def: StepDefinition): boolean =>
     spec?.requiredCapabilities?.includes('file_write'),
   );
 
+// A fan-out dispatches each agent under its seat's id, which `dispatchMiningAgents` hands the table.
+const miningSeatsOf = (def: StepDefinition): string[] =>
+  def.agentMining ? (STEP_MINING_SEATS[def.metadata.id] ?? []).map((seat) => seat.id) : [];
+
 const rolesOf = (def: StepDefinition): string[] =>
-  def.dagExecute ? DAG_ROLES : (def.metadata.cliRoles?.map((role) => role.id) ?? ['default']);
+  def.dagExecute
+    ? DAG_ROLES
+    : [...(def.metadata.cliRoles?.map((role) => role.id) ?? ['default']), ...miningSeatsOf(def)];
 
 const FILE_WRITERS = [
   '00a-sync-base',
@@ -88,7 +94,7 @@ describe('house rule roles', () => {
     for (const reason of reasons) expect(reason).toMatch(/^\S[^\n]*\S$/);
   });
 
-  it('shows the writers the rules to follow and the 07b validator the rules to check', () => {
+  it("shows the writers the rules to follow, the 07b validator and 08c's peer reviewer the rules to check", () => {
     expect(HOUSE_RULE_ROLES).toEqual({
       '04-phase-0b-pre-planning': { default: 'write' },
       '05-phase-0b5-spec-quality': { corrector: 'write' },
@@ -100,8 +106,23 @@ describe('house rule roles', () => {
       '07b-phase-4-validate': { validator: 'review', fixer: 'write' },
       '08a-browser-verify': { fixer: 'write' },
       '08b-test-management': { default: 'write' },
+      '08c-code-review': { 'peer-reviewer': 'review' },
       '08e-insights-triage': { default: 'write' },
     });
+  });
+
+  it('opts in one seat of one fan-out step: the 08c peer reviewer, and no seat of any other', () => {
+    const fanOuts = [...byId.values()].filter((def) => def.agentMining);
+    expect(fanOuts.map((def) => def.metadata.id)).toContain('08c-code-review');
+    const opted = fanOuts.flatMap((def) =>
+      Object.keys(HOUSE_RULE_ROLES[def.metadata.id] ?? {}).map(
+        (role) => `${def.metadata.id}/${role}`,
+      ),
+    );
+    expect(opted).toEqual(['08c-code-review/peer-reviewer']);
+    const seats = STEP_MINING_SEATS['08c-code-review']!.map((seat) => seat.id);
+    expect(seats).toContain('peer-reviewer');
+    expect(Object.keys(HOUSE_RULE_ROLES['08c-code-review']!)).toEqual(['peer-reviewer']);
   });
 
   it('exempts the merge fixers, plan merge, the skill steps, kb_author, the advisor, the replanner, the 08a tester and the 06c reviewer', () => {

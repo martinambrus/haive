@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
-import { houseRuleShortIds } from '@haive/shared/global-kb';
 import {
   TaskCancelledError,
   type StepContext,
@@ -51,10 +50,10 @@ import type { ReviewDimension, ReviewSeverity } from '@haive/shared/review';
 import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 import { recordReviewFindings, splitLocation } from './_review-findings.js';
 import {
-  loadInvocationStamp,
-  normalizeRuleRef,
+  givenRuleIds,
   parseRuleConflicts,
   parseRuleRef,
+  raiseRuleViolations,
   type ChangedFilesCoverage,
   type RuleConflict,
 } from './_gate-house-rules.js';
@@ -300,37 +299,6 @@ function priorValidatorIssueLists(previous: StepLoopPassRecord[]): ValidationIss
     if (out && (out.source === 'validator' || out.source === 'stub')) lists.push(out.issues);
   }
   return lists;
-}
-
-/** Short ids of the house rules a validator pass was given, from the stamp of its own invocation. Read
- *  only when an issue names a rule. */
-async function givenRuleIds(
-  ctx: StepContext,
-  issues: ValidationIssue[],
-  invocationId: string | null | undefined,
-): Promise<Set<string>> {
-  if (!invocationId || !issues.some((issue) => issue.rule !== undefined)) return new Set();
-  const stamp = await loadInvocationStamp(ctx.db, invocationId);
-  return new Set(stamp ? houseRuleShortIds(stamp.entries.map((entry) => entry.id)).values() : []);
-}
-
-/** A violation of a rule the pass was given blocks, whatever severity the model gave it. */
-function raiseRuleViolations(
-  issues: ValidationIssue[],
-  given: ReadonlySet<string>,
-): { issues: ValidationIssue[]; raised: number; stamped: number } {
-  const names = (issue: ValidationIssue): boolean =>
-    issue.rule !== undefined && given.has(normalizeRuleRef(issue.rule));
-  const raised = issues.map((issue) =>
-    names(issue) && !isBlockingSeverity(issue.severity)
-      ? { ...issue, severity: 'high' as const }
-      : issue,
-  );
-  return {
-    issues: raised,
-    raised: raised.filter((issue, i) => issue !== issues[i]).length,
-    stamped: issues.filter(names).length,
-  };
 }
 
 /** Bullet-point markdown of the whole run for the done card: the final verdict,
@@ -1054,9 +1022,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(
         parsed.issues,
-        await givenRuleIds(ctx, parsed.issues, args.llmInvocationId),
+        await givenRuleIds(ctx.db, parsed.issues, args.llmInvocationId),
       );
-      const issues = ruled.issues.map((issue) => {
+      const issues = ruled.items.map((issue) => {
         const upstream = upstreamKind(issue.file, policy);
         return { ...issue, upstream };
       });

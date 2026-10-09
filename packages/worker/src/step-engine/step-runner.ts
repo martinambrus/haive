@@ -1864,9 +1864,7 @@ async function dispatchMiningAgents(
           // marks; the dispatch names it and the dispatcher unions it with the marker ids.
           assignedAgentIds: dispatch.personaIds,
           toolProfile: spec.toolProfile,
-          houseRules: houseRulesOptOut(
-            'mining agents read and report; none is shown the house rules',
-          ),
+          houseRules: houseRulesFor(stepDef.metadata.id, dispatch.roleKey ?? 'default'),
           invokeOpts: {
             cwd: params.workspacePath,
             effortLevel: preferredEffort ?? undefined,

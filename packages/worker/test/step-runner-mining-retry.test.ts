@@ -11,7 +11,13 @@ import {
 import { MINING_ROW_COLUMNS, advanceStep } from '../src/step-engine/step-runner.js';
 import { agentDefinitionGuidance } from '../src/step-engine/steps/_retrieval-guidance.js';
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
+import {
+  HOUSE_RULES_MARKER,
+  houseRulesOf,
+  stripHaivePreamble,
+} from '../src/orchestrator/house-rules.js';
 import { MCP_SURFACE_MARKER } from '../src/sandbox/mcp-surface.js';
+import { codeReviewStep } from '../src/step-engine/steps/workflow/08c-code-review.js';
 import {
   MiningRetryError,
   MiningWaveError,
@@ -30,6 +36,25 @@ vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   ...browserCdp,
 }));
+
+// The enforced rules a dispatch is shown; null leaves the real store read, as every other test here has it.
+const kb = vi.hoisted(() => ({ rules: null as unknown[] | null }));
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../src/orchestrator/global-kb-context.js')>();
+  return {
+    ...original,
+    resolveGlobalKbContext: (...args: Parameters<typeof original.resolveGlobalKbContext>) =>
+      kb.rules === null
+        ? original.resolveGlobalKbContext(...args)
+        : Promise.resolve({
+            digest: { entries: [], omitted: 0, scanSaturated: false },
+            rules: kb.rules,
+            refused: [],
+            status: 'ok' as const,
+          }),
+  };
+});
 
 interface MiningRow {
   id: string;
@@ -2964,5 +2989,102 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(endedRuns(state)).toHaveLength(0);
     expect(stepWideAgentWrites(state)).toHaveLength(0);
     expect(state.updates.filter((u) => u.table === 'cli_invocations' && u.endedAt)).toHaveLength(0);
+  });
+});
+
+describe('the 08c fan-out and the house rules', () => {
+  const RULE = {
+    id: '42ac658a-3c1d-4e5f-8a9b-0c1d2e3f4a5b',
+    hash: `hr1:${'a'.repeat(64)}`,
+    title: 'No inline SVGs',
+    category: 'best_practice',
+    description: 'Keep markup in templates.',
+    body: 'Do not inline SVG markup.\n',
+    spec: { mode: 'always' },
+    enforcedAt: new Date(Date.UTC(2026, 9, 1)),
+  };
+  const detected = {
+    spec: 'the spec',
+    taskBrief: 'the brief',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    debtBlock: '',
+    level: 'enterprise',
+    promptDefectCapture: false,
+    reviewDimensionIds: [],
+  };
+
+  afterEach(() => {
+    kb.rules = null;
+  });
+
+  /** What the real 08c selects and the real runner sends, by seat: the stamp the job carries and the prompt. */
+  async function dispatchedSeats(rules: unknown[]) {
+    kb.rules = rules;
+    const state = freshState([]);
+    state.taskStepRow.stepId = '08c-code-review';
+    state.taskStepRow.detectOutput = detected;
+    const enqueued: CliExecJobPayload[] = [];
+    const step: StepDefinition = { ...codeReviewStep, detect: async () => detected };
+    await run(makeMockDb(state), step, enqueued);
+    const insert = (table: string, id: unknown) =>
+      state.inserts.find((i) => i.table === table && i.row.id === id)!.row;
+    return Object.fromEntries(
+      enqueued.map((payload) => [
+        insert('task_step_agent_minings', payload.agentMiningId).agentId as string,
+        {
+          stamp: houseRulesOf(payload.spec),
+          prompt: insert('cli_invocations', payload.invocationId).prompt as string,
+        },
+      ]),
+    );
+  }
+
+  it('sends all five reviewers of an enterprise task, so the seats below are the real ones', async () => {
+    expect(Object.keys(await dispatchedSeats([RULE])).sort()).toEqual([
+      'operational-reviewer',
+      'peer-reviewer',
+      'performance-reviewer',
+      'security-code-reviewer',
+      'simplicity-reviewer',
+    ]);
+  });
+
+  it('shows the peer reviewer the block and stamps its invocation review', async () => {
+    const { 'peer-reviewer': peer } = await dispatchedSeats([RULE]);
+    expect(peer!.stamp).toEqual({
+      mode: 'review',
+      entries: [
+        { id: RULE.id, hash: RULE.hash, title: 'No inline SVGs', why: { scope: 'always' } },
+      ],
+      omitted: [],
+    });
+    expect(peer!.prompt).toContain(HOUSE_RULES_MARKER);
+    expect(peer!.prompt).toContain('### Rule 42ac658a: No inline SVGs');
+    expect(peer!.prompt).toContain(
+      'Report each violation as a finding with severity exactly "high"',
+    );
+    expect(peer!.prompt).not.toContain('Report each violation as an issue');
+  });
+
+  it('shows the security reviewer and every lens neither the block nor a stamp', async () => {
+    const seats = await dispatchedSeats([RULE]);
+    for (const seat of [
+      'security-code-reviewer',
+      'operational-reviewer',
+      'performance-reviewer',
+      'simplicity-reviewer',
+    ]) {
+      expect(seats[seat]!.stamp, seat).toBeNull();
+      expect(seats[seat]!.prompt, seat).not.toContain(HOUSE_RULES_MARKER);
+      expect(seats[seat]!.prompt, seat).not.toContain('### Rule');
+    }
+  });
+
+  it('adds nothing but the block: with no rule enforced the peer prompt is the one it would have had', async () => {
+    const shown = (await dispatchedSeats([RULE]))['peer-reviewer']!;
+    const none = (await dispatchedSeats([]))['peer-reviewer']!;
+    expect(none.stamp).toEqual({ mode: 'review', entries: [], omitted: [] });
+    expect(none.prompt).not.toContain(HOUSE_RULES_MARKER);
+    expect(stripHaivePreamble(shown.prompt)).toBe(stripHaivePreamble(none.prompt));
   });
 });

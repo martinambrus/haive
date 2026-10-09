@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { houseRuleShortIds, type HouseRulesStamp } from '@haive/shared/global-kb';
 import {
+  givenRuleIds,
   houseRulesHoldApprove,
   houseRulesRow,
   loadGateHouseRules,
@@ -10,6 +11,7 @@ import {
   normalizeRuleRef,
   parseRuleConflicts,
   parseRuleRef,
+  raiseRuleViolations,
   type GateHouseRules,
 } from './_gate-house-rules.js';
 
@@ -125,6 +127,22 @@ describe('parseRuleConflicts', () => {
     ).toEqual([conflict]);
   });
 
+  it('reads the location from path when the item has no file, and stores it as file', () => {
+    expect(
+      parseRuleConflicts([
+        { rule: '42ac658a', path: 'src/a.php:7', reason: 'the spec requires it' },
+        { rule: '42ac658a', file: 'src/b.php:1', path: 'src/c.php:2', reason: 'file wins' },
+        { rule: '42ac658a', file: 7, path: 'src/d.php:3\nsrc/e.php:4', reason: 'path on one line' },
+        { rule: '42ac658a', file: '  ', path: 7, reason: 'neither is usable' },
+      ]),
+    ).toEqual([
+      { rule: '42ac658a', file: 'src/a.php:7', reason: 'the spec requires it' },
+      { rule: '42ac658a', file: 'src/b.php:1', reason: 'file wins' },
+      { rule: '42ac658a', file: 'src/d.php:3 src/e.php:4', reason: 'path on one line' },
+      { rule: '42ac658a', reason: 'neither is usable' },
+    ]);
+  });
+
   it('drops a file that is not a string, and keeps the item', () => {
     expect(
       parseRuleConflicts([
@@ -172,6 +190,8 @@ function world() {
   const db = fake.db as unknown as Database;
   const step07b = (output: unknown, round = 0) =>
     fake.insert(schema.taskSteps, { taskId: TASK, stepId: '07b-phase-4-validate', round, output });
+  const step08c = (output: unknown, round = 0) =>
+    fake.insert(schema.taskSteps, { taskId: TASK, stepId: '08c-code-review', round, output });
   const invocation = (
     id: string,
     houseRules: unknown,
@@ -179,7 +199,7 @@ function world() {
   ): void => {
     fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules, ...over });
   };
-  return { fake, db, step07b, invocation };
+  return { fake, db, step07b, step08c, invocation };
 }
 
 const validatorOutput = (over: Record<string, unknown> = {}) => ({
@@ -485,6 +505,368 @@ describe('loadGateHouseRules', () => {
     w.invocation(VALIDATOR, stamp({ entries: [entries[0]!] }));
     w.invocation(OTHER, stamp({ entries, omitted: [omittedRule(RULE_C, 'Late', 'budget')] }));
     expect((await loadGateHouseRules(w.db, TASK))!.entries).toHaveLength(1);
+  });
+});
+
+describe('loadGateHouseRules: the code review as the later check', () => {
+  const PEER = 'cccccccc-0000-4000-8000-000000000001';
+  const entryA = entry(RULE_A, 'No inline SVGs', ALWAYS);
+  const entryB = entry(RULE_B, 'Templates stay thin', { scope: 'files', glob: '**/*.tpl.php' });
+  const entryC = entry(RULE_C, 'Stylesheets stay in files', ALWAYS);
+  const shortA = houseRuleShortIds([RULE_A]).get(RULE_A)!;
+  const shortC = houseRuleShortIds([RULE_C]).get(RULE_C)!;
+  const withCodeReview = { withCodeReview: true };
+
+  const reviewOutput = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    reviewed: true,
+    peer: { verdict: 'REQUEST_CHANGES', findings: [], positives: [] },
+    coverage: { listed: 2, total: 2, truncated: false },
+    ruleConflicts: [],
+    peerInvocationId: PEER,
+    ...over,
+  });
+  const peerFinding = (rule: unknown, over: Record<string, unknown> = {}) => ({
+    severity: 'high',
+    path: 'src/a.php',
+    lines: '3-3',
+    issue: 'logic in a template',
+    rule,
+    ...over,
+  });
+  const peerWith = (...findings: unknown[]) => ({
+    verdict: 'REQUEST_CHANGES',
+    findings,
+    positives: [],
+  });
+
+  /** 07b checked rules A and B; the code review checked C. */
+  function seeded(
+    over: { validator?: Record<string, unknown>; review?: Record<string, unknown> | null } = {},
+  ) {
+    const w = world();
+    w.step07b(validatorOutput(over.validator));
+    w.invocation(VALIDATOR, stamp({ entries: [entryA, entryB] }));
+    if (over.review !== null) w.step08c(reviewOutput(over.review));
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    return w;
+  }
+
+  it('is the 07b row when no code review output exists, with or without asking for it', async () => {
+    const w = seeded({ review: null });
+    const alone = await loadGateHouseRules(w.db, TASK);
+    expect(alone!.entries).toHaveLength(2);
+    expect(await loadGateHouseRules(w.db, TASK, withCodeReview)).toEqual(alone);
+  });
+
+  it.each([
+    [
+      'carries no peerInvocationId (an output written before it existed)',
+      { peerInvocationId: undefined },
+    ],
+    ['names no invocation', { peerInvocationId: null }],
+    ['names an empty id', { peerInvocationId: '' }],
+    ['names an id that is not text', { peerInvocationId: 7 }],
+    ['names an invocation that does not exist', { peerInvocationId: OTHER }],
+  ])('is the 07b row when the code review output %s', async (_name, over) => {
+    const w = seeded({
+      validator: { issues: [violation(shortA)] },
+      review: { peer: peerWith(peerFinding(shortC)), ...over },
+    });
+    const alone = await loadGateHouseRules(w.db, TASK);
+    expect(await loadGateHouseRules(w.db, TASK, withCodeReview)).toEqual(alone);
+  });
+
+  it.each([
+    ['a NULL stamp', null],
+    ['a stamp that does not parse', { mode: 'bogus', entries: 'x' }],
+  ])('is the 07b row when the peer invocation holds %s', async (_name, stored) => {
+    const w = world();
+    w.step07b(validatorOutput({ issues: [violation(shortA)] }));
+    w.invocation(VALIDATOR, stamp({ entries: [entryA, entryB] }));
+    w.step08c(reviewOutput({ peer: peerWith(peerFinding(shortC)) }));
+    w.invocation(PEER, stored);
+    const alone = await loadGateHouseRules(w.db, TASK);
+    expect(await loadGateHouseRules(w.db, TASK, withCodeReview)).toEqual(alone);
+  });
+
+  it('leaves gate 3 on 07b alone: the default reads no code review output', async () => {
+    const w = seeded({
+      review: {
+        peer: peerWith(peerFinding(shortC)),
+        ruleConflicts: [{ rule: shortC, reason: 'a person asked for it' }],
+      },
+    });
+    const loaded = await loadGateHouseRules(w.db, TASK);
+    expect(loaded!.entries.map((e) => e.title)).toEqual(['No inline SVGs', 'Templates stay thin']);
+    expect(loaded!.violations).toEqual([]);
+    expect(loaded!.conflicts).toEqual([]);
+  });
+
+  it('takes mode, reason, entries and omitted from the code review, the later check', async () => {
+    const w = world();
+    w.step07b(validatorOutput());
+    w.invocation(
+      VALIDATOR,
+      stamp({ entries: [entryA, entryB], omitted: [omittedRule(RULE_C, 'Early', 'budget')] }),
+    );
+    w.step08c(reviewOutput());
+    w.invocation(
+      PEER,
+      stamp({
+        entries: [entryC],
+        omitted: [omittedRule(TWIN_1, 'Late', 'refused')],
+        reason: 'unavailable',
+        errorClass: 'timeout',
+      }),
+    );
+    expect(await loadGateHouseRules(w.db, TASK, withCodeReview)).toEqual({
+      mode: 'review',
+      reason: 'unavailable',
+      errorClass: 'timeout',
+      entries: [{ shortId: shortC, title: 'Stylesheets stay in files', why: ALWAYS }],
+      omitted: [{ title: 'Late', why: 'refused' }],
+      violations: [],
+      conflicts: [],
+      changedFilesCoverage: { listed: 2, total: 2 },
+    });
+  });
+
+  it('leaves a reason and an error class the code review stamp does not have out, whatever 07b had', async () => {
+    const w = world();
+    w.step07b(validatorOutput());
+    w.invocation(VALIDATOR, stamp({ reason: 'unavailable', errorClass: 'timeout' }));
+    w.step08c(reviewOutput());
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect('reason' in loaded!).toBe(false);
+    expect('errorClass' in loaded!).toBe(false);
+    expect(loaded!.entries).toHaveLength(1);
+  });
+
+  it("takes the coverage of the code review's own record, else 07b's", async () => {
+    const own = seeded({
+      validator: { changedFilesCoverage: { listed: 100, total: 150 } },
+      review: { coverage: { listed: 10, total: 10, truncated: false } },
+    });
+    expect((await loadGateHouseRules(own.db, TASK, withCodeReview))!.changedFilesCoverage).toEqual({
+      listed: 10,
+      total: 10,
+    });
+    for (const coverage of [null, undefined, 'all of it', { listed: 3 }]) {
+      const w = seeded({
+        validator: { changedFilesCoverage: { listed: 100, total: 150 } },
+        review: { coverage },
+      });
+      expect((await loadGateHouseRules(w.db, TASK, withCodeReview))!.changedFilesCoverage).toEqual({
+        listed: 100,
+        total: 150,
+      });
+    }
+    const neither = seeded({ review: { coverage: null } });
+    const loaded = await loadGateHouseRules(neither.db, TASK, withCodeReview);
+    expect('changedFilesCoverage' in loaded!).toBe(false);
+  });
+
+  it("maps each check's violations through that check's own stamp, and lists both", async () => {
+    const w = seeded({
+      validator: { issues: [violation(shortA)] },
+      review: {
+        peer: peerWith(
+          peerFinding(shortC, { path: 'src/b.php', lines: '5-9', issue: 'stylesheet inlined' }),
+        ),
+      },
+    });
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(loaded!.violations).toEqual([
+      {
+        shortId: shortA,
+        title: 'No inline SVGs',
+        file: 'templates/node.tpl.php:12',
+        description: 'inline svg in a template',
+      },
+      {
+        shortId: shortC,
+        title: 'Stylesheets stay in files',
+        file: 'src/b.php:5-9',
+        description: 'stylesheet inlined',
+      },
+    ]);
+  });
+
+  it('names a code review finding by its path alone when it has no lines', async () => {
+    const w = seeded({ review: { peer: peerWith(peerFinding(shortC, { lines: undefined })) } });
+    const [v] = (await loadGateHouseRules(w.db, TASK, withCodeReview))!.violations;
+    expect(v!.file).toBe('src/a.php');
+  });
+
+  it('counts a finding only if it names a rule of the code review own stamp', async () => {
+    const w = seeded({
+      validator: { issues: [violation(shortC, { file: 'src/c.php:1' })] },
+      review: {
+        peer: peerWith(
+          peerFinding(shortA, { issue: 'names a rule only 07b was given' }),
+          peerFinding('deadbeef', { issue: 'names no rule at all' }),
+          peerFinding(undefined, { issue: 'names nothing' }),
+          peerFinding(7, { issue: 'names a number' }),
+          peerFinding(`  RULE ${shortC.toUpperCase()} `, { issue: 'names it loosely' }),
+        ),
+      },
+    });
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(loaded!.violations.map((v) => v.description)).toEqual(['names it loosely']);
+  });
+
+  it('names an entry by the short id houseRuleShortIds gives, not by the 8 digits ids share', async () => {
+    const shorts = houseRuleShortIds([TWIN_1, TWIN_2]);
+    const w = world();
+    w.step07b(validatorOutput());
+    w.invocation(VALIDATOR, stamp({ entries: [entryA] }));
+    w.step08c(
+      reviewOutput({
+        peer: peerWith(
+          peerFinding('77aa11bb', { issue: 'prefix' }),
+          peerFinding(shorts.get(TWIN_1), { issue: 'twin' }),
+        ),
+      }),
+    );
+    w.invocation(
+      PEER,
+      stamp({ entries: [entry(TWIN_1, 'Twin one', ALWAYS), entry(TWIN_2, 'Twin two', ALWAYS)] }),
+    );
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(loaded!.violations.map((v) => v.description)).toEqual(['twin']);
+  });
+
+  it("lists both checks' conflicts, 07b's first, each as bounded one-line text", async () => {
+    const w = seeded({
+      validator: { ruleConflicts: [{ rule: shortA, file: 'src/a.php:7', reason: 'spec says so' }] },
+      review: {
+        ruleConflicts: [
+          { rule: shortC, file: 'src/b.php:9', reason: 'line one\nline two' },
+          { rule: shortC },
+          'junk',
+        ],
+      },
+    });
+    expect((await loadGateHouseRules(w.db, TASK, withCodeReview))!.conflicts).toEqual([
+      { rule: shortA, file: 'src/a.php:7', reason: 'spec says so' },
+      { rule: shortC, file: 'src/b.php:9', reason: 'line one line two' },
+    ]);
+  });
+
+  it('is the code review row alone when 07b names no usable stamp', async () => {
+    const w = world();
+    w.step07b(validatorOutput({ validatorInvocationId: null }));
+    w.step08c(
+      reviewOutput({
+        peer: peerWith(peerFinding(shortC)),
+        ruleConflicts: [{ rule: shortC, reason: 'a person asked for it' }],
+      }),
+    );
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(loaded!.entries.map((e) => e.shortId)).toEqual([shortC]);
+    expect(loaded!.violations).toHaveLength(1);
+    expect(loaded!.conflicts).toHaveLength(1);
+  });
+
+  it('reads the latest round of the code review', async () => {
+    const w = world();
+    w.step07b(validatorOutput());
+    w.invocation(VALIDATOR, stamp({ entries: [entryA] }));
+    w.step08c(reviewOutput({ peerInvocationId: OTHER }), 0);
+    w.step08c(reviewOutput(), 1);
+    w.invocation(OTHER, stamp({ entries: [entryA, entryB] }));
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    expect((await loadGateHouseRules(w.db, TASK, withCodeReview))!.entries).toHaveLength(1);
+  });
+
+  it('finds the peer invocation by the id the output names and by nothing else', async () => {
+    const w = seeded({ review: { peer: peerWith(peerFinding(shortC)) } });
+    const before = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    w.invocation(OTHER, stamp({ entries: [entryA, entryB], reason: 'unavailable' }), {
+      agentTitle: 'Peer Reviewer',
+      statusMessage: 'Peer Reviewer',
+    });
+    expect(await loadGateHouseRules(w.db, TASK, withCodeReview)).toEqual(before);
+  });
+});
+
+describe('givenRuleIds', () => {
+  const entries = [entry(RULE_A, 'No inline SVGs', ALWAYS), entry(RULE_B, 'Templates', ALWAYS)];
+
+  it('is the short ids of the stamp of the invocation it is given', async () => {
+    const w = world();
+    w.invocation(VALIDATOR, stamp({ entries }));
+    w.invocation(OTHER, stamp({ entries: [entry(RULE_C, 'Other', ALWAYS)] }));
+    const shorts = houseRuleShortIds([RULE_A, RULE_B]);
+    expect(await givenRuleIds(w.db, [{ rule: 'x' }], VALIDATOR)).toEqual(
+      new Set([shorts.get(RULE_A), shorts.get(RULE_B)]),
+    );
+  });
+
+  it('reads no stamp unless an item names a rule', async () => {
+    const reads: unknown[] = [];
+    const db = new Proxy({} as Database, {
+      get: (_target, key) => {
+        reads.push(key);
+        throw new Error('the store was read');
+      },
+    });
+    expect(await givenRuleIds(db, [{}, { rule: undefined }], VALIDATOR)).toEqual(new Set());
+    expect(await givenRuleIds(db, [{ rule: 'x' }], null)).toEqual(new Set());
+    expect(await givenRuleIds(db, [{ rule: 'x' }], undefined)).toEqual(new Set());
+    expect(reads).toEqual([]);
+  });
+
+  it.each([
+    ['an invocation that does not exist', OTHER, undefined],
+    ['a NULL stamp', VALIDATOR, null],
+    ['a stamp that does not parse', VALIDATOR, { mode: 'bogus', entries: 'x' }],
+  ])('is empty for %s', async (_name, id, stored) => {
+    const w = world();
+    if (stored !== undefined) w.invocation(VALIDATOR, stored);
+    expect(await givenRuleIds(w.db, [{ rule: 'x' }], id)).toEqual(new Set());
+  });
+});
+
+describe('raiseRuleViolations', () => {
+  const given = new Set(['42ac658a']);
+  const item = (severity: string, rule?: string) => ({
+    severity: severity as never,
+    rule,
+    id: severity,
+  });
+
+  it('raises what names a given rule below high to high, however the rule is written', () => {
+    const out = raiseRuleViolations(
+      [
+        item('low', '42ac658a'),
+        item('medium', ' RULE 42AC658A '),
+        item('high', '42ac658a'),
+        item('critical', '42ac658a'),
+      ],
+      given,
+    );
+    expect(out.items.map((i) => i.severity)).toEqual(['high', 'high', 'high', 'critical']);
+    expect(out.raised).toBe(2);
+    expect(out.stamped).toBe(4);
+  });
+
+  it('leaves what names an unknown rule or none, and does not touch its input', () => {
+    const items = [item('low', 'deadbeef'), item('medium'), item('low', '9d1f0b7c')];
+    const before = JSON.stringify(items);
+    const out = raiseRuleViolations(items, given);
+    expect(out.items).toEqual(items);
+    expect(out.raised).toBe(0);
+    expect(out.stamped).toBe(0);
+    expect(JSON.stringify(items)).toBe(before);
+  });
+
+  it('raises nothing when the pass was given no rule', () => {
+    const out = raiseRuleViolations([item('low', '42ac658a')], new Set());
+    expect(out.items.map((i) => i.severity)).toEqual(['low']);
+    expect(out.stamped).toBe(0);
   });
 });
 
