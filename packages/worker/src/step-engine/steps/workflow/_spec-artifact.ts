@@ -19,6 +19,16 @@ export async function hydrateTaskBrief(
   detected.taskBrief = briefFromTaskMeta(meta.title, meta.description);
 }
 
+/** Called before dispatch: with no spec the task brief stands in, even on a replayed payload. */
+export async function hydrateNoSpecBrief(
+  ctx: StepContext,
+  detected: { spec?: string },
+): Promise<void> {
+  if (detected.spec?.trim()) return;
+  const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+  detected.spec = briefFromTaskMeta(meta.title, meta.description);
+}
+
 /** Where the approved spec is materialized, relative to the worktree root. Under
  *  `.haive/` because 01-worktree-setup git-excludes that dir, so the artifact never
  *  reaches a commit. A cli-exec invocation mounts the worktree ALONE at the sandbox

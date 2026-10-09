@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { INVARIANT_CITATION } from '../_invariant-citation.js';
@@ -149,6 +149,7 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as CodeAuditDetect),
     requiredCapabilities: ['tool_use'],
     // Report-only audit: reads code, writes findings. See 04a-spec-audit.
     toolProfile: 'rag_only',

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,7 @@ const m = vi.hoisted(() => ({
   ddevSnapshot: vi.fn(),
   ddevMigrateDatabase: vi.fn(),
   ddevFailureMessage: vi.fn(),
+  ddevRestart: vi.fn(),
 }));
 
 vi.mock('./_app-runtime.js', () => ({
@@ -29,6 +30,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ddevSnapshot: m.ddevSnapshot,
   ddevMigrateDatabase: m.ddevMigrateDatabase,
   ddevFailureMessage: m.ddevFailureMessage,
+  ddevRestart: m.ddevRestart,
 }));
 
 import { appliedBaselineOf, classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
@@ -195,6 +197,123 @@ describe('classifyDrift', () => {
   });
 });
 
+// The database block of .ddev/config.yaml is repository text that ends up in a command line.
+describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => {
+  const NBSP = String.fromCharCode(0xa0);
+  const classify = (over: Partial<DdevConfigFields>) =>
+    classifyDrift(baseline(), target(over), HASH_B);
+
+  it.each([
+    ['mariadb', '10.11'],
+    ['mysql', '8.0'],
+    ['mysql', '5.7'],
+    ['mariadb', '10.6.12'],
+    ['mariadb', '11'],
+  ])('plans a migration to %s:%s', (dbType, dbVersion) => {
+    expect(classify({ dbType, dbVersion })).toEqual({
+      kind: 'db-migrate',
+      migrateTarget: `${dbType}:${dbVersion}`,
+      unsupportedReason: null,
+    });
+  });
+
+  // YAML reads these as the plain value, and the unquoted splice they replaced let bash do the same.
+  it.each([
+    ['mariadb', "'10.11'", 'mariadb:10.11'],
+    ['mariadb', '"10.11"', 'mariadb:10.11'],
+    ['mariadb', '10.11 # lts', 'mariadb:10.11'],
+    ['mariadb', '10.11\t# lts', 'mariadb:10.11'],
+    ['mariadb', "'10.11' # lts", 'mariadb:10.11'],
+    ['mariadb', '10.11 # $(id)', 'mariadb:10.11'],
+    ["'mariadb'", '10.11', 'mariadb:10.11'],
+    ['"mysql"', '"8.0"', 'mysql:8.0'],
+    ['mysql # engine', "'8.0'", 'mysql:8.0'],
+  ])('plans a migration to the YAML value of %s:%s', (dbType, dbVersion, migrateTarget) => {
+    expect(classify({ dbType, dbVersion })).toEqual({
+      kind: 'db-migrate',
+      migrateTarget,
+      unsupportedReason: null,
+    });
+  });
+
+  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts"])(
+    'plans mariadb:10.11 for a config file written with version: %s',
+    (written) => {
+      const parsed = parseDdevConfig(
+        `name: app\ndatabase:\n  type: mariadb\n  version: ${written}\n`,
+      );
+      expect(classifyDrift(baseline(), parsed, HASH_B)).toEqual({
+        kind: 'db-migrate',
+        migrateTarget: 'mariadb:10.11',
+        unsupportedReason: null,
+      });
+    },
+  );
+
+  it.each([
+    ['mariadb', '10.11; id'],
+    ['mysql', '$(id)'],
+    ['mysql', '8.0 x'],
+    ['mariadb', '`id`'],
+    ['mariadb', "10.11'"],
+    ['mariadb', "'10.11"],
+    ['mariadb', '\'10.11"'],
+    ['mariadb', "''10.11''"],
+    ['mariadb', "'10.11' x"],
+    ['mariadb', "'10.11'; id"],
+    ['mariadb', "'10.11; id'"],
+    ['mariadb', '"$(id)"'],
+    ['mariadb', "'10.11 # lts'"],
+    ['mariadb', '10.11#lts'],
+    ['mariadb', `10.11${NBSP}# lts`],
+    ['mariadb', "''"],
+    ['mariadb', '# lts'],
+    ['mariadb', '10.'],
+    ['mariadb', '.5'],
+    ['mariadb', '10..11'],
+    ['mysql', 'v8'],
+    ['mysql', '8.0-beta'],
+    ['mysql', '١٠'],
+  ])('refuses %s:%s and names database.version', (dbType, dbVersion) => {
+    const r = classify({ dbType, dbVersion });
+    expect(r.kind).toBe('unsupported');
+    expect(r.migrateTarget).toBeNull();
+    expect(r.unsupportedReason).toContain('database.version');
+  });
+
+  it.each([
+    ['mariadb; id', '10.11'],
+    ['mysql$(id)', '8.0'],
+    ['mariadb x', '10.11'],
+    ['sqlite', '3'],
+    ['mongodb', '4'],
+    ['MariaDB', '10.11'],
+  ])('refuses %s:%s and names database.type', (dbType, dbVersion) => {
+    const r = classify({ dbType, dbVersion });
+    expect(r.kind).toBe('unsupported');
+    expect(r.migrateTarget).toBeNull();
+    expect(r.unsupportedReason).toContain('database.type');
+  });
+
+  it('leaves the repository text out of the reason', () => {
+    const r = classify({ dbType: 'mysql', dbVersion: '$(id)' });
+    expect(r.unsupportedReason).not.toContain('$(id)');
+  });
+
+  it('keeps its own reason for a PostgreSQL target', () => {
+    const r = classify({ dbType: 'postgres', dbVersion: '16; id' });
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+  });
+
+  it('does not look at a database block that did not change', () => {
+    const same = { dbType: 'mysql; id', dbVersion: '8.0 x' };
+    const r = classifyDrift(baseline(same), target(same), HASH_B);
+    expect(r.kind).toBe('restart');
+    expect(r.migrateTarget).toBeNull();
+  });
+});
+
 describe('parseDdevProjectListForApproot (Slice C name-drift detection)', () => {
   // The registry retains the OLD name (rs-ollama9) after the config was renamed to calypso —
   // exactly the drift that must trigger a rename. Mirrors a real ~/.ddev/project_list.yaml.
@@ -346,4 +465,138 @@ describe('07c-ddev-reconcile apply: a database migration that fails', () => {
     );
     expect((ddevReconcileStep.fixLoopOnError as (m: string) => boolean)(err.message)).toBe(true);
   });
+});
+
+describe('07c-ddev-reconcile: a database block whose version is shell syntax', () => {
+  let workspace = '';
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-syntax-'));
+    await mkdir(path.join(workspace, '.ddev'));
+    await writeFile(
+      path.join(workspace, '.ddev/config.yaml'),
+      'name: app\ndatabase:\n  type: mariadb\n  version: "10.11; id"\n',
+    );
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+
+  beforeEach(() => {
+    m.ensureDdevWithProgress.mockClear();
+    m.ddevSnapshot.mockClear();
+    m.ddevMigrateDatabase.mockClear();
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({
+      output: {
+        baseline: { phpVersion: '8.1', dbType: 'mariadb', dbVersion: '10.4', configHash: 'h0' },
+      },
+    });
+    m.hashDdevInputs.mockResolvedValue('h1');
+  });
+
+  it('is unsupported at detect, with no migrate target and no form', async () => {
+    const detected = await ddevReconcileStep.detect!(ctx);
+    expect(detected).toMatchObject({ driftKind: 'unsupported', migrateTarget: null });
+    expect(detected.unsupportedReason).toContain('database.version');
+    expect(ddevReconcileStep.form!(undefined as never, detected)).toBeNull();
+  });
+
+  it('stops at apply with a reason naming the field, before the runner is touched', async () => {
+    await expect(
+      ddevReconcileStep.apply(ctx, { formValues: { confirmDbMigration: true } } as never),
+    ).rejects.toThrow(/database\.version/);
+    expect(m.ensureDdevWithProgress).not.toHaveBeenCalled();
+    expect(m.ddevSnapshot).not.toHaveBeenCalled();
+    expect(m.ddevMigrateDatabase).not.toHaveBeenCalled();
+  });
+});
+
+describe('07c-ddev-reconcile: a database version YAML reads as 10.11', () => {
+  let workspace = '';
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-yaml-'));
+    await mkdir(path.join(workspace, '.ddev'));
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+  const writeConfig = (version: string) =>
+    writeFile(
+      path.join(workspace, '.ddev/config.yaml'),
+      `name: app\ndatabase:\n  type: mariadb\n  version: ${version}\n`,
+    );
+
+  beforeEach(() => {
+    m.ensureDdevWithProgress.mockReset().mockResolvedValue({ container: 'c', projectDir: '/r' });
+    m.runnerExec.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevSnapshot.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevMigrateDatabase.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.ddevRestart.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({
+      output: {
+        baseline: { phpVersion: '8.1', dbType: 'mariadb', dbVersion: '10.4', configHash: 'h0' },
+      },
+    });
+    m.hashDdevInputs.mockResolvedValue('h1');
+  });
+
+  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts"])(
+    'migrates to mariadb:10.11 for version: %s',
+    async (written) => {
+      await writeConfig(written);
+      const detected = await ddevReconcileStep.detect!(ctx);
+      expect(detected).toMatchObject({
+        driftKind: 'db-migrate',
+        migrateTarget: 'mariadb:10.11',
+        unsupportedReason: null,
+      });
+
+      const out = await ddevReconcileStep.apply(ctx, {
+        formValues: { confirmDbMigration: true },
+      } as never);
+      expect(out).toMatchObject({ action: 'migrate', reconciled: true, to: 'mariadb:10.11' });
+      expect(m.ddevMigrateDatabase).toHaveBeenCalledTimes(1);
+      expect(m.ddevMigrateDatabase.mock.calls[0]![1]).toBe('mariadb:10.11');
+    },
+  );
+
+  it.each(['10.11; id', '$(id)', "'10.11; id'"])(
+    'still stops at version: %s, before the runner is touched',
+    async (written) => {
+      await writeConfig(written);
+      const detected = await ddevReconcileStep.detect!(ctx);
+      expect(detected).toMatchObject({ driftKind: 'unsupported', migrateTarget: null });
+
+      await expect(
+        ddevReconcileStep.apply(ctx, { formValues: { confirmDbMigration: true } } as never),
+      ).rejects.toThrow(/database\.version/);
+      expect(m.ensureDdevWithProgress).not.toHaveBeenCalled();
+      expect(m.ddevMigrateDatabase).not.toHaveBeenCalled();
+    },
+  );
 });

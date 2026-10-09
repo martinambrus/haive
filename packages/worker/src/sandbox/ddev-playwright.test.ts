@@ -1,5 +1,20 @@
-import { describe, it, expect } from 'vitest';
-import { failureReason, provisionScript, sweepScript } from './ddev-playwright.js';
+import { execFileSync } from 'node:child_process';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+
+const m = vi.hoisted(() => ({ ddevExec: vi.fn() }));
+
+vi.mock('./ddev-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ddev-runner.js')>()),
+  ddevExec: m.ddevExec,
+}));
+
+import { configService } from '@haive/shared';
+import {
+  ensureDdevPlaywrightBrowsers,
+  failureReason,
+  provisionScript,
+  sweepScript,
+} from './ddev-playwright.js';
 
 describe('provisionScript', () => {
   const script = provisionScript();
@@ -70,5 +85,60 @@ describe('sweepScript', () => {
     expect(script).not.toContain('set -e');
     expect(script).toContain('|| true');
     expect(script).toContain('${n:-0}');
+  });
+});
+
+// `ddevExec` splices its argument into a `bash -lc` in the runner, and a project root is a
+// directory name the repository chose.
+describe('ensureDdevPlaywrightBrowsers', () => {
+  const handle = { container: 'haive-ddev-test', projectDir: '/repos/u/r' };
+  const NUL = String.fromCharCode(0);
+  const script = `echo ${Buffer.from(provisionScript(), 'utf8').toString('base64')} | base64 -d | bash`;
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const wordsOf = (sent: string): string[] =>
+    execFileSync('bash', ['-c', `printf '%s\\0' ${sent}`], { encoding: 'utf8' })
+      .split(NUL)
+      .slice(0, -1);
+  const run = async (root: string): Promise<string> => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    m.ddevExec.mockReset().mockResolvedValue({ exitCode: 0, output: '' });
+    await ensureDdevPlaywrightBrowsers(handle, root);
+    expect(m.ddevExec).toHaveBeenCalledTimes(1);
+    return m.ddevExec.mock.calls[0]![1] as string;
+  };
+
+  // The control: the checks below have to be able to fail, or a green run proves nothing.
+  it('sees the words the runner would make of an unquoted root, and they are not the root', () => {
+    expect(wordsOf('exec -d /var/www/html/a b bash')).toEqual([
+      'exec',
+      '-d',
+      '/var/www/html/a',
+      'b',
+      'bash',
+    ]);
+  });
+
+  it.each([
+    ['a space and a separator', 'sub dir;echo x'],
+    ['quotes', `it's "q"`],
+    ['a command substitution', '$(echo hi)'],
+    ['a backtick substitution', '`echo hi`'],
+    ['a variable', '${HOME}'],
+  ])('hands the runner a project root with %s as one word', async (_n, root) => {
+    expect(wordsOf(await run(root))).toEqual([
+      'exec',
+      '-d',
+      `/var/www/html/${root}`,
+      'bash',
+      '-c',
+      script,
+    ]);
+  });
+
+  it('adds no directory at the workspace root', async () => {
+    expect(await run('')).toBe(`exec bash -c "${script}"`);
   });
 });

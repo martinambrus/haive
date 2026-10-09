@@ -19,7 +19,7 @@ import {
 } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES, fencedDebtBlock } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
@@ -980,13 +980,14 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     // same limit: the wind-down is a steer, so a non-steerable provider (codex, gemini,
     // amp, antigravity) gets none and is killed with zero grace.
     softTimeout: true,
-    async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
+    async selectAgents({ ctx, detected }): Promise<AgentMiningDispatch[]> {
       // No bypass stub for mining; return [] under test bypass (08c pattern).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as AdversarialDetect;
       // Wave 0 only, which is the whole surface: the verifier wave attacks findings this
       // wave produced, and there are none if this one never ran. See assertReviewableChange.
       assertReviewableChange('08d-adversarial-qa', d.implementationFiles);
+      await hydrateNoSpecBrief(ctx, d);
       // roleKey === agentId: the roster is a fixed catalog, so each adversary's id is
       // already the stable seat STEP_MINING_SEATS enumerates.
       return rosterForLevel(d.level).map((a) => ({

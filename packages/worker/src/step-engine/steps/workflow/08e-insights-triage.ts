@@ -9,7 +9,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from '../_untrusted-repo.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
@@ -170,6 +170,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as TriageDetect),
     requiredCapabilities: ['tool_use', 'file_write'],
     // Triage sorts existing findings into buckets. It writes files, but nothing
     // it writes needs a browser or a container to determine.

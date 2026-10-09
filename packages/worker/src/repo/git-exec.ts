@@ -27,12 +27,13 @@ function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /** Run a git command, capturing stdout/stderr/exit code instead of throwing. The
  *  identical helper was inlined in several steps (11a-gate-4-push, 12-worktree-cleanup);
- *  centralised here. `env` merges over process.env when provided. */
+ *  centralised here. `env` merges over process.env when provided. `io.timeout` (ms) kills a git
+ *  that outlives it, which reads as a failed run; without it there is no bound. */
 export async function gitRun(
   cwd: string,
   args: string[],
   env?: Record<string, string>,
-  io?: { maxBuffer?: number; encoding?: BufferEncoding; input?: Buffer },
+  io?: { maxBuffer?: number; encoding?: BufferEncoding; input?: Buffer; timeout?: number },
 ): Promise<GitRunResult> {
   try {
     const { input, ...output } = io ?? {};

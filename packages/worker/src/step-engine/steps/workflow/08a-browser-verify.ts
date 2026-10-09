@@ -17,7 +17,7 @@ import {
 } from '../_untrusted-repo.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
@@ -661,6 +661,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
     prepare: async ({ ctx, detected }) => {
       if ((detected as BrowserVerifyDetect).mode !== 'mcp') return;
+      await hydrateNoSpecBrief(ctx, detected as BrowserVerifyDetect);
       // Hand the capture directory to the sandbox uid before the agent asks
       // chrome-devtools to write its first screenshot into it.
       await ensureScreenshotsDir(ctx.repoPath, await resolveScreenshotRoot(ctx));

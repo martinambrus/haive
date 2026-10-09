@@ -25,6 +25,7 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal
 }));
 
 import {
+  CHANGE_READ_GIT_TIMEOUT_MS,
   FINGERPRINT_READ_BYTES,
   HOUSE_RULES_UNAVAILABLE_EVENT,
   changeFingerprint,
@@ -34,6 +35,7 @@ import {
   recordHouseRulesUnavailable,
   selectForDispatch,
 } from '../src/orchestrator/house-rules-dispatch.js';
+import { gitRun } from '../src/repo/git-exec.js';
 import type { HouseRuleCandidate } from '../src/orchestrator/house-rules.js';
 
 const dirs: string[] = [];
@@ -281,6 +283,71 @@ describe('changeFingerprint', () => {
     expect(await of(dir)).not.toBe(before);
     await writeFile(path.join(dir, 'big.bin'), Buffer.concat([big, Buffer.from('x')]));
     expect(await of(dir)).not.toBe(before);
+  });
+});
+
+describe('a git that hangs', () => {
+  const BOUND_MS = 600;
+  const SLEEP = 'exec sleep 120';
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const originalPath = process.env.PATH;
+  afterEach(() => {
+    process.env.PATH = originalPath;
+  });
+
+  /** Puts a `git` first on PATH that runs `script` instead of git; the tree is built before it. */
+  async function fakeGit(script: string): Promise<void> {
+    const bin = await mkdtemp(path.join(tmpdir(), 'haive-fake-git-'));
+    dirs.push(bin);
+    await writeFile(path.join(bin, 'git'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
+  }
+  async function within<T>(run: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    const value = await run();
+    expect(performance.now() - started).toBeLessThan(BOUND_MS + 2000);
+    return value;
+  }
+
+  it('bounds the change read at 30 seconds unless told otherwise', () => {
+    expect(CHANGE_READ_GIT_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('is killed by gitRun once it outlives its timeout, and reads as a failed run', async () => {
+    const dir = await repo();
+    await fakeGit(SLEEP);
+    const run = await within(() => gitRun(dir, ['--version'], undefined, { timeout: BOUND_MS }));
+    expect(run.code).not.toBe(0);
+  }, 10_000);
+
+  it('leaves readChangedFiles with null inside its bound', async () => {
+    const dir = await repo();
+    await fakeGit(SLEEP);
+    expect(await within(() => readChangedFiles(dir, 'main', BOUND_MS))).toBeNull();
+  }, 10_000);
+
+  it('leaves changeFingerprint with null inside its bound', async () => {
+    const dir = await repo();
+    await fakeGit(SLEEP);
+    expect(await within(() => changeFingerprint(dir, 'main', BOUND_MS))).toBeNull();
+  }, 10_000);
+
+  // Falling back to HEAD would answer a narrower question: a DAG task's commits would vanish.
+  it('answers null, not the dirty files alone, when only the fork-point lookup hangs', async () => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    await fakeGit(
+      `for a in "$@"; do [ "$a" = merge-base ] && exec sleep 120; done\nexec '${realGit}' "$@"`,
+    );
+    expect(await within(() => readChangedFiles(dir, 'main', BOUND_MS))).toBeNull();
+    expect(await within(() => changeFingerprint(dir, 'main', BOUND_MS))).toBeNull();
+  }, 10_000);
+
+  it('reads the change as before when git answers inside the bound', async () => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    expect(await readChangedFiles(dir, 'main', 15_000)).toContain('src/keep.php');
+    expect(await changeFingerprint(dir, 'main', 15_000)).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 

@@ -10,7 +10,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from '../_untrusted-repo.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
@@ -250,6 +250,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as SimplifyDetect),
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
     // Pass 0 — the simplifier (the vendored plugin definition + Haive's frame).

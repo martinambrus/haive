@@ -95,5 +95,6 @@ U+001C-U+001E.
 
 **FILTER AND FENCE AT PROMPT-BUILD TIME.** `detect_output` is PERSISTED and `step-runner` replays
 it, so anything applied in `detect()` never reaches a step detected before it shipped — the
-reason `fencedDebtBlock` and `assertReviewableChange` live where the prompt is assembled, and the
-bug `listKbFiles` shipped with.
+reason `fencedDebtBlock`, `assertReviewableChange` and the no-spec task brief
+(`hydrateNoSpecBrief`, in `llm.prepare`) live where the prompt is assembled, and the bug
+`listKbFiles` shipped with.

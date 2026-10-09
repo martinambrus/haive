@@ -17,6 +17,7 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
+import { hydrateNoSpecBrief } from './_spec-artifact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import {
@@ -29,6 +30,7 @@ import {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import {
@@ -149,9 +151,23 @@ export function parseTesterOutput(raw: unknown): {
 const TEST_FILE_RE =
   /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
-/** Created/updated paths that look like runnable test files. */
-export function filterTestFiles(files: string[]): string[] {
-  return files.filter((f) => TEST_FILE_RE.test(f));
+const CONTROL_CHAR_RE = /\p{Cc}/u;
+
+const PLAIN_PATH_RE = /^[A-Za-z0-9._/@+-]+$/;
+
+/** Reported test files; a ddev run passes through two shells, so its paths must also be plain. */
+export function filterTestFiles(files: string[], opts: { ddev: boolean }): string[] {
+  return files.filter((f) => {
+    const segments = f.split('/');
+    return (
+      TEST_FILE_RE.test(f) &&
+      !f.startsWith('/') &&
+      !segments.includes('..') &&
+      !segments.some((s) => s.startsWith('-')) &&
+      !CONTROL_CHAR_RE.test(f) &&
+      (!opts.ddev || PLAIN_PATH_RE.test(f))
+    );
+  });
 }
 
 export interface TestCommand {
@@ -551,11 +567,13 @@ async function runTestCommand(
 ): Promise<{ exitCode: number; command: string; output: string }> {
   const joined = cmd.args.join(' ');
   if (cmd.kind === 'ddev') {
+    // Quoted for the runner's bash -lc; filterTestFiles keeps paths plain for ddev exec's re-read.
+    const quoted = cmd.args.map(shellQuote).join(' ');
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath!);
     // `onLine` switches ddevExec to its streaming path, so the caller can surface the
     // runner's latest line. Absent for the enumerate probe, which is bounded and silent.
-    const res = await ddevExec(handle, joined, { timeoutMs, ...(onLine ? { onLine } : {}) });
-    return { exitCode: res.exitCode, command: `ddev ${joined}`, output: res.output.slice(-4000) };
+    const res = await ddevExec(handle, quoted, { timeoutMs, ...(onLine ? { onLine } : {}) });
+    return { exitCode: res.exitCode, command: `ddev ${quoted}`, output: res.output.slice(-4000) };
   }
   const [bin, ...rest] = cmd.args;
   try {
@@ -859,6 +877,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
   },
 
   llm: {
+    prepare: async ({ ctx, detected }) => hydrateNoSpecBrief(ctx, detected as TestManagementDetect),
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
     skipIf: ({ formValues }) => (formValues as { action?: string }).action === 'skip',
@@ -1015,7 +1034,9 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     let degradedNote: string | undefined;
 
     if (values.runTests !== false && changed) {
-      const targets = filterTestFiles([...acc.created, ...acc.updated]);
+      const reported = [...acc.created, ...acc.updated];
+      const targets = filterTestFiles(reported, { ddev: d.ddev });
+      const dropped = new Set(reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)));
       const root = primaryFrameworkRoot(d);
       const buildOpts = { ddev: d.ddev, ddevPlaywrightAddon: d.ddevPlaywrightAddon, root };
       const cmd = buildSelectiveCommand(d.primary, targets, buildOpts);
@@ -1040,13 +1061,16 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       } else if (cmd.kind === 'ddev' && !d.repoSubpath) {
         // DDEV command but no per-task runner subpath — host-side ddev is the
         // broken DooD path, so skip rather than fail confusingly.
+        const output =
+          'DDEV runner unavailable for the selective test run, so the related tests could not be run — they were written but never executed';
         testRun = {
           ran: false,
           passed: false,
           command: `ddev ${cmd.args.join(' ')}`,
-          output: 'DDEV runner unavailable for the selective test run — skipped',
+          output,
         };
         testsPassed = null;
+        degradedNote = output;
       } else {
         // The DDEV web image carries neither the browser binaries nor the libraries they
         // link against, and nothing in the sandbox can add them. Idempotent, so it runs
@@ -1137,6 +1161,16 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           }
         }
       }
+
+      if (dropped.size > 0) {
+        const rule = d.ddev
+          ? 'may hold only letters, digits and the characters "._/@+-", must be relative, and may not have a ".." segment or one starting with "-"'
+          : 'must be relative, and may not have a ".." segment, a segment starting with "-", or a control character';
+        const note =
+          `${dropped.size} reported test file${dropped.size === 1 ? ' was' : 's were'} dropped ` +
+          `and did not run. A test path ${rule}.`;
+        degradedNote = degradedNote === undefined ? note : `${note}\n\n${degradedNote}`;
+      }
     }
 
     ctx.logger.info(
@@ -1147,7 +1181,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         deleted: acc.deleted.size,
         testsPassed,
         frameworkRoot: primaryFrameworkRoot(d),
-        notRun: degradedNote !== undefined,
+        notRun: testRun?.ran === false,
         iteration: args.iteration,
       },
       'test management pass complete',
