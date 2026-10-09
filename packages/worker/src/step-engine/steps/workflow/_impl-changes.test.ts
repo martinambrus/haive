@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 
 const loadPreviousStepOutput = vi.fn();
 vi.mock('../onboarding/_helpers.js', () => ({
@@ -1545,6 +1545,7 @@ describe('collectChangedLineMap', () => {
         expect(out.files).toEqual([]);
         expect(out.total).toBe(0);
         expect(out.scanError).toBe(UNREAD);
+        expect(fileCoverage(out)?.scanFailed).toBe(true);
       });
     });
 
@@ -1611,6 +1612,66 @@ describe('collectChangedLineMap', () => {
         expect(covered).toEqual({ listed: 2, total: 2, truncated: false });
         expect('scanFailed' in covered!).toBe(false);
         expect(changedFilesBlock(out, 'Changed files', 'fallback')).not.toContain('COVERAGE');
+      });
+    });
+
+    describe('when git loses the fork point for one of the reads only', () => {
+      const originalPath = process.env.PATH;
+      const bins: string[] = [];
+      afterEach(async () => {
+        process.env.PATH = originalPath;
+        for (const bin of bins.splice(0)) await rm(bin, { recursive: true, force: true });
+      });
+
+      /** Puts a `git` first on PATH that fails the `nth` merge-base it is asked for and runs git otherwise. */
+      async function failMergeBase(nth: number): Promise<void> {
+        const { stdout } = await exec('sh', ['-c', 'command -v git']);
+        const bin = await mkdtemp(path.join(tmpdir(), 'impl-fake-git-'));
+        bins.push(bin);
+        const count = path.join(bin, 'merge-bases');
+        const asked = `n=$(($(cat '${count}' 2>/dev/null || echo 0) + 1)); echo $n > '${count}'`;
+        const script = [
+          '#!/bin/sh',
+          `for a in "$@"; do if [ "$a" = merge-base ]; then ${asked}; [ $n -eq ${nth} ] && exit 1; fi; done`,
+          `exec '${stdout.trim()}' "$@"`,
+        ].join('\n');
+        await writeFile(path.join(bin, 'git'), `${script}\n`, { mode: 0o755 });
+        process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
+      }
+
+      // The collector asks for the fork point three times: for the line notes, the deletions, the paths.
+      it('marks the scan failed when only the committed deletions read loses it, and still lists the file', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(2);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual(['c.js']);
+          expect(out.scanError).toBe(UNREAD);
+        });
+      });
+
+      it('marks the scan failed when only the committed paths read loses it', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(3);
+
+          const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+          expect(out.files).toEqual(['kept.js']);
+          expect(out.scanError).toBe(UNREAD);
+        });
+      });
+
+      it('leaves the scan unmarked when only the line notes lose it, since fewer notes are never a wrong list', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(1);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual(['c.js']);
+          expect(out.scanError).toBeNull();
+          expect(out.changedLines?.['c.js']).toBeUndefined();
+        });
       });
     });
 

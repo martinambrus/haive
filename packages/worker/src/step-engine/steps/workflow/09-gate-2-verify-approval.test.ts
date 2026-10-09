@@ -1271,8 +1271,6 @@ describe('gate-2 validation row: how much of the change the validator was given'
   );
 });
 
-// 07b, 08c, 08c2 and 08d each store the coverage of the list their agents were given, and a list a
-// failed scan produced carries `scanFailed`: every one of the four rows has to read it as PARTIAL.
 describe('gate-2 coverage rows: a scan that failed behind the list', () => {
   const ctx = {
     taskId: 'task-1',
