@@ -76,9 +76,9 @@ interface PorcelainEntry {
 }
 
 /** Parses `git status --porcelain -z`. Records are NUL-separated; each is
- *  `XY<space><path>`. For renames/copies the destination path is in the XY
- *  record and the source path follows as the next NUL field (verified against
- *  git: `R  new\0old\0`). */
+ *  `XY<space><path>`. For renames/copies, in either column, the destination path
+ *  is in the XY record and the source path follows as the next NUL field (verified
+ *  against git: `R  new\0old\0`, and ` R new\0old\0` for an intent-to-add file). */
 export function parsePorcelainZ(out: string): PorcelainEntry[] {
   const tokens = out.split('\0');
   const entries: PorcelainEntry[] = [];
@@ -93,7 +93,7 @@ export function parsePorcelainZ(out: string): PorcelainEntry[] {
     const x = tok.charAt(0);
     const y = tok.charAt(1);
     const entry: PorcelainEntry = { x, y, path: tok.slice(3) };
-    if (x === 'R' || x === 'C') {
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
       const src = tokens[i + 1];
       if (src !== undefined) {
         entry.oldPath = src;

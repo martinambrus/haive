@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -1312,6 +1312,21 @@ describe('collectChangedLineMap', () => {
       async (to) => {
         await inRepo({ 'old name.php': 'one\ntwo\n' }, async (dir) => {
           await git(dir, ['mv', 'old name.php', to]);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([to]);
+          expect(out.total).toBe(1);
+        });
+      },
+    );
+
+    it.each(['plain.php', 'café.php', 'x -> y.php'])(
+      'lists the destination of an intent-to-add rename to %s, and not its source',
+      async (to) => {
+        await inRepo({ 'old name.php': 'one\ntwo\n' }, async (dir) => {
+          await rename(path.join(dir, 'old name.php'), path.join(dir, to));
+          await git(dir, ['add', '-N', to]);
 
           const out = await collectImplementationFiles(ctxFor(), dir);
 
