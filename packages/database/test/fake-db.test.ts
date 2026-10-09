@@ -221,6 +221,142 @@ describe('the fake database', () => {
     expect(await names(desc(t.sizeBytes), asc(t.createdAt))).toEqual(['b.md', 'a.md', 'small.md']);
   });
 
+  it('orders by a text key by code point, as the C collation does', async () => {
+    const { fake, row } = setup();
+    for (const name of ['é.md', '😀.md', 'b.md', '～.md', 'B.md', 'a.md']) {
+      fake.insert(t, row(name));
+    }
+    const names = async (order: unknown) =>
+      (await fake.db.select().from(t).orderBy(order)).map((r) => r.filename);
+
+    const ascending = ['B.md', 'a.md', 'b.md', 'é.md', '～.md', '😀.md'];
+    expect(await names(asc(t.filename))).toEqual(ascending);
+    expect(await names(desc(t.filename))).toEqual([...ascending].reverse());
+  });
+
+  it('breaks a tie on a text second key', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('b.md', { sizeBytes: 5 }));
+    fake.insert(t, row('c.md', { sizeBytes: 5 }));
+    fake.insert(t, row('a.md', { sizeBytes: 5 }));
+    fake.insert(t, row('z.md', { sizeBytes: 1 }));
+    const names = async (...orders: unknown[]) => {
+      const rows = await fake.db
+        .select()
+        .from(t)
+        .orderBy(...orders);
+      return rows.map((r) => r.filename);
+    };
+
+    expect(await names(asc(t.sizeBytes), asc(t.filename))).toEqual([
+      'z.md',
+      'a.md',
+      'b.md',
+      'c.md',
+    ]);
+    expect(await names(desc(t.sizeBytes), desc(t.filename))).toEqual([
+      'c.md',
+      'b.md',
+      'a.md',
+      'z.md',
+    ]);
+    expect(await names(desc(t.sizeBytes), asc(t.filename))).toEqual([
+      'a.md',
+      'b.md',
+      'c.md',
+      'z.md',
+    ]);
+  });
+
+  it('puts a NULL after every value ascending and before every value descending, as Postgres does', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('null.md'));
+    fake.insert(t, row('x.md', { description: 'x' }));
+    fake.insert(t, row('undefined.md', { description: undefined }));
+    fake.insert(t, row('a.md', { description: 'a' }));
+    const names = async (order: unknown) =>
+      (await fake.db.select().from(t).orderBy(order)).map((r) => r.filename);
+
+    expect(await names(asc(t.description))).toEqual(['a.md', 'x.md', 'null.md', 'undefined.md']);
+    expect(await names(desc(t.description))).toEqual(['null.md', 'undefined.md', 'x.md', 'a.md']);
+
+    for (const [n, limit] of [
+      [3, 512],
+      [4, null],
+      [5, 256],
+    ] as const) {
+      fake.insert(schema.tasks, {
+        id: `00000000-0000-4000-8000-00000000000${n}`,
+        userId: USER,
+        type: 'workflow',
+        title: 'limited',
+        memoryLimitMb: limit,
+      });
+    }
+    const limits = async (order: unknown) =>
+      (
+        await fake.db
+          .select({ limit: schema.tasks.memoryLimitMb })
+          .from(schema.tasks)
+          .orderBy(order)
+      ).map((r) => r.limit);
+
+    expect(await limits(asc(schema.tasks.memoryLimitMb))).toEqual([256, 512, null, null, null]);
+    expect(await limits(desc(schema.tasks.memoryLimitMb))).toEqual([null, null, null, 512, 256]);
+  });
+
+  it('orders numbers and bigints together by value', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('ten.md', { sizeBytes: 10 }));
+    fake.insert(t, row('nine.md', { sizeBytes: 9n }));
+    fake.insert(t, row('two.md', { sizeBytes: 2 }));
+    const names = async (order: unknown) =>
+      (await fake.db.select().from(t).orderBy(order)).map((r) => r.filename);
+
+    expect(await names(asc(t.sizeBytes))).toEqual(['two.md', 'nine.md', 'ten.md']);
+    expect(await names(desc(t.sizeBytes))).toEqual(['ten.md', 'nine.md', 'two.md']);
+  });
+
+  it('orders booleans false before true, as Postgres does', async () => {
+    const providers = schema.cliProviders;
+    const fake = createFakeDb({ cliProviders: providers });
+    fake.insert(providers, {
+      id: '00000000-0000-4000-8000-0000000000b1',
+      userId: USER,
+      name: 'on',
+      enabled: true,
+    });
+    fake.insert(providers, {
+      id: '00000000-0000-4000-8000-0000000000b2',
+      userId: USER,
+      name: 'off',
+      enabled: false,
+    });
+    const names = async (order: unknown) =>
+      (await fake.db.select().from(providers).orderBy(order)).map((r) => r.name);
+
+    expect(await names(asc(providers.enabled))).toEqual(['off', 'on']);
+    expect(await names(desc(providers.enabled))).toEqual(['on', 'off']);
+  });
+
+  it('refuses a value it cannot order, whatever sits beside it', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('a.md', { description: 'x' }));
+    fake.insert(t, row('b.md', { description: 5 }));
+    const mixed = fake.db.select().from(t).orderBy(asc(t.description));
+    await expect(mixed).rejects.toThrow('fake db: unsupported orderBy value');
+
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-000000000003',
+      userId: USER,
+      type: 'workflow',
+      title: 'with metadata',
+      metadata: { a: 1 },
+    });
+    const json = fake.db.select().from(schema.tasks).orderBy(asc(schema.tasks.metadata));
+    await expect(json).rejects.toThrow('fake db: unsupported orderBy value');
+  });
+
   it('takes back exactly what a failed transaction wrote', async () => {
     const { fake, row, names } = setup();
     const keep = fake.insert(t, row('keep.md'));
