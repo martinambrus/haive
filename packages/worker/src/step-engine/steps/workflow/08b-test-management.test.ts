@@ -100,7 +100,7 @@ describe('actionInstructions', () => {
 });
 
 describe('filterTestFiles', () => {
-  it('keeps recognizable test files only', () => {
+  it.each([false, true])('keeps recognizable test files only (ddev: %s)', (ddev) => {
     const files = [
       'tests/feature.spec.ts',
       'src/feature.ts',
@@ -109,7 +109,7 @@ describe('filterTestFiles', () => {
       'docs/readme.md',
       'e2e/flow.test.js',
     ];
-    expect(filterTestFiles(files)).toEqual([
+    expect(filterTestFiles(files, { ddev })).toEqual([
       'tests/feature.spec.ts',
       'tests/unit/FeatureTest.php',
       'tests/test_feature.py',
@@ -886,7 +886,7 @@ describe('the ddev command a reported test path ends up in', () => {
     ddevPlaywrightAddon: addon,
   });
 
-  const REFUSED: Array<[string, string]> = [
+  const SHELL_REFUSED: Array<[string, string]> = [
     ['a command substitution', 'tests/$(id)Test.php'],
     ['a backtick substitution', 'tests/`echo hi`Test.php'],
     ['a single quote', "tests/it's'; echo pwned; 'Test.php"],
@@ -903,6 +903,8 @@ describe('the ddev command a reported test path ends up in', () => {
     ['a segment starting with a dash', 'tests/-x/a.spec.ts'],
     ['a first segment starting with a dash', '-tests/a.spec.ts'],
     ['a file name starting with two dashes', 'tests/--update-snapshots.spec.ts'],
+  ];
+  const BASE_REFUSED: Array<[string, string]> = [
     ['an absolute path', '/etc/cron.d/x.spec.ts'],
     ['a parent segment in the middle', 'tests/../../outside/x.spec.ts'],
     ['a leading parent segment', '../x.spec.ts'],
@@ -911,6 +913,14 @@ describe('the ddev command a reported test path ends up in', () => {
     ['an escape character', `tests/a${String.fromCharCode(27)}[31mb.spec.ts`],
     ['a delete character', `tests/a${String.fromCharCode(127)}b.spec.ts`],
     ['a line-feed look-alike from the C1 range', `tests/a${String.fromCharCode(133)}b.spec.ts`],
+  ];
+  const REFUSED = [...SHELL_REFUSED, ...BASE_REFUSED];
+  const HOST_KEPT: Array<[string, string]> = [
+    ['a bracket directory', 'app/[id]/page.test.tsx'],
+    ['a parenthesis directory', 'app/(group)/x.spec.ts'],
+    ['a space', 'tests/a b Test.php'],
+    ['a command substitution', 'tests/$(id)Test.php'],
+    ['a single quote', "tests/it's.spec.ts"],
   ];
   const PLAIN = [
     'tests/Unit/FooTest.php',
@@ -938,12 +948,26 @@ describe('the ddev command a reported test path ends up in', () => {
     expect(webWords(['tests/$(echo hi)Test.php'])).toEqual(['tests/hiTest.php']);
   });
 
-  it.each(REFUSED)('drops a reported path with %s', (_n, bad) => {
-    expect(filterTestFiles([bad, 'tests/ok.spec.ts'])).toEqual(['tests/ok.spec.ts']);
+  it.each(REFUSED)('drops a reported path with %s on a ddev run', (_n, bad) => {
+    expect(filterTestFiles([bad, 'tests/ok.spec.ts'], { ddev: true })).toEqual([
+      'tests/ok.spec.ts',
+    ]);
+  });
+
+  it.each(BASE_REFUSED)('drops a reported path with %s on a host run too', (_n, bad) => {
+    expect(filterTestFiles([bad, 'tests/ok.spec.ts'], { ddev: false })).toEqual([
+      'tests/ok.spec.ts',
+    ]);
+  });
+
+  it.each(HOST_KEPT)('keeps a path with %s on a host run, where execFile has no shell', (_n, p) => {
+    expect(filterTestFiles([p], { ddev: false })).toEqual([p]);
+    expect(filterTestFiles([p], { ddev: true })).toEqual([]);
   });
 
   it('keeps ordinary test paths, which both shells read as one word each', () => {
-    expect(filterTestFiles(PLAIN)).toEqual(PLAIN);
+    expect(filterTestFiles(PLAIN, { ddev: true })).toEqual(PLAIN);
+    expect(filterTestFiles(PLAIN, { ddev: false })).toEqual(PLAIN);
     expect(bashWords(PLAIN.join(' '))).toEqual(PLAIN);
     expect(webWords(PLAIN)).toEqual(PLAIN);
   });
@@ -951,7 +975,9 @@ describe('the ddev command a reported test path ends up in', () => {
   it('keeps exactly the characters both shells read as part of a plain word', () => {
     const codes = [...Array(256).keys(), 0x2028, 0x202e, 0xff0e, 0x1f600];
     const pathWith = (code: number) => `tests/a${String.fromCodePoint(code)}bTest.php`;
-    const kept = codes.filter((code) => filterTestFiles([pathWith(code)]).length === 1);
+    const kept = codes.filter(
+      (code) => filterTestFiles([pathWith(code)], { ddev: true }).length === 1,
+    );
     expect(String.fromCodePoint(...kept)).toBe(
       '+-./0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz',
     );

@@ -151,18 +151,22 @@ export function parseTesterOutput(raw: unknown): {
 const TEST_FILE_RE =
   /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
+const CONTROL_CHAR_RE = /\p{Cc}/u;
+
 const PLAIN_PATH_RE = /^[A-Za-z0-9._/@+-]+$/;
 
-/** Created/updated paths that look like runnable test files and read as one plain word in every
- *  shell a ddev run passes through: relative, only `[A-Za-z0-9._/@+-]`, no `..` or `-` segment. */
-export function filterTestFiles(files: string[]): string[] {
-  return files.filter(
-    (f) =>
+/** Reported test files; a ddev run passes through two shells, so its paths must also be plain. */
+export function filterTestFiles(files: string[], opts: { ddev: boolean }): string[] {
+  return files.filter((f) => {
+    const segments = f.split('/');
+    return (
       TEST_FILE_RE.test(f) &&
-      PLAIN_PATH_RE.test(f) &&
       !f.startsWith('/') &&
-      !f.split('/').some((segment) => segment === '..' || segment.startsWith('-')),
-  );
+      !segments.includes('..') &&
+      !CONTROL_CHAR_RE.test(f) &&
+      (!opts.ddev || (PLAIN_PATH_RE.test(f) && !segments.some((s) => s.startsWith('-'))))
+    );
+  });
 }
 
 export interface TestCommand {
@@ -1034,8 +1038,10 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
 
     if (values.runTests !== false && changed) {
       const reported = [...acc.created, ...acc.updated];
-      const targets = filterTestFiles(reported);
-      const dropped = new Set(reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)));
+      const targets = filterTestFiles(reported, { ddev: d.ddev });
+      const dropped = new Set(
+        d.ddev ? reported.filter((f) => TEST_FILE_RE.test(f) && !targets.includes(f)) : [],
+      );
       const root = primaryFrameworkRoot(d);
       const buildOpts = { ddev: d.ddev, ddevPlaywrightAddon: d.ddevPlaywrightAddon, root };
       const cmd = buildSelectiveCommand(d.primary, targets, buildOpts);
