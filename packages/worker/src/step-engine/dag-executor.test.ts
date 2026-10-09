@@ -1871,12 +1871,17 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
     expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('coder');
   });
 
-  it('does not re-spawn a fix coder whose prompt already carried the notice', async () => {
-    const { inserts } = await ingest(
+  it('fails the issue, without a re-review, when the fix coder truncated again after the notice', async () => {
+    const { inserts, updates } = await ingest(
       truncatedReviewer(`fix the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
       'coder',
     );
-    expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).not.toBe('coder');
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toEqual([
+      expect.objectContaining({
+        patch: expect.objectContaining({ resolution: 'failed_unrecoverable' }),
+      }),
+    ]);
   });
 
   it('re-spawns the reviewer once with the notice, charging no review retry', async () => {
