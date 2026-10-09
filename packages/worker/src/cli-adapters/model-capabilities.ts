@@ -221,7 +221,12 @@ export async function learnModelLimitFromFailure(
       .where(eq(schema.cliProviders.id, providerId))
       .for('update');
     if (!provider) return null;
-    const next = nextModelLimits(provider, errorMessage, new Date());
+    // Strictly after the stored learn, so learnedAt orders learns even within one millisecond.
+    const previous = Date.parse(
+      (provider.modelLimits as { learnedAt?: string } | null)?.learnedAt ?? '',
+    );
+    const at = new Date(Number.isNaN(previous) ? Date.now() : Math.max(Date.now(), previous + 1));
+    const next = nextModelLimits(provider, errorMessage, at);
     if (!next) return null;
     await tx
       .update(schema.cliProviders)
