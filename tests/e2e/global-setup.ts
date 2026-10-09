@@ -1,49 +1,44 @@
-import { writeFileSync } from 'node:fs';
+import { readdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { request } from '@playwright/test';
+import { request, type FullConfig } from '@playwright/test';
 import { REGISTERED_USERS_FILE_ENV, registerUser } from './helpers/auth.js';
 import { getSql } from './helpers/db.js';
 
 const WEB_BASE = process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3000';
 const NIL = '00000000-0000-4000-8000-000000000000';
-// `next dev` compiles a route on its first request. Public pages go before signing in (a signed-in
-// visit redirects), the rest as an admin, since the middleware and admin pages redirect anyone else.
-const PUBLIC_ROUTES = ['/login', '/register'];
-const SIGNED_IN_ROUTES = [
-  '/dashboard',
-  '/tasks',
-  '/tasks/new',
-  `/tasks/${NIL}`,
-  '/repos',
-  '/repos/new',
-  `/repos/${NIL}`,
-  `/repos/${NIL}/plan`,
-  `/repos/${NIL}/tooling`,
-  `/repos/${NIL}/estimates`,
-  '/settings',
-  '/settings/account',
-  '/settings/git-identity',
-  '/settings/global-kb',
-  '/cli-providers',
-  `/cli-providers/${NIL}`,
-  '/stats',
-  '/admin',
-  '/admin/users',
-  '/admin/pricing',
-  '/admin/audit',
-];
+const PAGE_FILE = /^page\.(tsx|ts|jsx|js)$/;
 const COMPILE_TIMEOUT_MS = 180_000;
 
 /** Starts this run's record of registered accounts; the workers inherit the variable. */
-export default async function globalSetup(): Promise<void> {
+export default async function globalSetup(config: FullConfig): Promise<void> {
   const file = path.join(os.tmpdir(), `haive-e2e-users-${process.pid}-${Date.now()}.jsonl`);
   writeFileSync(file, '');
   process.env[REGISTERED_USERS_FILE_ENV] = file;
-  await warmDevRoutes();
+  await warmDevRoutes(path.join(path.dirname(config.configFile ?? ''), 'packages/web/src/app'));
 }
 
-async function warmDevRoutes(): Promise<void> {
+/** Every page of the web app as a URL: a route group adds no segment, a dynamic one takes the nil id. */
+function pageRoutes(
+  dir: string,
+  url = '',
+  groups: string[] = [],
+): { url: string; groups: string[] }[] {
+  const found: { url: string; groups: string[] }[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile() && PAGE_FILE.test(entry.name)) found.push({ url: url || '/', groups });
+    if (!entry.isDirectory()) continue;
+    const sub = path.join(dir, entry.name);
+    if (entry.name.startsWith('(')) found.push(...pageRoutes(sub, url, [...groups, entry.name]));
+    else
+      found.push(
+        ...pageRoutes(sub, `${url}/${entry.name.startsWith('[') ? NIL : entry.name}`, groups),
+      );
+  }
+  return found;
+}
+
+async function warmDevRoutes(appDir: string): Promise<void> {
   const started = Date.now();
   const sql = getSql();
   const context = await request.newContext();
@@ -57,9 +52,12 @@ async function warmDevRoutes(): Promise<void> {
     took.push(`${route} ${res.status()} in ${Date.now() - begun} ms`);
   };
   try {
-    for (const route of PUBLIC_ROUTES) await warm(route);
+    // `next dev` compiles a route on its first request. The (auth) pages go before signing in (a
+    // signed-in visit redirects), the rest as an admin, since the middleware redirects anyone else.
+    const pages = pageRoutes(appDir);
+    for (const page of pages) if (page.groups.includes('(auth)')) await warm(page.url);
     await registerUser(sql, context, { prefix: 'warm-up', role: 'admin' });
-    for (const route of SIGNED_IN_ROUTES) await warm(route);
+    for (const page of pages) if (!page.groups.includes('(auth)')) await warm(page.url);
     console.log(`dev routes warmed in ${Date.now() - started} ms: ${took.join(', ')}`);
   } catch (err) {
     console.warn(`dev routes not warmed, the specs may meet a cold compile: ${String(err)}`);
