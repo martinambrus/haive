@@ -1,6 +1,5 @@
-import { expect, test } from '@playwright/test';
-import { cleanupTaskFixture, cleanupUser, getSql } from '../helpers/db.js';
-import { API_BASE, registerUser } from '../helpers/auth.js';
+import { API_BASE } from '../helpers/auth.js';
+import { expect, test } from '../helpers/fixtures.js';
 import { readFormValues, seedGate } from '../helpers/gate.js';
 
 /**
@@ -13,131 +12,99 @@ import { readFormValues, seedGate } from '../helpers/gate.js';
  */
 
 test.describe('gate form', () => {
-  test('the parked form renders its fields and its submit label', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let gate = null as Awaited<ReturnType<typeof seedGate>> | null;
-    try {
-      userId = (await registerUser(sql, page.request, { prefix: 'gate-render' })).userId;
-      gate = await seedGate(sql, userId, 'render');
+  test('the parked form renders its fields and its submit label', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'gate-render' });
+    const gate = await seedGate(sql, userId, 'render');
 
-      await page.goto(`/tasks/${gate.taskId}`);
+    await page.goto(`/tasks/${gate.taskId}`);
 
-      await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
-      await expect(page.getByLabel('Summary')).toBeVisible();
-      await expect(page.getByLabel('Proceed')).toBeVisible();
-      await expect(page.getByLabel('Mode')).toBeVisible();
-      // The schema's own submitLabel, not a generic one — a gate says what it is agreeing to.
-      await expect(page.getByRole('button', { name: 'Submit gate' })).toBeVisible();
-    } finally {
-      if (gate) await cleanupTaskFixture(sql, gate.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
+    await expect(page.getByLabel('Summary')).toBeVisible();
+    await expect(page.getByLabel('Proceed')).toBeVisible();
+    await expect(page.getByLabel('Mode')).toBeVisible();
+    // The schema's own submitLabel, not a generic one — a gate says what it is agreeing to.
+    await expect(page.getByRole('button', { name: 'Submit gate' })).toBeVisible();
   });
 
-  test('submitting the form stores the answers and closes the wait', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let gate = null as Awaited<ReturnType<typeof seedGate>> | null;
-    try {
-      userId = (await registerUser(sql, page.request, { prefix: 'gate-submit' })).userId;
-      gate = await seedGate(sql, userId, 'submit');
+  test('submitting the form stores the answers and closes the wait', async ({
+    page,
+    sql,
+    users,
+  }) => {
+    const { userId } = await users.register(page.request, { prefix: 'gate-submit' });
+    const gate = await seedGate(sql, userId, 'submit');
 
-      await page.goto(`/tasks/${gate.taskId}`);
-      await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
+    await page.goto(`/tasks/${gate.taskId}`);
+    await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
 
-      await page.getByLabel('Summary').fill('looks right to me');
-      await page.getByLabel('Proceed').check();
-      await page.getByLabel('Mode').selectOption('fast');
-      const submitPath = `/tasks/${gate.taskId}/steps/${gate.stepId}/submit`;
-      const submitted = page.waitForResponse(
-        (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === submitPath,
-      );
-      await page.getByRole('button', { name: 'Submit gate' }).click();
-      // The route answers only after it has stored the values, closed the wait and recorded the
-      // event, so every read below sees settled rows.
-      expect((await submitted).ok()).toBe(true);
+    await page.getByLabel('Summary').fill('looks right to me');
+    await page.getByLabel('Proceed').check();
+    await page.getByLabel('Mode').selectOption('fast');
+    const submitPath = `/tasks/${gate.taskId}/steps/${gate.stepId}/submit`;
+    const submitted = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === submitPath,
+    );
+    await page.getByRole('button', { name: 'Submit gate' }).click();
+    // The route answers only after it has stored the values, closed the wait and recorded the
+    // event, so every read below sees settled rows.
+    expect((await submitted).ok()).toBe(true);
 
-      // The values land in the step's own row, which is what the next step reads.
-      expect((await readFormValues(sql, gate.stepRowId)) ?? {}).toMatchObject({
-        [gate.fields.text]: 'looks right to me',
-        [gate.fields.checkbox]: true,
-        [gate.fields.select]: 'fast',
-      });
+    // The values land in the step's own row, which is what the next step reads.
+    expect((await readFormValues(sql, gate.stepRowId)) ?? {}).toMatchObject({
+      [gate.fields.text]: 'looks right to me',
+      [gate.fields.checkbox]: true,
+      [gate.fields.select]: 'fast',
+    });
 
-      // The step's STATUS is deliberately not asserted. Submit writes the values, clears the
-      // wait marker, records the event and enqueues ADVANCE_STEP — moving the step is the
-      // worker's job, and on a fixture task with no repository that worker fails. What the
-      // route guarantees synchronously is below.
-      const rows = await sql<{ waiting_started_at: Date | null }[]>`
-        select waiting_started_at from task_steps where id = ${gate.stepRowId}
-      `;
-      expect(rows[0]!.waiting_started_at, 'the wait is closed out').toBeNull();
+    // The step's STATUS is deliberately not asserted. Submit writes the values, clears the
+    // wait marker, records the event and enqueues ADVANCE_STEP — moving the step is the
+    // worker's job, and on a fixture task with no repository that worker fails. What the
+    // route guarantees synchronously is below.
+    const rows = await sql<{ waiting_started_at: Date | null }[]>`
+      select waiting_started_at from task_steps where id = ${gate.stepRowId}
+    `;
+    expect(rows[0]!.waiting_started_at, 'the wait is closed out').toBeNull();
 
-      const events = await sql<{ event_type: string }[]>`
-        select event_type from task_events
-        where task_id = ${gate.taskId} and event_type = 'step.form_submitted'
-      `;
-      expect(events).toHaveLength(1);
-    } finally {
-      if (gate) await cleanupTaskFixture(sql, gate.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const events = await sql<{ event_type: string }[]>`
+      select event_type from task_events
+      where task_id = ${gate.taskId} and event_type = 'step.form_submitted'
+    `;
+    expect(events).toHaveLength(1);
   });
 
-  test('a required field is enforced before anything is stored', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let gate = null as Awaited<ReturnType<typeof seedGate>> | null;
-    try {
-      userId = (await registerUser(sql, page.request, { prefix: 'gate-required' })).userId;
-      gate = await seedGate(sql, userId, 'required');
+  test('a required field is enforced before anything is stored', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'gate-required' });
+    const gate = await seedGate(sql, userId, 'required');
 
-      await page.goto(`/tasks/${gate.taskId}`);
-      await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
+    await page.goto(`/tasks/${gate.taskId}`);
+    await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
 
-      // Summary is required and left empty on purpose.
-      await page.getByRole('button', { name: 'Submit gate' }).click();
+    // Summary is required and left empty on purpose.
+    await page.getByRole('button', { name: 'Submit gate' }).click();
 
-      // Nothing was written, and the step is still parked. `required` rejects an ABSENT value,
-      // which is the half of that rule worth pinning: a submitted-but-empty value counts as
-      // present, so this test uses an untouched field rather than one cleared by hand.
-      await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
-      expect(await readFormValues(sql, gate.stepRowId)).toBeNull();
+    // Nothing was written, and the step is still parked. `required` rejects an ABSENT value,
+    // which is the half of that rule worth pinning: a submitted-but-empty value counts as
+    // present, so this test uses an untouched field rather than one cleared by hand.
+    await expect(page.getByRole('heading', { name: 'E2E gate' })).toBeVisible();
+    expect(await readFormValues(sql, gate.stepRowId)).toBeNull();
 
-      const rows = await sql<{ status: string }[]>`
-        select status from task_steps where id = ${gate.stepRowId}
-      `;
-      expect(rows[0]!.status).toBe('waiting_form');
-    } finally {
-      if (gate) await cleanupTaskFixture(sql, gate.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const rows = await sql<{ status: string }[]>`
+      select status from task_steps where id = ${gate.stepRowId}
+    `;
+    expect(rows[0]!.status).toBe('waiting_form');
   });
 
-  test('the submit route refuses a step that is not parked', async ({ page }) => {
-    const sql = getSql();
-    let userId = '';
-    let gate = null as Awaited<ReturnType<typeof seedGate>> | null;
-    try {
-      userId = (await registerUser(sql, page.request, { prefix: 'gate-guard' })).userId;
-      gate = await seedGate(sql, userId, 'guard');
-      await sql`update task_steps set status = 'done' where id = ${gate.stepRowId}`;
+  test('the submit route refuses a step that is not parked', async ({ page, sql, users }) => {
+    const { userId } = await users.register(page.request, { prefix: 'gate-guard' });
+    const gate = await seedGate(sql, userId, 'guard');
+    await sql`update task_steps set status = 'done' where id = ${gate.stepRowId}`;
 
-      const res = await page.request.post(
-        `${API_BASE}/tasks/${gate.taskId}/steps/${gate.stepId}/submit`,
-        { data: { values: { summary: 'x' } } },
-      );
-      // 409 rather than 404: the step exists, it is simply not asking anything.
-      expect(res.status()).toBe(409);
-      expect((await res.text()).toLowerCase()).toContain('awaiting form');
-    } finally {
-      if (gate) await cleanupTaskFixture(sql, gate.taskId);
-      if (userId) await cleanupUser(sql, userId);
-      await sql.end({ timeout: 5 });
-    }
+    const res = await page.request.post(
+      `${API_BASE}/tasks/${gate.taskId}/steps/${gate.stepId}/submit`,
+      { data: { values: { summary: 'x' } } },
+    );
+    // 409 rather than 404: the step exists, it is simply not asking anything.
+    expect(res.status()).toBe(409);
+    expect((await res.text()).toLowerCase()).toContain('awaiting form');
   });
 });
