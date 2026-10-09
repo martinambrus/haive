@@ -128,8 +128,13 @@ so an accepted repo gets honest full-text ranking instead of full-text plus nois
 on a live 9,197-row index: the same query returns 5 hits either way, `maxDense` 0.7233 with
 the dense half on and 0.0000 with it off. The api reaches that branch by two routes and both
 skip the vector rather than hashing one: the repo flag, and `embedQueryOrNull` returning null
-for a single query that could not be embedded. `embedQuery` keeps its hash fallback for
-callers that must have a vector of the right width.
+for a single query that could not be embedded or came back at the wrong width (a model or
+dimension change reached pgvector as SQLSTATE 22000, a 500). The global half of `rag_search`,
+global KB promotion (`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null
+the same way. `embedQuery` keeps its hash fallback for callers that must have a vector of the
+right width. The lexical-only branch has no identifier ranker, so a degraded search also loses
+identifier matches (MEASURED: an article naming `getUserById` ranks 2nd with a vector and drops
+out without one).
 
 Recovery re-embeds only where hash rows can actually exist — leaving lexical-only mode, or
 the explicit Rebuild action for a repo indexed before this existed (those carry no
