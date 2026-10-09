@@ -1184,7 +1184,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         deleted: acc.deleted.size,
         testsPassed,
         frameworkRoot: primaryFrameworkRoot(d),
-        notRun: degradedNote !== undefined,
+        notRun: testRun?.ran === false,
         iteration: args.iteration,
       },
       'test management pass complete',
