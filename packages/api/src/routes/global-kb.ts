@@ -20,6 +20,7 @@ import {
   houseRuleApprovalHash,
   houseRuleBytes,
   houseRuleContentToken,
+  houseRuleShortIds,
   normalizeGlobalKbDescription,
   orphanFacetMajors,
   refusedHouseRuleText,
@@ -176,12 +177,14 @@ function presentEntry<T extends HouseRuleRow>(entry: T, ctx: HouseRuleContext) {
   };
 }
 
+const ALWAYS: EnforceSpec = { mode: 'always' };
+
 // Counted as if house rules were on, so switching them on cannot overrun the cap.
-async function alwaysBytesUsed(
+async function alwaysBytes(
   db: Pick<GlobalKbDb, 'select'>,
   namespace: string,
-  exceptId: string,
-): Promise<number> {
+  entry: Pick<GlobalKbEntry, 'id' | 'title' | 'category' | 'description' | 'body'>,
+): Promise<{ usedBytes: number; entryBytes: number }> {
   const rows = await db
     .select()
     .from(globalKbEntries)
@@ -189,13 +192,18 @@ async function alwaysBytesUsed(
       and(
         eq(globalKbEntries.namespace, namespace),
         isNotNull(globalKbEntries.enforcedHash),
-        ne(globalKbEntries.id, exceptId),
+        ne(globalKbEntries.id, entry.id),
       ),
     );
-  return rows.reduce((sum, row) => {
+  // Every enforced rule widens the ids it shares a prefix with, as a prompt printing them all does.
+  const shortIds = houseRuleShortIds([entry.id, ...rows.map((row) => row.id)]);
+  const counted = (rule: typeof entry): number =>
+    houseRuleBytes(rule, { enforce: ALWAYS, shortId: shortIds.get(rule.id)! });
+  const usedBytes = rows.reduce((sum, row) => {
     const state = enforcementState(row, { namespace, houseRulesEnabled: true });
-    return state.state === 'enforced' && state.mode === 'always' ? sum + houseRuleBytes(row) : sum;
+    return state.state === 'enforced' && state.mode === 'always' ? sum + counted(row) : sum;
   }, 0);
+  return { usedBytes, entryBytes: counted(entry) };
 }
 
 export const enrichSchema = z.object({
@@ -669,12 +677,13 @@ globalKbRoutes.get('/entries/:id', async (c) => {
             SELECT id, title FROM chain WHERE status = 'active' LIMIT 1
           `)) as unknown as Array<{ id: string; title: string }>)
         : [];
+    const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, entry);
     return {
       entry: presentEntry(entry, await houseRuleContext(settings.namespace)),
       activeSuccessor: successors[0] ?? null,
-      usedBytes: await alwaysBytesUsed(db, settings.namespace, entry.id),
+      usedBytes,
       capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
-      entryBytes: houseRuleBytes(entry),
+      entryBytes,
     };
   });
   if (!found) throw new HttpError(404, 'global KB entry not found');
@@ -1098,8 +1107,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
         if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
       }
       if (spec.mode === 'always') {
-        const usedBytes = await alwaysBytesUsed(db, settings.namespace, row.id);
-        const entryBytes = houseRuleBytes(row);
+        const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, row);
         if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
           return { capExceeded: { usedBytes, capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES, entryBytes } };
         }

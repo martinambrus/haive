@@ -1995,6 +1995,78 @@ describe('ingestReviewRun: a reviewer that started, produced no verdict, and was
   });
 });
 
+describe('the house rules the review loop agents are shown', () => {
+  const ra = (db: unknown) =>
+    ({
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    }) as never;
+  const issue = {
+    id: 'issue1',
+    issueKey: 'ISSUE-1',
+    title: 'Fix the flaky cache',
+    innerIteration: 1,
+    stuckCount: 0,
+    reviewInfraRetries: 0,
+    branchName: 'main--ISSUE-1',
+    worktreePath: '/does/not/matter',
+    sandboxWorktreePath: '/does/not/matter',
+    estimatedFiles: ['templates/node.tpl.php'],
+    filesModified: [],
+    similarSites: [],
+    errorMessage: null,
+    reviewerVerdict: {
+      verdict: 'fix_required',
+      criteria_results: [],
+      issues: [
+        { severity: 'medium', file: 'a.ts', description: 'stale cache bug', suggestion: 'x' },
+      ],
+    },
+  } as never;
+  const neverAnswered = inv({
+    rawOutput: null,
+    parsedOutput: null,
+    exitCode: null,
+    startedAt: null,
+  });
+
+  /** The request the dispatcher was handed for the one agent the review loop spawned. */
+  async function requestFor(run: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { db } = makeSpawnDb();
+    let seen: Record<string, unknown> | undefined;
+    // Earlier tests in this file leave once-implementations queued that nothing consumed.
+    vi.mocked(resolveTaskDispatch).mockReset();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async (_db, _taskId, req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return workingDispatchPlan();
+    });
+    await ingestReviewRun(ra(db), issue, { id: 'run-1', ...run } as never, neverAnswered);
+    return seen!;
+  }
+
+  it('shows the fix coder the write framing and the files its issue plans to touch', async () => {
+    const request = await requestFor({ role: 'coder' });
+    expect(request.houseRules).toEqual({
+      mode: 'write',
+      estimatedFiles: ['templates/node.tpl.php'],
+    });
+  });
+
+  it('shows the reviewer nothing, a known risk the plan records', async () => {
+    const request = await requestFor({ role: 'reviewer' });
+    expect(request.houseRules).toBeUndefined();
+  });
+});
+
 describe('ingestAdvisor: an advisor that never answered', () => {
   it.each([
     [NEVER_STARTED, inv({ rawOutput: null, parsedOutput: null, exitCode: null, startedAt: null })],

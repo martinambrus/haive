@@ -7,6 +7,9 @@ declare module 'picomatch' {
      *  so anything that must agree with its scan has to pass it too. */
     dot?: boolean;
     nocase?: boolean;
+    /** Match the file name alone, so `*.css` finds `web/a.css`. Applied to a glob that holds a "/",
+     *  it matches nothing, so a caller turns it on per glob. */
+    basename?: boolean;
   }
   type Matcher = (test: string) => boolean;
   function picomatch(glob: string | readonly string[], options?: PicomatchOptions): Matcher;

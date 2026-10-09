@@ -19,6 +19,7 @@ const {
   isDocsOnlyChange,
   NO_CHANGE_SET_FALLBACK,
   parseChangedLineRanges,
+  readChangedPaths,
 } = await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
@@ -899,6 +900,184 @@ describe('collectChangedLineMap', () => {
       await writeFile(path.join(dir, 'has space.php'), 'x\n');
 
       expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
+    });
+  });
+
+  describe('readChangedPaths', () => {
+    const base = { 'kept.php': 'a\nb\n', 'gone.php': 'x\n', 'gone-in-commit.php': 'y\n' };
+
+    async function removeTwoAndEditOne(dir: string): Promise<void> {
+      await rm(path.join(dir, 'gone-in-commit.php'));
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: remove it']);
+      await rm(path.join(dir, 'gone.php'));
+      await writeFile(path.join(dir, 'kept.php'), 'a\nB\n');
+    }
+
+    it('leaves a deleted path out, committed or removed from the working tree', async () => {
+      await inRepo(base, async (dir) => {
+        await removeTwoAndEditOne(dir);
+
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.php']);
+      });
+    });
+
+    it('names a deleted path, committed or removed from the working tree, when asked', async () => {
+      await inRepo(base, async (dir) => {
+        await removeTwoAndEditOne(dir);
+
+        const paths = await readChangedPaths(dir, 'main', { includeDeleted: true });
+
+        expect([...(paths ?? [])].sort()).toEqual(['gone-in-commit.php', 'gone.php', 'kept.php']);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — committed deletions', () => {
+    async function commitRemoval(dir: string, name = 'gone.php'): Promise<void> {
+      await rm(path.join(dir, name));
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: remove it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+    }
+
+    it('lists a deletion nobody reported, with its note, and counts it', async () => {
+      await inRepo({ 'gone.php': 'x\n', 'kept.php': 'a\n' }, async (dir) => {
+        await commitRemoval(dir);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['gone.php']);
+        expect(out.total).toBe(1);
+        expect(out.truncated).toBe(false);
+        expect(out.changedLines).toEqual({ 'gone.php': 'deleted' });
+      });
+    });
+
+    it.each([
+      ['07 reported it', { touched: ['gone.php'] }],
+      ['a DAG issue reported it', { dag: ['gone.php'] }],
+    ])('lists a deletion once when %s too', async (_who, reported) => {
+      await inRepo({ 'gone.php': 'x\n' }, async (dir) => {
+        await commitRemoval(dir);
+
+        const out = await collectImplementationFiles(ctxFor(reported), dir);
+
+        expect(out.files).toEqual(['gone.php']);
+        expect(out.total).toBe(1);
+        expect(out.changedLines).toEqual({ 'gone.php': 'deleted' });
+      });
+    });
+
+    it.each([
+      ['a binary file', 'gone.bin', Buffer.from([0, 1, 2, 3])],
+      ['an empty file', 'empty.php', ''],
+    ])(
+      'lists the deletion of %s, which the diff prints no header for, once and with its note',
+      async (_what, name, content) => {
+        await inRepo({ [name]: content, 'kept.php': 'a\n' }, async (dir) => {
+          await commitRemoval(dir, name);
+
+          for (const reported of [{}, { touched: [name] }]) {
+            const out = await collectImplementationFiles(ctxFor(reported), dir);
+
+            expect(out.files).toEqual([name]);
+            expect(out.total).toBe(1);
+            expect(out.changedLines).toEqual({ [name]: 'deleted' });
+          }
+        });
+      },
+    );
+
+    it.each(['has"quote.php', 'café.php'])(
+      'lists the committed deletion of %s once, under its literal spelling, with its note',
+      async (name) => {
+        await inRepo({ [name]: 'x\n', 'kept.php': 'a\n' }, async (dir) => {
+          await commitRemoval(dir, name);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([name]);
+          expect(out.total).toBe(1);
+          expect(out.changedLines).toEqual({ [name]: 'deleted' });
+        });
+      },
+    );
+
+    it('lists a renamed file by its old name, and a deletion after it, since renames are not paired', async () => {
+      await inRepo({ 'a-old.php': 'one\ntwo\n', 'z-gone.php': 'x\n' }, async (dir) => {
+        await git(dir, ['mv', 'a-old.php', 'a-new.php']);
+        await rm(path.join(dir, 'z-gone.php'));
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: move one, remove one']);
+        const clean = await git(dir, ['status', '--porcelain']);
+        expect(clean.stdout.trim()).toBe('');
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(expect.arrayContaining(['a-old.php', 'z-gone.php']));
+      });
+    });
+
+    it('lists a committed deletion in a tree that holds a file named HEAD', async () => {
+      await inRepo({ HEAD: 'x\n', 'gone.php': 'y\n' }, async (dir) => {
+        await commitRemoval(dir);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['gone.php']);
+      });
+    });
+
+    it('leaves a modification nobody reported out, and lists only the deletion beside it', async () => {
+      await inRepo({ 'gone.php': 'x\n', 'app.php': 'a\nb\nc\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
+        await commitRemoval(dir);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['gone.php']);
+        expect(out.total).toBe(1);
+      });
+    });
+
+    it('lists a removal still in the working tree once', async () => {
+      await inRepo({ 'gone.php': 'x\n', 'kept.php': 'a\n' }, async (dir) => {
+        await rm(path.join(dir, 'gone.php'));
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['gone.php']);
+        expect(out.total).toBe(1);
+        expect(out.changedLines).toEqual({ 'gone.php': 'deleted' });
+      });
+    });
+
+    it.each(['has"quote.php', 'café.php'])(
+      'lists an uncommitted removal of %s once: git status names it and the committed diff cannot',
+      async (name) => {
+        await inRepo({ [name]: 'x\n', 'kept.php': 'a\n' }, async (dir) => {
+          await rm(path.join(dir, name));
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toHaveLength(1);
+          expect(out.total).toBe(1);
+        });
+      },
+    );
+
+    it('counts a deletion toward the cap like any other changed file', async () => {
+      await inRepo({ 'gone.php': 'x\n' }, async (dir) => {
+        await commitRemoval(dir);
+
+        const out = await collectImplementationFiles(ctxFor({ touched: names(100) }), dir);
+
+        expect(out.files).toHaveLength(100);
+        expect(out.total).toBe(101);
+        expect(out.truncated).toBe(true);
+      });
     });
   });
 });

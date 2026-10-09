@@ -8,6 +8,8 @@ const m = vi.hoisted(() => ({
   resolveScreenshotRoot: vi.fn(),
   loadTaskSimilarSites: vi.fn(),
   loadUnactedInsights: vi.fn(),
+  loadGateHouseRules: vi.fn(),
+  changeFingerprint: vi.fn(),
 }));
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
@@ -37,6 +39,14 @@ vi.mock('./_similar-sites.js', async (importOriginal) => ({
 vi.mock('./_gate-insights.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_gate-insights.js')>()),
   loadUnactedInsights: m.loadUnactedInsights,
+}));
+vi.mock('./_gate-house-rules.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_gate-house-rules.js')>()),
+  loadGateHouseRules: m.loadGateHouseRules,
+}));
+vi.mock('../../../orchestrator/house-rules-dispatch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../orchestrator/house-rules-dispatch.js')>()),
+  changeFingerprint: m.changeFingerprint,
 }));
 
 import { recurrenceTag } from './09-gate-2-verify-approval.js';
@@ -743,6 +753,132 @@ describe('gate-2 out-of-scope insights', () => {
   });
 });
 
+describe('gate-2 house rules', () => {
+  const ran = { ran: true, passed: true, output: '' };
+  const base = {
+    verify: { test: ran, lint: ran, typecheck: ran },
+    allPassed: true,
+    validation: {
+      verdict: 'VALID',
+      summary: '',
+      openIssues: [],
+      failedDimensions: [],
+      fixesApplied: 0,
+      exhaustedBudget: false,
+      converged: true,
+      churnFiles: [],
+      report: '',
+    },
+    testManagement: {
+      line: 'Test management (none): created 0, updated 0, deleted 0; related tests PASS',
+      testsPassed: true,
+    },
+    browser: null,
+    codeReview: {
+      peerVerdict: 'APPROVE',
+      securityVerdict: 'SECURE',
+      blocking: false,
+      reviewIncomplete: false,
+      peerFindings: [],
+      securityFindings: [],
+      lensFindings: [],
+      positives: [],
+    },
+    codeAudit: null,
+    adversarial: null,
+    liveBrowser: null,
+    runtimeSmoke: { ran: true, passed: true, httpStatus: 200, url: 'u', errorExcerpt: '' },
+  };
+  const entry = { shortId: '42ac658a', title: 'No inline SVGs', why: { scope: 'always' } };
+  const rules = (over: Record<string, unknown> = {}) => ({
+    mode: 'review',
+    entries: [],
+    omitted: [],
+    violations: [],
+    conflicts: [],
+    ...over,
+  });
+  const form = (detected: unknown) =>
+    gate2VerifyApprovalStep.form!({} as never, detected as never)!;
+  const labels = (detected: unknown) => (form(detected).statusSummary ?? []).map((r) => r.label);
+  const decision = (detected: unknown) =>
+    (form(detected).fields.find((f) => f.id === 'decision') as { default?: string }).default;
+
+  const holding = [
+    [
+      'a conflict',
+      rules({
+        entries: [entry],
+        conflicts: [{ rule: '42ac658a', reason: 'the spec requires it' }],
+      }),
+    ],
+    [
+      'a violation',
+      rules({
+        entries: [entry],
+        violations: [
+          { shortId: '42ac658a', title: 'No inline SVGs', file: 'a.php:1', description: 'inline' },
+        ],
+      }),
+    ],
+    ['rules that could not be read', rules({ reason: 'unavailable', errorClass: 'timeout' })],
+    ['a prompt that was too large', rules({ reason: 'too_large' })],
+    [
+      'a rule left out',
+      rules({ entries: [entry], omitted: [{ title: 'Did not fit', why: 'budget' }] }),
+    ],
+  ] as const;
+  const harmless = [
+    ['rules checked', rules({ entries: [entry] })],
+    ['house rules switched off', rules({ reason: 'switched_off' })],
+    ['nothing to say', rules()],
+  ] as const;
+
+  it('puts the row right after the validation row, ahead of every other', () => {
+    expect(labels({ ...base, houseRules: holding[0][1] })).toEqual([
+      'Tests',
+      'Lint',
+      'Typecheck',
+      'Implementation validation',
+      'House rules',
+      'Test management',
+      'Code review',
+      'Runtime smoke',
+    ]);
+  });
+
+  it.each(holding)('%s holds Approve off its default, however green the rest is', (_name, data) => {
+    expect(decision(base)).toBe('approve');
+    expect(decision({ ...base, houseRules: data })).toBe('reject');
+  });
+
+  it.each(harmless)('%s leaves the default at approve', (_name, data) => {
+    expect(decision({ ...base, houseRules: data })).toBe('approve');
+  });
+
+  it('shows what the stamp and the validator found, from the payload alone', () => {
+    const row = (form({ ...base, houseRules: holding[1][1] }).statusSummary ?? []).find(
+      (r) => r.label === 'House rules',
+    );
+    expect(row).toMatchObject({ status: 'fail', statusLabel: 'VIOLATED', defaultOpen: true });
+    expect(row?.body).toContain('inline');
+  });
+
+  it('renders a payload persisted before the field existed, or with nothing to say, exactly as before', () => {
+    const before = JSON.stringify(form(base));
+    expect(labels(base)).not.toContain('House rules');
+    expect(JSON.stringify(form({ ...base, houseRules: null }))).toBe(before);
+    expect(JSON.stringify(form({ ...base, houseRules: undefined }))).toBe(before);
+    expect(JSON.stringify(form({ ...base, houseRules: rules() }))).toBe(before);
+  });
+
+  it('shows the row when 07b ran no validation row of its own', () => {
+    expect(labels({ ...base, validation: null, houseRules: holding[0][1] })).toContain(
+      'House rules',
+    );
+  });
+});
+
 describe('recurrenceTag', () => {
   const map = new Map<string, number[]>([
     [recurrenceKey('peer-reviewer', 'src/a.ts'), [0, 2]],
@@ -852,6 +988,105 @@ describe('gate-2 verification results read from 08', () => {
     m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
     m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
     m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+    m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  it('reads the house rules of the task into the payload, and nothing when it has none', async () => {
+    stored({ ran: true, passed: true, command: 'pnpm run lint', output: '' });
+    expect((await gate2VerifyApprovalStep.detect!(ctx)).houseRules).toBeNull();
+
+    const rules = {
+      mode: 'review',
+      entries: [{ shortId: '42ac658a', title: 'No inline SVGs', why: { scope: 'always' } }],
+      omitted: [],
+      violations: [],
+      conflicts: [],
+    };
+    m.loadGateHouseRules.mockResolvedValue(rules);
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(m.loadGateHouseRules).toHaveBeenLastCalledWith(
+      (ctx as { db: unknown }).db,
+      (ctx as { taskId: string }).taskId,
+      { withCodeReview: true, currentFingerprint: expect.any(Function) },
+    );
+    expect(detected.houseRules).toEqual(rules);
+    expect(
+      (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).map((r) => r.label),
+    ).toContain('House rules');
+  });
+
+  it('hands the loader the change of the task worktree as it is now, read only when it is asked for', async () => {
+    const digest = 'f'.repeat(64);
+    m.changeFingerprint.mockResolvedValue(digest);
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        if (id === '08-phase-5-verify') return { output: { passed: true, runtimeSmoke: null } };
+        if (id === '01-worktree-setup') {
+          return { output: { worktreePath: '/repos/u/r/.haive/worktrees/t', baseBranch: 'main' } };
+        }
+        return null;
+      },
+    );
+    await gate2VerifyApprovalStep.detect!(ctx);
+    expect(m.changeFingerprint).not.toHaveBeenCalled();
+    const options = m.loadGateHouseRules.mock.calls.at(-1)![2] as {
+      currentFingerprint: () => Promise<string | null>;
+    };
+    expect(await options.currentFingerprint()).toBe(digest);
+    expect(m.changeFingerprint).toHaveBeenCalledWith('/repos/u/r/.haive/worktrees/t', 'main');
+  });
+
+  it('has no fingerprint of the change to offer when 01-worktree-setup made no worktree', async () => {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '08-phase-5-verify' ? { output: { passed: true, runtimeSmoke: null } } : null,
+    );
+    await gate2VerifyApprovalStep.detect!(ctx);
+    const options = m.loadGateHouseRules.mock.calls.at(-1)![2] as {
+      currentFingerprint: () => Promise<string | null>;
+    };
+    expect(await options.currentFingerprint()).toBeNull();
+    expect(m.changeFingerprint).not.toHaveBeenCalled();
+  });
+
+  it('names the rule on a peer finding that carries one, and writes the others as it always did', async () => {
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        if (id === '08-phase-5-verify') {
+          return { output: { test: passedRun, passed: true, runtimeSmoke: null } };
+        }
+        if (id !== '08c-code-review') return null;
+        return {
+          output: {
+            reviewed: true,
+            blocking: true,
+            peer: {
+              verdict: 'REQUEST_CHANGES',
+              findings: [
+                {
+                  severity: 'high',
+                  path: 'templates/node.tpl.php',
+                  lines: '12-12',
+                  issue: 'inline svg in a template',
+                  fix: 'move it',
+                  rule: '42ac658a',
+                },
+                { severity: 'low', path: 'src/a.php', lines: '3-3', issue: 'a naming nit' },
+                { severity: 'high', path: 'src/b.php', issue: 'no lines', rule: 'deadbeef' },
+              ],
+              positives: [],
+            },
+            security: { verdict: 'SECURE', findings: [] },
+          },
+        };
+      },
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(detected.codeReview?.peerFindings).toEqual([
+      '[high] templates/node.tpl.php:12-12 (rule 42ac658a) inline svg in a template → move it',
+      '[low] src/a.php:3-3 a naming nit',
+      '[high] src/b.php (rule deadbeef) no lines',
+    ]);
   });
 
   it('carries the scope and the note of a check through to the gate row', async () => {

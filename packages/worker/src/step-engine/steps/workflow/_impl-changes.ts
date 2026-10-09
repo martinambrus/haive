@@ -334,10 +334,12 @@ async function readChangeDiff(
   }
 }
 
-/** A binary or mode-only change prints no ---/+++ line, so only this list names its path. */
-async function readChangedPaths(
+/** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
+ *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. */
+export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
+  options: { includeDeleted?: boolean } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(worktreePath, baseBranch);
   if (!base) return null;
@@ -348,7 +350,30 @@ async function readChangedPaths(
     const fields = stdout.split('\0');
     const paths: string[] = [];
     for (let i = 0; i + 1 < fields.length; i += 2) {
-      if (fields[i] !== 'D') paths.push(fields[i + 1]!);
+      if (fields[i] !== 'D' || options.includeDeleted) paths.push(fields[i + 1]!);
+    }
+    return paths;
+  } catch {
+    return null;
+  }
+}
+
+/** Paths deleted by commits since the fork point, named exactly: the unified diff misses some. */
+async function readCommittedDeletions(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<string[] | null> {
+  const base = await resolveDiffBase(worktreePath, baseBranch);
+  if (!base) return null;
+  try {
+    const { stdout } = await gitExec(
+      ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--'],
+      { cwd: worktreePath },
+    );
+    const fields = stdout.split('\0');
+    const paths: string[] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      if (fields[i] === 'D') paths.push(fields[i + 1]!);
     }
     return paths;
   } catch {
@@ -373,8 +398,9 @@ async function changedLineNotes(
  * simplification, Phase 4 validation): the single-agent 07 output's
  * `filesTouched` when present, else the union of the DAG issues'
  * `filesModified`, plus currently-dirty worktree files (single-agent work is
- * still uncommitted at this point). Deduped, capped for prompt size — and the
- * cap is reported rather than applied silently.
+ * still uncommitted at this point) and the files the commits since the fork
+ * point deleted. Deduped, capped for prompt size — and the cap is reported
+ * rather than applied silently.
  */
 export async function collectImplementationFiles(
   ctx: StepContext,
@@ -383,14 +409,20 @@ export async function collectImplementationFiles(
   const files = await reportedFiles(ctx);
   const scan = await dirtyWorktreeFiles(worktreePath);
   for (const f of scan.files) files.add(f);
-  const all = [...files];
-  const listed = all.slice(0, MAX_LISTED_FILES);
 
   // Which lines of each file the change wrote. Measured against the task's fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const measured = await changedLineNotes(worktreePath, await taskBaseBranch(ctx));
+  const baseBranch = await taskBaseBranch(ctx);
+  const measured = await changedLineNotes(worktreePath, baseBranch);
   for (const p of scan.untracked) measured[p] ??= 'new file';
+  // A committed deletion may be unreported, and the sandbox masks git: only this list names it.
+  for (const p of (await readCommittedDeletions(worktreePath, baseBranch)) ?? []) {
+    files.add(p);
+    measured[p] ??= 'deleted';
+  }
+  const all = [...files];
+  const listed = all.slice(0, MAX_LISTED_FILES);
   // Only the files the prompt will actually list, so the persisted set carries no notes for
   // files nobody was given.
   const changedLines: ChangedLineNotes = {};

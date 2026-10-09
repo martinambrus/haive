@@ -1,9 +1,23 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { FACET_FILTER_DIMENSIONS } from '../rag/search.js';
+import { HOUSE_RULE_MODES } from '../step-engine/types.js';
 import { collapseToLine } from '../utils/collapse-line.js';
+import {
+  renderHouseRuleEntry,
+  type EnforceSpec,
+  type HouseRuleRenderOptions,
+  type RenderedEntry,
+} from './house-rule-render.js';
 import { normalizeFacets, type GlobalKbEntry } from './schema.js';
 
-export type EnforceSpec = { mode: 'always' } | { mode: 'files'; globs: string[] };
+export {
+  HOUSE_RULES_END,
+  houseRuleShortIds,
+  renderHouseRuleEntry,
+  type EnforceSpec,
+  type HouseRuleRenderOptions,
+} from './house-rule-render.js';
 
 export type HouseRuleContent = Pick<
   GlobalKbEntry,
@@ -233,20 +247,49 @@ export function validateHouseRuleGlobs(globs: readonly string[]): string | null 
   return null;
 }
 
-export function renderHouseRuleEntry(
-  entry: Pick<GlobalKbEntry, 'title' | 'description' | 'body'>,
-): string {
-  const title = collapseToLine(entry.title);
-  const description = collapseToLine(entry.description);
-  return [
-    `### ${title}`,
-    ...(description === '' ? [] : [description]),
-    '',
-    // As stored: the admin approved these bytes, and an indented code block begins with spaces.
-    entry.body,
-  ].join('\n');
+export const houseRuleBytes = (entry: RenderedEntry, opts: HouseRuleRenderOptions): number =>
+  Buffer.byteLength(renderHouseRuleEntry(entry, opts), 'utf8');
+
+const houseRulesStampSchema = z.object({
+  mode: z.enum(HOUSE_RULE_MODES),
+  entries: z.array(
+    z.object({
+      id: z.string(),
+      hash: z.string(),
+      title: z.string(),
+      why: z.discriminatedUnion('scope', [
+        z.object({ scope: z.literal('always') }),
+        // A null glob: the change's file set could not be read, so the rule went in unscoped.
+        z.object({ scope: z.literal('files'), glob: z.string().nullable() }),
+      ]),
+    }),
+  ),
+  omitted: z.array(
+    z.object({
+      id: z.string(),
+      hash: z.string(),
+      title: z.string(),
+      why: z.enum(['budget', 'refused']),
+    }),
+  ),
+  reason: z.enum(['switched_off', 'unavailable', 'too_large']).optional(),
+  errorClass: z.enum(['timeout', 'refused', 'auth', 'other']).optional(),
+  filesRulesUnmatched: z.number().int().nonnegative().optional(),
+});
+
+/** What a CLI run was given of the house rules, stored in `cli_invocations.house_rules`. */
+export type HouseRulesStamp = z.infer<typeof houseRulesStampSchema>;
+
+/** A stored value as a stamp, or null for NULL and for anything that is not one. */
+export function parseHouseRulesStamp(value: unknown): HouseRulesStamp | null {
+  const parsed = houseRulesStampSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
-export const houseRuleBytes = (
-  entry: Pick<GlobalKbEntry, 'title' | 'description' | 'body'>,
-): number => Buffer.byteLength(renderHouseRuleEntry(entry), 'utf8');
+/** A title as the stamp keeps it: one line of at most 300 characters, cut between characters. */
+export function houseRuleStampTitle(title: string): string {
+  return collapseToLine(title)
+    .slice(0, 300)
+    .replace(/[\uD800-\uDBFF]$/, '')
+    .trimEnd();
+}

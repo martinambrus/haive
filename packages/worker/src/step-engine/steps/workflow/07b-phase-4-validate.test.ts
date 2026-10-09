@@ -1,4 +1,8 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   ensureAppServing: vi.fn(),
@@ -21,13 +25,18 @@ vi.mock('./_dependency-policy.js', async (importOriginal) => ({
   ),
 }));
 
+import type { PgTable } from 'drizzle-orm/pg-core';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { TaskCancelledError } from '../../step-definition.js';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import {
   parseValidatorOutput,
   parseFixerOutput,
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
+import { houseRuleShortIds } from '@haive/shared/global-kb';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
@@ -915,4 +924,810 @@ describe('phase4ValidateStep fixer prompt', () => {
     expect(hostile).toBeGreaterThan(open);
     expect(hostile).toBeLessThan(close);
   });
+});
+
+// A violation of an enforced house rule is an issue that names the rule; a rule the approved spec or a
+// person requires breaking is a conflict, reported apart from the issues so no fixer is asked to repair it.
+const TASK = 'aaaaaaaa-0000-4000-8000-000000000001';
+const STEP = 'aaaaaaaa-0000-4000-8000-000000000002';
+const VALIDATOR_1 = 'bbbbbbbb-0000-4000-8000-000000000001';
+const FIXER_1 = 'bbbbbbbb-0000-4000-8000-000000000002';
+const VALIDATOR_2 = 'bbbbbbbb-0000-4000-8000-000000000003';
+const FIXER_2 = 'bbbbbbbb-0000-4000-8000-000000000004';
+const NEWER = 'bbbbbbbb-0000-4000-8000-000000000005';
+const RULE_A = '42ac658a-3c1d-4e5f-8a9b-0c1d2e3f4a5b';
+const RULE_B = '9d1f0b7c-5e6f-4a7b-9c8d-1e2f3a4b5c6d';
+const RULE_C = '7be19d02-1a2b-4c3d-8e4f-5a6b7c8d9e0f';
+const TWIN_1 = '77aa11bb-1111-4111-8111-111111111111';
+const TWIN_2 = '77aa11bb-2222-4222-8222-222222222222';
+const SHORT_A = '42ac658a';
+const SHORT_B = '9d1f0b7c';
+const SHORT_C = '7be19d02';
+
+const stampOf = (...ids: string[]) => ({
+  mode: 'review',
+  entries: ids.map((id) => ({
+    id,
+    hash: `hr1:${'a'.repeat(64)}`,
+    title: `Rule ${id.slice(0, 8)}`,
+    why: { scope: 'always' },
+  })),
+  omitted: [],
+});
+
+/** A db that answers the stamp lookup by invocation id, and counts what was read from that table.
+ *  `setup` is what 01-worktree-setup recorded, when the task has a worktree. */
+function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unknown>) {
+  const fake = createFakeDb({
+    cliInvocations: schema.cliInvocations,
+    taskEvents: schema.taskEvents,
+    taskSteps: schema.taskSteps,
+  });
+  for (const [id, houseRules] of Object.entries(stamps)) {
+    fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+  }
+  if (setup) {
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '01-worktree-setup',
+      round: 0,
+      output: setup,
+    });
+  }
+  const tables: unknown[] = [];
+  const db = {
+    ...fake.db,
+    select: (fields?: Record<string, unknown>) => ({
+      from: (table: PgTable) => {
+        tables.push(table);
+        return fake.db.select(fields).from(table);
+      },
+    }),
+  };
+  return {
+    ctx: { logger: stubLogger, db, taskId: TASK, taskStepId: STEP, round: 0 } as never,
+    stampReads: () => tables.filter((t) => t === schema.cliInvocations).length,
+  };
+}
+
+const ownedPolicy = { drupal: false, ownedPaths: [] };
+const runApply = (
+  ctx: never,
+  llmOutput: unknown,
+  opts: {
+    iteration?: number;
+    previous?: unknown[];
+    invocationId?: string | null;
+    implementationFiles?: unknown;
+  } = {},
+) =>
+  phase4ValidateStep.apply(ctx, {
+    detected: { dependencyPolicy: ownedPolicy, implementationFiles: opts.implementationFiles },
+    formValues: {},
+    iteration: opts.iteration ?? 0,
+    previousIterations: opts.previous ?? [],
+    llmOutput,
+    llmInvocationId: opts.invocationId,
+  } as never);
+const passRecord = (iteration: number, llmOutput: unknown, applyOutput: unknown) => ({
+  iteration,
+  llmOutput,
+  applyOutput,
+  continueRequested: true,
+});
+
+const reply = (body: { verdict?: string; issues?: unknown[]; conflicts?: unknown } = {}) =>
+  [
+    '```json',
+    JSON.stringify({
+      verdict: body.verdict ?? 'ISSUES_FOUND',
+      summary: 's',
+      issues: body.issues ?? [],
+      ...(body.conflicts === undefined ? {} : { rule_conflicts: body.conflicts }),
+      dimensions: [],
+    }),
+    '```',
+  ].join('\n');
+const FIXER_REPLY = '```json\n{"fixes_made":["moved it to a file"],"notes":""}\n```';
+const violation = (over: Record<string, unknown> = {}) => ({
+  severity: 'high',
+  file: 'templates/node.tpl.php:12',
+  description: 'inline svg in a template',
+  fix: 'reference a file',
+  rule: SHORT_A,
+  ...over,
+});
+const conflict = (over: Record<string, unknown> = {}) => ({
+  rule: SHORT_A,
+  file: 'src/a.php:7',
+  reason: 'the approved spec requires inline markup here',
+  ...over,
+});
+const continues = (applyOutput: unknown, iteration = 0) =>
+  phase4ValidateStep.loop!.shouldContinue({
+    ctx: {} as never,
+    llmOutput: null,
+    iteration,
+    previousIterations: [],
+    applyOutput,
+  } as never);
+const fixerPromptAfter = (previous: unknown[]) =>
+  phase4ValidateStep.loop!.buildIterationPrompt!({
+    detected: {
+      sandboxWorktreePath: '/ws',
+      spec: 'spec',
+      taskBrief: 'THE USER REQUEST',
+      dependencyPolicy: ownedPolicy,
+      debtBlock: '',
+      honoredBlock: '',
+      browserTesting: false,
+      docsOnly: false,
+    } as never,
+    formValues: {},
+    iteration: previous.length,
+    previousIterations: previous as never,
+  });
+
+describe('parseValidatorOutput: the rule fields', () => {
+  it('keeps the rule of an issue and the conflicts at the top level', () => {
+    const p = parseValidatorOutput(reply({ issues: [violation()], conflicts: [conflict()] }))!;
+    expect(p.issues[0]!.rule).toBe(SHORT_A);
+    expect(p.ruleConflicts).toEqual([conflict()]);
+  });
+
+  it('reads a reply with neither as an issue with no rule and no conflicts', () => {
+    const p = parseValidatorOutput(reply({ issues: [violation({ rule: undefined })] }))!;
+    expect(p.issues[0]!.rule).toBeUndefined();
+    expect(p.ruleConflicts).toEqual([]);
+  });
+
+  it.each([
+    ['a string', 'none'],
+    ['an object, not an array', { rule: SHORT_A, reason: 'why' }],
+    [
+      'items without a rule or a reason',
+      [{ rule: SHORT_A, file: 'a.php:1' }, { reason: 'why' }, 7, null],
+    ],
+  ])(
+    'still parses a reply whose rule_conflicts is %s, keeps its issues and stores no conflict',
+    (_shape, conflicts) => {
+      const p = parseValidatorOutput(
+        reply({ issues: [violation(), { severity: 'low', description: 'plain' }], conflicts }),
+      );
+      expect(p).not.toBeNull();
+      expect(p!.verdict).toBe('ISSUES_FOUND');
+      expect(p!.issues).toHaveLength(2);
+      expect(p!.issues[0]!.rule).toBe(SHORT_A);
+      expect(p!.ruleConflicts).toEqual([]);
+    },
+  );
+
+  it('drops a rule that is not a non-empty string, and keeps the issue', () => {
+    const bad = [7, { id: SHORT_A }, [SHORT_A], true, null, '', '   '];
+    const issues = bad.map((rule, i) => ({
+      severity: 'high',
+      file: `src/bad${i}.php:3`,
+      description: `issue ${i}`,
+      rule,
+    }));
+    const p = parseValidatorOutput(reply({ issues }))!;
+    expect(p.issues.map((i) => i.description)).toEqual(issues.map((i) => i.description));
+    expect(p.issues.every((i) => i.rule === undefined)).toBe(true);
+  });
+
+  it('trims a rule and cuts it at 64 characters', () => {
+    const p = parseValidatorOutput(
+      reply({
+        issues: [violation({ rule: `  ${SHORT_A}  ` }), violation({ rule: 'x'.repeat(80) })],
+      }),
+    )!;
+    expect(p.issues[0]!.rule).toBe(SHORT_A);
+    expect(p.issues[1]!.rule).toBe('x'.repeat(64));
+  });
+
+  it('keeps at most 20 conflicts, each reason on one line of at most 500 characters', () => {
+    const many = Array.from({ length: 25 }, (_, i) =>
+      conflict({ rule: `r${i}`, reason: `line one\nline two ${'z'.repeat(600)}` }),
+    );
+    const p = parseValidatorOutput(reply({ conflicts: many }))!;
+    expect(p.ruleConflicts).toHaveLength(20);
+    expect(p.ruleConflicts[0]!.reason).not.toContain('\n');
+    expect(p.ruleConflicts[0]!.reason).toHaveLength(500);
+  });
+});
+
+describe('phase4ValidateStep.apply: house rule fields', () => {
+  it('stores the rule on its issue, the conflicts apart from the issues, and the pass own invocation id', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const out = await runApply(w.ctx, reply({ issues: [violation()], conflicts: [conflict()] }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.source).toBe('validator');
+    expect(out.issues).toHaveLength(1);
+    expect(out.issues[0]).toMatchObject({
+      rule: SHORT_A,
+      severity: 'high',
+      file: 'templates/node.tpl.php:12',
+    });
+    expect(out.ruleConflicts).toEqual([conflict()]);
+    expect(out.validatorInvocationId).toBe(VALIDATOR_1);
+  });
+
+  it('records a null invocation id when the pass has none, and a pass with no conflicts stores none', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ issues: [violation()] }));
+    expect(out.validatorInvocationId).toBeNull();
+    expect(out.ruleConflicts).toEqual([]);
+  });
+
+  it('claims nothing about the rules for a reply it could not read', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const out = await runApply(w.ctx, 'no json at all', { invocationId: VALIDATOR_1 });
+    expect(out.verdict).toBe('UNPARSEABLE');
+    expect(out.validatorInvocationId).toBeUndefined();
+    expect(out.ruleConflicts ?? []).toEqual([]);
+  });
+
+  it('has each fixer pass carry the latest validator pass: its invocation id and conflicts, never its own id', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A), [VALIDATOR_2]: stampOf(RULE_B) });
+    const text0 = reply({ issues: [violation()], conflicts: [conflict()] });
+    const o0 = await runApply(w.ctx, text0, { invocationId: VALIDATOR_1 });
+    const r0 = passRecord(0, text0, o0);
+    const o1 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [r0],
+      invocationId: FIXER_1,
+    });
+    const r1 = passRecord(1, FIXER_REPLY, o1);
+    const second = conflict({ rule: SHORT_B, reason: 'a person asked for exactly this' });
+    const text2 = reply({
+      issues: [violation({ rule: SHORT_B, file: 'src/b.php:3' })],
+      conflicts: [second],
+    });
+    const o2 = await runApply(w.ctx, text2, {
+      iteration: 2,
+      previous: [r0, r1],
+      invocationId: VALIDATOR_2,
+    });
+    const r2 = passRecord(2, text2, o2);
+    const o3 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 3,
+      previous: [r0, r1, r2],
+      invocationId: FIXER_2,
+    });
+
+    expect(o1.source).toBe('fixer');
+    expect(o1.validatorInvocationId).toBe(VALIDATOR_1);
+    expect(o1.ruleConflicts).toEqual([conflict()]);
+    expect(o1.issues[0]!.rule).toBe(SHORT_A);
+    expect(o2.validatorInvocationId).toBe(VALIDATOR_2);
+    expect(o2.ruleConflicts).toEqual([second]);
+    expect(o3.source).toBe('fixer');
+    expect(o3.validatorInvocationId).toBe(VALIDATOR_2);
+    expect(o3.ruleConflicts).toEqual([second]);
+    expect([o1, o3].map((o) => o.validatorInvocationId)).not.toContain(FIXER_1);
+    expect([o1, o3].map((o) => o.validatorInvocationId)).not.toContain(FIXER_2);
+  });
+
+  it('has a fixer pass that follows an output written before the fields existed carry none', async () => {
+    const o = await runApply(ruleWorld({}).ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, '', mkValidateApply())],
+      invocationId: FIXER_1,
+    });
+    expect(o.source).toBe('fixer');
+    expect(o.ruleConflicts).toEqual([]);
+    expect(o.validatorInvocationId).toBeNull();
+  });
+});
+
+// The list handed to the validator is capped, and a house rule is matched against the whole change.
+const fileSet = (listed: number, total: number) => ({
+  files: Array.from({ length: listed }, (_, i) => `src/f${i}.php`),
+  total,
+  truncated: listed < total,
+});
+
+describe('phase4ValidateStep.apply: the changed files the validator was given', () => {
+  it('records {listed, total} of the list detect gave its pass, and no other field of that list', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply(), {
+      implementationFiles: fileSet(100, 150),
+    });
+    expect(out.source).toBe('validator');
+    expect(out.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
+  });
+
+  it('records a list that covers the change too, for the gate to compare', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: fileSet(3, 3),
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it.each([
+    ['no list', undefined],
+    ['a list written before the totals were recorded', ['src/a.php']],
+  ])('records nothing for %s, since nobody measured it', async (_name, implementationFiles) => {
+    const out = await runApply(ruleWorld({}).ctx, reply(), { implementationFiles });
+    expect(out.source).toBe('validator');
+    expect('changedFilesCoverage' in out).toBe(false);
+  });
+
+  it('has each fixer pass carry the latest validator pass, not what its own detect holds', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A), [VALIDATOR_2]: stampOf(RULE_B) });
+    const text0 = reply();
+    const o0 = await runApply(w.ctx, text0, {
+      invocationId: VALIDATOR_1,
+      implementationFiles: fileSet(100, 150),
+    });
+    const r0 = passRecord(0, text0, o0);
+    const o1 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [r0],
+      invocationId: FIXER_1,
+      implementationFiles: fileSet(7, 7),
+    });
+    const r1 = passRecord(1, FIXER_REPLY, o1);
+    const text2 = reply();
+    const o2 = await runApply(w.ctx, text2, {
+      iteration: 2,
+      previous: [r0, r1],
+      invocationId: VALIDATOR_2,
+      implementationFiles: fileSet(80, 90),
+    });
+    const r2 = passRecord(2, text2, o2);
+    const o3 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 3,
+      previous: [r0, r1, r2],
+      invocationId: FIXER_2,
+    });
+
+    expect(o1.source).toBe('fixer');
+    expect(o1.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
+    expect(o2.changedFilesCoverage).toEqual({ listed: 80, total: 90 });
+    expect(o3.source).toBe('fixer');
+    expect(o3.changedFilesCoverage).toEqual({ listed: 80, total: 90 });
+  });
+
+  it('has a fixer pass that follows an output written before the field carry none', async () => {
+    const o = await runApply(ruleWorld({}).ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, '', mkValidateApply())],
+      invocationId: FIXER_1,
+      implementationFiles: fileSet(100, 150),
+    });
+    expect(o.source).toBe('fixer');
+    expect('changedFilesCoverage' in o).toBe(false);
+  });
+});
+
+// Gate 2 compares what the change is then with what it was when the validator finished.
+describe('phase4ValidateStep.apply: the change the validator checked', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  async function checkout(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-validate-change-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    await writeFile(path.join(dir, 'a.php'), '<?php\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
+    return dir;
+  }
+  const worldOf = (dir: string) =>
+    ruleWorld(
+      { [VALIDATOR_1]: stampOf(RULE_A), [VALIDATOR_2]: stampOf(RULE_A) },
+      {
+        worktreePath: dir,
+        baseBranch: 'main',
+      },
+    );
+  const DIGEST = /^[0-9a-f]{64}$/;
+
+  it('stores a fingerprint of the change as it stands when the pass ends, the one a gate recomputes', async () => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, reply({ verdict: 'VALID' }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.source).toBe('validator');
+    expect(out.changeFingerprint).toMatch(DIGEST);
+    expect(out.changeFingerprint).toBe(await changeFingerprint(dir, 'main'));
+  });
+
+  it('stores another one once the change has moved, and the same one while it has not', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const first = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    const again = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    expect(again.changeFingerprint).toBe(first.changeFingerprint);
+    await writeFile(path.join(dir, 'b.php'), '<?php // added\n');
+    const moved = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    expect(moved.changeFingerprint).toMatch(DIGEST);
+    expect(moved.changeFingerprint).not.toBe(first.changeFingerprint);
+  });
+
+  it('has each fixer pass carry the latest validator pass, though the tree moved under the fixer', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const text0 = reply();
+    const o0 = await runApply(w.ctx, text0, { invocationId: VALIDATOR_1 });
+    await writeFile(path.join(dir, 'a.php'), '<?php // fixed\n');
+    const r0 = passRecord(0, text0, o0);
+    const o1 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [r0],
+      invocationId: FIXER_1,
+    });
+    expect(o1.source).toBe('fixer');
+    expect(o1.changeFingerprint).toBe(o0.changeFingerprint);
+
+    const text2 = reply({ verdict: 'VALID' });
+    const o2 = await runApply(w.ctx, text2, {
+      iteration: 2,
+      previous: [r0, passRecord(1, FIXER_REPLY, o1)],
+      invocationId: VALIDATOR_2,
+    });
+    expect(o2.changeFingerprint).toMatch(DIGEST);
+    expect(o2.changeFingerprint).not.toBe(o0.changeFingerprint);
+    await writeFile(path.join(dir, 'a.php'), '<?php // fixed twice\n');
+    const o3 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 3,
+      previous: [r0, passRecord(1, FIXER_REPLY, o1), passRecord(2, text2, o2)],
+      invocationId: FIXER_2,
+    });
+    expect(o3.changeFingerprint).toBe(o2.changeFingerprint);
+  });
+
+  it('has a fixer pass that follows an output written before the field carry none', async () => {
+    const dir = await checkout();
+    const o = await runApply(worldOf(dir).ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, '', mkValidateApply())],
+      invocationId: FIXER_1,
+    });
+    expect(o.source).toBe('fixer');
+    expect('changeFingerprint' in o).toBe(false);
+  });
+
+  it.each([
+    ['a pass with no invocation id, which the gate cannot find', { invocationId: null }],
+    ['a pass that was not given one at all', {}],
+  ])('stores none for %s', async (_name, opts) => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, reply(), opts);
+    expect(out.source).toBe('validator');
+    expect('changeFingerprint' in out).toBe(false);
+  });
+
+  it('stores none for a reply it could not read', async () => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, 'no json at all', { invocationId: VALIDATOR_1 });
+    expect(out.verdict).toBe('UNPARSEABLE');
+    expect('changeFingerprint' in out).toBe(false);
+  });
+
+  it.each([
+    ['a task with no worktree', undefined],
+    [
+      'a worktree that is not a checkout',
+      { worktreePath: '/nonexistent/hr6-worktree', baseBranch: 'main' },
+    ],
+  ])('stores none, and does not fail the pass, for %s', async (_name, setup) => {
+    const out = await runApply(ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) }, setup).ctx, reply(), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.source).toBe('validator');
+    expect(out.validatorInvocationId).toBe(VALIDATOR_1);
+    expect('changeFingerprint' in out).toBe(false);
+  });
+});
+
+describe('phase4ValidateStep: a violation of a house rule', () => {
+  it('is a blocking issue: the loop runs a fixer for it, which is told the rule, and the fix loop is asked to repair it', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const text = reply({ issues: [violation()] });
+    const out = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+    expect(out.issues[0]!.upstream).toBeNull();
+    expect(await continues(out)).toBe(true);
+
+    const prompt = fixerPromptAfter([passRecord(0, text, out)]);
+    const fenced = prompt.slice(
+      prompt.indexOf(UNTRUSTED_OPEN),
+      prompt.indexOf(UNTRUSTED_CLOSE) + UNTRUSTED_CLOSE.length,
+    );
+    expect(fenced).toContain(
+      `1. [high] templates/node.tpl.php:12 (rule ${SHORT_A}) inline svg in a template — required fix: reference a file`,
+    );
+
+    const repair = phase4ValidateStep.fixLoop!.evaluate(out);
+    expect(repair?.blocking).toBe(true);
+    expect(repair?.diagnosis).toContain(
+      `- [high] \`templates/node.tpl.php:12\` (rule ${SHORT_A}) — inline svg in a template`,
+    );
+  });
+
+  it('writes an issue with no rule exactly as it always did', () => {
+    const issues = [{ severity: 'high', file: 'src/a.ts:3', description: 'bad thing' }];
+    const prompt = fixerPromptAfter([passRecord(0, '', mkValidateApply({ issues }))]);
+    expect(prompt).toContain('\n1. [high] src/a.ts:3 bad thing\n');
+    expect(
+      phase4ValidateStep.fixLoop!.evaluate(mkValidateApply({ issues }) as never)?.diagnosis,
+    ).toBe(
+      '**Verdict:** ISSUES_FOUND\n\n### Remaining issues (1)\n- [high] `src/a.ts:3` — bad thing',
+    );
+  });
+
+  it('names the rule in the findings summary after the location, or alone where the issue has none', async () => {
+    const out = await runApply(
+      ruleWorld({}).ctx,
+      reply({ issues: [violation(), violation({ file: undefined, description: 'no place' })] }),
+    );
+    expect(out.findingsSummary).toContain(
+      `- [high] \`templates/node.tpl.php:12\` (rule ${SHORT_A}) — inline svg in a template`,
+    );
+    expect(out.findingsSummary).toContain(
+      `- [high] [ownership unknown — user decision required] (rule ${SHORT_A}) — no place`,
+    );
+  });
+});
+
+describe('phase4ValidateStep: a conflict with a house rule', () => {
+  it('on a VALID verdict runs no fixer pass and asks the fix loop for nothing, and a later fixer pass carries it', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const text = reply({ verdict: 'VALID', conflicts: [conflict()] });
+    const out = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+    expect(out).toMatchObject({ verdict: 'VALID', source: 'validator', issues: [] });
+    expect(out.ruleConflicts).toEqual([conflict()]);
+    expect(await continues(out)).toBe(false);
+    expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+
+    const later = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, out)],
+      invocationId: FIXER_1,
+    });
+    expect(later.ruleConflicts).toEqual([conflict()]);
+    expect(later.validatorInvocationId).toBe(VALIDATOR_1);
+  });
+
+  it('beside a blocking issue never reaches the fixer or the diagnosis: the loop runs for the issue alone', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const logic = { severity: 'high', file: 'src/logic.php:5', description: 'LOGIC-DELTA bound' };
+    const text = reply({
+      issues: [logic],
+      conflicts: [
+        conflict({ file: 'src/conflict-d.php:2', reason: 'CONFLICT-ECHO a person directed it' }),
+      ],
+    });
+    const out = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+    expect(out.issues).toHaveLength(1);
+    expect(out.ruleConflicts).toHaveLength(1);
+    expect(await continues(out)).toBe(true);
+
+    const prompt = fixerPromptAfter([passRecord(0, text, out)]);
+    expect(prompt).toContain('LOGIC-DELTA');
+    expect(prompt).not.toContain('CONFLICT-ECHO');
+    expect(prompt).not.toContain('src/conflict-d.php');
+    const repair = phase4ValidateStep.fixLoop!.evaluate(out);
+    expect(repair?.blocking).toBe(true);
+    expect(repair?.diagnosis).toContain('LOGIC-DELTA');
+    expect(repair?.diagnosis).not.toContain('CONFLICT-ECHO');
+    expect(repair?.diagnosis).not.toContain('src/conflict-d.php');
+  });
+
+  it('re-reported on three validator passes is not churn', async () => {
+    const w = ruleWorld({
+      [VALIDATOR_1]: stampOf(RULE_A),
+      [VALIDATOR_2]: stampOf(RULE_A),
+      [NEWER]: stampOf(RULE_A),
+    });
+    const ids = [VALIDATOR_1, VALIDATOR_2, NEWER];
+    let previous: ReturnType<typeof passRecord>[] = [];
+    let last = await runApply(w.ctx, 'x');
+    for (const [n, id] of ids.entries()) {
+      const text = reply({
+        issues: [{ severity: 'high', file: `src/f${n}.php:1`, description: `issue ${n}` }],
+        conflicts: [conflict({ file: 'src/conflict-f.php:4' })],
+      });
+      last = await runApply(w.ctx, text, { iteration: n * 2, previous, invocationId: id });
+      previous = [...previous, passRecord(n * 2, text, last)];
+      if (n < 2) {
+        const fixed = await runApply(w.ctx, FIXER_REPLY, {
+          iteration: n * 2 + 1,
+          previous,
+          invocationId: FIXER_1,
+        });
+        previous = [...previous, passRecord(n * 2 + 1, FIXER_REPLY, fixed)];
+      }
+    }
+    expect(last.churnFiles).toEqual([]);
+    expect(last.converged).toBe(true);
+  });
+});
+
+describe('phase4ValidateStep: the severity of an issue that names an enforced rule', () => {
+  const ladder = (rule: string | undefined, severity: string) => ({
+    severity,
+    file: 'src/e.php:1',
+    description: `case ${severity}`,
+    ...(rule === undefined ? {} : { rule }),
+  });
+
+  it.each([
+    ['medium naming a rule of the stamp', 'medium', SHORT_A, 'high'],
+    ['low naming the other rule of the stamp', 'low', SHORT_B, 'high'],
+    [
+      'low written with spaces, capitals and a "rule " prefix',
+      'low',
+      `  RULE ${SHORT_A.toUpperCase()}  `,
+      'high',
+    ],
+    ['medium naming a rule the stamp does not list', 'medium', 'deadbeef', 'medium'],
+    ['critical naming a rule of the stamp', 'critical', SHORT_A, 'critical'],
+    ['high naming a rule of the stamp', 'high', SHORT_A, 'high'],
+    ['medium naming no rule', 'medium', undefined, 'medium'],
+    ["medium naming a rule of another invocation's stamp", 'medium', SHORT_C, 'medium'],
+  ])('%s is stored %s', async (_name, severity, rule, stored) => {
+    const w = ruleWorld({
+      [VALIDATOR_1]: stampOf(RULE_A, RULE_B),
+      [NEWER]: stampOf(RULE_C),
+    });
+    const out = await runApply(w.ctx, reply({ issues: [ladder(rule, severity)] }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.issues[0]!.severity).toBe(stored);
+  });
+
+  it('turns a VALID verdict into ISSUES_FOUND when it raised an issue, so the fixer and the fix loop see it', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const out = await runApply(
+      w.ctx,
+      reply({ verdict: 'VALID', issues: [ladder(SHORT_A, 'medium')] }),
+      { invocationId: VALIDATOR_1 },
+    );
+    expect(out.issues[0]!.severity).toBe('high');
+    expect(out.verdict).toBe('ISSUES_FOUND');
+    expect(await continues(out)).toBe(true);
+    expect(phase4ValidateStep.fixLoop!.evaluate(out)?.blocking).toBe(true);
+  });
+
+  it('leaves a VALID verdict alone when it raised nothing', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    const out = await runApply(
+      w.ctx,
+      reply({ verdict: 'VALID', issues: [ladder('deadbeef', 'medium'), ladder(undefined, 'low')] }),
+      { invocationId: VALIDATOR_1 },
+    );
+    expect(out.verdict).toBe('VALID');
+    expect(out.issues.map((i) => i.severity)).toEqual(['medium', 'low']);
+    expect(await continues(out)).toBe(false);
+  });
+
+  it.each(['high', 'critical'])(
+    'turns a VALID verdict into ISSUES_FOUND for a %s issue that names a rule of the stamp, though there is nothing to raise',
+    async (severity) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+      const out = await runApply(
+        w.ctx,
+        reply({ verdict: 'VALID', issues: [ladder(SHORT_A, severity)] }),
+        { invocationId: VALIDATOR_1 },
+      );
+      expect(out.issues[0]!.severity).toBe(severity);
+      expect(out.verdict).toBe('ISSUES_FOUND');
+      expect(await continues(out)).toBe(true);
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)?.blocking).toBe(true);
+    },
+  );
+
+  it.each([
+    ['names a rule the stamp does not list', stampOf(RULE_A), 'deadbeef'],
+    ['names a rule on a pass with no stamp', null, SHORT_A],
+  ])(
+    'leaves a VALID verdict alone for a high and a critical issue that %s',
+    async (_name, stamp, rule) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stamp });
+      const out = await runApply(
+        w.ctx,
+        reply({ verdict: 'VALID', issues: [ladder(rule, 'high'), ladder(rule, 'critical')] }),
+        { invocationId: VALIDATOR_1 },
+      );
+      expect(out.verdict).toBe('VALID');
+      expect(out.issues.map((i) => i.severity)).toEqual(['high', 'critical']);
+      expect(await continues(out)).toBe(false);
+      expect(phase4ValidateStep.fixLoop!.evaluate(out)).toBeNull();
+    },
+  );
+
+  it('leaves the severity as the model gave it when the invocation has no stamp, or the pass has no invocation', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: null });
+    const unstamped = await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'medium')] }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(unstamped.issues[0]!.severity).toBe('medium');
+    const missing = await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'medium')] }), {
+      invocationId: VALIDATOR_2,
+    });
+    expect(missing.issues[0]!.severity).toBe('medium');
+    const none = await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'medium')] }));
+    expect(none.issues[0]!.severity).toBe('medium');
+    expect(none.validatorInvocationId).toBeNull();
+  });
+
+  it('leaves the severity when the stamp is not a stamp', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: { mode: 'bogus', entries: 'x' } });
+    const out = await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'low')] }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.issues[0]!.severity).toBe('low');
+  });
+
+  it('reads the stamp of the pass once, and only when an issue names a rule and the pass has an id', async () => {
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+    await runApply(
+      w.ctx,
+      reply({ issues: [ladder(SHORT_A, 'low'), ladder(SHORT_B, 'low'), ladder('x', 'low')] }),
+      {
+        invocationId: VALIDATOR_1,
+      },
+    );
+    expect(w.stampReads()).toBe(1);
+    await runApply(w.ctx, reply({ issues: [ladder(undefined, 'low')] }), {
+      invocationId: VALIDATOR_1,
+    });
+    await runApply(w.ctx, reply({ verdict: 'VALID' }), { invocationId: VALIDATOR_1 });
+    await runApply(w.ctx, reply({ issues: [ladder(SHORT_A, 'low')] }));
+    expect(w.stampReads()).toBe(1);
+  });
+
+  it('names an entry by the short id houseRuleShortIds gives, not by the 8 digits two ids share', async () => {
+    const shortOne = houseRuleShortIds([TWIN_1, TWIN_2]).get(TWIN_1)!;
+    expect(shortOne.length).toBeGreaterThan(8);
+    const w = ruleWorld({ [VALIDATOR_1]: stampOf(TWIN_1, TWIN_2) });
+    const out = await runApply(
+      w.ctx,
+      reply({ issues: [ladder('77aa11bb', 'medium'), ladder(shortOne, 'medium')] }),
+      { invocationId: VALIDATOR_1 },
+    );
+    expect(out.issues.map((i) => i.severity)).toEqual(['medium', 'high']);
+  });
+
+  it.each(['medium', 'high', 'critical'])(
+    'counts a %s issue that names a rule of the stamp towards the churn guard even though the model said VALID',
+    async (severity) => {
+      const w = ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) });
+      let previous: ReturnType<typeof passRecord>[] = [];
+      let last = await runApply(w.ctx, 'x');
+      for (const n of [0, 1, 2]) {
+        const text = reply({
+          verdict: 'VALID',
+          issues: [{ ...ladder(SHORT_A, severity), file: `templates/node.tpl.php:${n + 1}` }],
+        });
+        last = await runApply(w.ctx, text, {
+          iteration: n * 2,
+          previous,
+          invocationId: VALIDATOR_1,
+        });
+        previous = [...previous, passRecord(n * 2, text, last)];
+        if (n < 2) {
+          const fixed = await runApply(w.ctx, FIXER_REPLY, {
+            iteration: n * 2 + 1,
+            previous,
+            invocationId: FIXER_1,
+          });
+          previous = [...previous, passRecord(n * 2 + 1, FIXER_REPLY, fixed)];
+        }
+      }
+      expect(last.verdict).toBe('ISSUES_FOUND');
+      expect(last.churnFiles).toEqual(['templates/node.tpl.php']);
+      expect(last.converged).toBe(false);
+    },
+  );
 });

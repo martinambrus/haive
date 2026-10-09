@@ -52,6 +52,11 @@ export function globsFromLines(text: string): string[] {
     .filter((line) => line !== '');
 }
 
+/** What the panel previews: the mode and the globs as typed; the api validates them on Enforce. */
+export function draftEnforceSpec(mode: 'always' | 'files', globsText: string): GlobalKbEnforceSpec {
+  return mode === 'always' ? { mode } : { mode, globs: globsFromLines(globsText) };
+}
+
 export function describeEnforceSpec(spec: GlobalKbEnforceSpec | null | undefined): string {
   if (!spec) return 'none';
   return spec.mode === 'always' ? 'always' : `files: ${spec.globs.join(', ')}`;

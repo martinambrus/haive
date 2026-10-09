@@ -35,7 +35,9 @@ rules (`resolveEffectiveRules(provider.rulesContent)`, not the merged block) at 
 `kind: 'prompt'` dispatch through `withAgentRules` (`orchestrator/agent-rules.ts`). It is applied
 LAST in `adaptPrompt`, so no capability or marker rewrite ever touches the operator's text, under
 a framing line: the step's own instructions and output contract win where they differ, and the
-block supersedes a differing AGENTS.md copy.
+block supersedes a differing AGENTS.md copy. An opted dispatch's house-rules block (the global KB's
+admin-enforced rules, [Global knowledge base](global-kb.md)) sits directly under it, so these rules
+stay outermost.
 
 It is never skipped because the repository "already delivers" the rules, which was unsafe four
 ways: the block written into every repository was damaged by the dedup bug until #232, codex reads
@@ -49,7 +51,8 @@ repository copy also loads.
   prepends: one that applies now but did not on the stored run (a model newly learned to lack
   vision) would otherwise bury the old block and leave two. The isolation scan reads the prompt
   with that block removed for the same reason. A marker anywhere else is text the prompt carries
-  and can neither suppress nor replace the injection.
+  and can neither suppress nor replace the injection. `stripHaivePreamble` removes this block and
+  then a stored house-rules block, each only at position 0.
 - **Unfenced**, because providers are per-user and edited by their owner: this is operator text.
 - **Opt-outs** (`skipAgentRules`): the step recap, `01-env-detect` and the model-health canary,
   whose prompts carry their whole task and whose replies are parsed as they are. The sub-agent
@@ -59,7 +62,8 @@ repository copy also loads.
   byte-identical; a failed read means off.
 - **Never a new failure.** When the rules push a prompt that fits past `PROMPT_ARGV_LIMIT_BYTES` for
   an adapter that takes its prompt only as an argument, the dispatch is rebuilt without them and
-  says so. No shipped adapter is argv-only since gemini moved to stdin; the rebuild stays as a guard.
+  says so; a house-rules block is dropped before them. No shipped adapter is argv-only since gemini
+  moved to stdin; the rebuild stays as a guard.
 - **Recorded per run.** `spec.agentRules` (`{ hash, injected, reason? }`, the hash of the
   normalised effective rules, kept even when they were not injected) rides the job to exec and is
   written by the UPDATE that sets `started_at` into `cli_invocations.agent_rules` (migration 0166).

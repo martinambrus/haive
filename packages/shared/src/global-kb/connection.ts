@@ -122,9 +122,26 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   };
 }
 
+/** Per-call limits; see `GlobalKbCallOptions`. Left out of the options, postgres.js keeps its own. */
+export interface GlobalKbConnectOptions {
+  connectTimeoutSeconds?: number;
+  /** False skips the query that teaches the driver the array types of the store. */
+  fetchTypes?: boolean;
+}
+
+const poolOptions = (opts: GlobalKbConnectOptions) => ({
+  max: 5,
+  onnotice,
+  ...(opts.connectTimeoutSeconds === undefined
+    ? {}
+    : { connect_timeout: opts.connectTimeoutSeconds }),
+  ...(opts.fetchTypes === undefined ? {} : { fetch_types: opts.fetchTypes }),
+});
+
 async function resolveInternal(
   settings: GlobalKbSettings,
   haiveDb: Database,
+  opts: GlobalKbConnectOptions,
 ): Promise<GlobalKbConnection> {
   const dbName = GLOBAL_KB_DB_NAME;
 
@@ -150,12 +167,16 @@ async function resolveInternal(
   const url = new URL(haiveUrl);
   url.pathname = `/${dbName}`;
 
-  const pg = postgres(url.toString(), { max: 5, onnotice });
+  const pg = postgres(url.toString(), poolOptions(opts));
   return buildConnection('internal', pg, settings);
 }
 
-function resolveExternal(settings: GlobalKbSettings, connectionString: string): GlobalKbConnection {
-  const pg = postgres(connectionString, { max: 5, onnotice });
+function resolveExternal(
+  settings: GlobalKbSettings,
+  connectionString: string,
+  opts: GlobalKbConnectOptions,
+): GlobalKbConnection {
+  const pg = postgres(connectionString, poolOptions(opts));
   return buildConnection('external', pg, settings);
 }
 
@@ -183,12 +204,13 @@ function buildConnection(
 export async function resolveGlobalKbConnection(
   settings: GlobalKbSettings,
   haiveDb: Database,
+  opts: GlobalKbConnectOptions = {},
 ): Promise<GlobalKbConnection> {
   if (settings.mode === 'external') {
     if (!settings.connectionString) {
       throw new Error('external globalKbMode requires the GLOBAL_KB_CONNECTION_STRING secret');
     }
-    return resolveExternal(settings, settings.connectionString);
+    return resolveExternal(settings, settings.connectionString, opts);
   }
-  return resolveInternal(settings, haiveDb);
+  return resolveInternal(settings, haiveDb, opts);
 }

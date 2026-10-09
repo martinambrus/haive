@@ -95,9 +95,10 @@ check catches mistakes and is not a boundary: only an admin enforces, a delibera
 `enforcementState` reads none, superseded, cleared, not active, edited, other namespace, switched
 off or enforced, first match winning, and the api attaches it to every entry it returns. Validity
 comes first: "other namespace" and "switched off" are pauses that promise the rule resumes, so they
-apply only to an approval that is otherwise valid. The enforce panel shows the title and description
-as agents see them (collapsed onto one line) and the body as stored, since that is what is approved;
-Enforce is offered only in the namespace in use, Un-enforce on any live approval.
+apply only to an approval that is otherwise valid. The enforce panel shows the whole rule as agents
+receive it, `renderHouseRuleEntry` for the mode and globs being drafted, as plain text (highlighted
+as markdown, a glob's `**` turned the rest bold), since that is what is approved; Enforce is offered
+only in the namespace in use, Un-enforce on any live approval.
 
 An enforced entry needs a description and may not carry invisible or control characters or Haive
 prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
@@ -110,6 +111,132 @@ save that read the page before an admin's change cannot revert it. The house-rul
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
 enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
+
+## House rules in prompts
+
+**Haive, never the model, decides which enforced rules a dispatch is shown.** A dispatch is opted in
+only when its (step, role) is in `HOUSE_RULE_ROLES` (`shared/src/step-engine/types.ts`), as `write`
+(04, the 05 corrector, 05a, 06b, the 06c coder, 07, 07a, the 07b fixer, the 08a fixer, 08b, 08e) or
+`review` (the 07b validator, and 08c's peer reviewer, which re-checks after 08b and the 08a fixer
+have written). Every other file-writing role is in `HOUSE_RULE_EXEMPT` with its
+reason: merge fixers, the 06c reviewer (a recorded risk: it does not see the rules, 07b checks the
+merged change), the 08a tester, skill writers, the KB author. A ratchet test keeps every
+`file_write` role in one table or the other, and a source guard makes every `resolveTaskDispatch`
+call pass `houseRules: houseRulesFor(...)` or a named `houseRulesOptOut(reason)`: the ratchet
+cannot see hard-coded capability arrays. retry_ai takes the mode of the pass it repairs. A fan-out
+(mining) seat is opted in only where the table names it, so 08c's security reviewer, its lenses,
+its refuters and every other fan-out step get nothing.
+
+The block, `<haive_house_rules>…</haive_house_rules>`, sits directly under the agent-rules block,
+so the operator's rules stay outermost; neither is fenced, since a person approved both. It holds a
+framing paragraph and the entries, each rendered by `renderHouseRuleEntry`: a `### Rule <id>:
+<title>` heading (the id is the first 8 hex digits of the entry, widened where two injected ids
+share them), a `Category:` line (a category is never fused into the title: "Anti-pattern — avoid:
+no inline svgs" read as its opposite), the description, the scope line (`Applies to every change.`
+or `Applies to files matching: …`) and the body exactly as approved. The closing marker is escaped
+in every field. The write framing tells a writer to follow every rule on the lines it writes, to
+report untouched code that breaks one as a similar site, that a review finding or a check's
+diagnosis never licenses a breach, and that only the approved spec or a person's directive can
+require one, which it then follows and reports. The review framing tells the 07b validator to check
+every written line and every deleted file, to apply a `files` rule only to the files its globs
+match, to report a
+violation as a `high` issue with `file` as `path:line` and `rule` as the id, that debt and a check's
+diagnosis or honored constraint never waive a rule (a person's counts as a directive), and to list
+a spec- or person-required violation under `rule_conflicts`, never as an issue; it also says those
+two fields extend the shape 07b's own output contract calls exact. 08c's peer gets the same framing
+in a findings wording: a violation is a finding with severity "high", `path`, `lines` and `rule`,
+and one outside the written lines goes to its `## INSIGHTS`.
+
+**Selection** (`selectHouseRules`, `orchestrator/house-rules.ts`): `always` rules always go in. A
+`files` rule goes in when a glob matches a file of the dispatch's change, read as gate 3 reads it
+(`git status --porcelain -z`, never `_impl-changes`' quoted status) plus the branch against its fork
+point, since a DAG task's tree is clean at 07b, with deleted paths and a rename's source: a rule can
+cover what a task removes or moves out. A DAG coder also matches its issue's `estimated_files`. A
+glob with no `/` matches a file name at any depth, as in a gitignore (picomatch `basename`), and
+`dot: true` as secret masking uses it. A change that cannot be read
+puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement nobody made.
+One 07 round 0 dispatch never gets a `files` rule, since nothing is written yet; similarity
+(PR7) is for that. Each prompt spends at most 16,384 bytes on the block, markers, framing and
+notice included. Rules are kept first-fit: `always` rules first, oldest approval first (a set within
+the api's 8,000-byte cap always fits, so only an external store's writers can push one out), then
+`files` rules, written-file matches before estimate-only ones and smaller before larger. What is
+left out is named inside the block (up to 8 titles and a count) and in the stamp; when everything
+is left out the block is the framing and that notice alone. Off, not opted in, or nothing in scope,
+the prompt is byte-identical to one without house rules: MEASURED on 23 dispatches against main's
+prompts (`t6/harness`, H1, H4, H5).
+
+**One bounded read per dispatch** (`resolveGlobalKbContext`) replaces the title digest's own read:
+the digest and the enforced rows come from one connection with a 3 s connect timeout, a 3 s
+`statement_timeout` set with `SET LOCAL` in each query's own transaction (a pooler would refuse a
+startup parameter) and a 6 s deadline that destroys the pool. MEASURED before: a store that accepts
+the connection and never answers stalled each dispatch 30,239 ms. What a task's users can read, the
+stamp and the one `house_rules.unavailable` event per task (written under an advisory lock), names a
+failure by error class only (`timeout`, `refused`, `auth`, `other`), never its message, which names
+the admin-only host; the worker's own log keeps the error for the operator. With the house-rules
+switch read as off, a store that then fails the digest read leaves the rules `disabled`, not
+`unavailable`. Enforced rows have their own reads, with no cap: the `id` and `facets` of the
+namespace's enforced rows (the partial index), the project's facets applied, then the full rows of
+the matches in approval order, so a store too large to read in time is `unavailable`, never short.
+Each row is re-vetted, since an external store's approvals are trusted unsigned:
+`enforcementState` re-derives the hash from the stored content, and a missing description, refused
+text or a glob the grammar refuses moves the row to the stamp's
+`omitted` as `refused`. A call with a deadline never starts the shared schema ensure, whose failure
+every other caller awaiting it would inherit.
+
+**Each opted run records what it got** in `cli_invocations.house_rules` (migration 0176), written
+with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],
+omitted: [{id, hash, title, why: 'budget' | 'refused'}], reason?, errorClass?,
+filesRulesUnmatched?}`, where `why` is
+`{scope: 'always'}` or `{scope: 'files', glob}`. `reason` is `switched_off`, `unavailable` or
+`too_large`; `filesRulesUnmatched` counts the project's `files` rules that matched nothing yet
+(absent when 0). NULL means the run was not opted in or predates the column. `stripHaivePreamble`
+removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
+agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
+or duplicates the injection. An injected block counts as external text for agent isolation. When an
+argv-only CLI cannot take the prompt, the dispatch drops the house block first (stamp reason
+`too_large`), then the agent rules; no shipped adapter is argv-only since gemini reads stdin, so the
+ladder is a guard.
+
+**07b blocks on a violation, and a person sees the rules at the gate.** The validator's JSON may
+carry `rule` on an issue and a top-level `rule_conflicts: [{rule, file, reason}]`, both parsed
+tolerantly: a malformed one drops only itself and never makes a pass unparseable. A validator pass
+stores its conflicts, its own `cli_invocations` id (`validatorInvocationId`) and how many changed
+files its list held of how many changed (`changedFilesCoverage`, capped at 100); a fixer pass carries
+all three from the validator it follows. A conflict is never an issue, so no fixer, fix loop or
+churn count acts on it: it waits for a person. Haive backs the block: an issue whose `rule` names an
+entry of the pass's own stamp is raised to `high` when the model said less, and a VALID pass with
+such an issue becomes ISSUES_FOUND so the fixer and the fix loop run. The fixer's issue lines and
+the fix-loop diagnosis name the rule. Gate 2 shows a "House rules" row right after "Implementation
+validation", read only from that invocation's stamp and the output's issues and conflicts, never
+from message copy (`_gate-house-rules.ts`): CONFLICT, VIOLATED, NOT CHECKED (store unreadable or
+prompt too large), OFF, PARTIAL (a rule left out, or rules given while the validator's file list
+was capped: selection matches the whole change, so a rule may match a file it never got) or
+ENFORCED, the first match winning; every state
+but OFF and ENFORCED keeps Approve from being the default. `quick_bugfix` runs no gate 2, so gate 3
+shows the same row first when no gate-2 output exists, under the rule that already governs similar
+sites and insights. An unparseable validator reply records no invocation id and shows no row: the
+validation row already says UNPARSEABLE. A violation in a file the dependency policy calls
+third-party (a Drupal 7 theme outside `custom/`, unless `.haive-data/dependency-ownership.json`
+claims it) is an upstream issue: no fixer runs, and the row still shows it as VIOLATED.
+
+**08c re-checks what 08b and the 08a fixer wrote.** They run after 07b, and 08c runs after both
+(08e runs after 08c, and quick_bugfix runs no 08c). 08c parses its peer's `rule` and
+`rule_conflicts` the way 07b does, raises a finding that names a rule of the peer's own stamp to
+`high` so it blocks through the fix loop, and never sends such a finding to a refuter: Haive decides
+a violation blocks, and a refuter cannot see the rule. It stores `ruleConflicts` and
+`peerInvocationId`. Gate 2's row merges the two checks: with an 08c peer stamp, its state (reason,
+entries, omitted, coverage) comes from 08c, the later check, and its violations and conflicts are
+both checks'; without one it is 07b's row. Gate 3 reads 07b alone.
+
+**The row says when the change moved after the last check.** Each check stores `changeFingerprint`,
+a sha256 over the change set and each changed file's bytes (read through fs-safe, at most 8 MiB a
+file): the 07b validator (a fixer pass carries it) and 08c's peer. Gate 2, and gate 3 when no gate 2
+ran, recompute it from the task worktree. When it differs from the last check's and rules were in
+play (entries, or `filesRulesUnmatched`, since a later write may be the first to match a rule), the
+row is PARTIAL and holds Approve: "the change was modified after the last house-rules check". That
+covers 08e's writes and quick_bugfix's 08b; a leftover untracked file trips it too. MEASURED: 112-170
+ms per fingerprint on a 90-file change. A capped file list is attributed to the check it was given to
+("the validator" or "the code review").
 
 ## Facets
 

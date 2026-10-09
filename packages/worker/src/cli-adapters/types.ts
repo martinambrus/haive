@@ -1,4 +1,5 @@
 import { schema } from '@haive/database';
+import type { HouseRulesStamp } from '@haive/shared/global-kb';
 import type { CodexAppServerVerdicts } from './codex-app-server-verdict.js';
 
 export type CliProviderRecord = typeof schema.cliProviders.$inferSelect;
@@ -165,6 +166,9 @@ export interface CliCommandSpec {
   /** Which agent rules this run's prompt carries, decided with the prompt at dispatch and written to
    *  `cli_invocations.agent_rules` at exec start. Never sent to the CLI. */
   agentRules?: AgentRulesStamp;
+  /** Which house rules this run's prompt carries, decided with the prompt at dispatch and written to
+   *  `cli_invocations.house_rules` at exec start. Absent for a dispatch that was not shown any. */
+  houseRules?: HouseRulesStamp;
 }
 
 /** Why a dispatch went out without its provider's rules block. */

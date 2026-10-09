@@ -474,12 +474,16 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
             (rows, fields) => rows.map((row) => project(table, fields, row)),
           ),
       }),
-      /** Only the two statements the attachments lock issues, and only inside a transaction. */
+      /** Only the attachments lock's statements and a read's statement timeout, inside a transaction. */
       execute: async (query: unknown): Promise<void> => {
         undoLog(ctx);
         const chunks = is(query, SQL) ? query.queryChunks : [];
         const first = text(chunks[0]) ?? '';
-        if (ctx !== null && chunks.length === 1 && first.startsWith('SET LOCAL lock_timeout'))
+        if (
+          ctx !== null &&
+          chunks.length === 1 &&
+          /^SET LOCAL (lock|statement)_timeout/.test(first)
+        )
           return;
         if (
           ctx !== null &&

@@ -38,6 +38,13 @@ import type { FileCoverage } from './_impl-changes.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import {
+  houseRulesHoldApprove,
+  houseRulesRow,
+  loadGateHouseRules,
+  taskChangeFingerprint,
+  type GateHouseRules,
+} from './_gate-house-rules.js';
 import type { Insight } from './08e-insights-triage.js';
 import { codeBlock } from './_plan-ops.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
@@ -201,6 +208,9 @@ interface VerifyGateDetect {
    *  the same reason as `similarSites`. */
   outOfScopeInsights?: Insight[];
   outOfScopeInsightsOmitted?: number;
+  /** What the validator was given of the house rules and what it found. Optional for the same
+   *  reason as `similarSites`. */
+  houseRules?: GateHouseRules | null;
 }
 
 interface Phase8dOutput {
@@ -241,6 +251,7 @@ interface Phase8cOutput {
       lines?: string;
       issue?: string;
       fix?: string;
+      rule?: string;
       refuted?: boolean;
     }[];
     positives?: string[];
@@ -614,7 +625,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
         peerFindings: (pc.peer?.findings ?? []).map((f) =>
-          `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'peer-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'peer-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''}${f.rule ? ` (rule ${f.rule})` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         securityFindings: (pc.security?.findings ?? []).map((f) =>
           `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'security-code-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
@@ -787,6 +798,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       : null;
     const similar = await loadTaskSimilarSites(ctx.db, ctx.taskId);
     const insights = await loadUnactedInsights(ctx.db, ctx.taskId);
+    const houseRules = await loadGateHouseRules(ctx.db, ctx.taskId, {
+      withCodeReview: true,
+      currentFingerprint: () => taskChangeFingerprint(ctx),
+    });
 
     return {
       verify: {
@@ -810,6 +825,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
       outOfScopeInsightsOmitted: insights.omitted,
+      houseRules,
     };
   },
 
@@ -862,6 +878,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       (b.method === 'mcp' || b.method === 'interactive');
     const smokeAdvisory = smokeFailed && browserRuntimeAuthoritative;
     const runtimeSmokeOk = (!smokeFailed && !smokeUnsure) || browserRuntimeAuthoritative;
+    const houseRulesOk = !houseRulesHoldApprove(detected.houseRules);
     // The verification roll-up is a coloured status table (label + pill), each row
     // carrying its evidence as an inline disclosure. Skipped checks are OMITTED (a
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
@@ -988,6 +1005,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         defaultOpen: !validationOk,
       });
     }
+
+    const houseRow = houseRulesRow(detected.houseRules);
+    if (houseRow) rows.push(houseRow);
 
     if (detected.testManagement) {
       const tp = detected.testManagement.testsPassed;
@@ -1283,7 +1303,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             browserOk &&
             codeReviewOk &&
             adversarialOk &&
-            runtimeSmokeOk
+            runtimeSmokeOk &&
+            houseRulesOk
               ? 'approve'
               : 'reject',
           required: true,

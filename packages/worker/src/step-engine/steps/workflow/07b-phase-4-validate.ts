@@ -26,6 +26,7 @@ import {
   assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
+  fileCoverage,
   NO_CHANGE_SET_FALLBACK,
   isDocsOnlyChange,
   type ImplementationFileSet,
@@ -48,6 +49,15 @@ import {
 import type { ReviewDimension, ReviewSeverity } from '@haive/shared/review';
 import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 import { recordReviewFindings, splitLocation } from './_review-findings.js';
+import {
+  givenRuleIds,
+  parseRuleConflicts,
+  parseRuleRef,
+  raiseRuleViolations,
+  taskChangeFingerprint,
+  type ChangedFilesCoverage,
+  type RuleConflict,
+} from './_gate-house-rules.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -129,6 +139,8 @@ interface ValidationIssue {
   file?: string;
   description: string;
   fix?: string;
+  /** The house rule this issue violates, as the validator referred to it. */
+  rule?: string;
 }
 
 interface DimensionResult {
@@ -149,6 +161,14 @@ interface ValidateApply {
    *  dimension produces exactly the same empty finding list as one that checked it
    *  and found nothing, and only this field tells them apart. */
   excludedDimensions: string[];
+  /** House rules the approved spec or a person requires breaking. Never issues: no fixer is asked to repair them. */
+  ruleConflicts?: RuleConflict[];
+  /** The latest validator pass's cli_invocations row, which holds the stamp of the rules it was given. */
+  validatorInvocationId?: string | null;
+  /** How many changed files the latest validator pass was given; the gate reads a capped list as PARTIAL. */
+  changedFilesCoverage?: ChangedFilesCoverage;
+  /** The change as the latest validator pass left it; the gate reads a change that differs as PARTIAL. */
+  changeFingerprint?: string;
   /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
    *  validator passes (non-converging). A false value routes the run to a human
    *  decision at gate-2 instead of another fix round. */
@@ -179,6 +199,7 @@ const validatorOutputSchema = z.object({
         file: z.string().optional(),
         description: z.string(),
         fix: z.string().optional(),
+        rule: z.unknown().optional().transform(parseRuleRef),
       }),
     )
     .default([]),
@@ -191,6 +212,7 @@ const validatorOutputSchema = z.object({
       }),
     )
     .default([]),
+  rule_conflicts: z.unknown().optional().transform(parseRuleConflicts),
 });
 
 const fixerOutputSchema = z.object({
@@ -212,10 +234,13 @@ export function parseValidatorOutput(raw: unknown): {
   summary: string;
   issues: ValidationIssue[];
   dimensions: DimensionResult[];
+  ruleConflicts: RuleConflict[];
 } | null {
   return parseAgentJson(raw, (candidate) => {
     const parsed = validatorOutputSchema.safeParse(candidate);
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) return null;
+    const { rule_conflicts: ruleConflicts, ...rest } = parsed.data;
+    return { ...rest, ruleConflicts };
   });
 }
 
@@ -302,7 +327,10 @@ function buildFindingsSummary(
   if (issues.length > 0) {
     lines.push('', `### Remaining issues (${issues.length})`);
     for (const i of issues) {
-      const loc = i.file ? `\`${i.file}\` — ` : '';
+      const at = [i.file ? `\`${i.file}\`` : '', i.rule ? `(rule ${i.rule})` : '']
+        .filter(Boolean)
+        .join(' ');
+      const loc = at ? `${at} — ` : '';
       const ownership = i.upstream === 'unknown' ? 'ownership unknown' : `upstream ${i.upstream}`;
       lines.push(
         `- [${i.severity}] ${i.upstream ? `[${ownership} — user decision required] ` : ''}${loc}${i.description}`,
@@ -827,7 +855,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
               ? issues
                   .map(
                     (i, n) =>
-                      `${n + 1}. [${i.severity}] ${i.file ?? ''} ${i.description}${i.fix ? ` — required fix: ${i.fix}` : ''}`,
+                      `${n + 1}. [${i.severity}] ${i.file ?? ''}${i.rule ? ` (rule ${i.rule})` : ''} ${i.description}${i.fix ? ` — required fix: ${i.fix}` : ''}`,
                   )
                   .join('\n')
               : '(no project-owned repair assignments — make no edits and report that result)',
@@ -964,6 +992,14 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         upstreamIssues: prior?.upstreamIssues ?? [],
         dimensions: prior?.dimensions ?? [],
         excludedDimensions,
+        ruleConflicts: prior?.ruleConflicts ?? [],
+        validatorInvocationId: prior?.validatorInvocationId ?? null,
+        ...(prior?.changedFilesCoverage === undefined
+          ? {}
+          : { changedFilesCoverage: prior.changedFilesCoverage }),
+        ...(prior?.changeFingerprint === undefined
+          ? {}
+          : { changeFingerprint: prior.changeFingerprint }),
         converged: prior?.converged ?? true,
         churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
@@ -987,23 +1023,32 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
       const d = args.detected as ValidateDetect;
+      const coverage = fileCoverage(d.implementationFiles);
       const policy =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
-      const issues = parsed.issues.map((issue) => {
+      const ruled = raiseRuleViolations(
+        parsed.issues,
+        await givenRuleIds(ctx.db, parsed.issues, args.llmInvocationId),
+      );
+      const issues = ruled.items.map((issue) => {
         const upstream = upstreamKind(issue.file, policy);
         return { ...issue, upstream };
       });
       const upstreamIssues = issues.filter((issue) => issue.upstream);
-      const verdict = upstreamIssues.length > 0 ? 'ISSUES_FOUND' : parsed.verdict;
+      // Any issue naming a stamped rule makes a VALID pass ISSUES_FOUND: only that runs the fixer and the fix loop.
+      const verdict =
+        upstreamIssues.length > 0 || ruled.stamped > 0 ? 'ISSUES_FOUND' : parsed.verdict;
       // Churn only matters while issues remain; a VALID pass converged by definition.
       const churnFiles =
-        parsed.verdict === 'ISSUES_FOUND'
+        parsed.verdict === 'ISSUES_FOUND' || ruled.stamped > 0
           ? churnHotspots([...priorValidatorIssueLists(previous), issues])
           : [];
       ctx.logger.info(
         {
           verdict: parsed.verdict,
           issues: parsed.issues.length,
+          raisedByRule: ruled.raised,
+          stampedRules: ruled.stamped,
           dimensionFails: parsed.dimensions.filter((dim) => dim.status === 'FAIL').length,
           churnFiles: churnFiles.length,
         },
@@ -1036,6 +1081,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         round: ctx.round,
         text: parsed.summary,
       });
+      // Only a pass the gate can find by its invocation id is worth a read of the whole change.
+      const fingerprint = args.llmInvocationId ? await taskChangeFingerprint(ctx) : null;
       return {
         verdict,
         summary: parsed.summary,
@@ -1043,6 +1090,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         upstreamIssues,
         dimensions: parsed.dimensions,
         excludedDimensions,
+        ruleConflicts: parsed.ruleConflicts,
+        validatorInvocationId: args.llmInvocationId ?? null,
+        ...(coverage === null
+          ? {}
+          : { changedFilesCoverage: { listed: coverage.listed, total: coverage.total } }),
+        ...(fingerprint === null ? {} : { changeFingerprint: fingerprint }),
         converged: churnFiles.length === 0,
         churnFiles,
         fixesApplied: fixesSoFar,

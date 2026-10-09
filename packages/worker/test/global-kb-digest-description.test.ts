@@ -19,7 +19,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   };
 });
 
-import { resolveGlobalKbDigest } from '../src/step-engine/steps/_global-kb-digest.js';
+import { resolveGlobalKbContext } from '../src/orchestrator/global-kb-context.js';
 
 const at = (minute: number): Date => new Date(Date.UTC(2026, 9, 3, 12, minute));
 
@@ -39,7 +39,7 @@ function seed(rows: Array<Record<string, unknown>>): void {
   h.gdb = fake.db;
 }
 
-describe('resolveGlobalKbDigest and descriptions', () => {
+describe('resolveGlobalKbContext and descriptions', () => {
   beforeEach(() => {
     seed([
       { title: 'Alpha', updatedAt: at(5), description: 'Escape\nevery label.' },
@@ -51,7 +51,9 @@ describe('resolveGlobalKbDigest and descriptions', () => {
   });
 
   it('advertises the description of each live entry, normalised, and nothing else of the rest', async () => {
-    const digest = await resolveGlobalKbDigest({} as Database, 'task-1');
+    const { digest } = await resolveGlobalKbContext({} as Database, 'task-1', {
+      houseRules: false,
+    });
 
     expect(digest.entries.map((e) => e.title)).toEqual(['Alpha', 'Bravo', 'Echo']);
     expect(digest.entries[0]).toEqual({

@@ -31,11 +31,8 @@ import {
   agentGuidanceIds,
   stripAgentGuidanceBlocks,
 } from '../step-engine/steps/_retrieval-guidance.js';
-import {
-  resolveGlobalKbDigest,
-  withGlobalKbDigest,
-  type GlobalKbDigest,
-} from '../step-engine/steps/_global-kb-digest.js';
+import { withGlobalKbDigest, type GlobalKbDigest } from '../step-engine/steps/_global-kb-digest.js';
+import type { HouseRulesStamp } from '@haive/shared/global-kb';
 import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
@@ -51,6 +48,15 @@ import {
   resolveAgentRulesInjectionEnabled,
   withAgentRules,
 } from './agent-rules.js';
+import { resolveGlobalKbContext } from './global-kb-context.js';
+import { recordHouseRulesUnavailable, selectForDispatch } from './house-rules-dispatch.js';
+import {
+  houseRulesStampOf,
+  stripHaivePreamble,
+  withHouseRules,
+  type HouseRuleSelection,
+  type HouseRulesRequest,
+} from './house-rules.js';
 import {
   resolveInvocationUsesWorktreeGitBoundary,
   withWorktreeGitBoundary,
@@ -194,6 +200,12 @@ export interface DispatchRequest {
   /** Set by a dispatch the rules have no business in: the step recap, `01-env-detect` and the model
    *  health canary, whose prompts carry their whole task and whose replies are parsed as they are. */
   skipAgentRules?: boolean;
+  /** Set by a dispatch shown the admin-enforced house rules (`houseRulesFor`). Absent means not opted
+   *  in: no block, no stamp, no store read for rules. */
+  houseRules?: HouseRulesRequest;
+  /** What an opted dispatch is shown, computed by `resolveTaskDispatch`; exposed on the pure resolver
+   *  only for tests, like `globalKbDigest`. Absent means nothing was resolved: no block, no stamp. */
+  houseRuleSelection?: HouseRuleSelection;
   registry?: CliAdapterRegistry;
 }
 
@@ -215,9 +227,10 @@ export interface DispatchRequest {
  *   the repository's instruction chain names an agent directory or a file inside one;
  * - the step did not declare `agentPool: '*'`;
  * - nothing the dispatcher adds after this decision names one either: the MCP surface's user server
- *   keys, the global-KB digest's titles and descriptions, and `injectedRules`, the provider's rules
- *   block. The rules are passed only once the provider is known, so the async pre-check runs without
- *   them and can only be more permissive than the final pass.
+ *   keys, the global-KB digest's titles and descriptions, the house rules block when one is injected,
+ *   and `injectedRules`, the provider's rules block. The rules are passed only once the provider is
+ *   known, so the async pre-check runs without them and can only be more permissive than the final
+ *   pass.
  */
 export function agentIsolationApplies(req: DispatchRequest, injectedRules?: string): boolean {
   if (req.agentIsolation !== true) return false;
@@ -230,10 +243,10 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   // Haive's own marker pointers name `.claude/agents/<id>.md` by construction, so they are removed
   // before the scan; a user-forged marker-shaped block is removed with them and never reaches the
   // model. Bodies are scanned as they are, because they DO reach it unrewritten. A re-fed prompt's
-  // stored rules block goes too: `adaptPrompt` drops it, and the current rules are scanned below.
+  // stored rules blocks go too: `adaptPrompt` drops them, and the current ones are scanned below.
   if (
     promptNamesAgentPath(
-      stripAgentGuidanceBlocks(withAgentRules(req.input.prompt, null).prompt),
+      stripAgentGuidanceBlocks(stripHaivePreamble(req.input.prompt)),
       SANDBOX_WORKDIR,
     )
   )
@@ -266,6 +279,7 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
       entry.category,
       ...(entry.description ? [entry.description] : []),
     ]),
+    ...(req.houseRules && req.houseRuleSelection?.block ? [req.houseRuleSelection.block] : []),
     ...(injectedRules ? [injectedRules] : []),
   ].join('\n');
   if (externalText.length > 0 && promptNamesAgentPath(externalText, SANDBOX_WORKDIR)) return false;
@@ -279,11 +293,12 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
+  const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
   const [
     lspConfigured,
     worktreeGitBoundary,
     mcpSurface,
-    globalKbDigest,
+    globalKb,
     appReach,
     codexAppServer,
     hasRepo,
@@ -295,13 +310,19 @@ export async function resolveTaskDispatch(
     req.toolProfile === 'none'
       ? emptyMcpSurface()
       : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
-    resolveGlobalKbDigest(db, taskId),
+    resolveGlobalKbContext(db, taskId, { houseRules: houseRules !== undefined }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
     taskHasRepository(db, taskId),
     resolveAgentIsolationEnabled(),
     resolveAgentRulesInjectionEnabled(),
   ]);
+  const houseRuleSelection = houseRules
+    ? await selectForDispatch(db, taskId, houseRules, req.worktreeRel, globalKb)
+    : undefined;
+  if (houseRuleSelection?.status === 'unavailable') {
+    await recordHouseRulesUnavailable(db, taskId, houseRuleSelection.errorClass ?? 'other');
+  }
   const resolved: DispatchRequest = {
     ...req,
     lspConfigured,
@@ -309,12 +330,14 @@ export async function resolveTaskDispatch(
     // not apply (or omit one it will): the DB-backed target wins any input.
     worktreeGitBoundary,
     mcpSurface,
-    globalKbDigest,
+    globalKbDigest: globalKb.digest,
     appReach,
     codexAppServer,
     hasRepo,
     agentIsolation,
     agentRulesInjection,
+    houseRules,
+    houseRuleSelection,
   };
   const plan = resolveDispatch(resolved);
   // A provider's first steerable codex dispatch in a task is where its app-server transport is
@@ -378,7 +401,10 @@ async function resolveAgentIsolation(
   // The same four-condition gate today's pointer survives (Decision 1): outside it the prompt is
   // unchanged, so there is no body to read and nothing to paste.
   const metadata = getCliProviderMetadata(provider.name);
-  const ids = resolved.input.kind === 'prompt' ? agentGuidanceIds(resolved.input.prompt) : [];
+  const ids =
+    resolved.input.kind === 'prompt'
+      ? agentGuidanceIds(stripHaivePreamble(resolved.input.prompt))
+      : [];
   if (
     ids.length === 0 ||
     !metadata.projectAgentsDir ||
@@ -513,13 +539,18 @@ function buildCliSidePlan(
   // describes a surface neither half is looking at.
   const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
   const rules = agentRulesFor(req, provider);
+  const house = houseRulesInjection(req);
   // One decision for this plan, so the prompt and the mounts cannot disagree: the same boolean
   // chooses whether a persona body replaces the pointer and whether exec masks the directories.
   const isolated = agentIsolationApplies(req, rules.text ?? undefined);
-  const adaptPrompt = (prompt: string, rulesText: string | null = rules.text): string => {
-    // A stored prompt dispatched again opens with its old rules block; every adapter below prepends,
-    // so one that newly applies would bury that block where the replacement at the end cannot see it.
-    const capabilityAdapted = adaptPromptForCliCapabilities(withAgentRules(prompt, null).prompt, {
+  const adaptPrompt = (
+    prompt: string,
+    rulesText: string | null = rules.text,
+    houseBlock: string | null = house.block,
+  ): string => {
+    // A stored prompt dispatched again opens with its old rules blocks; every adapter below prepends,
+    // so one that newly applies would bury them where the replacement at the end cannot see them.
+    const capabilityAdapted = adaptPromptForCliCapabilities(stripHaivePreamble(prompt), {
       supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
       ragWired,
       projectAgentsDir: providerMetadata.projectAgentsDir,
@@ -575,8 +606,9 @@ function buildCliSidePlan(
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.
     const bounded = withModelCapabilityBoundary(digested, provider);
-    // LAST, so the operator's own rules sit outermost and no rewrite above ever touches them.
-    return withAgentRules(bounded, rulesText).prompt;
+    // LAST, so the operator's own rules sit outermost and no rewrite above ever touches them, and the
+    // admin's house rules directly under them: both are text a person approved, neither is fenced.
+    return withAgentRules(withHouseRules(bounded, houseBlock), rulesText).prompt;
   };
 
   // A model that cannot read images must not be handed the screenshot tool: the prompt
@@ -604,21 +636,37 @@ function buildCliSidePlan(
       adapter.steeringTransportReady(provider, { codexAppServer: req.codexAppServer ?? null });
     // Read off the ORIGINAL prompt: adaptPrompt rewrites every marker away, and the stored
     // prompt is the rewritten one.
-    const assignedAgentIds = assignedPersonaIds(req, [req.input.prompt]);
-    let effectivePrompt = adaptPrompt(req.input.prompt);
+    const assignedAgentIds = assignedPersonaIds(req, [stripHaivePreamble(req.input.prompt)]);
+    let rulesText = rules.text;
+    let houseBlock = house.block;
+    let effectivePrompt = adaptPrompt(req.input.prompt, rulesText, houseBlock);
     let agentRules = rules.stamp;
-    let spec: CliCommandSpec;
-    try {
-      spec = adapter.buildCliInvocation(provider, effectivePrompt, { ...invokeOpts, steeringMode });
-    } catch (err) {
-      // gemini takes its prompt only as an argument: the rules must never be what pushes a prompt
-      // that fits past that limit, so the dispatch goes out without them and says so.
-      if (!(err instanceof PromptTooLargeError) || !agentRules.injected) throw err;
-      effectivePrompt = adaptPrompt(req.input.prompt, null);
-      spec = adapter.buildCliInvocation(provider, effectivePrompt, { ...invokeOpts, steeringMode });
-      agentRules = { ...agentRules, injected: false, reason: 'prompt-too-large' };
+    let houseRules = house.stamp;
+    let spec: CliCommandSpec | undefined;
+    while (spec === undefined) {
+      try {
+        spec = adapter.buildCliInvocation(provider, effectivePrompt, {
+          ...invokeOpts,
+          steeringMode,
+        });
+      } catch (err) {
+        // gemini takes its prompt only as an argument, and rules must never be what pushes a prompt
+        // that fits past that limit: drop the house rules, then the agent rules, and say so.
+        if (!(err instanceof PromptTooLargeError)) throw err;
+        if (houseBlock !== null) {
+          houseBlock = null;
+          houseRules = house.droppedStamp;
+        } else if (agentRules.injected) {
+          rulesText = null;
+          agentRules = { ...agentRules, injected: false, reason: 'prompt-too-large' };
+        } else {
+          throw err;
+        }
+        effectivePrompt = adaptPrompt(req.input.prompt, rulesText, houseBlock);
+      }
     }
     spec.agentRules = agentRules;
+    if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
     if (isolated) spec.maskAgentDefinitions = true;
     // Recorded from the bodies actually pasted, and NOT gated on isolation: exec rechecks whatever
@@ -652,9 +700,9 @@ function buildCliSidePlan(
     // No step builds a sub-agent spec, so these carry no rules block rather than one per prompt.
     subAgents: req.input.spec.subAgents.map((subAgent) => ({
       ...subAgent,
-      prompt: adaptPrompt(subAgent.prompt, null),
+      prompt: adaptPrompt(subAgent.prompt, null, null),
     })),
-    synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt, null),
+    synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt, null, null),
   };
   const assignedAgentIds = assignedPersonaIds(req, [
     ...req.input.spec.subAgents.map((subAgent) => subAgent.prompt),
@@ -691,6 +739,22 @@ function agentRulesFor(
     return { text: null, stamp: { hash, injected: false, reason: 'opt-out' } };
   }
   return { text: effective, stamp: { hash, injected: true } };
+}
+
+/** The block this dispatch carries and the stamp that records it, or the stamp for when the CLI
+ *  cannot take the block. A dispatch that did not ask records none, one that asked records even an empty one. */
+function houseRulesInjection(req: DispatchRequest): {
+  block: string | null;
+  stamp: HouseRulesStamp | null;
+  droppedStamp: HouseRulesStamp | null;
+} {
+  const { houseRules, houseRuleSelection } = req;
+  if (!houseRules || !houseRuleSelection) return { block: null, stamp: null, droppedStamp: null };
+  return {
+    block: houseRuleSelection.block,
+    stamp: houseRulesStampOf(houseRules.mode, houseRuleSelection),
+    droppedStamp: houseRulesStampOf(houseRules.mode, houseRuleSelection, true),
+  };
 }
 
 /** The caller's explicit ids plus every marker id in the given prompts, unique and in code-unit

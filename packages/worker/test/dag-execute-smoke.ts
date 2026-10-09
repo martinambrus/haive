@@ -13,6 +13,12 @@ import {
   logger,
   type CliExecJobPayload,
 } from '@haive/shared';
+import {
+  globalKbEntries,
+  houseRuleApprovalHash,
+  withGlobalKb,
+  type EnforceSpec,
+} from '@haive/shared/global-kb';
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue } from '../src/queues/task-queue.js';
@@ -48,7 +54,12 @@ interface State {
   userId?: string;
   repoId?: string;
   taskId?: string;
+  ruleId?: string;
 }
+
+// An admin-enforced house rule in the real store, scoped to template files.
+const RULE_TITLE = 'dag smoke: no inline svgs in templates';
+const RULE_SPEC: EnforceSpec = { mode: 'files', globs: ['**/*.tpl.php'] };
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, stdio: 'pipe' }).toString();
@@ -87,6 +98,29 @@ async function main(): Promise<void> {
     await secretsService.initialize(db);
     const masterKek = await secretsService.getMasterKek();
     await userSecretsService.initialize(db, masterKek);
+
+    await withGlobalKb(db, async ({ db: gdb, settings }) => {
+      const content = {
+        title: RULE_TITLE,
+        category: 'anti_pattern' as const,
+        description: 'Reference SVG files from templates.',
+        body: 'Never paste inline svg markup into a template; reference a file.\n',
+        facets: {},
+      };
+      const [row] = await gdb
+        .insert(globalKbEntries)
+        .values({
+          ...content,
+          namespace: settings.namespace,
+          status: 'active',
+          source: 'user',
+          enforce: RULE_SPEC,
+          enforcedHash: houseRuleApprovalHash(content, RULE_SPEC),
+          enforcedAt: new Date(),
+        })
+        .returning({ id: globalKbEntries.id });
+      state.ruleId = row!.id;
+    });
 
     state.fixtureDir = await createFixture();
     const repoPath = state.fixtureDir;
@@ -255,6 +289,7 @@ async function main(): Promise<void> {
     // content) + store an ISSUE_RESULT_JSON, completing the invocation
     // synchronously. The next resolveDagPhase pass ingests + merges it.
     const coderPrompts: string[] = [];
+    const coderStamps = new Map<string, unknown>();
     const enqueueCliInvocation = async (payload: CliExecJobPayload): Promise<void> => {
       const sent = await db.query.cliInvocations.findFirst({
         where: eq(schema.cliInvocations.id, payload.invocationId),
@@ -266,6 +301,7 @@ async function main(): Promise<void> {
       });
       if (!issue?.worktreePath)
         throw new Error(`fake coder: no issue/worktree for ${payload.invocationId}`);
+      coderStamps.set(issue.issueKey, (payload.spec as { houseRules?: unknown }).houseRules);
       await writeFile(
         path.join(issue.worktreePath, `${issue.issueKey}.txt`),
         `impl ${issue.issueKey}\n`,
@@ -384,6 +420,29 @@ async function main(): Promise<void> {
       throw new Error(`${uninformed.length} coder prompt(s) carry no attachments notice`);
     }
 
+    // Every coder was shown the house rules in the write framing. The fixture is not under the
+    // worker's repository root, so no coder's change can be read and the rule goes in unscoped.
+    const wanted = JSON.stringify({
+      mode: 'write',
+      entries: [{ scope: 'files', glob: null, id: state.ruleId }],
+      omitted: [],
+    });
+    for (const d of issueDefs) {
+      const stamp = coderStamps.get(d.key) as
+        | { mode: string; entries: Array<{ id: string; why: unknown }>; omitted: unknown[] }
+        | undefined;
+      const seen = JSON.stringify({
+        mode: stamp?.mode,
+        entries: (stamp?.entries ?? []).map((e) => ({ ...(e.why as object), id: e.id })),
+        omitted: stamp?.omitted,
+      });
+      if (seen !== wanted) throw new Error(`${d.key}: coder house rules ${seen}, wanted ${wanted}`);
+    }
+    const rulePrompts = coderPrompts.filter((prompt) => prompt.includes(RULE_TITLE));
+    if (rulePrompts.length !== issueDefs.length) {
+      throw new Error(`${rulePrompts.length} coder prompt(s) carry the house rule`);
+    }
+
     // Issue worktrees cleaned up.
     for (const d of issueDefs) {
       const wt = path.join(repoPath, '.haive', 'worktrees', `${INTEGRATION_BRANCH}--${d.key}`);
@@ -412,6 +471,12 @@ async function main(): Promise<void> {
       if (state.userId) await db.delete(schema.users).where(eq(schema.users.id, state.userId));
     } catch (cleanupErr) {
       log.warn({ err: cleanupErr }, 'db cleanup failed');
+    }
+    if (state.ruleId) {
+      const ruleId = state.ruleId;
+      await withGlobalKb(getDb(), ({ db: gdb }) =>
+        gdb.delete(globalKbEntries).where(eq(globalKbEntries.id, ruleId)),
+      ).catch((err: unknown) => log.warn({ err }, 'house rule cleanup failed'));
     }
     if (state.fixtureDir) {
       // Prune worktree registrations before removing the dir.

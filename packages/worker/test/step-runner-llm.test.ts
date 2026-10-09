@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbContext: async () => ({
+    digest: { entries: [], omitted: 0, scanSaturated: false },
+    rules: [],
+    refused: [],
+    status: 'ok',
+  }),
+}));
 import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -132,7 +142,9 @@ function makeMockDb(state: MockState): Database {
     // production behavior for users who haven't set anything.
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
+      userStepCliRolePreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
+      taskStepCliTouched: { findFirst: async () => undefined },
       tasks: { findFirst: async () => undefined },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
@@ -1059,5 +1071,106 @@ describe('advanceStep LLM phase', () => {
     });
     expect(result.status).toBe('waiting_cli');
     expect(enqueued).toHaveLength(1);
+  });
+});
+
+describe('advanceStep and the house rules', () => {
+  // The store is not under test here, which step and role asks for rules is: an empty, readable
+  // store leaves the stamp the dispatch was opted in with.
+  const stepWith = (id: string, resolveRole?: (iteration: number) => string): StepDefinition => ({
+    ...baseStep(),
+    metadata: { ...baseStep().metadata, id },
+    ...(resolveRole
+      ? {
+          loop: {
+            maxIterations: 5,
+            shouldContinue: () => false,
+            resolveRole,
+          } as StepDefinition['loop'],
+        }
+      : {}),
+  });
+
+  /** The stamp the dispatch's job carries, or undefined for a dispatch not opted in. */
+  async function stampOf(
+    stepDef: StepDefinition,
+    opts: { iterations?: number; retryAi?: boolean } = {},
+  ): Promise<unknown> {
+    const state = freshState();
+    state.taskStepRow.stepId = stepDef.metadata.id;
+    state.taskStepRow.iterations = Array.from({ length: opts.iterations ?? 0 }, (_, i) => ({
+      iteration: i,
+      llmOutput: null,
+      applyOutput: null,
+      continueRequested: true,
+      recordedAt: new Date().toISOString(),
+    }));
+    if (opts.retryAi) state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'tail' };
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    const outcome = JSON.stringify({
+      status: result.status,
+      error: (result as { error?: string }).error,
+    });
+    expect(enqueued, outcome).toHaveLength(1);
+    return (enqueued[0]!.spec as { houseRules?: unknown }).houseRules;
+  }
+
+  const stamp = (mode: 'write' | 'review') => ({ mode, entries: [], omitted: [] });
+  const validatorFixer = (i: number) => (i % 2 === 0 ? 'validator' : 'fixer');
+  const reviewerCorrector = (i: number) => (i % 2 === 0 ? 'reviewer' : 'corrector');
+
+  it('shows 07 the write framing', async () => {
+    expect(await stampOf(stepWith('07-phase-2-implement'))).toEqual(stamp('write'));
+  });
+
+  it('shows the 07b validator the review framing and its fixer the write framing', async () => {
+    const step = stepWith('07b-phase-4-validate', validatorFixer);
+    expect(await stampOf(step, { iterations: 0 })).toEqual(stamp('review'));
+    expect(await stampOf(step, { iterations: 1 })).toEqual(stamp('write'));
+    expect(await stampOf(step, { iterations: 2 })).toEqual(stamp('review'));
+  });
+
+  it('shows the spec corrector the rules and the spec reviewer none', async () => {
+    const step = stepWith('05-phase-0b5-spec-quality', reviewerCorrector);
+    expect(await stampOf(step, { iterations: 0 })).toBeUndefined();
+    expect(await stampOf(step, { iterations: 1 })).toEqual(stamp('write'));
+  });
+
+  it('shows an exempt or unknown step nothing', async () => {
+    expect(await stampOf(stepWith('09_5-skill-generation'))).toBeUndefined();
+    expect(await stampOf(stepWith('01-plan-merge'))).toBeUndefined();
+    expect(await stampOf(stepWith('test-llm-step'))).toBeUndefined();
+  });
+
+  it('gives the retry_ai fix agent the mode of the step it repairs', async () => {
+    expect(await stampOf(stepWith('07-phase-2-implement'), { retryAi: true })).toEqual(
+      stamp('write'),
+    );
+  });
+
+  it('gives it nothing when the step it repairs is exempt', async () => {
+    expect(await stampOf(stepWith('09_5-skill-generation'), { retryAi: true })).toBeUndefined();
+    expect(await stampOf(stepWith('12-worktree-cleanup'), { retryAi: true })).toBeUndefined();
+  });
+
+  it('gives it the mode of the pass that failed, which is the pass the loop would run next', async () => {
+    const step = stepWith('07b-phase-4-validate', validatorFixer);
+    expect(await stampOf(step, { retryAi: true, iterations: 0 })).toEqual(stamp('review'));
+    expect(await stampOf(step, { retryAi: true, iterations: 1 })).toEqual(stamp('write'));
   });
 });
