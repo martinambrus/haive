@@ -13,7 +13,7 @@ import {
   normalizeGlobalKbDescription,
 } from '@haive/shared/global-kb';
 import {
-  embedQuery,
+  embedQueryOrNull,
   FACET_FILTER_DIMENSIONS,
   ragHybridSearch,
   type RagConnection,
@@ -456,9 +456,9 @@ export function mergeRankedWithRecency(
  *  the agent could also have found — there is no third notion of relevance in
  *  the codebase.
  *
- *  Degrades in two stages, never to nothing. With no embedding model configured
- *  `embedQuery` hash-embeds instead of throwing, so the dense half becomes noise
- *  and the ranking falls back to the LEXICAL half of the same fusion. Only a
+ *  Degrades in two stages, never to nothing. A query that cannot be embedded (no
+ *  model configured, a failed or wrong-width embed) ranks on the LEXICAL half of the
+ *  same fusion alone, since a hash vector is noise in the dense half. Only a
  *  thrown search (an index that is not built, an unreachable store) returns [],
  *  and the caller then falls back to the recency order this replaced. Retrieval
  *  degrading must never cost the step its article list. */
@@ -476,16 +476,16 @@ async function rankArticleIdsByRelevance(
   limit: number,
 ): Promise<string[]> {
   try {
-    const vec = await embedQuery(query, {
+    const vec = await embedQueryOrNull(query, {
       ollamaUrl: settings.ollamaUrl,
       model: settings.embedModel,
       dimensions: settings.embeddingDimensions,
     });
     const hits = await ragHybridSearch(
       conn,
-      vec,
+      vec ?? [],
       query,
-      { topK: limit * CHUNKS_PER_ARTICLE_ALLOWANCE },
+      { topK: limit * CHUNKS_PER_ARTICLE_ALLOWANCE, lexicalOnly: vec === null },
       { namespace: settings.namespace, facets },
     );
     if (hits.length === 0) return [];
