@@ -383,6 +383,16 @@ function reportExcerpt(report: string): string {
     : report;
 }
 
+const CHECKLIST_EXCERPT_CHARS = 12_000;
+
+function checklistExcerpt(checklist: string): string {
+  const left = checklist.length - CHECKLIST_EXCERPT_CHARS;
+  if (left <= 0) return checklist;
+  const one = left === 1;
+  const note = `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the checklist ${one ? 'is' : 'are'} not shown …]`;
+  return `${checklist.slice(0, CHECKLIST_EXCERPT_CHARS)}\n\n${note}`;
+}
+
 interface VerifyGateApply {
   decision: 'approve' | 'reject';
   feedback: string;
@@ -1039,7 +1049,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           '',
           '> Verify the checklist below by hand. Approve = all passed; Reject = issues found.',
           '',
-          b.checklistMarkdown.slice(0, 12_000),
+          checklistExcerpt(b.checklistMarkdown),
         );
       } else {
         lines.push('', `**Result:** ${b.passed ? 'PASS' : 'FAIL'}`);

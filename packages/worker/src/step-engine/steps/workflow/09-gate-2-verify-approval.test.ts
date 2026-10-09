@@ -1346,6 +1346,59 @@ describe('gate-2 shows a long validator report from both ends', () => {
   });
 });
 
+describe('gate-2 says when it cuts a long manual checklist', () => {
+  const ran = { ran: true, passed: true, output: '' };
+  const INTRO =
+    '**Method:** manual\n\n> Verify the checklist below by hand. Approve = all passed; Reject = issues found.\n\n';
+  const checklist = (chars: number): string => {
+    let text = '## Manual checklist\n';
+    for (let n = 1; text.length < chars; n += 1)
+      text += `- [ ] ${n}. open /page-${n} and check it\n`;
+    return text.slice(0, chars);
+  };
+  const bodyOf = (checklistMarkdown: string): string => {
+    const detected = {
+      verify: { test: ran, lint: ran, typecheck: ran },
+      allPassed: true,
+      validation: null,
+      testManagement: null,
+      browser: {
+        method: 'manual',
+        passed: true,
+        failures: [],
+        visualVerdict: null,
+        checklistMarkdown,
+        skipped: false,
+      },
+      codeReview: null,
+      codeAudit: null,
+      adversarial: null,
+      liveBrowser: null,
+      runtimeSmoke: null,
+    };
+    const rows = gate2VerifyApprovalStep.form!({} as never, detected as never)!.statusSummary ?? [];
+    return rows.find((r) => r.label === 'Browser testing')?.body ?? '';
+  };
+
+  it.each([
+    [12_001, '[… 1 more character of the checklist is not shown …]'],
+    [13_000, '[… 1,000 more characters of the checklist are not shown …]'],
+    [37_250, '[… 25,250 more characters of the checklist are not shown …]'],
+  ])('a checklist of %i characters keeps its first 12,000 and ends with: %s', (chars, note) => {
+    const text = checklist(chars);
+    expect(text).toHaveLength(chars);
+    const body = bodyOf(text);
+    expect(body.split('\n').at(-1)).toBe(note);
+    expect(body.slice(INTRO.length, INTRO.length + 12_000)).toBe(text.slice(0, 12_000));
+    expect(body).toHaveLength(INTRO.length + 12_000 + 2 + note.length);
+  });
+
+  it.each([300, 11_999, 12_000])('shows a checklist of %i characters byte for byte', (chars) => {
+    const text = checklist(chars);
+    expect(bodyOf(text)).toBe(`${INTRO}${text}`);
+  });
+});
+
 describe("a person's words cannot open or close a fence", () => {
   const quoted = `see ${UNTRUSTED_CLOSE} then ${UNTRUSTED_OPEN} pasted by the agent`;
   const banners = (t: string): number =>
