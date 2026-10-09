@@ -255,6 +255,27 @@ describe('withMcpSurface', () => {
     expect(once).toMatch(/<haive_mcp_surface>[\s\S]*Review this\.$/);
   });
 
+  it('adds no second copy to a prompt whose block sits behind one applied after it', () => {
+    const reach = '<haive_app_reach>\nThe running app is up.\n</haive_app_reach>';
+    const stored = `${reach}\n\n${withMcpSurface('Review this.', surfaceOf())}`;
+    expect(withMcpSurface(stored, surfaceOf())).toBe(stored);
+  });
+
+  it('still adds the block when its marker is quoted in the body', () => {
+    const body = [
+      'Review this change:',
+      '```diff',
+      `+export const MCP_SURFACE_MARKER = '${MCP_SURFACE_MARKER}';`,
+      '```',
+    ].join('\n');
+    expect(withMcpSurface(body, surfaceOf())).toBe(`${mcpSurfacePrompt(surfaceOf())}\n\n${body}`);
+  });
+
+  it('still adds the block when a whole earlier block is quoted in the body', () => {
+    const body = `The last run was sent:\n\n${mcpSurfacePrompt(surfaceOf())}\n\nand failed.`;
+    expect(withMcpSurface(body, surfaceOf())).toBe(`${mcpSurfacePrompt(surfaceOf())}\n\n${body}`);
+  });
+
   it('states the absence for an adapter that gets no MCP config at all', () => {
     const prompt = withMcpSurface('Review this.', null);
     expect(prompt).toContain(MCP_SURFACE_MARKER);

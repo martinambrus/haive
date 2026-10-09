@@ -94,6 +94,32 @@ describe('no-vision remedies', () => {
     // Idempotent: the retry path re-adapts an already-adapted prompt.
     expect(withModelCapabilityBoundary(once, provider)).toBe(once);
   });
+
+  it('add no second copy to a prompt whose boundary sits behind a block applied after it', () => {
+    const provider = view({ modelLimits: learned({ vision: false }) });
+    const house = '<haive_house_rules>\nKeep functions small.\n</haive_house_rules>';
+    const stored = `${house}\n\n${withModelCapabilityBoundary('do the work', provider)}`;
+    expect(withModelCapabilityBoundary(stored, provider)).toBe(stored);
+  });
+
+  it('still prepend the boundary when its marker is quoted in the body', () => {
+    const provider = view({ modelLimits: learned({ vision: false }) });
+    const block = withModelCapabilityBoundary('', provider).trimEnd();
+    const body = [
+      'Review this change:',
+      '```diff',
+      `+export const MODEL_CAPABILITY_BOUNDARY_MARKER = '${MODEL_CAPABILITY_BOUNDARY_MARKER}';`,
+      '```',
+    ].join('\n');
+    expect(withModelCapabilityBoundary(body, provider)).toBe(`${block}\n\n${body}`);
+  });
+
+  it('still prepend the boundary when a whole earlier block is quoted in the body', () => {
+    const provider = view({ modelLimits: learned({ vision: false }) });
+    const block = withModelCapabilityBoundary('', provider).trimEnd();
+    const body = `The last run was sent:\n\n${block}\n\nand failed.`;
+    expect(withModelCapabilityBoundary(body, provider)).toBe(`${block}\n\n${body}`);
+  });
 });
 
 describe('nextModelLimits: no_image_support', () => {

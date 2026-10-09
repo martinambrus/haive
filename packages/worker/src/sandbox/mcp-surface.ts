@@ -7,6 +7,7 @@ import {
   configService,
   logger,
 } from '@haive/shared';
+import { hasLeadingHaiveBlock } from '../repo/ddev-generated-boundary.js';
 import { emittedDefaultServerNames } from './mcp-config.js';
 import { signRagToken } from '@haive/shared/rag';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -458,6 +459,6 @@ export function withMcpSurface(
     hasWorktree?: boolean;
   } = {},
 ): string {
-  if (prompt.includes(MCP_SURFACE_MARKER)) return prompt;
+  if (hasLeadingHaiveBlock(prompt, MCP_SURFACE_MARKER)) return prompt;
   return `${mcpSurfacePrompt(surface, opts)}\n\n${prompt}`;
 }

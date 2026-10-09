@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { hasLeadingHaiveBlock } from './ddev-generated-boundary.js';
 import { worktreeDirName, WORKTREE_SUBDIR } from './worktree-paths.js';
 
 export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
@@ -37,7 +38,7 @@ export const WORKTREE_GIT_BOUNDARY_PROMPT = [
 /** Prepend the contract once. The marker makes this safe when nested prompt
  * builders or retry paths apply the same boundary more than once. */
 export function withWorktreeGitBoundary(prompt: string, enabled: boolean): string {
-  if (!enabled || prompt.includes(WORKTREE_GIT_BOUNDARY_MARKER)) return prompt;
+  if (!enabled || hasLeadingHaiveBlock(prompt, WORKTREE_GIT_BOUNDARY_MARKER)) return prompt;
   return `${WORKTREE_GIT_BOUNDARY_PROMPT}\n\n${prompt}`;
 }
 

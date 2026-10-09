@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
+import { DDEV_GENERATED_BOUNDARY_PROMPT } from './ddev-generated-boundary.js';
 import {
   invocationUsesWorktreeGitBoundary,
   resolveInvocationUsesWorktreeGitBoundary,
   withWorktreeGitBoundary,
   WORKTREE_GIT_BOUNDARY_MARKER,
+  WORKTREE_GIT_BOUNDARY_PROMPT,
 } from './worktree-git-boundary.js';
 
 describe('withWorktreeGitBoundary', () => {
@@ -24,6 +26,26 @@ describe('withWorktreeGitBoundary', () => {
     expect(twice).toBe(once);
     expect(twice.split(WORKTREE_GIT_BOUNDARY_MARKER)).toHaveLength(2);
     expect(withWorktreeGitBoundary('Review this.', false)).toBe('Review this.');
+  });
+
+  it('adds no second copy to a prompt whose block sits behind one applied after it', () => {
+    const stored = `${DDEV_GENERATED_BOUNDARY_PROMPT}\n\n${withWorktreeGitBoundary('Review this.', true)}`;
+    expect(withWorktreeGitBoundary(stored, true)).toBe(stored);
+  });
+
+  it('still adds the block when its marker is quoted in the body', () => {
+    const body = [
+      'Review this change:',
+      '```diff',
+      `+export const WORKTREE_GIT_BOUNDARY_MARKER = '${WORKTREE_GIT_BOUNDARY_MARKER}';`,
+      '```',
+    ].join('\n');
+    expect(withWorktreeGitBoundary(body, true)).toBe(`${WORKTREE_GIT_BOUNDARY_PROMPT}\n\n${body}`);
+  });
+
+  it('still adds the block when a whole earlier block is quoted in the body', () => {
+    const body = `The last run was sent:\n\n${WORKTREE_GIT_BOUNDARY_PROMPT}\n\nand failed.`;
+    expect(withWorktreeGitBoundary(body, true)).toBe(`${WORKTREE_GIT_BOUNDARY_PROMPT}\n\n${body}`);
   });
 });
 

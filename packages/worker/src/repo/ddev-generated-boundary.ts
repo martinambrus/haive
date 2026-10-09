@@ -31,9 +31,27 @@ export const DDEV_GENERATED_BOUNDARY_PROMPT = [
   '</haive_ddev_generated_boundary>',
 ].join('\n');
 
+/** Whether `marker` opens one of the `<haive_*>` blocks Haive prepended: they run from the first
+ * character, each ending at a closing tag on its own line. A marker quoted later is just text. */
+export function hasLeadingHaiveBlock(prompt: string, marker: string): boolean {
+  const openTag = /<haive_\w+>/y;
+  let at = 0;
+  for (;;) {
+    openTag.lastIndex = at;
+    const open = openTag.exec(prompt)?.[0];
+    if (open === undefined) return false;
+    const close = `\n</${open.slice(1)}`;
+    const end = prompt.indexOf(close, at + open.length);
+    if (end === -1) return false;
+    if (open === marker) return true;
+    at = end + close.length;
+    while (prompt[at] === '\n') at += 1;
+  }
+}
+
 /** Prepend the contract once. The marker makes this safe when nested prompt builders or
  * retry paths apply the same boundary more than once. */
 export function withDdevGeneratedBoundary(prompt: string, enabled: boolean): string {
-  if (!enabled || prompt.includes(DDEV_GENERATED_BOUNDARY_MARKER)) return prompt;
+  if (!enabled || hasLeadingHaiveBlock(prompt, DDEV_GENERATED_BOUNDARY_MARKER)) return prompt;
   return `${DDEV_GENERATED_BOUNDARY_PROMPT}\n\n${prompt}`;
 }

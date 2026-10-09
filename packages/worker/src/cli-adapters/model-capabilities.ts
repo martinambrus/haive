@@ -20,6 +20,7 @@
 
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { hasLeadingHaiveBlock } from '../repo/ddev-generated-boundary.js';
 import { capabilityClassFromMessage } from '../queues/cli-exec/failure-class.js';
 import type { CliProviderName, CliProviderRecord } from './types.js';
 
@@ -129,7 +130,7 @@ export function withModelCapabilityBoundary(
   provider: ProviderCapabilityView,
 ): string {
   if (resolveModelLimits(provider)?.vision !== false) return prompt;
-  if (prompt.includes(MODEL_CAPABILITY_BOUNDARY_MARKER)) return prompt;
+  if (hasLeadingHaiveBlock(prompt, MODEL_CAPABILITY_BOUNDARY_MARKER)) return prompt;
   return `${NO_VISION_BOUNDARY_PROMPT}\n\n${prompt}`;
 }
 

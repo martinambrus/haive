@@ -275,6 +275,31 @@ describe('withGlobalKbDigest', () => {
     );
     expect(withGlobalKbDigest(once, truncated)).toBe(once);
   });
+
+  it('adds no second copy to a prompt whose block sits behind one applied after it', () => {
+    const boundary =
+      '<haive_model_capability_boundary>\nThe model cannot read images.\n</haive_model_capability_boundary>';
+    const stored = `${boundary}\n\n${withGlobalKbDigest('DO THE WORK', digest)}`;
+    expect(withGlobalKbDigest(stored, digest)).toBe(stored);
+  });
+
+  it('still adds the block when its marker is quoted in the body', () => {
+    const body = [
+      'Review this change:',
+      '```diff',
+      "+const DIGEST_MARKER = '<haive_global_kb_index>';",
+      '```',
+    ].join('\n');
+    expect(withGlobalKbDigest(body, digest)).toBe(
+      `${globalKbDigestPrompt(digest.entries, digest)}\n\n${body}`,
+    );
+  });
+
+  it('still adds the block when a whole earlier block is quoted in the body', () => {
+    const block = globalKbDigestPrompt(digest.entries, digest);
+    const body = `The last run was sent:\n\n${block}\n\nand failed.`;
+    expect(withGlobalKbDigest(body, digest)).toBe(`${block}\n\n${body}`);
+  });
 });
 
 // `tags` is a topical label on the ARTICLE and a project has no counterpart — extractProjectFacets
