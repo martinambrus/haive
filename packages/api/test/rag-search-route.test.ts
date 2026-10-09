@@ -17,6 +17,9 @@ const h = vi.hoisted(() => ({
   search: vi.fn(),
   events: [] as string[],
   openOptions: [] as unknown[],
+  statements: [] as string[],
+  tx: {} as { unsafe: (statement: string) => Promise<unknown[]> },
+  pg: {} as unknown,
   realStore: false,
   connectionString: '',
 }));
@@ -43,7 +46,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
       h.openOptions.push(options);
       if (h.realStore) return actual.withGlobalKb(...args);
       return fn({
-        conn: { embeddingDimensions: DIMS, pg: { unsafe: async () => [] } },
+        conn: { embeddingDimensions: DIMS, pg: h.pg },
         db: {},
         settings: await actual.resolveGlobalKbSettings(),
       } as unknown as GlobalKbContext);
@@ -76,11 +79,12 @@ const hit = (sourcePath: string, sourceType: string, rrf: number): Hit => ({
 });
 
 type SearchConfig = { lexicalOnly?: boolean };
-type SearchCall = { vec: number[]; config: SearchConfig; filter: unknown };
+type SearchCall = { pg: unknown; vec: number[]; config: SearchConfig; filter: unknown };
 
 /** The calls ragHybridSearch got, split by store: only the global KB search passes a facet filter. */
 function searches(): { local: SearchCall[]; global: SearchCall[] } {
-  const calls = h.search.mock.calls.map(([, vec, , config, filter]): SearchCall => ({
+  const calls = h.search.mock.calls.map(([conn, vec, , config, filter]): SearchCall => ({
+    pg: conn.pg,
     vec,
     config,
     filter,
@@ -123,6 +127,23 @@ beforeEach(() => {
   h.globalHits = [hit('global_kb/cookies-11111111.md', 'kb', 0.04)];
   h.events = [];
   h.openOptions = [];
+  h.statements = [];
+  h.tx = {
+    unsafe: async (statement) => {
+      h.statements.push(statement);
+      return [];
+    },
+  };
+  h.pg = {
+    unsafe: async (statement: string) => {
+      h.statements.push(`outside a transaction: ${statement}`);
+      return [];
+    },
+    begin: async (run: (tx: unknown) => Promise<unknown>) => {
+      h.statements.push('begin');
+      return run(h.tx);
+    },
+  };
   h.realStore = false;
   h.connectionString = 'postgres://kb:kb@127.0.0.1:1/kb';
   h.search.mockReset();
@@ -276,6 +297,28 @@ describe('rag_search, the global store', () => {
 
     expect(h.events.filter((event) => event !== 'embed:local')).toEqual(['embed:global', 'open']);
     expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, deadlineMs: DEADLINE_MS }]);
+  });
+
+  it('reads the store in one transaction, under a server-side statement timeout', async () => {
+    await search();
+
+    expect(h.statements.slice(0, 2)).toEqual(['begin', "SET LOCAL statement_timeout = '3000ms'"]);
+    expect(h.statements.filter((statement) => statement.startsWith('outside'))).toEqual([]);
+    expect(searches().global[0]!.pg).toBe(h.tx);
+  });
+
+  it('answers with the local hits when the server cancels a statement', async () => {
+    h.tx.unsafe = async (statement) => {
+      if (statement.startsWith('SET LOCAL')) return [];
+      throw Object.assign(new Error('canceling statement due to statement timeout'), {
+        code: '57014',
+      });
+    };
+
+    const { status, paths } = await search();
+
+    expect(status).toBe(200);
+    expect(paths).toEqual(['src/session.ts']);
   });
 
   it('answers with the local hits when the store never answers, a deadline after the embed', async () => {

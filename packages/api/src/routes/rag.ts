@@ -193,6 +193,7 @@ const GLOBAL_KB_EXPAND_BUDGET_CHARS = 12_000;
 // The bounds of the worker's dispatch reads; the query embed runs before the store opens, outside them.
 const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 3;
 const GLOBAL_KB_DEADLINE_MS = 6_000;
+const GLOBAL_KB_STATEMENT_TIMEOUT_MS = 3_000;
 
 /** One global KB entry, keyed by the source path its chunks carry. */
 export interface GlobalKbEntryBody {
@@ -381,36 +382,41 @@ ragRoutes.post('/search', async (c) => {
       });
       const result = await withGlobalKb(
         db,
-        async ({ conn, settings }) => {
-          // Same rule as the local half: no query vector means full text only, never a hash vector.
-          const raw = await ragHybridSearch(
-            conn,
-            gvec ?? [],
-            query,
-            { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
-            { namespace: settings.namespace, facets },
-          );
-          const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
-          // Bodies for the entries that survived dedup, fetched on the SAME
-          // connection this block already holds (withGlobalKb opens and closes one
-          // per call). Numbered placeholders rather than `= ANY($2)` so the bind
-          // does not depend on array-type inference.
-          const bodies = new Map<string, GlobalKbEntryBody>();
-          if (scoped.length > 0) {
-            const paths = scoped.map((h) => h.sourcePath);
-            const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
-            const rows = (await conn.pg.unsafe(
-              `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
+        async ({ conn, settings }) =>
+          conn.pg.begin(async (tx) => {
+            // As the dispatch reads do: the server stops a statement the deadline gave up on.
+            await tx.unsafe(`SET LOCAL statement_timeout = '${GLOBAL_KB_STATEMENT_TIMEOUT_MS}ms'`);
+            // Same rule as the local half: no query vector means full text only, never a hash vector.
+            const raw = await ragHybridSearch(
+              { ...conn, pg: tx as unknown as RagConnection['pg'] },
+              gvec ?? [],
+              query,
+              { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
+              { namespace: settings.namespace, facets },
+            );
+            const scoped = dedupeGlobalByEntry(
+              raw.map((h) => ({ ...h, scope: 'global' as const })),
+            );
+            // Bodies for the entries that survived dedup, fetched on the SAME
+            // connection this block already holds (withGlobalKb opens and closes one
+            // per call). Numbered placeholders rather than `= ANY($2)` so the bind
+            // does not depend on array-type inference.
+            const bodies = new Map<string, GlobalKbEntryBody>();
+            if (scoped.length > 0) {
+              const paths = scoped.map((h) => h.sourcePath);
+              const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
+              const rows = (await tx.unsafe(
+                `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
                FROM ai_rag_embeddings r
                JOIN global_kb_entries e ON e.id = r.entry_id
               WHERE r.namespace = $1 AND r.source_path IN (${placeholders})`,
-              [settings.namespace, ...paths],
-            )) as unknown as Array<{ source_path: string; title: string; body: string }>;
-            for (const row of rows)
-              bodies.set(row.source_path, { title: row.title, body: row.body });
-          }
-          return { scoped, bodies };
-        },
+                [settings.namespace, ...paths],
+              )) as unknown as Array<{ source_path: string; title: string; body: string }>;
+              for (const row of rows)
+                bodies.set(row.source_path, { title: row.title, body: row.body });
+            }
+            return { scoped, bodies };
+          }),
         {
           connectTimeoutSeconds: GLOBAL_KB_CONNECT_TIMEOUT_SECONDS,
           deadlineMs: GLOBAL_KB_DEADLINE_MS,
