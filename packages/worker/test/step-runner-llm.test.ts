@@ -1075,6 +1075,17 @@ describe('advanceStep LLM phase', () => {
       expect(enqueued).toHaveLength(1);
     });
 
+    it('does not resend a no-image failure when the newer learn carries no vision remedy', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { maxOutputTokens: 131072 },
+        new Date(),
+        new Date(Date.now() - 600_000),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
     it('does not resend a no-image failure whose flag was learned before the run began', async () => {
       const { result, enqueued } = await advanceAfter('no_image_support', {
         vision: false,

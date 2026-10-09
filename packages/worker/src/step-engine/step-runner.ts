@@ -4298,6 +4298,16 @@ function limitsLearnedAtOf(
   return at ? new Date(at) : NO_LIMITS_LEARNED;
 }
 
+/** Whether the limits carry the remedy for this failure's own capability class. */
+function remedyLearned(
+  cls: NonNullable<ReturnType<typeof capabilityClassFromMessage>>,
+  limits: NonNullable<ReturnType<typeof resolveModelLimits>>,
+): boolean {
+  if (cls === 'no_image_support') return limits.vision === false;
+  if (cls === 'output_cap_reached') return limits.maxOutputTokens !== undefined;
+  return limits.maxOutputTokensExhausted === true;
+}
+
 /** Stamped on a run built while its provider had learned no limits, so null keeps meaning a row
  *  written before runs recorded this at all. */
 const NO_LIMITS_LEARNED = new Date(0);
@@ -4318,6 +4328,8 @@ function repeatsCapabilityRequest(
   const limits = provider ? resolveModelLimits(provider) : null;
   if (cls === 'output_cap_reached' && limits?.maxOutputTokensExhausted === true) return true;
   if (!limits?.learnedAt) return true;
+  // A newer learn for another capability does not change this request.
+  if (!remedyLearned(cls, limits)) return true;
   const learned = new Date(limits.learnedAt).getTime();
   if (run?.limitsLearnedAt) return learned <= run.limitsLearnedAt.getTime();
   if (!run?.createdAt) return true;

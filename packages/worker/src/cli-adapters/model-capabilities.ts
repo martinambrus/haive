@@ -208,16 +208,25 @@ export async function learnModelLimitFromFailure(
   errorMessage: string | null,
 ): Promise<ModelLimits | null> {
   if (!capabilityClassFromMessage(errorMessage)) return null;
-  const provider = await db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.id, providerId),
-    columns: { name: true, model: true, modelLimits: true },
+  // Read and write under the row lock: two runs learning at once would otherwise each write the
+  // whole object back and one remedy would be lost under a newer learnedAt.
+  return db.transaction(async (tx) => {
+    const [provider] = await tx
+      .select({
+        name: schema.cliProviders.name,
+        model: schema.cliProviders.model,
+        modelLimits: schema.cliProviders.modelLimits,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.id, providerId))
+      .for('update');
+    if (!provider) return null;
+    const next = nextModelLimits(provider, errorMessage, new Date());
+    if (!next) return null;
+    await tx
+      .update(schema.cliProviders)
+      .set({ modelLimits: next, updatedAt: new Date() })
+      .where(eq(schema.cliProviders.id, providerId));
+    return next;
   });
-  if (!provider) return null;
-  const next = nextModelLimits(provider, errorMessage, new Date());
-  if (!next) return null;
-  await db
-    .update(schema.cliProviders)
-    .set({ modelLimits: next, updatedAt: new Date() })
-    .where(eq(schema.cliProviders.id, providerId));
-  return next;
 }
