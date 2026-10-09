@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from './steps/_untrusted-repo.js';
@@ -59,6 +59,9 @@ vi.mock('./git-merge.js', async (importOriginal) => {
 vi.mock('../orchestrator/dispatcher.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../orchestrator/dispatcher.js')>();
   return { ...actual, resolveTaskDispatch: vi.fn(actual.resolveTaskDispatch) };
+});
+beforeEach(() => {
+  vi.mocked(resolveTaskDispatch).mockReset();
 });
 
 type DagIssue = Parameters<typeof issueSpecText>[1];
@@ -2365,8 +2368,6 @@ describe('the house rules the review loop agents are shown', () => {
   async function requestFor(run: Record<string, unknown>): Promise<Record<string, unknown>> {
     const { db } = makeSpawnDb();
     let seen: Record<string, unknown> | undefined;
-    // Earlier tests in this file leave once-implementations queued that nothing consumed.
-    vi.mocked(resolveTaskDispatch).mockReset();
     vi.mocked(resolveTaskDispatch).mockImplementationOnce(async (_db, _taskId, req) => {
       seen = req as unknown as Record<string, unknown>;
       return workingDispatchPlan();
