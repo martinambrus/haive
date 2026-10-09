@@ -31,10 +31,11 @@ and existing project contracts; they do not mandate new translation or other sub
 
 Every reviewing step (07a, 07b, 08a, 08b, 08c, 08c2, 08d) is scoped by ONE collector,
 `collectImplementationFiles` (`_impl-changes.ts`). It unions 07's agent-reported
-`filesTouched`, the DAG issues' `filesModified`, the dirty worktree, and every file a commit since
-the fork point added, changed or deleted (`git diff --name-status -z <base> HEAD`: a DAG coder
-commits and merges each issue, so a file it did not report is in no other source, and a house rule
-can cover a removal), caps the list at 100
+`filesTouched`, the DAG issues' `filesModified`, the dirty worktree (`git status --porcelain -z`,
+so no name arrives C-quoted and counts twice), every file the change added or changed since the
+fork point (the fork point against the working tree: a DAG coder commits and merges each issue, so
+a file it did not report is in no other source) and every file a commit since then deleted
+(`git diff --name-status -z <base> HEAD`: a house rule can cover a removal), caps the list at 100
 and REPORTS the cap (`changedFilesBlock`'s COVERAGE notice orders the agent to state what it
 was not given) — a silent cap once had a reviewer approve 100 of 150 files as though it had
 seen all of them. The list is not a convenience: `worktreeGitfileMask` bind-mounts an empty
