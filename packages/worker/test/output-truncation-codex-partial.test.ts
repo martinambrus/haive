@@ -8,6 +8,7 @@ vi.mock('../src/sandbox/sandbox-runner.js', async (importOriginal) => ({
 
 import { executeCliSpec } from '../src/queues/cli-exec/exec-core.js';
 import { defaultDeps } from '../src/queues/cli-exec/_shared.js';
+import type { CleanTranscript } from '@haive/shared';
 import {
   appServerSpec,
   execFixture,
@@ -23,6 +24,11 @@ beforeEach(() => {
 
 /** The Clean tab replays cli_invocations.raw_output as the model's answer, so a failed run's
  *  partial reply must not be stored there; the Raw stream (streamLog) keeps it. */
+/** The Clean transcript is what the replay viewer prefers over raw_output, so it must not hold the
+ *  partial reply either; the Raw stream keeps it. */
+const proseOf = (transcript: CleanTranscript | null | undefined): string =>
+  JSON.stringify(transcript ?? null);
+
 describe('a failed codex run does not store its partial reply as the answer', () => {
   it('exec: cut at the output limit', async () => {
     runInSandbox.mockImplementationOnce(execRun(execFixture, 1));
@@ -30,6 +36,7 @@ describe('a failed codex run does not store its partial reply as the answer', ()
     expect(outcome.rawOutput).toBe('');
     expect(outcome.parsedOutput).toBeNull();
     expect(outcome.streamLog).toContain(PARTIAL);
+    expect(proseOf(outcome.cleanTranscript)).not.toContain(PARTIAL);
   });
 
   it('exec: a failed turn that was not a truncation', async () => {
@@ -43,6 +50,7 @@ describe('a failed codex run does not store its partial reply as the answer', ()
     const outcome = await executeCliSpec(execSpec(), defaultDeps, 60_000);
     expect(outcome.rawOutput).toBe('');
     expect(outcome.streamLog).toContain(PARTIAL);
+    expect(proseOf(outcome.cleanTranscript)).not.toContain(PARTIAL);
   });
 
   it('exec: keeps the partial reply of a run killed before it finished', async () => {
@@ -53,6 +61,7 @@ describe('a failed codex run does not store its partial reply as the answer', ()
     runInSandbox.mockImplementationOnce(execRun(withoutFailure, 137));
     const outcome = await executeCliSpec(execSpec(), defaultDeps, 60_000);
     expect(outcome.rawOutput).toBe(PARTIAL);
+    expect(proseOf(outcome.cleanTranscript)).toContain(PARTIAL);
   });
 
   it('exec: keeps the answer of a successful run', async () => {
@@ -73,5 +82,6 @@ describe('a failed codex run does not store its partial reply as the answer', ()
     const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
     expect(outcome.rawOutput).toBe('');
     expect(outcome.streamLog).toContain(PARTIAL);
+    expect(proseOf(outcome.cleanTranscript)).not.toContain(PARTIAL);
   });
 });

@@ -7,6 +7,7 @@ import {
   CONFIG_KEYS,
   STEER_IN_CHANNEL_PREFIX,
   configService,
+  type CleanTranscript,
   type CliExecInvocationKind,
   type CliExecJobPayload,
   type CliNetworkPolicy,
@@ -96,6 +97,7 @@ import {
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
+  isOutputTruncationMessage,
   MCP_SERVER_FAILED_HEADLINE,
   CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
@@ -210,6 +212,9 @@ export function interpretCliFailure(
     }
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
+
+  // The partial reply in the scan below must not reclassify a truncation.
+  if (isOutputTruncationMessage(existing)) return existing;
 
   // Model-capability failures (no vision, output-token ceiling) come FIRST: they are
   // the most specific classes here, and unlike the fatal ones below they are things
@@ -924,6 +929,11 @@ export async function executeCliSpec(
   // to copy instead of two, so a branch added later cannot pick up the Raw tab and forget the
   // Clean one.
   const persisted = { streamLog, cleanTranscript: cleanBuf.toTranscript() } as const;
+  // A failed turn's partial reply is not an answer; the Raw stream keeps it, the Clean tab does not.
+  const withoutModelProse = (transcript: CleanTranscript | null): CleanTranscript | null => {
+    const segments = transcript?.segments.filter((seg) => seg.kind !== 'model') ?? [];
+    return segments.length > 0 ? { segments } : null;
+  };
   // Raw CLI stdout+stderr tail for provider-fatal classification. rawOutput is
   // now sanitized for the Clean tab (prose or empty), so it can no longer carry
   // an API error the classifier needs. Excludes the header/prompt (which
@@ -1070,6 +1080,9 @@ export async function executeCliSpec(
       modelIdentity,
       toolUsage: appServer.getToolUsage(),
       ...persisted,
+      ...(turnStatus === 'failed'
+        ? { cleanTranscript: withoutModelProse(persisted.cleanTranscript) }
+        : {}),
       providerErrorScan,
       codexAppServer,
     };
@@ -1126,6 +1139,7 @@ export async function executeCliSpec(
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,
+      cleanTranscript: withoutModelProse(persisted.cleanTranscript),
       providerErrorScan,
       providerDiagnosticLog: result.capturedLog ?? undefined,
     };

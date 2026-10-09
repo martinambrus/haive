@@ -61,6 +61,17 @@ describe('codex reply cut at max_output_tokens (exec)', () => {
     expect(isOutputTruncationMessage(outcome.errorMessage)).toBe(true);
   });
 
+  it.each(['rate limit 429', 'HTTP 500 Internal Server Error'])(
+    'stays the truncation headline when the partial reply mentions %s',
+    async (mention) => {
+      runInSandbox.mockImplementationOnce(execRun(execFixture.replaceAll(PARTIAL, mention), 1));
+      const outcome = await executeCliSpec(execSpec(), defaultDeps, 60_000);
+      expect(outcome.providerErrorScan).toContain(mention);
+      expect(isOutputTruncationMessage(outcome.errorMessage)).toBe(true);
+      expect(isOutputTruncationMessage(asFailure(outcome))).toBe(true);
+    },
+  );
+
   it('is not stored as a truncation when the run was killed', async () => {
     runInSandbox.mockImplementationOnce(execRun(execFixture, 137));
     const outcome = await executeCliSpec(execSpec(), defaultDeps, 60_000);
