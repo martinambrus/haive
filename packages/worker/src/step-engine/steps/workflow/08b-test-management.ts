@@ -1056,13 +1056,16 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       } else if (cmd.kind === 'ddev' && !d.repoSubpath) {
         // DDEV command but no per-task runner subpath — host-side ddev is the
         // broken DooD path, so skip rather than fail confusingly.
+        const output =
+          'DDEV runner unavailable for the selective test run, so the related tests could not be run — they were written but never executed';
         testRun = {
           ran: false,
           passed: false,
           command: `ddev ${cmd.args.join(' ')}`,
-          output: 'DDEV runner unavailable for the selective test run — skipped',
+          output,
         };
         testsPassed = null;
+        degradedNote = output;
       } else {
         // The DDEV web image carries neither the browser binaries nor the libraries they
         // link against, and nothing in the sandbox can add them. Idempotent, so it runs
