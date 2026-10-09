@@ -2057,7 +2057,7 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
   };
   // A run a concurrent pass linked after the first sweep: the next attempt sweeps it first.
   let carried: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < RELEASE_ATTEMPTS; attempt += 1) {
     try {
       await db.transaction(async (tx) => {
         const swept = await tx
@@ -2093,10 +2093,17 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
           )
           .returning({ cliInvocationId: schema.taskStepAgentMinings.cliInvocationId });
         const sweptIds = new Set(swept.map((r) => r.id));
+        // A carried run the sweep did not take had already ended: it is not missed again.
         const missed = released.flatMap((r) =>
-          r.cliInvocationId && !sweptIds.has(r.cliInvocationId) ? [r.cliInvocationId] : [],
+          r.cliInvocationId &&
+          !sweptIds.has(r.cliInvocationId) &&
+          !carried.includes(r.cliInvocationId)
+            ? [r.cliInvocationId]
+            : [],
         );
-        if (attempt === 0 && missed.length > 0) throw new LateLinkedRunsError(missed);
+        if (missed.length > 0 && attempt < RELEASE_ATTEMPTS - 1) {
+          throw new LateLinkedRunsError(missed);
+        }
         // A Stop also leaves the step failed and still wants these ended; only a Retry's reset is not ours.
         const [step] = await tx
           .select({ status: schema.taskSteps.status })
@@ -2109,17 +2116,20 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
     } catch (err) {
       if (err instanceof StepSupersededError) return;
       if (err instanceof LateLinkedRunsError) {
-        carried = err.invocationIds;
+        carried = [...carried, ...err.invocationIds];
         continue;
       }
-      if (attempt === 0 && (err as { code?: unknown } | null)?.code === PG_DEADLOCK_DETECTED) {
-        continue;
-      }
+      const last = attempt === RELEASE_ATTEMPTS - 1;
+      if (!last && (err as { code?: unknown } | null)?.code === PG_DEADLOCK_DETECTED) continue;
       log.error({ err, taskStepId }, 'could not end the mining agents a failed step left running');
       return;
     }
   }
 }
+
+/** Each attempt that finds a late-linked run sweeps it first on the next; bounded so a pass that
+ *  keeps linking cannot hold the release in a loop. */
+const RELEASE_ATTEMPTS = 5;
 
 /** Postgres' SQLSTATE for a transaction it aborted to break a lock cycle. */
 const PG_DEADLOCK_DETECTED = '40P01';

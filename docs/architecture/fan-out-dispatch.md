@@ -35,8 +35,9 @@ timeout, and fails every agent row still `pending` or `running`. Left so, such a
 api's Resume refuse the step as still running. It is one transaction in a Retry's lock order (runs,
 agents, step) and rolls back only when a Retry has reset the step to `pending`; a Stop that failed
 the step meanwhile still wants its agents ended. A concurrent pass can link a run between the run sweep and the agent update. The agent update
-returns the runs its rows name; one the sweep missed rolls the release back, and a second attempt
-sweeps that run first, so the lock order holds. A deadlock abort also gets that one retry.
+returns the runs its rows name; one the sweep missed rolls the release back, and the next attempt
+sweeps that run first, so the lock order holds; it repeats while passes keep linking, up to five
+attempts, the last of which commits. A deadlock abort also gets that one retry.
 
 **A run's end and its mining result land together, on the row still linked to it.**
 `handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no

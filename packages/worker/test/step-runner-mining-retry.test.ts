@@ -2868,6 +2868,25 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     expect(runsEnded).toBeGreaterThan(stepFailed);
   });
 
+  it('keeps retrying while passes link runs at different times, sweeping each first', async () => {
+    const state = freshState([]);
+    let calls = 0;
+    state.miningReturning = (set) => {
+      if (set.status !== 'failed') return [{ id: 'mock-updated' }];
+      calls += 1;
+      return calls === 1
+        ? [{ cliInvocationId: 'inv-a' }]
+        : [{ cliInvocationId: 'inv-a' }, { cliInvocationId: 'inv-b' }];
+    };
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(3);
+    const { params } = new PgDialect().sqlToQuery(cancels[2]!.where as SQL);
+    expect(params).toEqual(expect.arrayContaining(['inv-a', 'inv-b']));
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+  });
+
   it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
     const state = freshState([]);
     state.deadlockOnce = true;
