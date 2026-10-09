@@ -49,8 +49,10 @@ the files the fixer created, 07b's stored coverage is that pass's, and 07b re-de
 documentation protocol from it (MEASURED on a live run: a fixer's new `images/icon-check.svg` was
 missing from the re-validator's list and coverage read 2/2 of 3). A list from a failed scan never
 stands in for detect's, and a fixer's failed re-scan puts the re-validation on the code protocol:
-nobody can tell whether the fixer added code. Gate 2's Implementation validation row reads 07b's coverage the way the
-review rows read theirs, and holds Approve when 07b was given a capped list.
+nobody can tell whether the fixer added code. Gate 2's Implementation validation row reads 07b's
+coverage the way the review rows read theirs, and holds Approve when 07b was given a capped list or
+when the change could not be re-read after a fix (`changedFilesCoverage.scanFailed`): then nobody
+knows whether the fix added files, and the House rules row is PARTIAL for the same reason.
 
 Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
 `no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base
