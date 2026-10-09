@@ -341,28 +341,19 @@ async function readChangeDiff(
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
  *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. A git that
- *  outlives `timeoutMs` is killed and the list is null. `committedOnly` names what the commits
- *  since the fork point changed, not the working tree. */
+ *  outlives `timeoutMs` is killed and the list is null. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean; committedOnly?: boolean; timeoutMs?: number } = {},
+  options: { includeDeleted?: boolean; timeoutMs?: number } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(worktreePath, baseBranch, options.timeoutMs);
   if (!base) return null;
   try {
-    const { stdout } = await gitExec(
-      [
-        'diff',
-        '--name-status',
-        '-z',
-        '--no-renames',
-        base,
-        ...(options.committedOnly ? ['HEAD'] : []),
-        '--',
-      ],
-      { cwd: worktreePath, timeout: options.timeoutMs },
-    );
+    const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
+      cwd: worktreePath,
+      timeout: options.timeoutMs,
+    });
     const fields = stdout.split('\0');
     const paths: string[] = [];
     for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -438,7 +429,7 @@ export async function collectImplementationFiles(
     measured[p] ??= 'deleted';
   }
   // Last, so a capped list keeps the reported and dirty files.
-  const committed = await readChangedPaths(worktreePath, baseBranch, { committedOnly: true });
+  const committed = await readChangedPaths(worktreePath, baseBranch);
   for (const p of committed ?? []) files.add(p);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
