@@ -221,7 +221,7 @@ export function cleanDiagnosis(raw: string): string {
 }
 
 /** What the fix prompt keeps of one diagnosis: this many characters of agent text. */
-const DIAGNOSIS_BUDGET = 6000;
+export const DIAGNOSIS_BUDGET = 6000;
 
 /** How far a cut may move to land on a line boundary, and never more than half its piece. */
 const EXCERPT_LINE_SNAP = 200;

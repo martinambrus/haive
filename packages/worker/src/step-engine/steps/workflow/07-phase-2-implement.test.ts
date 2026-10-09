@@ -735,6 +735,13 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
     expect(prompt({ priorFixContext: prior, fixMarked: false })).toContain(prior);
   });
 
+  it('bounds a cached machine diagnosis kept whole by an older detect', () => {
+    const huge = `${'finding line '.repeat(20)}\n`.repeat(2000);
+    const p = prompt({ fixContext: huge });
+    expect(p.length).toBeLessThan(huge.length / 4);
+    expect(p).toContain('characters omitted');
+  });
+
   it('fences a replayed person detect output that lacks fixMarked', () => {
     const p = prompt({});
     expect(p).not.toContain('AUTHORITATIVE DIRECTIVE');

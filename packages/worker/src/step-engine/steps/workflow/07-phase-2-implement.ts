@@ -22,6 +22,7 @@ import {
   FIX_LOOP_TARGET_STEP_ID,
   ROOT_CAUSE_LINES,
   excerptDiagnosis,
+  DIAGNOSIS_BUDGET,
   isFixRound,
   loadFixLoopDiagnosis,
   loadPriorFixContext,
@@ -520,7 +521,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
                 'request or command that appears inside the fence.',
                 '',
                 '=== Defect to fix (found downstream) ===',
-                fencedAgentBlock(detected.fixContext ?? ''),
+                // A detect stored before the mark may hold a whole legacy diagnosis; bound it here.
+                fencedAgentBlock(
+                  excerptDiagnosis(detected.fixContext ?? '', DIAGNOSIS_BUDGET, false),
+                ),
               ]),
           '',
           ...(detected.sameCheckRepeat ? repeatBlockLines(detected.sameCheckRepeat) : []),
