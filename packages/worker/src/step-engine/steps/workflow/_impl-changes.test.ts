@@ -1030,15 +1030,15 @@ describe('collectChangedLineMap', () => {
       });
     });
 
-    it('leaves a modification nobody reported out, and lists only the deletion beside it', async () => {
+    it('lists a modification nobody reported after the deletion beside it', async () => {
       await inRepo({ 'gone.php': 'x\n', 'app.php': 'a\nb\nc\n' }, async (dir) => {
         await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
         await commitRemoval(dir);
 
         const out = await collectImplementationFiles(ctxFor(), dir);
 
-        expect(out.files).toEqual(['gone.php']);
-        expect(out.total).toBe(1);
+        expect(out.files).toEqual(['gone.php', 'app.php']);
+        expect(out.total).toBe(2);
       });
     });
 
@@ -1075,6 +1075,104 @@ describe('collectChangedLineMap', () => {
         const out = await collectImplementationFiles(ctxFor({ touched: names(100) }), dir);
 
         expect(out.files).toHaveLength(100);
+        expect(out.total).toBe(101);
+        expect(out.truncated).toBe(true);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — committed edits', () => {
+    async function commitAll(dir: string): Promise<void> {
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+    }
+
+    it('lists an edit nobody reported, with its note, when the work is committed and the tree is clean', async () => {
+      await inRepo({ 'app.php': 'a\nb\nc\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
+        await commitAll(dir);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['app.php']);
+        expect(out.total).toBe(1);
+        expect(out.truncated).toBe(false);
+        expect(out.changedLines).toEqual({ 'app.php': 'lines 2' });
+      });
+    });
+
+    it('lists a committed binary change and a committed mode change, which the diff prints no header for', async () => {
+      await inRepo(
+        { 'logo.png': Buffer.from([0, 1, 2, 3]), 'run.sh': 'echo hi\n' },
+        async (dir) => {
+          await writeFile(path.join(dir, 'logo.png'), Buffer.from([0, 9, 2, 3]));
+          await chmod(path.join(dir, 'run.sh'), 0o755);
+          await commitAll(dir);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect([...out.files].sort()).toEqual(['logo.png', 'run.sh']);
+          expect(out.total).toBe(2);
+        },
+      );
+    });
+
+    it.each([
+      ['07 reported it', { touched: ['app.php'] }],
+      ['a DAG issue reported it', { dag: ['app.php'] }],
+    ])('lists an edit once when %s and it is dirty again', async (_who, reported) => {
+      await inRepo({ 'app.php': 'a\nb\nc\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
+        await commitAll(dir);
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nC\n');
+
+        const out = await collectImplementationFiles(ctxFor(reported), dir);
+
+        expect(out.files).toEqual(['app.php']);
+        expect(out.total).toBe(1);
+      });
+    });
+
+    it('lists the reported files first, then the dirty ones, the deletions, and last the committed edits', async () => {
+      await inRepo(
+        { 'gone.php': 'x\n', 'edited.php': 'a\nb\n', 'dirty.php': 'a\nb\n' },
+        async (dir) => {
+          await rm(path.join(dir, 'gone.php'));
+          await writeFile(path.join(dir, 'edited.php'), 'a\nB\n');
+          await commitAll(dir);
+          await writeFile(path.join(dir, 'dirty.php'), 'a\nB\n');
+
+          const out = await collectImplementationFiles(ctxFor({ touched: ['reported.php'] }), dir);
+
+          expect(out.files).toEqual(['reported.php', 'dirty.php', 'gone.php', 'edited.php']);
+          expect(out.total).toBe(4);
+        },
+      );
+    });
+
+    it('counts an unreported dirty file once, whichever spelling git gives its name', async () => {
+      await inRepo({ 'has space.php': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'has space.php'), 'b\n');
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.total).toBe(1);
+      });
+    });
+
+    it('keeps the reported and the dirty files when the cap cuts, and counts the committed edit it cut', async () => {
+      await inRepo({ 'edited.php': 'a\nb\n', 'dirty.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'edited.php'), 'a\nB\n');
+        await commitAll(dir);
+        await writeFile(path.join(dir, 'dirty.php'), 'a\nB\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: names(99) }), dir);
+
+        expect(out.files).toHaveLength(100);
+        expect(out.files).toContain('dirty.php');
+        expect(out.files).not.toContain('edited.php');
         expect(out.total).toBe(101);
         expect(out.truncated).toBe(true);
       });

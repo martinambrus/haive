@@ -340,19 +340,28 @@ async function readChangeDiff(
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
  *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. A git that
- *  outlives `timeoutMs` is killed and the list is null. */
+ *  outlives `timeoutMs` is killed and the list is null. `committedOnly` names what the commits
+ *  since the fork point changed, not the working tree. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean; timeoutMs?: number } = {},
+  options: { includeDeleted?: boolean; committedOnly?: boolean; timeoutMs?: number } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(worktreePath, baseBranch, options.timeoutMs);
   if (!base) return null;
   try {
-    const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
-      cwd: worktreePath,
-      timeout: options.timeoutMs,
-    });
+    const { stdout } = await gitExec(
+      [
+        'diff',
+        '--name-status',
+        '-z',
+        '--no-renames',
+        base,
+        ...(options.committedOnly ? ['HEAD'] : []),
+        '--',
+      ],
+      { cwd: worktreePath, timeout: options.timeoutMs },
+    );
     const fields = stdout.split('\0');
     const paths: string[] = [];
     for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -405,8 +414,8 @@ async function changedLineNotes(
  * `filesTouched` when present, else the union of the DAG issues'
  * `filesModified`, plus currently-dirty worktree files (single-agent work is
  * still uncommitted at this point) and the files the commits since the fork
- * point deleted. Deduped, capped for prompt size — and the cap is reported
- * rather than applied silently.
+ * point deleted or changed. Deduped, capped for prompt size — and the cap is
+ * reported rather than applied silently.
  */
 export async function collectImplementationFiles(
   ctx: StepContext,
@@ -427,6 +436,10 @@ export async function collectImplementationFiles(
     files.add(p);
     measured[p] ??= 'deleted';
   }
+  // Last, so a capped list keeps the reported and dirty files. Committed only: git status spells a
+  // name with a space or a non-ASCII byte quoted, so a dirty file named here too would count twice.
+  const committed = await readChangedPaths(worktreePath, baseBranch, { committedOnly: true });
+  for (const p of committed ?? []) files.add(p);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
   // Only the files the prompt will actually list, so the persisted set carries no notes for
