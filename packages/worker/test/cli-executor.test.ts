@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   defaultCliSpawner,
@@ -6,6 +7,9 @@ import {
   type CliSpawner,
 } from '../src/cli-executor/index.js';
 import type { CliCommandSpec, SubAgentInvocation } from '../src/cli-adapters/types.js';
+import { describeFailedSubAgent } from '../src/queues/cli-exec/sub-agent.js';
+import { isOutputTruncationMessage } from '../src/queues/cli-exec/failure-class.js';
+import { execFixture, PARTIAL } from './support/codex-truncation-harness.js';
 
 const echoCommand: CliCommandSpec = {
   command: '/bin/sh',
@@ -232,5 +236,69 @@ describe('runSequentialSubAgent', () => {
     expect(result.collected).toEqual({ scan: { found: 1 }, labels: { labels: ['x'] } });
     expect(result.synthesis).toBe('All good');
     expect(result.tokenUsage).toEqual({ inputTokens: 15, outputTokens: 3, totalTokens: 18 });
+  });
+});
+
+describe('runSequentialSubAgent on a claude-stream-json sub-step cut at the output limit', () => {
+  const grokFixture = readFileSync(
+    new URL('./fixtures/truncation/grok-max-tokens.ndjson', import.meta.url),
+    'utf8',
+  );
+  const buildStream = (prompt: string): CliCommandSpec => ({
+    command: 'grok',
+    args: ['-p', prompt],
+    env: {},
+    outputFormat: 'claude-stream-json',
+  });
+
+  it('reports the truncation headline naming the sub-step', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: 'found 3\n' },
+      label: { stdout: grokFixture, exitCode: 1 },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildStream, spawner);
+    const message = describeFailedSubAgent(result);
+    expect(isOutputTruncationMessage(message)).toBe(true);
+    expect(message).toContain('label');
+  });
+});
+
+describe('runSequentialSubAgent on a codex sub-step cut at the output limit', () => {
+  const buildCodex = (prompt: string): CliCommandSpec => ({
+    command: 'codex',
+    args: ['exec', '--json', prompt],
+    env: {},
+    outputFormat: 'codex-jsonl',
+  });
+  const okStep = JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'agent_message', text: '<<<JSON>>>{"found":3}<<<ENDJSON>>>' },
+  });
+
+  it('reports the truncation headline naming the sub-step, and keeps no partial answer', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: `${okStep}\n` },
+      label: { stdout: execFixture, exitCode: 1 },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildCodex, spawner);
+    expect(result.exitCode).toBe(1);
+    expect(result.trace.map((t) => t.id)).toEqual(['scan', 'label']);
+    const message = describeFailedSubAgent(result);
+    expect(isOutputTruncationMessage(message)).toBe(true);
+    expect(message).toContain('label');
+    expect(result.trace[1]!.parsed).toBeNull();
+    expect(JSON.stringify(result.trace[1]!.parsed)).not.toContain(PARTIAL);
+  });
+
+  it("keeps today's message for a sub-step that failed for another reason", async () => {
+    const failed = JSON.stringify({ type: 'turn.failed', error: { message: 'boom' } });
+    const spawner = mockSpawner({
+      scan: { stdout: `${okStep}\n` },
+      label: { stdout: `${failed}\n`, exitCode: 1, stderr: 'it broke' },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildCodex, spawner);
+    const message = describeFailedSubAgent(result);
+    expect(isOutputTruncationMessage(message)).toBe(false);
+    expect(message).toBe('sub-agent step label failed: it broke');
   });
 });

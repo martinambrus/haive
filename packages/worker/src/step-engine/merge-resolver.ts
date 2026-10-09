@@ -37,10 +37,13 @@ import {
 } from './step-ownership.js';
 import { runFinishedCleanly, runIsLive, runNeverAnswered } from './run-wait.js';
 import { hasWorkspaceEntry } from './workspace-probe.js';
-import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
+import {
+  isFatalProviderFailure,
+  isOutputTruncationMessage,
+} from '../queues/cli-exec/failure-class.js';
 import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { parseJsonLooseValidated } from './steps/_fenced-json.js';
-import { resolvePreferredCli } from './step-runner.js';
+import { resolvePreferredCli, TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { overrideOr } from './dispatch-timeout.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
@@ -520,12 +523,13 @@ async function dispatchFixAgent(
   state: MergeResolveState,
   guidance: string,
   onInserted: (invocationId: string) => Promise<void>,
+  afterTruncation = false,
 ): Promise<FixAgentDispatch> {
   // Keep this exact value paired between prompt planning and queue payload: an
   // empty override is the repo root (real `.git` directory), while a transient
   // --base worktree receives the zero-byte gitfile boundary.
   const worktreeRel = path.relative(SANDBOX_WORKDIR, state.sandboxMergeDir);
-  const prompt = await augmentPromptWithTerseness(
+  const augmented = await augmentPromptWithTerseness(
     spec.buildFixPrompt({
       baseBranch: state.baseBranch,
       featureBranch: state.featureBranch,
@@ -533,6 +537,7 @@ async function dispatchFixAgent(
       guidance,
     }) + FIX_RESULT_CONTRACT,
   );
+  const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
@@ -780,6 +785,7 @@ export async function resolveMergePhase(
 
   // --- resolving: drive the fix-agent loop ---
   if (state.phase === 'resolving') {
+    let truncatedOnce = false;
     // (1) Ingest an in-flight fix agent.
     if (state.fixInvocationId) {
       const inv = await db.query.cliInvocations.findFirst({
@@ -813,9 +819,17 @@ export async function resolveMergePhase(
         return haltFailed(db, current, fixerIndexHeldNote(leftovers.indexHeld), 'merge index held');
       }
       const fix = parseFixResult(inv);
-      if (runNeverAnswered(inv) && !fix) {
-        // A fixer that never answered may have left the merge half-resolved, so its
-        // edits are discarded and it is dispatched again without spending an attempt.
+      const lastFixerCut =
+        !runNeverAnswered(inv) && isOutputTruncationMessage(inv.errorMessage?.trim());
+      // Saved with the state below, so a person's later "Retry with AI" keeps the shrink notice.
+      if (lastFixerCut) state = { ...state, lastFixerCut: true };
+      truncatedOnce =
+        lastFixerCut &&
+        typeof inv.prompt === 'string' &&
+        !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
+      if ((runNeverAnswered(inv) && !fix) || truncatedOnce) {
+        // A fixer that never answered, or was cut at the output limit, may have left the merge
+        // half-resolved, so its edits are discarded and it is dispatched again without spending an attempt.
         await db
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
@@ -936,9 +950,11 @@ export async function resolveMergePhase(
           fixInvocationId: invId,
           conflictRetries: priorState.conflictRetries + 1,
           fixBaseline,
+          lastFixerCut: false,
         };
         await saveMergeState(db, current.id, state);
       },
+      priorState.lastFixerCut === true,
     );
     if (dispatched.kind === 'already_live') {
       // A concurrent advance already dispatched and saved its own fixInvocationId; PARK

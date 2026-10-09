@@ -9,6 +9,8 @@
 //   ENVIRONMENT a real execution-environment problem (unwritable/root-owned worktree,
 //               no CLI provider, or transient re-dispatch exhausted). Re-running will
 //               not help until it is fixed → HALT with an actionable message.
+//   TRUNCATED   the run was cut off at the model's output-token limit. Re-dispatch ONCE
+//               with a smaller-output notice, not charged to either infra budget.
 //   GENUINE     the agent ran to a clean finish but violated the output contract, or a
 //               plain non-termination error. The implementation approach is the
 //               problem → the escalation path (advisor → replanner) decides.
@@ -16,9 +18,12 @@
 // Keyed on the STABLE exit signal + invariant error phrases, delegated to the shared
 // isTransientCliFailure classifier (cli-exec/failure-class.ts), never on ephemeral wording.
 
-import { isTransientCliFailure } from '../queues/cli-exec/failure-class.js';
+import {
+  isOutputTruncationMessage,
+  isTransientCliFailure,
+} from '../queues/cli-exec/failure-class.js';
 
-export type DagFailureClass = 'transient' | 'environment' | 'genuine';
+export type DagFailureClass = 'transient' | 'environment' | 'truncated' | 'genuine';
 
 /** Stable marker stamped on the issue's `concerns` when transient re-dispatch is
  *  exhausted, so the downstream ENVIRONMENT halt recognises a persistently-killed agent
@@ -60,6 +65,7 @@ export function classifyDagIssueFailure(signal: {
   const text = [signal.errorMessage, signal.concerns].filter(Boolean).join(' ; ');
   // A transient MARKER-exhausted concern reads as ENVIRONMENT, so check that first.
   if (ENVIRONMENT_FAILURE_RE.test(text)) return 'environment';
+  if (isOutputTruncationMessage(signal.errorMessage?.trim())) return 'truncated';
   // Delegate the transient (killed/orphaned/timed-out) test to the shared classifier,
   // passing the combined error+concerns text so a concern-only marker still matches.
   if (isTransientCliFailure({ exitCode: signal.exitCode, errorMessage: text })) return 'transient';

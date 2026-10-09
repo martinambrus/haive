@@ -5,7 +5,7 @@
 import type { CliTokenUsage, CompactionEvent, InvocationToolUsage } from '@haive/shared';
 import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
-import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
+import { buildOutputTruncationMessage, classifyStreamFailure } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
 
 /** One `api_retry` event, carried verbatim. `errorStatus` is null when no HTTP response arrived
@@ -95,6 +95,8 @@ export function createStreamJsonCollector(
   let assistantText = '';
   let lastResultSubtype: string | null = null;
   let lastResultError: string | null = null;
+  let lastResultStopReason: string | null = null;
+  let lastResultErrors: string[] = [];
   // Run-level failure reported by the result event's `is_error` flag, plus the
   // text and terminal_reason that came with it. Tracked separately from
   // lastResultSubtype because the two disagree: a mid-stream API abort is
@@ -255,6 +257,15 @@ export function createStreamJsonCollector(
       if (typeof event.error === 'string' && event.error.trim()) {
         lastResultError = event.error.trim();
       }
+      // grok reports a reply cut at the output limit as stop_reason "max_tokens" with the text in
+      // `errors[]` rather than `error`; the claude binary's own results carry "stop_sequence".
+      if (typeof event.stop_reason === 'string') lastResultStopReason = event.stop_reason;
+      if (Array.isArray(event.errors)) {
+        lastResultErrors = event.errors
+          .filter((e): e is string => typeof e === 'string')
+          .map((e) => e.replace(/\s+/g, ' ').trim())
+          .filter((e) => e.length > 0);
+      }
       // `is_error` is the RUN-LEVEL outcome flag and is the authoritative failure
       // signal; `subtype` is not. The claude binary reports a mid-stream API abort
       // as subtype "success" WITH is_error true, putting the error text in `result`.
@@ -369,19 +380,26 @@ export function createStreamJsonCollector(
       if (resultText !== null) return null;
       if (eventCount === 0) return null;
       if (lastResultSubtype && lastResultSubtype !== 'success') {
-        const cls = classifyStreamFailure(lastResultSubtype, lastResultError);
-        const detail = lastResultError ? `: ${lastResultError}` : '';
+        const cls =
+          lastResultStopReason === 'max_tokens'
+            ? 'output_truncated'
+            : classifyStreamFailure(lastResultSubtype, lastResultError);
+        const errorsDetail = lastResultErrors.join('; ');
+        const detail = lastResultError
+          ? `: ${lastResultError}`
+          : errorsDetail
+            ? `: ${errorsDetail}`
+            : '';
         if (cls === 'output_truncated') {
           // The assistant hit its OUTPUT-token ceiling and the turn was cut off
-          // (e.g. Amp/Claude max_tokens). The fix is to emit less per call, not to
+          // (Amp/grok max_tokens). The fix is to emit less per call, not to
           // retry the same oversized request — see failure-class.ts.
-          return `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off at the model's output-token limit (subtype "${lastResultSubtype}"${detail}). Reduce the requested output or split the task into smaller calls.`;
+          return buildOutputTruncationMessage(`subtype "${lastResultSubtype}"${detail}`);
         }
         if (cls === 'context_overflow') {
           return `LLM stopped: the prompt exceeded the model's context window (subtype "${lastResultSubtype}"${detail}). Reduce the prompt size or clear prior context.`;
         }
-        const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
-        return lastResultError ? `${base}: ${lastResultError}` : base;
+        return `LLM stream ended with result subtype "${lastResultSubtype}"${detail}`;
       }
       // Rate limit FIRST — ahead of the is_error branch below, which would otherwise
       // claim these runs and report them as a generic failure. `rate_limit_info.status`

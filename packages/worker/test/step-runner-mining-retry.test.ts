@@ -25,6 +25,11 @@ import {
 } from '../src/step-engine/step-definition.js';
 import type { StepApplyArgs, StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import { shouldRetryMiningTerminalFailure } from '../src/step-engine/mining-failure.js';
+import {
+  MODEL_CAPABILITY_HEADLINES,
+  OUTPUT_TRUNCATION_HEADLINE,
+} from '../src/queues/cli-exec/failure-class.js';
 
 // The barrier's tab sweep runs `docker exec` into the task's runner, four calls per fan-out that
 // ends; nothing in this file may reach docker, so the two helpers that spawn it are stubbed.
@@ -65,6 +70,7 @@ interface MiningRow {
   rawOutput: string | null;
   errorMessage: string | null;
   cliInvocationId: string | null;
+  cliProviderId?: string | null;
   attempts: number;
   /** Set when a human asked for THIS terminal to be re-run (the fan-out half of Resume). */
   userRetryRequestedAt?: Date | null;
@@ -94,6 +100,12 @@ interface MockState {
     prompt: string;
     errorMessage?: string | null;
     startedAt?: Date | null;
+    createdAt?: Date;
+    limitsSnapshot?: {
+      vision: boolean | null;
+      maxOutputTokens: number | null;
+      maxOutputTokensExhausted: boolean;
+    } | null;
     endedAt?: Date | null;
     exitCode?: number | null;
   }[];
@@ -1124,6 +1136,259 @@ const RATE_LIMIT_ERR =
   "Provider rate limit or quota exhausted — the provider's usage limit or quota is exhausted; " +
   'retry this task once it resets. (LLM run reported a failure (terminal_reason "api_error"): ' +
   'API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour.])';
+
+/** The wiring every real fan-out step uses: the shared predicate, three total attempts. */
+function sharedPredicateStep(applyCalls: StepApplyArgs[]): StepDefinition {
+  const step = terminalFailureRetryStep(applyCalls);
+  return {
+    ...step,
+    agentMining: {
+      ...step.agentMining!,
+      retry: { maxAttempts: 3, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
+    },
+  };
+}
+
+describe('advanceStep agentMining output truncation and model capability', () => {
+  const TRUNCATION_NOTICE =
+    'Your previous attempt was cut off at the output-token limit. Keep each reply and each tool call smaller (write a large file in several edits, keep prose brief), but include every required item and field.';
+  const CUT = `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`;
+
+  function failedAgentState(attempts: number, errorMessage: string): MockState {
+    const state = freshState([
+      miningRow('peer-reviewer', attempts, {
+        status: 'failed',
+        errorMessage,
+        cliProviderId: 'prov-1',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.invocationRows = [
+      {
+        id: 'inv-peer-reviewer',
+        prompt: 'review',
+        errorMessage,
+        startedAt: new Date(Date.now() - 60_000),
+        createdAt: new Date(Date.now() - 60_000),
+        endedAt: new Date(),
+        exitCode: 1,
+      },
+    ];
+    return state;
+  }
+
+  const sentPrompt = (state: MockState): string =>
+    String(state.inserts.find((i) => i.table === 'cli_invocations')!.row.prompt);
+
+  it('re-rolls a reply cut at the output limit once, with the cut-off notice on its prompt', async () => {
+    const state = failedAgentState(1, CUT);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-peer-reviewer']);
+    const prompt = sentPrompt(state);
+    expect(prompt).toContain('review');
+    expect(prompt.split(TRUNCATION_NOTICE)).toHaveLength(2);
+  });
+
+  it('does not re-roll a cut reply whose run already carried the cut-off notice', async () => {
+    const state = failedAgentState(1, CUT);
+    state.invocationRows![0]!.prompt = `review\n\n${TRUNCATION_NOTICE}`;
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), sharedPredicateStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  it('re-rolls a cut reply the person asked for even when its run carried the notice', async () => {
+    const state = failedAgentState(1, CUT);
+    state.invocationRows![0]!.prompt = `review\n\n${TRUNCATION_NOTICE}`;
+    state.miningRows[0]!.userRetryRequestedAt = new Date();
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
+
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-peer-reviewer']);
+  });
+
+  it('leaves the notice off the re-roll of a failure that was not a truncation', async () => {
+    const state = failedAgentState(1, 'stream ended prematurely');
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
+
+    expect(enqueued).toHaveLength(1);
+    expect(sentPrompt(state)).not.toContain(TRUNCATION_NOTICE);
+  });
+
+  describe('a model-capability failure the provider learned from', () => {
+    const noImage = `${MODEL_CAPABILITY_HEADLINES.no_image_support} — hint.`;
+    const learnedAt = (offsetMs: number) => [
+      makeProvider({
+        modelLimits: {
+          model: '',
+          vision: false,
+          learnedAt: new Date(Date.now() + offsetMs).toISOString(),
+        },
+      } as Partial<CliProviderRecord>),
+    ];
+
+    it('re-rolls the agent when the learn came after the run began', async () => {
+      const state = failedAgentState(1, noImage);
+      const enqueued: CliExecJobPayload[] = [];
+      const providers = learnedAt(-1000);
+      const result = await run(makeMockDb(state), sharedPredicateStep([]), enqueued, providers);
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+      const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+      expect(sent.limitsSnapshot).toEqual({
+        vision: false,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      });
+    });
+
+    it('re-rolls the agent whose request was built before the learn, though its run started after it', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 120_000);
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        learnedAt(-90_000),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-rolls the agent whose run was built before vision:false was learned', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 60_000);
+      state.invocationRows![0]!.limitsSnapshot = {
+        vision: null,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      };
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        learnedAt(-90_000),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not re-roll the agent whose run was built with vision:false already set', async () => {
+      const state = failedAgentState(1, noImage);
+      state.invocationRows![0]!.createdAt = new Date(Date.now() - 120_000);
+      state.invocationRows![0]!.limitsSnapshot = {
+        vision: false,
+        maxOutputTokens: null,
+        maxOutputTokensExhausted: false,
+      };
+      const applyCalls: StepApplyArgs[] = [];
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep(applyCalls),
+        enqueued,
+        learnedAt(-90_000),
+      );
+
+      expect(result.status).toBe('done');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('does not re-roll the agent when the learn came before the run began', async () => {
+      const state = failedAgentState(1, noImage);
+      const applyCalls: StepApplyArgs[] = [];
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep(applyCalls),
+        enqueued,
+        learnedAt(-120_000),
+      );
+
+      expect(result.status).toBe('done');
+      expect(applyCalls).toHaveLength(1);
+      expect(enqueued).toHaveLength(0);
+    });
+  });
+
+  it('still degrades on the final attempt instead of re-rolling a cut reply again', async () => {
+    const state = failedAgentState(3, CUT);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), sharedPredicateStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  describe('when the provider has no higher output ceiling left to try', () => {
+    const outputCap = `${MODEL_CAPABILITY_HEADLINES.output_cap_reached} — hint.`;
+    const withLimits = (limits: Record<string, unknown>) => [
+      makeProvider({
+        modelLimits: { model: '', learnedAt: new Date().toISOString(), ...limits },
+      } as Partial<CliProviderRecord>),
+    ];
+
+    it('does not resend an output-cap failure', async () => {
+      const state = failedAgentState(1, outputCap);
+      const applyCalls: StepApplyArgs[] = [];
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        sharedPredicateStep(applyCalls),
+        enqueued,
+        withLimits({ maxOutputTokens: 131072, maxOutputTokensExhausted: true }),
+      );
+
+      expect(result.status).toBe('done');
+      expect(applyCalls).toHaveLength(1);
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('resends an output-cap failure while a higher rung remains', async () => {
+      const state = failedAgentState(1, outputCap);
+      const enqueued: CliExecJobPayload[] = [];
+      await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        withLimits({ maxOutputTokens: 131072 }),
+      );
+
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('resends a rejected-ceiling failure, whose rollback changed the request', async () => {
+      const state = failedAgentState(
+        1,
+        `${MODEL_CAPABILITY_HEADLINES.max_tokens_too_large} — hint.`,
+      );
+      const enqueued: CliExecJobPayload[] = [];
+      await run(
+        makeMockDb(state),
+        sharedPredicateStep([]),
+        enqueued,
+        withLimits({ maxOutputTokens: 65536, maxOutputTokensExhausted: true }),
+      );
+
+      expect(enqueued).toHaveLength(1);
+    });
+  });
+});
 
 describe('advanceStep agentMining fatal provider failure', () => {
   it('fails the step instead of handing apply() a degraded batch', async () => {

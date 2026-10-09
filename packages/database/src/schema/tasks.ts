@@ -702,6 +702,9 @@ export interface MergeResolveState {
       }
     | { unavailable: string }
     | null;
+  /** The last fixer was cut at the output limit: the next one, automatic or a person's retry,
+   *  carries the shrink notice. Cleared when that fixer is dispatched. */
+  lastFixerCut?: boolean;
 }
 
 export const taskEvents = pgTable(
@@ -1131,6 +1134,13 @@ export const cliInvocations = pgTable(
       reason?: 'switched_off' | 'unavailable' | 'too_large';
       errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
       filesRulesUnmatched?: number;
+    }>(),
+    /** The capability remedies the request was built with (nulls when the provider had no limits);
+     *  NULL on rows written before the column. Migration 0177. */
+    limitsSnapshot: jsonb('limits_snapshot').$type<{
+      vision: boolean | null;
+      maxOutputTokens: number | null;
+      maxOutputTokensExhausted: boolean;
     }>(),
   },
   (table) => [

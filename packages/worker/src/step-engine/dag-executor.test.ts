@@ -29,7 +29,11 @@ import {
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
 import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
-import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
+import {
+  OUTPUT_TRUNCATION_HEADLINE,
+  PROVIDER_FATAL_HEADLINES,
+} from '../queues/cli-exec/failure-class.js';
+import { TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { StepSupersededError } from './step-ownership.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
@@ -920,6 +924,7 @@ function makeDagMergeWaitDb(opts: {
         errorMessage?: string | null;
         rawOutput?: string | null;
         parsedOutput?: unknown;
+        prompt?: string | null;
       }
     | undefined;
   integrationDir: string;
@@ -935,6 +940,7 @@ function makeDagMergeWaitDb(opts: {
     cliInvocationId: string | null;
     infraRetries: number;
     mergeStatus: string | null;
+    errorMessage: string | null;
   }>;
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
@@ -968,11 +974,13 @@ function makeDagMergeWaitDb(opts: {
     mergeStatus: 'conflict',
     branchName: 'main--ISSUE-1',
     debtItems: [],
+    similarSites: [],
     infraRetries: 0,
     ...opts.issue,
   };
   const issueUpdates: Record<string, unknown>[] = [];
   const events: { eventType?: string }[] = [];
+  const invocationInserts: Record<string, unknown>[] = [];
   let levelReads = 0;
 
   function chain(result: unknown) {
@@ -1027,6 +1035,7 @@ function makeDagMergeWaitDb(opts: {
       tasks: { findFirst: async () => undefined },
       users: { findFirst: async () => undefined },
       cliInvocations: { findFirst: async () => opts.invocation },
+      userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
     },
@@ -1049,6 +1058,7 @@ function makeDagMergeWaitDb(opts: {
     insert: (table: unknown) => ({
       values: (v: { eventType?: string }) => {
         if (table === schema.taskEvents) events.push(v);
+        if (table === schema.cliInvocations) invocationInserts.push(v);
         return {
           returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
           then: (resolve: (v: unknown) => void) => resolve(undefined),
@@ -1101,6 +1111,7 @@ function makeDagMergeWaitDb(opts: {
     getLevelMergeState: () => levelMergeState,
     getIssueMergeStatus: () => issueMergeStatus,
     issueUpdates,
+    invocationInserts,
     events,
   };
 }
@@ -1262,6 +1273,147 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }
+  });
+
+  describe('a fixer that ended, by autoResolve', () => {
+    const ended = (run: { exitCode: number; errorMessage: string | null; prompt?: string }) => ({
+      id: 'inv1',
+      startedAt: new Date(),
+      endedAt: new Date(),
+      supersededAt: null,
+      ...run,
+    });
+    const cut = {
+      exitCode: 1,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+    };
+    async function ingest(
+      invocation: ReturnType<typeof ended>,
+      autoResolveConflicts: boolean,
+      edit: string,
+      checkpointAfterFirstRead = false,
+    ) {
+      const integrationDir = await setupConflictedIntegration();
+      const h = makeDagMergeWaitDb({
+        invocation,
+        integrationDir,
+        autoResolveConflicts,
+        conflictRetries: { 'ISSUE-1': 1 },
+        checkpointAfterFirstRead,
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      await writeFile(path.join(integrationDir, 'base.txt'), edit, 'utf8');
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        mergeCtx(integrationDir),
+        dispatchingParams as never,
+      );
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        conflictRetries: Record<string, number>;
+        lastFixerCut?: boolean;
+      };
+      return { h, integrationDir, result, state };
+    }
+
+    it.each([true, false])(
+      'cut at the output limit (autoResolve %s): its edit is discarded, no attempt is charged, one smaller fixer is sent',
+      async (auto) => {
+        const { h, integrationDir, result, state } = await ingest(
+          ended({ ...cut, prompt: 'resolve the merge' }),
+          auto,
+          'half-resolved\n',
+        );
+        try {
+          expect(result.resolved).toBe(false);
+          if (!result.resolved) expect(result.result.status).toBe('waiting_cli');
+          expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(
+            0,
+          );
+          expect(await readFile(path.join(integrationDir, 'base.txt'), 'utf8')).toContain(
+            '<<<<<<<',
+          );
+          expect(h.getIssueMergeStatus()).toBe('conflict');
+          expect(state.conflictRetries['ISSUE-1']).toBe(1);
+          expect(state.fixInvocationId).toBe('fix-inv-1');
+          expect(h.invocationInserts).toHaveLength(1);
+          expect((h.invocationInserts[0]!.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(
+            true,
+          );
+        } finally {
+          await rm(integrationDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('cut again after the notice, manual: handled as today, aborted and halted with no new fixer', async () => {
+      const { h, integrationDir, result, state } = await ingest(
+        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        false,
+        'half-resolved\n',
+      );
+      try {
+        expect(result.resolved).toBe(false);
+        if (!result.resolved) expect(result.result.status).toBe('failed');
+        expect(h.invocationInserts).toHaveLength(0);
+        expect(
+          await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']),
+        ).not.toBe(0);
+        expect(state.conflictRetries['ISSUE-1']).toBe(1);
+        expect(state.fixInvocationId).toBeNull();
+        // Kept for the person's retry_ai, whose fixer then carries the shrink notice.
+        expect(state.lastFixerCut).toBe(true);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('cut again after the notice, auto-resolve: the attempt is charged and the next fixer keeps the notice', async () => {
+      const { h, integrationDir, state } = await ingest(
+        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(h.invocationInserts[0]!.prompt as string).toContain(TRUNCATION_RETRY_NOTICE);
+        expect(state.conflictRetries['ISSUE-1']).toBe(2);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('finished cleanly: the merge is committed and nothing is dispatched', async () => {
+      const { h, integrationDir } = await ingest(
+        ended({ exitCode: 0, errorMessage: null, prompt: 'resolve the merge' }),
+        true,
+        'resolved\n',
+        true,
+      );
+      try {
+        expect(h.getIssueMergeStatus()).toBe('resolved');
+        expect(h.invocationInserts).toHaveLength(0);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('never answered: refunded and sent again with the same prompt, no notice', async () => {
+      const { h, integrationDir, state } = await ingest(
+        { id: 'inv1', startedAt: null, endedAt: null, supersededAt: new Date() } as never,
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(state.conflictRetries['ISSUE-1']).toBe(1);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
   });
 
   it('auto-resolve dispatch saves fixInvocationId before the enqueue that can fail', async () => {
@@ -1807,6 +1959,103 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
   );
 });
 
+describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
+  const truncatedReviewer = (prompt: string | null) =>
+    inv({
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: 1,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      prompt,
+    } as never);
+
+  async function ingest(reviewer: InvLike, role: 'reviewer' | 'coder' = 'reviewer') {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const issue = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 0,
+      stuckCount: 0,
+      reviewInfraRetries: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    await ingestReviewRun(ra, issue, { id: 'run-1', role } as never, reviewer);
+    return { inserts, updates };
+  }
+
+  it('re-spawns a fix coder cut off at the limit once with the notice, before any re-review', async () => {
+    const { inserts } = await ingest(truncatedReviewer('fix the issue'), 'coder');
+    const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
+    expect(spawned).toHaveLength(1);
+    expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('coder');
+  });
+
+  it('fails the issue, without a re-review, when the fix coder truncated again after the notice', async () => {
+    const { inserts, updates } = await ingest(
+      truncatedReviewer(`fix the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+      'coder',
+    );
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toEqual([
+      expect.objectContaining({
+        patch: expect.objectContaining({ resolution: 'failed_unrecoverable' }),
+      }),
+    ]);
+  });
+
+  it('re-spawns the reviewer once with the notice, charging no review retry', async () => {
+    const { inserts, updates } = await ingest(truncatedReviewer('review the issue'));
+    const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
+    expect(spawned).toHaveLength(1);
+    expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('reviewer');
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+  });
+
+  it('reads a notice the dispatch wrapped with more text as already retried', async () => {
+    const { inserts } = await ingest(
+      truncatedReviewer(
+        `review the issue\n\n${TRUNCATION_RETRY_NOTICE}\n\n## Boundary added at dispatch`,
+      ),
+    );
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+  });
+
+  it('fails the issue when the reviewer prompt already carried the notice', async () => {
+    const { inserts, updates } = await ingest(
+      truncatedReviewer(`review the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+    );
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toEqual([
+      expect.objectContaining({
+        patch: expect.objectContaining({ resolution: 'failed_unrecoverable' }),
+      }),
+    ]);
+  });
+});
+
 describe('ingestReviewRun: stuck counts reviews without progress', () => {
   type Fix = { passed: boolean }[];
   const verdictOf = (criteria: Fix | null) =>
@@ -2130,6 +2379,100 @@ describe('ingestAdvisor: an advisor that never answered', () => {
   );
 });
 
+describe('DAG escalation agents cut off at the output limit', () => {
+  const truncated = (prompt: string) =>
+    inv({
+      id: 'esc-inv-1',
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: 1,
+      startedAt: new Date(),
+      endedAt: new Date(),
+      supersededAt: null,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      prompt,
+    } as never);
+  const escalationArgs = (db: unknown, plan: Record<string, unknown> = {}) =>
+    ({
+      db,
+      issues: [],
+      level: { level: 1 } as never,
+      current: { id: 'step1', status: 'running' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: { id: 'plan1', ...plan },
+    }) as never;
+  const issue = {
+    id: 'issue1',
+    issueKey: 'ISSUE-1',
+    title: 'Fix the flaky cache',
+    advisorInvocations: 1,
+    branchName: 'main--ISSUE-1',
+    worktreePath: '/does/not/matter',
+    sandboxWorktreePath: '/does/not/matter',
+    errorMessage: null,
+    reviewerVerdict: null,
+  } as never;
+
+  it('re-dispatches a truncated advisor once with the notice, uncharged', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const result = await ingestAdvisor(
+      escalationArgs(db),
+      issue,
+      { id: 'run-1' } as never,
+      truncated('advise'),
+    );
+    expect(result).toBe('retry');
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+    const spawned = inserts.find((i) => i.table === schema.cliInvocations);
+    expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+  });
+
+  it('reads a truncated advisor that already had the notice as today', async () => {
+    const { db, updates } = makeSpawnDb();
+    await ingestAdvisor(
+      escalationArgs(db),
+      issue,
+      { id: 'run-1' } as never,
+      truncated(`advise\n\n${TRUNCATION_RETRY_NOTICE}`),
+    );
+    expect(updates.filter((u) => u.table === schema.taskDagIssues).length).toBeGreaterThan(0);
+  });
+
+  it('re-dispatches a truncated replanner once with the notice instead of aborting', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    const fake = db as unknown as Record<string, unknown> & { query: Record<string, unknown> };
+    fake.query.cliInvocations = { findFirst: async () => truncated('replan') };
+    fake.select = () => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve([]), {
+            for: async () => [{ id: 'step1' }],
+            orderBy: async () => [],
+          }),
+      }),
+    });
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const result = await resolveEscalationPhase(
+      escalationArgs(db, { replannerInvocationId: 'esc-inv-1', replannerInvocations: 1 }),
+    );
+    expect(result.status).not.toBe('aborted');
+    const spawned = inserts.find((i) => i.table === schema.cliInvocations);
+    expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(
+      updates
+        .filter((u) => u.table === schema.taskDagPlans)
+        .every((u) => !('replannerInvocations' in u.patch)),
+    ).toBe(true);
+  });
+});
+
 describe('resolveEscalationPhase: a replanner run that never answered', () => {
   it.each([
     [
@@ -2337,11 +2680,14 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       rawOutput: null,
       parsedOutput: null,
     };
-    async function ingestCoder(stepRowStatus: string) {
+    async function ingestCoder(
+      stepRowStatus: string,
+      invocation: Parameters<typeof makeDagMergeWaitDb>[0]['invocation'] = killedCoder,
+    ) {
       const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-c-'));
       try {
         const h = makeDagMergeWaitDb({
-          invocation: killedCoder,
+          invocation,
           integrationDir,
           autoResolveConflicts: false,
           stepRowStatus,
@@ -2392,6 +2738,101 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       expect(issueUpdates).toEqual([
         expect.objectContaining({ outcome: 'pending', cliInvocationId: null, infraRetries: 1 }),
       ]);
+    });
+
+    const truncatedCoder = (prompt: string | null) => ({
+      ...killedCoder,
+      supersededAt: null,
+      exitCode: 1,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      prompt,
+    });
+
+    it('re-dispatches a coder cut off at the output limit once, without charging infraRetries', async () => {
+      const { outcome, issueUpdates } = await ingestCoder(
+        'running',
+        truncatedCoder('implement the issue'),
+      );
+      expect('result' in outcome && outcome.result.resolved).toBe(true);
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'pending',
+          cliInvocationId: null,
+          infraRetries: 1,
+          errorMessage: expect.stringContaining(OUTPUT_TRUNCATION_HEADLINE),
+        }),
+      ]);
+    });
+
+    it('handles a cut-off coder whose prompt already carries the notice as a failure', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        truncatedCoder(`implement the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+      );
+      expect(issueUpdates).toEqual([expect.objectContaining({ outcome: 'failed_unrecoverable' })]);
+    });
+  });
+
+  describe('a coder dispatched after a truncation (section B)', () => {
+    async function dispatchPending(errorMessage: string | null) {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-b-'));
+      try {
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          issue: {
+            outcome: 'pending',
+            cliInvocationId: null,
+            errorMessage,
+            mergeStatus: null,
+          },
+        });
+        const ctx = {
+          taskId: 'task1',
+          userId: 'user1',
+          repoPath: integrationDir,
+          sandboxWorkdir: integrationDir,
+          logger: logger.child({ test: 'dag-section-b' }),
+          emitProgress: async () => {},
+          db: h.db,
+        } as unknown as StepContext;
+        vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+        await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          ctx,
+          {
+            userId: 'user1',
+            taskId: 'task1',
+            cliProviderId: null,
+            ignoreSavedStepClis: false,
+            providers: [{ id: 'p1', enabled: true }],
+            deps: { enqueueCliInvocation: async () => {} },
+          } as never,
+        );
+        return h;
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    }
+
+    it('carries the notice at the end of its prompt and clears the headline on claim', async () => {
+      const h = await dispatchPending(`${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`);
+      expect(h.invocationInserts).toHaveLength(1);
+      expect((h.invocationInserts[0]!.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(
+        true,
+      );
+      expect(h.issueUpdates).toContainEqual(
+        expect.objectContaining({ outcome: 'running', errorMessage: null }),
+      );
+    });
+
+    it('carries no notice when the issue was not reset after a truncation', async () => {
+      const h = await dispatchPending(null);
+      expect(h.invocationInserts).toHaveLength(1);
+      expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
     });
   });
 });

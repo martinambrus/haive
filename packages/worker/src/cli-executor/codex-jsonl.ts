@@ -12,6 +12,16 @@ import { createToolUsageTally, type ToolUsageTally } from './tool-usage.js';
  * Lives in cli-executor (no deps) so both exec-core (queues/cli-exec) and
  * the sequential sub-agent runner can import it without a layering cycle. */
 
+/** VOLATILE: codex's own wording around OpenAI's documented `incomplete_details.reason` value
+ *  `max_output_tokens`, as it appears in the `turn.failed` message. Measured on codex 0.161.0
+ *  exec and inferred for app-server. A reword stops matching, which test/output-truncation-codex
+ *  fails on by pinning this against the recorded stream. */
+export const CODEX_OUTPUT_LIMIT_MARKER = 'Incomplete response returned, reason: max_output_tokens';
+
+export function isCodexOutputLimitMessage(message: string | null | undefined): boolean {
+  return typeof message === 'string' && message.includes(CODEX_OUTPUT_LIMIT_MARKER);
+}
+
 export interface CodexJsonlCollector {
   /** Feed raw stdout chunks; parses complete JSONL lines. */
   onChunk: (chunk: string) => void;
@@ -25,6 +35,9 @@ export interface CodexJsonlCollector {
    *  premature-end message. Null when a result exists. */
   getNoResultReason: () => string | null;
   getMalformedLineCount: () => number;
+  /** The message of a `turn.failed` event ('' when it carried none), else null. Unlike
+   *  getNoResultReason it is set even when an agent_message streamed before the failure. */
+  getTurnFailure: () => string | null;
   /** What the run USED, tallied from every `item.completed` item (commands, MCP calls,
    *  collab activity, file changes). Never null: a stream with no codex event at all
    *  finalizes as `coverage: 'none'`. */
@@ -43,6 +56,7 @@ export function createCodexJsonlCollector(
   let lastAgentMessage: string | null = null;
   let usageSum: CliTokenUsage | null = null;
   let lastError: string | null = null;
+  let turnFailure: string | null = null;
 
   function processLine(line: string): void {
     const trimmed = line.trim();
@@ -76,6 +90,7 @@ export function createCodexJsonlCollector(
     if (type === 'turn.failed') {
       const err = event.error as Record<string, unknown> | undefined;
       if (typeof err?.message === 'string') lastError = err.message;
+      turnFailure = typeof err?.message === 'string' ? err.message : '';
       return;
     }
     if (type === 'error' && typeof event.message === 'string') {
@@ -122,6 +137,10 @@ export function createCodexJsonlCollector(
     getMalformedLineCount(): number {
       return malformedLineCount;
     },
+    getTurnFailure(): string | null {
+      flush();
+      return turnFailure;
+    },
     getToolUsage(): InvocationToolUsage {
       flush();
       return toolUsage.finalize('stream');
@@ -133,6 +152,7 @@ export interface ExtractedCodexOutput {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
   eventCount: number;
+  turnFailure: string | null;
 }
 
 /** Full-buffer JSONL extraction for the sequential sub-agent runner: feeds
@@ -146,5 +166,6 @@ export function extractCodexJsonlOutput(stdout: string): ExtractedCodexOutput {
     text,
     tokenUsage: collector.getTokenUsage(),
     eventCount: collector.isJsonl() ? 1 : 0,
+    turnFailure: collector.getTurnFailure(),
   };
 }

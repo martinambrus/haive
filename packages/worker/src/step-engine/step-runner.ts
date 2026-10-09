@@ -40,6 +40,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
+import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
@@ -617,7 +618,8 @@ async function resolveLlmPhase(
       // Output-truncation retry: a response that hit the model's output-token cap
       // produces no result, so it never reaches apply()'s retry — handle it here by
       // consuming the bad row and re-dispatching a fresh invocation.
-      //  - Non-loop steps: bounded by llm.retry.maxAttempts (total attempts).
+      //  - Non-loop steps with llm.retry: bounded by llm.retry.maxAttempts (total attempts).
+      //  - Non-loop steps without it: one retry, so a second consecutive truncation fails.
       //  - Loop steps (no llm.retry): bounded by MAX_TRUNCATION_RETRIES consecutive
       //    truncations for the CURRENT iteration; each retry shrinks the request via
       //    buildIterationPrompt's truncationRetries (computed in the dispatch path;
@@ -627,8 +629,10 @@ async function resolveLlmPhase(
       if (isOutputTruncationMessage(errTrimmed)) {
         const llmRetry = llmSpec.retry;
         const canRetry = stepDef.loop
-          ? (await countTrailingTruncations(db, current.id)) < MAX_TRUNCATION_RETRIES
-          : !!llmRetry && (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts;
+          ? (await countTrailingTruncations(db, current.id)) <= MAX_TRUNCATION_RETRIES
+          : llmRetry
+            ? (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts
+            : (await countTrailingTruncations(db, current.id)) < 2;
         if (canRetry) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message, loop: !!stepDef.loop },
@@ -667,7 +671,15 @@ async function resolveLlmPhase(
       // declare neither loop nor llm.retry. Supersede rather than consume so the repaired
       // attempt does not burn the genuine retry budget — same as the orphan path.
       if (capabilityClassFromMessage(errTrimmed)) {
-        if ((await countTrailingCapabilityFailures(db, current.id)) < MAX_CAPABILITY_RETRIES) {
+        if (
+          (await countTrailingCapabilityFailures(db, current.id)) < MAX_CAPABILITY_RETRIES &&
+          !repeatsCapabilityRequest(
+            errTrimmed,
+            params.providers,
+            invocation.cliProviderId,
+            invocation,
+          )
+        ) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message },
             'model-capability failure; re-dispatching with the learned remedy',
@@ -896,6 +908,7 @@ async function resolveLlmPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+      limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
       mode,
       prompt: plan.effectivePrompt ?? prompt,
       agentTitle: roleLabel,
@@ -1101,6 +1114,7 @@ async function resolveAiFixPhase(
       cliProviderId: plan.providerId,
       effort: plan.effort ?? null,
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+      limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
       mode: fixMode,
       prompt: plan.effectivePrompt ?? prompt,
     }),
@@ -1577,6 +1591,8 @@ type MiningRetryTargets = Map<
     /** Read with `cliInvocationId`: the state a dispatch swaps, so two passes send it once. */
     status: MiningRow['status'];
     chargeAttempt?: boolean;
+    /** The prior run was cut at the output limit, so the re-dispatch carries the shrink notice. */
+    truncated?: boolean;
     /** Rung the re-dispatch runs at: the row's stored consecutive-timeout count, already
      *  incremented when the prior run burned its budget and reset to 0 when it did not.
      *  Required, not optional — the one construction site must decide, because defaulting
@@ -1836,11 +1852,15 @@ async function dispatchMiningAgents(
       // would each re-derive what 07/07b/08/08a already established, and could not see what the
       // user attached. Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
       // runtime directive is appended last and governs at prompt scope.
-      const prompt = dispatch.replayVerbatim
+      const augmented = dispatch.replayVerbatim
         ? dispatch.prompt
         : await augmentPromptWithTerseness(
             await augmentPromptWithLedger(db, params.taskId, attachmentsNotice + dispatch.prompt),
           );
+      const prompt =
+        target.truncated && !augmented.includes(TRUNCATION_RETRY_NOTICE)
+          ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}`
+          : augmented;
       const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
         await resolveSeat(dispatch.roleKey ?? 'default');
       const requirements = dispatchRequirements(dispatch);
@@ -1901,6 +1921,7 @@ async function dispatchMiningAgents(
         cliProviderId: plan.providerId,
         effort: plan.effort ?? null,
         assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+        limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
         mode: 'agent_mining',
         prompt: plan.effectivePrompt ?? prompt,
         steerable: plan.invocation.spec.steerable === true,
@@ -3850,25 +3871,40 @@ async function retryMiningAgents(
   // (it got its time and needed more). Re-running a timeout identically is the failure mode
   // CLI_TIMEOUT_HEADLINE exists to name.
   const timedOutInvocationIds = new Set<string>();
+  const truncatedInvocationIds = new Set<string>();
+  const retriedTruncationIds = new Set<string>();
+  const runsById = new Map<string, FailedRunStamp>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
       .select({
         id: schema.cliInvocations.id,
         errorMessage: schema.cliInvocations.errorMessage,
+        prompt: schema.cliInvocations.prompt,
         startedAt: schema.cliInvocations.startedAt,
+        createdAt: schema.cliInvocations.createdAt,
+        limitsSnapshot: schema.cliInvocations.limitsSnapshot,
       })
       .from(schema.cliInvocations)
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
+      runsById.set(p.id, p);
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
+      if (isOutputTruncationMessage(p.errorMessage?.trim())) {
+        truncatedInvocationIds.add(p.id);
+        if (p.prompt.includes(TRUNCATION_RETRY_NOTICE)) retriedTruncationIds.add(p.id);
+      }
     }
   }
   const runsFree = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && freeInvocationIds.has(r.cliInvocationId);
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
+  const truncated = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && truncatedInvocationIds.has(r.cliInvocationId);
+  const truncatedAgain = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && retriedTruncationIds.has(r.cliInvocationId);
   // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
   // preemption case above: that budget bounds automatic thrash, and a person asking is not
   // thrash. Without the bypass the one control a user has would silently do nothing once the
@@ -3878,7 +3914,16 @@ async function retryMiningAgents(
   const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
     r.userRetryRequestedAt != null;
   const candidates = wantedRows.filter(
-    (r) => r.attempts < maxAttempts || runsFree(r) || userAsked(r),
+    (r) =>
+      userAsked(r) ||
+      ((r.attempts < maxAttempts || runsFree(r)) &&
+        !truncatedAgain(r) &&
+        !repeatsCapabilityRequest(
+          r.errorMessage?.trim() ?? '',
+          params.providers,
+          r.cliProviderId,
+          r.cliInvocationId ? runsById.get(r.cliInvocationId) : null,
+        )),
   );
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
@@ -3888,6 +3933,7 @@ async function retryMiningAgents(
       cliInvocationId: r.cliInvocationId,
       status: r.status,
       chargeAttempt: !runsFree(r),
+      truncated: truncated(r),
       // Consecutive, so anything that is not a timeout resets the chain. A preemption
       // between two timeouts must not climb a rung — it never spent a budget to justify one.
       timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,
@@ -4199,12 +4245,13 @@ async function countLlmAttempts(db: Database, taskStepId: string): Promise<numbe
 }
 
 /** Appended to the prompt of any step re-dispatched after an output truncation. */
-const TRUNCATION_RETRY_NOTICE =
+export const TRUNCATION_RETRY_NOTICE =
   'Your previous attempt was cut off at the output-token limit. Keep each reply and each tool call smaller (write a large file in several edits, keep prose brief), but include every required item and field.';
 
 /** Max consecutive output-truncation re-dispatches tolerated for one loop
  *  iteration before the step fails. Each retry shrinks the request, so this also
- *  bounds how small a single chunk is asked to get. */
+ *  bounds how small a single chunk is asked to get. The trailing count includes the
+ *  call that was just cut off, so a count of up to this many still re-dispatches. */
 const MAX_TRUNCATION_RETRIES = 3;
 
 /** Count the most-recent CONSECUTIVE invocations for a step whose error is an
@@ -4239,6 +4286,74 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
  *  output-token ladder can climb at most one rung and then roll back if the provider
  *  rejects it. A third attempt would repeat a request we already know fails. */
 const MAX_CAPABILITY_RETRIES = 2;
+
+type LimitsSnapshot = NonNullable<typeof schema.cliInvocations.$inferSelect.limitsSnapshot>;
+type FailedRunStamp = { createdAt: Date | null; limitsSnapshot: LimitsSnapshot | null };
+
+function limitsSnapshotOf(
+  providers: CliProviderRecord[] | undefined,
+  providerId: string | null,
+): LimitsSnapshot {
+  const provider = providers?.find((p) => p.id === providerId);
+  const limits = provider ? resolveModelLimits(provider) : null;
+  return {
+    vision: limits?.vision ?? null,
+    maxOutputTokens: limits?.maxOutputTokens ?? null,
+    maxOutputTokensExhausted: limits?.maxOutputTokensExhausted === true,
+  };
+}
+
+/** Whether the limits carry the remedy for this failure's own capability class. */
+function remedyLearned(
+  cls: NonNullable<ReturnType<typeof capabilityClassFromMessage>>,
+  limits: NonNullable<ReturnType<typeof resolveModelLimits>>,
+): boolean {
+  if (cls === 'no_image_support') return limits.vision === false;
+  if (cls === 'output_cap_reached') return limits.maxOutputTokens !== undefined;
+  return limits.maxOutputTokensExhausted === true;
+}
+
+/** Whether the limits now hold a remedy for this class that the failed request was not built with. */
+function remedyChangedSince(
+  cls: NonNullable<ReturnType<typeof capabilityClassFromMessage>>,
+  limits: NonNullable<ReturnType<typeof resolveModelLimits>>,
+  built: LimitsSnapshot,
+): boolean {
+  if (cls === 'no_image_support') return limits.vision === false && built.vision !== false;
+  if (cls === 'output_cap_reached') {
+    return limits.maxOutputTokens !== undefined && limits.maxOutputTokens !== built.maxOutputTokens;
+  }
+  if (limits.maxOutputTokensExhausted === true && !built.maxOutputTokensExhausted) return true;
+  return (
+    limits.maxOutputTokens !== undefined &&
+    built.maxOutputTokens !== null &&
+    limits.maxOutputTokens < built.maxOutputTokens
+  );
+}
+
+/** True when re-dispatching this capability failure would send the request that just failed: the
+ *  remedy for its class is unchanged since the limits the run was built with (`limitsSnapshot`; a
+ *  run without one is judged by its `createdAt`), or its output-token ladder is spent, which stamps
+ *  `learnedAt` but changes nothing. False for any other failure. */
+function repeatsCapabilityRequest(
+  message: string,
+  providers: CliProviderRecord[] | undefined,
+  providerId: string | null,
+  run: FailedRunStamp | null | undefined,
+): boolean {
+  const cls = capabilityClassFromMessage(message);
+  if (!cls) return false;
+  const provider = providers?.find((p) => p.id === providerId);
+  const limits = provider ? resolveModelLimits(provider) : null;
+  if (cls === 'output_cap_reached' && limits?.maxOutputTokensExhausted === true) return true;
+  if (!limits) return true;
+  if (run?.limitsSnapshot) return !remedyChangedSince(cls, limits, run.limitsSnapshot);
+  if (!limits.learnedAt) return true;
+  // A newer learn for another capability does not change this request.
+  if (!remedyLearned(cls, limits)) return true;
+  if (!run?.createdAt) return true;
+  return new Date(limits.learnedAt).getTime() < run.createdAt.getTime();
+}
 
 /** Count the most-recent CONSECUTIVE invocations for a step that failed on a model
  *  capability. Resets at the first row with any other outcome, so an earlier remediated

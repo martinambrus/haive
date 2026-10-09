@@ -7,6 +7,7 @@ import {
   CONFIG_KEYS,
   STEER_IN_CHANNEL_PREFIX,
   configService,
+  type CleanTranscript,
   type CliExecInvocationKind,
   type CliExecJobPayload,
   type CliNetworkPolicy,
@@ -27,6 +28,7 @@ import {
   createCodexJsonlCollector,
   createAntigravityStreamCollector,
   extractGeminiJsonOutput,
+  isCodexOutputLimitMessage,
   type CliExecutionResult,
   type CliSpawner,
   type SpawnOptions,
@@ -91,9 +93,11 @@ import {
 } from './agent-definition-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
+  buildOutputTruncationMessage,
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
+  isOutputTruncationMessage,
   MCP_SERVER_FAILED_HEADLINE,
   CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
@@ -208,6 +212,9 @@ export function interpretCliFailure(
     }
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
+
+  // The partial reply in the scan below must not reclassify a truncation.
+  if (isOutputTruncationMessage(existing)) return existing;
 
   // Model-capability failures (no vision, output-token ceiling) come FIRST: they are
   // the most specific classes here, and unlike the fatal ones below they are things
@@ -847,12 +854,13 @@ export async function executeCliSpec(
   // codex and antigravity both speak line-delimited JSON and expose the same
   // collector shape, so they share the branch below. The only per-provider
   // difference is the wording when a stream carries no answer.
+  const codexCollector =
+    outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText, toolUsage) : null;
   const jsonlCollector =
-    outputFormat === 'codex-jsonl'
-      ? createCodexJsonlCollector(onProseText, toolUsage)
-      : outputFormat === 'antigravity-stream-json'
-        ? createAntigravityStreamCollector(onProseText)
-        : null;
+    codexCollector ??
+    (outputFormat === 'antigravity-stream-json'
+      ? createAntigravityStreamCollector(onProseText)
+      : null);
   const jsonlCliName = outputFormat === 'antigravity-stream-json' ? 'antigravity' : 'codex';
 
   // While the CLI streams, persist a running token-usage snapshot on a throttle
@@ -921,6 +929,11 @@ export async function executeCliSpec(
   // to copy instead of two, so a branch added later cannot pick up the Raw tab and forget the
   // Clean one.
   const persisted = { streamLog, cleanTranscript: cleanBuf.toTranscript() } as const;
+  // A failed turn's partial reply is not an answer; the Raw stream keeps it, the Clean tab does not.
+  const withoutModelProse = (transcript: CleanTranscript | null): CleanTranscript | null => {
+    const segments = transcript?.segments.filter((seg) => seg.kind !== 'model') ?? [];
+    return segments.length > 0 ? { segments } : null;
+  };
   // Raw CLI stdout+stderr tail for provider-fatal classification. rawOutput is
   // now sanitized for the Clean tab (prose or empty), so it can no longer carry
   // an API error the classifier needs. Excludes the header/prompt (which
@@ -1034,7 +1047,9 @@ export async function executeCliSpec(
     // `codex turn failed: ...`, so provider-fatal classification reads it identically.
     const turnMessage =
       turnStatus !== null && turnStatus !== 'completed'
-        ? `codex turn ${turnStatus}${turnError ? `: ${turnError}` : ''}`
+        ? isCodexOutputLimitMessage(turnError)
+          ? buildOutputTruncationMessage(`codex turn ${turnStatus}: ${turnError}`)
+          : `codex turn ${turnStatus}${turnError ? `: ${turnError}` : ''}`
         : null;
     const codexAppServer = { failure, binaryVersion: appServer.getBinaryVersion() };
     const modelIdentity = modelIdentityFrom({ codexAppServer: appServer.getModelReport() });
@@ -1053,7 +1068,7 @@ export async function executeCliSpec(
     }
     return {
       exitCode: result.exitCode,
-      rawOutput: proseForClean(text ?? '', result.stdout),
+      rawOutput: proseForClean(turnStatus === 'failed' ? '' : (text ?? ''), result.stdout),
       parsedOutput: null,
       errorMessage:
         result.error ??
@@ -1065,6 +1080,9 @@ export async function executeCliSpec(
       modelIdentity,
       toolUsage: appServer.getToolUsage(),
       ...persisted,
+      ...(turnStatus === 'failed'
+        ? { cleanTranscript: withoutModelProse(persisted.cleanTranscript) }
+        : {}),
       providerErrorScan,
       codexAppServer,
     };
@@ -1073,7 +1091,13 @@ export async function executeCliSpec(
   if (jsonlCollector && jsonlCollector.isJsonl()) {
     const jsonlText = jsonlCollector.getResult();
     const tokenUsage = jsonlCollector.getTokenUsage();
-    if (jsonlText !== null) {
+    // A failed codex turn is judged by its own event, and only on a failing exit: a run Haive
+    // killed has no turn.failed, and an exit 0 keeps the answer it printed.
+    const turnFailure = result.exitCode === 0 ? null : (codexCollector?.getTurnFailure() ?? null);
+    const outputLimitMessage = isCodexOutputLimitMessage(turnFailure)
+      ? buildOutputTruncationMessage(`codex turn failed: ${turnFailure}`)
+      : null;
+    if (jsonlText !== null && turnFailure === null) {
       // rawOutput = the model's answer text — the step parsers' fenced-JSON
       // contract (parsedOutput ?? rawOutput) is preserved.
       return {
@@ -1099,14 +1123,15 @@ export async function executeCliSpec(
         providerDiagnosticLog: result.capturedLog ?? undefined,
       };
     }
-    // JSONL stream without an agent message — partial usage is still recorded.
-    // No prose to recover; keep the raw codex JSONL out of the Clean tab.
+    // JSONL stream without an agent message, or a failed turn: partial usage is still recorded
+    // and neither the raw JSONL nor a partial reply (it stays in the Raw stream) is an answer.
     return {
       exitCode: result.exitCode,
       rawOutput: proseForClean('', result.stdout),
       parsedOutput: null,
       errorMessage:
         result.error ??
+        outputLimitMessage ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         jsonlCollector.getNoResultReason() ??
         `${jsonlCliName} emitted no agent message`,
@@ -1114,6 +1139,7 @@ export async function executeCliSpec(
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,
+      cleanTranscript: withoutModelProse(persisted.cleanTranscript),
       providerErrorScan,
       providerDiagnosticLog: result.capturedLog ?? undefined,
     };

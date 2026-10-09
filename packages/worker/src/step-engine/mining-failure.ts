@@ -1,5 +1,7 @@
 import {
+  capabilityClassFromMessage,
   fatalClassFromMessage,
+  isOutputTruncationMessage,
   isTransientCliFailure,
   isTransientProviderApiError,
 } from '../queues/cli-exec/failure-class.js';
@@ -145,6 +147,15 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
     .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
     .join('\n');
   if (!diagnostic) return false;
+  // A learned capability remedy and the truncation notice each change the next request. Read off
+  // the run's own headline first: the vetoes below also scan the model's partial reply.
+  const own = result.errorMessage?.trim() ?? '';
+  if (
+    (capabilityClassFromMessage(own) || isOutputTruncationMessage(own)) &&
+    !NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(own)
+  ) {
+    return true;
+  }
   // Fatal classes are NOT uniformly non-retryable, which is why this reads the class rather
   // than isFatalProviderFailure's boolean. `auth` needs a human and `rate_limit` needs a window
   // that has not moved — retrying either burns a run to learn nothing. A 5xx is the opposite:

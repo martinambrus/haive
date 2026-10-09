@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildOutputTruncationMessage,
+  isOutputTruncationMessage,
+} from '../src/queues/cli-exec/failure-class.js';
+import {
   formatCliErrorMessage,
   interpretCliFailure,
   type ExecutionOutcome,
@@ -20,6 +24,14 @@ describe('interpretCliFailure', () => {
     expect(interpretCliFailure(outcome({ exitCode: 0, errorMessage: 'x' }), 'claude-code')).toBe(
       'x',
     );
+  });
+
+  it('keeps the truncation headline whatever the partial reply says', () => {
+    const errorMessage = buildOutputTruncationMessage('stream result');
+    for (const scan of ['rate limit 429', 'HTTP 500', 'Invalid authentication credentials 401']) {
+      const msg = interpretCliFailure(outcome({ errorMessage, providerErrorScan: scan }), 'grok');
+      expect(isOutputTruncationMessage(msg)).toBe(true);
+    }
   });
 
   it('detects 401 in raw stdout and suggests claude /login', () => {

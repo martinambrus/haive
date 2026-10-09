@@ -61,6 +61,7 @@ import { loadTaskMeta } from './steps/workflow/_task-meta.js';
 import {
   isFatalProviderFailure,
   isCliTimeoutFailure,
+  isOutputTruncationMessage,
   cliTimeoutBudgetMinutes,
 } from '../queues/cli-exec/failure-class.js';
 import {
@@ -79,7 +80,7 @@ import {
   type SimilarSite,
 } from './steps/workflow/_similar-sites.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
-import { resolvePreferredCli } from './step-runner.js';
+import { resolvePreferredCli, TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
@@ -487,6 +488,9 @@ interface LevelMergeState {
   conflictRetries: Record<string, number>;
   /** The tree the in-flight fixer was sent into (null = none recorded). */
   fixBaseline: FixBaseline | FixBaselineUnavailable | null;
+  /** The last fixer was cut at the output limit: the next one, automatic or a person's
+   *  retry_ai, carries the shrink notice. Cleared when that fixer is dispatched. */
+  lastFixerCut: boolean;
 }
 
 function readMergeState(level: DagLevelRow): LevelMergeState {
@@ -496,6 +500,7 @@ function readMergeState(level: DagLevelRow): LevelMergeState {
     fixInvocationId: ms?.fixInvocationId ?? null,
     conflictRetries: ms?.conflictRetries ?? {},
     fixBaseline: ms?.fixBaseline ?? null,
+    lastFixerCut: ms?.lastFixerCut ?? false,
   };
 }
 
@@ -609,6 +614,7 @@ async function startConflictFix(
   m: MergeArgs,
   state: LevelMergeState,
   target: DagIssueRow,
+  afterTruncation = false,
 ): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
   // No fixer is in flight here (the ingest runs first, and a step's advances run one at a time),
   // so a merge still open is an earlier attempt's, and a fixer must start from a fresh one.
@@ -642,13 +648,20 @@ async function startConflictFix(
   );
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
-  const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
-    state.activeConflict = target.issueKey;
-    state.fixInvocationId = invId;
-    state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
-    state.fixBaseline = fixBaseline;
-    await saveMergeState(m.db, m.level.id, state);
-  });
+  const withNotice = afterTruncation || state.lastFixerCut;
+  const dispatched = await dispatchMergeFixAgent(
+    m,
+    target,
+    async (invId) => {
+      state.activeConflict = target.issueKey;
+      state.fixInvocationId = invId;
+      state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+      state.fixBaseline = fixBaseline;
+      state.lastFixerCut = false;
+      await saveMergeState(m.db, m.level.id, state);
+    },
+    withNotice,
+  );
   if (dispatched.kind === 'already_live') {
     // A concurrent advance already dispatched the fix agent for this step (the
     // one-live-per-step index rejected ours). The winner owns the in-progress merge and
@@ -688,11 +701,13 @@ async function dispatchMergeFixAgent(
   m: MergeArgs,
   issue: DagIssueRow,
   onInserted: (invocationId: string) => Promise<void>,
+  afterTruncation = false,
 ): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
-  const prompt = await augmentPromptWithTerseness(
+  const augmented = await augmentPromptWithTerseness(
     buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
   );
+  const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
@@ -805,9 +820,16 @@ async function runLevelMerge(
       return haltMerge(m, `Merge halted on ${branch}. ${fixerIndexHeldNote(leftovers.indexHeld)}`);
     }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
-    if (runNeverAnswered(inv)) {
-      // A fixer that never answered may have left the merge half-resolved, so its
-      // edits are discarded and it is dispatched again without spending an attempt.
+    const lastFixerCut =
+      !runNeverAnswered(inv) &&
+      classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+        'truncated';
+    // Saved with the merge state below, so a person's later retry_ai keeps the shrink notice.
+    if (lastFixerCut) state.lastFixerCut = true;
+    const fixerCut = lastFixerCut && truncationRetryable(inv);
+    if (runNeverAnswered(inv) || fixerCut) {
+      // A fixer that never answered, or was cut at the output limit, may have left the merge
+      // half-resolved, so its edits are discarded and it is dispatched again without spending an attempt.
       const aborted = await abortMerge(integration.path);
       if (!aborted.ok) unaborted = aborted;
       if (target) {
@@ -841,6 +863,7 @@ async function runLevelMerge(
     await clearAiFix(db, m.current.id);
     if (unaborted) return haltUnaborted(m, branch, unaborted);
     m.current = await setStepStatus(db, m.current.id, { status: 'running' });
+    if (fixerCut && target) return startConflictFix(m, state, target, true);
     // fall through to the merge pass + halt/ok decision
   } else if (m.current.aiFixContext) {
     // 2. retry_ai (manual) — dispatch a fix agent for the first held conflict.
@@ -1058,6 +1081,12 @@ const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> 
   issue_advisor: 'Advisor',
 };
 
+/** A run cut at the output limit is retried once: not when its prompt already carried the notice
+ *  anywhere (dispatch can wrap a prompt, so not only at its end). */
+function truncationRetryable(inv: { prompt?: string | null }): boolean {
+  return typeof inv.prompt === 'string' && !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
+}
+
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
  *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
  *  null when no provider would take it — every caller's truthiness check reads the same
@@ -1077,6 +1106,7 @@ async function spawnReviewAgent(
   prompt: string,
   capabilities: StepCapability[],
   claim?: (invocationId: string) => Promise<void>,
+  afterTruncation = false,
 ): Promise<string | null> {
   const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
@@ -1093,9 +1123,12 @@ async function spawnReviewAgent(
   // wrote, so it is told what is attached and what earlier agents already established about it.
   const meta = await loadTaskMeta(ra.db, ra.taskId);
   const taskBoundary = `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n`;
-  const fullPrompt = await augmentPromptWithTerseness(
+  const augmentedPrompt = await augmentPromptWithTerseness(
     await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + taskBoundary + prompt),
   );
+  const fullPrompt = afterTruncation
+    ? `${augmentedPrompt}\n\n${TRUNCATION_RETRY_NOTICE}`
+    : augmentedPrompt;
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
@@ -1243,7 +1276,24 @@ export async function ingestReviewRun(
 
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
-  if (run.role !== 'reviewer' && !fixed.parsed && runNeverAnswered(inv)) {
+  // A fix coder cut at the output limit is re-run once, smaller, before anything reviews its edits;
+  // cut again after that notice, its partial edit is not reviewed but escalated.
+  const fixerCut =
+    run.role !== 'reviewer' &&
+    classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+      'truncated';
+  const fixerTruncated = fixerCut && truncationRetryable(inv);
+  if (fixerCut && !fixerTruncated) {
+    await consume();
+    await setResolution(
+      ra.db,
+      issue,
+      'failed_unrecoverable',
+      'fix coder cut off at the output limit again after the smaller-output retry',
+    );
+    return;
+  }
+  if (run.role !== 'reviewer' && !fixed.parsed && (runNeverAnswered(inv) || fixerTruncated)) {
     const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     const ok = await spawnReviewAgent(
       ra,
@@ -1258,6 +1308,7 @@ export async function ingestReviewRun(
       ),
       ['tool_use', 'file_write'],
       consume,
+      fixerTruncated,
     );
     if (!ok) {
       await consume();
@@ -1280,6 +1331,26 @@ export async function ingestReviewRun(
       // Free when the reviewer never answered (preempted, never started or superseded), as on
       // the coder path: none of those may spend an infrastructure-recovery budget.
       const free = runNeverAnswered(inv);
+      if (cls === 'truncated' && truncationRetryable(inv)) {
+        const ok = await spawnReviewAgent(
+          ra,
+          issue,
+          'reviewer',
+          issue.innerIteration,
+          reviewerPrompt(issue, spec),
+          ['tool_use'],
+          undefined,
+          true,
+        );
+        if (!ok)
+          await setResolution(
+            ra.db,
+            issue,
+            'failed_unrecoverable',
+            'no cli provider available for reviewer re-dispatch',
+          );
+        return;
+      }
       if (cls === 'transient' && (free || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
         await ra.db
           .update(schema.taskDagIssues)
@@ -1770,8 +1841,12 @@ export async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
-  // An advisor that never answered must not be charged an attempt or read as ESCALATE_TO_REPLAN.
-  if (runNeverAnswered(inv)) {
+  // An advisor that never answered, or was cut at the output limit (once), must not be charged an
+  // attempt or read as ESCALATE_TO_REPLAN.
+  const truncatedOnce =
+    classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+      'truncated' && truncationRetryable(inv);
+  if (runNeverAnswered(inv) || truncatedOnce) {
     const ok = await spawnReviewAgent(
       ea,
       issue,
@@ -1779,6 +1854,8 @@ export async function ingestAdvisor(
       issue.advisorInvocations,
       advisorPrompt(issue, (await issueSpecText(ea.specView, issue)).text),
       ['tool_use'],
+      undefined,
+      truncatedOnce,
     );
     if (!ok) {
       await escalateIssueToReplan(ea.db, issue, 'no advisor provider available');
@@ -1897,7 +1974,11 @@ export async function ingestAdvisor(
   return 'retry';
 }
 
-async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
+async function spawnReplanner(
+  ea: EscalationArgs,
+  failed: DagIssueRow[],
+  afterTruncation = false,
+): Promise<boolean> {
   // Every issue in the plan, not just this level's: a failed issue's dependents sit
   // at LATER levels, and they are the whole question CONTINUE/REDUCE_SCOPE answers.
   const all = (await ea.db
@@ -1905,10 +1986,11 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     .from(schema.taskDagIssues)
     .where(eq(schema.taskDagIssues.dagPlanId, ea.plan.id))) as DagIssueRow[];
   const meta = await loadTaskMeta(ea.db, ea.taskId);
-  const prompt = await augmentPromptWithTerseness(
+  const augmented = await augmentPromptWithTerseness(
     `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n` +
       replannerPrompt(ea.plan, failed, all),
   );
+  const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
@@ -2019,9 +2101,12 @@ export async function resolveEscalationPhase(
       return { status: 'waiting', row: ea.current };
     }
     if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
-    // A replanner that never answered is not an attempt: free the slot and let escalation
-    // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
-    if (runNeverAnswered(inv)) {
+    // A replanner that never answered, or was cut at the output limit (once), is not an attempt:
+    // free the slot instead of parseReplanner's ABORT-on-no-output default.
+    const truncatedOnce =
+      classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+        'truncated' && truncationRetryable(inv);
+    if (runNeverAnswered(inv) || truncatedOnce) {
       await ea.db
         .update(schema.taskDagPlans)
         .set({ replannerInvocationId: null, updatedAt: new Date() })
@@ -2035,6 +2120,10 @@ export async function resolveEscalationPhase(
         .update(schema.cliInvocations)
         .set({ consumedAt: new Date() })
         .where(eq(schema.cliInvocations.id, inv.id));
+      if (truncatedOnce) {
+        const failed = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+        if (await spawnReplanner(ea, failed, true)) return { status: 'waiting', row: ea.current };
+      }
       return { status: 'reloop', row: ea.current };
     }
     const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
@@ -2344,7 +2433,7 @@ export async function resolveDagPhase(
         const issueSpec = await issueSpecText(specView, issue);
         // This path bypasses resolveLlmPhase's augmentation chain entirely, so the attachments
         // notice, the ledger and the terseness directive are applied here directly, in its order.
-        const prompt = await augmentPromptWithTerseness(
+        const augmentedPrompt = await augmentPromptWithTerseness(
           await augmentPromptWithLedger(
             db,
             ctx.taskId,
@@ -2355,6 +2444,10 @@ export async function resolveDagPhase(
               ),
           ),
         );
+        // Section (C) leaves the truncation headline on the reset issue; the claim below clears it.
+        const prompt = isOutputTruncationMessage(issue.errorMessage?.trim())
+          ? `${augmentedPrompt}\n\n${TRUNCATION_RETRY_NOTICE}`
+          : augmentedPrompt;
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,
@@ -2403,6 +2496,7 @@ export async function resolveDagPhase(
           .set({
             outcome: 'running',
             cliInvocationId: invId,
+            errorMessage: null,
             startedAt: new Date(),
             updatedAt: new Date(),
           })
@@ -2506,15 +2600,18 @@ export async function resolveDagPhase(
               );
             }
           }
-          if (cls === 'transient' && (free || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) {
+          if (
+            (cls === 'transient' && (free || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) ||
+            (cls === 'truncated' && truncationRetryable(inv))
+          ) {
             await db
               .update(schema.taskDagIssues)
               .set({
                 outcome: 'pending',
                 cliInvocationId: null,
-                infraRetries: issue.infraRetries + (free ? 0 : 1),
+                infraRetries: issue.infraRetries + (free || cls === 'truncated' ? 0 : 1),
                 concerns: null,
-                errorMessage: null,
+                errorMessage: cls === 'truncated' ? inv.errorMessage : null,
                 rawOutput: null,
                 startedAt: null,
                 endedAt: null,
@@ -2527,7 +2624,9 @@ export async function resolveDagPhase(
               .where(eq(schema.cliInvocations.id, inv.id));
             ctx.logger.info(
               { issueKey: issue.issueKey, attempt: issue.infraRetries + 1 },
-              'dag coder killed/orphaned — re-dispatching',
+              cls === 'truncated'
+                ? 'dag coder cut off at the output limit — re-dispatching smaller'
+                : 'dag coder killed/orphaned — re-dispatching',
             );
             continue; // re-dispatched by step (B) on the next loop pass
           }

@@ -52,8 +52,8 @@ export class GeminiAdapter extends BaseCliAdapter {
       //
       // KNOWN LIMITATION (max output tokens): the Gemini CLI has no flag or env to
       // raise the model's output cap, so the API default (8192) applies and long
-      // single responses truncate silently (finishReason MAX_TOKENS in the
-      // gemini-json envelope). The only lever is a settings.json
+      // single responses truncate silently (extractGeminiJsonOutput reads no finish reason, so
+      // nothing here detects it). The only lever is a settings.json
       // `modelConfigs.aliases.<alias>.modelConfig.generateContentConfig.maxOutputTokens`
       // override that must ALSO be explicitly selected — version-bound, and a wrong
       // key silently no-ops (google-gemini/gemini-cli#23081), so it is deliberately

@@ -920,6 +920,8 @@ describe('advanceStep LLM phase', () => {
     state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
     state.cliInvocationRow = {
       id: 'inv-1',
+      cliProviderId: 'prov-1',
+      startedAt: new Date(Date.now() - 60_000),
       exitCode: 1,
       rawOutput: null,
       parsedOutput: null,
@@ -958,6 +960,12 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued).toHaveLength(1);
     // Superseded, not consumed: a remediated attempt must not burn llm.retry budget.
     expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+    expect(sent.limitsSnapshot).toEqual({
+      vision: false,
+      maxOutputTokens: 131072,
+      maxOutputTokensExhausted: false,
+    });
 
     const spec = enqueued[0]!.spec as { args: string[]; env: Record<string, string> };
     expect(spec.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('131072');
@@ -965,6 +973,248 @@ describe('advanceStep LLM phase', () => {
     expect(spec.args).toContain('mcp__chrome-devtools__take_screenshot');
     // One-shot claude-family invocations carry the prompt as the `-p` positional.
     expect(spec.args.some((a) => a.includes(MODEL_CAPABILITY_BOUNDARY_MARKER))).toBe(true);
+  });
+
+  it('records a snapshot of nulls, not NULL, for a run built while the provider had learned no limits', async () => {
+    const state = freshState();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: { async enqueueCliInvocation() {} },
+    });
+    expect(result.status).toBe('waiting_cli');
+    const sent = state.inserts.find((i) => i.table === 'cli_invocations')!.row;
+    expect(sent.limitsSnapshot).toEqual({
+      vision: null,
+      maxOutputTokens: null,
+      maxOutputTokensExhausted: false,
+    });
+  });
+
+  describe('a model-capability failure whose remedy is already spent', () => {
+    const beforeRun = (): string => new Date(Date.now() - 120_000).toISOString();
+
+    async function advanceAfter(
+      cls: keyof typeof MODEL_CAPABILITY_HEADLINES,
+      modelLimits: Record<string, unknown>,
+      createdAt: Date = new Date(),
+      limitsSnapshot?: Record<string, unknown>,
+    ) {
+      const state = freshState();
+      state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+      state.cliInvocationRow = {
+        id: 'inv-1',
+        cliProviderId: 'prov-1',
+        startedAt: new Date(Date.now() - 60_000),
+        exitCode: 1,
+        rawOutput: null,
+        parsedOutput: null,
+        endedAt: new Date(),
+        errorMessage: `${MODEL_CAPABILITY_HEADLINES[cls]} — hint.`,
+        createdAt,
+        limitsSnapshot,
+      };
+      const enqueued: CliExecJobPayload[] = [];
+      const provider = {
+        ...makeProvider(),
+        modelLimits: { model: '', learnedAt: new Date().toISOString(), ...modelLimits },
+      } as CliProviderRecord;
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [provider],
+        deps: {
+          async enqueueCliInvocation(payload: CliExecJobPayload) {
+            enqueued.push(payload);
+          },
+        },
+      });
+      return { result, enqueued };
+    }
+
+    it('does not resend an output-cap failure once the ceiling ladder is spent', async () => {
+      const { result, enqueued } = await advanceAfter('output_cap_reached', {
+        maxOutputTokens: 131072,
+        maxOutputTokensExhausted: true,
+      });
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        MODEL_CAPABILITY_HEADLINES.output_cap_reached,
+      );
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('still re-dispatches an output-cap failure while a higher rung remains', async () => {
+      const { result, enqueued } = await advanceAfter('output_cap_reached', {
+        maxOutputTokens: 131072,
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('still re-dispatches a rejected ceiling, whose rollback changed the request', async () => {
+      const { result, enqueued } = await advanceAfter('max_tokens_too_large', {
+        maxOutputTokens: 65536,
+        maxOutputTokensExhausted: true,
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    const built = (over: Record<string, unknown> = {}) => ({
+      vision: null,
+      maxOutputTokens: null,
+      maxOutputTokensExhausted: false,
+      ...over,
+    });
+
+    it('re-dispatches a no-image failure whose request was built before vision:false was learned', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: beforeRun() },
+        new Date(),
+        built(),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a no-image failure when the newer learn carries no vision remedy', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { maxOutputTokens: 131072 },
+        new Date(),
+        built(),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('does not resend a no-image failure built with vision:false when a later output-ceiling learn bumped learnedAt', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, maxOutputTokens: 131072 },
+        new Date(Date.now() - 120_000),
+        built({ vision: false }),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('re-dispatches an output-cap failure built at another ceiling', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'output_cap_reached',
+        { maxOutputTokens: 131072 },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 65536 }),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend an output-cap failure built at the current ceiling', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'output_cap_reached',
+        { maxOutputTokens: 131072 },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 131072 }),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('does not resend an output-cap failure built at another ceiling once the ladder is spent', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'output_cap_reached',
+        { maxOutputTokens: 131072, maxOutputTokensExhausted: true },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 65536 }),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('re-dispatches a rejected ceiling built before the rollback marked it exhausted', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'max_tokens_too_large',
+        { maxOutputTokens: 65536, maxOutputTokensExhausted: true },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 65536 }),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-dispatches a rejected ceiling when the rollback lowered the ceiling it was built with', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'max_tokens_too_large',
+        { maxOutputTokens: 65536, maxOutputTokensExhausted: true },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 131072, maxOutputTokensExhausted: true }),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a rejected ceiling built with the rolled-back limits', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'max_tokens_too_large',
+        { maxOutputTokens: 65536, maxOutputTokensExhausted: true },
+        new Date(Date.now() - 120_000),
+        built({ maxOutputTokens: 65536, maxOutputTokensExhausted: true }),
+      );
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('does not resend a no-image failure whose flag was learned before the run began', async () => {
+      const { result, enqueued } = await advanceAfter('no_image_support', {
+        vision: false,
+        learnedAt: beforeRun(),
+      });
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        MODEL_CAPABILITY_HEADLINES.no_image_support,
+      );
+      expect(enqueued).toHaveLength(0);
+    });
+
+    it('re-dispatches a no-image failure whose flag was learned after the run began', async () => {
+      const { result, enqueued } = await advanceAfter('no_image_support', { vision: false });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('re-dispatches a no-image failure whose request was built before the learn, though the run started after it', async () => {
+      const { result, enqueued } = await advanceAfter(
+        'no_image_support',
+        { vision: false, learnedAt: new Date(Date.now() - 90_000).toISOString() },
+        new Date(Date.now() - 120_000),
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('does not resend a rejected ceiling that was already rolled back before the run began', async () => {
+      const { result, enqueued } = await advanceAfter('max_tokens_too_large', {
+        maxOutputTokens: 65536,
+        maxOutputTokensExhausted: true,
+        learnedAt: beforeRun(),
+      });
+      expect(result.status).toBe('failed');
+      expect(enqueued).toHaveLength(0);
+    });
   });
 
   it('blocks a local Ollama model on an unsafeForLocalModels step', async () => {
