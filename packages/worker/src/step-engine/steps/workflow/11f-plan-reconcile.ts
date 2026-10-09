@@ -5,7 +5,7 @@ import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
+import { isSingleLine, REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
   describeDropped,
@@ -162,7 +162,15 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
       : []),
     '## Files this task changed',
     '',
-    ...d.changedPaths.slice(0, 200).map((p) => `- ${p}`),
+    ...d.changedPaths
+      .filter(isSingleLine)
+      .slice(0, 200)
+      .map((p) => `- ${p}`),
+    ...(d.changedPaths.some((p) => !isSingleLine(p))
+      ? [
+          `(${d.changedPaths.filter((p) => !isSingleLine(p)).length} changed files have names that cannot be listed safely and are left out.)`,
+        ]
+      : []),
     '',
     ...(d.spec ? ['## What the task set out to do', '', d.spec, ''] : []),
     '## What to propose',
