@@ -6,11 +6,17 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   ensureAppServing: vi.fn(),
+  recordLedgerEntry: vi.fn(),
 }));
 
 vi.mock('./_app-runtime.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_app-runtime.js')>()),
   ensureAppServing: m.ensureAppServing,
+}));
+
+vi.mock('../../task-ledger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../task-ledger.js')>()),
+  recordLedgerEntry: m.recordLedgerEntry,
 }));
 
 vi.mock('./_dependency-policy.js', async (importOriginal) => ({
@@ -960,7 +966,6 @@ const stampOf = (...ids: string[]) => ({
 function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unknown>) {
   const fake = createFakeDb({
     cliInvocations: schema.cliInvocations,
-    taskEvents: schema.taskEvents,
     taskSteps: schema.taskSteps,
   });
   for (const [id, houseRules] of Object.entries(stamps)) {
