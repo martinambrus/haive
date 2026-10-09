@@ -287,12 +287,25 @@ function accumulatedScreenshots(previous: StepLoopPassRecord[]): ReportedScreens
   return last?.screenshots ?? [];
 }
 
-/** The latest fix pass's collected change; null unless its scan ran, so detect's list stands. */
-function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
+/** The latest fix pass's collected change, null unless its scan ran so detect's list stands, and
+ *  whether that scan failed. */
+function fixerFiles(previous: StepLoopPassRecord[]): {
+  files: ImplementationFileSet | null;
+  scanFailed: boolean;
+} {
   const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
   const collected = last?.source === 'fixer' ? last.implementationFiles : undefined;
-  return collected !== undefined && !collected.scanError ? collected : null;
+  if (collected === undefined) return { files: null, scanFailed: false };
+  return collected.scanError
+    ? { files: null, scanFailed: true }
+    : { files: collected, scanFailed: false };
 }
+
+const CHANGE_UNREAD_AFTER_FIX = [
+  'The change could not be re-read after the last fix, so files that fix created or changed may be',
+  'missing from any list above. Test the fixed behaviour and the flows around it in full, not only',
+  'what a list names.',
+] as const;
 
 const SEARCH_LADDER = [
   'When you need existing patterns or context, search in this order:',
@@ -756,9 +769,11 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         return buildFixerPrompt(d, prior?.failures ?? []);
       }
       // Re-test after a fix.
+      const { files, scanFailed } = fixerFiles(previousIterations);
       return buildTesterPrompt(
-        { ...d, implementationFiles: fixerFiles(previousIterations) ?? d.implementationFiles },
+        { ...d, implementationFiles: files ?? d.implementationFiles },
         appUrl,
+        scanFailed,
       );
     },
   },
@@ -1122,7 +1137,7 @@ async function applyMcp(
 
 // --- Prompt builders -------------------------------------------------------
 
-function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
+function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string, changeUnread = false): string {
   return [
     'You are the browser integration-tester. Test the implemented feature in a REAL browser using',
     'the chrome-devtools MCP tools (the browser is already running — connect to it).',
@@ -1138,6 +1153,7 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
       ].join('\n'),
     ),
     changedFilesBlock(d.implementationFiles, 'Changed files (focus your testing here)', ''),
+    ...(changeUnread ? CHANGE_UNREAD_AFTER_FIX : []),
     ...(d.planImpact ? ['', d.planImpact] : []),
     '',
     'Test the spec acceptance criteria end-to-end from the user perspective. MCP clicks are REAL',

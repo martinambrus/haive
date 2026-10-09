@@ -746,31 +746,55 @@ describe('08a re-test after a fix pass', () => {
     expect(prompt).toContain('- d.js');
   });
 
-  it.each([
-    ['a fix pass stored before it collected the change', {}],
-    [
-      'a fix pass whose scan failed',
-      {
-        implementationFiles: {
-          files: ['a.js'],
-          total: 1,
-          truncated: false,
-          scanError: 'git failed',
-        },
-      },
-    ],
-    [
-      'a fix pass whose scan failed and found no file',
-      { implementationFiles: { files: [], total: 0, truncated: false, scanError: 'git failed' } },
-    ],
-  ])('gives the re-tester the first tester prompt after %s', async (_name, carried) => {
+  it('gives the re-tester the first tester prompt after a fix pass stored before it collected the change', async () => {
     const dir = await checkout();
     const { detected } = await detectOn(dir, 'ddev');
-    const fixer = { source: 'fixer', failures: [], fixesApplied: [], screenshots: [], ...carried };
+    const fixer = { source: 'fixer', failures: [], fixesApplied: [], screenshots: [] };
 
     expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).toBe(
       firstPrompt(detected),
     );
+  });
+
+  const UNREAD = /\nThe change could not be re-read after the last fix[\s\S]*?what a list names\./;
+
+  it.each([
+    ['whose scan failed', ['a.js']],
+    ['whose scan failed and found no file', []],
+  ])(
+    "gives the re-tester detect's list and says the change could not be re-read after a fix pass %s",
+    async (_name, files) => {
+      const dir = await checkout();
+      const { detected } = await detectOn(dir, 'ddev');
+      const implementationFiles = {
+        files,
+        total: files.length,
+        truncated: false,
+        scanError: 'git failed',
+      };
+      const fixer = {
+        source: 'fixer',
+        failures: [],
+        fixesApplied: [],
+        screenshots: [],
+        implementationFiles,
+      };
+
+      const prompt = retestPrompt(detected, [record(0, testerOut), record(1, fixer)]);
+
+      expect(prompt).toMatch(UNREAD);
+      expect(prompt.replace(UNREAD, '')).toBe(firstPrompt(detected));
+    },
+  );
+
+  it('says nothing of an unread change in the first tester prompt or after a fix pass that read it', async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await detectOn(dir, 'ddev');
+    await writeFile(path.join(dir, 'c.js'), 'c\n');
+    const fixer = await fixPass(ctx, detected, 1, [record(0, testerOut)]);
+
+    expect(firstPrompt(detected)).not.toMatch(UNREAD);
+    expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).not.toMatch(UNREAD);
   });
 
   it('collects nothing in a fix pass when the detect output predates the workspace it records', async () => {
