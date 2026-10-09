@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyDagIssueFailure, dagEnvironmentHaltReason } from './dag-failure-class.js';
+import { OUTPUT_TRUNCATION_HEADLINE } from '../queues/cli-exec/failure-class.js';
 
 describe('classifyDagIssueFailure', () => {
   it('transient: SIGKILL (137), SIGINT (130), SIGTERM (143), null exit', () => {
@@ -29,6 +30,33 @@ describe('classifyDagIssueFailure', () => {
         errorMessage: 'LLM emitted no result event (stream ended prematurely — likely timeout)',
       }),
     ).toBe('transient');
+  });
+
+  it('truncated: the run own errorMessage carries the truncation headline', () => {
+    expect(
+      classifyDagIssueFailure({
+        exitCode: 1,
+        errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      }),
+    ).toBe('truncated');
+    expect(
+      classifyDagIssueFailure({
+        exitCode: null,
+        errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      }),
+    ).toBe('truncated');
+  });
+
+  it('not truncated: the headline quoted in concerns or mid-message', () => {
+    expect(
+      classifyDagIssueFailure({ exitCode: 1, concerns: `${OUTPUT_TRUNCATION_HEADLINE} quoted` }),
+    ).toBe('genuine');
+    expect(
+      classifyDagIssueFailure({
+        exitCode: 1,
+        errorMessage: `coder said: ${OUTPUT_TRUNCATION_HEADLINE}`,
+      }),
+    ).toBe('genuine');
   });
 
   it('environment: EACCES / root-owned worktree', () => {

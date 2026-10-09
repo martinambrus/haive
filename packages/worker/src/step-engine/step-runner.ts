@@ -4241,7 +4241,7 @@ async function countLlmAttempts(db: Database, taskStepId: string): Promise<numbe
 }
 
 /** Appended to the prompt of any step re-dispatched after an output truncation. */
-const TRUNCATION_RETRY_NOTICE =
+export const TRUNCATION_RETRY_NOTICE =
   'Your previous attempt was cut off at the output-token limit. Keep each reply and each tool call smaller (write a large file in several edits, keep prose brief), but include every required item and field.';
 
 /** Max consecutive output-truncation re-dispatches tolerated for one loop
