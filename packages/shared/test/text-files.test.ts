@@ -9,6 +9,7 @@ const BINARY_EXTENSIONS = new Set(['.png']);
 
 describe('tracked text files', () => {
   // grep reads a file holding a NUL byte as binary, and ripgrep skips it without a word.
+  // It reads every tracked file, which can outlast the 5 s default on a cold page cache.
   it('hold no NUL byte', () => {
     const listing = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' });
     const offenders: string[] = [];
@@ -22,5 +23,5 @@ describe('tracked text files', () => {
       offenders.push(`${rel}:${bytes.subarray(0, at).toString('utf8').split('\n').length}`);
     }
     expect(offenders).toEqual([]);
-  });
+  }, 20_000);
 });
