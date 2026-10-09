@@ -20,6 +20,7 @@ import {
 import {
   extractProjectFacets,
   resolveGlobalKbEnabled,
+  resolveGlobalKbSettings,
   resolveTaskStackContext,
   stackProjectName,
   withGlobalKb,
@@ -188,6 +189,10 @@ export function mergeHits(
  *  ~3.3 KB and p90 ~6 KB, so a default top_k=8 page expands roughly every global
  *  slot it reserves. */
 const GLOBAL_KB_EXPAND_BUDGET_CHARS = 12_000;
+
+// The bounds of the worker's dispatch reads; the query embed runs before the store opens, outside them.
+const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 3;
+const GLOBAL_KB_DEADLINE_MS = 6_000;
 
 /** One global KB entry, keyed by the source path its chunks carry. */
 export interface GlobalKbEntryBody {
@@ -368,40 +373,49 @@ ragRoutes.post('/search', async (c) => {
   const globalEnabled = await resolveGlobalKbEnabled(configService);
   if (globalEnabled) {
     try {
-      const result = await withGlobalKb(db, async ({ conn, settings }) => {
-        const gvec = await embedQueryOrNull(query, {
-          ollamaUrl: settings.ollamaUrl,
-          model: settings.embedModel,
-          dimensions: settings.embeddingDimensions,
-        });
-        // Same rule as the local half: no query vector means full text only, never a hash vector.
-        const raw = await ragHybridSearch(
-          conn,
-          gvec ?? [],
-          query,
-          { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
-          { namespace: settings.namespace, facets },
-        );
-        const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
-        // Bodies for the entries that survived dedup, fetched on the SAME
-        // connection this block already holds (withGlobalKb opens and closes one
-        // per call). Numbered placeholders rather than `= ANY($2)` so the bind
-        // does not depend on array-type inference.
-        const bodies = new Map<string, GlobalKbEntryBody>();
-        if (scoped.length > 0) {
-          const paths = scoped.map((h) => h.sourcePath);
-          const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
-          const rows = (await conn.pg.unsafe(
-            `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
+      const embedSettings = await resolveGlobalKbSettings();
+      const gvec = await embedQueryOrNull(query, {
+        ollamaUrl: embedSettings.ollamaUrl,
+        model: embedSettings.embedModel,
+        dimensions: embedSettings.embeddingDimensions,
+      });
+      const result = await withGlobalKb(
+        db,
+        async ({ conn, settings }) => {
+          // Same rule as the local half: no query vector means full text only, never a hash vector.
+          const raw = await ragHybridSearch(
+            conn,
+            gvec ?? [],
+            query,
+            { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
+            { namespace: settings.namespace, facets },
+          );
+          const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
+          // Bodies for the entries that survived dedup, fetched on the SAME
+          // connection this block already holds (withGlobalKb opens and closes one
+          // per call). Numbered placeholders rather than `= ANY($2)` so the bind
+          // does not depend on array-type inference.
+          const bodies = new Map<string, GlobalKbEntryBody>();
+          if (scoped.length > 0) {
+            const paths = scoped.map((h) => h.sourcePath);
+            const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
+            const rows = (await conn.pg.unsafe(
+              `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
                FROM ai_rag_embeddings r
                JOIN global_kb_entries e ON e.id = r.entry_id
               WHERE r.namespace = $1 AND r.source_path IN (${placeholders})`,
-            [settings.namespace, ...paths],
-          )) as unknown as Array<{ source_path: string; title: string; body: string }>;
-          for (const row of rows) bodies.set(row.source_path, { title: row.title, body: row.body });
-        }
-        return { scoped, bodies };
-      });
+              [settings.namespace, ...paths],
+            )) as unknown as Array<{ source_path: string; title: string; body: string }>;
+            for (const row of rows)
+              bodies.set(row.source_path, { title: row.title, body: row.body });
+          }
+          return { scoped, bodies };
+        },
+        {
+          connectTimeoutSeconds: GLOBAL_KB_CONNECT_TIMEOUT_SECONDS,
+          deadlineMs: GLOBAL_KB_DEADLINE_MS,
+        },
+      );
       globalHits = result.scoped;
       globalBodies = result.bodies;
     } catch (err) {
