@@ -2224,6 +2224,100 @@ describe('ingestAdvisor: an advisor that never answered', () => {
   );
 });
 
+describe('DAG escalation agents cut off at the output limit', () => {
+  const truncated = (prompt: string) =>
+    inv({
+      id: 'esc-inv-1',
+      rawOutput: null,
+      parsedOutput: null,
+      exitCode: 1,
+      startedAt: new Date(),
+      endedAt: new Date(),
+      supersededAt: null,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+      prompt,
+    } as never);
+  const escalationArgs = (db: unknown, plan: Record<string, unknown> = {}) =>
+    ({
+      db,
+      issues: [],
+      level: { level: 1 } as never,
+      current: { id: 'step1', status: 'running' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: { id: 'plan1', ...plan },
+    }) as never;
+  const issue = {
+    id: 'issue1',
+    issueKey: 'ISSUE-1',
+    title: 'Fix the flaky cache',
+    advisorInvocations: 1,
+    branchName: 'main--ISSUE-1',
+    worktreePath: '/does/not/matter',
+    sandboxWorktreePath: '/does/not/matter',
+    errorMessage: null,
+    reviewerVerdict: null,
+  } as never;
+
+  it('re-dispatches a truncated advisor once with the notice, uncharged', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const result = await ingestAdvisor(
+      escalationArgs(db),
+      issue,
+      { id: 'run-1' } as never,
+      truncated('advise'),
+    );
+    expect(result).toBe('retry');
+    expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+    const spawned = inserts.find((i) => i.table === schema.cliInvocations);
+    expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+  });
+
+  it('reads a truncated advisor that already had the notice as today', async () => {
+    const { db, updates } = makeSpawnDb();
+    await ingestAdvisor(
+      escalationArgs(db),
+      issue,
+      { id: 'run-1' } as never,
+      truncated(`advise\n\n${TRUNCATION_RETRY_NOTICE}`),
+    );
+    expect(updates.filter((u) => u.table === schema.taskDagIssues).length).toBeGreaterThan(0);
+  });
+
+  it('re-dispatches a truncated replanner once with the notice instead of aborting', async () => {
+    const { db, inserts, updates } = makeSpawnDb();
+    const fake = db as unknown as Record<string, unknown> & { query: Record<string, unknown> };
+    fake.query.cliInvocations = { findFirst: async () => truncated('replan') };
+    fake.select = () => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve([]), {
+            for: async () => [{ id: 'step1' }],
+            orderBy: async () => [],
+          }),
+      }),
+    });
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const result = await resolveEscalationPhase(
+      escalationArgs(db, { replannerInvocationId: 'esc-inv-1', replannerInvocations: 1 }),
+    );
+    expect(result.status).not.toBe('aborted');
+    const spawned = inserts.find((i) => i.table === schema.cliInvocations);
+    expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(
+      updates
+        .filter((u) => u.table === schema.taskDagPlans)
+        .every((u) => !('replannerInvocations' in u.patch)),
+    ).toBe(true);
+  });
+});
+
 describe('resolveEscalationPhase: a replanner run that never answered', () => {
   it.each([
     [

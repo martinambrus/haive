@@ -1807,8 +1807,12 @@ export async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
-  // An advisor that never answered must not be charged an attempt or read as ESCALATE_TO_REPLAN.
-  if (runNeverAnswered(inv)) {
+  // An advisor that never answered, or was cut at the output limit (once), must not be charged an
+  // attempt or read as ESCALATE_TO_REPLAN.
+  const truncatedOnce =
+    classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+      'truncated' && truncationRetryable(inv);
+  if (runNeverAnswered(inv) || truncatedOnce) {
     const ok = await spawnReviewAgent(
       ea,
       issue,
@@ -1816,6 +1820,8 @@ export async function ingestAdvisor(
       issue.advisorInvocations,
       advisorPrompt(issue, (await issueSpecText(ea.specView, issue)).text),
       ['tool_use'],
+      undefined,
+      truncatedOnce,
     );
     if (!ok) {
       await escalateIssueToReplan(ea.db, issue, 'no advisor provider available');
@@ -1934,7 +1940,11 @@ export async function ingestAdvisor(
   return 'retry';
 }
 
-async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
+async function spawnReplanner(
+  ea: EscalationArgs,
+  failed: DagIssueRow[],
+  afterTruncation = false,
+): Promise<boolean> {
   // Every issue in the plan, not just this level's: a failed issue's dependents sit
   // at LATER levels, and they are the whole question CONTINUE/REDUCE_SCOPE answers.
   const all = (await ea.db
@@ -1942,10 +1952,11 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     .from(schema.taskDagIssues)
     .where(eq(schema.taskDagIssues.dagPlanId, ea.plan.id))) as DagIssueRow[];
   const meta = await loadTaskMeta(ea.db, ea.taskId);
-  const prompt = await augmentPromptWithTerseness(
+  const augmented = await augmentPromptWithTerseness(
     `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n` +
       replannerPrompt(ea.plan, failed, all),
   );
+  const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
@@ -2056,9 +2067,12 @@ export async function resolveEscalationPhase(
       return { status: 'waiting', row: ea.current };
     }
     if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
-    // A replanner that never answered is not an attempt: free the slot and let escalation
-    // decide afresh, instead of parseReplanner's ABORT-on-no-output default.
-    if (runNeverAnswered(inv)) {
+    // A replanner that never answered, or was cut at the output limit (once), is not an attempt:
+    // free the slot instead of parseReplanner's ABORT-on-no-output default.
+    const truncatedOnce =
+      classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+        'truncated' && truncationRetryable(inv);
+    if (runNeverAnswered(inv) || truncatedOnce) {
       await ea.db
         .update(schema.taskDagPlans)
         .set({ replannerInvocationId: null, updatedAt: new Date() })
@@ -2072,6 +2086,10 @@ export async function resolveEscalationPhase(
         .update(schema.cliInvocations)
         .set({ consumedAt: new Date() })
         .where(eq(schema.cliInvocations.id, inv.id));
+      if (truncatedOnce) {
+        const failed = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+        if (await spawnReplanner(ea, failed, true)) return { status: 'waiting', row: ea.current };
+      }
       return { status: 'reloop', row: ea.current };
     }
     const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
