@@ -228,3 +228,91 @@ describe('ragHybridSearch parameters', () => {
     ]);
   });
 });
+
+/** A store as postgres.js hands one out. In a transaction a failed statement aborts it and only a savepoint takes that back. */
+function fakeStore(opts: { transaction: boolean; statisticsFail: boolean }): {
+  conn: RagConnection;
+  calls: Array<{ statement: string; savepoint: boolean }>;
+} {
+  const calls: Array<{ statement: string; savepoint: boolean }> = [];
+  let aborted = false;
+  let inSavepoint = false;
+  const pg: Record<string, unknown> = {
+    unsafe: async (statement: string) => {
+      if (aborted) {
+        throw Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+      }
+      calls.push({ statement, savepoint: inSavepoint });
+      if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+      if (statement.includes('AS t(term)')) {
+        if (opts.statisticsFail) {
+          aborted = opts.transaction && !inSavepoint;
+          throw Object.assign(new Error('division by zero'), { code: '22012' });
+        }
+        return [{ term: 'getuserbyid', df: 1, total: 10 }];
+      }
+      if (statement.includes('dense_c')) {
+        return [
+          {
+            source_path: 'src/auth.ts',
+            section_id: 's',
+            chunk_index: 0,
+            source_type: 'code',
+            content: 'getUserById',
+            dense_sim: 0.8,
+            ts_norm: 0,
+            hybrid: 0,
+            rrf: 0.01,
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  if (opts.transaction) {
+    pg.savepoint = async (run: (sp: unknown) => unknown) => {
+      inSavepoint = true;
+      try {
+        return await run(pg);
+      } finally {
+        inSavepoint = false;
+      }
+    };
+  }
+  return {
+    conn: { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never,
+    calls,
+  };
+}
+
+describe('ragHybridSearch identifier statistics', () => {
+  const QUERY = 'getUserById validation';
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const mainStatement = (calls: Array<{ statement: string }>) =>
+    calls.find((c) => c.statement.includes('dense_c'))?.statement;
+
+  it('keeps the identifier ranker when it runs the statistics inside a transaction', async () => {
+    const { conn, calls } = fakeStore({ transaction: true, statisticsFail: false });
+
+    const hits = await ragHybridSearch(conn, VEC, QUERY);
+
+    expect(hits.map((h) => h.sourcePath)).toEqual(['src/auth.ts']);
+    expect(calls.find((c) => c.statement.includes('AS t(term)'))!.savepoint).toBe(true);
+    expect(mainStatement(calls)).toContain('ident AS (');
+  });
+
+  it.each([
+    ['inside a transaction', true],
+    ['outside one', false],
+  ])(
+    'answers without the identifier ranker when the statistics fail %s',
+    async (_where, transaction) => {
+      const { conn, calls } = fakeStore({ transaction, statisticsFail: true });
+
+      const hits = await ragHybridSearch(conn, VEC, QUERY);
+
+      expect(hits.map((h) => h.sourcePath)).toEqual(['src/auth.ts']);
+      expect(mainStatement(calls)).not.toContain('ident AS (');
+    },
+  );
+});

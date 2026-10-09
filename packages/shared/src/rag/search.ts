@@ -1,3 +1,4 @@
+import type { TransactionSql } from 'postgres';
 import {
   type RagConnection,
   KNOWLEDGE_SOURCE_TYPES,
@@ -345,8 +346,8 @@ async function identifierIdfs(
   ];
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const scoped = conds.length ? `${conds.join(' AND ')} AND ` : '';
-  try {
-    const rows = (await conn.pg.unsafe(
+  const statistics = (pg: Pick<RagConnection['pg'], 'unsafe'>) =>
+    pg.unsafe(
       `
       WITH n AS (SELECT count(*)::float8 AS total FROM ${RAG_TABLE} ${where})
       SELECT t.term,
@@ -356,7 +357,17 @@ async function identifierIdfs(
         FROM unnest($1::text[]) AS t(term)
       `,
       [pgTextArrayLiteral(terms), ...(fc?.params ?? []), ...(repositoryId ? [repositoryId] : [])],
-    )) as unknown as Array<{ term: string; df: number | string; total: number | string }>;
+    );
+  try {
+    // A failed statement aborts the transaction it runs in; a savepoint keeps that to this one.
+    const tx = conn.pg as Partial<TransactionSql>;
+    const rows = (await (tx.savepoint
+      ? tx.savepoint(statistics)
+      : statistics(conn.pg))) as unknown as Array<{
+      term: string;
+      df: number | string;
+      total: number | string;
+    }>;
     const byTerm = new Map(rows.map((r) => [r.term, { df: num(r.df), total: num(r.total) }]));
     return terms.map((t) => {
       const stat = byTerm.get(t);
