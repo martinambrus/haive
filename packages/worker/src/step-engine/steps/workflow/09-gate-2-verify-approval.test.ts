@@ -9,6 +9,7 @@ const m = vi.hoisted(() => ({
   loadTaskSimilarSites: vi.fn(),
   loadUnactedInsights: vi.fn(),
   loadGateHouseRules: vi.fn(),
+  changeFingerprint: vi.fn(),
 }));
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
@@ -42,6 +43,10 @@ vi.mock('./_gate-insights.js', async (importOriginal) => ({
 vi.mock('./_gate-house-rules.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_gate-house-rules.js')>()),
   loadGateHouseRules: m.loadGateHouseRules,
+}));
+vi.mock('../../../orchestrator/house-rules-dispatch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../orchestrator/house-rules-dispatch.js')>()),
+  changeFingerprint: m.changeFingerprint,
 }));
 
 import { recurrenceTag } from './09-gate-2-verify-approval.js';
@@ -984,6 +989,7 @@ describe('gate-2 verification results read from 08', () => {
     m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
     m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
     m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
   });
 
   it('reads the house rules of the task into the payload, and nothing when it has none', async () => {
@@ -1002,12 +1008,45 @@ describe('gate-2 verification results read from 08', () => {
     expect(m.loadGateHouseRules).toHaveBeenLastCalledWith(
       (ctx as { db: unknown }).db,
       (ctx as { taskId: string }).taskId,
-      { withCodeReview: true },
+      { withCodeReview: true, currentFingerprint: expect.any(Function) },
     );
     expect(detected.houseRules).toEqual(rules);
     expect(
       (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).map((r) => r.label),
     ).toContain('House rules');
+  });
+
+  it('hands the loader the change of the task worktree as it is now, read only when it is asked for', async () => {
+    const digest = 'f'.repeat(64);
+    m.changeFingerprint.mockResolvedValue(digest);
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        if (id === '08-phase-5-verify') return { output: { passed: true, runtimeSmoke: null } };
+        if (id === '01-worktree-setup') {
+          return { output: { worktreePath: '/repos/u/r/.haive/worktrees/t', baseBranch: 'main' } };
+        }
+        return null;
+      },
+    );
+    await gate2VerifyApprovalStep.detect!(ctx);
+    expect(m.changeFingerprint).not.toHaveBeenCalled();
+    const options = m.loadGateHouseRules.mock.calls.at(-1)![2] as {
+      currentFingerprint: () => Promise<string | null>;
+    };
+    expect(await options.currentFingerprint()).toBe(digest);
+    expect(m.changeFingerprint).toHaveBeenCalledWith('/repos/u/r/.haive/worktrees/t', 'main');
+  });
+
+  it('has no fingerprint of the change to offer when 01-worktree-setup made no worktree', async () => {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '08-phase-5-verify' ? { output: { passed: true, runtimeSmoke: null } } : null,
+    );
+    await gate2VerifyApprovalStep.detect!(ctx);
+    const options = m.loadGateHouseRules.mock.calls.at(-1)![2] as {
+      currentFingerprint: () => Promise<string | null>;
+    };
+    expect(await options.currentFingerprint()).toBeNull();
+    expect(m.changeFingerprint).not.toHaveBeenCalled();
   });
 
   it('names the rule on a peer finding that carries one, and writes the others as it always did', async () => {

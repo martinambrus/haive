@@ -205,8 +205,9 @@ function rank(
   rules: readonly HouseRuleCandidate[],
   changedFiles: readonly string[] | null,
   estimatedFiles: readonly string[],
-): Ranked[] {
+): { ranked: Ranked[]; unmatched: number } {
   const ranked: Ranked[] = [];
+  let unmatched = 0;
   for (const rule of rules) {
     const size = houseRuleBytes(rule, { enforce: rule.spec, shortId: provisionalId(rule.id) });
     if (rule.spec.mode === 'always') {
@@ -223,9 +224,11 @@ function rank(
     const glob = written ?? estimated;
     if (glob !== null) {
       ranked.push({ rule, why: { scope: 'files', glob }, tier: written === null ? 2 : 1, size });
+    } else {
+      unmatched += 1;
     }
   }
-  return ranked.sort(
+  ranked.sort(
     (a, b) =>
       a.tier - b.tier ||
       (a.tier === 0
@@ -233,6 +236,7 @@ function rank(
         : a.size - b.size) ||
       (a.rule.id < b.rule.id ? -1 : a.rule.id > b.rule.id ? 1 : 0),
   );
+  return { ranked, unmatched };
 }
 
 function omissionLine(mode: HouseRuleMode, omitted: readonly Omitted[]): string {
@@ -273,6 +277,8 @@ export interface HouseRuleSelection {
   entries: Included[];
   omitted: Omitted[];
   block: string | null;
+  /** `files` rules that matched nothing in the change, which a later write may still match. */
+  filesRulesUnmatched?: number;
 }
 
 export const disabledSelection = (): HouseRuleSelection => ({
@@ -310,7 +316,7 @@ export function selectHouseRules(input: {
   const { mode, changedFiles } = input;
   const framing = framingOf(mode, input.findings === true);
   const budget = input.budgetBytes ?? HOUSE_RULES_BUDGET_BYTES;
-  const ranked = rank(input.rules, changedFiles, input.estimatedFiles ?? []);
+  const { ranked, unmatched } = rank(input.rules, changedFiles, input.estimatedFiles ?? []);
 
   // The notice counts against the budget but depends on what is left out, so its room only grows.
   let reserve = 0;
@@ -345,6 +351,7 @@ export function selectHouseRules(input: {
       entries,
       omitted: [...(input.refused ?? []), ...leftOut],
       block: kept.length === 0 && leftOut.length === 0 ? null : renderBlock(framing, kept, notice),
+      ...(unmatched > 0 ? { filesRulesUnmatched: unmatched } : {}),
     };
   }
 }
@@ -366,6 +373,8 @@ export function houseRulesStampOf(
       errorClass: selection.errorClass ?? 'other',
     };
   }
+  const unmatched = selection.filesRulesUnmatched ?? 0;
+  const counted = unmatched > 0 ? { filesRulesUnmatched: unmatched } : {};
   if (tooLarge) {
     return {
       mode,
@@ -380,7 +389,8 @@ export function houseRulesStampOf(
         })),
       ],
       reason: 'too_large',
+      ...counted,
     };
   }
-  return { mode, entries: selection.entries, omitted: selection.omitted };
+  return { mode, entries: selection.entries, omitted: selection.omitted, ...counted };
 }

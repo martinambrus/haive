@@ -1130,6 +1130,7 @@ export const cliInvocations = pgTable(
       omitted: Array<{ id: string; hash: string; title: string; why: 'budget' | 'refused' }>;
       reason?: 'switched_off' | 'unavailable' | 'too_large';
       errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
+      filesRulesUnmatched?: number;
     }>(),
   },
   (table) => [

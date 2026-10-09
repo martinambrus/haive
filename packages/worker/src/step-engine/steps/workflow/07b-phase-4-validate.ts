@@ -54,6 +54,7 @@ import {
   parseRuleConflicts,
   parseRuleRef,
   raiseRuleViolations,
+  taskChangeFingerprint,
   type ChangedFilesCoverage,
   type RuleConflict,
 } from './_gate-house-rules.js';
@@ -166,6 +167,8 @@ interface ValidateApply {
   validatorInvocationId?: string | null;
   /** How many changed files the latest validator pass was given; the gate reads a capped list as PARTIAL. */
   changedFilesCoverage?: ChangedFilesCoverage;
+  /** The change as the latest validator pass left it; the gate reads a change that differs as PARTIAL. */
+  changeFingerprint?: string;
   /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
    *  validator passes (non-converging). A false value routes the run to a human
    *  decision at gate-2 instead of another fix round. */
@@ -994,6 +997,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         ...(prior?.changedFilesCoverage === undefined
           ? {}
           : { changedFilesCoverage: prior.changedFilesCoverage }),
+        ...(prior?.changeFingerprint === undefined
+          ? {}
+          : { changeFingerprint: prior.changeFingerprint }),
         converged: prior?.converged ?? true,
         churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
@@ -1075,6 +1081,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         round: ctx.round,
         text: parsed.summary,
       });
+      // Only a pass the gate can find by its invocation id is worth a read of the whole change.
+      const fingerprint = args.llmInvocationId ? await taskChangeFingerprint(ctx) : null;
       return {
         verdict,
         summary: parsed.summary,
@@ -1087,6 +1095,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         ...(coverage === null
           ? {}
           : { changedFilesCoverage: { listed: coverage.listed, total: coverage.total } }),
+        ...(fingerprint === null ? {} : { changeFingerprint: fingerprint }),
         converged: churnFiles.length === 0,
         churnFiles,
         fixesApplied: fixesSoFar,

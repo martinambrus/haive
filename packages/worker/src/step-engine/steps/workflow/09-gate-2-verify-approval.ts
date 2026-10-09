@@ -42,6 +42,7 @@ import {
   houseRulesHoldApprove,
   houseRulesRow,
   loadGateHouseRules,
+  taskChangeFingerprint,
   type GateHouseRules,
 } from './_gate-house-rules.js';
 import type { Insight } from './08e-insights-triage.js';
@@ -797,7 +798,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       : null;
     const similar = await loadTaskSimilarSites(ctx.db, ctx.taskId);
     const insights = await loadUnactedInsights(ctx.db, ctx.taskId);
-    const houseRules = await loadGateHouseRules(ctx.db, ctx.taskId, { withCodeReview: true });
+    const houseRules = await loadGateHouseRules(ctx.db, ctx.taskId, {
+      withCodeReview: true,
+      currentFingerprint: () => taskChangeFingerprint(ctx),
+    });
 
     return {
       verify: {

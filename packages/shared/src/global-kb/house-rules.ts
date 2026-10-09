@@ -274,6 +274,7 @@ const houseRulesStampSchema = z.object({
   ),
   reason: z.enum(['switched_off', 'unavailable', 'too_large']).optional(),
   errorClass: z.enum(['timeout', 'refused', 'auth', 'other']).optional(),
+  filesRulesUnmatched: z.number().int().nonnegative().optional(),
 });
 
 /** What a CLI run was given of the house rules, stored in `cli_invocations.house_rules`. */

@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 
@@ -6,8 +10,13 @@ const h = vi.hoisted(() => ({
   context: undefined as unknown,
   asked: [] as Array<{ houseRules: boolean }>,
   recorded: [] as Array<{ taskId: string; errorClass: string }>,
+  tree: null as string | null,
 }));
 
+vi.mock('../src/repo/worktree-git-boundary.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveInvocationWorkerTree: async () => h.tree,
+}));
 vi.mock('../src/orchestrator/global-kb-context.js', () => ({
   resolveGlobalKbContext: async (_db: unknown, _taskId: string, opts: { houseRules: boolean }) => {
     h.asked.push(opts);
@@ -56,6 +65,7 @@ const db = {
   select: () => ({
     from: () => ({
       innerJoin: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      where: () => ({ orderBy: () => ({ limit: async () => [] }) }),
     }),
   }),
 } as unknown as Database;
@@ -89,11 +99,32 @@ const dispatch = async (extra: Record<string, unknown> = {}) => {
 
 const opted = { houseRules: { mode: 'write' as const } };
 
+const trees: string[] = [];
 beforeEach(() => {
   h.context = context();
   h.asked = [];
   h.recorded = [];
+  h.tree = null;
 });
+afterEach(async () => {
+  for (const dir of trees.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+/** A git checkout whose only change is one edited php file, as the tree a dispatch mounts. */
+async function checkoutWithAnEditedPhpFile(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'haive-dispatch-rules-'));
+  trees.push(dir);
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'test@test.local');
+  git('config', 'user.name', 'Test');
+  git('config', 'gc.auto', '0');
+  await writeFile(path.join(dir, 'a.php'), '<?php\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  await writeFile(path.join(dir, 'a.php'), '<?php // edited\n');
+  return dir;
+}
 
 describe('resolveTaskDispatch and the house rules', () => {
   it('asks the store for rules only when the dispatch is opted in', async () => {
@@ -162,6 +193,38 @@ describe('resolveTaskDispatch and the house rules', () => {
       houseRules: { mode: 'write', estimatedFiles: ['t/node.tpl.php'] },
     });
     expect(out.spec.houseRules?.entries).toHaveLength(1);
+  });
+
+  it('counts on the stamp the enforced files rules whose globs match nothing in the change', async () => {
+    h.tree = await checkoutWithAnEditedPhpFile();
+    h.context = context({
+      rules: [
+        rule('Php', {
+          id: '00000001-0000-4000-8000-000000000001',
+          spec: { mode: 'files', globs: ['*.php'] },
+        }),
+        rule('Twig', {
+          id: '00000002-0000-4000-8000-000000000002',
+          spec: { mode: 'files', globs: ['**/*.twig'] },
+        }),
+      ],
+    });
+    const out = await dispatch(opted);
+    expect(out.spec.houseRules?.entries.map((e) => e.title)).toEqual(['Php']);
+    expect(out.spec.houseRules?.filesRulesUnmatched).toBe(1);
+    expect(out.prompt).not.toContain('Twig');
+  });
+
+  it('leaves the count off the stamp when every files rule matched or the change cannot be read', async () => {
+    h.context = context({
+      rules: [rule('Twig', { spec: { mode: 'files', globs: ['**/*.twig'] } })],
+    });
+    expect('filesRulesUnmatched' in (await dispatch(opted)).spec.houseRules!).toBe(false);
+    h.tree = await checkoutWithAnEditedPhpFile();
+    h.context = context({
+      rules: [rule('Php', { spec: { mode: 'files', globs: ['*.php'] } })],
+    });
+    expect('filesRulesUnmatched' in (await dispatch(opted)).spec.houseRules!).toBe(false);
   });
 
   it('records the refused rows and shows nothing of them', async () => {

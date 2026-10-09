@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import type { StepContext } from '../../step-definition.js';
 import { UNTRUSTED_OPEN, UNTRUSTED_CLOSE } from '../_untrusted-repo.js';
@@ -517,6 +518,71 @@ describe('10-gate-3-commit house rules', () => {
     )!;
     expect(form.fields).toEqual(bare.fields);
     expect(form.fields.find((f) => f.id === 'commit')).toMatchObject({ default: true });
+  });
+
+  describe('the change after the validator checked it', () => {
+    const setupRow = (repo: string) => [
+      { detectOutput: null, output: { worktreePath: repo, baseBranch: 'main' }, iterations: [] },
+    ];
+    const queue = (repo: string, stored: string | null) => [
+      ...withoutGate2(
+        [output07b(stored === null ? {} : { changeFingerprint: stored })],
+        [{ houseRules: stamp }],
+      ),
+      setupRow(repo),
+    ];
+    const rowOf = (detected: Parameters<NonNullable<typeof gate3CommitStep.form>>[1]) =>
+      gate3CommitStep.form!({} as never, detected)!.statusSummary![0]!;
+
+    it('lists the row as PARTIAL when the tree moved since, and still leaves every form default where it was', async () => {
+      const repo = await seedRepo();
+      const checked = (await changeFingerprint(repo, 'main'))!;
+      await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
+      const detected = await gate3CommitStep.detect!(mkCtx(repo, queue(repo, checked)));
+      expect(detected.houseRules?.modifiedAfterCheck).toBe(true);
+      expect(rowOf(detected)).toMatchObject({
+        label: 'House rules',
+        status: 'warn',
+        statusLabel: 'PARTIAL',
+        defaultOpen: true,
+      });
+      expect(rowOf(detected).detail).toContain('modified after the last house-rules check');
+      const bare = gate3CommitStep.form!({} as never, { ...detected, houseRules: null })!;
+      expect(gate3CommitStep.form!({} as never, detected)!.fields).toEqual(bare.fields);
+    });
+
+    it('lists the row as ENFORCED when the tree is the one the validator checked', async () => {
+      const repo = await seedRepo();
+      await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
+      const checked = (await changeFingerprint(repo, 'main'))!;
+      const detected = await gate3CommitStep.detect!(mkCtx(repo, queue(repo, checked)));
+      expect('modifiedAfterCheck' in detected.houseRules!).toBe(false);
+      expect(rowOf(detected)).toMatchObject({ statusLabel: 'ENFORCED', status: 'pass' });
+    });
+
+    it('lists the row as it was for an output written before the fingerprint existed', async () => {
+      const repo = await seedRepo();
+      await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
+      const detected = await gate3CommitStep.detect!(mkCtx(repo, queue(repo, null)));
+      expect('modifiedAfterCheck' in detected.houseRules!).toBe(false);
+      expect(rowOf(detected)).toMatchObject({ statusLabel: 'ENFORCED' });
+    });
+
+    it('says nothing of the moved tree when the validator was given no rule, and reads no fingerprint', async () => {
+      const repo = await seedRepo();
+      await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
+      const ruleless = { ...stamp, entries: [] };
+      const detected = await gate3CommitStep.detect!(
+        mkCtx(repo, [
+          ...withoutGate2(
+            [output07b({ changeFingerprint: 'a'.repeat(64) })],
+            [{ houseRules: ruleless }],
+          ),
+          setupRow(repo),
+        ]),
+      );
+      expect(labels(detected)).not.toContain('House rules');
+    });
   });
 
   it('leaves them to gate 2 when gate 2 recorded a decision, without reading them', async () => {

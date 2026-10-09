@@ -19,7 +19,12 @@ import {
 } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
 import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
-import { houseRulesRow, loadGateHouseRules, type GateHouseRules } from './_gate-house-rules.js';
+import {
+  houseRulesRow,
+  loadGateHouseRules,
+  taskChangeFingerprint,
+  type GateHouseRules,
+} from './_gate-house-rules.js';
 import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -184,7 +189,11 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const insights = gate2?.output
       ? { insights: [], omitted: 0 }
       : await loadUnactedInsights(ctx.db, ctx.taskId);
-    const houseRules = gate2?.output ? null : await loadGateHouseRules(ctx.db, ctx.taskId);
+    const houseRules = gate2?.output
+      ? null
+      : await loadGateHouseRules(ctx.db, ctx.taskId, {
+          currentFingerprint: () => taskChangeFingerprint(ctx),
+        });
     // Throws on a present-but-unusable `.git`: reporting corruption as "0 dirty
     // files" defaults the commit checkbox off and drops the whole changeset.
     if (!(await requireUsableGit(workspacePath))) {

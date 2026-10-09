@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./_dependency-policy.js', async (importOriginal) => ({
@@ -22,6 +26,7 @@ import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
 import { houseRuleShortIds, type HouseRulesStamp } from '@haive/shared/global-kb';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import {
   parsePeerReview,
   parseSecurityReview,
@@ -1872,8 +1877,11 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
   const policy = { drupal: false, drupalRoots: [], ownedPaths: [] };
 
   /** The peer's invocation holds rule A, a newer invocation of the step holds rule B. */
-  function world(stored: Record<string, unknown> = {}) {
-    const fake = createFakeDb({ cliInvocations: schema.cliInvocations });
+  function world(stored: Record<string, unknown> = {}, setup?: Record<string, unknown>) {
+    const fake = createFakeDb({
+      cliInvocations: schema.cliInvocations,
+      taskSteps: schema.taskSteps,
+    });
     const rows = {
       [PEER_INVOCATION]: stampOf([RULE_A]),
       [SECURITY_INVOCATION]: null,
@@ -1882,6 +1890,14 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
     };
     for (const [id, houseRules] of Object.entries(rows)) {
       fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+    }
+    if (setup) {
+      fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: '01-worktree-setup',
+        round: 0,
+        output: setup,
+      });
     }
     const recorded: Record<string, unknown>[] = [];
     const db = {
@@ -2147,9 +2163,18 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
 
     it('reads no stamp when no finding names a rule', async () => {
       const { ctx } = world();
-      (ctx as unknown as { db: Record<string, unknown> }).db.select = () => {
-        throw new Error('the store was read');
-      };
+      const db = (
+        ctx as unknown as {
+          db: { select: (fields?: unknown) => { from: (t: unknown) => unknown } };
+        }
+      ).db;
+      const select = db.select.bind(db);
+      db.select = (fields) => ({
+        from: (table) => {
+          if (table === schema.cliInvocations) throw new Error('the store was read');
+          return select(fields).from(table);
+        },
+      });
       const out = await applyReview(ctx, [peerResult(peerText([finding()])), securityResult()]);
       expect(out.blocking).toBe(false);
     });
@@ -2326,6 +2351,82 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
       expect(out.reviewed).toBe(false);
       expect('ruleConflicts' in out).toBe(false);
       expect('peerInvocationId' in out).toBe(false);
+    });
+  });
+
+  // Gate 2 compares what the change is then with what it was when the code review finished.
+  describe('the change the review checked', () => {
+    const dirs: string[] = [];
+    afterEach(async () => {
+      for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+    });
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+    async function checkout(): Promise<string> {
+      const dir = await mkdtemp(path.join(tmpdir(), 'haive-review-change-'));
+      dirs.push(dir);
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 'test@test.local');
+      git(dir, 'config', 'user.name', 'Test');
+      git(dir, 'config', 'gc.auto', '0');
+      await writeFile(path.join(dir, 'a.php'), '<?php\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'base');
+      git(dir, 'checkout', '-q', '-b', 'task');
+      await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
+      return dir;
+    }
+    const worldOf = (dir: string) => world({}, { worktreePath: dir, baseBranch: 'main' });
+    const DIGEST = /^[0-9a-f]{64}$/;
+
+    it('stores a fingerprint of the change as it stands when the review ends, the one a gate recomputes', async () => {
+      const dir = await checkout();
+      const out = await applyReview(worldOf(dir).ctx, [
+        peerResult(peerText([finding()])),
+        securityResult(),
+      ]);
+      expect(out.changeFingerprint).toMatch(DIGEST);
+      expect(out.changeFingerprint).toBe(await changeFingerprint(dir, 'main'));
+    });
+
+    it('stores another one once the change has moved, and the same one while it has not', async () => {
+      const dir = await checkout();
+      const w = worldOf(dir);
+      const results = () => [peerResult(peerText([])), securityResult()];
+      const first = await applyReview(w.ctx, results());
+      expect((await applyReview(w.ctx, results())).changeFingerprint).toBe(first.changeFingerprint);
+      await writeFile(path.join(dir, 'b.php'), '<?php // added by a later step\n');
+      const moved = await applyReview(w.ctx, results());
+      expect(moved.changeFingerprint).toMatch(DIGEST);
+      expect(moved.changeFingerprint).not.toBe(first.changeFingerprint);
+    });
+
+    it.each([
+      [
+        'the peer result names no invocation',
+        () => [peerResult(peerText([]), null), securityResult()],
+      ],
+      ['the peer output could not be read', () => [peerResult('prose, no json'), securityResult()]],
+      ['no reviewer was dispatched', () => []],
+    ])('stores none when %s, since the gate cannot find the check', async (_name, results) => {
+      const dir = await checkout();
+      const out = await applyReview(worldOf(dir).ctx, results());
+      expect('changeFingerprint' in out).toBe(false);
+    });
+
+    it.each([
+      ['a task with no worktree', undefined],
+      [
+        'a worktree that is not a checkout',
+        { worktreePath: '/nonexistent/hr6-worktree', baseBranch: 'main' },
+      ],
+    ])('stores none, and does not fail the review, for %s', async (_name, setup) => {
+      const { ctx } = world({}, setup);
+      const out = await applyReview(ctx, [peerResult(peerText([])), securityResult()]);
+      expect(out.reviewed).toBe(true);
+      expect(out.peerInvocationId).toBe(PEER_INVOCATION);
+      expect('changeFingerprint' in out).toBe(false);
     });
   });
 });

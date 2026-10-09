@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { houseRuleShortIds, type HouseRulesStamp } from '@haive/shared/global-kb';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import {
   givenRuleIds,
   houseRulesHoldApprove,
@@ -12,6 +17,7 @@ import {
   parseRuleConflicts,
   parseRuleRef,
   raiseRuleViolations,
+  taskChangeFingerprint,
   type GateHouseRules,
 } from './_gate-house-rules.js';
 
@@ -627,7 +633,7 @@ describe('loadGateHouseRules: the code review as the later check', () => {
       omitted: [{ title: 'Late', why: 'refused' }],
       violations: [],
       conflicts: [],
-      changedFilesCoverage: { listed: 2, total: 2 },
+      changedFilesCoverage: { listed: 2, total: 2, givenTo: 'code review' },
     });
   });
 
@@ -651,6 +657,7 @@ describe('loadGateHouseRules: the code review as the later check', () => {
     expect((await loadGateHouseRules(own.db, TASK, withCodeReview))!.changedFilesCoverage).toEqual({
       listed: 10,
       total: 10,
+      givenTo: 'code review',
     });
     for (const coverage of [null, undefined, 'all of it', { listed: 3 }]) {
       const w = seeded({
@@ -792,6 +799,326 @@ describe('loadGateHouseRules: the code review as the later check', () => {
   });
 });
 
+describe('loadGateHouseRules: the change after the last check', () => {
+  const PEER = 'cccccccc-0000-4000-8000-000000000001';
+  const STORED = 'a'.repeat(64);
+  const LATER = 'b'.repeat(64);
+  const MOVED = 'c'.repeat(64);
+  const entryA = entry(RULE_A, 'No inline SVGs', ALWAYS);
+  const entryC = entry(RULE_C, 'Stylesheets stay in files', ALWAYS);
+  const withCodeReview = { withCodeReview: true };
+
+  /** What the caller says the change is now, and how many times it was asked. */
+  function change(value: string | null) {
+    const asked = { count: 0 };
+    return {
+      asked,
+      currentFingerprint: async () => {
+        asked.count += 1;
+        return value;
+      },
+    };
+  }
+  const reviewOutput = (over: Record<string, unknown> = {}) => ({
+    reviewed: true,
+    peer: { verdict: 'APPROVE', findings: [], positives: [] },
+    coverage: { listed: 2, total: 2, truncated: false },
+    ruleConflicts: [],
+    peerInvocationId: PEER,
+    ...over,
+  });
+
+  /** 07b checked rule A and stored STORED. */
+  function checkedByValidator(
+    over: { output?: Record<string, unknown>; stamp?: Partial<HouseRulesStamp> } = {},
+  ) {
+    const w = world();
+    w.step07b(validatorOutput({ changeFingerprint: STORED, ...over.output }));
+    w.invocation(VALIDATOR, stamp({ entries: [entryA], ...over.stamp }));
+    return w;
+  }
+
+  it('marks a change that moved after 07b checked it, and changes nothing else of the row', async () => {
+    const w = checkedByValidator();
+    const plain = await loadGateHouseRules(w.db, TASK);
+    const moved = change(MOVED);
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: moved.currentFingerprint,
+    });
+    expect(loaded).toEqual({ ...plain, modifiedAfterCheck: true });
+    expect(moved.asked.count).toBe(1);
+  });
+
+  it('leaves a change that did not move exactly as the row it was', async () => {
+    const w = checkedByValidator();
+    const plain = await loadGateHouseRules(w.db, TASK);
+    const same = change(STORED);
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: same.currentFingerprint,
+    });
+    expect(loaded).toEqual(plain);
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+  });
+
+  it('reads a files rule that matched nothing as a rule in play: a later write may match it', async () => {
+    const w = checkedByValidator({ stamp: { entries: [], filesRulesUnmatched: 2 } });
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: change(MOVED).currentFingerprint,
+    });
+    expect(loaded!.entries).toEqual([]);
+    expect(loaded!.modifiedAfterCheck).toBe(true);
+  });
+
+  it.each([
+    ['no entries and no unmatched rule', { entries: [] }],
+    ['no entries and a count of zero', { entries: [], filesRulesUnmatched: 0 }],
+    ['the switch off', { entries: [], reason: 'switched_off' as const }],
+  ])(
+    'says nothing of a change that moved when the stamp has %s, and does not ask for it',
+    async (_n, over) => {
+      const w = checkedByValidator({ stamp: over });
+      const moved = change(MOVED);
+      const loaded = await loadGateHouseRules(w.db, TASK, {
+        currentFingerprint: moved.currentFingerprint,
+      });
+      expect('modifiedAfterCheck' in loaded!).toBe(false);
+      expect(moved.asked.count).toBe(0);
+    },
+  );
+
+  it.each([
+    ['carries no changeFingerprint (an output written before there was one)', undefined],
+    ['has null', null],
+    ['has an empty one', ''],
+    ['has one that is not text', 7],
+  ])('does not ask for the change when 07b %s', async (_name, stored) => {
+    const w = checkedByValidator({ output: { changeFingerprint: stored } });
+    const moved = change(MOVED);
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: moved.currentFingerprint,
+    });
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+    expect(moved.asked.count).toBe(0);
+  });
+
+  it('reads a change it could not fingerprint now as a change that did not move', async () => {
+    const w = checkedByValidator();
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: change(null).currentFingerprint,
+    });
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+  });
+
+  it('compares with the code review, the later check, when it ran with a stamp', async () => {
+    const w = checkedByValidator();
+    w.step08c(reviewOutput({ changeFingerprint: LATER }));
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const alone = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    const as07b = await loadGateHouseRules(w.db, TASK, {
+      ...withCodeReview,
+      currentFingerprint: change(STORED).currentFingerprint,
+    });
+    expect(as07b).toEqual({ ...alone, modifiedAfterCheck: true });
+    const as08c = await loadGateHouseRules(w.db, TASK, {
+      ...withCodeReview,
+      currentFingerprint: change(LATER).currentFingerprint,
+    });
+    expect(as08c).toEqual(alone);
+  });
+
+  it("never falls back to 07b's fingerprint when the code review stored none", async () => {
+    const w = checkedByValidator();
+    w.step08c(reviewOutput());
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const moved = change(MOVED);
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      ...withCodeReview,
+      currentFingerprint: moved.currentFingerprint,
+    });
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+    expect(moved.asked.count).toBe(0);
+  });
+
+  it('judges whether a rule was in play by the stamp of the LAST check', async () => {
+    const w = checkedByValidator();
+    w.step08c(reviewOutput({ changeFingerprint: LATER }));
+    w.invocation(PEER, stamp({ entries: [] }));
+    const moved = change(MOVED);
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      ...withCodeReview,
+      currentFingerprint: moved.currentFingerprint,
+    });
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+    expect(moved.asked.count).toBe(0);
+  });
+
+  it.each([
+    ['carries no peerInvocationId', { peerInvocationId: undefined }],
+    ['names an invocation that does not exist', { peerInvocationId: OTHER }],
+  ])('compares with 07b when the code review output %s', async (_name, over) => {
+    const w = checkedByValidator();
+    w.step08c(reviewOutput({ changeFingerprint: LATER, ...over }));
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      ...withCodeReview,
+      currentFingerprint: change(LATER).currentFingerprint,
+    });
+    expect(loaded!.modifiedAfterCheck).toBe(true);
+  });
+
+  it('compares gate 3, which reads 07b alone, with 07b whatever the code review stored', async () => {
+    const w = checkedByValidator();
+    w.step08c(reviewOutput({ changeFingerprint: LATER }));
+    w.invocation(PEER, stamp({ entries: [entryC] }));
+    const loaded = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: change(LATER).currentFingerprint,
+    });
+    expect(loaded!.modifiedAfterCheck).toBe(true);
+    const same = await loadGateHouseRules(w.db, TASK, {
+      currentFingerprint: change(STORED).currentFingerprint,
+    });
+    expect('modifiedAfterCheck' in same!).toBe(false);
+  });
+
+  it('is asked for nothing when the caller supplies no way to read the change', async () => {
+    const w = checkedByValidator();
+    const loaded = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect('modifiedAfterCheck' in loaded!).toBe(false);
+  });
+
+  it('gives no row, however the change moved, when 07b names no usable stamp', async () => {
+    const w = world();
+    w.step07b(validatorOutput({ changeFingerprint: STORED, validatorInvocationId: null }));
+    const moved = change(MOVED);
+    expect(
+      await loadGateHouseRules(w.db, TASK, { currentFingerprint: moved.currentFingerprint }),
+    ).toBeNull();
+    expect(moved.asked.count).toBe(0);
+  });
+});
+
+describe('loadGateHouseRules: whose list of changed files was capped', () => {
+  const PEER = 'cccccccc-0000-4000-8000-000000000001';
+  const entryA = entry(RULE_A, 'No inline SVGs', ALWAYS);
+  const withCodeReview = { withCodeReview: true };
+
+  it("names the code review for its own coverage, alone or beside 07b's", async () => {
+    const w = world();
+    w.step07b(validatorOutput({ changedFilesCoverage: { listed: 100, total: 150 } }));
+    w.invocation(VALIDATOR, stamp({ entries: [entryA] }));
+    w.step08c({
+      reviewed: true,
+      peer: { verdict: 'APPROVE', findings: [], positives: [] },
+      coverage: { listed: 60, total: 90, truncated: true },
+      peerInvocationId: PEER,
+    });
+    w.invocation(PEER, stamp({ entries: [entryA] }));
+    const merged = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(merged!.changedFilesCoverage).toEqual({ listed: 60, total: 90, givenTo: 'code review' });
+
+    const alone = world();
+    alone.step07b(validatorOutput({ validatorInvocationId: null }));
+    alone.step08c({
+      reviewed: true,
+      peer: { verdict: 'APPROVE', findings: [], positives: [] },
+      coverage: { listed: 60, total: 90, truncated: true },
+      peerInvocationId: PEER,
+    });
+    alone.invocation(PEER, stamp({ entries: [entryA] }));
+    expect(
+      (await loadGateHouseRules(alone.db, TASK, withCodeReview))!.changedFilesCoverage,
+    ).toEqual({ listed: 60, total: 90, givenTo: 'code review' });
+  });
+
+  it("names the validator for 07b's coverage, which the merged row falls back to", async () => {
+    const w = world();
+    w.step07b(validatorOutput({ changedFilesCoverage: { listed: 100, total: 150 } }));
+    w.invocation(VALIDATOR, stamp({ entries: [entryA] }));
+    w.step08c({
+      reviewed: true,
+      peer: { verdict: 'APPROVE', findings: [], positives: [] },
+      coverage: null,
+      peerInvocationId: PEER,
+    });
+    w.invocation(PEER, stamp({ entries: [entryA] }));
+    const merged = await loadGateHouseRules(w.db, TASK, withCodeReview);
+    expect(merged!.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
+    expect('givenTo' in merged!.changedFilesCoverage!).toBe(false);
+  });
+});
+
+describe('taskChangeFingerprint', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  async function checkout(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-task-fingerprint-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    await writeFile(path.join(dir, 'a.php'), '<?php\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
+    return dir;
+  }
+  const taskWith = (output: unknown) => {
+    const fake = createFakeDb({ taskSteps: schema.taskSteps });
+    if (output !== undefined) {
+      fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: '01-worktree-setup',
+        round: 0,
+        output,
+      });
+    }
+    return { db: fake.db as unknown as Database, taskId: TASK };
+  };
+
+  it('is the fingerprint of the worktree 01-worktree-setup made, against the base it recorded', async () => {
+    const dir = await checkout();
+    const fingerprint = await taskChangeFingerprint(
+      taskWith({ worktreePath: dir, baseBranch: 'main' }),
+    );
+    expect(fingerprint).toBe(await changeFingerprint(dir, 'main'));
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    await writeFile(path.join(dir, 'a.php'), '<?php // changed again\n');
+    expect(
+      await taskChangeFingerprint(taskWith({ worktreePath: dir, baseBranch: 'main' })),
+    ).not.toBe(fingerprint);
+  });
+
+  it('measures against the dirty files alone when the setup recorded no base', async () => {
+    const dir = await checkout();
+    expect(await taskChangeFingerprint(taskWith({ worktreePath: dir }))).toBe(
+      await changeFingerprint(dir, null),
+    );
+  });
+
+  it.each([
+    ['no setup row', undefined],
+    ['an output that was reset', null],
+    ['an output without a worktree path', { baseBranch: 'main' }],
+    ['a worktree path that is not text', { worktreePath: 7, baseBranch: 'main' }],
+  ])('is null for %s', async (_name, output) => {
+    expect(await taskChangeFingerprint(taskWith(output))).toBeNull();
+  });
+
+  it('is null for a worktree that is not a checkout', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-task-fingerprint-'));
+    dirs.push(dir);
+    expect(
+      await taskChangeFingerprint(taskWith({ worktreePath: dir, baseBranch: 'main' })),
+    ).toBeNull();
+  });
+});
+
 describe('givenRuleIds', () => {
   const entries = [entry(RULE_A, 'No inline SVGs', ALWAYS), entry(RULE_B, 'Templates', ALWAYS)];
 
@@ -920,6 +1247,20 @@ const TABLE = [
     'PARTIAL',
     true,
   ],
+  [
+    'a change modified after the last check',
+    data({ entries: [rule()], modifiedAfterCheck: true }),
+    'warn',
+    'PARTIAL',
+    true,
+  ],
+  [
+    'a change modified after a check whose files rules matched nothing yet',
+    data({ modifiedAfterCheck: true }),
+    'warn',
+    'PARTIAL',
+    true,
+  ],
   ['rules checked', data({ entries: [rule()] }), 'pass', 'ENFORCED', false],
   [
     'a file list that covers the change',
@@ -996,6 +1337,105 @@ describe('houseRulesRow', () => {
     expect(houseRulesRow({ ...rest, changedFilesCoverage: undefined })!.statusLabel).toBe(
       'ENFORCED',
     );
+  });
+
+  it('ranks a change modified after the last check like a rule left out: below the other states, above ENFORCED', () => {
+    const all = data({
+      entries: [rule()],
+      violations: [found],
+      conflicts: [conflict],
+      reason: 'unavailable',
+      modifiedAfterCheck: true,
+    });
+    expect(houseRulesRow(all)!.statusLabel).toBe('CONFLICT');
+    expect(houseRulesRow({ ...all, conflicts: [] })!.statusLabel).toBe('VIOLATED');
+    expect(houseRulesRow({ ...all, conflicts: [], violations: [] })!.statusLabel).toBe(
+      'NOT CHECKED',
+    );
+    expect(
+      houseRulesRow({ ...all, conflicts: [], violations: [], reason: 'switched_off' })!.statusLabel,
+    ).toBe('OFF');
+    const rest = { ...all, conflicts: [], violations: [], reason: undefined };
+    expect(houseRulesRow(rest)!.statusLabel).toBe('PARTIAL');
+    expect(houseRulesRow({ ...rest, modifiedAfterCheck: false })!.statusLabel).toBe('ENFORCED');
+    expect(houseRulesRow({ ...rest, modifiedAfterCheck: undefined })!.statusLabel).toBe('ENFORCED');
+  });
+
+  it('says the change was modified after the last house-rules check, and lists it as not checked', () => {
+    const row = houseRulesRow(data({ entries: [rule()], modifiedAfterCheck: true }))!;
+    expect(row.detail).toBe(
+      '1 rule(s) checked; the change was modified after the last house-rules check',
+    );
+    expect(row.body).toBe(
+      [
+        '## Checked',
+        '- Rule `42ac658a` No inline SVGs — every change',
+        '',
+        '## Not checked',
+        '- changes made after the last house-rules check',
+      ].join('\n'),
+    );
+  });
+
+  it('still gives a row for a check that matched no files rule yet: a write since may break one', () => {
+    const row = houseRulesRow(data({ modifiedAfterCheck: true }))!;
+    expect(row).toMatchObject({ status: 'warn', statusLabel: 'PARTIAL', defaultOpen: true });
+    expect(row.detail).toBe('the change was modified after the last house-rules check');
+    expect(row.body).toBe('## Not checked\n- changes made after the last house-rules check');
+  });
+
+  it('puts the modified change after the rules left out and the capped list, in the same section', () => {
+    const row = houseRulesRow(
+      data({
+        entries: [rule()],
+        omitted: [left],
+        changedFilesCoverage: capped,
+        modifiedAfterCheck: true,
+      }),
+    )!;
+    expect(row.detail).toBe(
+      '1 rule(s) checked; 1 not checked; the validator was given 100 of 150 changed files; the change was modified after the last house-rules check',
+    );
+    expect(row.body).toContain(
+      [
+        '## Not checked',
+        '- Rule Did not fit — left out of the prompt: it did not fit the prompt budget',
+        "- 50 changed files beyond the validator's list of 100",
+        '- changes made after the last house-rules check',
+      ].join('\n'),
+    );
+  });
+
+  it('still names the modified change beside a conflict and a violation, which keep the row', () => {
+    const row = houseRulesRow(
+      data({
+        entries: [rule()],
+        conflicts: [conflict],
+        violations: [found],
+        modifiedAfterCheck: true,
+      }),
+    )!;
+    expect(row.statusLabel).toBe('CONFLICT');
+    expect(row.detail).toBe(
+      '1 rule(s) checked; the change was modified after the last house-rules check; 1 conflict(s); 1 violation(s) open',
+    );
+    expect(row.body).toContain('## Not checked\n- changes made after the last house-rules check');
+  });
+
+  it('names the code review where the capped list was its own, and the validator where it was not', () => {
+    const own = { ...capped, givenTo: 'code review' as const };
+    const row = houseRulesRow(data({ entries: [rule()], changedFilesCoverage: own }))!;
+    expect(row.detail).toBe(
+      '1 rule(s) checked; the code review was given 100 of 150 changed files',
+    );
+    expect(row.body).toContain("- 50 changed files beyond the code review's list of 100");
+    expect(row.body).not.toContain('validator');
+    const validator = houseRulesRow(data({ entries: [rule()], changedFilesCoverage: capped }))!;
+    expect(validator.detail).toBe(
+      '1 rule(s) checked; the validator was given 100 of 150 changed files',
+    );
+    expect(validator.body).toContain("- 50 changed files beyond the validator's list of 100");
+    expect(validator.body).not.toContain('code review');
   });
 
   it('says how many changed files the validator was given, and lists the rest as not checked', () => {

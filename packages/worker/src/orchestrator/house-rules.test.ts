@@ -353,7 +353,48 @@ describe('selectHouseRules: which rules a dispatch is shown', () => {
 
   it('shows nothing, and no block, when no rule applies', () => {
     const out = select([files(['**/*.twig'])], { changedFiles: ['a.php'] });
-    expect(out).toEqual({ status: 'ok', entries: [], omitted: [], block: null });
+    expect(out).toEqual({
+      status: 'ok',
+      entries: [],
+      omitted: [],
+      block: null,
+      filesRulesUnmatched: 1,
+    });
+  });
+});
+
+describe('selectHouseRules: the files rules that matched nothing', () => {
+  it('counts them, and leaves the count out when there are none', () => {
+    const matched = files(['**/*.tpl.php'], { title: 'Matched' });
+    const twig = files(['**/*.twig']);
+    const scss = files(['**/*.scss']);
+    const changedFiles = ['templates/node.tpl.php'];
+    expect(select([matched, twig, scss, rule()], { changedFiles }).filesRulesUnmatched).toBe(2);
+    expect('filesRulesUnmatched' in select([matched, rule()], { changedFiles })).toBe(false);
+    expect('filesRulesUnmatched' in select([], { changedFiles })).toBe(false);
+  });
+
+  it('does not count a rule the plan matched, one left out for the budget, or an always rule', () => {
+    const planned = files(['src/*.php'], { title: 'Planned' });
+    const huge = files(['*.php'], { title: 'Huge', size: 20_000 });
+    const out = select([planned, huge, rule()], {
+      changedFiles: ['a.php'],
+      estimatedFiles: ['src/new.php'],
+    });
+    expect(out.omitted.map((o) => o.title)).toEqual(['Huge']);
+    expect('filesRulesUnmatched' in out).toBe(false);
+  });
+
+  it('counts none when the change could not be read, since every files rule went in unscoped', () => {
+    const out = select([files(['**/*.twig']), files(['**/*.scss'])], { changedFiles: null });
+    expect(out.entries).toHaveLength(2);
+    expect('filesRulesUnmatched' in out).toBe(false);
+  });
+
+  it('counts every files rule against an empty change that no plan covers', () => {
+    expect(
+      select([files(['**/*.twig']), files(['*.css'])], { changedFiles: [] }).filesRulesUnmatched,
+    ).toBe(2);
   });
 });
 
@@ -833,6 +874,28 @@ describe('houseRulesStampOf', () => {
       reason: 'unavailable',
       errorClass: 'timeout',
     });
+  });
+
+  it('records how many files rules matched nothing, beside what the prompt carries', () => {
+    const out = select([a, files(['**/*.twig'])], { changedFiles: ['x.php'] });
+    expect(houseRulesStampOf('review', out)).toEqual({
+      mode: 'review',
+      entries: [{ id: a.id, hash: a.hash, title: 'Always', why: { scope: 'always' } }],
+      omitted: [],
+      filesRulesUnmatched: 1,
+    });
+  });
+
+  it('keeps that count on a stamp for a block the CLI could not take, and not on the switch or the store', () => {
+    const out = select([a, files(['**/*.twig'])], { changedFiles: ['x.php'] });
+    expect(houseRulesStampOf('review', out, true)).toMatchObject({
+      reason: 'too_large',
+      filesRulesUnmatched: 1,
+    });
+    expect('filesRulesUnmatched' in houseRulesStampOf('review', disabledSelection())).toBe(false);
+    expect(
+      'filesRulesUnmatched' in houseRulesStampOf('review', unavailableSelection('timeout')),
+    ).toBe(false);
   });
 
   it('moves the entries to the omitted when the CLI could not take the block', () => {

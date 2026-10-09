@@ -43,6 +43,7 @@ import {
   parseRuleConflicts,
   parseRuleRef,
   raiseRuleViolations,
+  taskChangeFingerprint,
   type RuleConflict,
 } from './_gate-house-rules.js';
 import {
@@ -188,6 +189,8 @@ interface CodeReviewApply {
   ruleConflicts?: RuleConflict[];
   /** The peer reviewer's cli_invocations row, which holds the stamp of the rules it was given. */
   peerInvocationId?: string | null;
+  /** The change as the review left it; the gate reads a change that differs as PARTIAL. */
+  changeFingerprint?: string;
 }
 
 // Severity is coerced, not enum-validated: a repo's checked-in reviewer persona may
@@ -1596,6 +1599,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       recurrence,
     );
 
+    // Only a peer the gate can find by its invocation id is worth a read of the whole change.
+    const fingerprint = peer !== null && peerInvocationId ? await taskChangeFingerprint(ctx) : null;
     return {
       reviewed: true,
       peer: peerOut,
@@ -1609,6 +1614,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
       recurringNote,
       ...(peer === null ? {} : { ruleConflicts: peer.ruleConflicts, peerInvocationId }),
+      ...(fingerprint === null ? {} : { changeFingerprint: fingerprint }),
     };
   },
 };

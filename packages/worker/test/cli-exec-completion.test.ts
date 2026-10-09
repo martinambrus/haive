@@ -175,6 +175,7 @@ describe('a cli run start', () => {
         },
       ],
       omitted: [{ id: 'b', hash: 'hr1:def', title: 'Too big', why: 'budget' }],
+      filesRulesUnmatched: 1,
     };
     await handleCliExecJob(db, { ...base, spec: { agentRules, houseRules } });
 

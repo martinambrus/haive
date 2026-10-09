@@ -7,6 +7,8 @@ import {
   parseHouseRulesStamp,
   type HouseRulesStamp,
 } from '@haive/shared/global-kb';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
+import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { collapseToLine } from '../_untrusted-repo.js';
 import { code } from './_plan-ops.js';
@@ -19,10 +21,12 @@ export interface RuleConflict {
   reason: string;
 }
 
-/** The validator's file list is capped, while a rule is matched against the whole change. */
+/** A check's file list is capped, while a rule is matched against the whole change. */
 export interface ChangedFilesCoverage {
   listed: number;
   total: number;
+  /** The check the list was given to; the validator where absent. */
+  givenTo?: 'code review';
 }
 
 export interface GateHouseRules {
@@ -34,6 +38,8 @@ export interface GateHouseRules {
   violations: { shortId: string; title: string; file: string; description: string }[];
   conflicts: RuleConflict[];
   changedFilesCoverage?: ChangedFilesCoverage;
+  /** The change moved after the last check, which had a rule in play. */
+  modifiedAfterCheck?: boolean;
 }
 
 const RULE_REF_CHARS = 64;
@@ -68,9 +74,14 @@ export function parseRuleConflicts(value: unknown): RuleConflict[] {
     .slice(0, CONFLICTS_MAX);
 }
 
-function parseChangedFilesCoverage(value: unknown): ChangedFilesCoverage | undefined {
+function parseChangedFilesCoverage(
+  value: unknown,
+  givenTo?: ChangedFilesCoverage['givenTo'],
+): ChangedFilesCoverage | undefined {
   const { listed, total } = (value ?? {}) as Record<string, unknown>;
-  return typeof listed === 'number' && typeof total === 'number' ? { listed, total } : undefined;
+  return typeof listed === 'number' && typeof total === 'number'
+    ? { listed, total, ...(givenTo === undefined ? {} : { givenTo }) }
+    : undefined;
 }
 
 export async function loadInvocationStamp(
@@ -131,6 +142,7 @@ function checkOf(
   found: StoredFinding[],
   conflicts: unknown,
   coverage: unknown,
+  givenTo?: ChangedFilesCoverage['givenTo'],
 ): GateHouseRules {
   const shortIds = houseRuleShortIds(stamp.entries.map((entry) => entry.id));
   const entries = stamp.entries.map((entry) => ({
@@ -151,7 +163,7 @@ function checkOf(
       },
     ];
   });
-  const listed = parseChangedFilesCoverage(coverage);
+  const listed = parseChangedFilesCoverage(coverage, givenTo);
   return {
     mode: stamp.mode,
     ...(stamp.reason === undefined ? {} : { reason: stamp.reason }),
@@ -175,12 +187,33 @@ async function stampNamedBy(db: Database, invocationId: unknown): Promise<HouseR
   return loadInvocationStamp(db, invocationId);
 }
 
-async function validationCheck(db: Database, taskId: string): Promise<GateHouseRules | null> {
+/** A check's row data with what the gate compares the change by: the fingerprint the check stored
+ *  (none in an output written before there was one) and whether a rule was in play for it. */
+interface Check {
+  rules: GateHouseRules;
+  fingerprint: string | null;
+  inPlay: boolean;
+}
+
+const checkWith = (
+  rules: GateHouseRules,
+  stamp: HouseRulesStamp,
+  output: Record<string, unknown>,
+): Check => ({
+  rules,
+  fingerprint:
+    typeof output.changeFingerprint === 'string' && output.changeFingerprint !== ''
+      ? output.changeFingerprint
+      : null,
+  inPlay: stamp.entries.length > 0 || (stamp.filesRulesUnmatched ?? 0) > 0,
+});
+
+async function validationCheck(db: Database, taskId: string): Promise<Check | null> {
   const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
   const output = (validation?.output ?? {}) as Record<string, unknown>;
   const stamp = await stampNamedBy(db, output.validatorInvocationId);
   if (stamp === null) return null;
-  return checkOf(
+  const rules = checkOf(
     stamp,
     recordsOf(output.issues).map((issue) => ({
       rule: issue.rule,
@@ -190,15 +223,16 @@ async function validationCheck(db: Database, taskId: string): Promise<GateHouseR
     output.ruleConflicts,
     output.changedFilesCoverage,
   );
+  return checkWith(rules, stamp, output);
 }
 
-async function codeReviewCheck(db: Database, taskId: string): Promise<GateHouseRules | null> {
+async function codeReviewCheck(db: Database, taskId: string): Promise<Check | null> {
   const review = await loadPreviousStepOutput(db, taskId, '08c-code-review');
   const output = (review?.output ?? {}) as Record<string, unknown>;
   const stamp = await stampNamedBy(db, output.peerInvocationId);
   if (stamp === null) return null;
   const peer = (output.peer ?? {}) as Record<string, unknown>;
-  return checkOf(
+  const rules = checkOf(
     stamp,
     recordsOf(peer.findings).map((finding) => ({
       rule: finding.rule,
@@ -209,7 +243,9 @@ async function codeReviewCheck(db: Database, taskId: string): Promise<GateHouseR
     })),
     output.ruleConflicts,
     output.coverage,
+    'code review',
   );
+  return checkWith(rules, stamp, output);
 }
 
 /** From the stamp of the invocation 07b's latest output names, never one picked by title, message or age.
@@ -217,12 +253,25 @@ async function codeReviewCheck(db: Database, taskId: string): Promise<GateHouseR
 export async function loadGateHouseRules(
   db: Database,
   taskId: string,
-  { withCodeReview = false }: { withCodeReview?: boolean } = {},
+  {
+    withCodeReview = false,
+    currentFingerprint,
+  }: { withCodeReview?: boolean; currentFingerprint?: () => Promise<string | null> } = {},
 ): Promise<GateHouseRules | null> {
   const validation = await validationCheck(db, taskId);
-  if (!withCodeReview) return validation;
-  const review = await codeReviewCheck(db, taskId);
-  if (review === null || validation === null) return review ?? validation;
+  const review = withCodeReview ? await codeReviewCheck(db, taskId) : null;
+  const last = review ?? validation;
+  if (last === null) return null;
+  const rules =
+    review === null || validation === null
+      ? last.rules
+      : mergeChecks(validation.rules, review.rules);
+  if (currentFingerprint === undefined || last.fingerprint === null || !last.inPlay) return rules;
+  const now = await currentFingerprint();
+  return now === null || now === last.fingerprint ? rules : { ...rules, modifiedAfterCheck: true };
+}
+
+function mergeChecks(validation: GateHouseRules, review: GateHouseRules): GateHouseRules {
   const coverage = review.changedFilesCoverage ?? validation.changedFilesCoverage;
   return {
     ...review,
@@ -230,6 +279,19 @@ export async function loadGateHouseRules(
     conflicts: [...validation.conflicts, ...review.conflicts],
     ...(coverage === undefined ? {} : { changedFilesCoverage: coverage }),
   };
+}
+
+/** The fingerprint a check stores and a gate compares, of the worktree 01-worktree-setup made. */
+export async function taskChangeFingerprint(
+  ctx: Pick<StepContext, 'db' | 'taskId'>,
+): Promise<string | null> {
+  const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const made = (setup?.output ?? {}) as { worktreePath?: unknown; baseBranch?: unknown };
+  if (typeof made.worktreePath !== 'string' || made.worktreePath === '') return null;
+  return changeFingerprint(
+    made.worktreePath,
+    typeof made.baseBranch === 'string' ? made.baseBranch : null,
+  );
 }
 
 type HouseCase = 'conflict' | 'violated' | 'notChecked' | 'off' | 'partial' | 'enforced';
@@ -246,7 +308,7 @@ const CASES: Record<
   enforced: { status: 'pass', label: 'ENFORCED', holdsApprove: false },
 };
 
-/** The validator's list, when rules were given to it and it did not list every changed file. */
+/** A check's list, when rules were given to it and it did not list every changed file. */
 function cappedList(data: GateHouseRules): ChangedFilesCoverage | null {
   const coverage = data.changedFilesCoverage;
   return data.entries.length > 0 && coverage !== undefined && coverage.listed < coverage.total
@@ -259,10 +321,15 @@ function caseOf(data: GateHouseRules): HouseCase | null {
   if (data.violations.length > 0) return 'violated';
   if (data.reason === 'unavailable' || data.reason === 'too_large') return 'notChecked';
   if (data.reason === 'switched_off') return 'off';
-  if (data.omitted.length > 0 || cappedList(data) !== null) return 'partial';
+  if (data.omitted.length > 0 || cappedList(data) !== null || data.modifiedAfterCheck === true) {
+    return 'partial';
+  }
   if (data.entries.length > 0) return 'enforced';
   return null;
 }
+
+const checkName = (coverage: ChangedFilesCoverage): string =>
+  coverage.givenTo === undefined ? 'the validator' : `the ${coverage.givenTo}`;
 
 function reasonText(data: GateHouseRules): string {
   if (data.reason === 'unavailable') {
@@ -303,9 +370,12 @@ function bodyOf(data: GateHouseRules): string {
           ? []
           : [
               bullet(
-                `${capped.total - capped.listed} changed files beyond the validator's list of ${capped.listed}`,
+                `${capped.total - capped.listed} changed files beyond ${checkName(capped)}'s list of ${capped.listed}`,
               ),
             ]),
+        ...(data.modifiedAfterCheck === true
+          ? [bullet('changes made after the last house-rules check')]
+          : []),
       ],
     ],
     [
@@ -349,7 +419,10 @@ export function houseRulesRow(data: GateHouseRules | null | undefined): StatusSu
     data.omitted.length > 0 ? `${data.omitted.length} not checked` : '',
     capped === null
       ? ''
-      : `the validator was given ${capped.listed} of ${capped.total} changed files`,
+      : `${checkName(capped)} was given ${capped.listed} of ${capped.total} changed files`,
+    data.modifiedAfterCheck === true
+      ? 'the change was modified after the last house-rules check'
+      : '',
     data.conflicts.length > 0 ? `${data.conflicts.length} conflict(s)` : '',
     data.violations.length > 0 ? `${data.violations.length} violation(s) open` : '',
   ];

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +25,9 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal
 }));
 
 import {
+  FINGERPRINT_READ_BYTES,
   HOUSE_RULES_UNAVAILABLE_EVENT,
+  changeFingerprint,
   plannedFiles,
   readChangedFiles,
   readDispatchChange,
@@ -168,6 +170,120 @@ describe('readChangedFiles', () => {
   });
 });
 
+describe('changeFingerprint', () => {
+  const DIGEST = /^[0-9a-f]{64}$/;
+  const of = async (dir: string) => (await changeFingerprint(dir, 'main'))!;
+
+  it('is a sha256 digest, the same while the change has not moved', async () => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    const first = await of(dir);
+    expect(first).toMatch(DIGEST);
+    expect(await of(dir)).toBe(first);
+  });
+
+  it.each([
+    ['a changed file is edited again', 'templates/node.tpl.php', 'edited again\n'],
+    ['a changed file is edited to the same size', 'src/keep.php', 'EDITED\n'],
+    ['a file is added', 'new/added.php', '<?php\n'],
+    ['a file the change had not touched is edited', 'a.txt', 'edited\n'],
+  ])('moves when %s', async (_name, rel, text) => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    const before = await of(dir);
+    await put(dir, rel, text);
+    expect(await of(dir)).not.toBe(before);
+  });
+
+  it.each([
+    ['a file the change added', 'src/committed.php'],
+    ['a file the change had not touched', 'b.txt'],
+  ])('moves when %s is deleted', async (_name, rel) => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    const before = await of(dir);
+    await rm(path.join(dir, rel));
+    expect(await of(dir)).not.toBe(before);
+  });
+
+  it('does not move when the work in the tree is committed between the check and the gate', async () => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    await put(dir, 'new/added.php', '<?php\n');
+    await rm(path.join(dir, 'b.txt'));
+    const before = await of(dir);
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'the commit gate 3 makes');
+    expect(await of(dir)).toBe(before);
+  });
+
+  it('names a path: the same bytes under another name are another change', async () => {
+    const one = await repo();
+    const two = await repo();
+    await put(one, 'new/one.php', 'same\n');
+    await put(two, 'new/two.php', 'same\n');
+    expect(await of(one)).not.toBe(await of(two));
+  });
+
+  it('holds only the dirty files when the fork point is unknown, as the change itself does', async () => {
+    const dir = await repo();
+    const clean = await changeFingerprint(dir, null);
+    expect(clean).toMatch(DIGEST);
+    await put(dir, 'src/keep.php', 'edited\n');
+    expect(await changeFingerprint(dir, null)).not.toBe(clean);
+  });
+
+  it('is null, not a digest of nothing, when the change cannot be read', async () => {
+    const broken = await mkdtemp(path.join(tmpdir(), 'haive-house-rules-'));
+    dirs.push(broken);
+    await writeFile(path.join(broken, '.git'), 'gitdir: /nonexistent/gitdir\n');
+    expect(await changeFingerprint(broken, 'main')).toBeNull();
+    expect(await changeFingerprint(path.join(broken, 'gone'), 'main')).toBeNull();
+  });
+
+  it('does not follow a link: what it points at is no part of the digest', async () => {
+    const dir = await repo();
+    const outside = await mkdtemp(path.join(tmpdir(), 'haive-outside-'));
+    dirs.push(outside);
+    await writeFile(path.join(outside, 'secret.txt'), 'one\n');
+    const without = await of(dir);
+    await symlink(path.join(outside, 'secret.txt'), path.join(dir, 'link.txt'));
+    const linked = await of(dir);
+    expect(linked).not.toBe(without);
+    await writeFile(path.join(outside, 'secret.txt'), 'two\n');
+    expect(await of(dir)).toBe(linked);
+  });
+
+  it('reads the files of a worktree under .haive/worktrees, anchored at the repository root', async () => {
+    const dir = await repo();
+    await appendFile(path.join(dir, '.git/info/exclude'), '.haive/\n');
+    const wt = path.join(dir, '.haive/worktrees/task');
+    git(dir, 'worktree', 'add', '-q', '-b', 'task', wt, 'main');
+    await put(wt, 'src/new.php', 'one\n');
+    const before = (await changeFingerprint(wt, 'main'))!;
+    expect(before).toMatch(DIGEST);
+    await put(wt, 'src/new.php', 'two\n');
+    expect(await changeFingerprint(wt, 'main')).not.toBe(before);
+  });
+
+  it('takes a bounded prefix of a large file and its size, so one file cannot exhaust the worker', async () => {
+    const dir = await repo();
+    const big = Buffer.alloc(FINGERPRINT_READ_BYTES + 4096, 97);
+    await writeFile(path.join(dir, 'big.bin'), big);
+    const before = await of(dir);
+    const tail = Buffer.from(big);
+    tail[tail.length - 1] = 98;
+    await writeFile(path.join(dir, 'big.bin'), tail);
+    expect(await of(dir)).toBe(before);
+    const head = Buffer.from(big);
+    head[0] = 98;
+    await writeFile(path.join(dir, 'big.bin'), head);
+    expect(await of(dir)).not.toBe(before);
+    await writeFile(path.join(dir, 'big.bin'), Buffer.concat([big, Buffer.from('x')]));
+    expect(await of(dir)).not.toBe(before);
+  });
+});
+
 describe('readDispatchChange', () => {
   beforeEach(() => {
     h.tree = null;
@@ -280,6 +396,29 @@ describe('selectForDispatch', () => {
     );
     expect(out.entries.map((e) => e.why)).toEqual([{ scope: 'files', glob: '**/*.tpl.php' }]);
     expect(h.treeCalls).toHaveLength(1);
+  });
+
+  it('counts the files rules that matched nothing in the change, which a later write may match', async () => {
+    const dir = await repo();
+    h.tree = dir;
+    h.setup = { output: { baseBranch: 'main' } };
+    const out = await select(
+      { mode: 'review' },
+      kb({ rules: [files(['**/*.tpl.php']), files(['**/*.twig']), files(['**/*.scss'])] }),
+    );
+    expect(out.entries).toHaveLength(1);
+    expect(out.filesRulesUnmatched).toBe(2);
+  });
+
+  it('counts none when every files rule matched, or when the change could not be read', async () => {
+    const dir = await repo();
+    h.tree = dir;
+    h.setup = { output: { baseBranch: 'main' } };
+    const matched = await select({ mode: 'review' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+    expect('filesRulesUnmatched' in matched).toBe(false);
+    h.tree = null;
+    const unread = await select({ mode: 'review' }, kb({ rules: [files(['**/*.twig'])] }));
+    expect('filesRulesUnmatched' in unread).toBe(false);
   });
 
   it('selects a files rule that only a deleted file matches, with that glob', async () => {

@@ -72,6 +72,22 @@ describe('parseHouseRulesStamp', () => {
     },
   );
 
+  it('reads the count of files rules that matched nothing, and a stamp written without it', () => {
+    const counted: HouseRulesStamp = { ...FULL, filesRulesUnmatched: 2 };
+    expect(parseHouseRulesStamp(counted)).toEqual(counted);
+    expect(parseHouseRulesStamp({ ...FULL, filesRulesUnmatched: 0 })).toEqual({
+      ...FULL,
+      filesRulesUnmatched: 0,
+    });
+    expect('filesRulesUnmatched' in parseHouseRulesStamp(FULL)!).toBe(false);
+  });
+
+  it('stores the count in the column type as well', () => {
+    // Checked by `pnpm typecheck`: the column's own type has to name the key too.
+    const column: StoredStamp = { ...FULL, filesRulesUnmatched: 1 };
+    expect(parseHouseRulesStamp(column)?.filesRulesUnmatched).toBe(1);
+  });
+
   it('leaves out a key it does not know rather than refusing the stamp', () => {
     const later = { ...FULL, similar: [{ id: ID_A, score: 0.9 }] };
     expect(parseHouseRulesStamp(later)).toEqual(FULL);
@@ -112,6 +128,9 @@ describe('parseHouseRulesStamp', () => {
       'an omitted rule that is neither budget nor refused',
       { ...FULL, omitted: [{ ...entry, why: 'cleared' }] },
     ],
+    ['a count of unmatched rules that is negative', { ...FULL, filesRulesUnmatched: -1 }],
+    ['a count of unmatched rules that is not whole', { ...FULL, filesRulesUnmatched: 1.5 }],
+    ['a count of unmatched rules written as text', { ...FULL, filesRulesUnmatched: '2' }],
     ['a reason it does not know', { ...FULL, reason: 'rate_limited' }],
     ['an error class it does not know', { ...FULL, errorClass: 'dns' }],
   ])('reads %s as none', (_name, stored) => {

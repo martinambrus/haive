@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
 import type { GlobalKbErrorClass } from '@haive/shared/global-kb';
 import { gitRun } from '../repo/git-exec.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { loadPreviousStepOutput } from '../step-engine/steps/onboarding/_helpers.js';
 import { parsePorcelainZ } from '../step-engine/steps/workflow/_commit-diff.js';
@@ -41,6 +44,29 @@ export async function readChangedFiles(
     entry.oldPath ? [entry.path, entry.oldPath] : [entry.path],
   );
   return [...new Set([...dirty, ...committed])];
+}
+
+// The worktree is written by sandboxed agents, so one file must never be able to exhaust the worker.
+export const FINGERPRINT_READ_BYTES = 8 * 1024 * 1024;
+
+/** sha256 over the paths `readChangedFiles` lists and the bytes of each regular file there; a link
+ *  or a deleted path counts as not there. Null when the change cannot be read. */
+export async function changeFingerprint(
+  tree: string,
+  baseBranch: string | null,
+): Promise<string | null> {
+  const files = await readChangedFiles(tree, baseBranch);
+  if (files === null) return null;
+  const { anchor, prefix } = workspaceAnchor(tree);
+  const hash = createHash('sha256');
+  for (const file of [...files].sort()) {
+    const read = await readFileNoFollow(anchor, `${prefix}${file}`, {
+      maxBytes: FINGERPRINT_READ_BYTES,
+    });
+    hash.update(JSON.stringify([file, read === null ? null : read.size]));
+    if (read !== null) hash.update(read.data);
+  }
+  return hash.digest('hex');
 }
 
 /** The change of the tree the dispatch mounts; null when it cannot be read, including no repository. */

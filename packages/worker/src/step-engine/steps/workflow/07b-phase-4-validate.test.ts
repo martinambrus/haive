@@ -1,4 +1,8 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   ensureAppServing: vi.fn(),
@@ -25,6 +29,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TaskCancelledError } from '../../step-definition.js';
+import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import {
   parseValidatorOutput,
   parseFixerOutput,
@@ -950,14 +955,24 @@ const stampOf = (...ids: string[]) => ({
   omitted: [],
 });
 
-/** A db that answers the stamp lookup by invocation id, and counts what was read from that table. */
-function ruleWorld(stamps: Record<string, unknown>) {
+/** A db that answers the stamp lookup by invocation id, and counts what was read from that table.
+ *  `setup` is what 01-worktree-setup recorded, when the task has a worktree. */
+function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unknown>) {
   const fake = createFakeDb({
     cliInvocations: schema.cliInvocations,
     taskEvents: schema.taskEvents,
+    taskSteps: schema.taskSteps,
   });
   for (const [id, houseRules] of Object.entries(stamps)) {
     fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+  }
+  if (setup) {
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '01-worktree-setup',
+      round: 0,
+      output: setup,
+    });
   }
   const tables: unknown[] = [];
   const db = {
@@ -1282,6 +1297,136 @@ describe('phase4ValidateStep.apply: the changed files the validator was given', 
     });
     expect(o.source).toBe('fixer');
     expect('changedFilesCoverage' in o).toBe(false);
+  });
+});
+
+// Gate 2 compares what the change is then with what it was when the validator finished.
+describe('phase4ValidateStep.apply: the change the validator checked', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  async function checkout(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-validate-change-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    await writeFile(path.join(dir, 'a.php'), '<?php\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
+    return dir;
+  }
+  const worldOf = (dir: string) =>
+    ruleWorld(
+      { [VALIDATOR_1]: stampOf(RULE_A), [VALIDATOR_2]: stampOf(RULE_A) },
+      {
+        worktreePath: dir,
+        baseBranch: 'main',
+      },
+    );
+  const DIGEST = /^[0-9a-f]{64}$/;
+
+  it('stores a fingerprint of the change as it stands when the pass ends, the one a gate recomputes', async () => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, reply({ verdict: 'VALID' }), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.source).toBe('validator');
+    expect(out.changeFingerprint).toMatch(DIGEST);
+    expect(out.changeFingerprint).toBe(await changeFingerprint(dir, 'main'));
+  });
+
+  it('stores another one once the change has moved, and the same one while it has not', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const first = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    const again = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    expect(again.changeFingerprint).toBe(first.changeFingerprint);
+    await writeFile(path.join(dir, 'b.php'), '<?php // added\n');
+    const moved = await runApply(w.ctx, reply(), { invocationId: VALIDATOR_1 });
+    expect(moved.changeFingerprint).toMatch(DIGEST);
+    expect(moved.changeFingerprint).not.toBe(first.changeFingerprint);
+  });
+
+  it('has each fixer pass carry the latest validator pass, though the tree moved under the fixer', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const text0 = reply();
+    const o0 = await runApply(w.ctx, text0, { invocationId: VALIDATOR_1 });
+    await writeFile(path.join(dir, 'a.php'), '<?php // fixed\n');
+    const r0 = passRecord(0, text0, o0);
+    const o1 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [r0],
+      invocationId: FIXER_1,
+    });
+    expect(o1.source).toBe('fixer');
+    expect(o1.changeFingerprint).toBe(o0.changeFingerprint);
+
+    const text2 = reply({ verdict: 'VALID' });
+    const o2 = await runApply(w.ctx, text2, {
+      iteration: 2,
+      previous: [r0, passRecord(1, FIXER_REPLY, o1)],
+      invocationId: VALIDATOR_2,
+    });
+    expect(o2.changeFingerprint).toMatch(DIGEST);
+    expect(o2.changeFingerprint).not.toBe(o0.changeFingerprint);
+    await writeFile(path.join(dir, 'a.php'), '<?php // fixed twice\n');
+    const o3 = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 3,
+      previous: [r0, passRecord(1, FIXER_REPLY, o1), passRecord(2, text2, o2)],
+      invocationId: FIXER_2,
+    });
+    expect(o3.changeFingerprint).toBe(o2.changeFingerprint);
+  });
+
+  it('has a fixer pass that follows an output written before the field carry none', async () => {
+    const dir = await checkout();
+    const o = await runApply(worldOf(dir).ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, '', mkValidateApply())],
+      invocationId: FIXER_1,
+    });
+    expect(o.source).toBe('fixer');
+    expect('changeFingerprint' in o).toBe(false);
+  });
+
+  it.each([
+    ['a pass with no invocation id, which the gate cannot find', { invocationId: null }],
+    ['a pass that was not given one at all', {}],
+  ])('stores none for %s', async (_name, opts) => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, reply(), opts);
+    expect(out.source).toBe('validator');
+    expect('changeFingerprint' in out).toBe(false);
+  });
+
+  it('stores none for a reply it could not read', async () => {
+    const dir = await checkout();
+    const out = await runApply(worldOf(dir).ctx, 'no json at all', { invocationId: VALIDATOR_1 });
+    expect(out.verdict).toBe('UNPARSEABLE');
+    expect('changeFingerprint' in out).toBe(false);
+  });
+
+  it.each([
+    ['a task with no worktree', undefined],
+    [
+      'a worktree that is not a checkout',
+      { worktreePath: '/nonexistent/hr6-worktree', baseBranch: 'main' },
+    ],
+  ])('stores none, and does not fail the pass, for %s', async (_name, setup) => {
+    const out = await runApply(ruleWorld({ [VALIDATOR_1]: stampOf(RULE_A) }, setup).ctx, reply(), {
+      invocationId: VALIDATOR_1,
+    });
+    expect(out.source).toBe('validator');
+    expect(out.validatorInvocationId).toBe(VALIDATOR_1);
+    expect('changeFingerprint' in out).toBe(false);
   });
 });
 
