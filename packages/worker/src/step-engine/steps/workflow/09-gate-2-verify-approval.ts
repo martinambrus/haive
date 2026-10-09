@@ -110,6 +110,9 @@ interface VerifyGateDetect {
     /** Files the validator/fixer kept re-flagging without resolving (empty when converged). */
     churnFiles: string[];
     report: string;
+    /** How much of the change the last validator pass was given. Optional for the same reason as
+     *  `excludedDimensions`; null when 07b stored no coverage. */
+    coverage?: FileCoverage | null;
   } | null;
   /** Phase 5b test management summary line (null when the step didn't run). */
   testManagement: { line: string; testsPassed: boolean | null } | null;
@@ -372,6 +375,7 @@ interface Phase4Output {
   reportChars?: number;
   converged?: boolean;
   churnFiles?: string[];
+  changedFilesCoverage?: CoverageOutput;
 }
 
 const REPORT_EXCERPT_CHARS = 8000;
@@ -560,6 +564,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     let validation: VerifyGateDetect['validation'] = null;
     if (p4?.verdict) {
       const iterations = (phase4?.iterations ?? []) as { exhaustedBudget?: boolean }[];
+      // 07b stores {listed, total} without the flag the other steps store: the cap is the difference.
+      const given = readCoverage(p4.changedFilesCoverage);
       validation = {
         verdict: p4.verdict,
         summary: p4.summary ?? '',
@@ -577,6 +583,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // A report with its reply length was cut once by 07b, at this size; one without it predates that and is cut here.
         report:
           typeof p4.reportChars === 'number' ? (p4.report ?? '') : reportExcerpt(p4.report ?? ''),
+        coverage: given && { ...given, truncated: given.listed < given.total },
       };
     }
 
@@ -854,7 +861,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
 
   form(_ctx, detected): FormSchema {
     const v = detected.validation;
-    const validationOk = v === null || v.verdict === 'VALID';
+    // A validator given only part of the change has said nothing about the rest, whatever it returned.
+    const validationPartial = v?.coverage?.truncated === true;
+    const validationOk = v === null || (v.verdict === 'VALID' && !validationPartial);
     const testsOk =
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
     const b = detected.browser;
@@ -1006,6 +1015,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           'repository or task. No finding above covers them, and their absence is not a pass.',
         );
       }
+      const vCoverage = coverageNote(v.coverage ?? null);
+      if (vCoverage) lines.push('', '## Coverage', `- ${vCoverage}`);
       if (v.openIssues.length > 0) {
         lines.push('', '## Open issues');
         for (const i of v.openIssues) lines.push(`- ${i}`);
@@ -1019,11 +1030,20 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ]
         .filter(Boolean)
         .join(' • ');
+      // The verdict outranks the cap in the label, as in the code review row: PARTIAL is for a pass
+      // that would otherwise read as clean.
+      const validPartial = v.verdict === 'VALID' && validationPartial;
       rows.push({
         label: 'Implementation validation',
-        status: v.verdict === 'VALID' ? 'pass' : v.verdict === 'UNPARSEABLE' ? 'warn' : 'fail',
-        statusLabel: v.verdict,
-        detail: flags || undefined,
+        status: validPartial
+          ? 'warn'
+          : v.verdict === 'VALID'
+            ? 'pass'
+            : v.verdict === 'UNPARSEABLE'
+              ? 'warn'
+              : 'fail',
+        statusLabel: validPartial ? 'PARTIAL' : v.verdict,
+        detail: [flags, vCoverage].filter(Boolean).join('; ') || undefined,
         body: lines.join('\n'),
         defaultOpen: !validationOk,
       });

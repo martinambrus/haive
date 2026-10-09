@@ -963,6 +963,233 @@ describe('gate-2 discloses what was not reviewed', () => {
   });
 });
 
+// 07b stores {listed, total} of the list its latest validator pass was given. The review and QA rows
+// say when their agents were given less than the whole change, and Approve is not their default then;
+// the validation row has to do the same.
+describe('gate-2 validation row: how much of the change the validator was given', () => {
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/repos/u/r',
+    round: 0,
+    db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
+  const GIVEN = 'only 2 of 3 changed files were given to the agents — 1 were not looked at';
+
+  const stored07b = {
+    valid: {
+      output: {
+        verdict: 'VALID',
+        summary: 'looks fine',
+        issues: [],
+        dimensions: [],
+        excludedDimensions: [],
+        fixesApplied: [],
+        converged: true,
+        churnFiles: [],
+        report: '',
+      },
+      iterations: [],
+    },
+    issues: {
+      output: {
+        verdict: 'ISSUES_FOUND',
+        summary: 'two problems',
+        issues: [{ severity: 'high', file: 'src/a.ts:3', description: 'stale caller' }],
+        dimensions: [
+          { name: 'Security', status: 'FAIL', note: 'open redirect' },
+          { name: 'Performance', status: 'PASS' },
+        ],
+        excludedDimensions: ['Accessibility'],
+        fixesApplied: ['moved it', 'renamed it'],
+        converged: false,
+        churnFiles: ['src/a.ts'],
+        report: 'REPORT TAIL',
+      },
+      iterations: [{ exhaustedBudget: true }],
+    },
+    unparseable: {
+      output: {
+        verdict: 'UNPARSEABLE',
+        summary: 'Validator output could not be parsed; review the raw report at gate 2.',
+        issues: [],
+        dimensions: [],
+        excludedDimensions: [],
+        fixesApplied: [],
+        converged: true,
+        churnFiles: [],
+        report: 'raw reply',
+      },
+      iterations: [],
+    },
+  };
+
+  // The rows and defaults the unchanged gate rendered for these three outputs, captured before it
+  // learned to read coverage. An output with no coverage field has to render exactly this.
+  const BEFORE = {
+    valid: {
+      row: {
+        label: 'Implementation validation',
+        status: 'pass',
+        statusLabel: 'VALID',
+        body: '**Verdict:** VALID\n\nlooks fine',
+        defaultOpen: false,
+      },
+      decision: 'approve',
+    },
+    issues: {
+      row: {
+        label: 'Implementation validation',
+        status: 'fail',
+        statusLabel: 'ISSUES_FOUND',
+        detail: 'budget exhausted • did not converge',
+        body: [
+          '**Verdict:** ISSUES_FOUND',
+          '',
+          'two problems',
+          '',
+          '**Fixes applied by the fix loop:** 2',
+          '',
+          '> ⚠️ **Fix budget exhausted** — the validator still reported issues on its final pass.',
+          '> Review the open issues below before approving.',
+          '',
+          '> ⚠️ **Validation did not converge** — the validator/fixer kept re-flagging src/a.ts across rounds without resolving it, so the loop stopped instead of burning more rounds. A human decision is needed.',
+          '',
+          '## Failed review dimensions',
+          '- Security: open redirect',
+          '',
+          '## Not reviewed',
+          'This run did not score Accessibility — they are scoped out for this',
+          'repository or task. No finding above covers them, and their absence is not a pass.',
+          '',
+          '## Open issues',
+          '- [high] src/a.ts:3 stale caller',
+          '',
+          '## Validator report (excerpt)',
+          '',
+          'REPORT TAIL',
+        ].join('\n'),
+        defaultOpen: true,
+      },
+      decision: 'reject',
+    },
+    unparseable: {
+      row: {
+        label: 'Implementation validation',
+        status: 'warn',
+        statusLabel: 'UNPARSEABLE',
+        body: [
+          '**Verdict:** UNPARSEABLE',
+          '',
+          'Validator output could not be parsed; review the raw report at gate 2.',
+          '',
+          "> ⚠️ The validator's output could not be parsed — review the report excerpt below.",
+          '',
+          '## Validator report (excerpt)',
+          '',
+          'raw reply',
+        ].join('\n'),
+        defaultOpen: true,
+      },
+      decision: 'reject',
+    },
+  };
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.hasWorkspaceEntry.mockReset().mockResolvedValue(false);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
+    m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+    m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  /** The gate over a green verification and the 07b output a task stored, from detect to the form. */
+  async function gate(which: keyof typeof stored07b, coverage?: { listed: number; total: number }) {
+    const { output, iterations } = stored07b[which];
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        if (id === '08-phase-5-verify') {
+          return {
+            output: {
+              test: passedRun,
+              lint: passedRun,
+              typecheck: passedRun,
+              passed: true,
+              runtimeSmoke: null,
+            },
+          };
+        }
+        if (id === '07b-phase-4-validate') {
+          return {
+            output: coverage === undefined ? output : { ...output, changedFilesCoverage: coverage },
+            iterations,
+          };
+        }
+        return null;
+      },
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+    return {
+      detected,
+      row: (schema.statusSummary ?? []).find((r) => r.label === 'Implementation validation'),
+      decision: (schema.fields.find((f) => f.id === 'decision') as { default?: string }).default,
+    };
+  }
+
+  it('reads what 07b stored into the payload, with the cap it implies', async () => {
+    expect((await gate('valid', { listed: 2, total: 3 })).detected.validation?.coverage).toEqual({
+      listed: 2,
+      total: 3,
+      truncated: true,
+    });
+    expect((await gate('valid', { listed: 3, total: 3 })).detected.validation?.coverage).toEqual({
+      listed: 3,
+      total: 3,
+      truncated: false,
+    });
+    expect((await gate('valid')).detected.validation?.coverage ?? null).toBeNull();
+  });
+
+  it('calls a VALID verdict over part of the change PARTIAL, names the cap, and does not default to approve', async () => {
+    const { row, decision } = await gate('valid', { listed: 2, total: 3 });
+    expect(row).toMatchObject({ status: 'warn', statusLabel: 'PARTIAL', defaultOpen: true });
+    expect(row?.detail).toBe(GIVEN);
+    expect(row?.body).toContain(`## Coverage\n- ${GIVEN}`);
+    expect(decision).toBe('reject');
+  });
+
+  it('keeps the verdict as the label when the pass also found issues, and names the cap beside the flags', async () => {
+    const { row, decision } = await gate('issues', { listed: 2, total: 3 });
+    expect(row).toMatchObject({ status: 'fail', statusLabel: 'ISSUES_FOUND' });
+    expect(row?.detail).toBe(`budget exhausted • did not converge; ${GIVEN}`);
+    const body = row?.body ?? '';
+    expect(body.indexOf('## Not reviewed')).toBeLessThan(body.indexOf('## Coverage'));
+    expect(body.indexOf('## Coverage')).toBeLessThan(body.indexOf('## Open issues'));
+    expect(decision).toBe('reject');
+  });
+
+  it.each(['valid', 'issues', 'unparseable'] as const)(
+    'renders a %s 07b output that has no coverage field exactly as it always did',
+    async (which) => {
+      const { row, decision } = await gate(which);
+      expect({ row, decision }).toEqual(BEFORE[which]);
+    },
+  );
+
+  it.each(['valid', 'issues'] as const)(
+    'renders a %s 07b output whose list covered the change as it renders one with no field',
+    async (which) => {
+      const covered = await gate(which, { listed: 3, total: 3 });
+      expect({ row: covered.row, decision: covered.decision }).toEqual(BEFORE[which]);
+    },
+  );
+});
+
 describe('gate-2 verification results read from 08', () => {
   const ctx = {
     taskId: 'task-1',
