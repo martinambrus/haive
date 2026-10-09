@@ -153,8 +153,9 @@ and one outside the written lines goes to its `## INSIGHTS`.
 point, since a DAG task's tree is clean at 07b, with deleted paths and a rename's source: a rule can
 cover what a task removes or moves out. A DAG coder also matches its issue's `estimated_files`. A
 glob with no `/` matches a file name at any depth, as in a gitignore (picomatch `basename`), and
-`dot: true` as secret masking uses it. A change that cannot be read
-puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement nobody made.
+`dot: true` as secret masking uses it. A change that cannot be read (a git read unanswered after
+30 s counts) puts every `files` rule in unscoped (`why.glob` null): never narrow on a measurement
+nobody made.
 One 07 round 0 dispatch never gets a `files` rule, since nothing is written yet; similarity
 (PR7) is for that. Each prompt spends at most 16,384 bytes on the block, markers, framing and
 notice included. Rules are kept first-fit: `always` rules first, oldest approval first (a set within
