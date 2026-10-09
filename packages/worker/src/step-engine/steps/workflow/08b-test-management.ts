@@ -30,6 +30,7 @@ import {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import {
@@ -547,10 +548,6 @@ export function actionInstructions(): string[] {
     '   with no tests has none RECORDED in the plan, which is not the same as having none.',
     '6. If a category does not apply, skip it — do not invent work; report zero changes honestly.',
   ];
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Run one built command through whichever path its `kind` names, so the selective run and the

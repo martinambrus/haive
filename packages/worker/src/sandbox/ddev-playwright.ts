@@ -1,5 +1,6 @@
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { DDEV_PROJECT_MOUNT, ddevExec, type DdevRunnerHandle } from './ddev-runner.js';
+import { shellQuote } from './shell-quote.js';
 
 /**
  * Provision Playwright's browser runtime inside a task's DDEV web container.
@@ -187,7 +188,7 @@ export async function ensureDdevPlaywrightBrowsers(
   if (!(await configService.getBoolean(CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED, true))) {
     return { attempted: false, ok: false, note: null };
   }
-  const dir = root ? ` -d ${DDEV_PROJECT_MOUNT}/${root}` : '';
+  const dir = root ? ` -d ${shellQuote(`${DDEV_PROJECT_MOUNT}/${root}`)}` : '';
   const encoded = Buffer.from(provisionScript(), 'utf8').toString('base64');
   try {
     const res = await ddevExec(handle, `exec${dir} bash -c "echo ${encoded} | base64 -d | bash"`, {
