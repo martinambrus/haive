@@ -1313,6 +1313,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       const state = h.getLevelMergeState() as {
         fixInvocationId: string | null;
         conflictRetries: Record<string, number>;
+        lastFixerCut?: boolean;
       };
       return { h, integrationDir, result, state };
     }
