@@ -42,7 +42,7 @@ import {
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import { collectImplementationFiles, isDocsOnlyChange } from './_impl-changes.js';
 import { houseRuleShortIds } from '@haive/shared/global-kb';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
@@ -1886,26 +1886,29 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
   });
   const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
 
-  /** A task branch on which the agent edited a.php and b.php, the two files 07 reported. */
-  async function checkout(): Promise<string> {
+  const put = async (dir: string, file: string, text: string) => {
+    await mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+    await writeFile(path.join(dir, file), text);
+  };
+
+  /** A task branch on which the agent edited `files`, the files 07 reported. */
+  async function checkout(files = ['a.php', 'b.php']): Promise<string> {
     const dir = await mkdtemp(path.join(tmpdir(), 'haive-validate-pass-'));
     dirs.push(dir);
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'user.email', 'test@test.local');
     git(dir, 'config', 'user.name', 'Test');
     git(dir, 'config', 'gc.auto', '0');
-    await writeFile(path.join(dir, 'a.php'), '<?php\n');
-    await writeFile(path.join(dir, 'b.php'), '<?php\n');
+    for (const file of files) await put(dir, file, 'base\n');
     git(dir, 'add', '-A');
     git(dir, 'commit', '-q', '-m', 'base');
     git(dir, 'checkout', '-q', '-b', 'task');
-    await writeFile(path.join(dir, 'a.php'), '<?php // changed\n');
-    await writeFile(path.join(dir, 'b.php'), '<?php // changed\n');
+    for (const file of files) await put(dir, file, 'changed\n');
     return dir;
   }
 
   /** The step's ctx over that branch, and the detect output the step would have stored for it. */
-  async function task(dir: string) {
+  async function task(dir: string, files = ['a.php', 'b.php']) {
     const fake = createFakeDb({
       cliInvocations: schema.cliInvocations,
       taskEvents: schema.taskEvents,
@@ -1922,7 +1925,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
       taskId: TASK,
       stepId: '07-phase-2-implement',
       round: 0,
-      output: { filesTouched: ['a.php', 'b.php'] },
+      output: { filesTouched: files },
     });
     const ctx = {
       logger: stubLogger,
@@ -1931,16 +1934,17 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
       taskStepId: STEP,
       round: 0,
     } as never;
+    const implementationFiles = await collectImplementationFiles(ctx, dir);
     const detected = {
       worktreePath: dir,
       sandboxWorktreePath: '/ws',
       spec: 'spec',
       dependencyPolicy: ownedPolicy,
-      implementationFiles: await collectImplementationFiles(ctx, dir),
+      implementationFiles,
       debtBlock: '',
       honoredBlock: '',
       browserTesting: false,
-      docsOnly: false,
+      docsOnly: isDocsOnlyChange(implementationFiles),
     };
     return { ctx, detected };
   }
@@ -1967,18 +1971,24 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
       previousIterations: previousIterations as never,
     });
 
-  /** A validator pass, a fixer pass that creates images/icon-check.svg, and the validator pass after it. */
-  async function validateFixValidate() {
-    const dir = await checkout();
-    const { ctx, detected } = await task(dir);
+  /** A validator pass, a fixer pass that creates `created`, and the validator pass after it. */
+  async function validateFixValidate(created = 'images/icon-check.svg', changed?: string[]) {
+    const dir = await checkout(changed);
+    const { ctx, detected } = await task(dir, changed);
     const first = await pass(ctx, detected, 0, [], reply());
-    await mkdir(path.join(dir, 'images'));
-    await writeFile(path.join(dir, 'images', 'icon-check.svg'), '<svg/>\n');
+    await put(dir, created, '<svg/>\n');
     const fixer = await pass(ctx, detected, 1, [passRecord(0, reply(), first)], FIXER_REPLY);
     const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
     const prompt = validatorPrompt(detected, previous);
     const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
-    return { first, fixer, prompt, second };
+    return {
+      first,
+      fixer,
+      prompt,
+      second,
+      detected,
+      passes: [...previous, passRecord(2, reply({ verdict: 'VALID' }), second)],
+    };
   }
 
   it('lists a file the fixer created in the next validator prompt, beside the files detect took', async () => {
@@ -2049,5 +2059,81 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
         previous,
       ),
     ).toThrow(/07b-phase-4-validate has no changed files to review/);
+  });
+
+  // A fixer that adds code to a documentation change makes the later passes a code review.
+  const DOCS = ['README.md', 'docs/guide.md'];
+  // After a validator the next pass is a fixer's, so the same builder renders it.
+  const fixerPrompt = validatorPrompt;
+
+  it('runs the code protocol on the validator pass after a fixer added code to a docs-only change', async () => {
+    const { prompt, second } = await validateFixValidate('scripts/check.ts', DOCS);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
+    expect(prompt).toContain('=== Spec (what the implementation must deliver) ===');
+    expect(prompt).toContain('- scripts/check.ts — new file');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('keeps the documentation protocol on the validator pass after a fixer that only added documentation', async () => {
+    const { prompt, second } = await validateFixValidate('docs/extra.md', DOCS);
+    expect(prompt).toContain('You are the Documentation Validator');
+    expect(prompt).not.toContain('Implementation Validator');
+    expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('takes the next fixer off the documentation protocol too, once a fixer has added code', async () => {
+    const { detected, passes } = await validateFixValidate('scripts/check.ts', DOCS);
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).not.toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Spec (the original requirements) ===');
+  });
+
+  it('keeps the next fixer on the documentation protocol while the change is documentation only', async () => {
+    const { detected, passes } = await validateFixValidate('docs/extra.md', DOCS);
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
+  });
+
+  it("keeps detect's protocol after a fixer output stored without a change", async () => {
+    const dir = await checkout(DOCS);
+    const { ctx, detected } = await task(dir, DOCS);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const previous = [
+      passRecord(0, reply(), first),
+      passRecord(1, FIXER_REPLY, mkValidateApply({ source: 'fixer' })),
+    ];
+    expect(validatorPrompt(detected, previous)).toContain('You are the Documentation Validator');
+  });
+
+  it("keeps detect's protocol when the fixer's scan failed, whatever its list holds", () => {
+    const previous = [
+      passRecord(0, reply(), mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: {
+            files: ['README.md'],
+            total: 1,
+            truncated: false,
+            scanError: 'git failed',
+          },
+        }),
+      ),
+    ];
+    const detected = {
+      sandboxWorktreePath: '/ws',
+      spec: 'spec',
+      implementationFiles: fileSet(2, 2),
+      debtBlock: '',
+      honoredBlock: '',
+      browserTesting: false,
+      docsOnly: false,
+    };
+    expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
   });
 });

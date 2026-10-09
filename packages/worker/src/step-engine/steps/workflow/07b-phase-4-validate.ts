@@ -123,7 +123,7 @@ interface ValidateDetect {
   promptDefectCapture: boolean;
   /** This change touched documentation only, so the validator runs the documentation
    *  protocol instead of the code one. Resolved in detect() for the same reason as
-   *  promptDefectCapture above. */
+   *  promptDefectCapture above; a pass after a fixer decides it from that fixer's list. */
   docsOnly: boolean;
   /** Review dimensions in scope for this run (ids from REVIEW_DIMENSIONS). Resolved
    *  in detect() from the task override falling back to the repository policy, and
@@ -273,12 +273,13 @@ function latestValidator(previous: StepLoopPassRecord[]): ValidateApply | null {
   return null;
 }
 
-/** The change the latest pass collected, when that pass was a fixer: the list the validator pass after
- *  it is given in place of the one detect took. Null before a fixer has run and for a fixer output
- *  stored before it collected one. */
+/** The change the latest fixer collected, given to the validator after it in place of detect's. */
 function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
-  const last = previous[previous.length - 1]?.applyOutput as ValidateApply | undefined;
-  return last?.source === 'fixer' ? (last.implementationFiles ?? null) : null;
+  for (let i = previous.length - 1; i >= 0; i -= 1) {
+    const out = previous[i]?.applyOutput as ValidateApply | undefined;
+    if (out?.source === 'fixer') return out.implementationFiles ?? null;
+  }
+  return null;
 }
 
 function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
@@ -839,6 +840,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     },
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;
+      const collected = fixerFiles(previousIterations);
+      // A fixer can add code to a documentation change: a list it measured beats detect's decision.
+      const docsOnly =
+        collected !== null && !collected.scanError ? isDocsOnlyChange(collected) : d.docsOnly;
       if (roleForIteration(iteration) === ROLE_FIXER) {
         const repairable = (list: ValidationIssue[]) =>
           list.filter(
@@ -889,7 +894,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           // README runs: one unsupported claim costs about six composite points, against a
           // ceiling only three points above the best unaided run — so an invented sentence
           // written while closing a gap costs more than the gap did.
-          ...(d.docsOnly ? DOC_FIXER_EVIDENCE_BAR : []),
+          ...(docsOnly ? DOC_FIXER_EVIDENCE_BAR : []),
           // The ACTING variant, not the reviewing one this step's other two prompts
           // take: this pass EDITS, and its `notes` are handed to later agents, so it
           // must not quote what it found into its own output.
@@ -917,7 +922,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           '`notes` (including what you ruled out) — later agents are fresh processes and are',
           'given your notes so they need not re-derive it.',
           '',
-          d.docsOnly
+          docsOnly
             ? '=== Brief (what the document was asked to cover) ==='
             : '=== Spec (the original requirements) ===',
           d.spec || '(no brief recorded)',
@@ -925,11 +930,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       }
       // Validator re-pass after fixes.
       const fixes = accumulatedFixes(previousIterations);
-      const collected = fixerFiles(previousIterations);
       const files = collected ?? d.implementationFiles;
       assertReviewableChange('07b-phase-4-validate', files);
       return [
-        ...validatorDefinition(d.docsOnly, dimensionsFor(d)),
+        ...validatorDefinition(docsOnly, dimensionsFor(d)),
         '',
         '=== Your assignment (RE-VALIDATION) ===',
         `A fix agent just addressed your previous findings in the workspace: ${d.sandboxWorktreePath}`,
@@ -969,9 +973,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         ...SEARCH_LADDER,
         '',
-        ...outputContract(d.docsOnly, dimensionsFor(d)),
+        ...outputContract(docsOnly, dimensionsFor(d)),
         '',
-        specHeading(d.docsOnly),
+        specHeading(docsOnly),
         d.spec || '(no brief recorded)',
         '=== Original user request (scope constraints) ===',
         d.taskBrief ?? '(not recorded — do not expand scope)',
