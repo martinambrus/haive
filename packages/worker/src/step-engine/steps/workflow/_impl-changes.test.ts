@@ -91,6 +91,16 @@ describe('fileCoverage', () => {
 });
 
 describe('changedFilesBlock', () => {
+  it('lists a file named like an Object member without a note it never had', () => {
+    const block = changedFilesBlock(
+      { files: ['constructor', 'toString'], total: 2, truncated: false, changedLines: {} },
+      'Changed files',
+      'fallback',
+    );
+    expect(block.split('\n')).toEqual(expect.arrayContaining(['- constructor', '- toString']));
+    expect(block).not.toContain('native code');
+  });
+
   it('returns the caller fallback when there are no files', () => {
     const block = changedFilesBlock(
       { files: [], total: 0, truncated: false },

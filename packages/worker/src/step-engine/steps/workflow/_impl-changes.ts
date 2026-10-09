@@ -19,8 +19,7 @@ const MAX_LISTED_FILES = 100;
  *  disclosure, not failure — but only if it is disclosed.
  */
 export interface ImplementationFileSet {
-  /** The files listed in the prompt: `total` of them, capped at MAX_LISTED_FILES. A name that
-   *  spans lines is kept here but never written onto a prompt line (see changedFilesBlock). */
+  /** Capped at MAX_LISTED_FILES; a name that spans lines is kept but never written onto a prompt line. */
   files: string[];
   /** How many changed files were found, before the cap. */
   total: number;
@@ -542,7 +541,7 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   const notes = set?.changedLines ?? {};
   const list = [
     `${header}:`,
-    ...files.map((f) => (notes[f] ? `- ${f} — ${notes[f]}` : `- ${f}`)),
+    ...files.map((f) => (Object.hasOwn(notes, f) && notes[f] ? `- ${f} — ${notes[f]}` : `- ${f}`)),
   ].join('\n');
 
   const parts = [list];
