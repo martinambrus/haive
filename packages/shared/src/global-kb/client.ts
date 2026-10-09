@@ -27,14 +27,17 @@ export interface GlobalKbContext {
   settings: GlobalKbSettings;
 }
 
-/** Bounds for one call. Absent, the connection keeps its own limits, which the sync job and the api
- *  rely on: their calls embed and wait on locks. */
+/** Bounds for one call, and the settings it opens. Absent, the connection keeps its own limits,
+ *  which the sync job and the api rely on: their calls embed and wait on locks. */
 export interface GlobalKbCallOptions {
   /** Seconds postgres.js allows for TCP, TLS, startup and auth. */
   connectTimeoutSeconds?: number;
   /** Past it the pool is destroyed and the call rejects with `GlobalKbDeadlineError`; nothing else
    *  bounds a socket that goes silent once connected. */
   deadlineMs?: number;
+  /** Settings the caller already read, so what it did with them (a query embed) and the store this
+   *  call opens are one snapshot; read afresh when absent. */
+  settings?: GlobalKbSettings;
 }
 
 async function openAndRun<T>(
@@ -43,7 +46,7 @@ async function openAndRun<T>(
   opts: GlobalKbCallOptions,
   onOpen?: (conn: GlobalKbConnection) => void,
 ): Promise<T> {
-  const settings = await resolveGlobalKbSettings();
+  const settings = opts.settings ?? (await resolveGlobalKbSettings());
   const conn = await resolveGlobalKbConnection(settings, haiveDb, {
     connectTimeoutSeconds: opts.connectTimeoutSeconds,
     // A pool destroyed at the deadline while that query is pending rejects it with nobody awaiting it.

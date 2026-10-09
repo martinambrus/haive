@@ -26,7 +26,7 @@
  */
 import { createDatabase } from '@haive/database';
 import {
-  embedQuery,
+  embedQueryOrNull,
   ragHybridSearch,
   resolveRagConnection,
   type RagMode,
@@ -63,13 +63,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const vec = await embedQuery(query, {
+  const vec = await embedQueryOrNull(query, {
     ollamaUrl: prefs.ollamaUrl,
     model: prefs.embeddingModel,
     dimensions: prefs.embeddingDimensions,
   });
+  if (vec === null) console.error('query could not be embedded: ranking on full text alone');
   const runbookBoost = Number(process.env.RAG_RUNBOOK_BOOST || 1);
-  const hits = await ragHybridSearch(conn, vec, query, { topK, runbookBoost });
+  const hits = await ragHybridSearch(conn, vec ?? [], query, {
+    topK,
+    runbookBoost,
+    lexicalOnly: vec === null,
+  });
 
   console.log(`\nQuery:   ${query}`);
   console.log(

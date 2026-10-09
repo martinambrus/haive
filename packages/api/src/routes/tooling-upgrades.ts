@@ -244,6 +244,9 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   return c.json({ repositoryId, applied, rebuildOnNextTask: applied.length > 0 });
 });
 
+// The connect bound rag_search puts on a project store (routes/rag.ts).
+const RAG_REEMBED_CONNECT_TIMEOUT_SECONDS = 3;
+
 /** Force every chunk of a repository's RAG index to be re-embedded on the next
  *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
  *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
@@ -297,6 +300,7 @@ async function forceRagReembed(
     },
     db,
     projectName,
+    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS },
   );
   if (!conn) return false;
   try {

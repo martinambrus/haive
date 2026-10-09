@@ -170,7 +170,12 @@ prompts (`t6/harness`, H1, H4, H5).
 the digest and the enforced rows come from one connection with a 3 s connect timeout, a 3 s
 `statement_timeout` set with `SET LOCAL` in each query's own transaction (a pooler would refuse a
 startup parameter) and a 6 s deadline that destroys the pool. MEASURED before: a store that accepts
-the connection and never answers stalled each dispatch 30,239 ms. What a task's users can read, the
+the connection and never answers stalled each dispatch 30,239 ms. The global half of `rag_search`
+takes the same three bounds and falls back to local-only results; its query embed runs BEFORE the
+connection opens, since a cold embed model takes 4.6-42.8 s and would spend the deadline. A bounded
+connection runs with `fetch_types: false`, so a query binds an array as a `'{…}'` literal with an
+explicit cast: a JS array fails there with 22P02 (it silently zeroed `rag_search`'s identifier
+ranker until the binds were changed). What a task's users can read, the
 stamp and the one `house_rules.unavailable` event per task (written under an advisory lock), names a
 failure by error class only (`timeout`, `refused`, `auth`, `other`), never its message, which names
 the admin-only host; the worker's own log keeps the error for the operator. With the house-rules

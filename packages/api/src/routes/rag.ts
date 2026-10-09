@@ -6,7 +6,6 @@ import {
   DEFAULT_RAG_SEARCH_CONFIG,
   RUNBOOK_BOOST_BUGFIX,
   RUNBOOK_BOOST_FEATURE,
-  embedQuery,
   applyKnowledgeReserve,
   embedQueryOrNull,
   ragHybridSearch,
@@ -21,6 +20,7 @@ import {
 import {
   extractProjectFacets,
   resolveGlobalKbEnabled,
+  resolveGlobalKbSettings,
   resolveTaskStackContext,
   stackProjectName,
   withGlobalKb,
@@ -190,6 +190,11 @@ export function mergeHits(
  *  slot it reserves. */
 const GLOBAL_KB_EXPAND_BUDGET_CHARS = 12_000;
 
+// The worker's dispatch-read bounds, for each store; a query embed runs before its store is queried.
+const RAG_SEARCH_CONNECT_TIMEOUT_SECONDS = 3;
+const RAG_SEARCH_DEADLINE_MS = 6_000;
+const RAG_SEARCH_STATEMENT_TIMEOUT_MS = 3_000;
+
 /** One global KB entry, keyed by the source path its chunks carry. */
 export interface GlobalKbEntryBody {
   title: string;
@@ -260,6 +265,28 @@ export function expandGlobalHits(
   });
 }
 
+/** Destroys the pool at the deadline and on failure: a graceful close waits out its own timeout. */
+async function withinDeadline<T>(
+  conn: RagConnection,
+  work: (conn: RagConnection) => Promise<T>,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`local rag search exceeded ${RAG_SEARCH_DEADLINE_MS} ms`)),
+      RAG_SEARCH_DEADLINE_MS,
+    );
+  });
+  try {
+    return await Promise.race([work(conn), deadline]);
+  } catch (err) {
+    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** RAG retrieval for sandbox CLI agents via the haive-rag MCP proxy.
  *  Auth is a task-scoped bearer token (not a user session): the proxy holds
  *  no DB credentials and can only query its own task's project + the global KB. */
@@ -295,14 +322,18 @@ ragRoutes.post('/search', async (c) => {
     true,
   );
 
-  // --- Local (per-repo) search: unchanged behaviour. ragMode 'none' contributes
-  // no local hits; a local failure is still a hard 500 (no facet filter here, so
-  // the per-repo SQL is identical to before). ---
+  // --- Local (per-repo) search: bounded like the global half, otherwise unchanged.
+  // ragMode 'none' contributes no local hits; a local failure is still a hard 500
+  // (no facet filter here, so the per-repo SQL is identical to before). ---
   let localHits: RagSearchHit[] = [];
   if (prefs.ragMode !== 'none') {
     let conn: RagConnection | null = null;
     try {
-      conn = await resolveRagConnection(prefs, db, projectName);
+      // No type fetch: its query would reject with no caller once the deadline destroys the pool.
+      conn = await resolveRagConnection(prefs, db, projectName, {
+        connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
+        fetchTypes: false,
+      });
       if (conn) {
         // Three ways to end up ranking on full text alone, and all must skip the
         // dense half rather than feed it a hash vector: the repo's owner accepted
@@ -334,13 +365,18 @@ ragRoutes.post('/search', async (c) => {
         // shared by co-tenant repos never returns another repo's chunks. External/
         // ddev stores are the user's own schema (may lack repository_id) — unscoped.
         const localRepoId = prefs.ragMode === 'internal' ? (repositoryId ?? undefined) : undefined;
-        const hits = await ragHybridSearch(
-          conn,
-          vec,
-          query,
-          { runbookBoost, lexicalOnly, identifierSearch, ...(topK ? { topK } : {}) },
-          undefined,
-          localRepoId,
+        const hits = await withinDeadline(conn, (store) =>
+          store.pg.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_SEARCH_STATEMENT_TIMEOUT_MS}ms'`);
+            return ragHybridSearch(
+              { ...store, pg: tx as unknown as RagConnection['pg'] },
+              vec,
+              query,
+              { runbookBoost, lexicalOnly, identifierSearch, ...(topK ? { topK } : {}) },
+              undefined,
+              localRepoId,
+            );
+          }),
         );
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
@@ -369,39 +405,56 @@ ragRoutes.post('/search', async (c) => {
   const globalEnabled = await resolveGlobalKbEnabled(configService);
   if (globalEnabled) {
     try {
-      const result = await withGlobalKb(db, async ({ conn, settings }) => {
-        const gvec = await embedQuery(query, {
-          ollamaUrl: settings.ollamaUrl,
-          model: settings.embedModel,
-          dimensions: settings.embeddingDimensions,
-        });
-        const raw = await ragHybridSearch(
-          conn,
-          gvec,
-          query,
-          { identifierSearch, ...(topK ? { topK } : {}) },
-          { namespace: settings.namespace, facets },
-        );
-        const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
-        // Bodies for the entries that survived dedup, fetched on the SAME
-        // connection this block already holds (withGlobalKb opens and closes one
-        // per call). Numbered placeholders rather than `= ANY($2)` so the bind
-        // does not depend on array-type inference.
-        const bodies = new Map<string, GlobalKbEntryBody>();
-        if (scoped.length > 0) {
-          const paths = scoped.map((h) => h.sourcePath);
-          const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
-          const rows = (await conn.pg.unsafe(
-            `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
+      const embedSettings = await resolveGlobalKbSettings();
+      const gvec = await embedQueryOrNull(query, {
+        ollamaUrl: embedSettings.ollamaUrl,
+        model: embedSettings.embedModel,
+        dimensions: embedSettings.embeddingDimensions,
+      });
+      const result = await withGlobalKb(
+        db,
+        async ({ conn, settings }) =>
+          conn.pg.begin(async (tx) => {
+            // As the dispatch reads do: the server stops a statement the deadline gave up on.
+            await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_SEARCH_STATEMENT_TIMEOUT_MS}ms'`);
+            // Same rule as the local half: no query vector means full text only, never a hash vector.
+            const raw = await ragHybridSearch(
+              { ...conn, pg: tx as unknown as RagConnection['pg'] },
+              gvec ?? [],
+              query,
+              { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
+              { namespace: settings.namespace, facets },
+            );
+            const scoped = dedupeGlobalByEntry(
+              raw.map((h) => ({ ...h, scope: 'global' as const })),
+            );
+            // Bodies for the entries that survived dedup, fetched on the SAME
+            // connection this block already holds (withGlobalKb opens and closes one
+            // per call). Numbered placeholders rather than `= ANY($2)` so the bind
+            // does not depend on array-type inference.
+            const bodies = new Map<string, GlobalKbEntryBody>();
+            if (scoped.length > 0) {
+              const paths = scoped.map((h) => h.sourcePath);
+              const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
+              const rows = (await tx.unsafe(
+                `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
                FROM ai_rag_embeddings r
                JOIN global_kb_entries e ON e.id = r.entry_id
               WHERE r.namespace = $1 AND r.source_path IN (${placeholders})`,
-            [settings.namespace, ...paths],
-          )) as unknown as Array<{ source_path: string; title: string; body: string }>;
-          for (const row of rows) bodies.set(row.source_path, { title: row.title, body: row.body });
-        }
-        return { scoped, bodies };
-      });
+                [settings.namespace, ...paths],
+              )) as unknown as Array<{ source_path: string; title: string; body: string }>;
+              for (const row of rows)
+                bodies.set(row.source_path, { title: row.title, body: row.body });
+            }
+            return { scoped, bodies };
+          }),
+        {
+          connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
+          deadlineMs: RAG_SEARCH_DEADLINE_MS,
+          // The store is searched with a vector from this snapshot's model, so it opens the same one.
+          settings: embedSettings,
+        },
+      );
       globalHits = result.scoped;
       globalBodies = result.bodies;
     } catch (err) {
