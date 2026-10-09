@@ -17,7 +17,8 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
-import { resolveDdevWorkspace } from './_task-meta.js';
+import { briefFromTaskMeta } from './_spec-artifact.js';
+import { loadTaskMeta, resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import {
   runnerHandleForTask,
@@ -788,11 +789,16 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
     const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
     const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
+    let spec =
       ((resolved?.output as { spec?: string } | null)?.spec ??
         (quality?.output as { spec?: string } | null)?.spec ??
         (plan?.output as { spec?: string } | null)?.spec) ||
       '';
+    if (spec.trim().length === 0) {
+      // quick_bugfix skips the spec steps; as in 07 and 07b the task title + description is the brief.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      spec = briefFromTaskMeta(meta.title, meta.description);
+    }
 
     const detected: TestManagementDetect = {
       workspacePath: workspace,
