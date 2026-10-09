@@ -1,10 +1,18 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const h = vi.hoisted(() => ({ warn: vi.fn() }));
+
+vi.mock('../logger/index.js', () => ({
+  logger: { child: () => ({ warn: h.warn }), info: () => {}, warn: () => {}, error: () => {} },
+}));
+
 import {
   OLLAMA_QUERY_TIMEOUT_MS,
   OLLAMA_TIMEOUT_MS,
   embedQuery,
   embedQueryOrNull,
   getOllamaModelPlacement,
+  hashEmbed,
   ollamaEmbed,
   resolveEmbedBudget,
 } from './embed.js';
@@ -19,6 +27,7 @@ function mockPs(body: unknown, ok = true) {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  h.warn.mockClear();
 });
 
 /** Mock /api/embed and capture every timeout `AbortSignal.timeout` was asked for,
@@ -94,6 +103,45 @@ describe('embedQueryOrNull', () => {
     mockEmbed(null);
     const vec = await embedQuery('q', { ollamaUrl: 'http://x', model: 'm', dimensions: 4 });
     expect(vec).toHaveLength(4);
+  });
+
+  it('returns the vector when it is the width asked for, without a log line', async () => {
+    mockEmbed([0.1, 0.2, 0.3, 0.4]);
+    expect(
+      await embedQueryOrNull('q', { ollamaUrl: 'http://x', model: 'm', dimensions: 4 }),
+    ).toEqual([0.1, 0.2, 0.3, 0.4]);
+    expect(h.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns null when the vector is not the width asked for, so pgvector never sees it', async () => {
+    mockEmbed([0.1, 0.2]);
+    expect(
+      await embedQueryOrNull('q', { ollamaUrl: 'http://x', model: 'm', dimensions: 4 }),
+    ).toBeNull();
+  });
+
+  it('logs both widths once for a wrong-width vector, and never the query text', async () => {
+    mockEmbed([0.1, 0.2]);
+    await embedQueryOrNull('where is the session cookie set', {
+      ollamaUrl: 'http://x',
+      model: 'm',
+      dimensions: 4,
+    });
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    expect(h.warn.mock.calls[0]![0]).toEqual({ width: 2, dimensions: 4 });
+    expect(JSON.stringify(h.warn.mock.calls[0])).not.toContain('session cookie');
+  });
+
+  it('logs nothing when the embed itself failed, which is not a width problem', async () => {
+    mockEmbed(null);
+    await embedQueryOrNull('q', { ollamaUrl: 'http://x', model: 'm', dimensions: 4 });
+    expect(h.warn).not.toHaveBeenCalled();
+  });
+
+  it('embedQuery gives a wrong-width answer the hash of the declared width', async () => {
+    mockEmbed([0.1, 0.2]);
+    const vec = await embedQuery('q', { ollamaUrl: 'http://x', model: 'm', dimensions: 4 });
+    expect(vec).toEqual(hashEmbed('q', 4));
   });
 });
 

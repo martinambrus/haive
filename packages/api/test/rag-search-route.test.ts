@@ -111,8 +111,23 @@ beforeEach(() => {
   h.localHits = [hit('src/session.ts', 'code', 0.05)];
   h.globalHits = [hit('global_kb/cookies-11111111.md', 'kb', 0.04)];
   h.search.mockReset();
-  h.search.mockImplementation(async (...args: unknown[]) =>
-    args[4] === undefined ? h.localHits : h.globalHits,
+  h.search.mockImplementation(
+    async (
+      conn: { embeddingDimensions: number },
+      vec: number[],
+      _text: string,
+      config: SearchConfig,
+      filter: unknown,
+    ) => {
+      // pgvector refuses a query vector of another width (SQLSTATE 22000, measured on pgvector/pgvector:pg18).
+      if (!config.lexicalOnly && vec.length !== conn.embeddingDimensions) {
+        throw Object.assign(
+          new Error(`expected ${conn.embeddingDimensions} dimensions, not ${vec.length}`),
+          { code: '22000' },
+        );
+      }
+      return filter === undefined ? h.localHits : h.globalHits;
+    },
   );
 
   const config = new Map<string, string>([
@@ -167,5 +182,33 @@ describe('rag_search, the global half', () => {
     expect(global[0]!.config.lexicalOnly).toBeFalsy();
     expect(global[0]!.vec).toEqual(h.globalEmbed.vector);
     expect(local[0]!.config.lexicalOnly).toBe(false);
+  });
+});
+
+describe('rag_search, a query vector of the wrong width', () => {
+  const WRONG = Array(DIMS - 5).fill(0.3);
+
+  it('searches the local half lexical-only and does not answer 500', async () => {
+    h.localEmbed = { vector: WRONG };
+
+    const { status, paths } = await search();
+
+    expect(status).toBe(200);
+    const { local } = searches();
+    expect.soft(local[0]!.vec).toEqual([]);
+    expect.soft(local[0]!.config.lexicalOnly).toBe(true);
+    expect(paths).toContain('src/session.ts');
+  });
+
+  it('searches the global half lexical-only and still serves its hits', async () => {
+    h.globalEmbed = { vector: WRONG };
+
+    const { status, paths } = await search();
+
+    expect(status).toBe(200);
+    const { global } = searches();
+    expect.soft(global[0]!.vec).toEqual([]);
+    expect.soft(global[0]!.config.lexicalOnly).toBe(true);
+    expect(paths).toContain('global_kb/cookies-11111111.md');
   });
 });

@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
+import { logger } from '../logger/index.js';
+
+const log = logger.child({ module: 'rag-embed' });
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -279,7 +282,8 @@ export async function embedQuery(
 }
 
 /** Embed a query, or return null when there is no usable vector — no endpoint
- *  configured, or the embed failed. Callers that can fall back to LEXICAL-ONLY
+ *  configured, the embed failed, or the vector is not `dimensions` wide (pgvector
+ *  refuses it with SQLSTATE 22000). Callers that can fall back to LEXICAL-ONLY
  *  search should prefer this over `embedQuery`: a hash vector is not a degraded
  *  embedding but noise, and feeding one into the dense half of the RRF fusion can
  *  push a genuine lexical hit down the ranking. `embedQuery` keeps the hash
@@ -293,7 +297,13 @@ export async function embedQueryOrNull(
     try {
       const { queryTimeoutMs } = await resolveEmbedBudget();
       const [vec] = await ollamaEmbed(ollamaUrl, model, [text], { timeoutMs: queryTimeoutMs });
-      if (vec && vec.length > 0) return vec;
+      if (vec && vec.length > 0) {
+        if (vec.length === opts.dimensions) return vec;
+        log.warn(
+          { width: vec.length, dimensions: opts.dimensions },
+          'query embedding is not the width of the index; searching without a vector',
+        );
+      }
     } catch {
       // fall through
     }
