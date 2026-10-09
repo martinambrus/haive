@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect } from 'vitest';
-import { parsePorcelainZ } from './_commit-diff.js';
+import { gitRun } from '../../../repo/git-exec.js';
+import { buildCommitDiffArtifact, buildFileEntry, parsePorcelainZ } from './_commit-diff.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -77,4 +78,76 @@ describe('parsePorcelainZ', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('the gate-3 diff entry for a moved file', () => {
+  const OLD = Array.from({ length: 12 }, (_, i) => `line ${i + 1} of the original file\n`).join('');
+  const NEW = `${OLD}one more line\n`;
+  const MOVED = {
+    path: 'new.php',
+    oldPath: 'old.php',
+    status: 'renamed',
+    binary: false,
+    truncated: false,
+    oldContent: OLD,
+    newContent: NEW,
+  };
+
+  async function inRepo<T>(act: (dir: string) => Promise<T>): Promise<T> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(dir, 'old.php'), OLD);
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      return await act(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    [
+      ' R',
+      async (dir: string) => {
+        await rename(path.join(dir, 'old.php'), path.join(dir, 'new.php'));
+        await writeFile(path.join(dir, 'new.php'), NEW);
+        await git(dir, ['add', '-N', 'new.php']);
+      },
+    ],
+    [
+      'RM',
+      async (dir: string) => {
+        await git(dir, ['mv', 'old.php', 'new.php']);
+        await writeFile(path.join(dir, 'new.php'), NEW);
+      },
+    ],
+  ])('records the %j rename git reports as a rename, with both sides', async (xy, move) => {
+    const { reported, built } = await inRepo(async (dir) => {
+      await move(dir);
+      const status = await git(dir, ['status', '--porcelain', '-z', '-uall']);
+      return {
+        reported: status.stdout.slice(0, 2),
+        built: await buildCommitDiffArtifact(dir, gitRun),
+      };
+    });
+
+    expect(reported).toBe(xy);
+    expect(built.artifact.files).toEqual([MOVED]);
+    expect(built.changedFileCount).toBe(1);
+  });
+
+  it.each(['R ', ' R', 'C ', ' C'])(
+    'reads a %j entry as a move from its source, whichever column holds the letter',
+    async (xy) => {
+      const file = await inRepo(async (dir) => {
+        await writeFile(path.join(dir, 'new.php'), NEW);
+        const entry = { x: xy.charAt(0), y: xy.charAt(1), path: 'new.php', oldPath: 'old.php' };
+        return buildFileEntry(dir, gitRun, entry, 1_000_000);
+      });
+
+      expect(file).toEqual(MOVED);
+    },
+  );
 });

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -234,6 +234,72 @@ describe('10-gate-3-commit message generation', () => {
       previousIterations: [],
     });
     expect(output.committed).toBe(false);
+  });
+});
+
+describe('10-gate-3-commit moved files', () => {
+  const SECRET = 'API_KEY=never-send-this\nDB_PASSWORD=never-send-this-either\n';
+  const LINES = Array.from({ length: 12 }, (_, i) => `line ${i + 1} of the notes\n`).join('');
+
+  /** The change context for a repository whose policy denies `secret.env`, after `move` ran. */
+  async function contextAfter(
+    files: Record<string, string>,
+    move: (repo: string) => Promise<void>,
+  ): Promise<{ text: string; files: unknown[] }> {
+    const repo = await seedRepo();
+    for (const [name, body] of Object.entries(files)) await writeFile(path.join(repo, name), body);
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-q', '-m', 'add the files']);
+    await move(repo);
+    const ctx = mkCtx(repo);
+    Object.assign(ctx.db.query, {
+      tasks: { findFirst: async () => ({ repositoryId: 'r1' }) },
+      repositories: {
+        findFirst: async () => ({ secretMaskDenyExtend: ['secret.env'], secretMaskAllow: [] }),
+      },
+    });
+    const detected = await gate3CommitStep.detect!(ctx);
+    const text = detected.commitMessageContext!;
+    return { text, files: JSON.parse(text).files };
+  }
+
+  const intentToAdd = (from: string, to: string, body?: string) => async (repo: string) => {
+    await rename(path.join(repo, from), path.join(repo, to));
+    if (body !== undefined) await writeFile(path.join(repo, to), body);
+    await git(repo, ['add', '-N', to]);
+  };
+
+  const staged = (from: string, to: string) => async (repo: string) => {
+    await git(repo, ['mv', from, to]);
+  };
+
+  it.each([
+    ['an intent-to-add rename', intentToAdd('secret.env', 'renamed.txt')],
+    ['a staged rename', staged('secret.env', 'renamed.txt')],
+  ])('omits the contents of a denied file moved to an allowed name: %s', async (_name, move) => {
+    const out = await contextAfter({ 'secret.env': SECRET }, move);
+
+    expect(out.files).toEqual([
+      {
+        path: 'renamed.txt',
+        oldPath: 'secret.env',
+        status: 'renamed',
+        note: 'secret content omitted',
+      },
+    ]);
+    expect(out.text).not.toContain('never-send-this');
+  });
+
+  it('still shows the change of a moved file that no rule denies', async () => {
+    const out = await contextAfter(
+      { 'notes.txt': LINES },
+      intentToAdd('notes.txt', 'moved.txt', `${LINES}one more line\n`),
+    );
+
+    expect(out.files).toEqual([
+      expect.objectContaining({ path: 'moved.txt', oldPath: 'notes.txt', status: 'renamed' }),
+    ]);
+    expect(out.text).toContain('one more line');
   });
 });
 

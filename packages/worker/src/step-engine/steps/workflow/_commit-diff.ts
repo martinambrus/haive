@@ -107,7 +107,7 @@ export function parsePorcelainZ(out: string): PorcelainEntry[] {
 }
 
 function classify(e: PorcelainEntry): CommitDiffStatus {
-  if (e.x === 'R' || e.x === 'C') return 'renamed';
+  if (e.x === 'R' || e.x === 'C' || e.y === 'R' || e.y === 'C') return 'renamed';
   if (e.x === '?' || e.y === '?') return 'added';
   if (e.x === 'A' || e.y === 'A') return 'added';
   if (e.x === 'D' || e.y === 'D') return 'deleted';
