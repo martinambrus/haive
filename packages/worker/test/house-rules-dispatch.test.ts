@@ -43,6 +43,7 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal
 
 import {
   CHANGE_READ_GIT_TIMEOUT_MS,
+  readTrackedFiles,
   FINGERPRINT_READ_BYTES,
   HOUSE_RULES_UNAVAILABLE_EVENT,
   changeFingerprint,
@@ -335,6 +336,12 @@ describe('a git that hangs', () => {
     await fakeGit(SLEEP);
     const run = await within(() => gitRun(dir, ['--version'], undefined, { timeout: BOUND_MS }));
     expect(run.code).not.toBe(0);
+  }, 10_000);
+
+  it('leaves the tracked-file read for named paths with null inside its bound', async () => {
+    const dir = await repo();
+    await fakeGit(SLEEP);
+    expect(await within(() => readTrackedFiles(dir, BOUND_MS))).toBeNull();
   }, 10_000);
 
   it('leaves readChangedFiles with null inside its bound', async () => {

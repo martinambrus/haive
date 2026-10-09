@@ -136,9 +136,12 @@ async function readTaskText(db: Database, taskId: string): Promise<string> {
   return row === undefined ? '' : [row.title, row.description ?? '', row.spec ?? ''].join('\n');
 }
 
-/** NUL separated so no path is quoted. Null when git fails. */
-async function readTrackedFiles(tree: string): Promise<string[] | null> {
-  const listed = await gitRun(tree, ['ls-files', '-z']);
+/** NUL separated so no path is quoted. Null when git fails or outlives `gitTimeoutMs`. */
+export async function readTrackedFiles(
+  tree: string,
+  gitTimeoutMs = CHANGE_READ_GIT_TIMEOUT_MS,
+): Promise<string[] | null> {
+  const listed = await gitRun(tree, ['ls-files', '-z'], undefined, { timeout: gitTimeoutMs });
   if (listed.code !== 0) return null;
   return listed.stdout.split('\0').filter((file) => file !== '');
 }
