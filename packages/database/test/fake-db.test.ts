@@ -204,6 +204,23 @@ describe('the fake database', () => {
     ]);
   });
 
+  it('orders a select by every argument of orderBy, the first the primary', async () => {
+    const { fake, row } = setup();
+    fake.insert(t, row('small.md', { sizeBytes: 1 }));
+    fake.insert(t, row('b.md', { sizeBytes: 5 }));
+    fake.insert(t, row('a.md', { sizeBytes: 5 }));
+    const names = async (...orders: unknown[]) => {
+      const rows = await fake.db
+        .select()
+        .from(t)
+        .orderBy(...orders);
+      return rows.map((r) => r.filename);
+    };
+
+    expect(await names(desc(t.sizeBytes), desc(t.createdAt))).toEqual(['a.md', 'b.md', 'small.md']);
+    expect(await names(desc(t.sizeBytes), asc(t.createdAt))).toEqual(['b.md', 'a.md', 'small.md']);
+  });
+
   it('takes back exactly what a failed transaction wrote', async () => {
     const { fake, row, names } = setup();
     const keep = fake.insert(t, row('keep.md'));

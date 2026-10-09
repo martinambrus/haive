@@ -89,7 +89,7 @@ export interface FakeTableApi {
 
 interface SelectQuery extends PromiseLike<FakeRow[]> {
   where(cond: unknown): SelectQuery;
-  orderBy(order: unknown): SelectQuery;
+  orderBy(...orders: unknown[]): SelectQuery;
   limit(n: number): SelectQuery;
   /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
   for(strength: string, config?: unknown): SelectQuery;
@@ -291,7 +291,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select(table, opts).map((row) => (fields === undefined ? row : project(table, fields, row)));
     const query: SelectQuery = {
       where: (cond) => ((opts.where = cond), query),
-      orderBy: (order) => ((opts.orderBy = order), query),
+      orderBy: (...orders) => ((opts.orderBy = orders), query),
       limit: (n) => ((opts.limit = n), query),
       for: () => query,
       then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),
