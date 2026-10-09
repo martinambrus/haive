@@ -1594,6 +1594,57 @@ describe('08c change-set guard', () => {
   });
 });
 
+describe('08c: a change set whose scan failed', () => {
+  const detected = (scanError: string | null) => ({
+    spec: 's',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false, scanError },
+    debtBlock: '',
+    level: 'enterprise' as const,
+  });
+  const dispatches = async (scanError: string | null) =>
+    codeReviewStep.agentMining!.selectAgents({
+      ctx: fakeCtx,
+      detected: detected(scanError),
+    } as never) as Promise<{ agentId: string; prompt: string }[]>;
+
+  it('tells every reviewer, lenses included, the list may lack files of the change', async () => {
+    const agents = await dispatches('git failed');
+    expect(agents.length).toBeGreaterThan(2);
+    for (const a of agents) {
+      expect(a.prompt, a.agentId).toContain('COVERAGE: the change could not be read in full');
+      expect(a.prompt, a.agentId).toContain('do NOT report a clean result');
+    }
+  });
+
+  it('says nothing of it when the scan ran', async () => {
+    for (const a of await dispatches(null)) {
+      expect(a.prompt, a.agentId).not.toContain('could not be read in full');
+    }
+  });
+
+  it('stores the failed scan on the coverage the gate reads, and leaves the flag off where it ran', async () => {
+    const results = [
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+    ];
+    const run = (scanError: string | null) =>
+      codeReviewStep.apply(fakeCtx, {
+        detected: detected(scanError),
+        agentMiningResults: results,
+        isFinalMiningAttempt: true,
+        miningWaveExhausted: true,
+      } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+
+    expect((await run('git failed')).coverage).toEqual({
+      listed: 1,
+      total: 1,
+      truncated: false,
+      scanFailed: true,
+    });
+    expect((await run(null)).coverage).toEqual({ listed: 1, total: 1, truncated: false });
+  });
+});
+
 describe('08c mining seats', () => {
   it('seats every wave-1 reviewer by its own agent id', async () => {
     // These are fixed personas, so the agent id already IS the stable seat.

@@ -88,6 +88,34 @@ describe('fileCoverage', () => {
     expect(fileCoverage(['src/a.ts', 'src/b.ts'])).toBeNull();
     expect(fileCoverage(undefined)).toBeNull();
   });
+
+  describe('a scan that failed', () => {
+    const set = { files: ['a.ts', 'b.ts'], total: 2, truncated: false };
+
+    it('is flagged, so a gate can tell a list from a failed scan from a complete one', () => {
+      expect(fileCoverage({ ...set, scanError: 'git failed' })).toEqual({
+        listed: 2,
+        total: 2,
+        truncated: false,
+        scanFailed: true,
+      });
+    });
+
+    it('is flagged alongside the cap when the list was cut too', () => {
+      expect(
+        fileCoverage({ files: names(100), total: 150, truncated: true, scanError: 'git failed' }),
+      ).toEqual({ listed: 100, total: 150, truncated: true, scanFailed: true });
+    });
+
+    it.each([null, undefined])(
+      'leaves the flag off where the scan ran (scanError %s)',
+      (scanError) => {
+        const covered = fileCoverage({ ...set, scanError });
+        expect(covered).toEqual({ listed: 2, total: 2, truncated: false });
+        expect('scanFailed' in covered!).toBe(false);
+      },
+    );
+  });
 });
 
 describe('changedFilesBlock', () => {
@@ -146,6 +174,58 @@ describe('changedFilesBlock', () => {
     );
     expect(block).toContain('state plainly in your output that the unlisted files were not');
     expect(block).toContain('clean result');
+  });
+
+  describe('a scan that failed', () => {
+    const set = { files: ['src/a.ts', 'src/b.ts'], total: 2, truncated: false };
+    const COVERAGE = [
+      'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
+      'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
+      'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
+      'though it covered the whole change.',
+    ].join('\n');
+    const block = (value: Parameters<typeof changedFilesBlock>[0]) =>
+      changedFilesBlock(value, 'Changed files', 'fallback');
+
+    it('adds one COVERAGE paragraph after the list, which orders the agent to say so', () => {
+      expect(block({ ...set, scanError: 'git failed' })).toBe(
+        `Changed files:\n- src/a.ts\n- src/b.ts\n\n${COVERAGE}`,
+      );
+    });
+
+    it('renders a set whose scan ran exactly as a set that never recorded it', () => {
+      expect(block({ ...set, scanError: null })).toBe(block(set));
+      expect(block({ ...set, scanError: undefined })).toBe(block(set));
+      expect(block(set)).toBe('Changed files:\n- src/a.ts\n- src/b.ts');
+    });
+
+    it('puts it after the notices for a cut list and for names left out', () => {
+      const out = block({
+        files: [...names(98), 'x=====y.ts', 'ok.ts'],
+        total: 160,
+        truncated: true,
+        scanError: 'git failed',
+      });
+      const cap = out.indexOf('COVERAGE: the list above is');
+      const unlistable = out.indexOf('names that cannot be listed safely');
+      const scan = out.indexOf('COVERAGE: the change could not be read in full');
+      expect(cap).toBeGreaterThan(-1);
+      expect(unlistable).toBeGreaterThan(cap);
+      expect(scan).toBeGreaterThan(unlistable);
+      expect(out.endsWith(COVERAGE)).toBe(true);
+    });
+
+    it("never writes the scan's own error onto a prompt line", () => {
+      expect(
+        block({ ...set, scanError: 'fatal: /secret/repo/path is not a repository' }),
+      ).not.toContain('secret');
+    });
+
+    it('has no list to put it after when the set is empty, which the callers refuse before they render', () => {
+      expect(block({ files: [], total: 0, truncated: false, scanError: 'git failed' })).toBe(
+        'fallback',
+      );
+    });
   });
 });
 
@@ -1501,6 +1581,37 @@ describe('collectChangedLineMap', () => {
       expect(out.scanError?.endsWith(`; ${UNREAD}`)).toBe(true);
       expect(out.scanError?.startsWith(UNREAD)).toBe(false);
       expect(out.scanError?.split(UNREAD)).toHaveLength(2);
+    });
+
+    it('tells the reviewers and the gate that the list may lack the committed file the fork point could not name', async () => {
+      await inCommittedRepo(async (dir) => {
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+        expect(out.files).toEqual(['kept.js']);
+        expect(fileCoverage(out)).toEqual({
+          listed: 1,
+          total: 1,
+          truncated: false,
+          scanFailed: true,
+        });
+        expect(changedFilesBlock(out, 'Changed files', 'fallback')).toContain(
+          'COVERAGE: the change could not be read in full',
+        );
+      });
+    });
+
+    it('records no failure for the same change while the fork point resolves', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+        expect(out.files).toEqual(['kept.js', 'c.js']);
+        const covered = fileCoverage(out);
+        expect(covered).toEqual({ listed: 2, total: 2, truncated: false });
+        expect('scanFailed' in covered!).toBe(false);
+        expect(changedFilesBlock(out, 'Changed files', 'fallback')).not.toContain('COVERAGE');
+      });
     });
 
     it('reads against HEAD when the fork point is gone, unless the caller asks for the fork point only', async () => {

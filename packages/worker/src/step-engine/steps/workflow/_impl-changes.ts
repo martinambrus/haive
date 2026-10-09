@@ -60,6 +60,8 @@ export interface FileCoverage {
   total: number;
   /** listed < total: the step's verdict does not cover the whole change. */
   truncated: boolean;
+  /** The scan of the change failed, so the list may lack files of it: the verdict does not cover those either. */
+  scanFailed?: true;
 }
 
 /** What a step's `detected` may actually hold.
@@ -91,7 +93,12 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   if (!set || typeof set.total !== 'number') return null;
   // A name changedFilesBlock leaves out was not given to the agents.
   const listed = set.files.filter(isListableName).length;
-  return { listed, total: set.total, truncated: set.truncated === true || listed < set.total };
+  return {
+    listed,
+    total: set.total,
+    truncated: set.truncated === true || listed < set.total,
+    ...(set.scanError ? { scanFailed: true } : {}),
+  };
 }
 
 /** How much of a failed scan's own error text is quoted back. */
@@ -536,8 +543,8 @@ export async function collectChangedLineMap(
 
 /**
  * The changed-file block a prompt carries: the caller's own header and its own
- * empty-set fallback, plus — when the list was capped or a name was left out — an
- * explicit statement of what the agent was NOT given.
+ * empty-set fallback, plus — when the list was capped, a name was left out or the scan
+ * of the change failed — an explicit statement of what the agent was NOT given.
  *
  * The notice is worded as an instruction to report the gap, not merely as a note:
  * an agent that silently reviews a partial list produces exactly the clean verdict
@@ -589,6 +596,15 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
       `COVERAGE: ${unlistable} changed files have names that cannot be listed safely. They were`,
       'NOT given to you and you cannot see them. State plainly in your output that those files',
       'were not covered — do NOT report a clean result as though it covered the whole change.',
+    );
+  }
+  if (set?.scanError) {
+    parts.push(
+      '',
+      'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
+      'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
+      'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
+      'though it covered the whole change.',
     );
   }
   return parts.join('\n');

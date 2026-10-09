@@ -1141,7 +1141,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
               changedFilesCoverage: {
                 listed: coverage.listed,
                 total: coverage.total,
-                ...(scanFailed ? { scanFailed } : {}),
+                ...(scanFailed || coverage.scanFailed ? { scanFailed: true } : {}),
               },
             }),
         ...(fingerprint === null ? {} : { changeFingerprint: fingerprint }),

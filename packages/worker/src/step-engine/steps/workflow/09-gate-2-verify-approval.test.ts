@@ -1113,8 +1113,10 @@ describe('gate-2 validation row: how much of the change the validator was given'
   async function gate(
     which: keyof typeof stored07b,
     coverage?: { listed: number; total: number; scanFailed?: true },
+    extra: Record<string, unknown> = {},
   ) {
-    const { output, iterations } = stored07b[which];
+    const { output: stored, iterations } = stored07b[which];
+    const output = { ...stored, ...extra };
     m.loadPreviousStepOutput.mockImplementation(
       async (_db: unknown, _task: unknown, id: string) => {
         if (id === '08-phase-5-verify') {
@@ -1211,6 +1213,47 @@ describe('gate-2 validation row: how much of the change the validator was given'
     expect(decision).toBe('reject');
   });
 
+  const SCAN =
+    "the change could not be read in full — files missing from the agents' list, if any, were not looked at";
+
+  it('words a failed scan behind the first validator pass as that, not as a failed re-read after a fix', async () => {
+    const { detected, row, decision } = await gate(
+      'valid',
+      { listed: 3, total: 3, scanFailed: true },
+      { validatorPasses: 1 },
+    );
+    expect(detected.validation?.coverage).toEqual({
+      listed: 3,
+      total: 3,
+      truncated: false,
+      scanFailed: true,
+      beforeAnyFix: true,
+    });
+    expect(row).toMatchObject({ status: 'warn', statusLabel: 'PARTIAL', defaultOpen: true });
+    expect(row?.detail).toBe(SCAN);
+    expect(row?.body).toContain(`## Coverage\n- ${SCAN}`);
+    expect(decision).toBe('reject');
+  });
+
+  it('keeps the re-read wording once a validator pass has followed a fix', async () => {
+    const { detected, row } = await gate(
+      'valid',
+      { listed: 3, total: 3, scanFailed: true },
+      { validatorPasses: 2 },
+    );
+    expect('beforeAnyFix' in detected.validation!.coverage!).toBe(false);
+    expect(row?.detail).toBe(UNREAD);
+  });
+
+  it('names the cap and a failed scan behind the first pass together', async () => {
+    const { row } = await gate(
+      'valid',
+      { listed: 2, total: 3, scanFailed: true },
+      { validatorPasses: 1 },
+    );
+    expect(row?.detail).toBe(`${GIVEN}; ${SCAN}`);
+  });
+
   it.each(['valid', 'issues', 'unparseable'] as const)(
     'renders a %s 07b output that has no coverage field exactly as it always did',
     async (which) => {
@@ -1226,6 +1269,165 @@ describe('gate-2 validation row: how much of the change the validator was given'
       expect({ row: covered.row, decision: covered.decision }).toEqual(BEFORE[which]);
     },
   );
+});
+
+// 07b, 08c, 08c2 and 08d each store the coverage of the list their agents were given, and a list a
+// failed scan produced carries `scanFailed`: every one of the four rows has to read it as PARTIAL.
+describe('gate-2 coverage rows: a scan that failed behind the list', () => {
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/repos/u/r',
+    round: 0,
+    db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
+  const NOTE =
+    "the change could not be read in full — files missing from the agents' list, if any, were not looked at";
+  const FLAGGED = { listed: 3, total: 3, truncated: false, scanFailed: true };
+  const COVERED = { listed: 3, total: 3, truncated: false };
+
+  type Step = 'validation' | 'review' | 'audit' | 'qa';
+  const LABELS: Record<Step, string> = {
+    validation: 'Implementation validation',
+    review: 'Code review',
+    audit: 'Code audit (broad)',
+    qa: 'Adversarial QA (poc)',
+  };
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.hasWorkspaceEntry.mockReset().mockResolvedValue(false);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
+    m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+    m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  /** The gate over a green verification and the four stored outputs, each given the coverage named for it. */
+  async function gate(coverage: Partial<Record<Step, Record<string, unknown>>>) {
+    const given = (step: Step, key: string) =>
+      coverage[step] === undefined ? {} : { [key]: coverage[step] };
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: string) => {
+        switch (id) {
+          case '08-phase-5-verify':
+            return {
+              output: {
+                test: passedRun,
+                lint: passedRun,
+                typecheck: passedRun,
+                passed: true,
+                runtimeSmoke: null,
+              },
+            };
+          case '07b-phase-4-validate':
+            return {
+              output: {
+                verdict: 'VALID',
+                summary: 'looks fine',
+                issues: [],
+                dimensions: [],
+                excludedDimensions: [],
+                fixesApplied: [],
+                converged: true,
+                churnFiles: [],
+                report: '',
+                validatorPasses: 1,
+                ...given('validation', 'changedFilesCoverage'),
+              },
+              iterations: [],
+            };
+          case '08c-code-review':
+            return {
+              output: {
+                reviewed: true,
+                blocking: false,
+                peer: { verdict: 'APPROVE', findings: [], positives: [] },
+                security: { verdict: 'SECURE', findings: [] },
+                extraLenses: [],
+                ...given('review', 'coverage'),
+              },
+            };
+          case '08c2-code-audit':
+            return { output: { audited: true, findings: [], ...given('audit', 'coverage') } };
+          case '08d-adversarial-qa':
+            return {
+              output: {
+                ran: true,
+                level: 'poc',
+                blocking: false,
+                qaIncomplete: false,
+                counts: { critical: 0, high: 0, total: 0 },
+                findings: [],
+                ...given('qa', 'coverage'),
+              },
+            };
+          default:
+            return null;
+        }
+      },
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+    return {
+      rows: schema.statusSummary ?? [],
+      decision: (schema.fields.find((f) => f.id === 'decision') as { default?: string }).default,
+    };
+  }
+
+  it('reads each of the four rows as PARTIAL, and names the failed scan', async () => {
+    const { rows, decision } = await gate({
+      validation: FLAGGED,
+      review: FLAGGED,
+      audit: FLAGGED,
+      qa: FLAGGED,
+    });
+    for (const label of Object.values(LABELS)) {
+      const row = rows.find((r) => r.label === label);
+      expect(row?.statusLabel, label).toBe('PARTIAL');
+      expect(row?.detail, label).toContain(NOTE);
+    }
+    // The adversarial row states its coverage in the detail only, with a cap as with a failed scan.
+    for (const step of ['validation', 'review', 'audit'] as const) {
+      const body = rows.find((r) => r.label === LABELS[step])?.body ?? '';
+      expect(body, step).toContain(`## Coverage\n- ${NOTE}`);
+    }
+    expect(decision).toBe('reject');
+  });
+
+  it.each([
+    ['validation', 'reject'],
+    ['review', 'reject'],
+    ['qa', 'reject'],
+    ['audit', 'approve'],
+  ] as const)(
+    'reads a failed scan behind the %s list as PARTIAL on its own row and leaves the default at %s',
+    async (step, expected) => {
+      const { rows, decision } = await gate({ [step]: FLAGGED });
+      expect(rows.find((r) => r.label === LABELS[step])?.statusLabel).toBe('PARTIAL');
+      const others = Object.entries(LABELS).filter(([key]) => key !== step);
+      for (const [, label] of others) {
+        expect(rows.find((r) => r.label === label)?.statusLabel, label).not.toBe('PARTIAL');
+      }
+      expect(decision).toBe(expected);
+    },
+  );
+
+  it('renders outputs whose list covered the change exactly as it renders outputs that stored no coverage', async () => {
+    const covered = await gate({
+      validation: { listed: 3, total: 3 },
+      review: COVERED,
+      audit: COVERED,
+      qa: COVERED,
+    });
+    const bare = await gate({});
+    expect(covered).toEqual(bare);
+    expect(covered.decision).toBe('approve');
+    expect(JSON.stringify(covered.rows)).not.toContain('could not be read in full');
+  });
 });
 
 describe('gate-2 verification results read from 08', () => {

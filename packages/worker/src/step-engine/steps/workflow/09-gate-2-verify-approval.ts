@@ -56,6 +56,7 @@ interface CoverageOutput {
   listed?: number;
   total?: number;
   truncated?: boolean;
+  scanFailed?: true;
 }
 
 /** Read a step's recorded coverage. Null on rows written before the steps recorded it —
@@ -63,25 +64,36 @@ interface CoverageOutput {
 function readCoverage(raw: CoverageOutput | undefined): FileCoverage | null {
   if (!raw || typeof raw.total !== 'number') return null;
   const listed = typeof raw.listed === 'number' ? raw.listed : raw.total;
-  return { listed, total: raw.total, truncated: raw.truncated === true };
+  return {
+    listed,
+    total: raw.total,
+    truncated: raw.truncated === true,
+    ...(raw.scanFailed === true ? { scanFailed: true } : {}),
+  };
 }
+
+/** A list that was capped, or that a failed scan may have left short, covers only part of the change. */
+const partialCoverage = (c: FileCoverage | null | undefined): boolean =>
+  c?.truncated === true || c?.scanFailed === true;
+
+const SCAN_FAILED =
+  "the change could not be read in full — files missing from the agents' list, if any, were not looked at";
+const RESCAN_FAILED = `${REREAD_FAILED} — files the fix added, if any, were not looked at`;
 
 /** The one line that names what a step's agents were NOT given; empty when they got
  *  the whole change. A cap is disclosure, not failure — but only if it is disclosed. */
-function coverageNote(c: FileCoverage | null): string {
-  if (!c?.truncated) return '';
-  return `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`;
+function coverageNote(c: FileCoverage | null, scanNote = SCAN_FAILED): string {
+  const cap = c?.truncated
+    ? `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`
+    : '';
+  return [cap, c?.scanFailed === true ? scanNote : ''].filter(Boolean).join('; ');
 }
 
-/** 07b's coverage adds a flag: its list was taken before a fix whose re-read failed. */
-type ValidationCoverage = FileCoverage & { scanFailed?: true };
+/** 07b's coverage adds a flag: its list was taken before any fix pass, so a failed scan behind it is not a failed re-read. */
+type ValidationCoverage = FileCoverage & { beforeAnyFix?: true };
 
 function validationCoverageNote(c: ValidationCoverage | null): string {
-  const unread =
-    c?.scanFailed === true
-      ? `${REREAD_FAILED} — files the fix added, if any, were not looked at`
-      : '';
-  return [coverageNote(c), unread].filter(Boolean).join('; ');
+  return coverageNote(c, c?.beforeAnyFix === true ? SCAN_FAILED : RESCAN_FAILED);
 }
 
 interface LiteCheck {
@@ -387,7 +399,9 @@ interface Phase4Output {
   reportChars?: number;
   converged?: boolean;
   churnFiles?: string[];
-  changedFilesCoverage?: CoverageOutput & { scanFailed?: true };
+  changedFilesCoverage?: CoverageOutput;
+  /** The first validator pass is given detect's list, before any fix. */
+  validatorPasses?: number;
 }
 
 const REPORT_EXCERPT_CHARS = 8000;
@@ -598,7 +612,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         coverage: given && {
           ...given,
           truncated: given.listed < given.total,
-          ...(p4.changedFilesCoverage?.scanFailed === true ? { scanFailed: true } : {}),
+          ...(given.scanFailed === true && p4.validatorPasses === 1 ? { beforeAnyFix: true } : {}),
         },
       };
     }
@@ -878,7 +892,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   form(_ctx, detected): FormSchema {
     const v = detected.validation;
     // A validator given only part of the change has said nothing about the rest, whatever it returned.
-    const validationPartial = v?.coverage?.truncated === true || v?.coverage?.scanFailed === true;
+    const validationPartial = partialCoverage(v?.coverage);
     const validationOk = v === null || (v.verdict === 'VALID' && !validationPartial);
     const testsOk =
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
@@ -893,19 +907,22 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // by default either — the developer decides what to do about the unreviewed part.
     // A reviewer that requested changes without a critical/high finding behind it carries
     // the same contract: no fix round to spend, but no silent approve either.
-    // A capped changed-file list is the third way a review can be non-blocking and still
-    // not clean: the reviewers may have approved everything they were given and never seen
-    // the rest of the change. Same contract as the two above — no fix round, no silent
-    // approve either.
+    // A capped changed-file list, or one a failed scan may have left short, is the third way a
+    // review can be non-blocking and still not clean: the reviewers may have approved everything
+    // they were given and never seen the rest of the change. Same contract as the two above —
+    // no fix round, no silent approve either.
     const codeReviewOk =
       cr === null ||
-      (!cr.blocking && !cr.reviewIncomplete && !cr.advisoryVerdict && !cr.coverage?.truncated);
+      (!cr.blocking &&
+        !cr.reviewIncomplete &&
+        !cr.advisoryVerdict &&
+        !partialCoverage(cr.coverage));
     const cAudit = detected.codeAudit;
     const aq = detected.adversarial;
     // Same contract as codeReviewOk above: an attack surface only partly probed is not a
     // clean one. It does not block, but it must not default the gate to approve either.
     const adversarialOk =
-      aq === null || (!aq.blocking && !aq.incomplete && !aq.coverage?.truncated);
+      aq === null || (!aq.blocking && !aq.incomplete && !partialCoverage(aq.coverage));
     const rs = detected.runtimeSmoke;
     const smokeVerdict = rs ? runtimeSmokeVerdict(rs) : 'skip';
     const smokeFailed = smokeVerdict === 'fail';
@@ -1177,7 +1194,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
               ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
               : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
       const detail = crCoverage ? `${base}; ${crCoverage}` : base;
-      const crPartial = cr.coverage?.truncated === true;
+      const crPartial = partialCoverage(cr.coverage);
       rows.push({
         label: 'Code review',
         status: cr.blocking
@@ -1241,7 +1258,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         label: `Adversarial QA (${aq.level})`,
         status: aq.blocking
           ? 'fail'
-          : aq.counts.total > 0 || aq.incomplete || aq.coverage?.truncated
+          : aq.counts.total > 0 || aq.incomplete || partialCoverage(aq.coverage)
             ? 'warn'
             : 'pass',
         // INCOMPLETE outranks the finding count in the label: "3 FINDINGS" on a roster that
@@ -1252,7 +1269,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             ? 'INCOMPLETE'
             : aq.counts.total > 0
               ? `${aq.counts.total} FINDINGS`
-              : aq.coverage?.truncated
+              : partialCoverage(aq.coverage)
                 ? 'PARTIAL'
                 : 'CLEAN',
         detail: [

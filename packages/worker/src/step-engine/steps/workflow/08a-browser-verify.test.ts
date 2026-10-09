@@ -797,6 +797,18 @@ describe('08a re-test after a fix pass', () => {
     expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).not.toMatch(UNREAD);
   });
 
+  it('tells the first tester pass the list may lack files of the change when the scan of it failed', async () => {
+    const dir = await checkout();
+    const { detected } = await detectOn(dir, 'ddev');
+    const failed = { files: ['a.js'], total: 1, truncated: false, scanError: 'git failed' };
+
+    const prompt = firstPrompt({ ...detected, implementationFiles: failed });
+
+    expect(prompt).toContain('COVERAGE: the change could not be read in full');
+    expect(prompt).toContain('do NOT report a clean result');
+    expect(firstPrompt(detected)).not.toContain('could not be read in full');
+  });
+
   it('collects nothing in a fix pass when the detect output predates the workspace it records', async () => {
     const dir = await checkout();
     const { ctx, detected } = await detectOn(dir, 'ddev');

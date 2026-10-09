@@ -359,6 +359,32 @@ describe('phase4ValidateStep change-set guard', () => {
   });
 });
 
+describe('phase4ValidateStep first validator pass: a change set whose scan failed', () => {
+  const prompt = (scanError: string | null) =>
+    phase4ValidateStep.llm!.buildPrompt!({
+      detected: {
+        worktreePath: '/wt',
+        sandboxWorktreePath: '/ws',
+        spec: 'spec',
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false, scanError },
+        debtBlock: '',
+        honoredBlock: '',
+        browserTesting: false,
+        docsOnly: false,
+      },
+    } as never);
+
+  it('tells the validator the list may lack files of the change, and not to report a clean result for it', () => {
+    const text = prompt('git failed');
+    expect(text).toContain('COVERAGE: the change could not be read in full');
+    expect(text).toContain('do NOT report a clean result');
+  });
+
+  it('says nothing of it when the scan ran', () => {
+    expect(prompt(null)).not.toContain('could not be read in full');
+  });
+});
+
 describe('phase4ValidateStep scope fence', () => {
   const detected = {
     worktreePath: '/wt',
@@ -1253,6 +1279,40 @@ describe('phase4ValidateStep.apply: the changed files the validator was given', 
       implementationFiles: fileSet(3, 3),
     });
     expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('flags the coverage of a list that a failed scan produced', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: { ...fileSet(3, 3), scanError: 'git failed' },
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('leaves the flag off where the scan ran', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: { ...fileSet(3, 3), scanError: null },
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect('scanFailed' in out.changedFilesCoverage!).toBe(false);
+  });
+
+  it('drops the flag once a fixer pass has re-read the change, since that list stands in for detect', async () => {
+    const detect = { ...fileSet(3, 3), scanError: 'git failed' };
+    const text0 = reply();
+    const first = await runApply(ruleWorld({}).ctx, text0, { implementationFiles: detect });
+    const previous = [
+      passRecord(0, text0, first),
+      passRecord(1, FIXER_REPLY, { ...first, source: 'fixer', implementationFiles: fileSet(5, 5) }),
+    ];
+
+    const second = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      iteration: 2,
+      previous,
+      implementationFiles: detect,
+    });
+
+    expect(first.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+    expect(second.changedFilesCoverage).toEqual({ listed: 5, total: 5 });
   });
 
   it.each([
