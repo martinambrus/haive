@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { isSingleLine } from '../_untrusted-repo.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
@@ -18,7 +19,8 @@ const MAX_LISTED_FILES = 100;
  *  disclosure, not failure — but only if it is disclosed.
  */
 export interface ImplementationFileSet {
-  /** The files listed in the prompt: `total` of them, capped at MAX_LISTED_FILES. */
+  /** The files listed in the prompt: `total` of them, capped at MAX_LISTED_FILES. A name that
+   *  spans lines is kept here but never written onto a prompt line (see changedFilesBlock). */
   files: string[];
   /** How many changed files were found, before the cap. */
   total: number;
@@ -85,7 +87,9 @@ function asFileSet(value: MaybeFileSet): ImplementationFileSet | null {
 export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   const set = asFileSet(value);
   if (!set || typeof set.total !== 'number') return null;
-  return { listed: set.files.length, total: set.total, truncated: set.truncated === true };
+  // A name changedFilesBlock leaves out was not given to the agents.
+  const listed = set.files.filter(isSingleLine).length;
+  return { listed, total: set.total, truncated: set.truncated === true || listed < set.total };
 }
 
 /** How much of a failed scan's own error text is quoted back. */
@@ -523,8 +527,8 @@ export async function collectChangedLineMap(
 
 /**
  * The changed-file block a prompt carries: the caller's own header and its own
- * empty-set fallback, plus — when the list was capped — an explicit statement of
- * what the agent was NOT given.
+ * empty-set fallback, plus — when the list was capped or a name was left out — an
+ * explicit statement of what the agent was NOT given.
  *
  * The notice is worded as an instruction to report the gap, not merely as a note:
  * an agent that silently reviews a partial list produces exactly the clean verdict
@@ -534,8 +538,11 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   const set = asFileSet(value);
   // A replayed pre-coverage row still lists its files; it simply carries no notice,
   // which is byte-for-byte what it produced before this shipped.
-  const files = set?.files ?? (Array.isArray(value) ? value : []);
-  if (files.length === 0) return fallback;
+  const recorded = set?.files ?? (Array.isArray(value) ? value : []);
+  if (recorded.length === 0) return fallback;
+  // A name that spans lines would open a line of the prompt, so it is counted, never written.
+  const files = recorded.filter(isSingleLine);
+  const unlistable = recorded.length - files.length;
 
   // The line note is what a list of paths alone cannot say: which part of a 5,000-line file
   // this change is. Without it a reviewer reads the whole file and cannot tell new code from
@@ -561,10 +568,18 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
     const missing = set.total - files.length;
     parts.push(
       '',
-      `COVERAGE: the list above is ${set.files.length} of ${set.total} changed files. The other`,
+      `COVERAGE: the list above is ${files.length} of ${set.total} changed files. The other`,
       `${missing} were NOT given to you and you cannot see them. Work from what is listed, and`,
       'state plainly in your output that the unlisted files were not covered — do NOT report a',
       'clean result as though it covered the whole change.',
+    );
+  }
+  if (unlistable > 0) {
+    parts.push(
+      '',
+      `COVERAGE: ${unlistable} changed files have names that cannot be listed safely. They were`,
+      'NOT given to you and you cannot see them. State plainly in your output that those files',
+      'were not covered — do NOT report a clean result as though it covered the whole change.',
     );
   }
   return parts.join('\n');

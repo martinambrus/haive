@@ -72,6 +72,14 @@ describe('fileCoverage', () => {
     });
   });
 
+  it('counts only the names a prompt can list, so a name left out reads as not covered', () => {
+    expect(fileCoverage({ files: ['a.ts', 'b\nc.ts'], total: 2, truncated: false })).toEqual({
+      listed: 1,
+      total: 2,
+      truncated: true,
+    });
+  });
+
   it('answers null — not full coverage — for a replayed pre-coverage row', () => {
     // step-runner replays a stored detect_output and only re-runs detect() when it is
     // null, so a task in flight when this shipped reaches apply() with the bare array.
@@ -581,6 +589,58 @@ describe('changedFilesBlock — line notes', () => {
 
   it('renders a replayed row that predates line notes exactly as it did before', () => {
     expect(changedFilesBlock(['a.ts'], 'Changed files', 'fallback')).toBe('Changed files:\n- a.ts');
+  });
+});
+
+describe('changedFilesBlock — names that span lines', () => {
+  const set = (files: string[], total = files.length) => ({
+    files,
+    total,
+    truncated: total > files.length,
+  });
+  const SPANNING = ['a\nb.php', 'a\rb.php', 'a\u0085b.php', 'a b.php'];
+  const listed = (block: string) => block.split('\n').filter((line) => line.startsWith('- '));
+
+  it('leaves out every name that holds a line break and counts them', () => {
+    const block = changedFilesBlock(set(['ok.php', ...SPANNING]), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+    expect(block).toContain('clean result');
+  });
+
+  it('keeps a name holding a tab, which cannot start a line', () => {
+    const block = changedFilesBlock(set(['ok.php', 'a\tb.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php', '- a\tb.php']);
+    expect(block).not.toContain('COVERAGE');
+  });
+
+  it('filters a replayed pre-coverage row the same way', () => {
+    const block = changedFilesBlock(['ok.php', ...SPANNING], 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+  });
+
+  it('states the cap and the names left out as two shortfalls of one list', () => {
+    const block = changedFilesBlock(
+      set([...names(98), 'a\nb.php', 'c\nd.php'], 150),
+      'Changed files',
+      'fallback',
+    );
+
+    expect(block).toContain('COVERAGE: the list above is 98 of 150 changed files');
+    expect(block).toContain('52 were NOT given to you');
+    expect(block).toContain('COVERAGE: 2 changed files have names that cannot be listed safely');
+  });
+
+  it('still says what it left out when no name can be listed, rather than answering the fallback', () => {
+    const block = changedFilesBlock(set(['a\nb.php', 'c\nd.php']), 'Changed files', 'fallback');
+
+    expect(block).not.toContain('fallback');
+    expect(listed(block)).toEqual([]);
+    expect(block).toContain('COVERAGE: 2 changed files have names that cannot be listed safely');
   });
 });
 
@@ -1289,6 +1349,33 @@ describe('collectChangedLineMap', () => {
         expect(out.files).not.toContain('edited.php');
         expect(out.total).toBe(101);
         expect(out.truncated).toBe(true);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — names that span lines', () => {
+    it('records a committed, a dirty and an untracked file whose names hold a newline, and lists none', async () => {
+      await inRepo({ 'dirty\nname.php': 'a\nb\n', 'ordinary.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'committed\nname.php'), 'x\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: add it']);
+        await writeFile(path.join(dir, 'dirty\nname.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'ordinary.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'untracked\nname.php'), 'fresh\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: ['reported.php'] }), dir);
+        const block = changedFilesBlock(out, 'Changed files', 'fallback');
+
+        expect(out.total).toBe(5);
+        expect(block.split('\n').filter((line) => line.startsWith('- '))).toEqual([
+          '- reported.php',
+          '- ordinary.php — lines 2',
+        ]);
+        expect(block).not.toContain('name.php');
+        expect(block).toContain(
+          'COVERAGE: 3 changed files have names that cannot be listed safely',
+        );
+        expect(fileCoverage(out)).toEqual({ listed: 2, total: 5, truncated: true });
       });
     });
   });
