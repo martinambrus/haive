@@ -5,7 +5,7 @@ import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { isSingleLine, REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
   describeDropped,
@@ -15,7 +15,7 @@ import {
   readPlanSnapshot,
 } from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import { collectImplementationFiles, isListableName } from './_impl-changes.js';
 
 /**
  * What this task changed, offered back to the plan as a patch a person approves.
@@ -163,12 +163,12 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
     '## Files this task changed',
     '',
     ...d.changedPaths
-      .filter(isSingleLine)
+      .filter(isListableName)
       .slice(0, 200)
       .map((p) => `- ${p}`),
-    ...(d.changedPaths.some((p) => !isSingleLine(p))
+    ...(d.changedPaths.some((p) => !isListableName(p))
       ? [
-          `(${d.changedPaths.filter((p) => !isSingleLine(p)).length} changed files have names that cannot be listed safely and are left out.)`,
+          `(${d.changedPaths.filter((p) => !isListableName(p)).length} changed files have names that cannot be listed safely and are left out.)`,
         ]
       : []),
     '',

@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { isSingleLine } from '../_untrusted-repo.js';
+import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
@@ -19,7 +19,7 @@ const MAX_LISTED_FILES = 100;
  *  disclosure, not failure — but only if it is disclosed.
  */
 export interface ImplementationFileSet {
-  /** Capped at MAX_LISTED_FILES; a name that spans lines is kept but never written onto a prompt line. */
+  /** Capped at MAX_LISTED_FILES; a name that spans lines or forges the fence is kept but never written onto a prompt line. */
   files: string[];
   /** How many changed files were found, before the cap. */
   total: number;
@@ -46,6 +46,9 @@ export interface ImplementationFileSet {
  *  the one thing a list of paths cannot say. Kept as strings rather than a structured shape
  *  because the set is persisted to `task_steps.output`, where a human reads it back. */
 export type ChangedLineNotes = Record<string, string>;
+
+/** Whether a changed file's name can be written onto a prompt line as itself. */
+export const isListableName = (name: string): boolean => isSingleLine(name) && survivesFence(name);
 
 /** What a step recorded about its own coverage, for a gate to read back out of
  *  `task_steps.output`. Separate from ImplementationFileSet because the gate needs
@@ -87,7 +90,7 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   const set = asFileSet(value);
   if (!set || typeof set.total !== 'number') return null;
   // A name changedFilesBlock leaves out was not given to the agents.
-  const listed = set.files.filter(isSingleLine).length;
+  const listed = set.files.filter(isListableName).length;
   return { listed, total: set.total, truncated: set.truncated === true || listed < set.total };
 }
 
@@ -530,8 +533,8 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   // which is byte-for-byte what it produced before this shipped.
   const recorded = set?.files ?? (Array.isArray(value) ? value : []);
   if (recorded.length === 0) return fallback;
-  // A name that spans lines would open a line of the prompt, so it is counted, never written.
-  const files = recorded.filter(isSingleLine);
+  // A name that spans lines or forges the fence would open a line or be rewritten, so it is counted, never written.
+  const files = recorded.filter(isListableName);
   const unlistable = recorded.length - files.length;
 
   // The line note is what a list of paths alone cannot say: which part of a 5,000-line file

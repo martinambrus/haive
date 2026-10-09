@@ -654,6 +654,49 @@ describe('changedFilesBlock — names that span lines', () => {
   });
 });
 
+describe('changedFilesBlock — names that would forge the fence', () => {
+  const set = (files: string[]) => ({ files, total: files.length, truncated: false });
+  const FORGING = ['x=====y.php', 'a====b.php', '=====.php', 'trailing====='];
+  const listed = (block: string) => block.split('\n').filter((line) => line.startsWith('- '));
+
+  it('leaves out every name holding a run of four equals signs and counts them', () => {
+    const block = changedFilesBlock(set(['ok.php', ...FORGING]), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+    expect(block).toContain('clean result');
+  });
+
+  it('keeps a name with a shorter run, which the fence leaves alone', () => {
+    const block = changedFilesBlock(set(['a=b.php', 'a===b.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- a=b.php', '- a===b.php']);
+    expect(block).not.toContain('COVERAGE');
+  });
+
+  it('counts a name that is both multi-line and forging once', () => {
+    const block = changedFilesBlock(set(['ok.php', 'a\n=====b.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 1 changed files have names that cannot be listed safely');
+  });
+
+  it('filters a replayed pre-coverage row the same way', () => {
+    const block = changedFilesBlock(['ok.php', ...FORGING], 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+  });
+
+  it('reads as not covered in the record a gate keeps', () => {
+    expect(fileCoverage(set(['ok.php', 'x=====y.php']))).toEqual({
+      listed: 1,
+      total: 2,
+      truncated: true,
+    });
+  });
+});
+
 describe('collectImplementationFiles — line notes against a real repo', () => {
   const exec = promisify(execFile);
   const GIT_ENV = {
@@ -1401,6 +1444,30 @@ describe('collectChangedLineMap', () => {
           'COVERAGE: 3 changed files have names that cannot be listed safely',
         );
         expect(fileCoverage(out)).toEqual({ listed: 2, total: 5, truncated: true });
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — names that would forge the fence', () => {
+    it('records a dirty file whose name holds a run of equals signs, and lists none of them', async () => {
+      await inRepo({ 'ordinary.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'ordinary.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'a===b.php'), 'fresh\n');
+        await writeFile(path.join(dir, 'x=====y.php'), 'fresh\n');
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+        const block = changedFilesBlock(out, 'Changed files', 'fallback');
+
+        expect(out.total).toBe(3);
+        expect(block.split('\n').filter((line) => line.startsWith('- '))).toEqual([
+          '- ordinary.php — lines 2',
+          '- a===b.php — new file',
+        ]);
+        expect(block).not.toContain('x=====y.php');
+        expect(block).toContain(
+          'COVERAGE: 1 changed files have names that cannot be listed safely',
+        );
+        expect(fileCoverage(out)).toEqual({ listed: 2, total: 3, truncated: true });
       });
     });
   });
