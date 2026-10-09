@@ -383,6 +383,37 @@ describe('phase4ValidateStep scope fence', () => {
   });
 });
 
+describe('phase4ValidateStep honored constraints stored before they were fenced', () => {
+  const HONORED = 'HONORED-MARK: keep the session middleware';
+  const detected = (over: Record<string, unknown>) => ({
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec: 'spec',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    debtBlock: '',
+    honoredBlock: HONORED,
+    browserTesting: false,
+    ...over,
+  });
+  const passes = (over: Record<string, unknown>) => [
+    phase4ValidateStep.llm!.buildPrompt!({ detected: detected(over) } as never),
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: detected(over) as never,
+      formValues: {},
+      iteration: 2,
+      previousIterations: [],
+    }),
+  ];
+
+  it('drops a block a detect output stored before the fencing, on both validator passes', () => {
+    for (const p of passes({})) expect(p).not.toContain(HONORED);
+  });
+
+  it('renders the block a current detect output stored', () => {
+    for (const p of passes({ honoredFenced: true })) expect(p).toContain(HONORED);
+  });
+});
+
 describe('phase4ValidateStep documentation protocol', () => {
   const detect = (docsOnly: boolean, spec = 'THE BRIEF') => ({
     worktreePath: '/wt',

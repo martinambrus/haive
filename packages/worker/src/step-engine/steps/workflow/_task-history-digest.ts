@@ -33,9 +33,10 @@ export interface TaskHistoryDigest {
   findingCount: number;
   /** Mid-run steering events mined from this task (a friction signal). */
   steerCount: number;
-  /** Set by this renderer, which fences agent text where it writes it; a digest persisted
-   *  before it lacks the field and is fenced whole at prompt-build time. */
-  fenced?: true;
+  /** Set by this renderer, which fences agent text where it writes it by its provenance mark; a
+   *  digest persisted before it lacks the field (older code set `fenced` while leaving unmarked
+   *  person-source rows bare) and is fenced whole at prompt-build time. */
+  fencedByProvenance?: true;
 }
 
 const TIER_TOTAL_CAP: Record<DigestTier, number> = { low: 1500, medium: 6000, high: 20000 };
@@ -255,6 +256,7 @@ export function renderTaskHistoryDigest(
         round: typeof p.round === 'number' ? p.round : 0,
         source: str(p.sourceStepId),
         diagnosis: str(p.diagnosis),
+        machineFenced: p.machineFenced === true,
       };
     })
     .filter((d) => d.diagnosis.trim())
@@ -269,8 +271,9 @@ export function renderTaskHistoryDigest(
     for (const d of diagnoses) {
       const head = `- round ${d.round} via ${d.source || 'review'}:`;
       const cut = cutHead(d.diagnosis.trim(), DIAGNOSIS_ITEM_CAP[tier], '… [truncated]');
-      if (HUMAN_REJECT_SOURCES.has(d.source)) lines.push(`${head} ${balanceFences(cut)}`);
-      else lines.push(head, fencedAgentBlock(cut));
+      if (HUMAN_REJECT_SOURCES.has(d.source) && d.machineFenced) {
+        lines.push(`${head} ${balanceFences(cut)}`);
+      } else lines.push(head, fencedAgentBlock(cut));
     }
   }
 
@@ -318,5 +321,5 @@ export function renderTaskHistoryDigest(
     text = cutHead(text, TIER_TOTAL_CAP[tier], `… [digest truncated at ${tier}-tier cap]`);
   }
 
-  return { text, tier, maxRound, fixLoopCount, findingCount, steerCount, fenced: true };
+  return { text, tier, maxRound, fixLoopCount, findingCount, steerCount, fencedByProvenance: true };
 }

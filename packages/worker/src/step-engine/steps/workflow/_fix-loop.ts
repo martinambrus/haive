@@ -80,6 +80,7 @@ export function buildFixLoopEscalationSchema(
   diagnosis: string,
   cap: number,
   guidance?: string,
+  person?: boolean,
 ): FormSchema {
   return {
     title: `Fix loop reached the ${cap}-round limit`,
@@ -90,7 +91,7 @@ export function buildFixLoopEscalationSchema(
       {
         title: 'Latest diagnosis',
         body:
-          excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(sourceStepId)) ||
+          excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(sourceStepId)) ||
           '(no diagnosis recorded)',
         defaultOpen: true,
       },
@@ -125,9 +126,10 @@ export function buildOscillationEscalationSchema(
   diagB: string,
   guidanceA?: string,
   guidanceB?: string,
+  persons?: { a: boolean; b: boolean },
 ): FormSchema {
-  const excerpt = (step: string, diagnosis: string): string =>
-    excerptDiagnosis(diagnosis, 1500, HUMAN_REJECT_SOURCES.has(step));
+  const excerpt = (step: string, diagnosis: string, person?: boolean): string =>
+    excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(step));
   return {
     title: `Fix loop is oscillating between ${stepA} and ${stepB}`,
     description:
@@ -137,12 +139,12 @@ export function buildOscillationEscalationSchema(
     infoSections: [
       {
         title: `Constraint from ${stepA}`,
-        body: excerpt(stepA, diagA) || '(no diagnosis recorded)',
+        body: excerpt(stepA, diagA, persons?.a) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
       {
         title: `Conflicting change from ${stepB}`,
-        body: excerpt(stepB, diagB) || '(no diagnosis recorded)',
+        body: excerpt(stepB, diagB, persons?.b) || '(no diagnosis recorded)',
         defaultOpen: true,
       },
       ...guidanceSections(guidanceA, `Instructions Haive gave the fixer (${stepA})`),
@@ -199,6 +201,8 @@ export interface FixLoopRequest {
   sourceStepId: string;
   round: number;
   guidance?: string;
+  /** The producer stored this diagnosis before it fenced its agent text; never marked. */
+  unfencedLegacy?: boolean;
 }
 
 /** Strip ANSI escape codes and normalise whitespace so raw tool output reads cleanly
@@ -217,7 +221,7 @@ export function cleanDiagnosis(raw: string): string {
 }
 
 /** What the fix prompt keeps of one diagnosis: this many characters of agent text. */
-const DIAGNOSIS_BUDGET = 6000;
+export const DIAGNOSIS_BUDGET = 6000;
 
 /** How far a cut may move to land on a line boundary, and never more than half its piece. */
 const EXCERPT_LINE_SNAP = 200;
@@ -338,7 +342,7 @@ export async function recordFixLoopRequest(
   sourceTaskStepId: string,
   req: FixLoopRequest,
 ): Promise<void> {
-  const { guidance, ...rest } = req;
+  const { guidance, unfencedLegacy, ...rest } = req;
   await db.insert(schema.taskEvents).values({
     taskId,
     taskStepId: sourceTaskStepId,
@@ -346,6 +350,9 @@ export async function recordFixLoopRequest(
     payload: {
       ...rest,
       ...(guidance?.trim() ? { guidance } : {}),
+      ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) && !unfencedLegacy
+        ? { machineFenced: true }
+        : {}),
       fingerprint: legacyContentFingerprint(req.sourceStepId, req.diagnosis),
       fingerprintV2: fixLoopFingerprint(req.sourceStepId, req.diagnosis),
     },
@@ -436,6 +443,8 @@ export interface OscillationResult {
   conflictingStepId?: string;
   /** The Haive guidance the conflicting side's fix request carried; '' when it had none. */
   conflictingGuidance?: string;
+  /** Whether the conflicting side is a person's words: a person source whose row carries the mark. */
+  conflictingPerson?: boolean;
 }
 
 /** Detect a non-converging fix loop: the SAME source step re-raising a fingerprint-equal
@@ -470,6 +479,7 @@ export async function detectFixLoopOscillation(
     fingerprint?: string;
     fingerprintV2?: string;
     guidance?: string;
+    machineFenced?: boolean;
   };
   const prior = rows
     .map((r) => r.payload as Payload | null)
@@ -505,6 +515,7 @@ export async function detectFixLoopOscillation(
     conflictingDiagnoses: [diagnosis, between[0]?.diagnosis ?? ''],
     conflictingStepId: between[0]?.sourceStepId ?? 'another step',
     conflictingGuidance: between[0]?.guidance ?? '',
+    conflictingPerson: !!between[0] && isFencedPersonRequest(between[0]),
   };
 }
 
@@ -523,12 +534,21 @@ export const HUMAN_REJECT_SOURCES = new Set([
   FIX_LOOP_GATE_SOURCE,
 ]);
 
+/** A recorded request whose diagnosis is a person's words with the machine text joined to it
+ *  already fenced. A row without the mark is legacy mixed text and reads as machine text. */
+function isFencedPersonRequest(p: { sourceStepId?: string; machineFenced?: boolean }): boolean {
+  return HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '') && p.machineFenced === true;
+}
+
 /** The diagnosis the implementation step should fix on this round, with whether it came from a
  *  human reject gate (authoritative, every item required) vs a machine check. Null on the
  *  original pass (round 0) or when no recorded request matches the current round. */
-export async function loadFixLoopDiagnosis(
-  ctx: StepContext,
-): Promise<{ diagnosis: string; humanSourced: boolean; guidance: string } | null> {
+export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<{
+  diagnosis: string;
+  humanSourced: boolean;
+  marked: boolean;
+  guidance: string;
+} | null> {
   if (ctx.round <= 0) return null;
   const rows = await ctx.db
     .select()
@@ -546,12 +566,18 @@ export async function loadFixLoopDiagnosis(
       round?: number;
       sourceStepId?: string;
       guidance?: string;
+      machineFenced?: boolean;
     } | null;
     if (p?.round === ctx.round) {
-      const humanSourced = HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '');
+      const humanSourced = isFencedPersonRequest(p);
       const d = excerptDiagnosis((p.diagnosis ?? '').trim(), DIAGNOSIS_BUDGET, humanSourced);
       if (d.length === 0) return null;
-      return { diagnosis: d, humanSourced, guidance: p.guidance ?? '' };
+      return {
+        diagnosis: d,
+        humanSourced,
+        marked: p.machineFenced === true,
+        guidance: p.guidance ?? '',
+      };
     }
   }
   return null;
@@ -562,7 +588,8 @@ export interface SameCheckRepeat {
   round: number;
   previousRound: number;
   report: string;
-  person: boolean;
+  /** Not `person`: a detect output persisted before the mark carries that key and must read as unmarked. */
+  personMarked: boolean;
 }
 
 // Bounded where it is loaded: detect() persists it, and the task page polls the step rows.
@@ -580,7 +607,12 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
-  type Payload = { diagnosis?: string; round?: number; sourceStepId?: string };
+  type Payload = {
+    diagnosis?: string;
+    round?: number;
+    sourceStepId?: string;
+    machineFenced?: boolean;
+  };
   // A gate directive is a person's instruction laid over a check, never a check itself.
   const checks = rows
     .map((r) => r.payload as Payload | null)
@@ -594,7 +626,7 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
     round: ctx.round,
     previousRound: ctx.round - 1,
     report: excerptDiagnosis(previous.diagnosis.trim(), REPEAT_REPORT_LIMIT, false),
-    person: HUMAN_REJECT_SOURCES.has(current.sourceStepId),
+    personMarked: isFencedPersonRequest(previous),
   };
 }
 
@@ -708,11 +740,16 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
-  type Payload = { diagnosis?: string; sourceStepId?: string; round?: number };
+  type Payload = {
+    diagnosis?: string;
+    sourceStepId?: string;
+    round?: number;
+    machineFenced?: boolean;
+  };
   // rows are newest-first → the first diagnosis seen per source is its latest. Include the
   // current round (payload.round === ctx.round is the failure 07 just fixed this round, which
   // 07b is most likely to re-flag).
-  const latestPerSource = new Map<string, string>();
+  const latestPerSource = new Map<string, { text: string; human: boolean }>();
   for (const r of rows) {
     const p = r.payload as Payload | null;
     if (!p?.sourceStepId || typeof p.round !== 'number') continue;
@@ -720,12 +757,11 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     if (!HONORED_CONSTRAINT_SOURCES.has(p.sourceStepId)) continue;
     if (!latestPerSource.has(p.sourceStepId)) {
       const text = (p.diagnosis ?? '').trim();
-      latestPerSource.set(
-        p.sourceStepId,
-        HUMAN_REJECT_SOURCES.has(p.sourceStepId)
-          ? excerptDiagnosis(text, DIAGNOSIS_BUDGET, true)
-          : cleanDiagnosis(text),
-      );
+      const human = isFencedPersonRequest(p);
+      latestPerSource.set(p.sourceStepId, {
+        text: human ? excerptDiagnosis(text, DIAGNOSIS_BUDGET, true) : cleanDiagnosis(text),
+        human,
+      });
     }
   }
   // Priority sources first; everything else keeps its newest-first order (sort is stable, so
@@ -735,7 +771,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     return i >= 0 ? i : PRIORITY_CONSTRAINT_SOURCES.length;
   };
   const ordered = [...latestPerSource.entries()]
-    .filter(([, d]) => d.length > 0)
+    .filter(([, d]) => d.text.length > 0)
     .sort(([a], [b]) => rank(a) - rank(b));
   if (ordered.length === 0) return '';
   const header = [
@@ -753,7 +789,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     HONORED_ENTRY_MIN,
     Math.floor((HONORED_BLOCK_TARGET - header.length) / ordered.length),
   );
-  const entries = ordered.map(([src, d]) => {
+  const entries = ordered.map(([src, { text: d, human }]) => {
     const label = `- ${src}: `;
     const room = Math.max(HONORED_ENTRY_MIN, perEntry - label.length);
     // Head-slice: a constraint states its rule up front (tool output arrives tail-kept by
@@ -761,7 +797,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     // gate-2 constraint carries fences INSIDE it, and a head slice keeps the BEGIN and drops
     // the END — which would swallow the rest of the prompt around a person's entry, which
     // stays unfenced (a honored constraint from a person is the developer's).
-    return { line: `${label}${cutHead(d, room, '…')}`, human: HUMAN_REJECT_SOURCES.has(src) };
+    return { line: `${label}${cutHead(d, room, '…')}`, human };
   });
   const person = entries.filter((e) => e.human).map((e) => e.line);
   const machine = entries.filter((e) => !e.human).map((e) => e.line);
@@ -825,6 +861,7 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
       round?: number;
       fingerprint?: string;
       fingerprintV2?: string;
+      machineFenced?: boolean;
     } | null;
     if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
     const short = excerptDiagnosis((p.diagnosis ?? '').trim(), PRIOR_FIX_ENTRY_LIMIT, false);
@@ -834,7 +871,7 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
     seenFp.add(fp);
     entries.push({
       line: `- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`,
-      human: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? ''),
+      human: isFencedPersonRequest(p),
     });
   }
 

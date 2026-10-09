@@ -99,6 +99,9 @@ interface ValidateDetect {
   debtBlock: string;
   /** Prior objective/runtime fix-loop constraints the validator must not revert ('' if none). */
   honoredBlock: string;
+  /** Set with every honoredBlock rendered since its machine entries are fenced; a detect output
+   *  stored before that lacks it, and its pre-rendered block is dropped rather than replayed. */
+  honoredFenced?: boolean;
   /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to the
    *  running app's browser; the fixer pass verifies runtime-affecting fixes in-browser. */
   browserTesting: boolean;
@@ -698,6 +701,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       implementationFiles,
       debtBlock,
       honoredBlock: await loadHonoredConstraints(ctx),
+      honoredFenced: true,
       browserTesting,
       promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
       docsOnly: isDocsOnlyChange(implementationFiles),
@@ -747,7 +751,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           NO_CHANGE_SET_FALLBACK,
         ),
         d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
-        d.honoredBlock ? `\n${d.honoredBlock}` : '',
+        d.honoredBlock && d.honoredFenced === true ? `\n${d.honoredBlock}` : '',
         '',
         'Do NOT run git (it is unavailable in this environment — the orchestrator commits later)',
         'and do NOT run the test suite (a later step does).',
@@ -903,7 +907,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'them as approximate now: they still show which part of each file this change is, but',
         'take exact line numbers from the file in front of you, not from the list.',
         d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
-        d.honoredBlock ? `\n${d.honoredBlock}` : '',
+        d.honoredBlock && d.honoredFenced === true ? `\n${d.honoredBlock}` : '',
         '',
         'Re-validate from scratch — verify the fixes hold AND nothing else broke.',
         'Do NOT run git and do NOT run the test suite.',

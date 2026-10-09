@@ -196,3 +196,11 @@ verdict, so the advisor reads the last review rather than an earlier one. The co
 rounds; MEASURED on the dev install, the file set a reviewer flags never repeated across rounds
 even when the same criteria kept failing, so a file key would have turned all five debt issues into
 failures. Before this, both counters rose together and the iteration cap was unreachable.
+
+**A person-source request says whether its machine text is fenced.** Gate 2 began fencing the
+runtime output and audit findings it joins to a developer's words on 2026-09-22, 08d2 its QA
+findings on 2026-10-03. `recordFixLoopRequest` stamps `machineFenced: true` on every request from a
+`HUMAN_REJECT_SOURCES` source; every reader that keeps a person's words outside the fences (07's
+defect block, the repeat quote, the honored block, the prior-rounds block, the learning digest)
+does so only for a marked row, and treats an unmarked one as machine text. Keyed on the field, never
+on the wording.

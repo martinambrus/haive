@@ -271,6 +271,7 @@ describe('08d2 waiver writes', () => {
       applyArgs({ decision: 'fix', scope: 'critical_high' }),
     );
     expect(out.decision).toBe('fix');
+    expect(out.diagnosisFenced).toBe(true);
     expect(out.selectedCount).toBe(2);
     expect(out.waivedCount).toBe(1);
   });
@@ -280,10 +281,20 @@ describe('08d2 restartLoop', () => {
   it('routes fix back to implementation and finalizes accept (and empty fix)', () => {
     const hook = adversarialQaReviewStep.restartLoop!;
     expect(
-      hook.evaluate({ decision: 'fix', diagnosis: 'do it', selectedCount: 1, waivedCount: 0 }),
+      hook.evaluate({
+        decision: 'fix',
+        diagnosis: 'do it',
+        diagnosisFenced: true,
+        selectedCount: 1,
+        waivedCount: 0,
+      }),
     ).toEqual({
       diagnosis: 'do it',
     });
+    // An output stored before apply fenced its findings has no mark, whatever the text says.
+    expect(
+      hook.evaluate({ decision: 'fix', diagnosis: 'do it', selectedCount: 1, waivedCount: 0 }),
+    ).toEqual({ diagnosis: 'do it', unfencedLegacy: true });
     expect(
       hook.evaluate({ decision: 'accept', diagnosis: '', selectedCount: 0, waivedCount: 0 }),
     ).toBeNull();
