@@ -222,7 +222,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
-      const isGlobal = String(url).startsWith(GLOBAL_OLLAMA);
+      const isGlobal = new URL(String(url)).origin === GLOBAL_OLLAMA;
       const embed = isGlobal ? h.globalEmbed : h.localEmbed;
       h.events.push(isGlobal ? 'embed:global' : 'embed:local');
       if (embed.delayMs) await new Promise((resolve) => setTimeout(resolve, embed.delayMs));
