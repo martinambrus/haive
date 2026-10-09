@@ -1828,7 +1828,7 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
       prompt,
     } as never);
 
-  async function ingest(reviewer: InvLike) {
+  async function ingest(reviewer: InvLike, role: 'reviewer' | 'coder' = 'reviewer') {
     const { db, inserts, updates } = makeSpawnDb();
     vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
     const ra = {
@@ -1859,9 +1859,25 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
       errorMessage: null,
       reviewerVerdict: null,
     } as never;
-    await ingestReviewRun(ra, issue, { id: 'run-1', role: 'reviewer' } as never, reviewer);
+    await ingestReviewRun(ra, issue, { id: 'run-1', role } as never, reviewer);
     return { inserts, updates };
   }
+
+  it('re-spawns a fix coder cut off at the limit once with the notice, before any re-review', async () => {
+    const { inserts } = await ingest(truncatedReviewer('fix the issue'), 'coder');
+    const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
+    expect(spawned).toHaveLength(1);
+    expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('coder');
+  });
+
+  it('does not re-spawn a fix coder whose prompt already carried the notice', async () => {
+    const { inserts } = await ingest(
+      truncatedReviewer(`fix the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+      'coder',
+    );
+    expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).not.toBe('coder');
+  });
 
   it('re-spawns the reviewer once with the notice, charging no review retry', async () => {
     const { inserts, updates } = await ingest(truncatedReviewer('review the issue'));

@@ -1253,7 +1253,13 @@ export async function ingestReviewRun(
 
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
-  if (run.role !== 'reviewer' && !fixed.parsed && runNeverAnswered(inv)) {
+  // A fix coder cut at the output limit is re-run once, smaller, before anything reviews its edits.
+  const fixerTruncated =
+    run.role !== 'reviewer' &&
+    classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+      'truncated' &&
+    truncationRetryable(inv);
+  if (run.role !== 'reviewer' && !fixed.parsed && (runNeverAnswered(inv) || fixerTruncated)) {
     const storedVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     const ok = await spawnReviewAgent(
       ra,
@@ -1268,6 +1274,7 @@ export async function ingestReviewRun(
       ),
       ['tool_use', 'file_write'],
       consume,
+      fixerTruncated,
     );
     if (!ok) {
       await consume();
