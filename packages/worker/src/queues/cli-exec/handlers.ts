@@ -142,6 +142,8 @@ export function ownMiningRow(agentMiningId: string, invocationId: string) {
   return and(
     eq(schema.taskStepAgentMinings.id, agentMiningId),
     eq(schema.taskStepAgentMinings.cliInvocationId, invocationId),
+    // A failed step's release fails the row and keeps the link; a late write must not revive it.
+    inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
   );
 }
 

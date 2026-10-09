@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getTableColumns } from 'drizzle-orm';
+import { getTableColumns, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -90,6 +91,12 @@ interface MockState {
   openTransaction?: number;
   /** Every mining-row update that matched, with the WHERE that picked its row. */
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
+  /** Abort the next in-transaction mining-row update as Postgres does to break a lock cycle. */
+  deadlockOnce?: boolean;
+  /** What a task_step_agent_minings update's returning() yields, in place of one stub id. */
+  miningReturning?: (set: Record<string, unknown>) => unknown[];
+  /** Every cli_invocations update with its condition, so a test can say which runs it selects. */
+  invocationUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Runs after each write to the step row, to land something (a Retry's reset) right after it. */
   afterStepWrite?: (set: Record<string, unknown>) => void;
   /** Runs after each mining-row write that matched, to land it in the rows a later read returns. */
@@ -234,10 +241,23 @@ function makeMockDb(state: MockState): Database {
       return {
         set: (v: Record<string, unknown>) => {
           const record = (where: unknown) => {
+            if (state.openTransaction)
+              (state.ops ??= []).push(`update:${tableName}@${state.openTransaction}`);
             state.updates.push({ table: tableName, ...v });
             if (tableName === 'task_steps') {
               state.taskStepRow = { ...state.taskStepRow, ...v };
               state.afterStepWrite?.(v);
+            }
+            if (tableName === 'cli_invocations') {
+              (state.invocationUpdateLog ??= []).push({ set: v, where });
+            }
+            if (
+              tableName === 'task_step_agent_minings' &&
+              state.openTransaction &&
+              state.deadlockOnce
+            ) {
+              state.deadlockOnce = false;
+              throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
@@ -266,6 +286,9 @@ function makeMockDb(state: MockState): Database {
                   if (lost() || refused()) return [];
                   record(cond);
                   if (tableName === 'task_steps') return [state.taskStepRow];
+                  if (tableName === 'task_step_agent_minings' && state.miningReturning) {
+                    return state.miningReturning(v);
+                  }
                   return tableName === 'task_step_agent_minings' ? [{ id: 'mock-updated' }] : [];
                 },
               };
@@ -280,11 +303,15 @@ function makeMockDb(state: MockState): Database {
       const outer = state.openTransaction;
       state.openTransaction = state.transactions;
       const inserted = state.inserts.length;
+      const updated = state.updates.length;
+      const miningUpdated = state.miningUpdateLog?.length ?? 0;
       try {
         return await fn(db);
       } catch (err) {
-        // A transaction that throws takes back what it inserted.
+        // A transaction that throws takes back what it inserted and updated.
         state.inserts.length = inserted;
+        state.updates.length = updated;
+        if (state.miningUpdateLog) state.miningUpdateLog.length = miningUpdated;
         throw err;
       } finally {
         state.openTransaction = outer;
@@ -2695,5 +2722,247 @@ describe('a person re-runs an agent whose seat no provider now takes', () => {
     expect(enqueued).toHaveLength(1);
     expect(applyCalls).toEqual([]);
     expect(state.miningRows[0]!.errorMessage).toBe(OLD_FAILURE);
+  });
+});
+
+describe('a fan-out step that ends while agents it queued are still live', () => {
+  function threeAgentStep(): StepDefinition {
+    return {
+      metadata: { id: 'test-mining-step', title: 'three', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [1, 2, 3].map((n) => ({
+            agentId: `agent-${n}`,
+            agentTitle: `agent-${n}`,
+            prompt: `review ${n}`,
+          }));
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  /** Enqueue succeeds for the first `okCalls` agents, then `onFail` runs and the enqueue throws. */
+  function runWithEnqueueFailingAfter(state: MockState, okCalls: number, onFail?: () => void) {
+    let calls = 0;
+    return advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: threeAgentStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          calls += 1;
+          if (calls > okCalls) {
+            onFail?.();
+            throw new Error('redis refused the job');
+          }
+        },
+      },
+    });
+  }
+
+  const endedRuns = (state: MockState) =>
+    state.updates.filter((u) => u.table === 'cli_invocations' && u.exitCode === 137);
+  const stepWideAgentWrites = (state: MockState) =>
+    (state.miningUpdateLog ?? []).filter(
+      (u) => u.set.status === 'failed' && conditionValues(u.where).includes('ts-1'),
+    );
+
+  it('ends and supersedes the runs it queued and fails every agent of the step', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 1);
+
+    expect(result.status).toBe('failed');
+    const [ended] = endedRuns(state);
+    expect(endedRuns(state)).toHaveLength(1);
+    expect(ended).toMatchObject({
+      errorMessage: 'cancelled: the step ended',
+      endedAt: expect.any(Date),
+      supersededAt: expect.any(Date),
+    });
+    const [failed] = stepWideAgentWrites(state);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+    expect(conditionValues(failed!.where)).toEqual(
+      expect.arrayContaining(['ts-1', 'pending', 'running']),
+    );
+    expect(String(failed!.set.errorMessage)).toContain('redis refused');
+    expect(state.taskStepRow.status).toBe('failed');
+  });
+
+  it('cancels only the live fan-out runs of the step', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(1);
+    const { sql, params } = new PgDialect().sqlToQuery(cancels[0]!.where as SQL);
+    expect(params).toEqual(expect.arrayContaining(['ts-1', 'agent_mining']));
+    expect(sql).toContain('"task_step_id" = $');
+    expect(sql).toContain('"mode" = $');
+    expect(sql).toContain('"ended_at" is null');
+    expect(sql).toContain('"superseded_at" is null');
+  });
+
+  it('supersedes the run whose enqueue threw, in case the queue took the job after all', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cleanup = (state.invocationUpdateLog ?? []).filter((u) =>
+      String(u.set.errorMessage).startsWith('dispatch failed before the agent was queued'),
+    );
+    expect(cleanup).toHaveLength(1);
+    expect(cleanup[0]!.set).toMatchObject({
+      endedAt: expect.any(Date),
+      supersededAt: expect.any(Date),
+    });
+  });
+
+  it('also cancels a run a concurrent pass linked after the first sweep', async () => {
+    const state = freshState([]);
+    state.miningReturning = (set) =>
+      set.status === 'failed' ? [{ cliInvocationId: 'inv-linked-late' }] : [{ id: 'mock-updated' }];
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(2);
+    const { sql, params } = new PgDialect().sqlToQuery(cancels[1]!.where as SQL);
+    expect(params).toContain('inv-linked-late');
+    expect(sql).toContain('"ended_at" is null');
+    expect(sql).toContain('"superseded_at" is null');
+    // The retry sweeps the late run before it touches an agent row: runs, agents, step.
+    const ops = state.ops ?? [];
+    const last = ops.filter((o) => o.startsWith('update:cli_invocations@')).at(-1)!;
+    const n = last.slice(last.indexOf('@') + 1);
+    expect(ops.filter((o) => o.endsWith(`@${n}`))).toEqual([
+      `update:cli_invocations@${n}`,
+      `update:task_step_agent_minings@${n}`,
+      `lock:task_steps@${n}`,
+    ]);
+  });
+
+  it('ends the agents only after the step itself reads failed, so a Resume cannot slip between', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const stepFailed = state.updates.findIndex(
+      (u) => u.table === 'task_steps' && u.status === 'failed',
+    );
+    const runsEnded = state.updates.findIndex(
+      (u) => u.table === 'cli_invocations' && u.exitCode === 137,
+    );
+    expect(stepFailed).toBeGreaterThan(-1);
+    expect(runsEnded).toBeGreaterThan(stepFailed);
+  });
+
+  it('keeps retrying while passes link runs at different times, sweeping each first', async () => {
+    const state = freshState([]);
+    let calls = 0;
+    state.miningReturning = (set) => {
+      if (set.status !== 'failed') return [{ id: 'mock-updated' }];
+      calls += 1;
+      return calls === 1
+        ? [{ cliInvocationId: 'inv-a' }]
+        : [{ cliInvocationId: 'inv-a' }, { cliInvocationId: 'inv-b' }];
+    };
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const cancels = (state.invocationUpdateLog ?? []).filter((u) => u.set.exitCode === 137);
+    expect(cancels).toHaveLength(3);
+    const { params } = new PgDialect().sqlToQuery(cancels[2]!.where as SQL);
+    expect(params).toEqual(expect.arrayContaining(['inv-a', 'inv-b']));
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+  });
+
+  it('leaves the agents alone when the failure write of the step errors', async () => {
+    const state = freshState([]);
+    state.afterStepWrite = (set) => {
+      if (set.status === 'failed') throw new Error('could not serialize access');
+    };
+    await runWithEnqueueFailingAfter(state, 1).catch(() => undefined);
+
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+  });
+
+  it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
+    const state = freshState([]);
+    state.deadlockOnce = true;
+    await runWithEnqueueFailingAfter(state, 1);
+
+    expect(state.deadlockOnce).toBe(false);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+    expect(state.taskStepRow.status).toBe('failed');
+  });
+
+  it('takes the runs, then the agents, then the step, in one transaction', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const ops = state.ops ?? [];
+    const tx = ops.find((o) => o.startsWith('update:cli_invocations@'))!;
+    const n = tx.slice(tx.indexOf('@') + 1);
+    const inTx = ops.filter((o) => o.endsWith(`@${n}`));
+    expect(inTx).toEqual([
+      `update:cli_invocations@${n}`,
+      `update:task_step_agent_minings@${n}`,
+      `lock:task_steps@${n}`,
+    ]);
+  });
+
+  it('also ends them when the write parking the step after a second wave fails', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.afterStepWrite = (set) => {
+      if (set.status === 'waiting_cli') throw new Error('postgres went away');
+    };
+    const result = await run(makeMockDb(state), waveStep([], ['refute-a']), []);
+
+    expect(result.status).toBe('failed');
+    expect(endedRuns(state)).toHaveLength(1);
+  });
+
+  it('leaves the runs and agents alone when a Retry has taken the step', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 1, () => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    });
+
+    expect(result.status).toBe('superseded');
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+    expect(state.taskStepRow.status).toBe('pending');
+  });
+
+  it('still ends the runs and agents when a Stop has failed the step meanwhile', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1, () => {
+      state.taskStepRow = { ...state.taskStepRow, status: 'failed' };
+    });
+
+    expect(endedRuns(state)).toHaveLength(1);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+  });
+
+  it('touches nothing when every agent dispatches', async () => {
+    const state = freshState([]);
+    const result = await runWithEnqueueFailingAfter(state, 3);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(endedRuns(state)).toHaveLength(0);
+    expect(stepWideAgentWrites(state)).toHaveLength(0);
+    expect(state.updates.filter((u) => u.table === 'cli_invocations' && u.endedAt)).toHaveLength(0);
   });
 });
