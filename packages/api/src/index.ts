@@ -6,6 +6,7 @@ import { logger } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { HttpError, type AppEnv } from './context.js';
 import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
+import { installUnhandledRejectionLogger } from './lib/unhandled-rejection.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
@@ -139,6 +140,7 @@ const invokedAsScript =
   process.argv[1]?.endsWith('/packages/api/dist/index.js');
 
 if (invokedAsScript) {
+  installUnhandledRejectionLogger();
   main().catch((err) => {
     logger.error({ err }, 'API bootstrap failed');
     process.exit(1);
