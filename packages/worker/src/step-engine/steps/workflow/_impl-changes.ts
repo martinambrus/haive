@@ -285,20 +285,24 @@ export function parseChangedLineRanges(diff: string): ChangedLineNotes {
 async function resolveDiffBase(
   worktreePath: string,
   baseBranch: string | null,
+  timeout?: number,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
       const { stdout } = await gitExec(['merge-base', 'HEAD', baseBranch], {
         cwd: worktreePath,
+        timeout,
       });
       const sha = stdout.toString().trim();
       if (sha) return sha;
-    } catch {
+    } catch (err) {
+      // A git killed at its timeout said nothing, and HEAD would answer a narrower question.
+      if ((err as { killed?: boolean }).killed) return null;
       // base branch renamed, deleted, or unrelated history — fall through to HEAD
     }
   }
   try {
-    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath });
+    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout });
     return 'HEAD';
   } catch {
     return null;
@@ -335,17 +339,19 @@ async function readChangeDiff(
 }
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
- *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. */
+ *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. A git that
+ *  outlives `timeoutMs` is killed and the list is null. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean } = {},
+  options: { includeDeleted?: boolean; timeoutMs?: number } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch);
+  const base = await resolveDiffBase(worktreePath, baseBranch, options.timeoutMs);
   if (!base) return null;
   try {
     const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
       cwd: worktreePath,
+      timeout: options.timeoutMs,
     });
     const fields = stdout.split('\0');
     const paths: string[] = [];

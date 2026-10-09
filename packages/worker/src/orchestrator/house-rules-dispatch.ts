@@ -22,6 +22,10 @@ import {
 
 const log = logger.child({ module: 'house-rules-dispatch' });
 
+/** Each git of the change read is killed at this bound, so a hung git costs a dispatch or a gate
+ *  its answer (null) and not the whole wait. */
+export const CHANGE_READ_GIT_TIMEOUT_MS = 30_000;
+
 /** What git reports dirty or untracked (gate 3's argv, NUL separated so no path is quoted) plus what
  *  the branch holds against its fork point, which is all of a DAG task's work. A deleted path counts,
  *  and so does a rename's or copy's source: a rule can cover what a task removes or moves out. Null
@@ -29,16 +33,19 @@ const log = logger.child({ module: 'house-rules-dispatch' });
 export async function readChangedFiles(
   tree: string,
   baseBranch: string | null,
+  gitTimeoutMs = CHANGE_READ_GIT_TIMEOUT_MS,
 ): Promise<string[] | null> {
-  const status = await gitRun(tree, [
-    '--no-optional-locks',
-    'status',
-    '--porcelain',
-    '-z',
-    '--untracked-files=all',
-  ]);
+  const status = await gitRun(
+    tree,
+    ['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all'],
+    undefined,
+    { timeout: gitTimeoutMs },
+  );
   if (status.code !== 0) return null;
-  const committed = await readChangedPaths(tree, baseBranch, { includeDeleted: true });
+  const committed = await readChangedPaths(tree, baseBranch, {
+    includeDeleted: true,
+    timeoutMs: gitTimeoutMs,
+  });
   if (committed === null) return null;
   const dirty = parsePorcelainZ(status.stdout).flatMap((entry) =>
     entry.oldPath ? [entry.path, entry.oldPath] : [entry.path],
@@ -54,8 +61,9 @@ export const FINGERPRINT_READ_BYTES = 8 * 1024 * 1024;
 export async function changeFingerprint(
   tree: string,
   baseBranch: string | null,
+  gitTimeoutMs = CHANGE_READ_GIT_TIMEOUT_MS,
 ): Promise<string | null> {
-  const files = await readChangedFiles(tree, baseBranch);
+  const files = await readChangedFiles(tree, baseBranch, gitTimeoutMs);
   if (files === null) return null;
   const { anchor, prefix } = workspaceAnchor(tree);
   const hash = createHash('sha256');
