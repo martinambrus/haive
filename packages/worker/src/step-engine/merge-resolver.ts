@@ -785,6 +785,8 @@ export async function resolveMergePhase(
 
   // --- resolving: drive the fix-agent loop ---
   if (state.phase === 'resolving') {
+    // The ingested fixer was cut at the output limit: the fixer sent next carries the notice.
+    let lastFixerCut = false;
     let truncatedOnce = false;
     // (1) Ingest an in-flight fix agent.
     if (state.fixInvocationId) {
@@ -819,9 +821,9 @@ export async function resolveMergePhase(
         return haltFailed(db, current, fixerIndexHeldNote(leftovers.indexHeld), 'merge index held');
       }
       const fix = parseFixResult(inv);
+      lastFixerCut = !runNeverAnswered(inv) && isOutputTruncationMessage(inv.errorMessage?.trim());
       truncatedOnce =
-        !runNeverAnswered(inv) &&
-        isOutputTruncationMessage(inv.errorMessage?.trim()) &&
+        lastFixerCut &&
         typeof inv.prompt === 'string' &&
         !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
       if ((runNeverAnswered(inv) && !fix) || truncatedOnce) {
@@ -950,7 +952,7 @@ export async function resolveMergePhase(
         };
         await saveMergeState(db, current.id, state);
       },
-      truncatedOnce,
+      lastFixerCut,
     );
     if (dispatched.kind === 'already_live') {
       // A concurrent advance already dispatched and saved its own fixInvocationId; PARK

@@ -776,6 +776,8 @@ async function runLevelMerge(
   const state = readMergeState(level);
 
   // 1. A fix agent is in flight — ingest its result.
+  // The ingested fixer was cut at the output limit: any fixer sent after it carries the notice.
+  let lastFixerCut = false;
   if (state.fixInvocationId) {
     const inv = await db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, state.fixInvocationId),
@@ -814,11 +816,11 @@ async function runLevelMerge(
       return haltMerge(m, `Merge halted on ${branch}. ${fixerIndexHeldNote(leftovers.indexHeld)}`);
     }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
-    const fixerCut =
+    lastFixerCut =
       !runNeverAnswered(inv) &&
       classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
-        'truncated' &&
-      truncationRetryable(inv);
+        'truncated';
+    const fixerCut = lastFixerCut && truncationRetryable(inv);
     if (runNeverAnswered(inv) || fixerCut) {
       // A fixer that never answered, or was cut at the output limit, may have left the merge
       // half-resolved, so its edits are discarded and it is dispatched again without spending an attempt.
@@ -895,7 +897,7 @@ async function runLevelMerge(
     const target = conflicts.find(
       (c) => (state.conflictRetries[c.issueKey] ?? 0) < MAX_AUTO_CONFLICT_RETRIES,
     );
-    if (target) return startConflictFix(m, state, target);
+    if (target) return startConflictFix(m, state, target, lastFixerCut);
     return haltConflicts(
       m,
       conflicts,

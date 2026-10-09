@@ -838,7 +838,7 @@ describe('12 merge fix-agent dispatch', () => {
       }
     });
 
-    it('whose prompt already carried the notice, even wrapped, is a spent attempt and gets no notice', async () => {
+    it('whose prompt already carried the notice, even wrapped, is a spent attempt and keeps the notice', async () => {
       const { parent, wt } = await setupWorktree();
       try {
         await divergeBase(parent, wt);
@@ -849,7 +849,7 @@ describe('12 merge fix-agent dispatch', () => {
         expect(second.resolved).toBe(false);
         expect(h.getState()?.conflictRetries).toBe(2);
         expect(h.invocationInserts).toHaveLength(2);
-        expect(h.invocationInserts[1]!.prompt).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.invocationInserts[1]!.prompt).toContain(TRUNCATION_RETRY_NOTICE);
       } finally {
         await rm(parent, { recursive: true, force: true });
       }

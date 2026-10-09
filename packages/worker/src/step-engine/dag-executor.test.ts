@@ -1367,7 +1367,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       }
     });
 
-    it('cut again after the notice, auto-resolve: the budget decides, and the next fixer carries no notice', async () => {
+    it('cut again after the notice, auto-resolve: the attempt is charged and the next fixer keeps the notice', async () => {
       const { h, integrationDir, state } = await ingest(
         ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
         true,
@@ -1375,7 +1375,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       );
       try {
         expect(h.invocationInserts).toHaveLength(1);
-        expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.invocationInserts[0]!.prompt as string).toContain(TRUNCATION_RETRY_NOTICE);
         expect(state.conflictRetries['ISSUE-1']).toBe(2);
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
