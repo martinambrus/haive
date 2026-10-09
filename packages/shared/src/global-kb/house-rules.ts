@@ -260,7 +260,12 @@ const houseRulesStampSchema = z.object({
       why: z.discriminatedUnion('scope', [
         z.object({ scope: z.literal('always') }),
         // A null glob: the change's file set could not be read, so the rule went in unscoped.
-        z.object({ scope: z.literal('files'), glob: z.string().nullable() }),
+        // `via`: a named path selected the rule; a value a later release adds is dropped alone.
+        z.object({
+          scope: z.literal('files'),
+          glob: z.string().nullable(),
+          via: z.enum(['named']).optional().catch(undefined),
+        }),
       ]),
     }),
   ),

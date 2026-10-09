@@ -19,6 +19,7 @@ import {
   type HouseRuleSelection,
   type HouseRulesRequest,
 } from './house-rules.js';
+import { namedFiles, resolveNamedFiles } from './named-files.js';
 
 const log = logger.child({ module: 'house-rules-dispatch' });
 
@@ -109,6 +110,59 @@ export function plannedFiles(files: readonly string[] | undefined): string[] {
   return out;
 }
 
+const SPEC_STEP_04 = '04-phase-0b-pre-planning';
+const SPEC_STEP_05 = '05-phase-0b5-spec-quality';
+const SPEC_STEP_05A = '05a-resolve-spec-warnings';
+
+/** The task's title and description, then its freshest spec: the highest round, then 05a, 05, 04. */
+async function readTaskText(db: Database, taskId: string): Promise<string> {
+  const { tasks, taskSteps } = schema;
+  const rows = (await db.execute(sql`
+    select ${tasks.title} as title, ${tasks.description} as description,
+      (select ${taskSteps.output}->>'spec' from ${taskSteps}
+        where ${taskSteps.taskId} = ${tasks.id}
+          and ${taskSteps.stepId} in (${SPEC_STEP_04}, ${SPEC_STEP_05}, ${SPEC_STEP_05A})
+          and coalesce(${taskSteps.output}->>'spec', '') <> ''
+        order by ${taskSteps.round} desc,
+          case ${taskSteps.stepId} when ${SPEC_STEP_05A} then 3 when ${SPEC_STEP_05} then 2 else 1 end desc
+        limit 1) as spec
+    from ${tasks}
+    where ${tasks.id} = ${taskId}`)) as unknown as Array<{
+    title: string;
+    description: string | null;
+    spec: string | null;
+  }>;
+  const row = rows[0];
+  return row === undefined ? '' : [row.title, row.description ?? '', row.spec ?? ''].join('\n');
+}
+
+/** NUL separated so no path is quoted. Null when git fails. */
+async function readTrackedFiles(tree: string): Promise<string[] | null> {
+  const listed = await gitRun(tree, ['ls-files', '-z']);
+  if (listed.code !== 0) return null;
+  return listed.stdout.split('\0').filter((file) => file !== '');
+}
+
+/** The paths a task names, resolved against the tracked files; none when they cannot be read. */
+async function readNamedFiles(
+  db: Database,
+  taskId: string,
+  worktreeRel: string | undefined,
+): Promise<string[]> {
+  try {
+    const names = namedFiles(await readTaskText(db, taskId));
+    if (names.length === 0) return [];
+    const tree = await resolveInvocationWorkerTree(db, taskId, worktreeRel);
+    const tracked = tree === null ? null : await readTrackedFiles(tree);
+    if (tracked !== null) return resolveNamedFiles(names, tracked);
+    log.warn({ taskId }, 'could not list the tracked files to resolve the paths a task names');
+    return [];
+  } catch (err) {
+    log.warn({ err, taskId }, 'could not read the paths a task names to scope house rules');
+    return [];
+  }
+}
+
 /** Reads the change only when a `files` rule is there to be scoped by it. */
 export async function selectForDispatch(
   db: Database,
@@ -120,13 +174,22 @@ export async function selectForDispatch(
   if (kb.status === 'disabled') return disabledSelection();
   if (kb.status === 'unavailable') return unavailableSelection(kb.errorClass ?? 'other');
   const scoped = kb.rules.some((rule) => rule.spec.mode === 'files');
+  const changedFiles = scoped ? await readDispatchChange(db, taskId, worktreeRel) : [];
+  const named =
+    scoped &&
+    changedFiles !== null &&
+    request.mode === 'write' &&
+    request.estimatedFiles === undefined
+      ? await readNamedFiles(db, taskId, worktreeRel)
+      : [];
   return selectHouseRules({
     mode: request.mode,
     findings: request.findings,
     rules: kb.rules,
     refused: kb.refused,
-    changedFiles: scoped ? await readDispatchChange(db, taskId, worktreeRel) : [],
+    changedFiles,
     estimatedFiles: plannedFiles(request.estimatedFiles),
+    namedFiles: named,
   });
 }
 

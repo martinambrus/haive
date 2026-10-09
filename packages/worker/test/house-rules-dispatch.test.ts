@@ -3,14 +3,31 @@ import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Database } from '@haive/database';
 
 const h = vi.hoisted(() => ({
   tree: null as string | null | Error,
   treeCalls: [] as Array<{ taskId: string; rel: string | undefined }>,
   setup: undefined as unknown,
+  gitCalls: [] as string[][],
+  lsFilesFails: false,
 }));
 
+vi.mock('../src/repo/git-exec.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/repo/git-exec.js')>();
+  return {
+    ...original,
+    gitRun: async (...args: Parameters<typeof original.gitRun>) => {
+      h.gitCalls.push(args[1]);
+      if (h.lsFilesFails && args[1].includes('ls-files')) {
+        return { stdout: '', stderr: 'fatal: made to fail', code: 128 };
+      }
+      return original.gitRun(...args);
+    },
+  };
+});
 vi.mock('../src/repo/worktree-git-boundary.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resolveInvocationWorkerTree: async (_db: unknown, taskId: string, rel?: string) => {
@@ -547,6 +564,221 @@ describe('selectForDispatch', () => {
     const refused = [{ id: 'x', hash: 'h', title: 'Bad', why: 'refused' as const }];
     const out = await select({ mode: 'write' }, kb({ rules: [rule()], refused }));
     expect(out.omitted).toEqual(refused);
+  });
+
+  describe('the paths the task names', () => {
+    const queries: SQL[] = [];
+    let rows: Array<Record<string, unknown>> = [];
+    let readFails: Error | null = null;
+    const db = {
+      execute: async (query: SQL) => {
+        queries.push(query);
+        if (readFails !== null) throw readFails;
+        return rows;
+      },
+    } as unknown as Database;
+    const task = (over: { title?: string; description?: string | null; spec?: string | null }) => {
+      rows = [{ title: 'Task', description: null, spec: null, ...over }];
+    };
+    const lsFiles = () => h.gitCalls.filter((args) => args.includes('ls-files'));
+    const titled = (title: string, globs: string[]) =>
+      rule({ title, spec: { mode: 'files', globs } });
+    const selectNamed = (
+      request: Parameters<typeof selectForDispatch>[2],
+      k: ReturnType<typeof kb>,
+    ) => selectForDispatch(db, 'task-1', request, undefined, k);
+
+    /** A tree with nothing changed, as at the first write dispatch; `tracked` is committed on main. */
+    async function emptyTree(...tracked: string[]): Promise<void> {
+      const dir = await repo();
+      git(dir, 'checkout', '-q', 'main');
+      for (const rel of tracked) await put(dir, rel);
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '--allow-empty', '-m', 'tracked');
+      h.tree = dir;
+      h.setup = { output: { baseBranch: 'main' } };
+    }
+
+    beforeEach(() => {
+      queries.length = 0;
+      rows = [];
+      readFails = null;
+      h.gitCalls = [];
+      h.lsFilesFails = false;
+    });
+
+    it('selects a files rule through a path the description names, while the change is still empty', async () => {
+      await emptyTree();
+      task({ description: 'Replace the inline svg in `templates/node.tpl.php`.' });
+      const out = await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+      expect(out.entries.map((e) => e.why)).toStrictEqual([
+        { scope: 'files', glob: '**/*.tpl.php', via: 'named' },
+      ]);
+      expect('filesRulesUnmatched' in out).toBe(false);
+      expect(queries).toHaveLength(1);
+      expect(lsFiles()).toEqual([['ls-files', '-z']]);
+    });
+
+    it('reads the title and the spec as well as the description', async () => {
+      await emptyTree();
+      task({
+        title: 'Tidy docs/old.md',
+        description: 'Nothing here.',
+        spec: 'Then `src/keep.php`.',
+      });
+      const rules = [files(['**/*.md']), files(['**/*.php']), files(['**/*.twig'])];
+      const out = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(out.entries.map((e) => JSON.stringify(e.why)).sort()).toEqual([
+        JSON.stringify({ scope: 'files', glob: '**/*.md', via: 'named' }),
+        JSON.stringify({ scope: 'files', glob: '**/*.php', via: 'named' }),
+      ]);
+      expect(out.filesRulesUnmatched).toBe(1);
+    });
+
+    it('leaves the marker off a rule a written file matched, though the names are read all the same', async () => {
+      h.tree = await repo();
+      h.setup = { output: { baseBranch: 'main' } };
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const out = await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+      expect(out.entries.map((e) => e.why)).toStrictEqual([
+        { scope: 'files', glob: '**/*.tpl.php' },
+      ]);
+      expect(queries).toHaveLength(1);
+    });
+
+    it('resolves a path to the one tracked file it ends, so an anchored glob meets it and css/** does not', async () => {
+      await emptyTree('sites/all/modules/custom/m/css/m.css');
+      task({ description: 'Restyle css/m.css.' });
+      const anchored = titled('Anchored', ['sites/all/modules/custom/**/*.css']);
+      const rooted = titled('Rooted', ['css/**']);
+      const out = await selectNamed({ mode: 'write' }, kb({ rules: [anchored, rooted] }));
+      expect(out.entries.map((e) => e.title)).toEqual(['Anchored']);
+      expect(out.filesRulesUnmatched).toBe(1);
+    });
+
+    it('keeps as written a path two tracked files end, and one no tracked file ends', async () => {
+      await emptyTree('a/css/m.css', 'b/css/m.css');
+      task({ description: 'Restyle css/m.css and add includes/new.inc.' });
+      const rules = [
+        titled('Rooted', ['css/**']),
+        titled('New', ['includes/*.inc']),
+        titled('Resolved', ['a/**/*.css']),
+      ];
+      const out = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(out.entries.map((e) => e.title).sort()).toEqual(['New', 'Rooted']);
+    });
+
+    it('reads nothing for a review, which is scoped by the change it checks', async () => {
+      await emptyTree();
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const out = await selectNamed({ mode: 'review' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+      expect(out.entries).toEqual([]);
+      expect(out.filesRulesUnmatched).toBe(1);
+      expect(queries).toHaveLength(0);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it.each([[[]], [['src/other.php']]])(
+      'reads nothing for a DAG coder, whose estimate is %j',
+      async (estimatedFiles) => {
+        await emptyTree();
+        task({ description: 'Edit templates/node.tpl.php.' });
+        const out = await selectNamed(
+          { mode: 'write', estimatedFiles },
+          kb({ rules: [files(['**/*.tpl.php'])] }),
+        );
+        expect(out.entries).toEqual([]);
+        expect(out.filesRulesUnmatched).toBe(1);
+        expect(queries).toHaveLength(0);
+        expect(lsFiles()).toHaveLength(0);
+      },
+    );
+
+    it('reads nothing when no files rule is enforced', async () => {
+      await emptyTree();
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const out = await selectNamed({ mode: 'write' }, kb({ rules: [rule()] }));
+      expect(out.entries).toHaveLength(1);
+      expect(queries).toHaveLength(0);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it('reads nothing when the change could not be read, and shows the rule unscoped as it always did', async () => {
+      h.tree = null;
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const out = await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+      expect(out.entries.map((e) => e.why)).toStrictEqual([{ scope: 'files', glob: null }]);
+      expect(queries).toHaveLength(0);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it('reads nothing when the switch is off or the store could not be read', async () => {
+      await emptyTree();
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const rules = [files(['**/*.tpl.php'])];
+      await selectNamed({ mode: 'write' }, kb({ rules, status: 'disabled' as const }));
+      await selectNamed(
+        { mode: 'write' },
+        kb({ rules, status: 'unavailable' as const, errorClass: 'timeout' as const }),
+      );
+      expect(queries).toHaveLength(0);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it('runs no git when the text names nothing, or the task has no row', async () => {
+      await emptyTree();
+      const rules = [files(['**/*.tpl.php'])];
+      task({ description: 'Make the badge look right.' });
+      const prose = await selectNamed({ mode: 'write' }, kb({ rules }));
+      rows = [];
+      const none = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(prose.entries).toEqual([]);
+      expect(none).toStrictEqual(prose);
+      expect(queries).toHaveLength(2);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it('takes a failed read of the task for no names, and fails no dispatch', async () => {
+      await emptyTree();
+      const rules = [files(['**/*.tpl.php'])];
+      task({ description: 'Make the badge look right.' });
+      const without = await selectNamed({ mode: 'write' }, kb({ rules }));
+      readFails = new Error('relation "tasks" does not exist');
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const failed = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(failed).toStrictEqual(without);
+      expect(lsFiles()).toHaveLength(0);
+    });
+
+    it('takes a failed git ls-files for no names, and fails no dispatch', async () => {
+      await emptyTree();
+      const rules = [files(['**/*.tpl.php'])];
+      task({ description: 'Make the badge look right.' });
+      const without = await selectNamed({ mode: 'write' }, kb({ rules }));
+      h.lsFilesFails = true;
+      task({ description: 'Edit templates/node.tpl.php.' });
+      const failed = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(failed).toStrictEqual(without);
+      expect(lsFiles()).toEqual([['ls-files', '-z']]);
+    });
+
+    it('asks for the freshest spec: the highest round, then 05a over 05 over 04', async () => {
+      await emptyTree();
+      task({ description: 'Make the badge look right.' });
+      await selectNamed({ mode: 'write' }, kb({ rules: [files(['**/*.css'])] }));
+      const { sql: text, params } = new PgDialect().sqlToQuery(queries[0]!);
+      expect(text.replace(/\s+/g, ' ')).toContain(
+        'order by "task_steps"."round" desc, case "task_steps"."step_id" when $4 then 3 when $5 then 2 else 1 end desc limit 1',
+      );
+      expect(params).toEqual([
+        '04-phase-0b-pre-planning',
+        '05-phase-0b5-spec-quality',
+        '05a-resolve-spec-warnings',
+        '05a-resolve-spec-warnings',
+        '05-phase-0b5-spec-quality',
+        'task-1',
+      ]);
+    });
   });
 });
 

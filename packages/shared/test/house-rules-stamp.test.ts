@@ -46,6 +46,56 @@ describe('parseHouseRulesStamp', () => {
     expect(parseHouseRulesStamp(JSON.parse(JSON.stringify(FULL)))).toEqual(FULL);
   });
 
+  it('gives back a stamp written before the via marker existed, with no via key added', () => {
+    expect(parseHouseRulesStamp(FULL)).toStrictEqual(FULL);
+    expect(parseHouseRulesStamp(JSON.parse(JSON.stringify(FULL)))).toStrictEqual(FULL);
+  });
+
+  it('keeps the via marker of a rule only a named path selected', () => {
+    const named: HouseRulesStamp = {
+      ...FULL,
+      entries: [
+        { ...FULL.entries[1]!, why: { scope: 'files', glob: '**/*.css', via: 'named' } },
+        FULL.entries[2]!,
+      ],
+    };
+    expect(parseHouseRulesStamp(named)).toStrictEqual(named);
+    expect(parseHouseRulesStamp(JSON.parse(JSON.stringify(named)))).toStrictEqual(named);
+  });
+
+  it.each([['similar'], [42], [null], [['named']], [{}], [true]])(
+    'drops the via %j alone and keeps the rest of the stamp',
+    (via) => {
+      const stored = {
+        ...FULL,
+        filesRulesUnmatched: 2,
+        entries: FULL.entries.map((e) =>
+          e.why.scope === 'files' ? { ...e, why: { ...e.why, via } } : e,
+        ),
+      };
+      const parsed = parseHouseRulesStamp(stored);
+      expect(parsed).toEqual({ ...FULL, filesRulesUnmatched: 2 });
+      expect(JSON.stringify(parsed)).toBe(JSON.stringify({ ...FULL, filesRulesUnmatched: 2 }));
+    },
+  );
+
+  it('stores the via marker in the column type as well', () => {
+    // Checked by `pnpm typecheck`: the column's own type has to name the key too.
+    const column: StoredStamp = {
+      mode: 'write',
+      entries: [
+        {
+          id: ID_B,
+          hash: HASH,
+          title: 'Templates stay thin',
+          why: { scope: 'files', glob: '**/*.css', via: 'named' },
+        },
+      ],
+      omitted: [],
+    };
+    expect(parseHouseRulesStamp(column)).toStrictEqual(column);
+  });
+
   it('reads a review stamp that carries no rule and says why', () => {
     const unavailable: HouseRulesStamp = {
       mode: 'review',
