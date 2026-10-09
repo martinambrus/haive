@@ -944,6 +944,7 @@ function makeDagMergeWaitDb(opts: {
     innerIteration: number;
     retryContext: unknown;
     reviewerVerdict: unknown;
+    filesModified: string[];
   }>;
   /** The dag_agent_runs rows a select of that table returns. */
   agentRuns?: unknown[];
@@ -2786,6 +2787,18 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           errorMessage: expect.stringContaining(OUTPUT_TRUNCATION_HEADLINE),
         }),
       ]);
+    });
+
+    it('keeps the files an earlier coder recorded when a coder fails with no result', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        { ...killedCoder, supersededAt: null, exitCode: 1, errorMessage: 'the agent gave up' },
+        { issue: { infraRetries: 0, filesModified: ['src/cache.ts'] } },
+      );
+      const failed = issueUpdates.find(
+        (u) => (u as { outcome?: string }).outcome === 'failed_unrecoverable',
+      );
+      expect(failed).toMatchObject({ filesModified: ['src/cache.ts'] });
     });
 
     describe('a fix coder the advisor started (it has an agent-run row)', () => {

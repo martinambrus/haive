@@ -2741,7 +2741,8 @@ export async function resolveDagPhase(
           .update(schema.taskDagIssues)
           .set({
             outcome: result.outcome,
-            filesModified: result.filesModified,
+            // A coder that left no result reported no files; the worktree still holds earlier edits.
+            filesModified: result.parsed ? result.filesModified : (issue.filesModified ?? []),
             debtItems: result.debtItems,
             concerns: result.concerns,
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),
