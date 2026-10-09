@@ -549,7 +549,6 @@ function keepOrderingOps(ops: unknown[]): { ops: unknown[]; discarded: number } 
         continue;
       }
       kept.push({ op: 'upsert', nodeRef: op.nodeRef, ordinal: op.ordinal });
-      if (Object.keys(op).length > 3) discarded++;
       continue;
     }
     if ((op?.op === 'link' || op?.op === 'unlink') && op.kind === 'depends_on') {

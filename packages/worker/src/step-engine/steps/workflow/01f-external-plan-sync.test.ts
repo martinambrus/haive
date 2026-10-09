@@ -1,13 +1,35 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { applyPlanPatch } from '@haive/shared/plan';
+import {
+  applyPlanPatch,
+  findPlanRoot,
+  loadPlanSkeletons,
+  PlanPatchError,
+  renderPlanMarkdown,
+  renderPlanMarkdownFrom,
+} from '@haive/shared/plan';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
+import { writePlanMirror } from '../../../plan/mirror.js';
 import { externalPlanSyncStep, type ExternalPlanSyncDetect } from './01f-external-plan-sync.js';
+import { resolveExternalDrift } from './_external-drift.js';
 
 vi.mock('@haive/shared/plan', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/plan')>();
-  return { ...actual, applyPlanPatch: vi.fn() };
+  return {
+    ...actual,
+    applyPlanPatch: vi.fn(),
+    findPlanRoot: vi.fn(),
+    loadPlanSkeletons: vi.fn(),
+    renderPlanMarkdown: vi.fn(),
+  };
 });
+vi.mock('./_external-drift.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./_external-drift.js')>();
+  return { ...actual, resolveExternalDrift: vi.fn() };
+});
+vi.mock('../../../plan/code-link-staleness.js', () => ({
+  markPlanCodeLinksStaleForPaths: vi.fn(async () => ({ marked: 0 })),
+}));
 vi.mock('../../../plan/mirror.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../plan/mirror.js')>();
   return { ...actual, writePlanMirror: vi.fn(async () => {}) };
@@ -27,6 +49,7 @@ function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
         },
       }),
     }),
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   } as unknown as Database;
   return { db, stamps };
 }
@@ -238,5 +261,144 @@ describe('apply — approved changes', () => {
       'Applied 1 of 1 proposed plan change(s) from 1 external commit(s): 0 node(s) created, ' +
         '1 updated, 0 code link(s) written.',
     );
+  });
+});
+
+describe('node versions', () => {
+  const node = (id: string, title: string, version: number) =>
+    ({
+      id,
+      parentId: null,
+      path: '0001',
+      ordinal: 0,
+      title,
+      kind: 'component',
+      status: 'planned',
+      taskable: false,
+      version,
+      createdBy: 'user',
+      sourceTaskId: null,
+      lastReviewedAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      body: null,
+    }) as never;
+
+  it('shows the agent each node version in the plan', async () => {
+    const nodes = [node(NODE, 'Billing', 3)];
+    vi.mocked(resolveExternalDrift).mockResolvedValueOnce({
+      ...detect(),
+      worktreePath: '/tmp',
+    } as never);
+    vi.mocked(findPlanRoot).mockResolvedValueOnce({ id: NODE } as never);
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce(nodes);
+    vi.mocked(renderPlanMarkdown).mockImplementationOnce(async (_db, _repo, opts) =>
+      renderPlanMarkdownFrom(nodes, [], opts),
+    );
+    const d = await externalPlanSyncStep.detect!(ctx(fakeDb().db));
+    const prompt = externalPlanSyncStep.llm!.buildPrompt({ detected: d } as never) as string;
+    expect(prompt).toContain('`version 3`');
+  });
+
+  it('reports a conflict as a done step with nothing applied, and leaves the range unstamped', async () => {
+    vi.mocked(applyPlanPatch).mockRejectedValueOnce(
+      new PlanPatchError('conflict', 'version mismatch', 0),
+    );
+    vi.mocked(writePlanMirror).mockClear();
+    const { db, stamps } = fakeDb();
+    const out = await apply(detect(), { llmOutput: OPS, formValues: { applyOps: ['0'] } }, db);
+    expect(out.decision).toBe('conflict');
+    expect(out.applied).toBe(0);
+    expect(out.summary).toBe('The plan changed since this proposal; nothing applied.');
+    expect(writePlanMirror).not.toHaveBeenCalled();
+    expect(stamps).toHaveLength(0);
+  });
+
+  it('still throws any other patch error', async () => {
+    vi.mocked(applyPlanPatch).mockRejectedValueOnce(new PlanPatchError('invalid', 'bad', 0));
+    await expect(
+      apply(detect(), { llmOutput: OPS, formValues: { applyOps: ['0'] } }, fakeDb().db),
+    ).rejects.toThrow('bad');
+  });
+});
+
+describe('agent ops are versioned', () => {
+  const sent = () => vi.mocked(applyPlanPatch).mock.lastCall;
+  const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+    created: [],
+    updated: [],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: {},
+    dropped: [],
+    strippedCodeLinks: [],
+    ...over,
+  });
+
+  it('has the applier drop a field-writing op that carries no expectedVersion', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({}));
+    await apply(detect(), { llmOutput: OPS, formValues: { applyOps: ['0'] } }, fakeDb().db);
+    expect(sent()?.[2]).toMatchObject({ origin: 'user', requireExpectedVersion: true });
+  });
+
+  it('reports an op the applier dropped for want of a version', async () => {
+    const unversioned = `upsert dropped: plan node ${NODE} was changed without its expectedVersion`;
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ dropped: [unversioned] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: OPS, formValues: { applyOps: ['0'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(0);
+    expect(out.summary).toContain(unversioned);
+  });
+
+  const SAME_NODE = {
+    ops: [
+      { op: 'upsert', nodeRef: NODE, status: 'done', expectedVersion: 3 },
+      {
+        op: 'upsert',
+        nodeRef: `node:${NODE}`,
+        codeLinks: [{ repoPath: 'src/a.ts' }],
+        expectedVersion: 3,
+      },
+    ],
+  };
+
+  it('sends the chosen ops to the applier unmerged and in order', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect((sent()?.[1] as { ops: unknown[] }).ops).toEqual(SAME_NODE.ops);
+    expect(out.applied).toBe(2);
+  });
+
+  it('counts only the ops the applier did not drop', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(
+      outcome({ dropped: [`upsert dropped: plan node '${NODE}' not found`] }),
+    );
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(1);
+  });
+
+  it('leaves a versioned op for a node that changed since detect as a conflict', async () => {
+    vi.mocked(applyPlanPatch).mockRejectedValueOnce(
+      new PlanPatchError('conflict', 'expected version 3, found 4', 0),
+    );
+    const out = await apply(
+      detect(),
+      { llmOutput: SAME_NODE, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect(out.decision).toBe('conflict');
   });
 });

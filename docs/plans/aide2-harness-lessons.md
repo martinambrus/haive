@@ -196,7 +196,9 @@ Where the two differ, the paper's numbers supersede the blog's: reward hacking f
   (`apply-patch.ts`) returns early when `expectedVersion` is absent, so an agent's edit to any other
   existing node runs without the optimistic-concurrency check and can overwrite a person's concurrent
   edit. 03-plan-sequence is unaffected: `keepOrderingOps` keeps only `nodeRef` and `ordinal`. → P4, P5,
-  D9. Since #374 (2026-10-01) an agent's change to an existing node must carry its version.
+  D9. Since #374 (2026-10-01) an agent's change to an existing node must carry its version. Since #452 11f and
+  01f, which apply as the developer without that refusal, show each node's version and report a
+  conflict instead of failing the step.
 - **F15. `03-plan-sequence` still shows its agents the edges they are asked to judge (pre-existing,
   found while answering a review of P1).** `omitLinks` exists so the agent is "a second opinion" rather
   than "an echo" of the recorded `depends_on` edges (its comment in `render.ts`), but it drops only the
@@ -455,16 +457,17 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D4.** A cheaper provider for narrow seats as a product default, or user configuration only.
 - **D5.** F11: collapse repeated lines in test output before the tail cut (structural, with no banner
   matching), parked until more 08b runs exist.
-- **D9.** F14 beyond P4 and P5: 01-plan-build's and 02-plan-coverage's neighbourhood nodes carry no
-  version either. Show versions wherever a writer may patch, deciding whether the committed
-  `.haive-data/plan.md` mirror (which shares `renderPlanMarkdown`) shows them too, or refuse an agent
-  update that omits `expectedVersion`. Not from the paper; pre-existing.
 - **D11.** P4 and P5: how a bounded plan writer reaches a node its index omits. A versioned snapshot
   written for each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls
   that answers from the dispatch's read. One choice serves plan chat, 11f and 01f.
 
 ## Decided
 
+- **D9.** Versions where a writer may patch (2026-10-08, #452). The refusal of an unversioned agent
+  update shipped in #374; the committed `.haive-data/plan.md` mirror stays version-free; 11f and 01f
+  now show versions and report a conflict. 01-plan-build's and 02-plan-coverage's neighbourhood
+  nodes stay version-free on purpose: within one wave each sibling's own agent bumps its version, so
+  a sibling version shown at dispatch goes stale and would cost the whole reply.
 - **First wave (the user, 2026-10-02).** P0, P1's parity arm, P2, F17 and F18; F17 before P2 and F18
   after it. One PR each, through review and CI. P0 is checked live on the dev stack after it merges:
   the migration, one worker restart with a temporary uncommitted edit and its revert, and one local

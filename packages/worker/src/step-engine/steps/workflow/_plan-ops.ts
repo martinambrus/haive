@@ -1,4 +1,10 @@
-import { isPlanNodeId, stripNodeRefPrefix } from '@haive/shared/plan';
+import type { Database } from '@haive/database';
+import {
+  isPlanNodeId,
+  loadPlanSkeletons,
+  renderPlanMarkdown,
+  stripNodeRefPrefix,
+} from '@haive/shared/plan';
 import { parsePlanPatch } from '../plan/_plan-prompt.js';
 
 /**
@@ -14,6 +20,23 @@ import { parsePlanPatch } from '../plan/_plan-prompt.js';
 export const MAX_PROPOSED_OPS = 40;
 
 type ProposedOp = Record<string, unknown>;
+
+/** The plan text the agent reads and the nodes whose versions it is told, from one snapshot:
+ *  read apart, an edit between the two would hand it a version for text it never saw. */
+export async function readPlanSnapshot(db: Database, repositoryId: string) {
+  return db.transaction(
+    async (tx) =>
+      [
+        await renderPlanMarkdown(tx, repositoryId, {
+          titlesOnly: true,
+          maxDepth: 4,
+          withVersions: true,
+        }),
+        await loadPlanSkeletons(tx, repositoryId),
+      ] as const,
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
+}
 
 /** The proposals, however the runner hands them over. */
 export function proposedOps(llmOutput: unknown): ProposedOp[] {
@@ -113,7 +136,7 @@ export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): 
     case 'unlink':
       return `Remove the ${String(op.kind)} link ${name(op.fromRef)} → ${name(op.toRef)}`;
     case 'delete':
-      return `Delete ${name(op.nodeRef)} and everything under it`;
+      return `Delete ${name(op.nodeRef)} (only if nothing is under it)`;
     default:
       // Never a silent empty label: an op nobody can read is one nobody should
       // be able to approve by accident.

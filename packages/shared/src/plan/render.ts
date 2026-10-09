@@ -142,7 +142,7 @@ export function renderPlanMarkdownFrom(
 
 /** Render straight from the database. */
 export async function renderPlanMarkdown(
-  db: Database,
+  db: Pick<Database, 'select'>,
   repositoryId: string,
   opts: RenderPlanOptions = {},
 ): Promise<string> {

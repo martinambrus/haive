@@ -1,10 +1,5 @@
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
-import {
-  applyPlanPatch,
-  findPlanRoot,
-  loadPlanSkeletons,
-  renderPlanMarkdown,
-} from '@haive/shared/plan';
+import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
@@ -16,6 +11,7 @@ import {
   describePlanOp,
   describeStrippedLinks,
   proposedOps,
+  readPlanSnapshot,
 } from './_plan-ops.js';
 import {
   externalCommitBlock,
@@ -65,7 +61,8 @@ export interface ExternalPlanSyncDetect {
 }
 
 export interface ExternalPlanSyncApply {
-  decision: 'applied' | 'declined' | 'nothing_to_review' | 'tracking_started' | 'not_measured';
+  decision:
+    'applied' | 'declined' | 'nothing_to_review' | 'tracking_started' | 'not_measured' | 'conflict';
   commitsReviewed: number;
   reviewedThrough: string | null;
   proposed: number;
@@ -201,10 +198,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       drift.changedPaths,
     );
 
-    const [planMarkdown, nodes] = await Promise.all([
-      renderPlanMarkdown(ctx.db, drift.repositoryId, { titlesOnly: true, maxDepth: 4 }),
-      loadPlanSkeletons(ctx.db, drift.repositoryId),
-    ]);
+    const [planMarkdown, nodes] = await readPlanSnapshot(ctx.db, drift.repositoryId);
     return {
       ...empty,
       planMarkdown,
@@ -350,19 +344,33 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     // the exact commit the evidence came from. `onUnresolvableRef: 'drop'` because a node
     // can be deleted by a plan chat while the form sits parked, and one stale id must lose
     // its own op rather than the developer's whole approved set.
-    const applied = await applyPlanPatch(
-      ctx.db,
-      { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
-      {
-        repositoryId: d.repositoryId,
-        origin: 'user',
-        sourceTaskId: ctx.taskId,
-        derivedAtCommit: d.branchPoint,
-        onUnresolvableRef: 'drop',
-        // The agent wrote the links, and the form never showed one it could not read.
-        onInvalidCodeLink: 'strip',
-      },
-    );
+    let applied;
+    try {
+      applied = await applyPlanPatch(
+        ctx.db,
+        { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
+        {
+          repositoryId: d.repositoryId,
+          origin: 'user',
+          sourceTaskId: ctx.taskId,
+          derivedAtCommit: d.branchPoint,
+          onUnresolvableRef: 'drop',
+          // The agent wrote the links, and the form never showed one it could not read.
+          onInvalidCodeLink: 'strip',
+          requireExpectedVersion: true,
+        },
+      );
+    } catch (err) {
+      if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
+      // Not stamped: the range stays unreviewed, so the next run proposes against the new plan.
+      return {
+        ...base,
+        decision: 'conflict',
+        commitsReviewed: d.commits.length,
+        proposed: ops.length,
+        summary: 'The plan changed since this proposal; nothing applied.',
+      };
+    }
     if (applied.dropped.length > 0) {
       ctx.logger.warn({ dropped: applied.dropped }, 'external plan sync dropped stale ops');
     }
