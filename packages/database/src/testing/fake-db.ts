@@ -40,7 +40,7 @@ function canonicalJson(value: unknown): string {
 
 type Orderable = number | bigint | string | null;
 
-/** Postgres's default order: NULL is the largest, text compares by code point (C collation). */
+/** Postgres's default order: NULL is the largest, and text compares as `compareText` says. */
 function orderable(v: unknown): Orderable {
   if (v == null) return null;
   if (v instanceof Date) return v.getTime();
@@ -49,11 +49,31 @@ function orderable(v: unknown): Orderable {
   throw new Error('fake db: unsupported orderBy value');
 }
 
+const textCollator = new Intl.Collator('en-US');
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+
+// en_US.utf8, the deployed database's collation: letters and digits decide (case and accents after
+// them), and any other character only breaks a tie, ranking below every letter and digit.
+function compareText(a: string, b: string): number {
+  const significant = (s: string) => [...s].filter((c) => LETTER_OR_DIGIT.test(c)).join('');
+  const bySignificant = textCollator.compare(significant(a), significant(b));
+  if (bySignificant !== 0) return bySignificant;
+  const x = [...a];
+  const y = [...b];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const p = x[i] as string;
+    const q = y[i] as string;
+    if (p === q) continue;
+    const pSignificant = LETTER_OR_DIGIT.test(p);
+    if (pSignificant !== LETTER_OR_DIGIT.test(q)) return pSignificant ? 1 : -1;
+    return (p.codePointAt(0) ?? 0) - (q.codePointAt(0) ?? 0);
+  }
+  return x.length - y.length;
+}
+
 function compareOrderable(a: Orderable, b: Orderable): number {
   if (a === null || b === null) return Number(a === null) - Number(b === null);
-  if (typeof a === 'string' && typeof b === 'string') {
-    return Buffer.compare(Buffer.from(a), Buffer.from(b));
-  }
+  if (typeof a === 'string' && typeof b === 'string') return compareText(a, b);
   if (typeof a === 'string' || typeof b === 'string') {
     throw new Error('fake db: unsupported orderBy value');
   }

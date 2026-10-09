@@ -221,15 +221,31 @@ describe('the fake database', () => {
     expect(await names(desc(t.sizeBytes), asc(t.createdAt))).toEqual(['b.md', 'a.md', 'small.md']);
   });
 
-  it('orders by a text key by code point, as the C collation does', async () => {
+  it('orders text the way the deployed en_US.utf8 collation does', async () => {
     const { fake, row } = setup();
-    for (const name of ['é.md', '😀.md', 'b.md', '～.md', 'B.md', 'a.md']) {
-      fake.insert(t, row(name));
-    }
+    // The order Postgres 18 returns for these names under en_US.utf8.
+    const ascending = [
+      '10.md',
+      '9.md',
+      'a b.md',
+      'a-b.md',
+      'ab.md',
+      'a.md',
+      'b.md',
+      'B.md',
+      'e.md',
+      'é.md',
+      'file.md',
+      'File.md',
+      '～.md',
+      '😀.md',
+      '_x.md',
+      'x.md',
+    ];
+    for (const name of [...ascending].reverse()) fake.insert(t, row(name));
     const names = async (order: unknown) =>
       (await fake.db.select().from(t).orderBy(order)).map((r) => r.filename);
 
-    const ascending = ['B.md', 'a.md', 'b.md', 'é.md', '～.md', '😀.md'];
     expect(await names(asc(t.filename))).toEqual(ascending);
     expect(await names(desc(t.filename))).toEqual([...ascending].reverse());
   });
