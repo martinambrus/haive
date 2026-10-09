@@ -3889,7 +3889,7 @@ async function retryMiningAgents(
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
       if (isOutputTruncationMessage(p.errorMessage?.trim())) {
         truncatedInvocationIds.add(p.id);
-        if (p.prompt.trimEnd().endsWith(TRUNCATION_RETRY_NOTICE)) retriedTruncationIds.add(p.id);
+        if (p.prompt.includes(TRUNCATION_RETRY_NOTICE)) retriedTruncationIds.add(p.id);
       }
     }
   }

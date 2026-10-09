@@ -610,6 +610,7 @@ async function startConflictFix(
   m: MergeArgs,
   state: LevelMergeState,
   target: DagIssueRow,
+  afterTruncation = false,
 ): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
   // No fixer is in flight here (the ingest runs first, and a step's advances run one at a time),
   // so a merge still open is an earlier attempt's, and a fixer must start from a fresh one.
@@ -643,13 +644,18 @@ async function startConflictFix(
   );
   // `onInserted` runs after the insert and before the enqueue, as spawnReviewAgent's `claim`
   // does, so no run can start that mergeState does not name.
-  const dispatched = await dispatchMergeFixAgent(m, target, async (invId) => {
-    state.activeConflict = target.issueKey;
-    state.fixInvocationId = invId;
-    state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
-    state.fixBaseline = fixBaseline;
-    await saveMergeState(m.db, m.level.id, state);
-  });
+  const dispatched = await dispatchMergeFixAgent(
+    m,
+    target,
+    async (invId) => {
+      state.activeConflict = target.issueKey;
+      state.fixInvocationId = invId;
+      state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+      state.fixBaseline = fixBaseline;
+      await saveMergeState(m.db, m.level.id, state);
+    },
+    afterTruncation,
+  );
   if (dispatched.kind === 'already_live') {
     // A concurrent advance already dispatched the fix agent for this step (the
     // one-live-per-step index rejected ours). The winner owns the in-progress merge and
@@ -689,11 +695,13 @@ async function dispatchMergeFixAgent(
   m: MergeArgs,
   issue: DagIssueRow,
   onInserted: (invocationId: string) => Promise<void>,
+  afterTruncation = false,
 ): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
-  const prompt = await augmentPromptWithTerseness(
+  const augmented = await augmentPromptWithTerseness(
     buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
   );
+  const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
@@ -806,9 +814,14 @@ async function runLevelMerge(
       return haltMerge(m, `Merge halted on ${branch}. ${fixerIndexHeldNote(leftovers.indexHeld)}`);
     }
     let unaborted: Extract<MergeAbort, { ok: false }> | null = null;
-    if (runNeverAnswered(inv)) {
-      // A fixer that never answered may have left the merge half-resolved, so its
-      // edits are discarded and it is dispatched again without spending an attempt.
+    const fixerCut =
+      !runNeverAnswered(inv) &&
+      classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
+        'truncated' &&
+      truncationRetryable(inv);
+    if (runNeverAnswered(inv) || fixerCut) {
+      // A fixer that never answered, or was cut at the output limit, may have left the merge
+      // half-resolved, so its edits are discarded and it is dispatched again without spending an attempt.
       const aborted = await abortMerge(integration.path);
       if (!aborted.ok) unaborted = aborted;
       if (target) {
@@ -842,6 +855,7 @@ async function runLevelMerge(
     await clearAiFix(db, m.current.id);
     if (unaborted) return haltUnaborted(m, branch, unaborted);
     m.current = await setStepStatus(db, m.current.id, { status: 'running' });
+    if (fixerCut && target) return startConflictFix(m, state, target, true);
     // fall through to the merge pass + halt/ok decision
   } else if (m.current.aiFixContext) {
     // 2. retry_ai (manual) — dispatch a fix agent for the first held conflict.
@@ -1059,9 +1073,10 @@ const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> 
   issue_advisor: 'Advisor',
 };
 
-/** A run cut at the output limit is retried once: not when its prompt already carried the notice. */
+/** A run cut at the output limit is retried once: not when its prompt already carried the notice
+ *  anywhere (dispatch can wrap a prompt, so not only at its end). */
 function truncationRetryable(inv: { prompt?: string | null }): boolean {
-  return typeof inv.prompt === 'string' && !inv.prompt.trimEnd().endsWith(TRUNCATION_RETRY_NOTICE);
+  return typeof inv.prompt === 'string' && !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
 }
 
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue

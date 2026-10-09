@@ -1275,6 +1275,144 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     }
   });
 
+  describe('a fixer that ended, by autoResolve', () => {
+    const ended = (run: { exitCode: number; errorMessage: string | null; prompt?: string }) => ({
+      id: 'inv1',
+      startedAt: new Date(),
+      endedAt: new Date(),
+      supersededAt: null,
+      ...run,
+    });
+    const cut = {
+      exitCode: 1,
+      errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
+    };
+    async function ingest(
+      invocation: ReturnType<typeof ended>,
+      autoResolveConflicts: boolean,
+      edit: string,
+      checkpointAfterFirstRead = false,
+    ) {
+      const integrationDir = await setupConflictedIntegration();
+      const h = makeDagMergeWaitDb({
+        invocation,
+        integrationDir,
+        autoResolveConflicts,
+        conflictRetries: { 'ISSUE-1': 1 },
+        checkpointAfterFirstRead,
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(cliPlan);
+      await writeFile(path.join(integrationDir, 'base.txt'), edit, 'utf8');
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        mergeCtx(integrationDir),
+        dispatchingParams as never,
+      );
+      const state = h.getLevelMergeState() as {
+        fixInvocationId: string | null;
+        conflictRetries: Record<string, number>;
+      };
+      return { h, integrationDir, result, state };
+    }
+
+    it.each([true, false])(
+      'cut at the output limit (autoResolve %s): its edit is discarded, no attempt is charged, one smaller fixer is sent',
+      async (auto) => {
+        const { h, integrationDir, result, state } = await ingest(
+          ended({ ...cut, prompt: 'resolve the merge' }),
+          auto,
+          'half-resolved\n',
+        );
+        try {
+          expect(result.resolved).toBe(false);
+          if (!result.resolved) expect(result.result.status).toBe('waiting_cli');
+          expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(
+            0,
+          );
+          expect(await readFile(path.join(integrationDir, 'base.txt'), 'utf8')).toContain(
+            '<<<<<<<',
+          );
+          expect(h.getIssueMergeStatus()).toBe('conflict');
+          expect(state.conflictRetries['ISSUE-1']).toBe(1);
+          expect(state.fixInvocationId).toBe('fix-inv-1');
+          expect(h.invocationInserts).toHaveLength(1);
+          expect((h.invocationInserts[0]!.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(
+            true,
+          );
+        } finally {
+          await rm(integrationDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('cut again after the notice, manual: handled as today, aborted and halted with no new fixer', async () => {
+      const { h, integrationDir, result, state } = await ingest(
+        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        false,
+        'half-resolved\n',
+      );
+      try {
+        expect(result.resolved).toBe(false);
+        if (!result.resolved) expect(result.result.status).toBe('failed');
+        expect(h.invocationInserts).toHaveLength(0);
+        expect(
+          await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']),
+        ).not.toBe(0);
+        expect(state.conflictRetries['ISSUE-1']).toBe(1);
+        expect(state.fixInvocationId).toBeNull();
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('cut again after the notice, auto-resolve: the budget decides, and the next fixer carries no notice', async () => {
+      const { h, integrationDir, state } = await ingest(
+        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(state.conflictRetries['ISSUE-1']).toBe(2);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('finished cleanly: the merge is committed and nothing is dispatched', async () => {
+      const { h, integrationDir } = await ingest(
+        ended({ exitCode: 0, errorMessage: null, prompt: 'resolve the merge' }),
+        true,
+        'resolved\n',
+        true,
+      );
+      try {
+        expect(h.getIssueMergeStatus()).toBe('resolved');
+        expect(h.invocationInserts).toHaveLength(0);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('never answered: refunded and sent again with the same prompt, no notice', async () => {
+      const { h, integrationDir, state } = await ingest(
+        { id: 'inv1', startedAt: null, endedAt: null, supersededAt: new Date() } as never,
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(state.conflictRetries['ISSUE-1']).toBe(1);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('auto-resolve dispatch saves fixInvocationId before the enqueue that can fail', async () => {
     const integrationDir = await setupConflictedIntegration();
     try {
@@ -1891,6 +2029,15 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
     expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
     expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('reviewer');
     expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
+  });
+
+  it('reads a notice the dispatch wrapped with more text as already retried', async () => {
+    const { inserts } = await ingest(
+      truncatedReviewer(
+        `review the issue\n\n${TRUNCATION_RETRY_NOTICE}\n\n## Boundary added at dispatch`,
+      ),
+    );
+    expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
   });
 
   it('fails the issue when the reviewer prompt already carried the notice', async () => {
