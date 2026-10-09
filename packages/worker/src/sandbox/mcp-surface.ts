@@ -8,6 +8,7 @@ import {
   logger,
 } from '@haive/shared';
 import { hasLeadingHaiveBlock } from '../repo/ddev-generated-boundary.js';
+import { isSingleLine, survivesFence } from '../step-engine/steps/_untrusted-repo.js';
 import { emittedDefaultServerNames } from './mcp-config.js';
 import { signRagToken } from '@haive/shared/rag';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -384,8 +385,15 @@ export function mcpSurfacePrompt(
         }),
       )
     : [];
-  if (userNames.length > 0) {
-    wired.push(`- Project-configured servers: ${userNames.map((n) => `\`${n}\``).join(', ')}.`);
+  // A name is repository text: one that is not a single line, or that the fence would rewrite, is only counted.
+  const listedNames = userNames.filter((n) => isSingleLine(n) && survivesFence(n));
+  if (listedNames.length > 0) {
+    wired.push(`- Project-configured servers: ${listedNames.map((n) => `\`${n}\``).join(', ')}.`);
+  }
+  if (listedNames.length < userNames.length) {
+    wired.push(
+      `- ${userNames.length - listedNames.length} more project-configured server(s) whose names cannot be listed safely.`,
+    );
   }
 
   if (wired.length > 0) lines.push('MCP tools wired into this run:', ...wired);
