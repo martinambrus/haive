@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   defaultCliSpawner,
@@ -235,6 +236,30 @@ describe('runSequentialSubAgent', () => {
     expect(result.collected).toEqual({ scan: { found: 1 }, labels: { labels: ['x'] } });
     expect(result.synthesis).toBe('All good');
     expect(result.tokenUsage).toEqual({ inputTokens: 15, outputTokens: 3, totalTokens: 18 });
+  });
+});
+
+describe('runSequentialSubAgent on a claude-stream-json sub-step cut at the output limit', () => {
+  const grokFixture = readFileSync(
+    new URL('./fixtures/truncation/grok-max-tokens.ndjson', import.meta.url),
+    'utf8',
+  );
+  const buildStream = (prompt: string): CliCommandSpec => ({
+    command: 'grok',
+    args: ['-p', prompt],
+    env: {},
+    outputFormat: 'claude-stream-json',
+  });
+
+  it('reports the truncation headline naming the sub-step', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: 'found 3\n' },
+      label: { stdout: grokFixture, exitCode: 1 },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildStream, spawner);
+    const message = describeFailedSubAgent(result);
+    expect(isOutputTruncationMessage(message)).toBe(true);
+    expect(message).toContain('label');
   });
 });
 

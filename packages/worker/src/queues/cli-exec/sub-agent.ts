@@ -10,7 +10,8 @@ import { unobservedToolUsage } from '../../cli-executor/tool-usage.js';
 import { assembleNativePrompt } from '../../sub-agent-emulator/native-mode.js';
 import { type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createSandboxSpawner, executeCliSpec } from './exec-core.js';
-import { buildOutputTruncationMessage } from './failure-class.js';
+import { buildOutputTruncationMessage, isOutputTruncationMessage } from './failure-class.js';
+import { createStreamJsonCollector } from './stream.js';
 import { resolveAppReach } from './app-reach.js';
 import {
   resolveAuthMounts,
@@ -204,6 +205,14 @@ export function describeFailedSubAgent(result: SubAgentRunResult): string {
     return buildOutputTruncationMessage(
       `sub-agent step ${failedEntry.id}, codex turn failed: ${failedEntry.outputLimit}`,
     );
+  }
+  // A Claude-compatible sub-step (amp, grok) reports a cut reply in its result event; only that
+  // event can produce the truncation message, so another format's stdout never matches.
+  const collector = createStreamJsonCollector();
+  collector.onChunk(`${failedEntry.stdout}\n`);
+  const streamReason = collector.getNoResultReason();
+  if (isOutputTruncationMessage(streamReason)) {
+    return `${streamReason} [sub-agent step ${failedEntry.id}]`;
   }
   return `sub-agent step ${failedEntry.id} failed: ${failedEntry.error ?? failedEntry.stderr.slice(0, 500)}`;
 }
