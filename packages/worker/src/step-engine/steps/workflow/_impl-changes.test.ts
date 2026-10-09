@@ -156,6 +156,27 @@ describe('isDocsOnlyChange', () => {
     expect(isDocsOnlyChange(set(['README.md'], true))).toBe(false);
   });
 
+  it('is false when the scan of the dirty worktree failed, even when every listed file is documentation', () => {
+    // The files the scan would have named are unknown, so the rest being documents proves nothing.
+    expect(
+      isDocsOnlyChange({ ...set(['README.md']), scanError: 'fatal: not a git repository' }),
+    ).toBe(false);
+  });
+
+  it('is false for the list a failed scan produced', async () => {
+    const failed = await collectImplementationFiles(
+      ctxWith(['README.md']),
+      '/nonexistent-worktree',
+    );
+    expect(failed.files).toEqual(['README.md']);
+    expect(failed.scanError).toBeTruthy();
+    expect(isDocsOnlyChange(failed)).toBe(false);
+  });
+
+  it('is true when the scan ran and every listed file is documentation', () => {
+    expect(isDocsOnlyChange({ ...set(['README.md']), scanError: null })).toBe(true);
+  });
+
   it('is false for an empty file list', () => {
     expect(isDocsOnlyChange(set([]))).toBe(false);
   });

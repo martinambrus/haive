@@ -277,7 +277,11 @@ function latestValidator(previous: StepLoopPassRecord[]): ValidateApply | null {
 function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
   for (let i = previous.length - 1; i >= 0; i -= 1) {
     const out = previous[i]?.applyOutput as ValidateApply | undefined;
-    if (out?.source === 'fixer') return out.implementationFiles ?? null;
+    if (out?.source === 'fixer') {
+      const collected = out.implementationFiles ?? null;
+      // A failed scan lacks the dirty files, so detect's list stands; an empty one fails the guard.
+      return collected?.scanError && collected.files.length > 0 ? null : collected;
+    }
   }
   return null;
 }

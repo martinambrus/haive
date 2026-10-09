@@ -2136,4 +2136,79 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     };
     expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
   });
+
+  // detect's scan names c.php, which 07 never reported; the fixer's failed scan names only 07's files.
+  async function validateBrokenFixValidate() {
+    const dir = await checkout();
+    await put(dir, 'c.php', 'new\n');
+    const { ctx, detected } = await task(dir);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const fixer = await pass(
+      ctx,
+      { ...detected, worktreePath: '/nonexistent-worktree' },
+      1,
+      [passRecord(0, reply(), first)],
+      FIXER_REPLY,
+    );
+    const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+    return { fixer, prompt, second };
+  }
+
+  it("lists detect's files to the validator after a fixer whose scan failed", async () => {
+    const { fixer, prompt } = await validateBrokenFixValidate();
+    expect(fixer.implementationFiles?.files).toEqual(['a.php', 'b.php']);
+    expect(fixer.implementationFiles?.scanError).toBeTruthy();
+    expect(prompt).toContain('- c.php');
+    expect(prompt).toContain('recorded BEFORE the fix agent edited');
+  });
+
+  it("stores the coverage of detect's list for the validator after a fixer whose scan failed", async () => {
+    const { fixer, second } = await validateBrokenFixValidate();
+    expect(fixer.implementationFiles?.total).toBe(2);
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it("still refuses to build the validator prompt when the fixer's scan failed and left no changed file", () => {
+    const previous = [
+      passRecord(0, '', mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: 'git failed' },
+        }),
+      ),
+    ];
+    expect(() =>
+      validatorPrompt(
+        {
+          sandboxWorktreePath: '/ws',
+          spec: 'spec',
+          implementationFiles: fileSet(2, 2),
+          debtBlock: '',
+          honoredBlock: '',
+          browserTesting: false,
+          docsOnly: false,
+        },
+        previous,
+      ),
+    ).toThrow(
+      /07b-phase-4-validate has no changed files to review: the worktree scan failed \(git: git failed\)/,
+    );
+  });
+
+  it('runs the code protocol when the scan behind a documentation-only list failed', async () => {
+    const dir = await checkout(DOCS);
+    const { ctx, detected } = await task(dir, DOCS);
+    const failed = await collectImplementationFiles(ctx, '/nonexistent-worktree');
+    expect(failed.files).toEqual(DOCS);
+    const prompt = phase4ValidateStep.llm!.buildPrompt!({
+      detected: { ...detected, implementationFiles: failed, docsOnly: isDocsOnlyChange(failed) },
+    } as never);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
+  });
 });
