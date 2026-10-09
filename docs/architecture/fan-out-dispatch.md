@@ -27,7 +27,9 @@ sent nothing still parks while any row is live (`hasLiveMiningAgents`).
 A dispatch that throws part-way fails what it reserved or linked and did not queue
 (`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step, at any
 point (a `selectAgents` that refuses, an enqueue that throws on the second of three agents, a park
-write that fails after a wave), then ends the whole fan-out (`releaseStepAgents`): it supersedes
+write that fails after a wave), then ends the whole fan-out (`releaseStepAgents`) once its own
+terminal write is done, so a Resume finds either agents still live (and refuses) or a step that is
+already failed: it supersedes
 every run the step still has live, which stops itself within seconds instead of spending to its
 timeout, and fails every agent row still `pending` or `running`. Left so, such a row would make the
 api's Resume refuse the step as still running. It is one transaction in a Retry's lock order (runs,

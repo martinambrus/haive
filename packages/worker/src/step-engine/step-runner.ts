@@ -3281,7 +3281,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
-    if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
@@ -3295,6 +3294,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         errorMessage,
         endedAt: new Date(),
       }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+      // After the step's own write, so a Resume never finds the agents ended on a step still running.
+      if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
       if (!finished) return supersededPass(row);
       log.info(
         { stepId: meta.id, taskId, round },
@@ -3315,6 +3316,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage,
       endedAt: new Date(),
     }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+    if (stepDef.agentMining) await releaseStepAgents(db, row.id, errorMessage);
     if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };
   } finally {

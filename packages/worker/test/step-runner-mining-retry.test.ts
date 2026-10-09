@@ -2854,6 +2854,20 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
     ]);
   });
 
+  it('ends the agents only after the step itself reads failed, so a Resume cannot slip between', async () => {
+    const state = freshState([]);
+    await runWithEnqueueFailingAfter(state, 1);
+
+    const stepFailed = state.updates.findIndex(
+      (u) => u.table === 'task_steps' && u.status === 'failed',
+    );
+    const runsEnded = state.updates.findIndex(
+      (u) => u.table === 'cli_invocations' && u.exitCode === 137,
+    );
+    expect(stepFailed).toBeGreaterThan(-1);
+    expect(runsEnded).toBeGreaterThan(stepFailed);
+  });
+
   it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
     const state = freshState([]);
     state.deadlockOnce = true;
