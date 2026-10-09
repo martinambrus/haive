@@ -91,6 +91,8 @@ interface BrowserVerifyDetect {
   /** Spec + changed files for the MCP tester prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
+  /** Where `implementationFiles` came from, so a fix pass collects again; absent on old rows. */
+  workspace?: string;
   /** What the project plan says stands on the components this change touches, and
    *  the tests recorded against them, pre-rendered. Empty on a repo with no plan,
    *  a spec that named no component, or a disabled canvas — the prompt is then
@@ -168,6 +170,8 @@ interface BrowserVerifyApply {
    *  Optional like `appLogin`: only the mcp tester path can set it, and rows written
    *  before this existed have no value. Read it as `=== true`, never as truthy-absent. */
   verificationIncomplete?: boolean;
+  /** The change as the latest fix pass left it: the list the re-test after it is given. */
+  implementationFiles?: ImplementationFileSet;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
   source: 'tester' | 'fixer' | 'skip';
 }
@@ -281,6 +285,13 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
 function accumulatedScreenshots(previous: StepLoopPassRecord[]): ReportedScreenshot[] {
   const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
   return last?.screenshots ?? [];
+}
+
+/** The latest fix pass's collected change; null unless its scan ran, so detect's list stands. */
+function fixerFiles(previous: StepLoopPassRecord[]): ImplementationFileSet | null {
+  const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
+  const collected = last?.source === 'fixer' ? last.implementationFiles : undefined;
+  return collected !== undefined && !collected.scanError ? collected : null;
 }
 
 const SEARCH_LADDER = [
@@ -573,15 +584,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // must deliver, and can Read any section it needs in full. Plus the changed files for
     // the tester prompts.
     const spec = (await resolveSpecView(ctx)).text;
-    const implementationFiles = await collectImplementationFiles(
-      ctx,
-      rt.workspace ?? ctx.workspacePath,
-    );
+    const workspace = rt.workspace ?? ctx.workspacePath;
+    const implementationFiles = await collectImplementationFiles(ctx, workspace);
     // This agent drives the app and reports; the block tells it which neighbouring
     // flows the plan says stand on what changed, so a regression there is looked
     // for rather than stumbled on.
     const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'tester' });
-    const detectedForBringUp = { ...baseDetect, spec, implementationFiles, planImpact };
+    const detectedForBringUp = { ...baseDetect, spec, implementationFiles, workspace, planImpact };
 
     // Bring up the live headed browser for the gate (idempotent; mirrors 09-gate-2).
     // Best-effort — a failure leaves the gate usable, just without the live panel.
@@ -746,7 +755,11 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         const prior = latestTester(previousIterations);
         return buildFixerPrompt(d, prior?.failures ?? []);
       }
-      return buildTesterPrompt(d, appUrl); // re-test after a fix
+      // Re-test after a fix.
+      return buildTesterPrompt(
+        { ...d, implementationFiles: fixerFiles(previousIterations) ?? d.implementationFiles },
+        appUrl,
+      );
     },
   },
 
@@ -1001,6 +1014,11 @@ async function applyMcp(
       round: ctx.round,
       text: fix.notes,
     });
+    // buildIterationPrompt cannot await, so the change the re-test is given is collected here.
+    const implementationFiles =
+      detected.workspace === undefined
+        ? null
+        : await collectImplementationFiles(ctx, detected.workspace);
     return {
       ...base,
       failures: prior?.failures ?? [],
@@ -1011,6 +1029,7 @@ async function applyMcp(
       screenshotsArtifactPath: await manifest(shots),
       passed: false,
       output: '',
+      ...(implementationFiles === null ? {} : { implementationFiles }),
       source: 'fixer',
     };
   }

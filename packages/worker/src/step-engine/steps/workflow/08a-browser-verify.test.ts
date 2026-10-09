@@ -1,4 +1,8 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   resolveBrowserRuntime: vi.fn(),
@@ -576,5 +580,213 @@ describe('08a fixer prompt', () => {
       previousIterations: [testerRecord] as never,
     });
     expect(p).not.toContain('state the root cause');
+  });
+});
+
+// A fix pass can add to the change detect listed, so the re-tester is given the change it left.
+describe('08a re-test after a fix pass', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  /** A task branch on which the agent edited a.js and b.js, the two files 07 reported. */
+  async function checkout(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-browser-retest-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    await writeFile(path.join(dir, 'a.js'), 'a\n');
+    await writeFile(path.join(dir, 'b.js'), 'b\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    await writeFile(path.join(dir, 'a.js'), 'a changed\n');
+    await writeFile(path.join(dir, 'b.js'), 'b changed\n');
+    return dir;
+  }
+
+  const FIXER_REPLY = '```json\n{"fixes_made":["added the icon"],"notes":""}\n```';
+  const record = (iteration: number, applyOutput: unknown) => ({
+    iteration,
+    llmOutput: '',
+    continueRequested: true,
+    applyOutput,
+  });
+  const testerOut = {
+    source: 'tester',
+    failures: [{ description: 'The icon is missing.' }],
+    fixesApplied: [],
+    screenshots: [],
+  };
+  const firstPrompt = (detected: unknown) =>
+    browserVerifyStep.llm!.buildPrompt({ detected, formValues: {} } as never);
+  const retestPrompt = (detected: unknown, previousIterations: unknown[]) =>
+    browserVerifyStep.loop!.buildIterationPrompt!({
+      detected: detected as never,
+      formValues: {},
+      iteration: previousIterations.length,
+      previousIterations: previousIterations as never,
+    });
+
+  beforeEach(async () => {
+    const real = await vi.importActual<typeof import('./_impl-changes.js')>('./_impl-changes.js');
+    m.collectImplementationFiles.mockReset().mockImplementation(real.collectImplementationFiles);
+    m.loadPreviousStepOutput
+      .mockReset()
+      .mockImplementation(async (_db: unknown, _taskId: string, stepId: string) => {
+        if (stepId === '08a-browser-setup') return { output: { mode: 'mcp' } };
+        if (stepId === '07-phase-2-implement') {
+          return { output: { filesTouched: ['a.js', 'b.js'] } };
+        }
+        if (stepId === '01-worktree-setup') return { output: { baseBranch: 'main' } };
+        return null;
+      });
+    m.resolveBrowserRuntime.mockReset();
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.isStepGuidanceEnabled.mockReset().mockResolvedValue(false);
+    m.resolveSpecView
+      .mockReset()
+      .mockResolvedValue({ text: 'the spec', spec: 'the spec', condensed: false });
+    m.loadPlanImpactContext.mockReset().mockResolvedValue(null);
+    m.ensureAppServing.mockReset().mockResolvedValue({ mode: 'none', url: null });
+    m.recordLedgerEntry.mockReset().mockResolvedValue(undefined);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.buildScreenshotManifest.mockReset().mockResolvedValue({ artifactPath: null, count: 0 });
+  });
+
+  /** detect over that branch, from the DDEV workspace or, for an app on the host, the step's own. */
+  async function detectOn(dir: string, runtime: 'ddev' | 'host') {
+    m.resolveBrowserRuntime.mockResolvedValue({
+      browserTesting: true,
+      available: true,
+      skipReason: null,
+      ddevMode: runtime === 'ddev',
+      appRunnerMode: false,
+      appUrl: 'https://app.ddev.site',
+      appBooted: true,
+      envImageTag: null,
+      repoSubpath: 'u/r',
+      workspace: runtime === 'ddev' ? dir : null,
+    });
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 0,
+      repoPath: '/repos/u/r',
+      workspacePath: runtime === 'ddev' ? '/repos/u/r' : dir,
+      db: {},
+      emitProgress: vi.fn(async () => {}),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    } as never;
+    return { ctx, detected: await browserVerifyStep.detect!(ctx) };
+  }
+
+  const fixPass = (
+    ctx: never,
+    detected: unknown,
+    iteration: number,
+    previousIterations: unknown[],
+  ) =>
+    browserVerifyStep.apply(ctx, {
+      detected,
+      formValues: {},
+      iteration,
+      previousIterations,
+      llmOutput: FIXER_REPLY,
+    } as never);
+
+  it.each([
+    ['a DDEV workspace', 'ddev'],
+    ['the workspace the step was given', 'host'],
+  ] as const)(
+    'lists a file the fix pass created in the re-test prompt, beside the files detect took, in %s',
+    async (_name, runtime) => {
+      const dir = await checkout();
+      const { ctx, detected } = await detectOn(dir, runtime);
+      await mkdir(path.join(dir, 'images'));
+      await writeFile(path.join(dir, 'images', 'icon-check.svg'), '<svg/>\n');
+
+      const fixer = await fixPass(ctx, detected, 1, [record(0, testerOut)]);
+      const prompt = retestPrompt(detected, [record(0, testerOut), record(1, fixer)]);
+
+      expect(prompt).toContain('- images/icon-check.svg — new file');
+      expect(prompt).toContain('- a.js');
+      expect(prompt).toContain('- b.js');
+    },
+  );
+
+  it('has the fix pass carry the change on its own output and leave detect output as it was', async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await detectOn(dir, 'ddev');
+    await writeFile(path.join(dir, 'c.js'), 'c\n');
+
+    const fixer = await fixPass(ctx, detected, 1, [record(0, testerOut)]);
+
+    expect(fixer.source).toBe('fixer');
+    expect(fixer.implementationFiles?.files).toEqual(['a.js', 'b.js', 'c.js']);
+    expect(detected.implementationFiles.files).toEqual(['a.js', 'b.js']);
+  });
+
+  it('lists the change the latest fix pass left, not the first one', async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await detectOn(dir, 'ddev');
+    await writeFile(path.join(dir, 'c.js'), 'c\n');
+    const first = await fixPass(ctx, detected, 1, [record(0, testerOut)]);
+    await writeFile(path.join(dir, 'd.js'), 'd\n');
+    const earlier = [record(0, testerOut), record(1, first), record(2, testerOut)];
+    const second = await fixPass(ctx, detected, 3, earlier);
+
+    const prompt = retestPrompt(detected, [...earlier, record(3, second)]);
+
+    expect(prompt).toContain('- c.js');
+    expect(prompt).toContain('- d.js');
+  });
+
+  it.each([
+    ['a fix pass stored before it collected the change', {}],
+    [
+      'a fix pass whose scan failed',
+      {
+        implementationFiles: {
+          files: ['a.js'],
+          total: 1,
+          truncated: false,
+          scanError: 'git failed',
+        },
+      },
+    ],
+    [
+      'a fix pass whose scan failed and found no file',
+      { implementationFiles: { files: [], total: 0, truncated: false, scanError: 'git failed' } },
+    ],
+  ])('gives the re-tester the first tester prompt after %s', async (_name, carried) => {
+    const dir = await checkout();
+    const { detected } = await detectOn(dir, 'ddev');
+    const fixer = { source: 'fixer', failures: [], fixesApplied: [], screenshots: [], ...carried };
+
+    expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).toBe(
+      firstPrompt(detected),
+    );
+  });
+
+  it('collects nothing in a fix pass when the detect output predates the workspace it records', async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await detectOn(dir, 'ddev');
+    await writeFile(path.join(dir, 'c.js'), 'c\n');
+    m.collectImplementationFiles.mockClear();
+
+    const fixer = await fixPass(ctx, { ...detected, workspace: undefined }, 1, [
+      record(0, testerOut),
+    ]);
+
+    expect(m.collectImplementationFiles).not.toHaveBeenCalled();
+    expect(fixer).not.toHaveProperty('implementationFiles');
+    expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).toBe(
+      firstPrompt(detected),
+    );
   });
 });
