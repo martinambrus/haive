@@ -93,11 +93,14 @@ function changedExcerpt(before: string, after: string): { before: string; after:
 }
 
 function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
-  // A moved protected file can surface as an added or a modified file, and a capped list can hide its deletion.
-  const protectedRemoved =
+  // A protected file's bytes can leave it under any status git reports, and a capped list can hide the change.
+  const protectedChanged =
     artifact.truncated ||
     artifact.files.some(
-      (file) => file.status === 'deleted' && secretMaskDeniesPath(policy, file.path),
+      (file) =>
+        file.status !== 'added' &&
+        (secretMaskDeniesPath(policy, file.path) ||
+          (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath))),
     );
   const files = artifact.files.map((file) => {
     const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
@@ -109,7 +112,7 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
     ) {
       return { ...metadata, note: 'secret content omitted' };
     }
-    if (protectedRemoved && file.status !== 'deleted') {
+    if (protectedChanged && file.status !== 'deleted') {
       return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
     }
     if (file.binary || file.truncated) return { ...metadata, note: 'content unavailable' };
