@@ -112,7 +112,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         await startBrowserDesktop(runtime.handle);
         await runnerExec(
           runtime.handle,
-          `node /opt/browser-probe-connect.js ${shellQuote(appUrl)}`,
+          `node /opt/browser-probe-connect.js ${shellQuote(String(appUrl))}`,
           {
             timeoutMs: 60_000,
           },
@@ -121,7 +121,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         await startAppBrowserDesktop(runtime.handle);
         await appRunnerExec(
           runtime.handle,
-          `node /opt/browser/browser-probe-connect.js ${shellQuote(appUrl)}`,
+          `node /opt/browser/browser-probe-connect.js ${shellQuote(String(appUrl))}`,
           { timeoutMs: 60_000 },
         );
       }
