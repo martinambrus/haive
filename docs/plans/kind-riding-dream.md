@@ -184,6 +184,16 @@ A refuter its provider refuses is an unreadable voter and so never counts toward
 the refutation lenses are seats as in `08c` (`refuter:<lens>`), their CLIs chosen per lens like the
 analysis seats.
 
+**It also re-checks what earlier scans left unconfirmed.** A finding an earlier scan's report
+listed as unresolved — attempted, no change made, or never picked — leaves that list only on
+affirmative evidence, never on absence (`review-findings.md`: a skipped, budget-cut or rewording
+reviewer produces the same absence). So every such finding whose file lies in this scan's target
+and whose dimension this scan ran is handed to the same panel as a claim, the lens asking whether
+the defect still exists in the snapshot, and it is cleared only when the same 2-of-3 quorum says
+it is gone, each voter citing the current `file:line`; an unreadable voter never counts toward
+it. One outside the target, in a dimension not run or REFUSED, or in a file the per-file cap
+truncated is not re-checked and stays listed, carried into this scan's report as unconfirmed.
+
 **A consolidator does not make this step redundant**, and the prompt should say so where a reader
 might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a claim
 against the code and demands a cited `file:line`. `purring-marinating-peacock`'s own caveat is
@@ -337,8 +347,8 @@ dispatched and is recorded as blocked with a marker in `concerns` naming the fai
 step completes. An issue accepted for merge whose branch holds no change — its coder found the fix
 already on the landing tip, which can be ahead of the scanned commit, or reported done without
 editing — is recorded unmerged with a no-change marker rather than failing the step, and is never
-merged as an empty implementation; its findings are listed as no change made, which a re-scan
-settles, since either reading is possible. A refusal before dispatch — the landing-branch checks
+merged as an empty implementation; its findings are listed as no change made, which a later
+scan's re-check settles (see `scan-verify`), since either reading is possible. A refusal before dispatch — the landing-branch checks
 above — is recorded the same way, its reason on every planned issue, and its findings are listed as
 offered no remediation.
 
@@ -403,12 +413,15 @@ reason and most severe first within each group:
   landing tip and unconfirmed;
 - findings whose DAG issue merged, as remediation attempted and unconfirmed: a merge proves the
   issue's worktree landed, not that its coder repaired each finding grouped into it, so they stay
-  listed until a later scan no longer raises them;
+  listed until a later scan's re-check clears them (see `scan-verify`);
 - findings an earlier scan recorded that are still present and were not picked this time, naming
   the scan that first recorded them;
 - out-of-scope observations under a diff target (`raw.inScope = false`);
 - findings the core tail's own reviewers (07b, 08c, 08c2, 08d) raised in this task and nobody
-  resolved, read from their `review_findings` rows by disposition: `accepted_risk` (accepted at
+  resolved. Each reviewer's final step output is the source, since `recordReviewFindings` is
+  best-effort and a failed write leaves a finding in the output with no row; the rows supply the
+  disposition, joined by fingerprint (08c and 08d already carry `fingerprints[]` on their output),
+  and a finding with no row is listed with its disposition unknown, never dropped. By disposition: `accepted_risk` (accepted at
   the fix loop's escalation gate), `dismissed_human` (left out at gate 1.5), and `open` rows of the
   last round each reviewer ran, which no fix round followed. `dismissed_refuted` is left out, since
   a refuter disproved it, and so are an earlier round's `open` rows, which a later round re-reviewed;
@@ -422,8 +435,8 @@ Each entry's reason is derived from structural state — the triage step's outpu
 `task_dag_issues` outcome, marker and `mergeStatus` reached through the plan id and `issueKey` its finding's
 `raw` records, `review_findings.disposition` and `raw` — never from a
 message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
-claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a re-scan
-that no longer raises a finding is evidence of a fix. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
+claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a later
+scan's affirmative re-check clears one. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
 escaping symlink, a submodule — is a coverage gap, not a found defect, and sits beside the section
 in the coverage record, never inside it. Nothing is capped here: the per-file cap upstream already
 bounds volume, the step shows counts per reason, and the dashboard lists every entry.
@@ -957,6 +970,11 @@ former, and this module does both kinds of write.
 - Under a diff target: coherence raises a pair only when a side lies in the changed lines;
   `dead-code` raises a pre-existing symbol whose last caller the target removed; `comment-debt`
   raises nothing outside the changed lines and the blocks around them.
+- A finding an earlier report left unconfirmed is cleared only by a 2-of-3 re-check citing the
+  current `file:line`; one in a REFUSED dimension, a cap-truncated file or outside the target stays
+  listed as unconfirmed, and its absence from the new findings alone clears nothing.
+- A tail reviewer finding present in its step output whose `review_findings` write failed is listed
+  with its disposition unknown.
 - A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped,
   and writes a row of its own for it; triaging and remediating that finding writes the disposition
   and the plan association on the new row and leaves the earlier task's row byte-for-byte
@@ -1067,7 +1085,8 @@ former, and this module does both kinds of write.
    the two merged ones as remediation attempted and unconfirmed.
 2b. Run a scan and pick nothing at triage; confirm the task ends on `scan-report` with the
    remediation steps and the tail recorded `skipped` and every verified finding in the section.
-3. Re-scan; confirm the already-fixed finding does not reappear and the report says what is new.
+3. Re-scan; confirm the remediated findings are re-checked by the verify panel and leave
+   `Found, not fixed` only on its quorum, and the report says what is new.
 3b. Run coherence alone over this repo's own rules, `AGENTS.md` and KB; confirm every finding cites
    two `file:line` sides, and that the carve-out `2fffb947` added is not raised as a conflict.
 3c. Run `comment-debt` alone over this repo; confirm the comments `AGENTS.md` demands survive, that
