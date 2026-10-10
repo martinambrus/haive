@@ -1,9 +1,18 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { FolderUp, Paperclip, X } from 'lucide-react';
-import { attachmentUploadName, buildPlan, startTask, uploadTaskAttachment } from '@/lib/api-client';
+import {
+  api,
+  attachmentUploadName,
+  buildPlan,
+  getPlanBuildClis,
+  startTask,
+  uploadTaskAttachment,
+  type CliProvider,
+} from '@/lib/api-client';
+import { planBuildBody } from '@/lib/plan-build-request';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import {
   Button,
@@ -79,6 +88,36 @@ export function PlanStarter({
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const folderInput = useRef<HTMLInputElement | null>(null);
+  const [providers, setProviders] = useState<CliProvider[]>([]);
+  const [plannerId, setPlannerId] = useState('');
+  const [questionerId, setQuestionerId] = useState('');
+  const [askBrief, setAskBrief] = useState(true);
+  const [askRepo, setAskRepo] = useState(false);
+
+  // Preselect what a build would run on: the server's planner fallback, and the questioner this
+  // user picked last time. Without the list the pickers stay hidden and the server picks.
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      api.get<{ providers: CliProvider[] }>('/cli-providers'),
+      getPlanBuildClis(repositoryId).catch(() => null),
+    ])
+      .then(([res, clis]) => {
+        if (cancelled) return;
+        const enabled = res.providers.filter((p) => p.enabled);
+        const pick = (id: string | null | undefined) =>
+          id && enabled.some((p) => p.id === id) ? id : (enabled[0]?.id ?? '');
+        setProviders(enabled);
+        setPlannerId(pick(clis?.plannerCliProviderId));
+        setQuestionerId(pick(clis?.questionerCliProviderId));
+      })
+      .catch(() => {
+        /* the pickers are optional */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repositoryId]);
 
   function addFiles(picked: FileList | null) {
     if (!picked || picked.length === 0) return;
@@ -116,11 +155,16 @@ export function PlanStarter({
       const taskId =
         draftTaskId ??
         (
-          await buildPlan(repositoryId, {
-            mode: 'greenfield',
-            ...(description ? { description } : {}),
-            ...(deferStart ? { deferStart } : {}),
-          })
+          await buildPlan(
+            repositoryId,
+            planBuildBody('greenfield', {
+              description,
+              deferStart,
+              clarify: askBrief,
+              plannerCliProviderId: plannerId,
+              questionerCliProviderId: questionerId,
+            }),
+          )
         ).taskId;
 
       if (!deferStart) return onNavigate(`/tasks/${taskId}`);
@@ -176,7 +220,14 @@ export function PlanStarter({
     setBusy(true);
     setError(null);
     try {
-      const { taskId } = await buildPlan(repositoryId, { mode: 'from_repo' });
+      const { taskId } = await buildPlan(
+        repositoryId,
+        planBuildBody('from_repo', {
+          clarify: askRepo,
+          plannerCliProviderId: plannerId,
+          questionerCliProviderId: questionerId,
+        }),
+      );
       onNavigate(`/tasks/${taskId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start the build');
@@ -211,6 +262,42 @@ export function PlanStarter({
 
       <div className="flex flex-col gap-4">
         <FormError message={error} />
+
+        {providers.length > 0 && (
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
+            {(
+              [
+                ['CLI for planning', plannerId, setPlannerId],
+                ['CLI for questions', questionerId, setQuestionerId],
+              ] as const
+            ).map(([label, value, set]) => (
+              <label
+                key={label}
+                className="flex min-w-0 items-center gap-2 text-xs text-neutral-400"
+              >
+                {label}
+                <select
+                  value={value}
+                  // Saved on the draft with the brief: a retry starts the draft as it was created.
+                  disabled={busy || draftTaskId !== null}
+                  title={
+                    draftTaskId
+                      ? 'Already saved on the draft task. Open the draft to change it.'
+                      : undefined
+                  }
+                  onChange={(e) => set(e.target.value)}
+                  className="h-7 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        )}
 
         {/* Primary. Works on a repository created empty, which is the case none
             of the other two serve. */}
@@ -328,6 +415,20 @@ export function PlanStarter({
             </ul>
           )}
 
+          <label className="flex items-start gap-2 text-xs text-neutral-300">
+            <input
+              type="checkbox"
+              checked={askBrief}
+              disabled={busy || draftTaskId !== null}
+              onChange={(e) => setAskBrief(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Ask me clarifying questions first. The planner drafts an outline from what you wrote,
+              then asks about what it leaves open, until you choose to build the full plan.
+            </span>
+          </label>
+
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
@@ -360,6 +461,16 @@ export function PlanStarter({
         {onboarded !== false && (
           <div className="flex flex-col gap-1.5 border-t border-neutral-800 pt-3">
             <p className="text-xs font-medium text-neutral-400">Or build from this repository</p>
+            <label className="flex items-start gap-2 text-xs text-neutral-300">
+              <input
+                type="checkbox"
+                checked={askRepo}
+                disabled={busy}
+                onChange={(e) => setAskRepo(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>Ask me clarifying questions first</span>
+            </label>
             <div>
               {/* Primary only when the KB is KNOWN to exist. `null` means the
                   check has not answered; the offer still renders (fail-open),

@@ -465,6 +465,12 @@ export const planBuildRequestSchema = z
      *  enqueue races the first step's detect — which is the whole reason this
      *  flag exists rather than a create-then-upload sequence. */
     deferStart: z.boolean().optional(),
+    /** Ask the owner clarifying questions about an outline before it is expanded
+     *  (`00b-plan-clarify`). Unset means on for `greenfield` and off for `from_repo`,
+     *  whose code already answers most of them. */
+    clarify: z.boolean().optional(),
+    /** The CLI that asks those questions; `cliProviderId` plans. */
+    questionerCliProviderId: z.string().uuid().optional(),
   })
   .refine((v) => v.mode !== 'greenfield' || Boolean(v.description?.trim()) || v.deferStart, {
     // A greenfield build with no brief and no incoming files has nothing to

@@ -53,6 +53,7 @@ import { renderBoundedPlanIndex } from './_plan-index.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { REPO_IS_DATA_AUTHORING_LINES, safeTitle } from '../_untrusted-repo.js';
+import { ownsClarifiedOutline } from './_plan-clarify-owner.js';
 
 /**
  * What the build did not cover, repaired to a semantic fixed point.
@@ -374,9 +375,10 @@ function liveFrontier(
   buildFormValues: FormValues,
   buildRows: MiningRow[],
   coverageRows: MiningRow[],
+  ownsWholePlan: boolean,
 ): PlanNodeSkeleton[] {
   const blocked = unresolvedExpansionNodeIds([...buildRows, ...coverageRows]);
-  return computeFrontier(nodes, depthBudget(buildFormValues), ctx.taskId).filter(
+  return computeFrontier(nodes, depthBudget(buildFormValues), ctx.taskId, ownsWholePlan).filter(
     (node) => !blocked.has(node.id),
   );
 }
@@ -555,7 +557,14 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     { failure: APPLY_FAILURE_PREFIX, partial: PARTIAL_APPLY_PREFIX },
   );
 
-  const frontier = liveFrontier(skeletons, ctx, buildFormValues, buildRows, coverageRows);
+  const frontier = liveFrontier(
+    skeletons,
+    ctx,
+    buildFormValues,
+    buildRows,
+    coverageRows,
+    await ownsClarifiedOutline(ctx, skeletons),
+  );
 
   // The source documents, when this build had any. A from_repo build has no
   // written authority to check against, so the section half simply does not run.
@@ -1019,7 +1028,14 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         loadMiningRows(ctx, '01-plan-build'),
         loadMiningRows(ctx, '02-plan-coverage'),
       ]);
-      const frontier = liveFrontier(nodes, ctx, d.buildFormValues, buildRows, coverageRows);
+      const frontier = liveFrontier(
+        nodes,
+        ctx,
+        d.buildFormValues,
+        buildRows,
+        coverageRows,
+        await ownsClarifiedOutline(ctx, nodes),
+      );
       const state = continuationState(coverageRows);
       const agentsUsed = state.agentsByBatch.get(d.continuationBatch) ?? 0;
       const wave = (state.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;
@@ -1092,6 +1108,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             refreshed.buildFormValues,
             buildRows,
             coverageRows,
+            await ownsClarifiedOutline(ctx, nodes),
           );
           const state = continuationState(coverageRows);
           const agentsUsed = state.agentsByBatch.get(automaticDetected.continuationBatch) ?? 0;
@@ -1214,7 +1231,14 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       loadMiningRows(ctx, '01-plan-build'),
       loadMiningRows(ctx, '02-plan-coverage'),
     ]);
-    const frontier = liveFrontier(nodes, ctx, d.buildFormValues, buildRows, coverageRows);
+    const frontier = liveFrontier(
+      nodes,
+      ctx,
+      d.buildFormValues,
+      buildRows,
+      coverageRows,
+      await ownsClarifiedOutline(ctx, nodes),
+    );
     const continuation = continuationState(coverageRows);
     const agentsUsed = continuation.agentsByBatch.get(d.continuationBatch) ?? 0;
     const nextWave = (continuation.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;

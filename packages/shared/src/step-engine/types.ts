@@ -184,6 +184,10 @@ export const HOUSE_RULE_EXEMPT: Readonly<Record<string, Readonly<Record<string, 
  *  Keep in sync with `REVIEW_LENSES` / `REFUTE_LENSES` in 08c-code-review.ts and
  *  `ADVERSARIES` in 08d-adversarial-qa.ts. */
 export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
+  '00b-plan-clarify': [
+    { id: 'planner', label: 'Planner' },
+    { id: 'questioner', label: 'Questioner' },
+  ],
   '08c-code-review': [
     { id: 'peer-reviewer', label: 'Peer Reviewer' },
     { id: 'security-code-reviewer', label: 'Security Code Reviewer' },
@@ -221,6 +225,7 @@ export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
  *  answers `canSkip: false` and the button simply never renders, which reads as
  *  "this step is not skippable" rather than as a bug. */
 export const SKIPPABLE_STEP_IDS: readonly string[] = [
+  '00b-plan-clarify',
   '11g-save-database',
   '01e-external-kb-sync',
   '01f-external-plan-sync',
@@ -376,6 +381,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '01-kb-enrich', workflowType: 'kb_author', title: 'Knowledge base enrichment' },
   // plan canvas — 02-advisory-decision is deliberately absent: it runs no CLI,
   // because closing a non-code blocker is the user's call, not an agent's.
+  { id: '00b-plan-clarify', workflowType: 'plan_build', title: 'Clarifying questions' },
   { id: '01-plan-build', workflowType: 'plan_build', title: 'Build the plan' },
   // Dispatches only what a person ticked at its gate — a clean build spends
   // nothing here — but it CAN dispatch, which is what this list records.

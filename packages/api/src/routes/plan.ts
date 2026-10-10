@@ -55,11 +55,36 @@ import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { getTaskQueue } from '../queues.js';
 
 const exec = promisify(execFile);
+
+const PLAN_CLARIFY_STEP_ID = '00b-plan-clarify';
+
+/** A build asking clarifying questions, or about to expand the outline they shaped, owns the
+ *  plan's root until it ends: deleting or replacing it would leave the questions about, or the
+ *  expansion working on, a plan the owner's answers never reached. */
+async function refuseRootChangeDuringClarify(
+  repositoryId: string,
+  message = 'A plan build is asking clarifying questions about this outline. Finish or cancel it before deleting or replacing the plan root.',
+): Promise<void> {
+  const open = await getDb()
+    .select({ metadata: schema.tasks.metadata })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'plan_build'),
+        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+      ),
+    );
+  if (open.some((t) => (t.metadata as { planClarify?: unknown } | null)?.planClarify === true)) {
+    throw new HttpError(409, message);
+  }
+}
 
 export const planRoutes = new Hono<AppEnv>();
 
@@ -798,6 +823,7 @@ planRoutes.post('/:id/plan/nodes', async (c) => {
     const root = await findPlanRoot(db, repositoryId);
     parentRef = root?.id ?? null;
   }
+  if (parentRef === null) await refuseRootChangeDuringClarify(repositoryId);
 
   try {
     const res = await applyPlanPatch(
@@ -980,6 +1006,9 @@ planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
   const nodeId = c.req.param('nodeId');
   const db = getDb();
   await requireNode(repositoryId, nodeId);
+  if ((await findPlanRoot(db, repositoryId))?.id === nodeId) {
+    await refuseRootChangeDuringClarify(repositoryId);
+  }
   try {
     const res = await applyPlanPatch(
       db,
@@ -1097,6 +1126,35 @@ async function resolveProvider(
   return fallback?.id ?? null;
 }
 
+/** The CLIs the plan starter preselects: the one a build would plan on, and the questioner this
+ *  user last picked, while it is still enabled. */
+planRoutes.get('/:id/plan/build/clis', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const db = getDb();
+  const planner = await resolveProvider(userId, repositoryId);
+  const saved = await db.query.userStepCliRolePreferences.findFirst({
+    where: and(
+      eq(schema.userStepCliRolePreferences.userId, userId),
+      eq(schema.userStepCliRolePreferences.stepId, PLAN_CLARIFY_STEP_ID),
+      eq(schema.userStepCliRolePreferences.role, 'questioner'),
+    ),
+    columns: { cliProviderId: true },
+  });
+  const questioner = saved?.cliProviderId
+    ? await db.query.cliProviders.findFirst({
+        where: and(
+          eq(schema.cliProviders.id, saved.cliProviderId),
+          eq(schema.cliProviders.enabled, true),
+        ),
+        columns: { id: true },
+      })
+    : undefined;
+  return c.json({
+    plannerCliProviderId: planner,
+    questionerCliProviderId: questioner?.id ?? planner,
+  });
+});
+
 planRoutes.post('/:id/plan/build', async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
@@ -1109,6 +1167,16 @@ planRoutes.post('/:id/plan/build', async (c) => {
     throw new HttpError(409, 'This repository is not ready for uploads yet');
   }
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
+  const clarify = body.mode === 'greenfield' ? body.clarify !== false : body.clarify === true;
+  if (clarify && (await findPlanRoot(getDb(), repositoryId))) {
+    throw new HttpError(
+      409,
+      'This repository already has a plan. Clarifying questions shape a new one; use the plan chat to change an existing plan.',
+    );
+  }
+  // Checked before the task exists: the seed below runs after its row is written.
+  const questioner = clarify ? body.questionerCliProviderId : undefined;
+  if (questioner) await loadUsableProvider(getDb(), userId, questioner);
   const taskId = await spawnPlanTask({
     userId,
     repositoryId,
@@ -1121,9 +1189,26 @@ planRoutes.post('/:id/plan/build', async (c) => {
     metadata: {
       planBuildMode: body.mode,
       ...(body.deferStart ? { planBuildDeferred: true } : {}),
+      ...(clarify ? { planClarify: true } : {}),
     },
     cliProviderId,
     ignoreSavedStepClis: Boolean(body.cliProviderId),
+    // The questioner is its own seat, so its pick is a step choice and is remembered for the
+    // next build; the planner is the task's own CLI.
+    ...(questioner
+      ? {
+          seed: (taskId: string) =>
+            writeStepCliChoice(getDb(), {
+              userId,
+              taskId,
+              stepId: PLAN_CLARIFY_STEP_ID,
+              role: 'questioner',
+              cliProviderId: questioner,
+              requestedEffort: null,
+              remember: true,
+            }),
+        }
+      : {}),
     // Uploads cannot ride a seed hook: the api does not know how many files are
     // coming or whether they all arrive. So the row is created unstarted and the
     // client finalizes with the `start` action once every upload succeeds —
@@ -1248,6 +1333,12 @@ planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
   const nodeId = c.req.param('nodeId');
   const body = planChatRequestSchema.parse(await c.req.json());
   const node = await requireNode(repositoryId, nodeId);
+  // A chat's agent patches the whole plan, the root included, and would race the planner folding
+  // the owner's answers in. The questions form's own steering box is the way to change it then.
+  await refuseRootChangeDuringClarify(
+    repositoryId,
+    'A plan build is asking clarifying questions about this outline. Use its "Anything else the planner should know" box, or finish or cancel the build, before chatting about the plan.',
+  );
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
 
   // The opening turn is recorded here rather than by the step: the step's detect

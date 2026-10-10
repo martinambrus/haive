@@ -394,6 +394,35 @@ export const planNodeTasks = pgTable(
   ],
 );
 
+/**
+ * One round of a plan build's clarifying Q&A (`00b-plan-clarify`): the questions asked, the
+ * person's answers, and what the planner made of them. Here rather than on the step row because
+ * every round reopens the step's form, which clears its answers, and a Retry must resume the
+ * conversation rather than start it again.
+ */
+export const planClarifyRounds = pgTable(
+  'plan_clarify_rounds',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    round: integer('round').notNull(),
+    questions: jsonb('questions').$type<unknown[]>().notNull().default([]),
+    nothingOpen: boolean('nothing_open').notNull().default(false),
+    answers: jsonb('answers').$type<unknown[]>(),
+    steer: text('steer'),
+    action: varchar('action', { length: 16 }),
+    answeredAt: timestamp('answered_at'),
+    outcome: jsonb('outcome').$type<unknown>(),
+    integratedAt: timestamp('integrated_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    /** Round 0 only: the root of the outline this task drafted. Nulled when that root is deleted. */
+    rootId: uuid('root_id').references(() => planNodes.id, { onDelete: 'set null' }),
+  },
+  (table) => [uniqueIndex('plan_clarify_rounds_task_round_idx').on(table.taskId, table.round)],
+);
+
 export const planNodesRelations = relations(planNodes, ({ one, many }) => ({
   repository: one(repositories, {
     fields: [planNodes.repositoryId],

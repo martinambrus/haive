@@ -43,6 +43,7 @@ import {
 } from './00-plan-inputs.js';
 import { classifyPlanInput } from './_plan-inputs.js';
 import { gitExec } from '../../../repo/git-exec.js';
+import { ownsClarifiedOutline } from './_plan-clarify-owner.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -130,6 +131,9 @@ export interface PlanBuildDetect {
   /** Stamped by detect so the opt-in form keys on it: a row detected before the form existed
    *  reuses its saved detect output, lacks this, and keeps building instead of asking mid-build. */
   askToRun?: boolean;
+  /** Every node so far came from THIS task, i.e. the outline `00b-plan-clarify` drafted with the
+   *  user, so the depth form says it expands that outline rather than merging into a plan. */
+  outlineFromThisTask?: boolean;
 }
 
 export interface PlanBuildApply {
@@ -189,10 +193,13 @@ export function computeFrontier(
    *  already exists, and without this exemption the wave machine would find an
    *  empty frontier after level 1 and stop. */
   sourceTaskId?: string,
+  /** The whole plan is this build's own outline (`ownsClarifiedOutline`), so every node counts as
+   *  mined by it: a canvas edit rewrites `sourceTaskId` and must not take a branch off the frontier. */
+  ownsWholePlan = false,
 ): PlanNodeSkeleton[] {
   const withChildren = new Set(nodes.map((n) => n.parentId).filter(Boolean) as string[]);
   const minedByThisBuild = (n: PlanNodeSkeleton): boolean =>
-    sourceTaskId !== undefined && n.sourceTaskId === sourceTaskId;
+    ownsWholePlan || (sourceTaskId !== undefined && n.sourceTaskId === sourceTaskId);
   return nodes.filter(
     (n) =>
       !withChildren.has(n.id) &&
@@ -434,7 +441,11 @@ function sourceGuidance(d: PlanBuildDetect): string {
 /** The INITIAL mining dispatch's prompt (wave 0), distinct from `buildExpandPrompt`'s per-node one.
  *  Exported for the prompt-path tripwire: its `sourceGuidance` has a branch per build mode, and only a
  *  real mode string reaches any but the fallback. */
-export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
+export function buildRootPrompt(
+  d: PlanBuildDetect,
+  values: FormValues,
+  extra: readonly string[] = [],
+): string {
   return [
     `You are drafting the top of a project plan for "${d.repoName}".`,
     '',
@@ -463,6 +474,7 @@ export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string 
     'hosting account. These are first-class parts of a plan and are usually the ones that get',
     'forgotten.',
     '',
+    ...extra,
     PLAN_PATCH_CONTRACT,
   ]
     .filter(Boolean)
@@ -620,6 +632,7 @@ export function createPlanBuildStep(
       let repoName = 'this project';
       let existingNodeCount = 0;
       let hasRoot = false;
+      let outlineFromThisTask = false;
       if (repositoryId) {
         const [repo] = await ctx.db
           .select({ name: schema.repositories.name })
@@ -630,6 +643,7 @@ export function createPlanBuildStep(
         const nodes = await loadPlanSkeletons(ctx.db, repositoryId);
         existingNodeCount = nodes.length;
         hasRoot = nodes.some((n) => n.parentId === null);
+        outlineFromThisTask = nodes.length > 0 && nodes.every((n) => n.sourceTaskId === ctx.taskId);
       }
 
       // Read from 00-plan-inputs rather than re-derived here. That step already
@@ -650,6 +664,7 @@ export function createPlanBuildStep(
         visualOnlyInputs: visualOnlyInputsOf(inputs),
         hasPdfInputs: inputs?.hasPdfInputs === true,
         ...(opts.askToRun ? { askToRun: true } : {}),
+        ...(outlineFromThisTask ? { outlineFromThisTask: true } : {}),
       };
     },
 
@@ -681,8 +696,9 @@ export function createPlanBuildStep(
       if (!opts.askForBudget) return null;
       return {
         title: 'Plan depth',
-        description:
-          detected.existingNodeCount > 0
+        description: detected.outlineFromThisTask
+          ? `The outline you shaped in the clarifying questions has ${detected.existingNodeCount} node(s). This step breaks it down further.`
+          : detected.existingNodeCount > 0
             ? `This repository already has ${detected.existingNodeCount} plan node(s). New work is MERGED into the existing plan — nothing is deleted.`
             : 'How far should the plan be broken down?',
         fields: [
@@ -919,9 +935,12 @@ export function createPlanBuildStep(
       }
       if (root) asked.add(root.id);
 
-      const frontierAll = computeFrontier(nodes, depthBudget(args.formValues), ctx.taskId).filter(
-        (n) => !asked.has(n.id),
-      );
+      const frontierAll = computeFrontier(
+        nodes,
+        depthBudget(args.formValues),
+        ctx.taskId,
+        await ownsClarifiedOutline(ctx, nodes),
+      ).filter((n) => !asked.has(n.id));
       // Failure aggregation for the output: every failed row across ALL waves,
       // recomputed from the cumulative set each pass.
       const allFailures = cumulative

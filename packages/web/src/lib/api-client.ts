@@ -2138,9 +2138,21 @@ export function buildPlan(
      *  picks a job up immediately, so uploading afterwards would race the first
      *  step's detect. */
     deferStart?: boolean;
+    /** Ask clarifying questions about an outline before expanding it. Unset: on for a brief,
+     *  off for a knowledge-base build. */
+    clarify?: boolean;
+    questionerCliProviderId?: string;
   },
 ): Promise<{ taskId: string; deferred: boolean }> {
   return api.post<{ taskId: string; deferred: boolean }>(`${planBase(repositoryId)}/build`, body);
+}
+
+/** The CLIs a new build would plan and ask questions on, for the starter to preselect. */
+export function getPlanBuildClis(repositoryId: string): Promise<{
+  plannerCliProviderId: string | null;
+  questionerCliProviderId: string | null;
+}> {
+  return api.get(`${planBase(repositoryId)}/build/clis`);
 }
 
 /** Enqueue a task that was created but never started. Idempotent server-side, so

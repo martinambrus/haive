@@ -327,12 +327,12 @@ export async function applyAgentPatch(
  * `note` is what the row records about the outcome, written in the same transaction: every later
  * pass skips a claimed reply, so a note written after the commit could be lost for good.
  */
-export async function applyAgentPatchOnce(
+export async function applyAgentPatchOnce<T = ApplyPlanPatchResult>(
   ctx: Pick<StepContext, 'db' | 'taskStepId'>,
   agentId: string,
-  write: (tx: DbOrTx) => Promise<ApplyPlanPatchResult>,
-  note: (applied: ApplyPlanPatchResult) => string | null,
-): Promise<ApplyPlanPatchResult | null> {
+  write: (tx: DbOrTx) => Promise<T>,
+  note: (applied: T) => string | null,
+): Promise<T | null> {
   return ctx.db.transaction(async (tx) => {
     const [claimed] = await tx
       .update(schema.taskStepAgentMinings)
