@@ -141,13 +141,15 @@ export async function loadInsightOutputs(
     const parsed = reviewerOutputSchema.safeParse(reviewerVerdict);
     for (const f of parsed.success ? (parsed.data.withheld ?? []) : []) {
       const id = findingIdentity(f);
-      const covered = written.some((i) =>
-        [i.title, i.description].some(
-          (w) =>
-            normalizeFinding(w) === normalizeFinding(f.description) &&
-            (!f.file || findingIdentity({ file: i.location, description: w }) === id),
-        ),
-      );
+      const covered =
+        normalizeFinding(f.description) !== '' &&
+        written.some((i) =>
+          [i.title, i.description].some(
+            (w) =>
+              normalizeFinding(w) === normalizeFinding(f.description) &&
+              (!f.file || findingIdentity({ file: i.location, description: w }) === id),
+          ),
+        );
       if (!covered) {
         const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
         const title =

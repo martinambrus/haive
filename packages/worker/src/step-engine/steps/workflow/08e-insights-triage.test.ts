@@ -218,6 +218,32 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
     }
   });
 
+  it('never takes a finding with no description as covered by an insight that has none', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT: Extract helper\n';
+    const bare = { severity: 'low', suggestion: 'Split the module', in_scope: 'no' };
+    for (const description of ['', '\u0007']) {
+      const ins = await titles(
+        [{ stepId: '06c-dag-execute', raw }],
+        [{ ...verdict, withheld: [{ ...bare, description }] }],
+      );
+      expect(ins.map((i) => i.title).sort()).toEqual(['Extract helper', 'Split the module']);
+    }
+  });
+
+  it('still covers a finding with a description by an insight that repeats it', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT: Extract helper\n';
+    const ins = await titles(
+      [{ stepId: '06c-dag-execute', raw }],
+      [
+        {
+          ...verdict,
+          withheld: [{ severity: 'low', description: 'extract  HELPER', in_scope: 'no' }],
+        },
+      ],
+    );
+    expect(ins.map((i) => i.title)).toEqual(['Extract helper']);
+  });
+
   it('ignores a verdict that withheld nothing and one that is not a verdict', async () => {
     const none = { verdict: 'approve', criteria_results: [], issues: [] };
     expect(await titles([], [none, null, 'x', { withheld: 'x' }])).toEqual([]);
