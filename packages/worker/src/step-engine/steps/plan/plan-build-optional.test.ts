@@ -15,11 +15,21 @@ const detected = {
 
 describe('onboarding plan build is opt-in', () => {
   it('asks whether to build, defaulting to skip, and points at the Plan view', () => {
-    const form = onboardingPlanBuildStep.form!({} as never, detected as never)!;
+    const form = onboardingPlanBuildStep.form!(
+      {} as never,
+      {
+        ...detected,
+        askToRun: true,
+      } as never,
+    )!;
     const field = form.fields.find((f) => f.id === 'buildPlan');
     expect(field).toMatchObject({ type: 'radio', default: 'skip' });
     expect(form.description).toContain('tokens');
     expect(form.description).toContain('Build from the knowledge base');
+  });
+
+  it('does not ask a row detected before the opt-in existed, so its build continues', () => {
+    expect(onboardingPlanBuildStep.form!({} as never, detected as never)).toBeNull();
   });
 
   it('dispatches no agent and applies nothing when skipped', async () => {

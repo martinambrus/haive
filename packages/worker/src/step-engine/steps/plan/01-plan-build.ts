@@ -126,6 +126,9 @@ export interface PlanBuildDetect {
   /** PDFs that DID yield text. A SOFT preference only — the sidecar is a real
    *  fallback, so a blind model can still read one and must not be refused. */
   hasPdfInputs?: boolean;
+  /** Stamped by detect so the opt-in form keys on it: a row detected before the form existed
+   *  reuses its saved detect output, lacks this, and keeps building instead of asking mid-build. */
+  askToRun?: boolean;
 }
 
 export interface PlanBuildApply {
@@ -146,8 +149,7 @@ export function depthBudget(values: FormValues): number {
   return Number.isFinite(n) && n >= 1 && n <= 6 ? Math.floor(n) : DEFAULT_DEPTH;
 }
 
-/** Only an explicit `skip` declines: a step parked before the opt-in form existed has no value
- *  and must keep building. */
+/** Only an explicit `skip` declines: a step parked before the opt-in form existed has no value. */
 export function planBuildDeclined(values: FormValues): boolean {
   return values.buildPlan === 'skip';
 }
@@ -646,11 +648,12 @@ export function createPlanBuildStep(
         inputIndexPath: inputs?.indexPath ?? null,
         visualOnlyInputs: visualOnlyInputsOf(inputs),
         hasPdfInputs: inputs?.hasPdfInputs === true,
+        ...(opts.askToRun ? { askToRun: true } : {}),
       };
     },
 
     form(_ctx, detected): FormSchema | null {
-      if (opts.askToRun) {
+      if (detected.askToRun) {
         return {
           title: 'Build the project plan now?',
           description: [
