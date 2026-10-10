@@ -12,6 +12,7 @@ import {
 } from '@haive/shared';
 import {
   historyOrigin,
+  isRenderContextSnapshot,
   pickSnapshotRow,
   readRenderContextColumn,
   renderContextOrigin,
@@ -100,11 +101,12 @@ export function pickRenderSnapshot(
 }
 
 function snapshotFacts(r: Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>) {
+  const decodes = isRenderContextSnapshot(r.formValuesSnapshot);
   return {
     id: r.id,
     generatedAt: r.generatedAt,
-    hasSnapshot: Boolean(r.formValuesSnapshot),
-    rtkRecorded: typeof r.formValuesSnapshot?.rtkEnabled === 'boolean',
+    hasSnapshot: decodes,
+    rtkRecorded: decodes && typeof r.formValuesSnapshot?.rtkEnabled === 'boolean',
     formValuesSnapshot: r.formValuesSnapshot,
   };
 }

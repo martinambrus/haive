@@ -16,6 +16,7 @@ const { state } = vi.hoisted(() => ({
     repo: null as Record<string, unknown> | null,
     rows: new Map<unknown, unknown[]>(),
     onboarded: false,
+    snapshotGroups: [] as unknown[],
   },
 }));
 
@@ -27,15 +28,18 @@ vi.mock('../src/db.js', () => ({
       repositories: { findFirst: async () => state.repo },
       tasks: { findFirst: async () => (state.onboarded ? { id: 'onboarding-1' } : null) },
     },
-    select: () => ({
+    select: (fields?: Record<string, unknown>) => ({
       from: (table: unknown) => {
         const q = {
           where: () => q,
           innerJoin: () => q,
           orderBy: () => q,
+          groupBy: () => q,
           limit: () => q,
           then: (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) =>
-            Promise.resolve(state.rows.get(table) ?? []).then(resolve, reject),
+            Promise.resolve(
+              fields && 'ids' in fields ? state.snapshotGroups : (state.rows.get(table) ?? []),
+            ).then(resolve, reject),
         };
         return q;
       },
@@ -254,19 +258,19 @@ const EXPECTED: Record<string, string> = {
   'rows=none 07=unrecorded source=git_https live=on':
     'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=unrecorded source=git_https live=off':
-    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=unrecorded source=blank live=on':
     'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=unrecorded source=blank live=off':
-    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=missing-row source=git_https live=on':
     'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=missing-row source=git_https live=off':
-    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=missing-row source=blank live=on':
     'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=missing-row source=blank live=off':
-    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=-',
   'rows=none 07=none source=git_https live=on':
     'onboarded=false available=false changed=- rtkSettings=- rtkBlocks=-',
   'rows=none 07=none source=git_https live=off':
@@ -286,23 +290,23 @@ const EXPECTED: Record<string, string> = {
   'rows=no-snapshot 07=unrecorded source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=unrecorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=unrecorded source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=unrecorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=missing-row source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=missing-row source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=missing-row source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=missing-row source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=none source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=none source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=none source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=no-snapshot 07=none source=blank live=off':
@@ -342,35 +346,35 @@ const EXPECTED: Record<string, string> = {
   'rows=unrecorded 07=recorded source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=recorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=recorded source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=recorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=unrecorded source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=unrecorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=unrecorded source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=unrecorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=missing-row source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=missing-row source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=missing-row source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=missing-row source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=none source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=none source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=none source=blank live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=none source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=recorded source=git_https live=on':
     'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=recorded source=git_https live=off':
@@ -435,4 +439,37 @@ describe('GRID: upgrade-status resolves RTK: the characterization grid', () => {
       }
     },
   );
+});
+
+describe('the banner reads the context the plan reads', () => {
+  const cell: Cell = { rows: 'unrecorded', history: 'recorded', source: 'git_https', live: false };
+  let dir: string;
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'upgrade-status-snapshots-'));
+    await writeRtkRepo(dir);
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('S-a: does not count a snapshot that does not decode as a render context', async () => {
+    seed(cell, dir, null);
+    state.rows.set(schema.onboardingArtifacts, [
+      artifact('row-0', 1000, 'unrecorded'),
+      artifact('row-1', 2000, 'recorded'),
+    ]);
+    state.snapshotGroups = [];
+    const counted = await answerFor();
+    state.snapshotGroups = [{ snapshot: { rtkEnabled: false }, ids: ['row-1'] }];
+    const refused = await answerFor();
+    state.snapshotGroups = [];
+
+    expect(counted).toContain('rtkBlocks=AGENTS.md');
+    expect(refused).toContain('rtkBlocks=-');
+  });
+
+  it('S-c: offers no RTK block on a snapshot from before RTK, switch off', async () => {
+    seed(cell, dir, null);
+    expect(await answerFor()).toContain('rtkBlocks=-');
+  });
 });

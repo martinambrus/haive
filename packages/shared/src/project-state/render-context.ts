@@ -27,6 +27,19 @@ export const renderContextColumnSchema = z.strictObject({
 
 export type RenderContextColumn = z.infer<typeof renderContextColumnSchema>;
 
+const renderContextSnapshotSchema = renderContextColumnSchema.omit({ rtkChoiceRecorded: true });
+
+/** Whether a stored snapshot decodes as a render context, by the schema the column is read with. */
+export function isRenderContextSnapshot(value: unknown): boolean {
+  return renderContextSnapshotSchema.safeParse(value).success;
+}
+
+/** RTK's block and settings files go only where the render context recorded an RTK choice and the
+ *  switch is off: a context from before RTK made none, and its `false` is only a default. */
+export function rtkLeftoversToRemove(choiceRecorded: boolean, rtkEnabled: boolean): boolean {
+  return choiceRecorded && !rtkEnabled;
+}
+
 /** The render unit of a context: its five portable fields, and nothing else it holds. The values
  *  pass through as they are; the codec refuses a render unit that is not valid. */
 export function portableRender(context: { [K in keyof ProjectRender]: unknown }): ProjectRender {

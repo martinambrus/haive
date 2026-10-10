@@ -25,6 +25,7 @@ import {
   upsertRegion,
   type FormSchema,
 } from '@haive/shared';
+import { rtkLeftoversToRemove } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -53,6 +54,7 @@ import {
 import { withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 import {
   backfillRecord,
+  recordableContext,
   type UpgradePlanOutput,
   type UpgradePlanEntry,
 } from './01-upgrade-plan.js';
@@ -678,6 +680,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const plan = args.detected;
     const values = args.formValues;
     const warnings: string[] = [];
+    const rowContext = recordableContext(plan.renderCtxSnapshot, plan.rtkFollowsLive === true);
 
     // The form parks between the plan and this apply, and RTK switched meanwhile leaves the plan's
     // RTK actions pointing the wrong way.
@@ -855,7 +858,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         templateKind: entry.templateKind,
         templateSchemaVersion: entry.templateSchemaVersion ?? 1,
         ...record,
-        formValuesSnapshot: plan.renderCtxSnapshot,
+        formValuesSnapshot: rowContext,
         sourceStepId: '02-upgrade-apply',
         source,
         haiveVersion,
@@ -1030,7 +1033,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           writtenContent: kept.content,
           lastObservedDiskHash: kept.hash,
           userModified: true,
-          formValuesSnapshot: plan.renderCtxSnapshot,
+          formValuesSnapshot: rowContext,
           sourceStepId: '02-upgrade-apply',
           source: 'backfill' as const,
           haiveVersion,
@@ -1294,7 +1297,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     // The RTK block is no manifest item, so no obsolete entry takes it out once RTK is off.
     const rtkBlockStrips: RtkBlockStrip[] = [];
-    if (plan.renderCtxSnapshot.rtkEnabled === false) {
+    if (
+      rtkLeftoversToRemove(
+        plan.rtkFollowsLive === true,
+        plan.renderCtxSnapshot.rtkEnabled !== false,
+      )
+    ) {
       const recorded = new Map<string, string>();
       const strips = await stripRtkBlocks(ctx.repoPath, async (file, before, after) => {
         const beforeHash = sha256Hex(normalizeContent(before));
@@ -1310,7 +1318,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           writtenHash: beforeHash,
           writtenContent: before,
           lastObservedDiskHash: sha256Hex(normalizeContent(after)),
-          formValuesSnapshot: plan.renderCtxSnapshot,
+          formValuesSnapshot: rowContext,
           sourceStepId: '02-upgrade-apply',
           source: 'backfill',
           haiveVersion,

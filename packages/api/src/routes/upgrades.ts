@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
   checkRevive,
   isRootClaimLive,
@@ -30,9 +30,11 @@ import {
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   historyOrigin,
+  isRenderContextSnapshot,
   readRenderContextColumn,
   renderContextOrigin,
   renderContextProviderNames,
+  rtkLeftoversToRemove,
   type RenderContextOrigin,
   type SnapshotRowFacts,
 } from '@haive/shared/project-state';
@@ -90,6 +92,29 @@ export async function rulesImportGaps(
     else if (state === 'linked-elsewhere') linked.push(file);
   }
   return { missing, linked };
+}
+
+/** The live rows whose snapshot does not decode as a render context, which 01 does not render from.
+ *  Grouped by snapshot, so each distinct one crosses the wire once. */
+async function undecodableSnapshotRows(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<Set<string>> {
+  const groups = await db
+    .select({
+      snapshot: schema.onboardingArtifacts.formValuesSnapshot,
+      ids: sql<string[]>`array_agg(${schema.onboardingArtifacts.id}::text)`,
+    })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        isNull(schema.onboardingArtifacts.supersededAt),
+        isNotNull(schema.onboardingArtifacts.formValuesSnapshot),
+      ),
+    )
+    .groupBy(schema.onboardingArtifacts.formValuesSnapshot);
+  return new Set(groups.filter((g) => !isRenderContextSnapshot(g.snapshot)).flatMap((g) => g.ids));
 }
 
 /** The providers a snapshot's `enabledCliProviders` names. */
@@ -387,9 +412,12 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
+  const refusedSnapshots = await undecodableSnapshotRows(db, repositoryId);
   const origin = renderContextOrigin({
     column: readRenderContextColumn(repo.renderContext),
-    rows: liveArtifacts,
+    rows: liveArtifacts.map((a) =>
+      refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
+    ),
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
@@ -566,13 +594,16 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
-  const rtkBlockLeftovers = !repo.rtkEnabled && root ? await rtkBlockFiles(root) : [];
+  const rtkRemoval =
+    root !== null &&
+    rtkLeftoversToRemove(
+      await rtkChoiceFollowsLive(db, repositoryId, origin, repo.source),
+      repo.rtkEnabled,
+    );
+  const rtkBlockLeftovers = root && rtkRemoval ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =
-    !repo.rtkEnabled &&
-    root &&
-    (repo.source === 'blank' || liveArtifacts.length === 0) &&
-    (await rtkChoiceFollowsLive(db, repositoryId, origin, repo.source))
+    root && rtkRemoval && (repo.source === 'blank' || liveArtifacts.length === 0)
       ? await rtkSettingsLeftovers(root, new Set(liveArtifacts.map((a) => a.diskPath)))
       : [];
 

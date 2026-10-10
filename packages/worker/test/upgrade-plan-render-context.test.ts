@@ -432,6 +432,35 @@ describe('the upgrade backfills a clone from the completed context', () => {
   });
 });
 
+describe('the upgrade backfills a context that recorded no RTK choice', () => {
+  it('stores no rtkEnabled, so the next upgrade still finds no recorded choice', async () => {
+    const seed = (fake: Fake) => seedOnboarding(fake, detect07('history-unrecorded', false));
+    const plan = planOf({ column: null, live: true, seed });
+    const first = await plan.detect();
+    expect(first.rtkFollowsLive).toBe(false);
+    for (const r of expandManifestFor(
+      first.renderCtxSnapshot as unknown as TemplateRenderContext,
+    )) {
+      await mkdir(dirname(join(repo, r.diskPath)), { recursive: true });
+      await writeFile(join(repo, r.diskPath), r.content, 'utf8');
+    }
+
+    const detected = await plan.detect();
+    const out = await plan.apply(detected);
+
+    const rows = plan.fake.rows(schema.onboardingArtifacts);
+    expect(out.backfilledRows).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.formValuesSnapshot).not.toHaveProperty('rtkEnabled');
+      expect(row.formValuesSnapshot).toMatchObject({ framework: 'history-unrecorded' });
+    }
+    const next = await plan.detect();
+    expect(next.ranBackfill).toBe(false);
+    expect(next.rtkFollowsLive).toBe(false);
+    expect(next.renderCtxSnapshot.rtkEnabled).toBeUndefined();
+  });
+});
+
 describe('01 reads a refused column as NULL, and says so', () => {
   const rowsRecorded = (fake: Fake) =>
     seedLiveRow(fake, {

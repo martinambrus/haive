@@ -12,6 +12,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { rtkLeftoversToRemove } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -201,6 +202,13 @@ export function classifyEntry(args: {
 
 export class RenderContextUnresolvedError extends Error {}
 
+/** The context a row records: without `rtkEnabled` unless that is the repository's live choice. */
+export function recordableContext<T extends object>(context: T, rtkFollowsLive: boolean): T {
+  if (rtkFollowsLive) return context;
+  const { rtkEnabled: _unrecorded, ...rest } = context as T & { rtkEnabled?: unknown };
+  return rest as T;
+}
+
 export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutput> = {
   metadata: {
     id: '01-upgrade-plan',
@@ -311,7 +319,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     // no rows at all, so with RTK now off they are found by rendering them as if it were on, for every
     // CLI: the scaffold seeded them for the ones enabled then, which may not be the ones enabled now.
     let unrecordedRtk: ExpandedRendering[] = [];
-    if (resolved.rtkLive && renderCtx.rtkEnabled === false) {
+    if (rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)) {
       const [repo] = await ctx.db
         .select({ source: schema.repositories.source })
         .from(schema.repositories)
@@ -375,8 +383,9 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       ctx.repoPath,
       await enabledImportRulesFiles(ctx.db, ctx.userId),
     );
-    const rtkBlockLeftovers =
-      renderCtx.rtkEnabled === false ? await rtkBlockFiles(ctx.repoPath) : [];
+    const rtkBlockLeftovers = rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)
+      ? await rtkBlockFiles(ctx.repoPath)
+      : [];
 
     return {
       repositoryId,
@@ -408,6 +417,8 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
       const { renderCtx } = resolved;
+      // A context that recorded no RTK choice must not record one through its rows.
+      const snapshot = recordableContext(renderCtx, resolved.rtkLive);
       const expanded = await unionExpandedFor(ctx.db, {
         repositoryId: detected.repositoryId,
         userId: ctx.userId,
@@ -456,7 +467,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
           templateKind: r.templateKind,
           templateSchemaVersion: r.templateSchemaVersion,
           ...recorded,
-          formValuesSnapshot: renderCtx as unknown as Record<string, unknown>,
+          formValuesSnapshot: snapshot as unknown as Record<string, unknown>,
           sourceStepId: '01-upgrade-plan',
           source: 'backfill' as const,
           haiveVersion,

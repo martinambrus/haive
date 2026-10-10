@@ -25,7 +25,7 @@ import {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { cliRulesRegionRecord } from '../src/step-engine/steps/onboarding/_rules-files.js';
-import type { ExpandedRendering } from '../src/step-engine/template-manifest.js';
+import { REFERENCE_CONTEXT, type ExpandedRendering } from '../src/step-engine/template-manifest.js';
 
 function live(partial: Partial<LiveArtifactRow> = {}): LiveArtifactRow {
   return {
@@ -358,10 +358,18 @@ describe('pickRenderSnapshot', () => {
     generatedAt: new Date(at),
     formValuesSnapshot,
   });
+  const context = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>),
+    ...over,
+  });
+  const withoutRtk = (): Record<string, unknown> => {
+    const { rtkEnabled: _own, ...rest } = context();
+    return rest;
+  };
 
   it('renders from a snapshot that recorded an RTK choice ahead of one from before RTK', () => {
-    const beforeRtk = { framework: 'drupal' };
-    const recorded = { framework: 'drupal', rtkEnabled: false };
+    const beforeRtk = { ...withoutRtk(), framework: 'drupal' };
+    const recorded = context({ framework: 'drupal', rtkEnabled: false });
     expect(
       pickRenderSnapshot([row('a', null), row('b', beforeRtk, 2), row('c', recorded, 1)]),
     ).toBe(recorded);
@@ -369,9 +377,27 @@ describe('pickRenderSnapshot', () => {
     expect(pickRenderSnapshot([row('a', null)])).toBeNull();
   });
 
+  it('does not count a snapshot that does not decode as a render context', () => {
+    const full = context({ framework: 'drupal' });
+    const beforeRtk = withoutRtk();
+    for (const bad of [{}, { framework: 'drupal', rtkEnabled: false }]) {
+      expect(pickRenderSnapshot([row('a', full, 1), row('b', bad, 2)])).toBe(full);
+      expect(pickRenderSnapshot([row('a', beforeRtk, 1), row('b', bad, 2)])).toBe(beforeRtk);
+      expect(pickRenderSnapshot([row('a', bad, 2)])).toBeNull();
+    }
+  });
+
   it('takes the newest recorded snapshot, whatever order the rows come in', () => {
-    const older = { rtkEnabled: true, enabledCliProviders: [{ name: 'gemini' }] };
-    const newer = { rtkEnabled: true, enabledCliProviders: [{ name: 'claude-code' }] };
+    const older = context({
+      rtkEnabled: true,
+      enabledCliProviders: [{ name: 'gemini', rulesFile: 'GEMINI.md', rulesFileMode: 'import' }],
+    });
+    const newer = context({
+      rtkEnabled: true,
+      enabledCliProviders: [
+        { name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' },
+      ],
+    });
     expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 2)])).toBe(newer);
     expect(pickRenderSnapshot([row('b', newer, 2), row('a', older, 1)])).toBe(newer);
     expect(pickRenderSnapshot([row('a', older, 1), row('b', newer, 1)])).toBe(newer);
