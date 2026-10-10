@@ -4,6 +4,7 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
+import { isListableName } from './_impl-changes.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { commitKnowledgeTrees, gitRun, revertKnowledgeBase } from './_kb-commit.js';
 import { EXTERNAL_KB_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
@@ -94,6 +95,8 @@ export function parseKbChanges(llmOutput: unknown): KbChange[] {
 }
 
 function buildPrompt(d: ExternalKbSyncDetect): string {
+  const paths = d.changedPaths.filter(isListableName);
+  const pathsOmitted = d.pathsOmitted + (d.changedPaths.length - paths.length);
   return [
     agentDefinitionGuidance(
       'knowledge-curator',
@@ -115,10 +118,10 @@ function buildPrompt(d: ExternalKbSyncDetect): string {
     '',
     '## Files those commits touched',
     '',
-    ...d.changedPaths.map((p) => `- ${p}`),
-    ...(d.pathsOmitted > 0
+    ...paths.map((p) => `- ${p}`),
+    ...(pathsOmitted > 0
       ? [
-          `- (+${d.pathsOmitted} further path(s) not listed — say so in your summary rather ` +
+          `- (+${pathsOmitted} further path(s) not listed — say so in your summary rather ` +
             'than implying you saw the whole change)',
         ]
       : []),

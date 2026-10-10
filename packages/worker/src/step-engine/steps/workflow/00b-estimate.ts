@@ -6,6 +6,7 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
 import { retrieveSimilarTaskIds } from './_task-embedding.js';
 import { collapseToLine } from '../_untrusted-repo.js';
+import { isListableName } from './_impl-changes.js';
 import {
   buildAnchors,
   planProximityTaskIds,
@@ -165,8 +166,9 @@ function renderAnchor(a: EstimateAnchor): string {
   // from plan-node bodies, which is agent prose. Collapsed rather than fenced: these are
   // one-line bullets in a list the estimator scans, and `_estimate` already caps them.
   if (a.description) line += `\n    ${collapseToLine(a.description)}`;
-  if (a.changedPaths.length > 0) {
-    line += `\n    files: ${a.changedPaths.slice(0, ANCHOR_PATHS_SHOWN).join(', ')}`;
+  const paths = a.changedPaths.filter(isListableName);
+  if (paths.length > 0) {
+    line += `\n    files: ${paths.slice(0, ANCHOR_PATHS_SHOWN).join(', ')}`;
   }
   return line;
 }
