@@ -21,10 +21,14 @@
  *     tsx scripts/resume-plan-sequence-review.ts <taskId>
  */
 import { Queue } from 'bullmq';
-import IORedis from 'ioredis';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { createDatabase, schema } from '@haive/database';
-import { QUEUE_NAMES, TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
+import {
+  QUEUE_NAMES,
+  TASK_JOB_NAMES,
+  createBullRedisConnection,
+  type TaskJobPayload,
+} from '@haive/shared';
 
 /** Both ids the one step definition is registered under — plan_build's and the
  *  standalone plan_sequence workflow's. A literal here would silently match
@@ -122,9 +126,7 @@ async function main(): Promise<void> {
     });
   });
 
-  const connection = new IORedis(process.env.REDIS_URL ?? 'redis://redis:6379', {
-    maxRetriesPerRequest: null,
-  });
+  const connection = createBullRedisConnection(process.env.REDIS_URL ?? 'redis://redis:6379');
   const queue = new Queue(QUEUE_NAMES.TASK, { connection });
   await queue.add(
     TASK_JOB_NAMES.ADVANCE_STEP,
