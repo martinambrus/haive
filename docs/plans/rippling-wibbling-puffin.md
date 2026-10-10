@@ -107,6 +107,44 @@ disabled, removed, or failed to load after a rebuild.
   materialised, and `buildRunList` is forward-walked from the current step. That half gates new task
   creation only; the persona half warns at start and decides at every dispatch, as above.
 
+### Steps may require integrations
+
+Companion to "Integrations" in `serialized-chasing-thacker.md`, which owns providers, connections,
+grants and the `haive-integrations` broker. This plan owns how a task type asks for them.
+
+An integration is not a capability token. `requires`/`provides` tokens are satisfied by an UPSTREAM
+STEP in the same run list; a Drive or Slack connection is satisfied by an ACCOUNT the user connected,
+granted to the task when it is created. Mixing the two would let the validator "prove" a
+composition whose task can never get the account.
+
+- `ComposableStepEntry` gains `integrations?: { provider | category, access: 'read' | 'write',
+  optional? }[]`. A requirement may name a provider (`github`, `module.google.drive`) or a category
+  (`storage`), so one step can accept Drive or Dropbox the way a capability token accepts
+  alternatives.
+- A definition's integration requirements are the union of its steps', and are shown in the composer
+  beside the step list. The composer validates provider and category names against the loaded
+  provider registry; it cannot check accounts, which are per user.
+- Task-create resolves each requirement to a connection: the New Task form shows one picker per
+  requirement listing the user's connected and shared connections that match, and writes one
+  `integration_grants` row per pick, targeted at the task. A required one with no pick blocks create
+  with a named reason and a link to connect an account; an optional one may be left empty, and its
+  steps see no tools for it.
+- `access: 'write'` on a requirement is a declaration, not a grant. Write itself is the user's
+  per-integration switch (`serialized-chasing-thacker`, decision 5), never asked per task or step.
+  Task-create refuses a type whose required write requirement meets a switch that is off, with a
+  named reason and a link to the switch: one flip on the Integrations page, after which every later
+  task of that type creates without asking.
+- Dangling references extend to providers: a definition requiring a provider that is not installed
+  or whose module is deactivated is not selectable with a named reason ("requires integration
+  `Google Drive`, provided by module `integration-google`, which is not installed"), by the same rule
+  as a missing step.
+- Mid-task, a connection that goes `needs_reauth`, `revoked` or `provider_unavailable` PARKS the step
+  needing it with a reconnect banner rather than failing it, and the step resumes after reconnect.
+  A running task's grants are pinned like its `run_list_snapshot`: editing the definition does not
+  change them.
+- Built-in types declare no integration requirements. `workflow`'s `12-worktree-cleanup` keeps
+  reaching the forge through the repository's `repo_credentials` row, untouched by this plan.
+
 ### Spatial composability is these capability tokens — already done, do not "add" it
 
 Cordis's "spatial composability" means a plugin declares what it needs from the environment and the
@@ -186,9 +224,10 @@ The task-detail tabs (steps/editor/terminal/activity/attachments) and the `/task
 
 ### 3.1 Prompt-template step -> synthetic StepDefinition (data, not code)
 
-A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs, agentPool?, uiPanels? }` becomes a synthetic `StepDefinition` at registration time, reusing the existing runner/dispatch with no new execution path.
+A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs, agentPool?, integrations?, uiPanels? }` becomes a synthetic `StepDefinition` at registration time, reusing the existing runner/dispatch with no new execution path.
 
 - Factory `synthesizeStepDefinition(entry, defSlug, index)`: `metadata.id = 'custom.<defSlug>.<stepSlug>'`, `workflowType = defSlug`, `requiresCli: true`, capabilities from config, `llm.agentPool` from `entry.agentPool`. `llm.buildPrompt(args)` = safe mustache-style `{{field}}` interpolation of `entry.promptTemplate` against `args.formValues` (already has preAnswers overlaid) + `args.detected` — plain substitution, no eval/Function. `parseOutput` = generic JSON try-parse. `apply` = generic: write raw + parsed to `task_steps.output`; no in-process fs writes (file work goes through the sandboxed MCP tool).
+- `integrations` uses the shape of "Steps may require integrations" and is what makes a template like "summarise the spec in the linked Drive folder" or "post the review to #releases" possible without code. The synthetic step's dispatch carries the task's grants for exactly these requirements, and `buildDefaultMcpServers` adds `haive-integrations` for that invocation with only those tools, write tools included only while the task owner's write switch for that integration is on. A template with no `integrations` gets no integration tools even when the task holds grants for other steps. `{{integration:<requirementId>.account}}` interpolates the picked connection's `accountLabel` (never a token).
 - Repository agents follow `toasty-percolating-kernighan`'s per-invocation rule with nothing custom here. An entry whose `requiredCapabilities` carry `file_write` keeps seeing the real tree. One that carries `subagents` keeps the agent catalog, and that capability already restricts dispatch to sub-agent-capable adapters (`resolveDispatch`), every one of which reads a markdown agent directory — so a template that wants the model to spawn repository agents never lands on amp (no agent directory), codex or gemini. Any other entry sees no repository agent definitions unless it sets `agentPool: '*'`, which is for reading agent files as data and leaves provider eligibility alone.
 - `{{agent:<id>}}` is not a form field. `buildPrompt` renders it as a marker of its own, `[[HAIVE_TEMPLATE_PERSONA:<id>]]`, never as that plan's `agentDefinitionGuidance` block, and Phase 3.1 widens that plan's persona resolver for that syntax only, because the LSP gate that plan keeps exists to protect an embedded fallback a template persona does not have. The kind rides in the prompt itself, not in a `DispatchRequest` field every dispatch path would have to carry, and the rewrite handles both kinds in one `replace` over a pattern matching either, since a second pass would rescan the bodies the first inserted. A token id must match the marker grammar (`[a-z0-9-]+`): the composer refuses any other id at save, task-create refuses it with a named reason, and `agentDefinitionGuidance` and the template marker's renderer both assert it, so no caller can emit a marker the rewrite would leave unparsed. Save and task-create run in the api, which cannot import the worker's private patterns, so the id grammar is one `@haive/shared` constant that the api's checks and both marker patterns are built from. The body is pasted for EVERY provider and whether or not the invocation is isolated — a template that declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still has no embedded protocol — so the widened resolver runs for these markers outside that plan's isolation predicate, and every body it pastes is still recorded in `pastedPersonaPaths` for that plan's exec-time secret-mask recheck, isolated or not. It reads `<id>.md` by filename, as that plan does, from the selected provider's own agent directory when that one is markdown and holds it, and otherwise from the first markdown agent directory in catalog order that does — the same directories the dangling-reference check searches, so a persona defined only in `.gemini/agents` raises no start-time warning and still resolves for a claude dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader that plan defers. A marker whose body cannot be found at dispatch fails the dispatch with the dangling-reference reason instead of running without its persona — the start-time check reads a different tree, and the tree can change before dispatch — and one whose body would exceed that plan's per-prompt `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size, so many tokens cannot add up past it. A template that names an agent directory or file (`Review {{path}}` with `path = .claude/agents/foo.md`) needs nothing of its own: that plan's prompt path scan sees interpolated values and static text like any other prompt text; a template marker names no path, and the bodies pasted for it are scanned verbatim, marker-shaped text included, since the rewrite never rescans what it inserts.
 - Registration: `registerCustomStepsFromDefinitions(registry, db)` runs at boot after `registerAllSteps`, reading definitions and calling `registry.override(...)` (packages/worker/src/step-engine/registry.ts:19, upserts, tolerates re-runs). `buildRunList` `require()`s ids at execution time, well after boot, so synthetics are present when needed.
@@ -198,7 +237,7 @@ A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, r
 
 Rides `buildDefaultMcpServers` exactly like `haive-rag` / `ddev-control` (packages/worker/src/sandbox/mcp-config.ts:125,137): a dep-free stdio ESM server bind-mounted as a `SandboxExtraFile`, gated by a flag, handed an API URL + a task-scoped token (`signRagToken` / `verifyRagToken`). The MCP server runs inside the sandbox (already the untrusted zone). The API callback route is the security boundary and must be Haive code, not admin code.
 
-- Admin supplies per tool: `toolName`, `description`, `inputSchema` (the MCP advertisement); a gating flag; and a callback behavior chosen from a vetted, allow-listed action registry (e.g. proxy to an allow-listed HTTPS URL, read-only RAG-style query) — not arbitrary handler code (that would need a real sandbox for the callback and is out of MVP scope).
+- Admin supplies per tool: `toolName`, `description`, `inputSchema` (the MCP advertisement); a gating flag; and a callback behavior chosen from a vetted, allow-listed action registry (e.g. proxy to an allow-listed HTTPS URL, read-only RAG-style query, or `integration-op`: call one declared operation of a granted integration connection, with the admin fixing which operation and which input fields the agent may set; a `write` operation also needs the task owner's write switch, checked by the broker at each call) — not arbitrary handler code (that would need a real sandbox for the callback and is out of MVP scope). `integration-op` is the route to an AUTHENTICATED external system; the plain HTTPS proxy stays for unauthenticated ones, and never carries a token.
 - Wiring: one parameterized `custom-mcp-server.ts` string (clone of the ddev/rag server); `buildDefaultMcpServers` accepts a `customMcpServers[]` array and pushes each as an `McpServerSpec`; `resolveMcpExtraFiles` (packages/worker/src/queues/cli-exec/resolvers.ts:300) mints a token and ships the file per enabled tool; new api router packages/api/src/routes/custom-mcp.ts (mounted `/custom-mcp`) verifies the token and dispatches to the vetted registry (delegating to a worker queue when it needs docker/fs, as ddev-control does).
 
 ---
@@ -209,7 +248,8 @@ Rides `buildDefaultMcpServers` exactly like `haive-rag` / `ddev-control` (packag
 - Public read `GET /task-types` (requireAuth only) returning enabled+selectable `{slug,name,description,runListStrategy}` for the New Task picker (web stays REST-only; no worker import).
 - New admin page packages/web/src/app/(app)/admin/task-types/page.tsx: list + editor mirroring the load->edit->save shape of packages/web/src/app/(app)/repos/[id]/tooling/page.tsx and the Card layout of admin/page.tsx; add an `admin/task-types` link next to the existing `admin/audit` link.
 - Composer control: bespoke React modeled on the existing `bundle-composer` custom field + `BundleComposer` component (packages/web/src/components/form-renderer.tsx:881) — FormRenderer renders a flat field list and has no reorderable-sub-form primitive. Palette (curated catalog) on the left; ordered `stepIds` with reorder/remove + live prereq validation on the right; per-step params rendered inline with FormRenderer against each step's `paramFormSchema` (this part reuses FormRenderer directly). The reorder editor is shown only for `runListStrategy = 'static'`; for the two dynamic built-ins the admin edits enable/disable + params only.
-- New Task form (packages/web/src/app/(app)/tasks/new/page.tsx:251-255,329-335,462-493): replace the binary run-app toggle with a real select sourced from `GET /task-types`, keeping onboarding-status auto-detect as the fallback default.
+- New Task form (packages/web/src/app/(app)/tasks/new/page.tsx:251-255,329-335,462-493): replace the binary run-app toggle with a real select sourced from `GET /task-types`, keeping onboarding-status auto-detect as the fallback default. A type with integration requirements adds one connection picker per requirement ("Steps may require integrations"); `GET /task-types` returns the requirements so the form needs no second round trip.
+- Composer: each step in the palette shows its integration requirements; the definition's union is listed under the step list with the provider's install state, so an admin sees "needs Slack — not installed" while composing rather than at task-create.
 
 ### A module may seed a task-type definition
 
@@ -237,7 +277,9 @@ prompt-template step is DATA, not code:
   `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs,
   agentPool?, uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
   The turn is handed the persona catalog Haive's onboarding templates install (id + description), so
-  the template can name one with `{{agent:<id>}}`. Authoring is global, so no single repository's
+  the template can name one with `{{agent:<id>}}`, and the catalog of installed integration providers
+  with their operations' descriptions and access classes, so a step described as "post the summary to
+  Slack" comes back with its `integrations` requirement filled in. Authoring is global, so no single repository's
   own agents apply; a repository-specific persona typed by hand is warned about when a task starts
   and checked authoritatively at dispatch by the dangling-reference rule, and the admin reviews the
   pick in the composer like any other field.
@@ -267,6 +309,7 @@ prompt-template step is DATA, not code:
 7. Parameterized custom-mcp-server.ts + `/custom-mcp` router + vetted callback registry.
 8. `CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED` kill-switch + admin toggle card.
 9. task-types admin API router + admin page + composer component + public `GET /task-types`.
+10. Integration requirements on `ComposableStepEntry` and prompt-template entries, the per-requirement connection pickers at task-create writing task-targeted `integration_grants`, the reconnect park, and the `integration-op` action in the Phase 3.2 registry. Providers, connections, grants and the broker themselves are `serialized-chasing-thacker` Slices 6-7.
 
 ## Critical files (touch points)
 
@@ -278,6 +321,7 @@ prompt-template step is DATA, not code:
 - Shared: packages/shared/src/schemas/tasks.ts:3-8,66, types/index.ts:1, config.service.ts (kill-switch), new validator + UiPanelSpec, and the `{{agent:<id>}}` id grammar constant beside the validator.
 - Api: packages/api/src/routes/tasks/index.ts:154-247, task-types.ts (NEW), custom-mcp.ts (NEW), verify insert sites upgrades.ts:395 + global-kb.ts:336.
 - Web: packages/web/src/lib/api-client.ts:430, app/(app)/tasks/new/page.tsx, app/(app)/tasks/[id]/page.tsx (panel promotion), app/(app)/admin/task-types/page.tsx (NEW) + composer component.
+- Integrations: packages/worker/src/sandbox/mcp-config.ts:247 (`buildDefaultMcpServers` adds `haive-integrations` per invocation), packages/web/src/lib/step-banners.ts (reconnect park), and the tables and broker from `serialized-chasing-thacker` Slices 6-7.
 
 ## Verification (end-to-end, per phase)
 
@@ -286,6 +330,7 @@ prompt-template step is DATA, not code:
 - Custom type (kill-switch on): author a static custom type in the admin UI composing [worktree-setup, a prompt-template step, a verify step]; create a task of it; confirm it runs, reuses terminal/IDE/browser, and the verify gate + panels render (via `uiPanels`, no stepId branch). Confirm the composition validator rejects an unsatisfied-prerequisite ordering and a loop step without a target.
 - Phase 2: custom type with a fix loop targeting its own implement-equivalent — confirm `loop_back` re-enters correctly; a built-in workflow task still fixes-loops identically (fallback path).
 - Phase 3: prompt-template step renders the template with form values and dispatches a sandbox CLI invocation; a custom MCP tool is injected via `buildDefaultMcpServers`, the agent calls it, and the `/custom-mcp` callback verifies the task token. A prompt-template step using `{{agent:peer-reviewer}}` produces a captured request (`toasty-percolating-kernighan`'s capture harness) that contains that persona's body and no other repository agent. A token naming a persona the checked-out repository lacks records `agent_persona.unresolved` when the task starts and fails that step's dispatch with the named reason, while one defined only on the base `01-worktree-setup` branches from warns at start and still runs; on codex the template marker's body is pasted while a built-in step's marker in the same task keeps its fallback sentence; a `file_write` template, which is not isolated, whose persona file a deny rule covers by exec time fails before the CLI starts; a token id outside the grammar is refused at task-create.
+- Integrations: a custom type with a prompt-template step requiring `storage` read shows a picker at task-create listing the user's Drive and Dropbox connections; create is blocked with a named reason when the user has none; the step's agent lists only that connection's read tools, and a sibling step without `integrations` lists none; a type requiring `storage` write is refused at task-create with a link to the switch while the user's switch is off, and creates without further prompts once it is on; a definition requiring an uninstalled provider is not selectable with the named reason; revoking the connection mid-task parks the next step needing it with the reconnect banner and reconnecting resumes it; an `integration-op` custom MCP tool runs only its fixed operation.
 - Use the project verify skill / chrome-devtools MCP to drive the admin UI and a custom task in the running app, not just tests.
 
 ## Rollback (write the undo before the change)
@@ -303,6 +348,7 @@ Phase 1 is the foundation and the bulk of the value and risk (schema, seed, byte
 - Migrating built-in step SEQUENCES to admin-editable (they stay registry-owned; fork to customize).
 - Arbitrary admin-authored MCP callback handler code (vetted allow-list only for MVP).
 - Per-user (non-global) task types.
+- Inbound integration triggers (a Slack message, an issue label or a new Drive file STARTS a task). Requirements here are outbound only; webhooks and polling triggers need their own plan, beginning with how an unauthenticated vendor callback reaches a task safely.
 - Exposing all ~60 registered steps as composable (curated allow-list only).
 - The reactive RUNTIME rebind other plugin harnesses do (swap a provider under a live task and
   reload it). A running task's run list is materialised and forward-walked precisely so a mid-flight
