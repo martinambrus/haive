@@ -416,7 +416,7 @@ function reportExcerpt(report: string): string {
 }
 
 const CHECK_OUTPUT_CHARS = 4000;
-// excerptDiagnosis measured up to 45 characters over its budget, so what it returns stays within the cap and a second pass leaves it alone.
+// excerptDiagnosis can run a little over its budget; the room keeps its result under the cap, so a second pass leaves it alone.
 const CHECK_OUTPUT_ROOM = 150;
 
 // A run's verdict is at the end of its output, so a cut keeps both ends.
