@@ -548,6 +548,12 @@ export async function collectChangedLineMap(
   return map.size > 0 ? map : null;
 }
 
+/** The sentence a pass after a fix opens with when the fixer's re-read of the change failed. */
+export const CHANGE_UNREAD_AFTER_FIX_LEAD = [
+  'The change could not be re-read after the last fix, so files that fix created or changed may be',
+  'missing from any list above.',
+].join('\n');
+
 const SCAN_FAILED_NOTICE = [
   'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
   'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',

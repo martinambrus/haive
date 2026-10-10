@@ -42,7 +42,11 @@ import {
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
-import { collectImplementationFiles, isDocsOnlyChange } from './_impl-changes.js';
+import {
+  CHANGE_UNREAD_AFTER_FIX_LEAD,
+  collectImplementationFiles,
+  isDocsOnlyChange,
+} from './_impl-changes.js';
 import { houseRuleShortIds } from '@haive/shared/global-kb';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
@@ -1107,7 +1111,7 @@ const fixerPromptAfter = (previous: unknown[]) =>
   });
 
 describe('07b re-validation after a fix pass whose re-read failed', () => {
-  const NOTICE = 'The change could not be re-read after the fix';
+  const NOTICE = CHANGE_UNREAD_AFTER_FIX_LEAD;
   const revalidate = (fixerFiles: unknown) =>
     phase4ValidateStep.loop!.buildIterationPrompt!({
       detected: {
@@ -1146,7 +1150,7 @@ describe('07b re-validation after a fix pass whose re-read failed', () => {
 });
 
 describe('07b re-validation after several fix passes', () => {
-  const NOTICE = 'The change could not be re-read after the fix';
+  const NOTICE = CHANGE_UNREAD_AFTER_FIX_LEAD;
   const set = (files: string[], scanError: string | null = null) => ({
     files,
     total: files.length,
@@ -2186,7 +2190,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
 
     expect(prompt).toContain('- a.php');
     expect(prompt).toContain('recorded BEFORE the fix agent edited');
-    expect(prompt).toContain('The change could not be re-read after the fix');
+    expect(prompt).toContain(CHANGE_UNREAD_AFTER_FIX_LEAD);
     expect(second.changedFilesCoverage).toEqual({ listed: 2, total: 2, scanFailed: true });
   });
 

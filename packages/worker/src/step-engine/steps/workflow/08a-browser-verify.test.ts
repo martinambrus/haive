@@ -79,6 +79,7 @@ vi.mock('./_task-meta.js', async (importOriginal) => ({
 }));
 
 import { TaskCancelledError } from '../../step-definition.js';
+import { CHANGE_UNREAD_AFTER_FIX_LEAD } from './_impl-changes.js';
 import {
   appHealthFailures,
   browserVerifyStep,
@@ -747,6 +748,24 @@ describe('08a re-test after a fix pass', () => {
   });
 
   const UNREAD = /\nThe change could not be re-read after the last fix[\s\S]*?what a list names\./;
+
+  it('words the unread notice exactly as it always has, the shared lead included', async () => {
+    const dir = await checkout();
+    const { detected } = await detectOn(dir, 'ddev');
+    const fixer = { source: 'fixer', failures: [], fixesApplied: [], screenshots: [] };
+
+    const prompt = retestPrompt(detected, [record(0, testerOut), record(1, fixer)]);
+
+    expect(prompt.match(UNREAD)![0]).toBe(
+      [
+        '',
+        'The change could not be re-read after the last fix, so files that fix created or changed may be',
+        'missing from any list above. Test the fixed behaviour and the flows around it in full, not only',
+        'what a list names.',
+      ].join('\n'),
+    );
+    expect(prompt).toContain(CHANGE_UNREAD_AFTER_FIX_LEAD);
+  });
 
   it("gives the re-tester detect's list and the unread notice after a fix pass stored before it collected the change", async () => {
     const dir = await checkout();

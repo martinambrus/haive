@@ -24,6 +24,7 @@ import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import {
+  CHANGE_UNREAD_AFTER_FIX_LEAD,
   changedFilesBlock,
   collectImplementationFiles,
   type ImplementationFileSet,
@@ -305,8 +306,7 @@ function fixerFiles(previous: StepLoopPassRecord[]): {
 }
 
 const CHANGE_UNREAD_AFTER_FIX = [
-  'The change could not be re-read after the last fix, so files that fix created or changed may be',
-  'missing from any list above. Test the fixed behaviour and the flows around it in full, not only',
+  `${CHANGE_UNREAD_AFTER_FIX_LEAD} Test the fixed behaviour and the flows around it in full, not only`,
   'what a list names.',
 ] as const;
 
