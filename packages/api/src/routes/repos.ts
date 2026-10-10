@@ -15,6 +15,7 @@ import {
   errno,
   fileIdentity,
   isPathContainmentError,
+  decodeUtf8Strict,
   lstatNoFollow,
   ParkedFileError,
   openFileNoFollow,
@@ -1982,7 +1983,10 @@ export async function resetOnboardingArtifacts(
       const result = await removeFileIfNoFollow(
         root,
         rel,
-        (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+        (data) => {
+          const text = decodeUtf8Strict(data);
+          return text !== null && hashes.includes(sha256Hex(normalizeContent(text)));
+        },
         { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
       // A save that took the name back while the old file was judged is the person's file.

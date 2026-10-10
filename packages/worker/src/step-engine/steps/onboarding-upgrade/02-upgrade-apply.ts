@@ -254,7 +254,12 @@ export async function removeIfHaives(
         repoPath,
         rel,
         (data) => {
-          content = data.toString('utf8');
+          const text = decodeUtf8Strict(data);
+          if (text === null) {
+            undecodable = true;
+            return false;
+          }
+          content = text;
           return haives(content);
         },
         cap,
@@ -268,7 +273,11 @@ export async function removeIfHaives(
         repoPath,
         rel,
         (data) => {
-          const current = data.toString('utf8');
+          const current = decodeUtf8Strict(data);
+          if (current === null) {
+            undecodable = true;
+            return false;
+          }
           const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
           content = region ?? '';
           return (

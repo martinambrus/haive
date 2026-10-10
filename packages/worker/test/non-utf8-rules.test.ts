@@ -208,6 +208,44 @@ describe('02 and a rules file that is not UTF-8', () => {
     expect(removal).toMatchObject({ outcome: 'kept' });
     expect(removal.outcome === 'kept' && removal.refusal).toMatch(/UTF-8/);
   });
+
+  // A U+FFFD Haive wrote, its bytes since replaced by one invalid byte, decodes back to the same text.
+  const written = 'a � mark\n';
+  const swapped = Buffer.from(
+    Buffer.from(written).toString('latin1').replace('\xef\xbf\xbd', '\xff'),
+    'latin1',
+  );
+
+  it('keeps a whole file whose bytes decode leniently to what it wrote', async () => {
+    const root = await repo({ 'docs/x.md': swapped });
+    const removal = await removeIfHaives(
+      root,
+      'docs/x.md',
+      { diskPath: 'docs/x.md', templateKind: 'doc' },
+      hashOf(written),
+    );
+    expect(await sameBytes(root, 'docs/x.md', swapped)).toBe(true);
+    expect(removal).toMatchObject({ outcome: 'kept' });
+    expect(removal.outcome === 'kept' && removal.refusal).toMatch(/UTF-8/);
+  });
+
+  it('keeps a rules file it created whose region decodes leniently to what it wrote', async () => {
+    const region = `${CLI_RULES_START}\n${written}${CLI_RULES_END}`;
+    const bytes = Buffer.from(
+      Buffer.from(`${region}\n`).toString('latin1').replace('\xef\xbf\xbd', '\xff'),
+      'latin1',
+    );
+    const root = await repo({ 'AGENTS.md': bytes });
+    const removal = await removeIfHaives(
+      root,
+      'AGENTS.md',
+      { diskPath: 'AGENTS.md', templateKind: CLI_RULES_TEMPLATE_KIND, fileCreated: true },
+      hashOf(region),
+    );
+    expect(await sameBytes(root, 'AGENTS.md', bytes)).toBe(true);
+    expect(removal).toMatchObject({ outcome: 'kept' });
+    expect(removal.outcome === 'kept' && removal.refusal).toMatch(/UTF-8/);
+  });
 });
 
 describe('04 and a rules file that is not UTF-8', () => {
