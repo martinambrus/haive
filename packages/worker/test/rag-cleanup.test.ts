@@ -276,6 +276,21 @@ describe('cleanupRagForRepository', () => {
     expect(fake.calls.filter((c) => c.includes('DROP DATABASE'))).toHaveLength(2);
   });
 
+  it('retries the DROP once when drizzle wraps the in-use error', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity
+    const inUse = Object.assign(new Error('is being accessed by other users'), { code: '55006' });
+    fake.queueError(Object.assign(new Error('Failed query: DROP DATABASE'), { cause: inUse }));
+    fake.queueResult([]); // the retry succeeds
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res.dropped).toEqual(['haive_rag_rdapi']);
+    expect(fake.calls.filter((c) => c.includes('DROP DATABASE'))).toHaveLength(2);
+  });
+
   it('skips blank names and dedupes by sanitized database name', async () => {
     fake = makeFakeDb([]);
     openExistingRagDatabase.mockResolvedValue(null);
