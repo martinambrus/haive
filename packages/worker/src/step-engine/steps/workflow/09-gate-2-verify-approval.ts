@@ -33,6 +33,7 @@ import {
   restoreAppRunnerBrowserWindow,
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
+import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 import type { FileCoverage } from './_impl-changes.js';
@@ -801,6 +802,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
               ws.repoSubpath,
               envTemplate.imageTag,
               boot.port ?? undefined,
+              { signal: ctx.signal },
             );
             await startAppBrowserDesktop(handle);
             // Same restore as the DDEV branch above, for the same reason.
@@ -820,6 +822,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       }
     } catch (err) {
       if (err instanceof TaskCancelledError) throw err;
+      if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
       ctx.logger.warn({ err }, 'gate-2 live browser bring-up failed');
       liveBrowser = { available: false, appUrl: null, reason: (err as Error).message };
     }

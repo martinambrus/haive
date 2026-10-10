@@ -6,6 +6,8 @@ const m = vi.hoisted(() => ({
   resolveDdevWorkspace: vi.fn(),
   hasWorkspaceEntry: vi.fn(),
   ensureDdevWithProgress: vi.fn(),
+  ensureAppRunnerStarted: vi.fn(),
+  loadAppBootOutput: vi.fn(),
   startBrowserDesktop: vi.fn(),
   restoreRunnerBrowserWindow: vi.fn(),
   runnerExec: vi.fn(),
@@ -28,6 +30,11 @@ vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
 vi.mock('./_task-meta.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_task-meta.js')>()),
   resolveDdevWorkspace: m.resolveDdevWorkspace,
+  loadAppBootOutput: m.loadAppBootOutput,
+}));
+vi.mock('../../../sandbox/app-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/app-runner.js')>()),
+  ensureAppRunnerStarted: m.ensureAppRunnerStarted,
 }));
 vi.mock('../../workspace-probe.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../workspace-probe.js')>()),
@@ -63,12 +70,15 @@ vi.mock('./_gate-insights.js', async (importOriginal) => ({
 }));
 
 import { TaskCancelledError } from '../../step-definition.js';
+import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 
 const HANDLE = { container: 'haive-ddev-ensured', projectDir: '/repos/u/r' };
 const warn = vi.fn();
+const stop = new AbortController();
 const ctx = {
   taskId: 'task-1',
+  signal: stop.signal,
   repoPath: '/repos/u/r',
   round: 0,
   db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
@@ -118,6 +128,30 @@ describe('gate-2 live browser bring-up', () => {
 
     expect(err, 'the cancel was swallowed into liveBrowser.reason').not.toBeNull();
     expect(err, 'the cancel was replaced by another error').toBe(cancel);
+  });
+
+  it('hands the step signal to the app-runner ensure and lets its Stop out as a cancel', async () => {
+    m.hasWorkspaceEntry.mockResolvedValue(false);
+    m.loadAppBootOutput.mockResolvedValue({
+      containerized: true,
+      runtimeContainer: 'r',
+      port: 3000,
+    });
+    m.getTaskEnvTemplate.mockResolvedValue({
+      status: 'ready',
+      imageTag: 'img:tag',
+      declaredDeps: { browserTesting: true },
+    });
+    m.ensureAppRunnerStarted.mockRejectedValueOnce(new RuntimeSlotAbortedError('task-1'));
+
+    const err = await rejection(detect);
+
+    expect(err, 'the Stop was swallowed into liveBrowser.reason').toBeInstanceOf(
+      TaskCancelledError,
+    );
+    expect(m.ensureAppRunnerStarted).toHaveBeenCalledWith('task-1', 'u/r', 'img:tag', 3000, {
+      signal: stop.signal,
+    });
   });
 
   it('brings the live browser up through the handle the ensure returned', async () => {

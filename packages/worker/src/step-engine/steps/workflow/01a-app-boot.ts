@@ -4,7 +4,7 @@ import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { RetryableParseError } from '../../step-definition.js';
+import { RetryableParseError, TaskCancelledError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
@@ -14,6 +14,7 @@ import {
   appRunnerExec,
   launchAppInRunner,
 } from '../../../sandbox/app-runner.js';
+import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 
 const exec = promisify(execFile);
 
@@ -520,6 +521,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
           detected.repoSubpath,
           detected.envImageTag,
           port,
+          { signal: ctx.signal },
         );
 
         let installOut = '';
@@ -558,6 +560,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
             .join('\n\n'),
         };
       } catch (err) {
+        if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
         const message = err instanceof Error ? err.message : String(err);
         ctx.logger.warn({ err: message }, 'app-runner launch failed');
         return {

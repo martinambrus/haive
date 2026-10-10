@@ -1147,8 +1147,12 @@ async function ddevExecOnce(
 ): Promise<{ exitCode: number; output: string }> {
   // Live progress requested: stream line-by-line rather than buffering (the
   // buffered path below returns nothing until a multi-minute op completes).
-  if (opts.onLine)
-    return ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
+  if (opts.onLine) {
+    const res = await ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
+    return res.exitCode === 0
+      ? res
+      : { ...res, output: `${res.output}${await staleHandleNote(handle)}` };
+  }
   const command = buildDdevCommand(handle.projectDir, ddevArgs, opts.timeoutMs ?? 600_000);
   try {
     const { stdout, stderr } = await exec(
@@ -2568,7 +2572,10 @@ export async function runnerExec(
     return { exitCode: 0, output: `${stdout}${stderr}` };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
-    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+    return {
+      exitCode: e.code ?? 1,
+      output: `${e.stdout ?? ''}${e.stderr ?? ''}${await staleHandleNote(handle)}`,
+    };
   }
 }
 
