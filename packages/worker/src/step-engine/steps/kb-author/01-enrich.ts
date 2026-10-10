@@ -436,7 +436,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             ne(globalKbEntries.id, entryId),
           ),
         )
-        .orderBy(desc(globalKbEntries.updatedAt))
+        .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
         .limit(EXISTING_LIMIT + 1);
       if (rows.length > EXISTING_LIMIT) {
         ctx.logger.warn(
@@ -607,7 +607,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
               ne(globalKbEntries.id, skeletonId),
             ),
           )
-          .orderBy(desc(globalKbEntries.updatedAt))
+          .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
           .limit(SUPERSEDE_CANDIDATE_LIMIT);
         const candidates = appeared.filter((c) => !existingIds.has(c.id));
         // Keep the model's proposed target in the running even if it's an older entry

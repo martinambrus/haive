@@ -15,13 +15,13 @@ body is read only if the agent chooses to search for it. MEASURED since the titl
 (2026-08-16): claude-code called `rag_search` at all in 24.5% of its rag-wired runs, ollama in 0
 of 125.
 
-The list says what it left out. It keeps the 40 newest matches from a 400-row scan, and past that
-it ends with one line that is not a bullet, counting the rest ("at least N", or "possibly" when the
-scan filled before it read them all) and saying `rag_search` still searches every one, because a
-capped list that reads as complete is worse than none. Every title and category is collapsed onto
-one line (`collapseToLine`), as step 11's article headers and title list are, so an
-agent-authored title cannot open a line of its own; the isolation scan still reads the raw values,
-and its verdict is the same for either.
+The list says what it left out. It keeps the 40 newest matches from a 400-row scan, ties broken by
+id so the same rows give the same list, and past that it ends with one line that is not a bullet,
+counting the rest ("at least N", or "possibly" when the scan filled before it read them all) and
+saying `rag_search` still searches every one, because a capped list that reads as complete is worse
+than none. Every title and category is collapsed onto one line (`collapseToLine`), as step 11's
+article headers and title list are, so an agent-authored title cannot open a line of its own; the
+isolation scan still reads the raw values, and its verdict is the same for either.
 
 **Each entry may carry a one-line description** — what the rule says and when it applies, like a
 skill's frontmatter description — shown beside its title as `- title — description`, so a model
