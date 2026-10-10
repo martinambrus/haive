@@ -130,6 +130,8 @@ interface MockState {
   miningUpdateLog?: { set: Record<string, unknown>; where: unknown }[];
   /** Abort the next in-transaction mining-row update as Postgres does to break a lock cycle. */
   deadlockOnce?: boolean;
+  /** Throw that deadlock the way drizzle does: no code of its own, the driver error on `cause`. */
+  deadlockWrapped?: boolean;
   /** What a task_step_agent_minings update's returning() yields, in place of one stub id. */
   miningReturning?: (set: Record<string, unknown>) => unknown[];
   /** Every cli_invocations update with its condition, so a test can say which runs it selects. */
@@ -294,7 +296,10 @@ function makeMockDb(state: MockState): Database {
               state.deadlockOnce
             ) {
               state.deadlockOnce = false;
-              throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+              const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' });
+              throw state.deadlockWrapped
+                ? Object.assign(new Error('Failed query: update'), { cause: deadlock })
+                : deadlock;
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
@@ -3191,6 +3196,17 @@ describe('a fan-out step that ends while agents it queued are still live', () =>
   it('runs the release once more when Postgres aborts it to break a deadlock', async () => {
     const state = freshState([]);
     state.deadlockOnce = true;
+    await runWithEnqueueFailingAfter(state, 1);
+
+    expect(state.deadlockOnce).toBe(false);
+    expect(stepWideAgentWrites(state)).toHaveLength(1);
+    expect(state.taskStepRow.status).toBe('failed');
+  });
+
+  it('runs the release once more when drizzle wraps the deadlock', async () => {
+    const state = freshState([]);
+    state.deadlockOnce = true;
+    state.deadlockWrapped = true;
     await runWithEnqueueFailingAfter(state, 1);
 
     expect(state.deadlockOnce).toBe(false);
