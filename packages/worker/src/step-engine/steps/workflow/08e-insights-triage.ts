@@ -161,8 +161,9 @@ export async function loadInsightOutputs(
       if (!covered) {
         const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
         const title = field(findingText(f));
+        const suggestion = collapseToLine(f.description) ? field(f.suggestion ?? '') : '';
         lines.push(
-          `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
+          `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote${suggestion ? ` — suggested: ${suggestion}` : ''}`,
         );
       }
     }

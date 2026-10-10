@@ -219,6 +219,22 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
     }
   });
 
+  it('keeps the suggestion of a described finding in its insight, on one line', async () => {
+    const described = { ...legacy, suggestion: 'Split\nthe | module' };
+    const ins = await titles([], [{ ...verdict, withheld: [described] }]);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]).toMatchObject({ title: 'legacy', location: 'lib.ts' });
+    expect(ins[0]!.description).toContain('high severity');
+    expect(ins[0]!.description).toContain('suggested: Split the / module');
+  });
+
+  it('does not repeat a suggestion that already is the title', async () => {
+    const bare = { severity: 'low', file: 'lib.ts', description: '', suggestion: 'Split it' };
+    const ins = await titles([], [{ ...verdict, withheld: [bare] }]);
+    expect(ins[0]!.title).toBe('Split it');
+    expect(ins[0]!.description).not.toContain('Split it');
+  });
+
   it('names two findings with no description on one file by their fallback title', async () => {
     const bare = { severity: 'low', file: 'lib.ts', in_scope: 'no' };
     for (const description of ['', '\u0007']) {
