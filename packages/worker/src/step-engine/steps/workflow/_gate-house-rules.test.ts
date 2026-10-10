@@ -930,12 +930,13 @@ describe('loadGateHouseRules: the change after the last check', () => {
     expect(moved.asked.count).toBe(0);
   });
 
-  it('reads a change it could not fingerprint now as a change that did not move', async () => {
+  it('reads a change it could not fingerprint now as unread, never as one that did not move', async () => {
     const w = checkedByValidator();
     const loaded = await loadGateHouseRules(w.db, TASK, {
       currentFingerprint: change(null).currentFingerprint,
     });
     expect('modifiedAfterCheck' in loaded!).toBe(false);
+    expect(loaded!.changedFilesCoverage?.scanFailed).toBe(true);
   });
 
   it('compares with the code review, the later check, when it ran with a stamp', async () => {

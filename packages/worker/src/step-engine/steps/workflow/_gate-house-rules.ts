@@ -282,7 +282,12 @@ export async function loadGateHouseRules(
       : mergeChecks(validation.rules, review.rules);
   if (currentFingerprint === undefined || last.fingerprint === null || !last.inPlay) return rules;
   const now = await currentFingerprint();
-  return now === null || now === last.fingerprint ? rules : { ...rules, modifiedAfterCheck: true };
+  if (now === null) {
+    // Unread now (a read failed or the base is gone): whether the change moved is unknown, not "no".
+    const coverage = rules.changedFilesCoverage ?? { listed: 0, total: 0 };
+    return { ...rules, changedFilesCoverage: { ...coverage, scanFailed: true } };
+  }
+  return now === last.fingerprint ? rules : { ...rules, modifiedAfterCheck: true };
 }
 
 function mergeChecks(validation: GateHouseRules, review: GateHouseRules): GateHouseRules {
