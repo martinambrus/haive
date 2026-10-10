@@ -1,9 +1,10 @@
 import { and, asc, eq, ilike } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { reviewerOutputSchema, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
+  collapseToLine,
   fenceSafe,
   REPO_IS_DATA_ACTING_LINES,
   UNTRUSTED_CLOSE,
@@ -85,9 +86,8 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
   const out: Insight[] = [];
   for (const { stepId, raw } of outputs) {
     if (!raw) continue;
-    const m = /##\s*INSIGHTS\b([\s\S]*?)(?:\n##\s|\n```|$)/i.exec(raw);
-    if (!m) continue;
-    for (const line of m[1]!.split('\n')) {
+    const sections = [...raw.matchAll(/##\s*INSIGHTS\b([\s\S]*?)(?=\n##\s|\n```|$)/gi)];
+    for (const line of sections.flatMap((m) => m[1]!.split('\n'))) {
       const im = /^\s*[-*]\s*INSIGHT:\s*(.+)$/i.exec(line);
       if (!im) continue;
       const parts = im[1]!.split('|').map((p) => p.trim());
@@ -105,8 +105,23 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
   return out;
 }
 
+const normalizeFinding = (text: string): string => collapseToLine(text).toLowerCase();
+
+type WithheldFinding = { file?: string | null; description: string; suggestion?: string | null };
+
+/** What names a finding: its description, else its suggestion, else its file. */
+const findingText = (f: WithheldFinding): string =>
+  collapseToLine(f.description) ||
+  collapseToLine(f.suggestion ?? '') ||
+  collapseToLine(f.file ? `out-of-scope finding at ${f.file}` : 'out-of-scope finding');
+
+/** The identity of a finding: its file (without a trailing line number) and its normalized name. */
+export const findingIdentity = (f: WithheldFinding): string =>
+  `${normalizeFinding((f.file ?? '').replace(/:\d+(-\d+)?$/, ''))}::${normalizeFinding(findingText(f))}`;
+
 /** The raw output of every step invocation of the task that carries an `## INSIGHTS` block, in the
- *  order they ran. */
+ *  order they ran, then one block per finding a DAG reviewer withheld as outside its issue's lines
+ *  (kept on the issue's verdict, not in the reply) that no insight above already covers. */
 export async function loadInsightOutputs(
   db: Database,
   taskId: string,
@@ -122,7 +137,40 @@ export async function loadInsightOutputs(
       ),
     )
     .orderBy(asc(schema.cliInvocations.createdAt), asc(schema.cliInvocations.id));
-  return rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' }));
+  const outputs = rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' }));
+  const written = parseInsights(outputs, Number.POSITIVE_INFINITY);
+  const verdicts = await db
+    .select({ reviewerVerdict: schema.taskDagIssues.reviewerVerdict })
+    .from(schema.taskDagIssues)
+    .where(eq(schema.taskDagIssues.taskId, taskId))
+    .orderBy(asc(schema.taskDagIssues.createdAt), asc(schema.taskDagIssues.id));
+  const lines: string[] = [];
+  for (const { reviewerVerdict } of verdicts) {
+    const parsed = reviewerOutputSchema.safeParse(reviewerVerdict);
+    for (const f of parsed.success ? (parsed.data.withheld ?? []) : []) {
+      const id = findingIdentity(f);
+      const covered =
+        normalizeFinding(f.description) !== '' &&
+        written.some((i) =>
+          [i.title, i.description].some(
+            (w) =>
+              normalizeFinding(w) === normalizeFinding(f.description) &&
+              (!f.file || findingIdentity({ file: i.location, description: w }) === id),
+          ),
+        );
+      if (!covered) {
+        const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
+        const title = field(findingText(f));
+        const suggestion = collapseToLine(f.description) ? field(f.suggestion ?? '') : '';
+        lines.push(
+          `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote${suggestion ? ` — suggested: ${suggestion}` : ''}`,
+        );
+      }
+    }
+  }
+  return lines.length > 0
+    ? [...outputs, { stepId: '06c-dag-execute', raw: `## INSIGHTS\n${lines.join('\n')}\n` }]
+    : outputs;
 }
 
 async function collectInsights(ctx: StepContext): Promise<Insight[]> {

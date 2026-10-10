@@ -3,12 +3,23 @@ import { schema } from '@haive/database';
 import { INSIGHTS_AT_GATE, insightsRow, loadUnactedInsights } from './_gate-insights.js';
 
 /** Answers by TABLE: the loader reads the step invocations' raw output, then 08e's rows. */
-function tableDb(outputs: { stepId: string; raw: string }[], triage: unknown[]) {
+function tableDb(
+  outputs: { stepId: string; raw: string }[],
+  triage: unknown[],
+  verdicts: unknown[] = [],
+) {
   let rows: unknown[] = [];
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
     from: (table: unknown) => {
-      rows = table === schema.cliInvocations ? outputs : table === schema.taskSteps ? triage : [];
+      rows =
+        table === schema.cliInvocations
+          ? outputs
+          : table === schema.taskSteps
+            ? triage
+            : table === schema.taskDagIssues
+              ? verdicts.map((reviewerVerdict) => ({ reviewerVerdict }))
+              : [];
       return chain;
     },
     innerJoin: () => chain,
@@ -22,6 +33,19 @@ function tableDb(outputs: { stepId: string; raw: string }[], triage: unknown[]) 
 const block = (...lines: string[]): string => ['## INSIGHTS', ...lines].join('\n');
 
 describe('loadUnactedInsights', () => {
+  it('includes a finding a DAG reviewer withheld from its issue', async () => {
+    const withheld = { description: 'legacy', file: 'lib.ts', severity: 'high' };
+    const out = await loadUnactedInsights(
+      tableDb(
+        [],
+        [],
+        [{ verdict: 'approve', criteria_results: [], issues: [], withheld: [withheld] }],
+      ),
+      't1',
+    );
+    expect(out.insights.map((i) => [i.title, i.location])).toEqual([['legacy', 'lib.ts']]);
+  });
+
   it('lists what agents noted, minus what 08e picked in any round', async () => {
     const out = await loadUnactedInsights(
       tableDb(

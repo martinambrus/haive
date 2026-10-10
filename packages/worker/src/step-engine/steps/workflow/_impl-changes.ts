@@ -434,14 +434,21 @@ export async function collectImplementationFiles(
   ctx: StepContext,
   worktreePath: string,
 ): Promise<ImplementationFileSet> {
-  const files = await reportedFiles(ctx);
+  return collectChangeSet(worktreePath, await taskBaseBranch(ctx), await reportedFiles(ctx));
+}
+
+/** The change one worktree holds against `baseBranch`, beside the files an agent `files` reported. */
+export async function collectChangeSet(
+  worktreePath: string,
+  baseBranch: string | null,
+  files: Set<string>,
+): Promise<ImplementationFileSet> {
   const scan = await dirtyWorktreeFiles(worktreePath);
   for (const f of scan.files) files.add(f);
 
-  // Which lines of each file the change wrote. Measured against the task's fork point, so
+  // Which lines of each file the change wrote. Measured against the fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const baseBranch = await taskBaseBranch(ctx);
   const measured = await changedLineNotes(worktreePath, baseBranch);
   for (const p of scan.untracked) measured[p] ??= 'new file';
   // A committed deletion may be unreported, and the sandbox masks git: only this list names it.

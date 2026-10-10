@@ -529,13 +529,14 @@ describe('10-gate-3-commit house rules', () => {
   };
   const site = { path: 'src/other.ts', lines: '3-5', reason: 'same null check' };
   // In the order detect asks: 01-worktree-setup, 09-gate-2, the DAG issues, 07's rounds, the
-  // insight outputs, 08e's rows, and then 07b's output and the validator invocation it names.
+  // insight outputs, the DAG issues' reviewer verdicts, 08e's rows, and then 07b's output and the validator invocation it names.
   const withoutGate2 = (rows07b: unknown[], invocation: unknown[]) => [
     [],
     [],
     [],
     [{ round: 0, output: { summary: 's', similarSites: [site] } }],
     [noted],
+    [],
     [],
     rows07b,
     invocation,

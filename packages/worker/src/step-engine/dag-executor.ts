@@ -3,6 +3,7 @@ import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
+  logger,
   reviewerOutputSchema,
   advisorOutputSchema,
   replannerOutputSchema,
@@ -22,6 +23,13 @@ import {
   safeKey,
 } from './steps/_untrusted-repo.js';
 import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
+import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
+import { findingIdentity, INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
+import {
+  changedFilesBlock,
+  collectChangeSet,
+  type ImplementationFileSet,
+} from './steps/workflow/_impl-changes.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
@@ -252,7 +260,11 @@ async function createIssueWorktree(
 
 /** Pre-formatted notes from completed lower-level issues that carried debt, so
  *  downstream coders know about upstream compromises. */
-async function buildUpstreamDebt(db: Database, planId: string, level: number): Promise<string> {
+export async function buildUpstreamDebt(
+  db: Database,
+  planId: string,
+  level: number,
+): Promise<string> {
   if (level === 0) return '';
   const upstream = await db
     .select()
@@ -264,7 +276,9 @@ async function buildUpstreamDebt(db: Database, planId: string, level: number): P
     if (issue.outcome !== 'completed' && issue.outcome !== 'completed_with_debt') continue;
     const debt = (issue.debtItems ?? []) as unknown[];
     if (debt.length === 0) continue;
-    lines.push(`- ${issue.issueKey} (${issue.title}) completed with debt: ${JSON.stringify(debt)}`);
+    lines.push(
+      `- ${safeKey(issue.issueKey)} (${safeTitle(issue.title)}) completed with debt: ${JSON.stringify(debt)}`,
+    );
   }
   if (lines.length === 0) return '';
   return [
@@ -952,23 +966,56 @@ function specLines(issue: DagIssueRow, spec: string): string[] {
   ];
 }
 
-export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
+/** What the issue's worktree holds against the integration branch it forked from, as the other
+ *  reviewers' lists are measured; null when that base cannot be named, which leaves the coder's list. */
+async function issueChangeSet(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+): Promise<ImplementationFileSet | null> {
+  if (!issue.worktreePath) return null;
+  try {
+    const integration = await loadIntegrationWorktree(ra.db, ra.taskId);
+    return await collectChangeSet(
+      issue.worktreePath,
+      integration.branch,
+      new Set((issue.filesModified ?? []) as string[]),
+    );
+  } catch (err) {
+    logger.warn({ err, issueKey: issue.issueKey }, 'could not measure the issue change set');
+    return null;
+  }
+}
+
+export function reviewerPrompt(
+  issue: DagIssueRow,
+  spec: string,
+  changes: ImplementationFileSet | null = null,
+): string {
   const criteria = (issue.acceptanceCriteria ?? []) as string[];
   const files = (issue.filesModified ?? []) as string[];
+  const reported =
+    files.length > 0
+      ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
+      : '';
   return [
-    `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
+    `You are reviewing the implementation of ${safeKey(issue.issueKey)}: ${safeTitle(issue.title)}`,
     'Your working directory is the issue worktree containing the implementation.',
     // Joined into ONE element on purpose: this array is `.filter(Boolean)`-ed, which would
     // strip the deliberate blank lines inside the block and collapse three paragraphs into a
     // wall of text. A single joined string keeps its own newlines and is non-empty, so the
     // filter passes it through whole — the same reason INVARIANT_CITATION survives below.
     REPO_IS_DATA_LINES.join('\n'),
-    // The coder's own files_modified IS the change set here: git is unavailable in the
-    // sandbox, so without this list a reviewer has no way to find what changed except by
-    // reaching for git — and then treating the zero-byte `.git` boundary as corruption.
-    files.length > 0
-      ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
-      : '',
+    // The files and lines this issue changed, measured against its fork point; the coder's list when that fails.
+    changes
+      ? changedFilesBlock(
+          changes,
+          'Files this issue changed — this list is the change set (read each in full)',
+          reported,
+        )
+      : reported,
+    SCOPE_FENCE_INSIGHTS.join('\n'),
+    'In this verdict the list is `issues`: put a problem in code this issue did not write under `## INSIGHTS`. One you list anyway needs `"in_scope": "no"`, and is not sent to the fix agent.',
+    INSIGHTS_INSTRUCTION,
     'Review it as a senior engineer would before merge; verify each acceptance criterion against the code.',
     criteria.length > 0 ? `Acceptance criteria:\n- ${criteria.join('\n- ')}` : '',
     ...specLines(issue, spec),
@@ -984,7 +1031,7 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
     INVARIANT_CITATION,
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',
+    '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "...", "in_scope": "yes|no" }] }',
     'Verdict rules: approve = every acceptance criterion passes — choose approve even if you still have low-severity or cosmetic suggestions; list them under issues and they are tracked as debt, not a merge blocker.',
     'fix_required = at least one issue makes an acceptance criterion fail and a fix coder can address it. block = a fundamental problem (broken build, security hole, wrong approach) that cannot be approved.',
   ]
@@ -1052,7 +1099,17 @@ export function parseReviewerOutput(
     candidate = body ? safeJsonParse(body) : null;
   }
   const parsed = reviewerOutputSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  const issues = parsed.data.issues.filter((i) => !isOutOfScope(i));
+  const withheld = parsed.data.issues.filter(isOutOfScope);
+  const out: ReviewerOutput = { ...parsed.data, issues, withheld: undefined };
+  if (withheld.length === 0) return out;
+  out.withheld = withheld;
+  // A fix_required/block that rested only on withheld findings is a pass; a failed criterion keeps it.
+  if (out.verdict !== 'approve' && issues.length === 0 && failedCriteriaCount(out) === 0) {
+    out.verdict = 'approve';
+  }
+  return out;
 }
 
 /** A fix_required verdict whose own structured signals say the work is done:
@@ -1209,11 +1266,25 @@ async function setResolution(
     .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
+/** The findings withheld in any round, the earlier ones first, each identity once. */
+function unionWithheld(
+  earlier: ReviewerOutput['withheld'],
+  latest: ReviewerOutput['withheld'],
+): NonNullable<ReviewerOutput['withheld']> {
+  const seen = new Set<string>();
+  return [...(earlier ?? []), ...(latest ?? [])].filter((f) => {
+    const id = findingIdentity(f);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 async function acceptWithDebt(
   db: Database,
   issue: DagIssueRow,
   reviewIssues: unknown[],
-  round?: { stuckCount: number; innerIteration: number },
+  round?: { stuckCount: number; innerIteration: number; reviewerVerdict?: ReviewerOutput },
 ): Promise<void> {
   const existing = (issue.debtItems ?? []) as unknown[];
   await db
@@ -1344,7 +1415,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           true,
@@ -1371,7 +1442,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
         );
         if (!ok)
@@ -1390,29 +1461,46 @@ export async function ingestReviewRun(
         `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
       );
     }
-    if (verdict.verdict === 'approve') return setResolution(ra.db, issue, 'approved');
-    if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
+    const previousVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const withheld = unionWithheld(
+      previousVerdict.success ? previousVerdict.data.withheld : undefined,
+      verdict.withheld,
+    );
+    if (withheld.length > 0) verdict.withheld = withheld;
+    const kept = verdict.withheld
+      ? {
+          stuckCount: issue.stuckCount,
+          innerIteration: issue.innerIteration,
+          reviewerVerdict: verdict,
+        }
+      : undefined;
+    if (verdict.verdict === 'approve') {
+      return setResolution(ra.db, issue, 'approved', undefined, kept);
+    }
+    if (verdict.verdict === 'block') {
+      return setResolution(ra.db, issue, 'failed_unrecoverable', undefined, kept);
+    }
     // fix_required whose criteria all pass and whose only issues are cosmetic →
     // approve (folding the nits into debt) instead of looping on polish.
     if (fixRequiredIsCosmetic(verdict)) {
       return verdict.issues.length > 0
-        ? acceptWithDebt(ra.db, issue, verdict.issues)
-        : setResolution(ra.db, issue, 'approved');
+        ? acceptWithDebt(ra.db, issue, verdict.issues, kept)
+        : setResolution(ra.db, issue, 'approved', undefined, kept);
     }
     // fix_required
-    const previous = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     // A shorter list than last time is not evidence that the omitted criteria passed.
     const progressed =
       verdict.criteria_results.length > 0 &&
-      previous.success &&
-      verdict.criteria_results.length >= previous.data.criteria_results.length &&
-      failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
+      previousVerdict.success &&
+      verdict.criteria_results.length >= previousVerdict.data.criteria_results.length &&
+      failedCriteriaCount(verdict) < failedCriteriaCount(previousVerdict.data);
     const newStuck = progressed ? 1 : issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;
     if (newStuck >= STUCK_LIMIT) {
       return acceptWithDebt(ra.db, issue, verdict.issues, {
         stuckCount: newStuck,
         innerIteration: newIter,
+        ...(verdict.withheld ? { reviewerVerdict: verdict } : {}),
       });
     }
     if (newIter >= MAX_REVIEW_ITERS) {
@@ -1466,7 +1554,7 @@ export async function ingestReviewRun(
     issue,
     'reviewer',
     issue.innerIteration,
-    reviewerPrompt(issue, spec),
+    reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
     ['tool_use'],
   );
   if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
@@ -1495,9 +1583,14 @@ export async function resolveReviewPhase(
       .limit(1);
     const latest = runs[0];
     if (!latest) {
-      const ok = await spawnReviewAgent(ra, issue, 'reviewer', 0, reviewerPrompt(issue, spec), [
-        'tool_use',
-      ]);
+      const ok = await spawnReviewAgent(
+        ra,
+        issue,
+        'reviewer',
+        0,
+        reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+        ['tool_use'],
+      );
       if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
       continue;
     }
@@ -1519,7 +1612,7 @@ export async function resolveReviewPhase(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
         );
         if (!ok)

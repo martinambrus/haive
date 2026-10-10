@@ -61,6 +61,14 @@ export type DagIssueResult = z.infer<typeof dagIssueResultSchema>;
 /** A reviewer's verdict on an issue's implementation (Phase 3 inner loop).
  *  approve = ready to merge; fix_required = non-blocking issues a fix coder can
  *  address; block = a fundamental problem the loop can't fix. */
+const reviewerIssueSchema = z.object({
+  severity: z.enum(['high', 'medium', 'low']).optional(),
+  file: z.string().optional(),
+  description: z.string(),
+  suggestion: z.string().optional(),
+  in_scope: z.union([z.boolean(), z.string()]).optional().catch(undefined),
+});
+
 export const reviewerOutputSchema = z.object({
   verdict: z.enum(['approve', 'fix_required', 'block']),
   criteria_results: z
@@ -72,16 +80,9 @@ export const reviewerOutputSchema = z.object({
       }),
     )
     .default([]),
-  issues: z
-    .array(
-      z.object({
-        severity: z.enum(['high', 'medium', 'low']).optional(),
-        file: z.string().optional(),
-        description: z.string(),
-        suggestion: z.string().optional(),
-      }),
-    )
-    .default([]),
+  issues: z.array(reviewerIssueSchema).default([]),
+  /** Set by the worker, never read from the reviewer: the issues it marked out of scope. */
+  withheld: z.array(reviewerIssueSchema).optional(),
 });
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
 
