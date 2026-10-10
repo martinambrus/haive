@@ -1,5 +1,6 @@
-import { and, eq, ne, notInArray } from 'drizzle-orm';
+import { and, eq, ne, notInArray, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { worktreeDirName } from './worktree-paths.js';
 
 /** Statuses whose worktree has been torn down, so the branch/directory is free again.
  *  `failed` is deliberately NOT here: a failed task keeps its worktree and branch on disk
@@ -14,6 +15,10 @@ export interface WorktreeClaimant {
   status: string;
 }
 
+export interface BranchClaimant extends WorktreeClaimant {
+  worktreeBranch: string | null;
+}
+
 /** The other task, if any, that already claims `branchName` in this repository.
  *
  *  Two tasks must never share a branch: `worktreeDirName` maps a branch to exactly ONE
@@ -22,19 +27,25 @@ export interface WorktreeClaimant {
  *  "reusing existing worktree" and continues. Both `tasks.worktree_path` rows then point at
  *  one directory, and whichever task tears down first destroys the other's work.
  *
+ *  A task also claims when its branch maps to the same
+ *  directory (`feature/x` and `feature-x` both live in `.haive/worktrees/feature-x`).
+ *
  *  Excludes the caller so a Retry / step reset of the SAME task re-enters its own worktree. */
 export async function findBranchClaimant(
   db: Database,
   params: { repositoryId: string; branchName: string; taskId: string },
-): Promise<WorktreeClaimant | null> {
+): Promise<BranchClaimant | null> {
   const row = await db.query.tasks.findFirst({
     where: and(
       eq(schema.tasks.repositoryId, params.repositoryId),
-      eq(schema.tasks.worktreeBranch, params.branchName),
+      or(
+        eq(schema.tasks.worktreeBranch, params.branchName),
+        sql`replace(${schema.tasks.worktreeBranch}, '/', '-') = ${worktreeDirName(params.branchName)}`,
+      ),
       ne(schema.tasks.id, params.taskId),
       notInArray(schema.tasks.status, [...RELEASED_STATUSES]),
     ),
-    columns: { id: true, title: true, status: true },
+    columns: { id: true, title: true, status: true, worktreeBranch: true },
   });
   return row ?? null;
 }

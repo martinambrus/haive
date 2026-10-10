@@ -318,11 +318,16 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         taskId: ctx.taskId,
       });
       if (claimant) {
+        const sharesDir = claimant.worktreeBranch && claimant.worktreeBranch !== branchName;
         throw new Error(
-          `Branch "${branchName}" is already held by task "${claimant.title}" ` +
-            `(${claimant.id}, ${claimant.status}). Two tasks cannot share a branch — both ` +
-            `would work in the same worktree directory. Retry this step and pick a different ` +
-            `name, or finish/cancel that task first.`,
+          (sharesDir
+            ? `Branch "${branchName}" shares its worktree directory with branch ` +
+              `"${claimant.worktreeBranch}", held by task "${claimant.title}" ` +
+              `(${claimant.id}, ${claimant.status}).`
+            : `Branch "${branchName}" is already held by task "${claimant.title}" ` +
+              `(${claimant.id}, ${claimant.status}).`) +
+            ` Two tasks cannot share a branch — both would work in the same worktree ` +
+            `directory. Retry this step and pick a different name, or finish/cancel that task first.`,
         );
       }
     }
