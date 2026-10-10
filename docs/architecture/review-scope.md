@@ -43,6 +43,15 @@ file over the worktree's `.git` for every cli-exec invocation, so inside the san
 no `git status` and no `git diff`, and everything an agent knows about the change has to
 arrive in its prompt.
 
+A read that fails is never "no change". The committed half is read only against a real fork point:
+a base branch that is unrecorded or gone, or a `merge-base` that fails or outlives its bound, would
+otherwise diff against HEAD and, on a DAG task's clean tree, list nothing. Such a read, like a
+failed `git status`, sets the set's `scanError`: every reviewer's list then carries a COVERAGE
+paragraph saying it may miss files, the stored coverage carries `scanFailed`, and gate 2's
+validation, review, audit and QA rows read PARTIAL (the validation row says whether it happened
+before any fix or after one). Two other readers keep the HEAD fallback for now: the lint scope's
+`collectChangedLineMap` and the house-rules change read.
+
 A pass after a fix is given the change as it stands, not as detect saw it: the 07b and 08a fix
 passes re-collect it and carry the list on their output, so the next validator or re-tester lists
 the files the fixer created, 07b's stored coverage is that pass's, and 07b re-decides the
@@ -52,7 +61,8 @@ stands in for detect's, and a fixer's failed re-scan puts the re-validation on t
 nobody can tell whether the fixer added code. Gate 2's Implementation validation row reads 07b's
 coverage the way the review rows read theirs, and holds Approve when 07b was given a capped list or
 when the change could not be re-read after a fix (`changedFilesCoverage.scanFailed`): then nobody
-knows whether the fix added files, and the House rules row is PARTIAL for the same reason.
+knows whether the fix added files, and the House rules row is PARTIAL for the same reason (it says
+only that the change could not be fully read, since its data does not say when).
 08a's re-tester is told instead, beside detect's list: its verdict is behavioural, so re-testing
 the failures exercises the fix whatever a list names, and 08c re-collects the change at its own
 detect, so gate 2's Browser testing row takes no mark.
