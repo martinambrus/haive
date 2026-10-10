@@ -1,10 +1,9 @@
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { type Database } from '@haive/database';
+import { isDuplicateDatabase, type Database } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
-import { isDuplicateDatabaseError } from '../utils/pg-errors.js';
 
 const log = logger.child({ module: 'rag-connection' });
 
@@ -197,7 +196,7 @@ async function resolveInternal(
       log.info({ dbName }, 'created per-project RAG database');
     }
   } catch (err) {
-    if (!isDuplicateDatabaseError(err)) throw err;
+    if (!isDuplicateDatabase(err)) throw err;
   }
 
   const pg = postgres(internalRagUrl(dbName), poolOptions(opts));

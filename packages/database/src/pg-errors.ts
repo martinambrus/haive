@@ -6,6 +6,8 @@ const UNDEFINED_TABLE = '42P01';
 const ACTIVE_SQL_TRANSACTION = '25001';
 /** Postgres SQLSTATE for lock_not_available, raised when a `lock_timeout` runs out. */
 const LOCK_NOT_AVAILABLE = '55P03';
+/** Postgres SQLSTATE for duplicate_database. */
+const DUPLICATE_DATABASE = '42P04';
 
 /**
  * True when an error — or anything it wraps — carries the given Postgres SQLSTATE.
@@ -81,4 +83,15 @@ export function isActiveSqlTransaction(err: unknown): boolean {
  */
 export function isLockNotAvailable(err: unknown): boolean {
   return hasPgCode(err, LOCK_NOT_AVAILABLE);
+}
+
+/**
+ * True when `CREATE DATABASE` lost to another creator: `42P04 duplicate_database` once the name
+ * exists, or a unique_violation of `pg_database_datname_index` when two creates overlap (MEASURED
+ * on Postgres 18: every loser of 20 concurrent pairs got the latter).
+ */
+export function isDuplicateDatabase(err: unknown): boolean {
+  return (
+    hasPgCode(err, DUPLICATE_DATABASE) || isUniqueViolationOf(err, 'pg_database_datname_index')
+  );
 }

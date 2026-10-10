@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isUniqueViolation, isUndefinedTable, isActiveSqlTransaction } from './pg-errors.js';
+import {
+  isDuplicateDatabase,
+  isUniqueViolation,
+  isUndefinedTable,
+  isActiveSqlTransaction,
+} from './pg-errors.js';
 
 /** The EXACT shape drizzle-orm throws, captured from a live duplicate insert:
  *  ctor=DrizzleQueryError code=undefined causeCtor=PostgresError causeCode=23505.
@@ -105,5 +110,29 @@ describe('isActiveSqlTransaction', () => {
   it('does not match a different SQLSTATE', () => {
     expect(isActiveSqlTransaction({ code: '23505' })).toBe(false);
     expect(isActiveSqlTransaction(null)).toBe(false);
+  });
+});
+
+describe('isDuplicateDatabase', () => {
+  const wrapped = (fields: Record<string, unknown>) =>
+    Object.assign(new Error('Failed query: CREATE DATABASE "x"'), {
+      cause: Object.assign(new Error('driver'), fields),
+    });
+
+  it("matches 42P04 and the concurrent create's unique violation of pg_database, wrapped or bare", () => {
+    expect(isDuplicateDatabase(wrapped({ code: '42P04' }))).toBe(true);
+    expect(
+      isDuplicateDatabase(wrapped({ code: '23505', constraint_name: 'pg_database_datname_index' })),
+    ).toBe(true);
+    expect(isDuplicateDatabase(Object.assign(new Error('x'), { code: '42P04' }))).toBe(true);
+  });
+
+  it('refuses any other unique violation and an "already exists" message with another code', () => {
+    expect(isDuplicateDatabase(wrapped({ code: '23505', constraint_name: 'other_idx' }))).toBe(
+      false,
+    );
+    expect(isDuplicateDatabase(Object.assign(new Error('already exists'), { code: '42P07' }))).toBe(
+      false,
+    );
   });
 });

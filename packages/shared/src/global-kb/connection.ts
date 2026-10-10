@@ -1,9 +1,8 @@
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { type Database } from '@haive/database';
+import { isDuplicateDatabase, type Database } from '@haive/database';
 import { logger } from '../logger/index.js';
-import { isDuplicateDatabaseError } from '../utils/pg-errors.js';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { configService, CONFIG_KEYS, type ConfigService } from '../config/config.service.js';
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
@@ -157,7 +156,7 @@ async function resolveInternal(
       log.info({ dbName }, 'created internal global KB database');
     }
   } catch (err) {
-    if (!isDuplicateDatabaseError(err)) throw err;
+    if (!isDuplicateDatabase(err)) throw err;
   }
 
   const haiveUrl = process.env.DATABASE_URL;
