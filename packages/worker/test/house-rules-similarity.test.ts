@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
   text: 'Add a cart icon\nShow it in the header.',
   embed: vi.fn(async (..._args: unknown[]): Promise<number[][]> => [[0.6, 0.8]]),
   rows: [] as Array<{ id: string; score: number | string }>,
+  hasVector: true,
+  jsonRows: [] as Array<{ id: string; embedding: unknown }>,
   storeError: null as Error | null,
   storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
   storeOptions: [] as unknown[],
@@ -42,7 +44,13 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
       execute: async (query: SQL) => {
         const built = new PgDialect().sqlToQuery(query);
         h.storeCalls.push({ sql: built.sql, params: built.params });
-        return built.sql.includes('ai_rag_embeddings') ? h.rows : [];
+        if (built.sql.includes('information_schema')) return h.hasVector ? [{ '?column?': 1 }] : [];
+        if (built.sql.includes('embedding_json')) return h.jsonRows;
+        if (built.sql.includes('r.vector')) {
+          if (!h.hasVector) throw new Error('column r.vector does not exist');
+          return h.rows;
+        }
+        return [];
       },
     };
     return fn({ db: { transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } });
@@ -89,6 +97,8 @@ beforeEach(() => {
   updateFails = false;
   h.text = 'Add a cart icon\nShow it in the header.';
   h.rows = [];
+  h.hasVector = true;
+  h.jsonRows = [];
   h.storeError = null;
   h.storeCalls = [];
   h.storeOptions = [];
@@ -144,11 +154,39 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     expect(h.embed).toHaveBeenCalledExactlyOnceWith('http://embed.invalid:11434', 'embed-model', [
       h.text,
     ]);
-    const read = h.storeCalls.find((call) => call.sql.includes('ai_rag_embeddings'))!;
+    const read = h.storeCalls.find((call) => call.sql.includes('embed_status'))!;
     expect(read.params).toContain(`{${A},${B}}`);
     expect(read.sql).toContain('embed_status');
     expect(h.storeCalls[0]!.sql).toContain('statement_timeout');
     expect(h.storeOptions[0]).toMatchObject({ deadlineMs: 6_000, settings: h.settings });
+  });
+
+  it('scores a store without pgvector from its jsonb vectors, the best cosine per rule', async () => {
+    h.hasVector = false;
+    h.jsonRows = [
+      { id: A, embedding: [1, 0] },
+      { id: A, embedding: '[0,1]' },
+      { id: C, embedding: [0.6, 0.8] },
+      { id: C, embedding: [1, 0] },
+    ];
+    scoreHouseRulesInBackground(
+      db,
+      INV,
+      TASK,
+      pendingStamp([
+        [A, 'Alpha'],
+        [B, 'Beta'],
+        [C, 'Gamma'],
+      ]),
+    );
+    const record = await recordWritten();
+
+    expect(record.status).toBe('ok');
+    const scores = record.scores as Array<{ id: string; score: number | null }>;
+    expect(scores.map((x) => x.id)).toEqual([A, B, C]);
+    expect(scores[0]!.score).toBeCloseTo(0.8, 9);
+    expect(scores[1]!.score).toBeNull();
+    expect(scores[2]!.score).toBeCloseTo(1, 9);
   });
 
   it('scores through a cold embedder load that outlasts the old 30 s budget', async () => {

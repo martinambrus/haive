@@ -10,7 +10,7 @@ import {
   type HouseRulesSimilarity,
   type HouseRulesStamp,
 } from '@haive/shared/global-kb';
-import { ollamaEmbed, vectorLiteral } from '@haive/shared/rag';
+import { cosineSimilarity, ollamaEmbed, vectorLiteral } from '@haive/shared/rag';
 import { DISPATCH_KB_BOUNDS, timed } from './global-kb-context.js';
 import { readTaskText } from './house-rules-dispatch.js';
 
@@ -34,6 +34,27 @@ const queryOf = (text: string): string =>
     .slice(0, SIMILARITY_QUERY_MAX_CHARS)
     .replace(/[\uD800-\uDBFF]$/, '');
 
+/** A jsonb store's vectors, as the driver hands them over: parsed, or still the raw text. */
+function vectorOf(value: unknown): number[] | null {
+  const parsed = typeof value === 'string' ? (JSON.parse(value) as unknown) : value;
+  return Array.isArray(parsed) ? (parsed as number[]) : null;
+}
+
+/** The best cosine per entry, computed over the fetched vectors of a store without pgvector. */
+function bestCosines(
+  rows: Array<{ id: string; embedding: unknown }>,
+  query: number[],
+): Array<{ id: string; score: number }> {
+  const best = new Map<string, number>();
+  for (const row of rows) {
+    const vector = vectorOf(row.embedding);
+    if (vector === null) continue;
+    const score = cosineSimilarity(query, vector);
+    if (score > (best.get(row.id) ?? -Infinity)) best.set(row.id, score);
+  }
+  return [...best].map(([id, score]) => ({ id, score }));
+}
+
 /** The highest cosine between the query and any row of each candidate; a rule with no vector keeps null. */
 async function measure(
   db: Database,
@@ -56,15 +77,28 @@ async function measure(
     db,
     ({ db: gdb }) =>
       timed(gdb, DISPATCH_KB_BOUNDS.statementTimeoutMs, async (tx) => {
+        const columns = (await tx.execute(sql`
+          select 1 from information_schema.columns
+          where table_name = 'ai_rag_embeddings' and column_name = 'vector'`)) as unknown as unknown[];
+        if (columns.length > 0) {
+          const read = await tx.execute(sql`
+            select r.entry_id::text as id, max(1 - (r.vector <=> ${vectorLiteral(vector)}::vector)) as score
+            from ai_rag_embeddings r
+            join global_kb_entries e on e.id = r.entry_id
+            where r.namespace = ${settings.namespace}
+              and r.entry_id = any(${ids}::uuid[])
+              and e.embed_status = 'embedded'
+            group by r.entry_id`);
+          return read as unknown as Array<{ id: string; score: number | string }>;
+        }
         const read = await tx.execute(sql`
-          select r.entry_id::text as id, max(1 - (r.vector <=> ${vectorLiteral(vector)}::vector)) as score
+          select r.entry_id::text as id, r.embedding_json as embedding
           from ai_rag_embeddings r
           join global_kb_entries e on e.id = r.entry_id
           where r.namespace = ${settings.namespace}
             and r.entry_id = any(${ids}::uuid[])
-            and e.embed_status = 'embedded'
-          group by r.entry_id`);
-        return read as unknown as Array<{ id: string; score: number | string }>;
+            and e.embed_status = 'embedded'`);
+        return bestCosines(read as unknown as Array<{ id: string; embedding: unknown }>, vector);
       }),
     {
       connectTimeoutSeconds: DISPATCH_KB_BOUNDS.connectTimeoutSeconds,
