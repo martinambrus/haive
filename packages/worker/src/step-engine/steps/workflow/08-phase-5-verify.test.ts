@@ -823,25 +823,69 @@ describe('phase5VerifyStep.apply', () => {
     });
   });
 
-  it('keeps the tail of a long host check output, as the DDEV path does', async () => {
-    ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
-    const noisy = {
+  describe('stores both ends of a long check output', () => {
+    const hostCheck = (script: string) => ({
       kind: 'host' as const,
       label: 'noisy',
-      argv: [
-        process.execPath,
-        '-e',
-        "process.stdout.write('x'.repeat(6000) + 'END'); process.exitCode = 1",
-      ],
-    };
+      argv: [process.execPath, '-e', script],
+    });
+    const LONG = `FIRST\n${'noise line\n'.repeat(950)}Tests: 3 failed`;
 
-    const out = await runApply(
-      { ddevMode: false, workspacePath: tmpdir(), test: noisy },
-      { runTest: true },
-    );
+    it('keeps the start and the verdict of a long host run, within the cap', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck(`process.stdout.write(${JSON.stringify(LONG)}); process.exitCode = 1`),
+        },
+        { runTest: true },
+      );
 
-    expect(out.test.output).toHaveLength(4000);
-    expect(out.test.output.endsWith('END')).toBe(true);
+      expect(LONG.length).toBeGreaterThan(10_000);
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+      expect(out.test.output).toMatch(/\[… [\d,]+ characters? omitted …\]/);
+      expect(out.test.output.length).toBeLessThanOrEqual(4000);
+    });
+
+    it('keeps both ends of a long DDEV run too', async () => {
+      ddevExec.mockResolvedValue({ exitCode: 1, output: LONG });
+      const out = await runApply({ test: PHPUNIT }, { runTest: true });
+
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+      expect(out.test.output.length).toBeLessThanOrEqual(4000);
+    });
+
+    it('keeps both ends of a failing host run that exits non-zero with stderr', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck(`process.stderr.write(${JSON.stringify(LONG)}); process.exitCode = 2`),
+        },
+        { runTest: true },
+      );
+
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+    });
+
+    it('stores a 3,999 character output byte for byte', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck("process.stdout.write('x'.repeat(3998) + '!'); process.exitCode = 1"),
+        },
+        { runTest: true },
+      );
+
+      expect(out.test.output).toBe(`${'x'.repeat(3998)}!`);
+    });
   });
 
   describe('lint limited to the lines the change wrote', () => {

@@ -14,7 +14,7 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
-import { excerptDiagnosis } from './_fix-loop.js';
+import { checkOutputExcerpt, excerptDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -413,17 +413,6 @@ function reportExcerpt(report: string): string {
   return report.length > REPORT_EXCERPT_CHARS
     ? excerptDiagnosis(report, REPORT_EXCERPT_CHARS, false)
     : report;
-}
-
-const CHECK_OUTPUT_CHARS = 4000;
-// excerptDiagnosis can run a little over its budget; the room keeps its result under the cap, so a second pass leaves it alone.
-const CHECK_OUTPUT_ROOM = 150;
-
-// A run's verdict is at the end of its output, so a cut keeps both ends.
-function checkOutputExcerpt(output: string): string {
-  return output.length > CHECK_OUTPUT_CHARS
-    ? excerptDiagnosis(output, CHECK_OUTPUT_CHARS - CHECK_OUTPUT_ROOM, false)
-    : output;
 }
 
 // The first `max` characters without a split surrogate pair, and a note counting what is left out.

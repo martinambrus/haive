@@ -27,6 +27,7 @@ import {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
+import { checkOutputExcerpt } from './_fix-loop.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 import type { TestFramework } from './08b-test-management.js';
@@ -351,7 +352,7 @@ async function execSlot(
         }),
       { initialLine: cmd.argv.join(' ') },
     );
-    return { ran: true, exitCode: res.exitCode, output: res.output.slice(-4000) };
+    return { ran: true, exitCode: res.exitCode, output: checkOutputExcerpt(res.output) };
   }
   try {
     const [bin, ...rest] = cmd.argv;
@@ -364,11 +365,15 @@ async function execSlot(
         maxBuffer: 10 * 1024 * 1024,
       }),
     );
-    return { ran: true, exitCode: 0, output: `${stdout}${stderr}`.slice(-4000) };
+    return { ran: true, exitCode: 0, output: checkOutputExcerpt(`${stdout}${stderr}`) };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: unknown };
     const exitCode = typeof e.code === 'number' ? e.code : e.code === 'ENOENT' ? NOT_FOUND_EXIT : 1;
-    return { ran: true, exitCode, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-4000) };
+    return {
+      ran: true,
+      exitCode,
+      output: checkOutputExcerpt(`${e.stdout ?? ''}${e.stderr ?? ''}`),
+    };
   }
 }
 
