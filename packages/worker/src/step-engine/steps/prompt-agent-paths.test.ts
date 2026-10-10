@@ -387,7 +387,12 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         // A redraft after the outline's root was deleted carries the answered rounds.
         label: `00b-plan-clarify outline redraft (${mode})`,
         exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildRootPrompt',
-        build: () => buildRootPrompt(d, permissive({ depth: 3 }), outlineExtraLines(d, [round])),
+        build: () =>
+          buildRootPrompt(
+            d,
+            permissive({ depth: 3 }),
+            outlineExtraLines(d, [{ ...round, integrated: true }]),
+          ),
       },
       {
         label: `00b-plan-clarify buildIntegratePrompt (${mode})`,

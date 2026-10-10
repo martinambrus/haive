@@ -263,7 +263,10 @@ export function outlineExtraLines(
   d: Pick<PlanBuildDetect, 'mode'>,
   rounds: readonly ClarifyRound[] = [],
 ): string[] {
-  const decided = rounds.some((r) => r.round > 0 && r.answered);
+  // Integrated rounds only: one answered but not yet folded in is integrated after the redraft,
+  // and carrying it here as well would apply the same answer twice.
+  const carried = rounds.filter((r) => r.round > 0 && r.integrated);
+  const decided = carried.length > 0;
   return [
     ...(decided
       ? [
@@ -275,7 +278,7 @@ export function outlineExtraLines(
             '',
             UNTRUSTED_FENCE_LEGEND.join('\n'),
             '',
-            ...historyLines(rounds),
+            ...historyLines(carried),
           ].join('\n'),
           '',
         ]

@@ -28,6 +28,7 @@ const plan = vi.hoisted(() => ({
   patches: [] as unknown[],
   refuse: null as Error | null,
   makesRoot: true,
+  created: [] as string[],
 }));
 
 vi.mock('@haive/shared/plan', async (importOriginal) => ({
@@ -53,8 +54,15 @@ vi.mock('./_plan-prompt.js', async (importOriginal) => ({
           ordinal: 0,
         });
       plan.root = { id: ROOT };
+      plan.created = [ROOT];
     }
-    return { created: [], updated: [], dropped: [], strippedCodeLinks: [], refs: {} };
+    return {
+      created: plan.created,
+      updated: [],
+      dropped: [],
+      strippedCodeLinks: [],
+      refs: {},
+    };
   }),
 }));
 vi.mock('./01-plan-build.js', async (importOriginal) => ({
@@ -168,6 +176,7 @@ beforeEach(() => {
   plan.patches = [];
   plan.refuse = null;
   plan.makesRoot = true;
+  plan.created = [];
   delete process.env.HAIVE_TEST_BYPASS_LLM;
 });
 
@@ -390,6 +399,26 @@ describe('00b-plan-clarify apply', () => {
     expect(err.dispatches[0]!.prompt).not.toContain('What the owner already decided');
   });
 
+  it('does not take ownership of a root its outline patch did not create', async () => {
+    plan.makesRoot = false;
+    const { fake, mined, apply, rounds } = setup();
+    fake.insert(schema.planNodes, {
+      id: OTHER_ROOT,
+      repositoryId: REPO,
+      parentId: null,
+      path: `/${OTHER_ROOT}/`,
+      title: 'Someone else',
+      ordinal: 0,
+    });
+    plan.root = { id: OTHER_ROOT };
+    const outline = mined(
+      'clarify-outline',
+      json({ summary: 's', ops: [{ op: 'link', fromRef: 'x', toRef: 'y', kind: 'affects' }] }),
+    );
+    expect(((await thrown(apply([outline]))) as Error).message).toContain('got a plan before');
+    expect(rounds()).toEqual([expect.objectContaining({ round: 0, rootId: null })]);
+  });
+
   it('carries the answered rounds into a redrafted outline', () => {
     const lines = outlineExtraLines({ mode: 'greenfield' }, [
       {
@@ -410,6 +439,21 @@ describe('00b-plan-clarify apply', () => {
     expect(lines).toContain('What the owner already decided');
     expect(lines).toContain('The owner answered: Stripe only');
     expect(lines).toContain('The owner also said: Mobile first.');
+    const pending = outlineExtraLines({ mode: 'greenfield' }, [
+      {
+        round: 1,
+        questions: [],
+        nothingOpen: false,
+        answers: [],
+        steer: 'Not yet folded in.',
+        action: 'continue',
+        answered: true,
+        outcome: null,
+        integrated: false,
+        rootId: null,
+      },
+    ]).join('\n');
+    expect(pending).not.toContain('Not yet folded in.');
   });
 
   it('does nothing under the LLM bypass', async () => {

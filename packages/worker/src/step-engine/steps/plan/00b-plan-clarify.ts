@@ -209,7 +209,9 @@ async function foldOutline(
             ),
           )
           .limit(1);
-        const rootId = root?.id ?? null;
+        // Only a root THIS patch created: one another writer added since detect is not ours,
+        // and leaving it unnamed makes `assertOwnOutline` refuse it.
+        const rootId = root && applied.created.includes(root.id) ? root.id : null;
         const marked = await tx
           .update(schema.planClarifyRounds)
           .set({ rootId })
