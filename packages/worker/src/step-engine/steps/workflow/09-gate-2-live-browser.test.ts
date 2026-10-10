@@ -71,6 +71,7 @@ vi.mock('./_gate-insights.js', async (importOriginal) => ({
 
 import { TaskCancelledError } from '../../step-definition.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 
 const HANDLE = { container: 'haive-ddev-ensured', projectDir: '/repos/u/r' };
@@ -163,6 +164,19 @@ describe('gate-2 live browser bring-up', () => {
       appUrl: 'https://app.ddev.site',
       mailpitUrl: 'http://app.ddev.site:8025',
     });
+  });
+
+  it('quotes an app URL holding a quote when it navigates the browser', async () => {
+    const hostile = "http://x'; id; '.ddev.site";
+    m.ddevPrimaryUrl.mockResolvedValue(hostile);
+
+    await detect();
+
+    expect(m.runnerExec).toHaveBeenCalledWith(
+      HANDLE,
+      `node /opt/browser-probe-connect.js ${shellQuote(hostile)}`,
+      expect.anything(),
+    );
   });
 
   it('still turns any other ensure failure into liveBrowser.reason, and the gate renders', async () => {

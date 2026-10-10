@@ -48,6 +48,7 @@ import {
 } from '../../../sandbox/ddev-runner.js';
 import { appAuthPromptLines, loginAppBrowser, type AppLoginOutcome } from './_app-auth.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
@@ -449,15 +450,19 @@ async function bringUpLiveBrowser(
       // http, not https: opened in the runner's own Chromium, whose trust store is separate
       // from the system one, so https would risk an interstitial instead of the mailbox.
       mailpitUrl = (await ddevMailpitUrls(runtime.handle))?.http ?? null;
-      const r = await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-        timeoutMs: 60_000,
-      });
+      const r = await runnerExec(
+        runtime.handle,
+        `node /opt/browser-probe-connect.js ${shellQuote(appUrl)}`,
+        {
+          timeoutMs: 60_000,
+        },
+      );
       probe = extractReport(r.output);
     } else if (runtime.mode === 'app-runner') {
       await startAppBrowserDesktop(runtime.handle);
       const r = await appRunnerExec(
         runtime.handle,
-        `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+        `node /opt/browser/browser-probe-connect.js ${shellQuote(appUrl)}`,
         { timeoutMs: 60_000 },
       );
       probe = extractReport(r.output);
@@ -701,14 +706,18 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       // tests). Best-effort: a nav miss never blocks the agent.
       if (runtime.mode === 'ddev') {
         await startBrowserDesktop(runtime.handle);
-        await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-          timeoutMs: 30_000,
-        }).catch(() => {});
+        await runnerExec(
+          runtime.handle,
+          `node /opt/browser-probe-connect.js ${shellQuote(appUrl)}`,
+          {
+            timeoutMs: 30_000,
+          },
+        ).catch(() => {});
       } else if (runtime.mode === 'app-runner') {
         await startAppBrowserDesktop(runtime.handle);
         await appRunnerExec(
           runtime.handle,
-          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+          `node /opt/browser/browser-probe-connect.js ${shellQuote(appUrl)}`,
           { timeoutMs: 30_000 },
         ).catch(() => {});
       }
@@ -953,13 +962,17 @@ async function checkAppHealth(
     // reader to infer from a crash.
     const r =
       runtime.mode === 'ddev'
-        ? await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${url}'`, {
-            timeoutMs: 60_000,
-          })
+        ? await runnerExec(
+            runtime.handle,
+            `node /opt/browser-probe-connect.js ${shellQuote(url)}`,
+            {
+              timeoutMs: 60_000,
+            },
+          )
         : runtime.mode === 'app-runner'
           ? await appRunnerExec(
               runtime.handle,
-              `node /opt/browser/browser-probe-connect.js '${url}'`,
+              `node /opt/browser/browser-probe-connect.js ${shellQuote(url)}`,
               { timeoutMs: 60_000 },
             )
           : null;

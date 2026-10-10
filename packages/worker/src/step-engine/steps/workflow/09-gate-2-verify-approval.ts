@@ -35,6 +35,7 @@ import {
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 import type { FileCoverage } from './_impl-changes.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
@@ -787,9 +788,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           // put the user on a warning page instead of their mailbox.
           const mailpitUrl = (await ddevMailpitUrls(handle))?.http ?? null;
           liveBrowser = { available: true, appUrl, mailpitUrl };
-          const nav = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-            timeoutMs: 30_000,
-          });
+          const nav = await runnerExec(
+            handle,
+            `node /opt/browser-probe-connect.js ${shellQuote(appUrl)}`,
+            {
+              timeoutMs: 30_000,
+            },
+          );
           if (nav.exitCode !== 0)
             ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
           liveBrowser = { ...liveBrowser, ...parseProbeErrors(nav.output) };
@@ -811,7 +816,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             liveBrowser = { available: true, appUrl };
             const nav = await appRunnerExec(
               handle,
-              `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+              `node /opt/browser/browser-probe-connect.js ${shellQuote(appUrl)}`,
               { timeoutMs: 30_000 },
             );
             if (nav.exitCode !== 0)

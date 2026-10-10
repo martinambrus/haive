@@ -9,17 +9,11 @@ import {
 import { schema, type Database } from '@haive/database';
 import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
+import { shellQuote } from '../sandbox/shell-quote.js';
 
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READ_TIMEOUT_MS = 15_000;
 const WRITE_TIMEOUT_MS = 15_000;
-
-/** Shell-quote a value for the `sh -c` script the write helper runs. Local rather than
- *  imported from sandbox/task-auth-volume.ts, which already imports this module — sharing
- *  it the other way would close an import cycle. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 /** Read a decrypted cli_provider_secret by name. Returns null when absent. */
 export async function readProviderSecretToken(

@@ -22,6 +22,7 @@ import {
   signRepoGitCredToken,
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
+import { shellQuote } from '../sandbox/shell-quote.js';
 
 const log = logger.child({ module: 'terminal-container' });
 
@@ -812,10 +813,6 @@ function parentDir(p: string): string {
   const idx = trimmed.lastIndexOf('/');
   if (idx <= 0) return '/';
   return trimmed.slice(0, idx);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function isNotFoundError(err: unknown): boolean {
