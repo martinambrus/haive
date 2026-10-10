@@ -5,8 +5,11 @@ import {
   RAG_TABLE,
   TASK_SOURCE_TYPE,
 } from './connection.js';
+import { logger } from '../logger/index.js';
 import { vectorLiteral } from './embed.js';
 import { extractIdentifiers, identifierTsQuery } from './identifiers.js';
+
+const log = logger.child({ module: 'rag-search' });
 
 /** Keeps the effort estimator's per-task embeddings out of every candidate CTE — see
  *  TASK_SOURCE_TYPE. A literal from our own constant, not a bind parameter, because the
@@ -386,7 +389,9 @@ async function identifierIdfs(
       if (!stat || stat.df <= 0 || stat.total <= 0) return 0;
       return Math.log(stat.total / stat.df);
     });
-  } catch {
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    log.warn({ code: typeof code === 'string' ? code : undefined }, 'identifier statistics failed');
     // A store predating the identifier lexemes answers this fine (every df is 0),
     // so a throw here is a real fault — degrade to no identifier ranker rather
     // than failing a search that would otherwise work.

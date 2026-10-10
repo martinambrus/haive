@@ -1,4 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const h = vi.hoisted(() => ({ warn: vi.fn() }));
+
+vi.mock('../logger/index.js', () => ({
+  logger: { child: () => ({ warn: h.warn }), info: () => {}, warn: () => {}, error: () => {} },
+}));
+
 import type { RagConnection } from './connection.js';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
@@ -336,6 +343,8 @@ describe('ragHybridSearch knowledge candidates', () => {
 });
 
 describe('ragHybridSearch identifier statistics', () => {
+  beforeEach(() => h.warn.mockClear());
+
   const QUERY = 'getUserById validation';
   const VEC = [0.1, 0.2, 0.3, 0.4];
   const mainStatement = (calls: Array<{ statement: string }>) =>
@@ -365,4 +374,24 @@ describe('ragHybridSearch identifier statistics', () => {
       expect(mainStatement(calls)).not.toContain('ident AS (');
     },
   );
+
+  it('logs one warning carrying the SQLSTATE and nothing of the query', async () => {
+    const { conn } = fakeStore({ transaction: false, statisticsFail: true });
+
+    await ragHybridSearch(conn, VEC, QUERY);
+
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(h.warn.mock.calls[0]);
+    expect(h.warn.mock.calls[0]![0]).toMatchObject({ code: '22012' });
+    expect(logged).not.toContain('getuserbyid');
+    expect(logged).not.toContain('content_tsv');
+  });
+
+  it('logs nothing when the statistics read succeeds', async () => {
+    const { conn } = fakeStore({ transaction: false, statisticsFail: false });
+
+    await ragHybridSearch(conn, VEC, QUERY);
+
+    expect(h.warn).not.toHaveBeenCalled();
+  });
 });
