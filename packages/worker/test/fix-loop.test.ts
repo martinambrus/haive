@@ -1086,6 +1086,24 @@ describe('excerptDiagnosis', () => {
     expect(lines[marker + 2]).toBe(fence);
   });
 
+  it.each([
+    [
+      'head',
+      `${'a'.repeat(100)}\n${'`'.repeat(400)}\n${numbered('code', 30)}\n${'`'.repeat(400)}\n${numbered('outro', 20)}`,
+    ],
+    [
+      'tail',
+      `${numbered('intro', 20)}\n${'`'.repeat(400)}\n${'c'.repeat(100)}\n${'`'.repeat(400)}\n${'z'.repeat(49)}`,
+    ],
+  ])('never splits a fence delimiter line with the %s cut', (_end, text) => {
+    const lines = excerptDiagnosis(text, 600, false).split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(lines.filter((l) => /^`+$/.test(l)).every((l) => l.length === 400)).toBe(true);
+  });
+
   it('adds no fence line when the cut falls outside every block', () => {
     const text = `${'prose '.repeat(600)}\n\`\`\`\ncode\n\`\`\`\n${'prose '.repeat(600)}`;
     const out = excerptDiagnosis(text, 400, false);

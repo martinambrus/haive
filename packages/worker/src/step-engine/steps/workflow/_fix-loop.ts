@@ -234,6 +234,15 @@ const snapWindow = (piece: number): number => Math.min(EXCERPT_LINE_SNAP, Math.f
 const omissionLine = (n: number): string =>
   `[… ${n.toLocaleString('en-US')} character${n === 1 ? '' : 's'} omitted …]`;
 
+/** The line holding index `at`, when `at` falls strictly inside a fence delimiter line. */
+function delimiterLineAround(text: string, at: number): { start: number; end: number } | null {
+  const start = text.lastIndexOf('\n', at - 1) + 1;
+  const found = text.indexOf('\n', at);
+  const end = found === -1 ? text.length : found;
+  if (at <= start || at >= end) return null;
+  return fenceOpener(text.slice(start, end)) ? { start, end } : null;
+}
+
 function headPiece(text: string, max: number): string {
   let end = max;
   if (isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
@@ -241,6 +250,8 @@ function headPiece(text: string, max: number): string {
     const lineEnd = text.lastIndexOf('\n', end - 1);
     if (lineEnd !== -1 && lineEnd >= end - snapWindow(max)) end = lineEnd;
   }
+  const split = delimiterLineAround(text, end);
+  if (split) end = Math.max(split.start - 1, 0);
   return text.slice(0, end);
 }
 
@@ -253,6 +264,8 @@ function tailPiece(text: string, max: number): string {
     const lineEnd = text.indexOf('\n', start);
     if (lineEnd !== -1 && lineEnd < start + snapWindow(max)) start = lineEnd + 1;
   }
+  const split = delimiterLineAround(text, start);
+  if (split) start = Math.min(split.end + 1, text.length);
   return text.slice(start);
 }
 
