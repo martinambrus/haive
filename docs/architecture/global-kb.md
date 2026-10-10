@@ -220,7 +220,12 @@ over its vectors in the global store, and amends the row by compare-and-set on `
 `model`, `queryHash`, `ms`) or `failed` with an error class only. It runs off the dispatch path because a
 cold embed measured 4.6-42.8 s, with the ingest budget (`RAG_EMBED_TIMEOUT_MS`, 240 s, admin-tunable), not
 a query's. It reads `vector` or, on a store without pgvector, `embedding_json`, and scores a rule only
-while its enforced hash still equals the stamped one; a rule edited since gets `score: null, stale: true`. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
+while its enforced hash still equals the stamped one; a rule edited since gets `score: null, stale: true`.
+Nothing marks a hash-fallback vector apart from a model one, so with
+`RAG_EMBED_STRICT_ENABLED` off the scorer records `failed`/`unknown_provenance` rather than score noise. The
+cli-exec job waits for its scorer before it completes (the CLI itself is never delayed), so a worker
+restart cannot strand a `pending` record; one still pending past the embed budget plus 15 s is
+`failed`/`abandoned`. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
 else is record (seeded record); a read that throws is off. `stripHaivePreamble`
 removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
 agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
