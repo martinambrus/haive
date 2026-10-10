@@ -8,7 +8,7 @@ import {
 } from '@haive/shared/fs-safe';
 import {
   readUpgradeFile,
-  removableClaim,
+  deletableClaim,
   RULES_FILE_READ_CAP,
   type UnreadReason,
 } from '@haive/shared/rules-files';
@@ -559,7 +559,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // 02 deletes a file only while it holds the bytes its row records, so deletion is offered for
     // those and for a path already gone, as the banner counts them.
     const removes = (e: UpgradePlanEntry) =>
-      removableClaim(
+      deletableClaim(
         e.currentContent === null ? { kind: 'absent' } : { kind: 'text', text: e.currentContent },
         { templateId: e.templateId, writtenHash: e.baselineWrittenHash ?? '' },
       );

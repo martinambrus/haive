@@ -1,7 +1,14 @@
 import type { CliProviderName } from './types/index.js';
 import { CLI_PROVIDER_CATALOG, type CliRulesFileMode } from './cli-providers/catalog.js';
 import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
-import { extractRegion, RTK_REF_MARKER_END, RTK_REF_MARKER_START } from './templates/cli-rules.js';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_ID,
+  extractRegion,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
+} from './templates/cli-rules.js';
 import { normalizeContent, sha256Hex } from './templates/manifest.js';
 import { withoutRtkHookEntry } from './templates/rtk-settings.js';
 
@@ -34,17 +41,33 @@ export async function readUpgradeFile(repoPath: string, rel: string): Promise<Up
   return { kind: 'text', text: read.data.toString('utf8') };
 }
 
-/** Whether 02 could still act on a claim whose path reads as `read`: it is absent, holds the bytes
- *  its row records as Haive's, or is an RTK settings file whose hook can come out. 02 keeps any other. */
-export function removableClaim(
+/** Whether 02 would delete the file at a claim's path: it is absent, or holds the bytes its row
+ *  records as Haive's. A cli-rules row records the marker-delimited region alone, so that is what
+ *  is compared, and a file with no region reads as absent, as the plan reads it. */
+export function deletableClaim(
   read: UpgradeRead,
   claim: { templateId: string; writtenHash: string },
 ): boolean {
   if (read.kind === 'absent') return true;
   if (read.kind === 'unread') return false;
+  let text = read.text;
+  if (claim.templateId === CLI_RULES_TEMPLATE_ID) {
+    const region = extractRegion(text, CLI_RULES_START, CLI_RULES_END);
+    if (region === null) return true;
+    text = region;
+  }
+  return sha256Hex(normalizeContent(text)) === claim.writtenHash;
+}
+
+/** Whether 02 could still act on a claim: it would delete the file, or it is an RTK settings file
+ *  whose hook can come out. 02 keeps any other. */
+export function removableClaim(
+  read: UpgradeRead,
+  claim: { templateId: string; writtenHash: string },
+): boolean {
   return (
-    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
-    withoutRtkHookEntry(claim.templateId, read.text) !== null
+    deletableClaim(read, claim) ||
+    (read.kind === 'text' && withoutRtkHookEntry(claim.templateId, read.text) !== null)
   );
 }
 

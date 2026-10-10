@@ -30,6 +30,7 @@ import {
 import {
   importRulesFilesFor,
   readUpgradeFile,
+  deletableClaim,
   removableClaim,
   rtkBlockFiles,
   rulesImportState,
@@ -469,11 +470,11 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // and current manifest? Used by the UI banner.
   const changedTemplateIds: string[] = [];
   const obsoleteTemplateIds: string[] = [];
-  // 02 offers a removal only for a row whose file still holds the bytes it wrote.
+  // 02 deletes a file only while it holds the bytes its row wrote; stripping an RTK hook is no deletion.
   const removableRow = async (id: string) => {
     if (!root) return false;
     for (const a of liveArtifacts) {
-      if (a.templateId === id && removableClaim(await readUpgradeFile(root, a.diskPath), a)) {
+      if (a.templateId === id && deletableClaim(await readUpgradeFile(root, a.diskPath), a)) {
         return true;
       }
     }

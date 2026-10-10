@@ -7,7 +7,9 @@ import {
   buildClaudeSettingsJson,
   buildCliRulesBlockFromProviders,
   bundleAgentTemplateHash,
+  CLI_RULES_END,
   CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_START,
   CLI_RULES_TEMPLATE_ID,
   normalizeContent,
   RTK_REF_MARKER_END,
@@ -1122,6 +1124,42 @@ describe('upgrade-status and a claim outside the applicable set', () => {
   it('N7: nor for an RTK settings file the hook was taken out of', async () => {
     await settings({ file: '{\n  "model": "ours"\n}\n' });
     expect(await reads()).toEqual([[], false]);
+  });
+
+  describe('and the files 02 deletes', () => {
+    const REGION = `${CLI_RULES_START}\nthe rules\n${CLI_RULES_END}`;
+    const obsolete = async () => (await status()).obsoleteTemplateIds;
+    const rulesRow = (file: string) => {
+      inSync([{ ...claude, enabled: false }]);
+      return claim({
+        templateId: CLI_RULES_TEMPLATE_ID,
+        diskPath: 'AGENTS.md',
+        hash: 'h-cr',
+        body: REGION,
+        file,
+      });
+    };
+
+    it('G2: counts a retired rules region that AGENTS.md still holds unedited among other text', async () => {
+      await rulesRow(`# mine\n\n${REGION}\n\nmore of mine\n`);
+      expect(await obsolete()).toEqual([CLI_RULES_TEMPLATE_ID]);
+    });
+
+    it('G2: not one whose region was edited', async () => {
+      await rulesRow(`# mine\n\n${REGION.replace('the rules', 'my rules')}\n`);
+      expect(await obsolete()).toBeUndefined();
+    });
+
+    it('G3: counts an RTK settings file holding what Haive wrote, not one only its hook can leave', async () => {
+      await settings();
+      expect(await obsolete(), 'unedited').toEqual([RTK]);
+      state.rows.set(
+        schema.onboardingArtifacts,
+        state.rows.get(schema.onboardingArtifacts)!.slice(0, 2),
+      );
+      await settings({ file: editedSettings });
+      expect(await obsolete(), 'edited around the hook').toBeUndefined();
+    });
   });
 
   it('N8b: keeps reporting a template the manifest dropped while the set still holds it', async () => {
