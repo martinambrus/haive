@@ -541,6 +541,13 @@ export async function collectChangedLineMap(
   return map.size > 0 ? map : null;
 }
 
+const SCAN_FAILED_NOTICE = [
+  'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
+  'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
+  'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
+  'though it covered the whole change.',
+].join('\n');
+
 /**
  * The changed-file block a prompt carries: the caller's own header and its own
  * empty-set fallback, plus — when the list was capped, a name was left out or the scan
@@ -555,7 +562,9 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   // A replayed pre-coverage row still lists its files; it simply carries no notice,
   // which is byte-for-byte what it produced before this shipped.
   const recorded = set?.files ?? (Array.isArray(value) ? value : []);
-  if (recorded.length === 0) return fallback;
+  if (recorded.length === 0) {
+    return set?.scanError ? (fallback ? `${fallback}\n\n` : '') + SCAN_FAILED_NOTICE : fallback;
+  }
   // A name that spans lines or forges the fence would open a line or be rewritten, so it is counted, never written.
   const files = recorded.filter(isListableName);
   const unlistable = recorded.length - files.length;
@@ -599,13 +608,7 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
     );
   }
   if (set?.scanError) {
-    parts.push(
-      '',
-      'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
-      'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
-      'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
-      'though it covered the whole change.',
-    );
+    parts.push('', SCAN_FAILED_NOTICE);
   }
   return parts.join('\n');
 }

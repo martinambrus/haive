@@ -138,6 +138,27 @@ describe('changedFilesBlock', () => {
     expect(block).toBe('Work it out from the workspace.');
   });
 
+  describe('an empty list', () => {
+    const empty = { files: [], total: 0, truncated: false };
+    const NOTICE = 'COVERAGE: the change could not be read in full';
+
+    it('carries the notice alone when the scan failed and the fallback is empty', () => {
+      const block = changedFilesBlock({ ...empty, scanError: 'x' }, 'H', '');
+      expect(block.startsWith(NOTICE)).toBe(true);
+      expect(block).toContain('do NOT report a clean result');
+    });
+
+    it('carries the fallback and then the notice when the scan failed', () => {
+      const block = changedFilesBlock({ ...empty, scanError: 'x' }, 'H', 'fallback');
+      expect(block.startsWith(`fallback\n\n${NOTICE}`)).toBe(true);
+    });
+
+    it('returns the fallback exactly when the scan did not fail', () => {
+      expect(changedFilesBlock({ ...empty, scanError: null }, 'H', 'fallback')).toBe('fallback');
+      expect(changedFilesBlock(empty, 'H', '')).toBe('');
+    });
+  });
+
   it('lists the files under the caller header with no notice when complete', () => {
     const block = changedFilesBlock(
       { files: ['src/a.ts', 'src/b.ts'], total: 2, truncated: false },
@@ -221,9 +242,9 @@ describe('changedFilesBlock', () => {
       ).not.toContain('secret');
     });
 
-    it('has no list to put it after when the set is empty, which the callers refuse before they render', () => {
+    it('puts it after the fallback when the set is empty', () => {
       expect(block({ files: [], total: 0, truncated: false, scanError: 'git failed' })).toBe(
-        'fallback',
+        `fallback\n\n${COVERAGE}`,
       );
     });
   });
