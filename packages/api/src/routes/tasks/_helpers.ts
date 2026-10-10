@@ -7,6 +7,8 @@ import {
   CLI_DISPATCH_STEPS,
   COST_METERED_PROVIDERS,
   decideTaskWorktree,
+  WORKTREE_SUBDIR,
+  worktreeDirName,
   resolveCostBasis,
   MODEL_HEALTH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
@@ -1252,7 +1254,13 @@ export async function resolveWorkspaceRoot(
     latestStatus: latestSetup?.status,
     output: latestSetup?.output,
   });
-  const worktreePath = decision.kind === 'worktree' ? decision.path : null;
+  const worktreePath =
+    decision.kind !== 'worktree'
+      ? null
+      : (decision.path ??
+        (decision.branch && repoRoot
+          ? resolve(repoRoot, WORKTREE_SUBDIR, worktreeDirName(decision.branch))
+          : null));
   let root = worktreePath ?? repoRoot;
   if (!root) {
     // A task with neither a worktree nor a repository may still have a workspace: a repo-less

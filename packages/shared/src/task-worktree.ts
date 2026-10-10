@@ -1,3 +1,14 @@
+/** Where 01-worktree-setup puts a task's feature worktree, relative to the repo root.
+ *  Already git-excluded via .git/info/exclude. */
+export const WORKTREE_SUBDIR = '.haive/worktrees';
+
+/** The worktree DIRECTORY name for a branch. A namespaced branch (`feature/x`)
+ *  flattens its slashes so the on-disk layout stays one level under the subdir; the
+ *  branch ref keeps its slash. */
+export function worktreeDirName(branch: string): string {
+  return branch.replace(/\//g, '-');
+}
+
 export interface TaskWorktreeInput {
   columnBranch: string | null | undefined;
   columnPath: string | null | undefined;

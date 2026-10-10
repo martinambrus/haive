@@ -120,6 +120,30 @@ describe('resolveWorkspaceRoot', () => {
     await expect(resolveWorkspaceRoot(db, TASK, USER)).rejects.toMatchObject({ status: 409 });
   });
 
+  // A branch with no recorded path is rebuilt under the repository, as the worker does.
+  it('roots a branch-only worktree at its directory under the repository', async () => {
+    const worktree = path.join(repo, '.haive', 'worktrees', 'feature-x');
+    await mkdir(worktree, { recursive: true });
+    const db = fakeDb(
+      task({ worktreePath: null, worktreeBranch: 'feature/x' }),
+      { storagePath: repo, localPath: null },
+      [{ status: 'done', output: null }],
+    );
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).resolves.toMatchObject({
+      root: worktree,
+      anchor: repo,
+    });
+  });
+
+  it('answers 409 for a branch-only worktree whose directory was removed', async () => {
+    const db = fakeDb(
+      task({ worktreePath: null, worktreeBranch: 'feature/x' }),
+      { storagePath: repo, localPath: null },
+      [{ status: 'done', output: null }],
+    );
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).rejects.toMatchObject({ status: 409 });
+  });
+
   // G2: Retry state, output nulled, 01 not skipped, directory on disk.
   it('G2 keeps the worktree for a Retry state', async () => {
     const worktree = path.join(repo, '.haive', 'worktrees', 'wt');

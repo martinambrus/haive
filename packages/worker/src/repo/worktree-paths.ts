@@ -1,15 +1,7 @@
 import path from 'node:path';
 
-/** Where 01-worktree-setup puts a task's feature worktree, relative to the repo root.
- *  Already git-excluded via .git/info/exclude. */
-export const WORKTREE_SUBDIR = '.haive/worktrees';
-
-/** The worktree DIRECTORY name for a branch. A namespaced branch (`feature/x`)
- *  flattens its slashes so the on-disk layout stays one level under the subdir; the
- *  branch ref keeps its slash. */
-export function worktreeDirName(branch: string): string {
-  return branch.replace(/\//g, '-');
-}
+export { WORKTREE_SUBDIR, worktreeDirName } from '@haive/shared';
+import { WORKTREE_SUBDIR, worktreeDirName } from '@haive/shared';
 
 /** Host + sandbox paths for a worktree directory name. Callers that suffix the name
  *  (`--base` for the transient merge worktree, `--<issue>` for a DAG issue worktree)
