@@ -325,6 +325,20 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
   });
 
+  it('reads only the first document of a stream, as DDEV does', () => {
+    const cfg = 'name: app\nphp_version: "8.2"\n---\ndatabase: {type: mysql, version: "8.0"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.2',
+      dbType: null,
+      dbVersion: null,
+    });
+  });
+
+  it('keeps the line readers to the first document when that one is not YAML it can read', () => {
+    const cfg = 'php_version: "8.2"\nphp_version: "8.3"\n---\ndatabase:\n  type: mysql\n';
+    expect(parseDdevConfig(cfg).dbType).toBeNull();
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });

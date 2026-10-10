@@ -4,7 +4,7 @@
 // the line readers below. Shared by onboarding env detection (01-env-detect), the
 // workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
 // (01-declare-deps) so all interpret the config identically.
-import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from 'yaml';
+import { isAlias, isMap, isScalar, isSeq, parseAllDocuments, visit } from 'yaml';
 import type { Document, Node, YAMLMap } from 'yaml';
 
 /** Match a top-level `key: value` scalar (optionally double-quoted), line by line. */
@@ -77,21 +77,32 @@ function lookup(map: YAMLMap, key: string, resolve: Resolve): unknown {
   return undefined;
 }
 
-function topLevelMap(text: string): { resolve: Resolve; map: YAMLMap } | null {
-  const doc = parseDocument(text, { schema: 'failsafe' });
-  return doc.errors.length === 0 && isMap(doc.contents)
-    ? { resolve: anchorResolver(doc), map: doc.contents }
-    : null;
+/** The first YAML document, which is all DDEV's yaml.v3 decodes, and the text it spans. */
+function firstDocument(text: string): {
+  parsed: { resolve: Resolve; map: YAMLMap } | null;
+  own: string;
+} {
+  const docs = parseAllDocuments(text, { schema: 'failsafe' });
+  const doc = Array.isArray(docs) ? docs[0] : undefined;
+  if (!doc) return { parsed: null, own: text };
+  const own = text.slice(0, doc.range[2]);
+  return {
+    parsed:
+      doc.errors.length === 0 && isMap(doc.contents)
+        ? { resolve: anchorResolver(doc), map: doc.contents }
+        : null,
+    own,
+  };
 }
 
 /** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
 function ddevReader(text: string) {
-  const parsed = topLevelMap(text);
+  const { parsed, own } = firstDocument(text);
   return {
     field: (key: string): string | null =>
-      parsed ? scalarText(lookup(parsed.map, key, parsed.resolve), text) : lineField(text, key),
+      parsed ? scalarText(lookup(parsed.map, key, parsed.resolve), text) : lineField(own, key),
     blockField: (block: string, key: string): string | null => {
-      if (!parsed) return lineBlockField(text, block, key);
+      if (!parsed) return lineBlockField(own, block, key);
       const inner = lookup(parsed.map, block, parsed.resolve);
       return isMap(inner) ? scalarText(lookup(inner, key, parsed.resolve), text) : null;
     },
