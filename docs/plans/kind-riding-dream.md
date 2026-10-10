@@ -328,10 +328,22 @@ declares a record-and-continue failure policy on its `dagExecute` hook (see Core
 issue that ends `failed_unrecoverable`, after the advisor and replanner have run as they do today,
 is recorded on its row, its level merges what finished, an issue that depends on it is not
 dispatched and is recorded as blocked with a marker in `concerns` naming the failed issue, and the
-step completes. A refusal before dispatch — the landing-branch checks above — is recorded the same
-way, its reason on every planned issue, and its findings are listed as offered no remediation.
-What a Retry is expected to cure still fails the step: an environment halt (`coderEnvHalt`) or a
-crash, where the report waits for the Retry rather than recording a transient fault as a verdict.
+step completes. An issue accepted for merge whose branch holds no change — its coder found the fix
+already on the landing tip, which can be ahead of the scanned commit, or reported done without
+editing — is recorded unmerged with a no-change marker rather than failing the step, and is never
+merged as an empty implementation; its findings are listed as no change made, which a re-scan
+settles, since either reading is possible. A refusal before dispatch — the landing-branch checks
+above — is recorded the same way, its reason on every planned issue, and its findings are listed as
+offered no remediation.
+
+Which failures take the policy turns on whether the step fails because of one issue's own result.
+Those sites do: a failed coder with review off, an escalation that cannot replan or finds
+no replanner, a replanner that aborts, and an empty branch. Every other site is a fault a person
+or a Retry clears and still fails the step, the report waiting for it rather than recording a
+transient fault as a verdict: an environment halt for a coder or a reviewer, an issue killed until
+`DAG_INFRA_EXHAUSTED_MARKER`, missing providers, a fatal provider class other than a refusal, a
+crash, and a merge halt, whose conflict a person resolves with "Retry with LLM" once the automatic
+attempts are spent.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
@@ -381,6 +393,8 @@ reason and most severe first within each group:
   read-only folder import, a detached HEAD), with the reason triage gave;
 - findings whose DAG issue did not merge: refused by the provider (the refusal marker in
   `concerns`), failed, or cancelled, naming which;
+- findings whose DAG issue made no change (the no-change marker), as possibly already fixed on the
+  landing tip and unconfirmed;
 - findings whose DAG issue merged, as remediation attempted and unconfirmed: a merge proves the
   issue's worktree landed, not that its coder repaired each finding grouped into it, so they stay
   listed until a later scan no longer raises them;
@@ -794,11 +808,13 @@ ahead of the module:
   no step a later unguarded one depends on.
 - **The DAG executor takes a record-and-continue failure policy.** A `dagExecute` hook can declare
   it, and core's own steps never do, so a workflow task's DAG keeps failing as it does. Under it,
-  the two sites that fail the step on an issue failure (`resolveDagPhase`'s review-off level
-  check and an escalation that cannot replan) record the failure and let the level merge its other
-  issues, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
+  the sites that fail the step on an issue's own result (`resolveDagPhase`'s review-off level
+  check, an escalation that cannot replan or finds no replanner, and a replanner abort) record the
+  failure and let the level merge its other
+  issues, and so does the third, an accepted issue whose branch holds no change
+  (`issueBranchHasChanges`), which is left unmerged with a no-change marker in `concerns`, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
   `concerns` — no new `dag_issue_outcome` value, as with the refusal marker — and an environment
-  halt still fails the step.
+  halt, a merge halt and every other site `scan-remediate` lists as a fault still fail it.
 - **`loadUnactedInsights` takes a limit.** It slices to `INSIGHTS_AT_GATE` (30) itself, which suits
   a gate row and not a report that lists everything. The gates pass that constant, `scan-report`
   passes none, and the omitted count keeps its meaning for both.
@@ -1015,8 +1031,10 @@ former, and this module does both kinds of write.
 - A seed span whose predicate is false records each of its steps `skipped` and runs the step after
   it; one whose predicate is true runs as if unguarded.
 - Under the record-and-continue policy, a level with one failed issue merges its others and the
-  step completes, a dependent of the failed issue is recorded blocked and never dispatched, and an
-  environment halt still fails the step; without the policy, every existing DAG test is unchanged.
+  step completes, a dependent of the failed issue is recorded blocked and never dispatched, an
+  accepted issue whose branch is empty is left unmerged with the no-change marker while the step
+  completes, a replanner abort records its issues and the step completes, and an environment
+  halt or a merge halt still fails the step; without the policy, every existing DAG test is unchanged.
 - `loadUnactedInsights` with no limit returns every unpicked insight; with `INSIGHTS_AT_GATE` the
   gates still show 30 and count the rest.
 
