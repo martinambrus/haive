@@ -131,6 +131,16 @@ describe('classifyDrift', () => {
     ).toBe('none');
   });
 
+  it('a half-recorded baseline database is unknown, so an unrelated .ddev/ change restarts', () => {
+    const t = target({ dbType: 'mariadb', dbVersion: '10.11' });
+    for (const half of [
+      { dbType: 'mariadb', dbVersion: null },
+      { dbType: null, dbVersion: '10.11' },
+    ]) {
+      expect(classifyDrift(baseline(half), t, HASH_B).kind).toBe('restart');
+    }
+  });
+
   it('refuses a version whose quoted text holds " #" rather than migrating to the text before it', () => {
     const r = classifyDrift(baseline(), target({ dbVersion: "'10.11 # lts'" }), HASH_B);
     expect(r.kind).toBe('unsupported');

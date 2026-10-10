@@ -119,7 +119,10 @@ export function classifyDrift(
   const targetDb = targetBlock ? `${targetBlock.type}:${targetBlock.version}` : null;
   const baseDb = baseBlock ? `${baseBlock.type}:${baseBlock.version}` : null;
 
-  if (targetBlock && targetDb !== baseDb) {
+  // Half a recorded database cannot say what it was, so only the hash decides.
+  const baseHalfRecorded = !baseline.dbType !== !baseline.dbVersion;
+
+  if (targetBlock && !baseHalfRecorded && targetDb !== baseDb) {
     if (targetBlock.type === 'postgres' || baseBlock?.type === 'postgres') {
       return {
         kind: 'unsupported',
