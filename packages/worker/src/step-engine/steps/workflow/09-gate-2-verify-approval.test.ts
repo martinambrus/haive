@@ -1864,6 +1864,15 @@ describe('gate-2 says when it cuts a long manual checklist', () => {
     const text = checklist(chars);
     expect(bodyOf(text)).toBe(`${INTRO}${text}`);
   });
+
+  it('does not split an emoji that straddles the cut', () => {
+    const text = `${'a'.repeat(11_999)}\u{1F600}${'b'.repeat(100)}`;
+    const body = bodyOf(text);
+    expect(body).not.toMatch(LONE_SURROGATE);
+    expect(body.split('\n').at(-1)).toBe(
+      '[… 102 more characters of the checklist are not shown …]',
+    );
+  });
 });
 
 describe("a person's words cannot open or close a fence", () => {

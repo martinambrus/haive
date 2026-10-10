@@ -445,11 +445,8 @@ function headWithNote(
 const CHECKLIST_EXCERPT_CHARS = 12_000;
 
 function checklistExcerpt(checklist: string): string {
-  const left = checklist.length - CHECKLIST_EXCERPT_CHARS;
-  if (left <= 0) return checklist;
-  const one = left === 1;
-  const note = `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the checklist ${one ? 'is' : 'are'} not shown …]`;
-  return `${checklist.slice(0, CHECKLIST_EXCERPT_CHARS)}\n\n${note}`;
+  const cut = headWithNote(checklist, CHECKLIST_EXCERPT_CHARS, 'checklist');
+  return cut ? `${cut.head}\n\n${cut.note}` : checklist;
 }
 
 interface VerifyGateApply {
