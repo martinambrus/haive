@@ -184,6 +184,23 @@ A refuter its provider refuses is an unreadable voter and so never counts toward
 the refutation lenses are seats as in `08c` (`refuter:<lens>`), their CLIs chosen per lens like the
 analysis seats.
 
+**It also re-checks what earlier scans left unconfirmed.** A finding an earlier scan's report
+listed as unresolved — attempted, no change made, or never picked — leaves that list only on
+affirmative evidence, never on absence (`review-findings.md`: a skipped, budget-cut or rewording
+reviewer produces the same absence). So every such finding whose file lies in this scan's target
+and whose dimension this scan ran is handed to the same panel as a claim, the lens asking whether
+the defect still exists in the snapshot, and it is cleared only when the same 2-of-3 quorum says
+it is gone, each voter citing the current `file:line`; an unreadable voter never counts toward
+it. One outside the target, in a dimension not run or REFUSED, or in a file the per-file cap
+truncated is not re-checked and stays listed, carried into this scan's report as unconfirmed.
+
+Every re-check outcome is written down, on a row of THIS scan as every later write is: a re-checked
+finding gets one carrying, in `raw`, the scan that first recorded it and the verdict, `cleared` or
+`still present`, and one not re-checked gets one marked `carried`. The earlier rows stay as they
+are. Loading what is unresolved then reads each finding's latest row, so a finding scan B cleared
+is not handed to scan C again, and comes back only if scan C raises it anew — as a new finding,
+since the defect was gone in between.
+
 **A consolidator does not make this step redundant**, and the prompt should say so where a reader
 might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a claim
 against the code and demands a cited `file:line`. `purring-marinating-peacock`'s own caveat is
@@ -210,6 +227,11 @@ earlier task's row counts only when that row's issue text is the same text, not 
 after the fingerprint's normalization, which drops digits and ids and so can hand a different
 defect the earlier row's fingerprint; anything else is new, the safer of the two mistakes, and a
 defect that moved lines between scans still matches, since its text did not change.
+A still-present finding gets a row of THIS task too, carrying the scan that first recorded it in
+`raw`: the dedupe index is per task, so the two rows never collide, and every later write about the
+finding — triage's disposition, the issue it was planned into — lands on this scan's row and never
+rewrites an earlier task's history, the current-scope rule `review-findings.md` keeps for both of
+its UPDATE paths.
 Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
 
 **Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
@@ -273,7 +295,14 @@ so this changes nothing for the other sixteen, `comment-debt` and `dead-code` in
 findings names one path, and several such findings in a file being fixed by one agent is the right
 unit anyway. All at level 0 unless a dependency is declared. Every issue names the commit its
 findings were read at, so a coder working on a newer tip knows which revision their line numbers
-describe.
+describe. Each finding's row from THIS scan (see `scan-record`, which gives a still-present
+finding one too) records the plan id and `issueKey` it was planned into, in `review_findings.raw`,
+written here once and never again — the key alone is unique only within one plan: the issue's own `filesModified` starts as its paths but the
+executor overwrites it with what the coder reported (`dag-executor.ts`), so it cannot say which
+findings an issue held. A finding's outcome is its issue's; when an advisor split the issue, the
+sub-issues it spawned (`parentIssueId`) do not say which of them took which finding, so the
+finding counts as merged only when every sub-issue merged and otherwise takes the worst outcome
+among them.
 
 One cheap post-check falls out of that: when every finding in an issue is `comment-debt`, the
 remediation diff must touch **comment lines only** — a mechanical assertion no other dimension can
@@ -282,7 +311,7 @@ guarantee, so it is a bonus gate and must not be turned into a requirement by ma
 dimension-aware.
 
 **7 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
-**Reusing the executor needs no core change:** `resolveDagPhase`
+**Reusing the executor needs no core change to find its plan:** `resolveDagPhase`
 (`step-engine/dag-executor.ts:1505`) loads its plan by `taskDagPlans.taskId`, not from `06b`, so the
 module inherits per-level isolated worktrees, parallel coders, the barrier, level-by-level merge,
 checkpointing and crash recovery wholesale. This is the single largest piece of reuse in the plan.
@@ -305,12 +334,39 @@ pre-answer included, and 01 falls back to `HEAD`, so remediation refuses there a
 built on a tip the source has moved away from is work its push cannot land. A check that cannot
 be answered, a history too shallow to connect the commits, refuses rather than guesses.
 
-**One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
+**Two things it inherits must change.** The first is the DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
 fix the provider's filter refuses carries one, so one refused issue would stop its whole level.
 Taking the guard away alone would send that issue to the advisor instead, which can re-send the
 refused content. The first new core change covers both; the refused issue's findings stay recorded
 as not remediated, naming the refusal.
+
+The second is what an issue that fails for good does to the step. With per-issue review off,
+`resolveDagPhase` fails the step as soon as a level has a failed coder, and with it on, an
+escalation that cannot replan aborts it, so `scan-remediate` itself ends `failed` and nothing after
+it runs, the report included. That fits a workflow task, whose plan is one change that is wrong
+without every part of it. A scan's issues are independent fixes a person picked one by one, and
+an unfixed one is a line in the report, not a reason to throw the others away. So `scan-remediate`
+declares a record-and-continue failure policy on its `dagExecute` hook (see Core changes): an
+issue that ends `failed_unrecoverable`, after the advisor and replanner have run as they do today,
+is recorded on its row, its level merges what finished, an issue that depends on it is not
+dispatched and is recorded as blocked with a marker in `concerns` naming the failed issue, and the
+step completes. An issue accepted for merge whose branch holds no change — its coder found the fix
+already on the landing tip, which can be ahead of the scanned commit, or reported done without
+editing — is recorded unmerged with a no-change marker rather than failing the step, and is never
+merged as an empty implementation; its findings are listed as no change made, which a later
+scan's re-check settles (see `scan-verify`), since either reading is possible. A refusal before dispatch — the landing-branch checks
+above — is recorded the same way, its reason on every planned issue, and its findings are listed as
+offered no remediation.
+
+Which failures take the policy turns on whether the step fails because of one issue's own result.
+Those sites do: a failed coder with review off, an escalation that cannot replan or finds
+no replanner, a replanner that aborts, and an empty branch. Every other site is a fault a person
+or a Retry clears and still fails the step, the report waiting for it rather than recording a
+transient fault as a verdict: an environment halt for a coder or a reviewer, an issue killed until
+`DAG_INFRA_EXHAUSTED_MARKER`, missing providers, a fatal provider class other than a refusal, a
+crash, and a merge halt, whose conflict a person resolves with "Retry with LLM" once the automatic
+attempts are spent.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
@@ -325,6 +381,72 @@ the tail and declared as the seed's `fixLoop.targetStepId`. It skips round 0, wh
 `scan-remediate` owns — the split core makes between `06c-dag-execute` and 07 in DAG mode — and in
 each fix round reads the diagnosis (`loadFixLoopDiagnosis`) and edits `01-worktree-setup`'s
 integration worktree under `REPO_IS_DATA_ACTING_LINES`, the guard for a pass that edits.
+
+**9 · `scan-report`** — deterministic, **no LLM**, composed last, and the step that holds the
+scan's report. It runs whatever triage chose, an empty selection included, since a scan whose
+triage picked nothing is a report and nothing else.
+
+**Nothing between triage and the report may stand in its way.** Every reviewer in the tail fails
+on an empty change set (`assertReviewableChange`, `_impl-changes.ts`), deliberately, so a scan
+whose triage planned nothing, or whose every issue failed to merge, would fail in the tail and
+never reach this step. The seed therefore guards two spans of its run list (see Core changes):
+`00a-sync-base` through `scan-remediate` run only when `scan-plan-remediation` wrote at least one
+issue, and `scan-fix` plus the tail only when at least one issue merged. A guarded-out step is
+recorded `skipped`, never `done`, so no skipped review reads as an approval, and the commit gate is
+skipped with them, so nothing is committed. `12-worktree-cleanup` stays outside the second span and
+under the first: once `01-worktree-setup` has made the integration worktree, completion removes it
+only for a cancelled or `run_app` task (`cleanupTaskResources`, `task-queue.ts`), so a scan where
+nothing merged must still run the cleanup or leave a worktree and branch behind on every such run.
+With nothing merged its branch holds no commit of its own, so the cleanup merges nothing.
+
+**Every report carries a `Found, not fixed` section, and nothing turns it off.** A workflow task
+surfaces what it left behind only at review time: an agent MAY add a `## INSIGHTS` block
+(`INSIGHTS_INSTRUCTION`), and gates 2 and 3 show whatever 08e did not pick as one collapsed,
+informational row (`loadUnactedInsights` / `insightsRow`, `_gate-insights.ts`). That fits a task
+whose deliverable is a change. A scan's deliverable is the list of defects, so what it found and
+did not fix is the report's main content, not a side note: the section has no form field, no
+setting and no `visibleWhen`, it renders open, and when it is empty it says so in one line rather
+than disappearing, since a missing section reads exactly like a clean one. It lists, grouped by
+reason and most severe first within each group:
+
+- verified findings triage did not pick, whose rows from this scan are written `dismissed_human`
+  the way 08d2 writes what gate 1.5 left out, an earlier scan's row untouched;
+- coherence findings left with no authoritative side, so recorded and never planned;
+- findings triage could offer no remediation for (a landing branch without the scanned commit, a
+  read-only folder import, a detached HEAD), with the reason triage gave;
+- findings whose DAG issue did not merge: refused by the provider (the refusal marker in
+  `concerns`), failed, or cancelled, naming which;
+- findings whose DAG issue made no change (the no-change marker), as possibly already fixed on the
+  landing tip and unconfirmed;
+- findings whose DAG issue merged, as remediation attempted and unconfirmed: a merge proves the
+  issue's worktree landed, not that its coder repaired each finding grouped into it, so they stay
+  listed until a later scan's re-check clears them (see `scan-verify`);
+- findings an earlier scan recorded that are still present and were not picked this time, naming
+  the scan that first recorded them;
+- out-of-scope observations under a diff target (`raw.inScope = false`);
+- findings the core tail's own reviewers (07b, 08c, 08c2, 08d) raised in this task and nobody
+  resolved. Each reviewer's final step output is the source, since `recordReviewFindings` is
+  best-effort and a failed write leaves a finding in the output with no row; the rows supply the
+  disposition, joined by fingerprint (08c and 08d already carry `fingerprints[]` on their output),
+  and a finding with no row is listed with its disposition unknown, never dropped. By disposition: `accepted_risk` (accepted at
+  the fix loop's escalation gate), `dismissed_human` (left out at gate 1.5), and `open` rows of the
+  last round each reviewer ran, which no fix round followed. `dismissed_refuted` is left out, since
+  a refuter disproved it, and so are an earlier round's `open` rows, which a later round re-reviewed;
+- `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted, read through
+  `loadUnactedInsights` with no limit (see Core changes) rather than re-parsed: those 08e did not
+  pick, and those it did as implementation attempted and unconfirmed, since 08e's `implemented` is
+  true whenever anything was picked, whatever its agent did. `scan-remediate`'s coder prompt and
+  `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
+
+Each entry's reason is derived from structural state — the triage step's output, the issue's
+`task_dag_issues` outcome, marker and `mergeStatus` reached through the plan id and `issueKey` its finding's
+`raw` records, `review_findings.disposition` and `raw` — never from a
+message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
+claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a later
+scan's affirmative re-check clears one. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
+escaping symlink, a submodule — is a coverage gap, not a found defect, and sits beside the section
+in the coverage record, never inside it. Nothing is capped here: the per-file cap upstream already
+bounds volume, the step shows counts per reason, and the dashboard lists every entry.
 
 ### Scan targets
 
@@ -660,7 +782,8 @@ Two are already written into the two modularity plans (`5aa4704`):
 - Module `composableSteps` union into `composable_step_catalog`, namespaced `module.<id>.<stepId>`.
 - Module-seeded task-type definitions, and the dangling-reference rule when a module is removed.
 
-Five more follow from how the scan runs. The first and the last stand on their own and can ship
+Eight more follow from how the scan runs. The first, the insights reader's limit and the last
+stand on their own and can ship
 ahead of the module:
 
 - **A provider's content-filter refusal is a per-agent outcome, not a dead provider.** The fan-out
@@ -708,6 +831,27 @@ ahead of the module:
   workspace, and a cancel runs no step code that could remove the snapshot itself. Widen it to a
   repository task's scratch workspace, keeping its settled-or-cancelled and no-pending-recap
   guards, so a failed scan keeps its snapshot for the Retry as a failed task keeps its Editor.
+- **A task-type seed can guard a span of its run list.** A composed step runs or skips by its own
+  `shouldRun`, and a core step's knows nothing of the module, so nothing lets `deep_scan` skip the
+  tail when there is no change to review. A seed names a contiguous span and a predicate the module
+  supplies, read from structural rows (`task_dag_plans` and `task_dag_issues` here), and the runner
+  records every step in the span `skipped` when it is false. This belongs with the task-type seed
+  in `rippling-wibbling-puffin`, whose composition validator then also checks a guarded span holds
+  no step a later unguarded one depends on.
+- **The DAG executor takes a record-and-continue failure policy.** A `dagExecute` hook can declare
+  it, and core's own steps never do, so a workflow task's DAG keeps failing as it does. Under it,
+  the sites that fail the step on an issue's own result (`resolveDagPhase`'s review-off level
+  check, an escalation that cannot replan or finds no replanner, and a replanner abort) record the
+  failure and let the level merge its other
+  issues, and so does the third, an accepted issue whose branch holds no change
+  (`issueBranchHasChanges`), which is left unmerged with a no-change marker in `concerns`, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
+  `concerns` — no new `dag_issue_outcome` value, as with the refusal marker — and an environment
+  halt, a merge halt and every other site `scan-remediate` lists as a fault still fail it.
+- **`loadUnactedInsights` takes a limit and can return what 08e picked.** It slices to
+  `INSIGHTS_AT_GATE` (30) itself, which suits a gate row and not a report that lists everything,
+  and it drops every insight 08e picked, which a gate can afford and a report cannot. The gates
+  pass that constant and keep today's subtraction; `scan-report` passes no limit and takes the
+  picked insights back, marked as picked. The omitted count keeps its meaning for both.
 - **`00a-sync-base` fences its refspecs.** Its fetches put `base` straight after `origin`
   (`fetch origin <base>:refs/heads/<base>`, `fetch --deepen=50 origin <base>`) with no
   `--end-of-options`, and `base` comes from a free-text field, so a value shaped like an option is
@@ -767,6 +911,9 @@ former, and this module does both kinds of write.
   `steps/workflow/06-run-config.ts`, the runner's `overlayPreAnswerDefaults`, and 00a's `base`
   field in `steps/workflow/00a-sync-base.ts`
 - Conditional form fields: `visibleWhen` in `packages/shared/src/schemas/form.ts`
+- What a workflow task reports as found and not fixed, which `scan-report` reads and widens:
+  `INSIGHTS_INSTRUCTION` in `steps/workflow/08e-insights-triage.ts`, `loadUnactedInsights` in
+  `steps/workflow/_gate-insights.ts`, and the `disposition` writers in `_review-findings.ts`
 - A commit's stored bytes with no attribute or filter applied, the rule the merge snapshots keep:
   `captureFixBaseline` in `step-engine/git-merge.ts`
 
@@ -780,7 +927,7 @@ former, and this module does both kinds of write.
   until the module handles it. No count is hardcoded anywhere but prose.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
 - `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
-- Findings already recorded are deduped on a re-scan; a repeat run reports only what is new, and a
+- Findings already recorded are labelled still present on a re-scan, never new, and a
   coherence pair reported with its two sides swapped fingerprints identically.
 - Coherence raises a pair with both sides cited, and does NOT raise when one side states a carve-out
   naming the other.
@@ -830,7 +977,16 @@ former, and this module does both kinds of write.
 - Under a diff target: coherence raises a pair only when a side lies in the changed lines;
   `dead-code` raises a pre-existing symbol whose last caller the target removed; `comment-debt`
   raises nothing outside the changed lines and the blocks around them.
-- A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped.
+- A finding an earlier report left unconfirmed is cleared only by a 2-of-3 re-check citing the
+  current `file:line`, and the clearance is a row of the clearing scan: the scan after it neither
+  re-checks nor lists that finding, while the earlier rows are unchanged; one in a REFUSED dimension, a cap-truncated file or outside the target stays
+  listed as unconfirmed, and its absence from the new findings alone clears nothing.
+- A tail reviewer finding present in its step output whose `review_findings` write failed is listed
+  with its disposition unknown.
+- A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped,
+  and writes a row of its own for it; triaging and remediating that finding writes the disposition
+  and the plan association on the new row and leaves the earlier task's row byte-for-byte
+  unchanged.
 - Triage marks a finding whose file differs between the scanned commit and the landing tip, and
   offers no remediation when the landing branch does not contain the scanned commit.
 - A diff target that deletes a function and renames a file puts both files' base-side versions in
@@ -878,6 +1034,27 @@ former, and this module does both kinds of write.
   landing name that starts with `-` is refused at triage before it is stored.
 - A committed `.env` in the snapshot is visible to the security dimension, which reports its
   file, line and kind and never its value.
+- `scan-report` renders `Found, not fixed` for every scan, with no input that hides it: a scan
+  whose triage picked nothing lists every verified finding there, and a scan that left nothing
+  renders the one-line empty statement rather than omitting the section. Fixtures put one entry in
+  each reason group — not picked, no authoritative side, no remediation offered, a refused issue,
+  a failed issue, still present from an earlier scan, out of scope, an unpicked coder insight —
+  and each lands under its own reason; a merged issue's findings are listed as remediation
+  attempted and unconfirmed, and no row is written `fixed`; an insight 08e picked is listed as implementation attempted;
+  a tail reviewer's `accepted_risk` row and its last round's `open` row are listed and its
+  `dismissed_refuted` row is not; more than 30 unpicked insights are all
+  listed; a REFUSED dimension appears in the coverage record and not in the section; a stale
+  status message on a step changes no entry's reason.
+- A triage that picks nothing, and a remediation whose every issue fails, each reach `scan-report`
+  with the guarded steps recorded `skipped`: no reviewer runs `assertReviewableChange` on an empty
+  change set, and nothing is committed. Under the record-and-continue policy, a remediation whose
+  only issue fails with review off, and one whose escalation cannot replan, each end `scan-remediate`
+  `done`, and a refusal before dispatch lists every planned finding as offered no remediation,
+  naming the reason. Where an issue was planned, `12-worktree-cleanup` still
+  runs and the integration worktree and its branch are gone afterwards.
+- An issue holding two findings whose coder reports a different file set still classifies both
+  findings by that issue's outcome, and a finding whose issue an advisor split is merged only when
+  every sub-issue merged, otherwise taking the worst sub-issue outcome.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
@@ -896,14 +1073,28 @@ former, and this module does both kinds of write.
 - `00a-sync-base` refuses a `base` that starts with `-` or breaks git's ref-name rules, and every
   fetch it runs carries its refspec after `--end-of-options` with the source fully qualified, so a
   base named `+topic` updates `refs/heads/+topic` from `refs/heads/+topic` and nothing else.
+- A seed span whose predicate is false records each of its steps `skipped` and runs the step after
+  it; one whose predicate is true runs as if unguarded.
+- Under the record-and-continue policy, a level with one failed issue merges its others and the
+  step completes, a dependent of the failed issue is recorded blocked and never dispatched, an
+  accepted issue whose branch is empty is left unmerged with the no-change marker while the step
+  completes, a replanner abort records its issues and the step completes, and an environment
+  halt or a merge halt still fails the step; without the policy, every existing DAG test is unchanged.
+- `loadUnactedInsights` with no limit returns every unpicked insight, and the picked ones marked
+  when asked; with `INSIGHTS_AT_GATE` the gates still show 30, count the rest and list no picked
+  insight.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
    `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fifteen
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
-   merges.
-3. Re-scan; confirm the already-fixed finding does not reappear and the report says what is new.
+   merges, and that the report's `Found, not fixed` section lists every finding left unpicked, and
+   the two merged ones as remediation attempted and unconfirmed.
+2b. Run a scan and pick nothing at triage; confirm the task ends on `scan-report` with the
+   remediation steps and the tail recorded `skipped` and every verified finding in the section.
+3. Re-scan; confirm the remediated findings are re-checked by the verify panel and leave
+   `Found, not fixed` only on its quorum, and the report says what is new.
 3b. Run coherence alone over this repo's own rules, `AGENTS.md` and KB; confirm every finding cites
    two `file:line` sides, and that the carve-out `2fffb947` added is not raised as a conflict.
 3c. Run `comment-debt` alone over this repo; confirm the comments `AGENTS.md` demands survive, that
