@@ -13,7 +13,7 @@ import {
   or,
 } from 'drizzle-orm';
 import type { Database } from '@haive/database';
-import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/database';
+import { schema, hasPgCode, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
   CONFIG_KEYS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
@@ -2154,7 +2154,7 @@ async function releaseStepAgents(db: Database, taskStepId: string, reason: strin
         continue;
       }
       const last = attempt === RELEASE_ATTEMPTS - 1;
-      if (!last && (err as { code?: unknown } | null)?.code === PG_DEADLOCK_DETECTED) continue;
+      if (!last && hasPgCode(err, PG_DEADLOCK_DETECTED)) continue;
       log.error({ err, taskStepId }, 'could not end the mining agents a failed step left running');
       return;
     }

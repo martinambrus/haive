@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { type Database } from '@haive/database';
+import { hasPgCode, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
   IDENTIFIER_TSV_SENTINEL,
@@ -436,6 +436,8 @@ async function isRagDatabaseClaimed(haiveDb: Database, dbName: string): Promise<
   return false;
 }
 
+const OBJECT_IN_USE = '55006';
+
 /** Drop the database, retrying once on `55006 object_in_use`: postgres.js closing its
  *  socket is not synchronous with the server tearing the backend down, so a drop issued
  *  immediately after `pg.end()` can still lose that race. Returns whether it went. */
@@ -454,8 +456,7 @@ async function dropRagDatabase(
       );
       return true;
     } catch (err) {
-      const code = (err as { code?: string } | null)?.code;
-      if (code === '55006' && attempt === 0) {
+      if (attempt === 0 && hasPgCode(err, OBJECT_IN_USE)) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
       }

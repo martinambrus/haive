@@ -8,8 +8,11 @@ import type { RagConnection } from '@haive/shared/rag';
 // content_tsv GIN index; the global-KB twin had a schema test and did not drift.
 /** A failure carrying its SQLSTATE, as postgres.js reports one. */
 const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), { code });
+/** The same failure as drizzle rethrows it: no code of its own, the driver error on `cause`. */
+const drizzleError = (code: string) =>
+  Object.assign(new Error('Failed query: CREATE EXTENSION'), { cause: pgError(code) });
 
-function fakeConn(opts: { vectorThrows?: string } = {}): {
+function fakeConn(opts: { vectorThrows?: string; wrapped?: boolean } = {}): {
   conn: RagConnection;
   queries: () => string;
 } {
@@ -21,7 +24,9 @@ function fakeConn(opts: { vectorThrows?: string } = {}): {
     const q = strings.join('');
     captured.push(q);
     if (opts.vectorThrows && q.includes('CREATE EXTENSION')) {
-      return Promise.reject(pgError(opts.vectorThrows));
+      return Promise.reject(
+        opts.wrapped ? drizzleError(opts.vectorThrows) : pgError(opts.vectorThrows),
+      );
     }
     return Promise.resolve([]);
   }) as unknown as { unsafe: (q: string, params?: unknown[]) => Promise<unknown[]> };
@@ -104,6 +109,13 @@ describe('ensureRagSchema', () => {
       expect(queries()).toContain('embedding_json jsonb NOT NULL');
     },
   );
+
+  it('falls back to jsonb when the pgvector failure arrives wrapped, its code on the cause', async () => {
+    const { conn, queries } = fakeConn({ vectorThrows: '0A000', wrapped: true });
+
+    expect((await ensureRagSchema(conn)).usedPgvector).toBe(false);
+    expect(queries()).toContain('embedding_json jsonb NOT NULL');
+  });
 
   it.each(['XX000', 'CONNECTION_CLOSED'])(
     'rethrows an extension failure that says nothing about pgvector (%s), and creates nothing',
