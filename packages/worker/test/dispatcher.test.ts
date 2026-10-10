@@ -35,6 +35,7 @@ import {
 import {
   HOUSE_RULES_MARKER,
   disabledSelection,
+  houseRulesStampOf,
   selectHouseRules,
   unavailableSelection,
   withHouseRules,
@@ -1101,6 +1102,24 @@ describe('house rules injection', () => {
       expect(out.spec.houseRules).toBeUndefined();
     });
 
+    it('when a files rule matched nothing and the scores are recorded, which carry no word into the prompt', () => {
+      const twig = rule('Twig', { spec: { mode: 'files', globs: ['**/*.twig'] } });
+      const input = { mode: 'write' as const, rules: [twig], changedFiles: ['a.php'] };
+      const plain = selectHouseRules(input);
+      const scored = selectHouseRules({ ...input, similarity: true });
+      expect(scored.similarity).toEqual({
+        status: 'pending',
+        scores: [{ id: twig.id, hash: twig.hash, title: 'Twig', score: null }],
+      });
+      expect(plain.similarity).toBeUndefined();
+      const out = dispatch({ ...surroundings, ...mode, houseRuleSelection: scored });
+      expect(out.prompt).toBe(baseline);
+      expect(out.prompt).toBe(
+        dispatch({ ...surroundings, ...mode, houseRuleSelection: plain }).prompt,
+      );
+      expect(out.spec.houseRules?.similarity).toEqual(scored.similarity);
+    });
+
     it('when a stored prompt that carries a block is dispatched again with the switch off', () => {
       const stored = dispatch({
         ...surroundings,
@@ -1112,6 +1131,75 @@ describe('house rules injection', () => {
         stored,
       ).prompt;
       expect(again).toBe(baseline);
+    });
+  });
+
+  describe('the rules a writer is scored against', () => {
+    const files = (title: string, globs: string[], extra: Partial<HouseRuleCandidate> = {}) =>
+      rule(title, { spec: { mode: 'files', globs }, ...extra });
+    const ids = (out: ReturnType<typeof selectHouseRules>) =>
+      out.similarity?.scores?.map((s) => s.title);
+
+    it('are the files rules no glob matched, counted by filesRulesUnmatched, never an always rule', () => {
+      const out = selectHouseRules({
+        mode: 'write',
+        similarity: true,
+        changedFiles: ['t/node.tpl.php'],
+        rules: [
+          rule('Always'),
+          files('Tpl', ['**/*.tpl.php']),
+          files('Twig', ['**/*.twig']),
+          files('Scss', ['**/*.scss']),
+        ],
+      });
+      expect(ids(out)).toEqual(['Twig', 'Scss']);
+      expect(out.similarity?.scores).toHaveLength(out.filesRulesUnmatched ?? -1);
+    });
+
+    it('leave out a rule that matched but did not fit the budget, and every rule when the change is unreadable', () => {
+      const big = files('Big', ['**/*.tpl.php'], { body: 'x'.repeat(4000) });
+      const small = files('Small', ['**/*.tpl.php']);
+      const twig = files('Twig', ['**/*.twig']);
+      const out = selectHouseRules({
+        mode: 'write',
+        similarity: true,
+        changedFiles: ['t/node.tpl.php'],
+        rules: [big, small, twig],
+        budgetBytes: 2500,
+      });
+      expect(out.omitted.map((o) => o.title)).toEqual(['Big']);
+      expect(ids(out)).toEqual(['Twig']);
+      const unread = selectHouseRules({
+        mode: 'write',
+        similarity: true,
+        changedFiles: null,
+        rules: [twig],
+      });
+      expect(unread.similarity).toBeUndefined();
+    });
+
+    it('are asked for only when the caller asks and one exists', () => {
+      const twig = files('Twig', ['**/*.twig']);
+      const base = { mode: 'write' as const, changedFiles: ['a.php'] };
+      expect('similarity' in selectHouseRules({ ...base, rules: [twig] })).toBe(false);
+      expect(
+        'similarity' in selectHouseRules({ ...base, rules: [rule('A')], similarity: true }),
+      ).toBe(false);
+    });
+
+    it('keep the record on the stamp when the ladder drops the block, and the count with it', () => {
+      const twig = files('Twig', ['**/*.twig']);
+      const picked = selectHouseRules({
+        mode: 'write',
+        similarity: true,
+        changedFiles: ['a.php'],
+        rules: [rule('Always'), twig],
+      });
+      const dropped = houseRulesStampOf('write', picked, true);
+      expect(dropped.reason).toBe('too_large');
+      expect(dropped.filesRulesUnmatched).toBe(1);
+      expect(dropped.similarity).toEqual(picked.similarity);
+      expect(houseRulesStampOf('write', picked).similarity).toEqual(picked.similarity);
     });
   });
 

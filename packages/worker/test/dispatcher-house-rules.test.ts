@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { configService } from '@haive/shared';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 
 const h = vi.hoisted(() => ({
@@ -213,6 +214,44 @@ describe('resolveTaskDispatch and the house rules', () => {
     expect(out.spec.houseRules?.entries.map((e) => e.title)).toEqual(['Php']);
     expect(out.spec.houseRules?.filesRulesUnmatched).toBe(1);
     expect(out.prompt).not.toContain('Twig');
+  });
+
+  it('records the unmatched files rules as pending scores and shows the agent no more than with the setting off', async () => {
+    h.tree = await checkoutWithAnEditedPhpFile();
+    h.context = context({
+      rules: [
+        rule('Php', {
+          id: '00000001-0000-4000-8000-000000000001',
+          spec: { mode: 'files', globs: ['*.php'] },
+        }),
+        rule('Twig', {
+          id: '00000002-0000-4000-8000-000000000002',
+          hash: 'hr1:2',
+          spec: { mode: 'files', globs: ['**/*.twig'] },
+        }),
+      ],
+    });
+    const setting = vi.spyOn(configService, 'get');
+    setting.mockResolvedValue('off');
+    const off = await dispatch(opted);
+    setting.mockResolvedValue('record');
+    const recorded = await dispatch(opted);
+    setting.mockRejectedValue(new Error('redis is gone'));
+    const broken = await dispatch(opted);
+    vi.restoreAllMocks();
+
+    expect(recorded.prompt).toBe(off.prompt);
+    expect(recorded.spec.houseRules?.similarity).toEqual({
+      status: 'pending',
+      scores: [
+        { id: '00000002-0000-4000-8000-000000000002', hash: 'hr1:2', title: 'Twig', score: null },
+      ],
+    });
+    const { similarity: _dropped, ...rest } = recorded.spec.houseRules!;
+    expect(rest).toEqual(off.spec.houseRules);
+    expect('similarity' in off.spec.houseRules!).toBe(false);
+    expect(broken.spec.houseRules).toEqual(off.spec.houseRules);
+    expect(broken.prompt).toBe(off.prompt);
   });
 
   it('leaves the count off the stamp when every files rule matched or the change cannot be read', async () => {
