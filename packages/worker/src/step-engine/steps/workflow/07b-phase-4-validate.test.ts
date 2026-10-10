@@ -1106,6 +1106,41 @@ const fixerPromptAfter = (previous: unknown[]) =>
     previousIterations: previous as never,
   });
 
+describe('07b re-validation after a fix pass whose re-read failed', () => {
+  const NOTICE = 'The change could not be re-read after the fix';
+  const revalidate = (fixerFiles: unknown) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: {
+        sandboxWorktreePath: '/ws',
+        spec: 'spec',
+        taskBrief: 'THE USER REQUEST',
+        dependencyPolicy: ownedPolicy,
+        debtBlock: '',
+        honoredBlock: '',
+        browserTesting: false,
+        docsOnly: false,
+        implementationFiles: fileSet(2, 2),
+      } as never,
+      formValues: {},
+      iteration: 2,
+      previousIterations: [
+        { iteration: 0, applyOutput: mkValidateApply({}) },
+        {
+          iteration: 1,
+          applyOutput: { ...mkValidateApply({}), source: 'fixer', implementationFiles: fixerFiles },
+        },
+      ] as never,
+    });
+
+  it('tells the re-validator its list may miss what the fix created', () => {
+    expect(revalidate({ ...fileSet(2, 2), scanError: 'git failed' })).toContain(NOTICE);
+  });
+
+  it('says nothing of it after a fix pass whose re-read ran', () => {
+    expect(revalidate({ ...fileSet(3, 3), scanError: null })).not.toContain(NOTICE);
+  });
+});
+
 describe('parseValidatorOutput: the rule fields', () => {
   it('keeps the rule of an issue and the conflicts at the top level', () => {
     const p = parseValidatorOutput(reply({ issues: [violation()], conflicts: [conflict()] }))!;
