@@ -37,7 +37,7 @@ const { LIVE_TASK_STATUSES } = onboardingState;
  * every state of the verdict (live onboarding, reset epoch, status, markers) is real here.
  */
 const REPO = '00000000-0000-4000-8000-0000000000c1';
-const NO_ONBOARDING = 'No completed onboarding found for this repository; cannot upgrade';
+const NO_ONBOARDING = 'No completed onboarding found for this repository, so it cannot be upgraded';
 
 const app = new Hono<AppEnv>();
 app.use(async (c, next) => {

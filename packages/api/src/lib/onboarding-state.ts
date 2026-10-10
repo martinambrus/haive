@@ -429,3 +429,16 @@ export async function upgradeAdmission(
   }
   return { admitted: false, reason: resetAt === null ? 'none' : 'reset' };
 }
+
+/** The 409 text for a refused admission; `action` names what was refused. */
+export function upgradeRefusalMessage(
+  refusal: Exclude<UpgradeAdmission, { admitted: true }>,
+  action: 'upgraded' | 'rolled back',
+): string {
+  if (refusal.reason === 'live-onboarding') {
+    return `Onboarding is still running for this repository (task ${refusal.taskId}), so it cannot be ${action} yet`;
+  }
+  return refusal.reason === 'reset'
+    ? `This repository was reset and no onboarding has finished since, so it cannot be ${action}`
+    : `No completed onboarding found for this repository, so it cannot be ${action}`;
+}

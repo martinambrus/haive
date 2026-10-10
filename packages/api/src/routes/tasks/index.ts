@@ -59,6 +59,7 @@ import {
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   upgradeAdmission,
+  upgradeRefusalMessage,
 } from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
@@ -470,18 +471,7 @@ taskRoutes.post('/', async (c) => {
     if (!repo) throw new HttpError(404, 'Repository not found');
     const admission = await upgradeAdmission(db, userId, repo);
     if (!admission.admitted) {
-      if (admission.reason === 'live-onboarding') {
-        throw new HttpError(
-          409,
-          `Onboarding is still running for this repository (task ${admission.taskId}), so it cannot be upgraded yet`,
-        );
-      }
-      throw new HttpError(
-        409,
-        admission.reason === 'reset'
-          ? 'This repository was reset and no onboarding has finished since, so it cannot be upgraded'
-          : 'No completed onboarding found for this repository; cannot upgrade',
-      );
+      throw new HttpError(409, upgradeRefusalMessage(admission, 'upgraded'));
     }
   }
 

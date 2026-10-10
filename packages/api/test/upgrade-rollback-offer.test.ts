@@ -96,14 +96,29 @@ beforeEach(() => {
 
 type TaskSeed = { mode?: string; status: string; completedAt?: number };
 
-function repoWith(tasks: TaskSeed[]) {
+function repoWith(tasks: TaskSeed[], opts: { resetAt?: number; liveOnboarding?: boolean } = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'repo',
+    status: 'ready',
+    onboardingResetAt: opts.resetAt === undefined ? null : new Date(opts.resetAt),
+  });
+  const liveOnboardingId = opts.liveOnboarding
+    ? (fake.insert(schema.tasks, {
+        userId: USER,
+        repositoryId: REPO,
+        type: 'onboarding',
+        title: 'onboarding again',
+        status: 'running',
+      }).id as string)
+    : null;
   fake.insert(schema.tasks, {
     userId: USER,
     repositoryId: REPO,
@@ -129,7 +144,7 @@ function repoWith(tasks: TaskSeed[]) {
     fake
       .rows(schema.tasks)
       .filter((r) => r.type === 'onboarding_upgrade' && !ids.includes(r.id as string));
-  return { ids, upgradeTasks, fake };
+  return { ids, upgradeTasks, fake, liveOnboardingId };
 }
 
 const rollBack = () => app.request(`/repositories/${REPO}/rollback-upgrade`, { method: 'POST' });
@@ -198,6 +213,23 @@ describe('rolling back an upgrade', () => {
     const res = await rollBack();
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain(t.ids[1]);
+    expect(t.upgradeTasks()).toEqual([]);
+  });
+
+  // A rollback restores what the upgrade replaced or removed, so it is gated like the upgrade.
+  it('is refused after a reset no onboarding has answered', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 1 }], { resetAt: 5 });
+    const res = await rollBack();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain('reset');
+    expect(t.upgradeTasks()).toEqual([]);
+  });
+
+  it('is refused while an onboarding runs', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 1 }], { liveOnboarding: true });
+    const res = await rollBack();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain(t.liveOnboardingId);
     expect(t.upgradeTasks()).toEqual([]);
   });
 

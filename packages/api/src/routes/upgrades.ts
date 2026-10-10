@@ -41,6 +41,7 @@ import {
   LIVE_TASK_STATUSES,
   renderContextAdmitsUpgrade,
   upgradeAdmission,
+  upgradeRefusalMessage,
 } from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
@@ -711,9 +712,24 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, name: true },
+    columns: {
+      id: true,
+      name: true,
+      renderContext: true,
+      source: true,
+      status: true,
+      storagePath: true,
+      localPath: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  // A rollback restores files a reset removed, or races a live onboarding, so it is admitted alike.
+  const admission = await upgradeAdmission(db, userId, repo);
+  if (!admission.admitted) {
+    throw new HttpError(409, upgradeRefusalMessage(admission, 'rolled back'));
+  }
 
   const { task, queued } = await insertUpgradeTask(db, repositoryId, async (tx) => {
     const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
