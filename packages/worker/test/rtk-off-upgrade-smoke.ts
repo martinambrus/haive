@@ -470,8 +470,8 @@ async function main(): Promise<void> {
       'a file that is not valid UTF-8 keeps every byte, and says why',
       (await readFile(join(repoPath, SETTINGS))).equals(notUtf8) &&
         lossyApplied.writtenPaths?.includes(SETTINGS) !== true &&
-        lossyApplied.warnings.some((w) => w.includes('not valid UTF-8')),
-      lossyApplied.warnings,
+        JSON.stringify(lossy.form).includes('not valid UTF-8'),
+      { warnings: lossyApplied.warnings, writtenPaths: lossyApplied.writtenPaths },
     );
 
     // ---- the same bytes Haive wrote, and a second upgrade ----------------------------------
