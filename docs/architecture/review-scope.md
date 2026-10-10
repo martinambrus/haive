@@ -110,6 +110,12 @@ approval. The two ways to get an empty set are reported as different diagnoses, 
 `dirtyWorktreeFiles` no longer swallows its own error — a failed scan names git's message, a
 scan that ran and found nothing says the implementation wrote no files.
 
+The DAG per-issue reviewer is scoped the same way: its list is the issue's files and the lines it
+wrote, measured in the issue's worktree against the integration branch it forked from (the coder's
+own list when that cannot be read), under the same report-only fence. A finding the reviewer marks
+out of scope goes to its insights and never to the fix coder, so a fix round cannot rewrite code the
+issue never touched.
+
 **Review is where a workflow run's time goes, and in DAG mode HALF of it is spent before the
 merge.** MEASURED across five runs of one task, per-issue DAG reviewers against total
 `06c-dag-execute` CLI time: 184 of 369 min (Opus 5 max), 59 of 109 (Opus 5 medium), 39 of 72
