@@ -85,6 +85,93 @@ describe('matchYamlField / matchYamlBlockField', () => {
   });
 });
 
+// 07c plans a migration or refuses PostgreSQL from these reads: quotes and comments must not leak.
+describe('matchYamlBlockField: a scalar as YAML reads it', () => {
+  const read = (written: string, key = 'version') =>
+    matchYamlBlockField(`name: app\ndatabase:\n  ${key}: ${written}\n`, 'database', key);
+
+  it.each([
+    ['"10.11"', '10.11'],
+    ["'10.11'", '10.11'],
+    ['10.11', '10.11'],
+    ['"10.11" # lts', '10.11'],
+    ["'10.11' # lts", '10.11'],
+    ['10.11 # lts', '10.11'],
+    ['"10.11"   # lts', '10.11'],
+    ['10.11\t# lts', '10.11'],
+    ['"10.11"  ', '10.11'],
+    ['10.11  ', '10.11'],
+    ['10.11#lts', '10.11#lts'],
+    ['"10.11 # lts"', '"10.11 # lts"'],
+    ["'10.11 # lts'", "'10.11 # lts'"],
+  ])('reads version: %s as %s', (written, expected) => {
+    expect(read(written)).toBe(expected);
+  });
+
+  it.each([
+    ["'postgres'", 'postgres'],
+    ['"postgres"', 'postgres'],
+    ['postgres # engine', 'postgres'],
+    ["'postgres' # engine", 'postgres'],
+  ])('reads type: %s as %s', (written, expected) => {
+    expect(read(written, 'type')).toBe(expected);
+  });
+
+  it.each(['""', "''", '""  # lts', '# lts', ''])('reads no value from version: %s', (written) => {
+    expect(read(written)).toBeNull();
+  });
+
+  // What YAML cannot read as one scalar stays whole, so 07c refuses it, not a made-up version.
+  it.each([
+    ['"10.11" x', '"10.11" x'],
+    ["'10.11", "'10.11"],
+    ['10.11"', '10.11"'],
+    ['"10.11\'', '"10.11\''],
+  ])('hands version: %s on whole', (written, expected) => {
+    expect(read(written)).toBe(expected);
+  });
+
+  it('reads a long run of whitespace in linear time', () => {
+    const started = performance.now();
+    const value = read(`${' '.repeat(2500)}a"b`);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(value).toBe('a"b');
+  });
+
+  it('reads a DDEV-style block with comments after its values', () => {
+    const cfg = [
+      'name: myproject',
+      'type: drupal10',
+      'docroot: web',
+      'php_version: "8.3"',
+      'database:',
+      "    type: 'mariadb' # engine",
+      '    version: "10.11" # lts',
+      'use_dns_when_possible: true',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toEqual({
+      phpVersion: '8.3',
+      dbType: 'mariadb',
+      dbVersion: '10.11',
+      webserver: null,
+      docroot: 'web',
+    });
+  });
+});
+
+describe('parseDdevConfig: line endings and quoted comment marks', () => {
+  it('reads a database block written with CRLF line endings', () => {
+    const cfg = ['name: p', 'database:', '  type: mariadb', '  version: "10.11"', ''].join('\r\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mariadb', dbVersion: '10.11' });
+  });
+
+  it('hands on whole a quoted value holding " #", so 07c refuses it', () => {
+    const cfg = ['database:', '  type: mariadb', "  version: '10.11 # lts'", ''].join('\n');
+    expect(parseDdevConfig(cfg).dbVersion).toBe("'10.11 # lts'");
+  });
+});
+
 describe('ddevUrlFromConfigText', () => {
   it('derives https://<name>.ddev.site from the booted config (default tld)', () => {
     expect(ddevUrlFromConfigText(MARIADB_CONFIG)).toBe('https://myproject.ddev.site');

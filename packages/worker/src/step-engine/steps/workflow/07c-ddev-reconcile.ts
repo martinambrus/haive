@@ -75,9 +75,17 @@ function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
 }
 
 /** A captured scalar as YAML reads it: one pair of quotes, or a trailing " # comment", removed. */
-function yamlScalar(raw: string | null): string {
-  const text = (raw ?? '').replace(/[ \t]#.*$/, '').trim();
+function yamlScalar(raw: string): string {
+  const text = raw.replace(/[ \t]#.*$/, '').trim();
   return /^(["'])(.*)\1$/.exec(text)?.[2] ?? text;
+}
+
+/** A database type and version as YAML reads them, or null when either is missing. */
+function yamlDatabase(
+  type: string | null,
+  version: string | null,
+): { type: string; version: string } | null {
+  return type && version ? { type: yamlScalar(type), version: yamlScalar(version) } : null;
 }
 
 /** The database field migrate-database cannot take: its target reaches the runner's shell. */
@@ -102,13 +110,26 @@ export function classifyDrift(
   target: DdevConfigFields,
   targetHash: string,
 ): { kind: DriftKind; migrateTarget: string | null; unsupportedReason: string | null } {
-  const targetDb =
-    target.dbType && target.dbVersion ? `${target.dbType}:${target.dbVersion}` : null;
+  // An unchanged .ddev/ tree has no drift, whatever an older parser stored for the baseline.
+  if (targetHash === baseline.configHash) {
+    return { kind: 'none', migrateTarget: null, unsupportedReason: null };
+  }
+  const targetBlock = yamlDatabase(target.dbType, target.dbVersion);
+  const baseType = baseline.dbType ? yamlScalar(baseline.dbType) : null;
+  const baseVersion = baseline.dbVersion ? yamlScalar(baseline.dbVersion) : null;
+  const targetDb = targetBlock ? `${targetBlock.type}:${targetBlock.version}` : null;
   const baseDb =
-    baseline.dbType && baseline.dbVersion ? `${baseline.dbType}:${baseline.dbVersion}` : null;
+    baseType || baseVersion ? `${baseType ?? '(default)'}:${baseVersion ?? '(default)'}` : null;
 
-  if (targetDb && targetDb !== baseDb) {
-    if (target.dbType === 'postgres' || baseline.dbType === 'postgres') {
+  // A half-recorded baseline compares only the field it recorded; none recorded is always a change.
+  const dbChanged =
+    targetBlock !== null &&
+    ((!baseType && !baseVersion) ||
+      (baseType !== null && baseType !== targetBlock.type) ||
+      (baseVersion !== null && baseVersion !== targetBlock.version));
+
+  if (targetBlock && dbChanged) {
+    if (targetBlock.type === 'postgres' || baseType === 'postgres') {
       return {
         kind: 'unsupported',
         migrateTarget: null,
@@ -118,9 +139,7 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    const dbType = yamlScalar(target.dbType);
-    const dbVersion = yamlScalar(target.dbVersion);
-    const refused = refusedMigrateField(dbType, dbVersion);
+    const refused = refusedMigrateField(targetBlock.type, targetBlock.version);
     if (refused) {
       return {
         kind: 'unsupported',
@@ -130,13 +149,10 @@ export function classifyDrift(
           `Reconfigure the database manually, or revert the .ddev/config.yaml database block.`,
       };
     }
-    return { kind: 'db-migrate', migrateTarget: `${dbType}:${dbVersion}`, unsupportedReason: null };
+    return { kind: 'db-migrate', migrateTarget: targetDb, unsupportedReason: null };
   }
 
-  if (targetHash !== baseline.configHash) {
-    return { kind: 'restart', migrateTarget: null, unsupportedReason: null };
-  }
-  return { kind: 'none', migrateTarget: null, unsupportedReason: null };
+  return { kind: 'restart', migrateTarget: null, unsupportedReason: null };
 }
 
 /**

@@ -25,15 +25,26 @@ export function ddevUrlFromConfigText(text: string): string | null {
   return `https://${name}.${tld}`;
 }
 
-/** Match a `key: value` scalar one level inside a `block:` mapping. */
+/** A one-line YAML scalar's value: inside one pair of quotes, or bare up to any ` # comment`. */
+function yamlScalarValue(rest: string): string | null {
+  const line = rest.trimEnd();
+  const quoted = /^(?:"([^"]*)"|'([^']*)')(?:[ \t]+#.*)?$/.exec(line);
+  const inner = quoted ? (quoted[1] ?? quoted[2] ?? '') : null;
+  // A quoted " #" is not a comment; handed on whole, the line is refused rather than read as the text before it.
+  if (inner !== null && /[ \t]#/.test(inner)) return line;
+  const value = inner ?? line.replace(/(?:^|[ \t])#.*$/, '');
+  return value.trim() || null;
+}
+
+/** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
 export function matchYamlBlockField(text: string, block: string, key: string): string | null {
-  const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\n?)+)`, 'm');
+  const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\r?\\n?)+)`, 'm');
   const blockMatch = text.match(blockRe);
   if (!blockMatch || !blockMatch[1]) return null;
   const inner = blockMatch[1];
-  const fieldRe = new RegExp(`^[ \\t]+${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm');
+  const fieldRe = new RegExp(`^[ \\t]+${key}:\\s*([^\\n]*)$`, 'm');
   const m = inner.match(fieldRe);
-  return m && m[1] ? m[1].trim() : null;
+  return m ? yamlScalarValue(m[1] ?? '') : null;
 }
 
 export interface DdevConfigFields {

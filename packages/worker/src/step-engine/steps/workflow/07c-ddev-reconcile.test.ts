@@ -124,6 +124,57 @@ describe('classifyDrift', () => {
     expect(classifyDrift(baseline(), target(), HASH_A).kind).toBe('none');
   });
 
+  it('an unchanged .ddev/ tree is no drift, whatever an older parser stored for the baseline', () => {
+    const stored = baseline({ dbType: 'mariadb', dbVersion: null });
+    expect(
+      classifyDrift(stored, target({ dbType: 'mariadb', dbVersion: '10.11' }), HASH_A).kind,
+    ).toBe('none');
+  });
+
+  it('a half-recorded baseline database is unknown, so an unrelated .ddev/ change restarts', () => {
+    const t = target({ dbType: 'mariadb', dbVersion: '10.11' });
+    for (const half of [
+      { dbType: 'mariadb', dbVersion: null },
+      { dbType: null, dbVersion: '10.11' },
+    ]) {
+      expect(classifyDrift(baseline(half), t, HASH_B).kind).toBe('restart');
+    }
+  });
+
+  it('a half-recorded baseline compares only the field it recorded', () => {
+    const typeOnly = { dbType: 'mariadb', dbVersion: null };
+    const versionOnly = { dbType: null, dbVersion: '10.11' };
+    const pg = classifyDrift(
+      baseline(typeOnly),
+      target({ dbType: 'postgres', dbVersion: '16' }),
+      HASH_B,
+    );
+    expect(pg.kind).toBe('unsupported');
+    expect(pg.unsupportedReason).toContain('PostgreSQL');
+    const my = classifyDrift(
+      baseline(typeOnly),
+      target({ dbType: 'mysql', dbVersion: '8.0' }),
+      HASH_B,
+    );
+    expect(my.kind).toBe('db-migrate');
+    expect(my.migrateTarget).toBe('mysql:8.0');
+    const same = target({ dbType: 'mariadb', dbVersion: '10.11' });
+    expect(classifyDrift(baseline(typeOnly), same, HASH_B).kind).toBe('restart');
+    expect(classifyDrift(baseline(versionOnly), same, HASH_B).kind).toBe('restart');
+    const bumped = classifyDrift(
+      baseline(versionOnly),
+      target({ dbType: 'mariadb', dbVersion: '11.4' }),
+      HASH_B,
+    );
+    expect(bumped.kind).toBe('db-migrate');
+    expect(bumped.migrateTarget).toBe('mariadb:11.4');
+  });
+
+  it('refuses a version whose quoted text holds " #" rather than migrating to the text before it', () => {
+    const r = classifyDrift(baseline(), target({ dbVersion: "'10.11 # lts'" }), HASH_B);
+    expect(r.kind).toBe('unsupported');
+  });
+
   // 01c now writes `nodejs_version` into a config it generates. It writes the file BEFORE
   // reading its baseline, so the new line is inside the baseline hash and must not surface
   // here as a phantom restart of an environment nobody touched.
@@ -236,7 +287,7 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
     });
   });
 
-  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts"])(
+  it.each(["'10.11'", '"10.11"', '10.11', '10.11 # lts', "'10.11' # lts", '"10.11" # lts'])(
     'plans mariadb:10.11 for a config file written with version: %s',
     (written) => {
       const parsed = parseDdevConfig(
@@ -311,6 +362,105 @@ describe('classifyDrift: the migrate target read from .ddev/config.yaml', () => 
     const r = classifyDrift(baseline(same), target(same), HASH_B);
     expect(r.kind).toBe('restart');
     expect(r.migrateTarget).toBeNull();
+  });
+});
+
+// A stored baseline holds the text an earlier parser captured, so both sides are read as YAML does.
+describe('classifyDrift: the same database restated', () => {
+  const same = { dbType: 'mariadb', dbVersion: '10.11' };
+
+  it.each([
+    ['mariadb', "'10.11'"],
+    ['mariadb', '10.11 # lts'],
+    ['mariadb', '"10.11" # lts'],
+    ["'mariadb'", '"10.11"'],
+    ['mariadb # engine', "'10.11' # lts"],
+  ])('a target %s:%s is no database change', (dbType, dbVersion) => {
+    const stored = baseline(same);
+    expect(classifyDrift(stored, target({ dbType, dbVersion }), HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, target({ dbType, dbVersion }), HASH_B)).toEqual({
+      kind: 'restart',
+      migrateTarget: null,
+      unsupportedReason: null,
+    });
+  });
+
+  it.each([
+    ["'mariadb'", "'10.11'"],
+    ['mariadb', '10.11 # lts'],
+    ['"mariadb"', '"10.11" # lts'],
+  ])('a baseline stored as %s:%s is no database change', (dbType, dbVersion) => {
+    const stored = baseline({ dbType, dbVersion });
+    expect(classifyDrift(stored, target(same), HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, target(same), HASH_B).kind).toBe('restart');
+  });
+
+  it.each([{ dbVersion: null }, { dbType: null }, { dbType: null, dbVersion: null }])(
+    'a database field the config does not declare is no change (%o)',
+    (over) => {
+      expect(classifyDrift(baseline(), target(over), HASH_A).kind).toBe('none');
+    },
+  );
+});
+
+describe('classifyDrift: PostgreSQL written with quotes or a comment', () => {
+  const POSTGRES = ["'postgres'", '"postgres"', 'postgres # engine'];
+
+  it.each(POSTGRES)('a target type %s keeps the PostgreSQL guard', (dbType) => {
+    const r = classifyDrift(baseline(), target({ dbType, dbVersion: '16' }), HASH_B);
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+    expect(r.unsupportedReason).toContain('mariadb:10.4 -> postgres:16');
+    expect(r.migrateTarget).toBeNull();
+  });
+
+  it.each(POSTGRES)('a baseline type %s moving to mariadb is refused, not migrated', (dbType) => {
+    const r = classifyDrift(
+      baseline({ dbType, dbVersion: '15' }),
+      target({ dbType: 'mariadb', dbVersion: '10.11' }),
+      HASH_B,
+    );
+    expect(r.kind).toBe('unsupported');
+    expect(r.unsupportedReason).toContain('PostgreSQL');
+    expect(r.migrateTarget).toBeNull();
+  });
+
+  it.each(POSTGRES)('a PostgreSQL project restated as %s is no change', (dbType) => {
+    const stored = baseline({ dbType: 'postgres', dbVersion: '16' });
+    const restated = target({ dbType, dbVersion: '"16"' });
+    expect(classifyDrift(stored, restated, HASH_A).kind).toBe('none');
+    expect(classifyDrift(stored, restated, HASH_B).kind).toBe('restart');
+  });
+});
+
+describe('classifyDrift: a real database change written with quotes or a comment', () => {
+  it.each([
+    [
+      { dbType: 'mariadb', dbVersion: '10.11' },
+      { dbType: 'mariadb', dbVersion: '"11.4" # lts' },
+      'mariadb:11.4',
+    ],
+    [
+      { dbType: "'mariadb'", dbVersion: "'10.11'" },
+      { dbType: 'mariadb', dbVersion: '11.4' },
+      'mariadb:11.4',
+    ],
+    [
+      { dbType: 'mariadb', dbVersion: '10.11 # lts' },
+      { dbType: "'mysql'", dbVersion: "'8.0'" },
+      'mysql:8.0',
+    ],
+    [
+      { dbType: null, dbVersion: null },
+      { dbType: "'mariadb'", dbVersion: '"10.11" # lts' },
+      'mariadb:10.11',
+    ],
+  ])('plans the migration from %o to %o', (from, to, migrateTarget) => {
+    expect(classifyDrift(baseline(from), target(to), HASH_B)).toEqual({
+      kind: 'db-migrate',
+      migrateTarget,
+      unsupportedReason: null,
+    });
   });
 });
 
@@ -565,7 +715,7 @@ describe('07c-ddev-reconcile: a database version YAML reads as 10.11', () => {
     m.hashDdevInputs.mockResolvedValue('h1');
   });
 
-  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts"])(
+  it.each(["'10.11'", '"10.11"', '10.11 # lts', "'10.11' # lts", '"10.11" # lts'])(
     'migrates to mariadb:10.11 for version: %s',
     async (written) => {
       await writeConfig(written);
