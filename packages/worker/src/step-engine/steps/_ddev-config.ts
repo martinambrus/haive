@@ -39,9 +39,10 @@ function lookup(map: YAMLMap, key: string, doc: Document, seen = new Set<YAMLMap
   // Each map is searched once, so a chain of merges repeating one alias stays linear.
   if (seen.has(map)) return undefined;
   seen.add(map);
-  const own = map.items.find(
-    (pair) => !isMergeKey(pair.key) && isScalar(pair.key) && pair.key.value === key,
-  );
+  const own = map.items.find((pair) => {
+    const name = resolved(pair.key, doc);
+    return !isMergeKey(pair.key) && isScalar(name) && name.value === key;
+  });
   if (own) return resolved(own.value, doc);
   for (const pair of map.items) {
     if (!isMergeKey(pair.key)) continue;
