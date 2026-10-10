@@ -1,6 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
 import {
   cleanText,
@@ -233,6 +234,15 @@ const snapWindow = (piece: number): number => Math.min(EXCERPT_LINE_SNAP, Math.f
 const omissionLine = (n: number): string =>
   `[… ${n.toLocaleString('en-US')} character${n === 1 ? '' : 's'} omitted …]`;
 
+/** The line holding index `at`, when `at` falls strictly inside a fence delimiter line. */
+function delimiterLineAround(text: string, at: number): { start: number; end: number } | null {
+  const start = text.lastIndexOf('\n', at - 1) + 1;
+  const found = text.indexOf('\n', at);
+  const end = found === -1 ? text.length : found;
+  if (at <= start || at >= end) return null;
+  return fenceOpener(text.slice(start, end)) ? { start, end } : null;
+}
+
 function headPiece(text: string, max: number): string {
   let end = max;
   if (isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
@@ -240,6 +250,8 @@ function headPiece(text: string, max: number): string {
     const lineEnd = text.lastIndexOf('\n', end - 1);
     if (lineEnd !== -1 && lineEnd >= end - snapWindow(max)) end = lineEnd;
   }
+  const split = delimiterLineAround(text, end);
+  if (split) end = Math.max(split.start - 1, 0);
   return text.slice(0, end);
 }
 
@@ -252,21 +264,81 @@ function tailPiece(text: string, max: number): string {
     const lineEnd = text.indexOf('\n', start);
     if (lineEnd !== -1 && lineEnd < start + snapWindow(max)) start = lineEnd + 1;
   }
+  const split = delimiterLineAround(text, start);
+  if (split) start = Math.min(split.end + 1, text.length);
   return text.slice(start);
+}
+
+/** A longer opener is not re-synthesized: its closer would cost as much as the budget it is cut to. */
+const MAX_SYNTHETIC_FENCE = 16;
+
+/** The opener's indentation and run of the markdown fence still open where `text` ends, or null
+ *  when there is none or its run is longer than `MAX_SYNTHETIC_FENCE`. */
+function openFenceRun(text: string): string | null {
+  const lines = text.split('\n');
+  const open = scanFences(lines).find((fence) => fence.close === null);
+  const opener = open ? fenceOpener(lines[open.open] ?? '') : null;
+  return opener && opener.run.length <= MAX_SYNTHETIC_FENCE
+    ? `${' '.repeat(opener.indent)}${opener.run}`
+    : null;
+}
+
+/** The head cut back to before a block still open at its end whose opener run exceeds the cap. */
+function headBeforeLongFence(head: string): string {
+  const lines = head.split('\n');
+  const open = scanFences(lines).find((fence) => fence.close === null);
+  const opener = open ? fenceOpener(lines[open.open] ?? '') : null;
+  return open && opener && opener.run.length > MAX_SYNTHETIC_FENCE
+    ? lines.slice(0, open.open).join('\n')
+    : head;
+}
+
+/** The tail from the line after the closer of a block it starts inside whose opener run exceeds the
+ *  cap, or empty when that block never closes. */
+function tailAfterLongFence(text: string, tail: string): string {
+  const lines = text.split('\n');
+  const before = text.slice(0, text.length - tail.length).split('\n');
+  const open = scanFences(before).find((fence) => fence.close === null);
+  const opener = open ? fenceOpener(before[open.open] ?? '') : null;
+  if (!open || !opener || opener.run.length <= MAX_SYNTHETIC_FENCE) return tail;
+  const close = scanFences(lines).find((fence) => fence.open === open.open)?.close ?? null;
+  return close === null ? '' : lines.slice(close + 1).join('\n');
 }
 
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is
  *  repaired alone: one repair over both would fence a head that sits outside any fence. */
-function cutMiddle(text: string, budget: number, repair: (piece: string) => string): string {
-  const headLines = headPiece(text, Math.ceil(budget / 2)).split('\n');
-  const tailLines = tailPiece(text, Math.floor(budget / 2)).split('\n');
+function cutMiddle(
+  text: string,
+  budget: number,
+  repair: (piece: string) => string,
+  framed = false,
+): string {
+  let headText = headPiece(text, Math.ceil(budget / 2));
+  let tailText = tailPiece(text, Math.floor(budget / 2));
+  // A block with a run too long to re-synthesize is cut around, never through.
+  if (framed) {
+    headText = headBeforeLongFence(headText);
+    tailText = tailAfterLongFence(text, tailText);
+  }
+  const headLines = headText.split('\n');
+  const tailLines = tailText.split('\n');
   // A BEGIN ending the head, or an END starting the tail, would be repaired into an empty fence.
   if (headLines.at(-1) === UNTRUSTED_OPEN) headLines.pop();
   if (tailLines[0] === UNTRUSTED_CLOSE) tailLines.shift();
   const head = headLines.join('\n');
   const tail = tailLines.join('\n');
   const omitted = omissionLine(text.length - head.length - tail.length);
-  return [repair(head), omitted, repair(tail)].join('\n');
+  // framed: the line is its own paragraph and a markdown fence the cut split is closed and reopened.
+  if (!framed) return [repair(head), omitted, repair(tail)].join('\n');
+  const headRun = openFenceRun(head);
+  const tailRun = openFenceRun(text.slice(0, text.length - tailText.length));
+  return [
+    repair(headRun ? `${head}\n${headRun}` : head),
+    omitted,
+    tail ? repair(tailRun ? `${tailRun}\n${tail}` : tail) : '',
+  ]
+    .filter((part, i) => part !== '' || i === 1)
+    .join('\n\n');
 }
 
 /** The first `max` characters of `text`, then `marker` on its own line. A BEGIN banner ending the
@@ -308,7 +380,7 @@ function cutFencedBodies(text: string, budget: number): string {
   for (const { start, end, share } of bodies) {
     const body = text.slice(start, end);
     out += text.slice(copied, start);
-    out += body.length > share ? cutMiddle(body, share, (piece) => piece) : body;
+    out += body.length > share ? cutMiddle(body, share, (piece) => piece, true) : body;
     copied = end;
   }
   return out + text.slice(copied);
@@ -322,7 +394,7 @@ function cutFencedBodies(text: string, budget: number): string {
 export function excerptDiagnosis(raw: string, budget: number, keepPersonWhole: boolean): string {
   const text = cleanText(raw, Infinity);
   if (keepPersonWhole) return balanceFences(cutFencedBodies(text, budget));
-  return text.length > budget ? cutMiddle(text, budget, balanceFences) : balanceFences(text);
+  return text.length > budget ? cutMiddle(text, budget, balanceFences, true) : balanceFences(text);
 }
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses

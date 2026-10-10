@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
+import { fencedLines, scanFences } from '@haive/shared/markdown-fences';
 import {
   advanceStep,
   finishedRoutingVerdict,
@@ -1011,7 +1012,7 @@ const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
 describe('excerptDiagnosis', () => {
   function parts(out: string): { head: string; tail: string; omitted: number } {
     const [head = '', count = '0', tail = ''] = out.split(
-      /\n\[… ([\d,]+) characters omitted …\]\n/,
+      /\n\n\[… ([\d,]+) characters omitted …\]\n\n/,
     );
     return { head, tail, omitted: Number(count.replace(/,/g, '')) };
   }
@@ -1043,9 +1044,9 @@ describe('excerptDiagnosis', () => {
 
   it('cuts inside a line when none ends nearby, and writes the count with its separator', () => {
     expect(excerptDiagnosis('x'.repeat(10_000), 6000, false)).toBe(
-      `${'x'.repeat(3000)}\n[… 4,000 characters omitted …]\n${'x'.repeat(3000)}`,
+      `${'x'.repeat(3000)}\n\n[… 4,000 characters omitted …]\n\n${'x'.repeat(3000)}`,
     );
-    expect(excerptDiagnosis('abcde', 4, false)).toBe('ab\n[… 1 character omitted …]\nde');
+    expect(excerptDiagnosis('abcde', 4, false)).toBe('ab\n\n[… 1 character omitted …]\n\nde');
   });
 
   it('never gives up more than half a piece to land on a line', () => {
@@ -1060,6 +1061,129 @@ describe('excerptDiagnosis', () => {
     expect(text.slice(-3001).isWellFormed()).toBe(false);
     expect(excerptDiagnosis(text, 6001, false).isWellFormed()).toBe(true);
     expect(excerptDiagnosis(text, 6003, false).isWellFormed()).toBe(true);
+  });
+
+  it('puts the omission line on its own paragraph', () => {
+    const out = excerptDiagnosis('word '.repeat(3000), 400, false);
+    expect(out).toMatch(/[^\n]\n\n\[… [\d,]+ characters omitted …\]\n\n[^\n]/);
+  });
+
+  it.each([
+    ['```', 'ts'],
+    ['~~~~', ''],
+  ])('closes the %s block the head cut and reopens it for the tail', (fence, info) => {
+    const text = `intro\n${fence}${info}\n${numbered('code', 300)}\n${fence}\noutro paragraph`;
+    const out = excerptDiagnosis(text, 800, false);
+    const lines = out.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(scanFences(lines).length).toBe(2);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(lines[marker - 1]).toBe('');
+    expect(lines[marker + 1]).toBe('');
+    expect(lines.slice(0, marker).some((l) => l.startsWith(fence))).toBe(true);
+    expect(lines[marker + 2]).toBe(fence);
+  });
+
+  it.each([1, 3])('reopens a block with its opener indented %i spaces at that indentation', (n) => {
+    const pad = ' '.repeat(n);
+    const code = numbered('code', 300).replace(/^/gm, pad);
+    const out = excerptDiagnosis(
+      `intro\n${pad}\`\`\`yaml\n${code}\n${pad}\`\`\`\noutro`,
+      800,
+      false,
+    );
+    const lines = out.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(lines[marker + 2]).toBe(`${pad}\`\`\``);
+    const fences = scanFences(lines);
+    expect(fences.length).toBe(2);
+    expect(fences.every((f) => f.close !== null)).toBe(true);
+    for (const f of fences) expect(f.content.every((l) => /^code line/.test(l))).toBe(true);
+  });
+
+  it.each([
+    [
+      'head',
+      `${'a'.repeat(100)}\n${'`'.repeat(400)}\n${numbered('code', 30)}\n${'`'.repeat(400)}\n${numbered('outro', 20)}`,
+    ],
+    [
+      'tail',
+      `${numbered('intro', 20)}\n${'`'.repeat(400)}\n${'c'.repeat(100)}\n${'`'.repeat(400)}\n${'z'.repeat(49)}`,
+    ],
+  ])('never splits a fence delimiter line with the %s cut', (_end, text) => {
+    const lines = excerptDiagnosis(text, 600, false).split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(lines.filter((l) => /^`+$/.test(l)).every((l) => l.length === 400)).toBe(true);
+  });
+
+  it('adds no synthetic fence longer than the cap when the opener is a huge run', () => {
+    const run = '`'.repeat(10_000);
+    const text = `intro\n${run}\n${numbered('code', 800)}`;
+    const out = excerptDiagnosis(text, 6000, false);
+    expect(out.length).toBeLessThanOrEqual(6000 + 120);
+    expect(out).toMatch(OMISSION);
+  });
+
+  describe('a block opened with a run longer than the synthetic cap', () => {
+    const long = '`'.repeat(17);
+    const prose = numbered('prose', 12);
+    const closed = (lines: string[]): boolean => scanFences(lines).every((f) => f.close !== null);
+
+    it('is cut outside of when the head ends inside it and its closer is omitted', () => {
+      const text = `intro\n${long}\n${numbered('code', 300)}\n${long}\n${prose}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      const marker = lines.findIndex((l) => OMISSION.test(l));
+      expect(marker).toBeGreaterThan(0);
+      expect(lines.slice(0, marker).join('\n')).toBe('intro\n');
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.endsWith(prose.slice(-300))).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(800 + 120);
+    });
+
+    it('is cut outside of when the tail starts inside it, after its closer', () => {
+      const outro = numbered('outro', 3);
+      const text = `${numbered('intro', 12)}\n${long}\n${numbered('code', 300)}\n${long}\n${outro}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      const marker = lines.findIndex((l) => OMISSION.test(l));
+      expect(marker).toBeGreaterThan(0);
+      expect(closed(lines)).toBe(true);
+      expect(fencedLines(lines)[marker]).toBe(false);
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.endsWith(`\n\n${outro}`)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(800 + 120);
+    });
+
+    it('drops the rest of a block that never closes instead of leaving it open', () => {
+      const text = `intro\n${long}\n${numbered('code', 300)}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.startsWith('intro\n')).toBe(true);
+      expect(out).toMatch(/\[… [\d,]+ characters omitted …\]$/);
+    });
+
+    it('drops the tail of a block opened before the cut that never closes', () => {
+      const text = `${numbered('intro', 12)}\n${long}\n${numbered('code', 300)}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      expect(closed(lines)).toBe(true);
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out).toMatch(/\[… [\d,]+ characters omitted …\]$/);
+    });
+  });
+
+  it('adds no fence line when the cut falls outside every block', () => {
+    const text = `${'prose '.repeat(600)}\n\`\`\`\ncode\n\`\`\`\n${'prose '.repeat(600)}`;
+    const out = excerptDiagnosis(text, 400, false);
+    expect(scanFences(out.split('\n')).length).toBe(0);
   });
 
   it('repairs the fence each end of the cut carries, without pulling the head into one', () => {
@@ -1135,6 +1259,26 @@ describe('excerptDiagnosis', () => {
       expect(body.length).toBeGreaterThan(2800);
       expect(body.length).toBeLessThan(3100);
     }
+  });
+
+  it("frames a cut agent body like a whole-text cut and leaves a person's words as they are", () => {
+    const person = 'Please fix the layout.\n\nKeep it small.';
+    const code = `\`\`\`ts\n${numbered('code', 300)}\n\`\`\``;
+    const small = numbered('small', 3);
+    const text = [person, fencedAgentBlock(code), 'Then this:', fencedAgentBlock(small)].join('\n');
+    const out = excerptDiagnosis(text, 800, true);
+    const [cut = '', kept = ''] = fenceBodies(out);
+    const lines = cut.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(lines[marker - 1]).toBe('');
+    expect(lines[marker + 1]).toBe('');
+    expect(scanFences(lines).length).toBe(2);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(out.startsWith(`${person}\n${UNTRUSTED_OPEN}`)).toBe(true);
+    expect(out).toContain(`${UNTRUSTED_CLOSE}\nThen this:\n${UNTRUSTED_OPEN}`);
+    expect(kept).toBe(`\n${small}\n`);
   });
 
   it('gives a short fenced block no more than it needs', () => {
@@ -1368,7 +1512,7 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
     const body = bodies[0] ?? '';
     expect(body.split(OMISSION)).toHaveLength(2);
     const marker = body.match(OMISSION)?.[0] ?? '';
-    expect(body.length).toBeLessThanOrEqual(6000 + marker.length + 2);
+    expect(body.length).toBeLessThanOrEqual(6000 + marker.length + 4);
   });
 
   it('shows the oscillation gate the findings of an adversarial-QA request bounded', () => {
