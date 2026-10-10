@@ -1,6 +1,34 @@
 import { describe, it, expect } from 'vitest';
-import { insightsTriageStep, parseInsights, readTriageOutcome } from './08e-insights-triage.js';
+import { schema } from '@haive/database';
+import {
+  insightsTriageStep,
+  loadInsightOutputs,
+  parseInsights,
+  readTriageOutcome,
+} from './08e-insights-triage.js';
 import type { StepContext } from '../../step-definition.js';
+
+/** Answers by TABLE: the invocations' raw output, then the DAG issues' reviewer verdicts. */
+function tableDb(outputs: { stepId: string; raw: string }[], verdicts: unknown[]) {
+  let rows: unknown[] = [];
+  const chain: Record<string, unknown> = {};
+  Object.assign(chain, {
+    from: (table: unknown) => {
+      rows =
+        table === schema.cliInvocations
+          ? outputs
+          : table === schema.taskDagIssues
+            ? verdicts.map((reviewerVerdict) => ({ reviewerVerdict }))
+            : [];
+      return chain;
+    },
+    innerJoin: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
+  });
+  return { select: () => chain } as never;
+}
 
 describe('parseInsights', () => {
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
@@ -123,5 +151,37 @@ describe('insightsTriageStep.apply', () => {
       previousIterations: [],
     });
     expect(out).toMatchObject({ implemented: true, changes: ['Did T'] });
+  });
+});
+
+describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
+  const legacy = { severity: 'high', file: 'lib.ts', description: 'legacy', in_scope: 'no' };
+  const verdict = { verdict: 'approve', criteria_results: [], issues: [], withheld: [legacy] };
+  const titles = async (outputs: { stepId: string; raw: string }[], verdicts: unknown[]) =>
+    parseInsights(await loadInsightOutputs(tableDb(outputs, verdicts), 't1'));
+
+  it('turns a withheld finding into one insight although the reply has no INSIGHTS block', async () => {
+    const ins = await titles([], [verdict]);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]).toMatchObject({ title: 'legacy', location: 'lib.ts' });
+    expect(ins[0]!.description).toContain('high');
+  });
+
+  it('lists a finding the reviewer also wrote under ## INSIGHTS once', async () => {
+    const raw = '```json\n{}\n```\n\n## INSIGHTS\n- INSIGHT: legacy | lib.ts:40 | old code\n';
+    const ins = await titles([{ stepId: '06c-dag-execute', raw }], [verdict]);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.location).toBe('lib.ts:40');
+  });
+
+  it('keeps the reviewer own insights next to a withheld finding it did not repeat', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT: Extract helper | util.ts:3 | dedupe\n';
+    const ins = await titles([{ stepId: '06c-dag-execute', raw }], [verdict]);
+    expect(ins.map((i) => i.title).sort()).toEqual(['Extract helper', 'legacy']);
+  });
+
+  it('ignores a verdict that withheld nothing and one that is not a verdict', async () => {
+    const none = { verdict: 'approve', criteria_results: [], issues: [] };
+    expect(await titles([], [none, null, 'x', { withheld: 'x' }])).toEqual([]);
   });
 });

@@ -1,9 +1,10 @@
 import { and, asc, eq, ilike } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { reviewerOutputSchema, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
+  collapseToLine,
   fenceSafe,
   REPO_IS_DATA_ACTING_LINES,
   UNTRUSTED_CLOSE,
@@ -105,7 +106,8 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
 }
 
 /** The raw output of every step invocation of the task that carries an `## INSIGHTS` block, in the
- *  order they ran. */
+ *  order they ran, then one block per finding a DAG reviewer withheld as outside its issue's lines
+ *  (kept on the issue's verdict, not in the reply) that no insight above already covers. */
 export async function loadInsightOutputs(
   db: Database,
   taskId: string,
@@ -121,7 +123,34 @@ export async function loadInsightOutputs(
       ),
     )
     .orderBy(asc(schema.cliInvocations.createdAt), asc(schema.cliInvocations.id));
-  return rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' }));
+  const outputs = rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' }));
+  const written = parseInsights(outputs, Number.POSITIVE_INFINITY);
+  const verdicts = await db
+    .select({ reviewerVerdict: schema.taskDagIssues.reviewerVerdict })
+    .from(schema.taskDagIssues)
+    .where(eq(schema.taskDagIssues.taskId, taskId))
+    .orderBy(asc(schema.taskDagIssues.createdAt), asc(schema.taskDagIssues.id));
+  const lines: string[] = [];
+  for (const { reviewerVerdict } of verdicts) {
+    const parsed = reviewerOutputSchema.safeParse(reviewerVerdict);
+    for (const f of parsed.success ? (parsed.data.withheld ?? []) : []) {
+      const text = collapseToLine(f.description).toLowerCase();
+      const covered = written.some((i) => {
+        const words = [i.title, i.description].map((w) => collapseToLine(w).toLowerCase());
+        return (
+          (!f.file || i.location.includes(f.file)) &&
+          words.some((w) => w.includes(text) || (w.length >= 12 && text.includes(w)))
+        );
+      });
+      if (!covered)
+        lines.push(
+          `- INSIGHT: ${collapseToLine(f.description).replaceAll('|', '/')} | ${f.file ?? ''} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
+        );
+    }
+  }
+  return lines.length > 0
+    ? [...outputs, { stepId: '06c-dag-execute', raw: `## INSIGHTS\n${lines.join('\n')}\n` }]
+    : outputs;
 }
 
 async function collectInsights(ctx: StepContext): Promise<Insight[]> {

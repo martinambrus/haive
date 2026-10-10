@@ -66,7 +66,7 @@ const TITLE = 'Fix the login redirect';
 const DESCRIPTION = 'After login the user lands on /home instead of the page they asked for.';
 
 // Only what the five detect() functions read of the db: the task's level and DAG mode, and the
-// insight outputs 08e collects. Everything else goes through the mocks above.
+// insight outputs and DAG reviewer verdicts 08e collects. Everything else goes through the mocks above.
 const db = {
   query: {
     tasks: { findFirst: async () => ({ adversarialQaLevel: 'poc' }) },
@@ -74,7 +74,10 @@ const db = {
     taskSteps: { findFirst: async () => undefined },
   },
   select: () => ({
-    from: () => ({ innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }) }),
+    from: () => ({
+      innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
+      where: () => ({ orderBy: async () => [] }),
+    }),
   }),
 };
 const ctx = {

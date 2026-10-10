@@ -28,7 +28,6 @@ import {
   buildUpstreamDebt,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
-import { parseInsights } from './steps/workflow/08e-insights-triage.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
 import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import {
@@ -2336,18 +2335,16 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
     } finally {
       vi.mocked(resolveTaskDispatch).mockImplementation(actualDispatch);
     }
-    const rewritten = updates.filter(
+    const rawWrites = updates.filter(
       (u) => u.table === schema.cliInvocations && 'rawOutput' in u.patch,
     );
-    const stored = (rewritten.at(-1)?.patch.rawOutput as string | null | undefined) ?? rawOutput;
-    const insights = parseInsights([{ stepId: '06c-dag-execute', raw: stored ?? '' }]);
     const patches = updates.filter((u) => u.table === schema.taskDagIssues).map((u) => u.patch);
     const resolved = patches.find((p) => p.resolution) as
       | { resolution: string; reviewerVerdict?: { withheld?: { description: string }[] } }
       | undefined;
     const prompt = inserts.find((i) => i.table === schema.cliInvocations)?.values.prompt as
       string | undefined;
-    return { resolved, prompt, insights };
+    return { resolved, prompt, rawWrites };
   }
 
   it('approves a fix_required verdict and keeps the withheld findings in the record', async () => {
@@ -2357,24 +2354,10 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
     expect(r.resolved?.reviewerVerdict?.withheld?.map((i) => i.description)).toEqual(['legacy']);
   });
 
-  it('hands the withheld finding to the insights 08e and the gates read', async () => {
-    const r = await run({ verdict: 'fix_required', criteria_results: pass, issues: [legacy] });
-    expect(r.insights).toHaveLength(1);
-    expect(r.insights[0]).toMatchObject({ title: 'legacy', location: 'lib.ts' });
-    expect(r.insights[0]!.description).toContain('high');
-  });
-
-  it('lists a finding the reviewer also wrote under ## INSIGHTS once', async () => {
-    const raw = '```json\n{}\n```\n\n## INSIGHTS\n- INSIGHT: legacy | lib.ts:40 | old code\n';
+  it('leaves the reviewer invocation raw output as the agent wrote it', async () => {
+    const raw = '```json\n{}\n```\n\n## INSIGHTS\n- INSIGHT: Extract helper | util.ts:3 | dedupe\n';
     const r = await run({ verdict: 'fix_required', criteria_results: pass, issues: [legacy] }, raw);
-    expect(r.insights).toHaveLength(1);
-    expect(r.insights[0]!.location).toBe('lib.ts:40');
-  });
-
-  it('keeps the reviewer own insights next to a withheld finding it did not repeat', async () => {
-    const raw = '## INSIGHTS\n- INSIGHT: Extract helper | util.ts:3 | dedupe\n';
-    const r = await run({ verdict: 'fix_required', criteria_results: pass, issues: [legacy] }, raw);
-    expect(r.insights.map((i) => i.title).sort()).toEqual(['Extract helper', 'legacy']);
+    expect(r.rawWrites).toEqual([]);
   });
 
   it('approves it when the reviewer listed no criteria at all', async () => {
