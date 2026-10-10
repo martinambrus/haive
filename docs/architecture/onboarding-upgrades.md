@@ -250,6 +250,16 @@ starts or ends a `created` task, and one left by a failure part-way would block 
 and rollback. The migration fails the ones an older release left that way before it builds the
 index, and then keeps each repository's newest live one.
 
+**What an upgrade renders from is a context someone recorded.** A row's `form_values_snapshot`
+counts as a snapshot only if it decodes as a render context, with the decoder the column uses
+(`isRenderContextSnapshot`); `{}` or a shape the catalog no longer knows does not, and the read falls
+through to the next row or to the history path. A rollback restores from the first prior snapshot that
+decodes and stores null rather than `{}` when none does. A row never records an `rtkEnabled` that was
+synthesized rather than chosen: `recordableContext` drops it unless the choice is live, for 01's
+backfill rows and every row 02 writes. RTK leftovers (the block and the settings files) are removed only
+when `rtkLeftoversToRemove` holds, a recorded choice and the switch off; the banner, 01's plan and 02's
+strip all ask it, so the banner offers exactly what the upgrade will do.
+
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
 off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
