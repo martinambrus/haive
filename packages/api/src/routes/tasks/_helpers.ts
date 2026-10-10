@@ -22,6 +22,7 @@ import {
   type CliTokenUsage,
 } from '@haive/shared';
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
+import { summarizeThroughput, type ThroughputSummary } from '@haive/shared/stats';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
@@ -644,6 +645,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     cliInvocationCount: number;
     attemptCount: number;
     tokenUsage: CliTokenUsage | null;
+    throughput: ThroughputSummary;
     summaryError: StepSummaryFailure | null;
   })[]
 > {
@@ -674,6 +676,11 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       // Real dollars, decided by the shared rule (snapshot when the cost pass ran,
       // legacy metered + api_key filter otherwise).
       costUsd: realCostUsdSql(),
+      runs: sql<Array<[number | null, number | null, number | null]>>`json_agg(json_build_array(
+        (${tu} ->> 'outputTokens')::double precision,
+        extract(epoch from (${schema.cliInvocations.endedAt} - ${schema.cliInvocations.startedAt})) * 1000,
+        ${schema.cliInvocations.apiDurationMs}
+      ))`,
       // The LATEST recap pass, whatever its outcome — not the latest FAILED one. A newer
       // pass that ran is the answer about the current state of the panel even when it
       // exited 0 and wrote nothing, and reporting an older round's error there would
@@ -698,6 +705,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       count: number;
       attemptCount: number;
       tokenUsage: CliTokenUsage | null;
+      throughput: ThroughputSummary;
       summaryError: StepSummaryFailure | null;
     }
   >();
@@ -724,6 +732,9 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       count: row.count,
       attemptCount: Number(row.attemptCount) || 0,
       tokenUsage,
+      throughput: summarizeThroughput(
+        (row.runs ?? []).map(([outputTokens, wallMs, apiMs]) => ({ outputTokens, wallMs, apiMs })),
+      ),
       summaryError: resolveSummaryFailure(row.latestSummaryRun),
     });
   }
@@ -734,6 +745,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       cliInvocationCount: stat?.count ?? 0,
       attemptCount: stat?.attemptCount ?? 0,
       tokenUsage: stat?.tokenUsage ?? null,
+      throughput: stat?.throughput ?? summarizeThroughput([]),
       summaryError: stat?.summaryError ?? null,
     };
   });

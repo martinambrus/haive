@@ -379,6 +379,7 @@ export async function handleCliExecJob(
           tokenUsage: result.tokenUsage ?? null,
           modelIdentity: result.modelIdentity ?? null,
           compaction: result.compaction ?? null,
+          apiDurationMs: result.apiDurationMs ?? null,
           // A provider whose stream carries no tool events (amp) would otherwise record "used
           // nothing"; the rule lives beside the tally so the backfill applies the same one. The
           // assigned personas ride every path: the observability rule keeps them on purpose.

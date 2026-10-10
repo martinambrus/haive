@@ -1222,6 +1222,7 @@ export async function executeCliSpec(
       tokenUsage: collector.getTokenUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       compaction: compactionFrom(collector.getCompactions()),
+      apiDurationMs: collector.getApiDurationMs(),
       toolUsage: collector.getToolUsage(),
       ...persisted,
     };
@@ -1263,6 +1264,7 @@ export async function executeCliSpec(
       // is recorded on the failure branch too — the compaction is a fact about the run
       // whether or not it produced a result event.
       compaction: compactionFrom(collector.getCompactions()),
+      apiDurationMs: collector.getApiDurationMs(),
       // Same stance as compaction: a run that died mid-stream still used what it used.
       toolUsage: collector.getToolUsage(),
       ...persisted,
@@ -1287,6 +1289,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: extracted.tokenUsage,
+        apiDurationMs: extracted.apiDurationMs,
         // gemini names its models only as the keys of stats.models.
         modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
         // gemini's JSON envelope carries no tool events; `none` is the honest record.

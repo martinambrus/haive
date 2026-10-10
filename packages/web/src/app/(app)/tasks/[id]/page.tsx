@@ -63,6 +63,7 @@ import {
   RETRY_TIMEOUT_MIN_MINUTES,
 } from '@/lib/retry-timeout';
 import { formatTokens } from '@/lib/format-tokens';
+import { formatTps } from '@/lib/format-throughput';
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
 import {
   UsageFaultChip,
@@ -2767,7 +2768,13 @@ function UserActiveDuration({ ms }: { ms: number }) {
 // Per-step CLI token usage: summed across the step's non-superseded invocations
 // (reconciles with the per-invocation terminal panel). Hidden when the step ran
 // no token-bearing CLI so deterministic steps stay clean.
-function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
+function StepTokens({
+  tokenUsage,
+  throughput,
+}: {
+  tokenUsage: TaskStep['tokenUsage'];
+  throughput: TaskStep['throughput'];
+}) {
   if (!tokenUsage || tokenUsage.totalTokens <= 0) return null;
   const { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens, costUsd } =
     tokenUsage;
@@ -2775,10 +2782,18 @@ function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
     `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}` +
     (cacheReadTokens ? `, cache read ${cacheReadTokens.toLocaleString()}` : '') +
     (cacheCreationTokens ? `, cache write ${cacheCreationTokens.toLocaleString()}` : '') +
-    (costUsd ? `, ~$${costUsd.toFixed(2)}` : '');
+    (costUsd ? `, ~$${costUsd.toFixed(2)}` : '') +
+    `. Output per model second ${formatTps(throughput.api.tps)} over ${throughput.api.n} runs` +
+    `, per wall-clock second ${formatTps(throughput.wall.tps)} over ${throughput.wall.n} runs`;
+  const rate =
+    throughput.api.tps !== null
+      ? `${formatTps(throughput.api.tps)} model`
+      : throughput.wall.tps !== null
+        ? `${formatTps(throughput.wall.tps)} wall`
+        : null;
   return (
     <span className="font-mono text-xs text-sky-300" title={title}>
-      {formatTokens(totalTokens)} tok
+      {formatTokens(totalTokens)} tok{rate ? ` · ${rate}` : ''}
     </span>
   );
 }
@@ -3799,7 +3814,7 @@ function StepCardImpl({
             taskCompletedAt={taskCompletedAt}
             carriedWorkMs={step.carriedWorkMs}
           />
-          <StepTokens tokenUsage={step.tokenUsage} />
+          <StepTokens tokenUsage={step.tokenUsage} throughput={step.throughput} />
           <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
             <span

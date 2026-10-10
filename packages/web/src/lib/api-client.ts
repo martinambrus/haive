@@ -1062,6 +1062,8 @@ export interface TaskStep {
     cacheCreationTokens?: number;
     costUsd?: number;
   } | null;
+  /** Output tokens per second over the same invocations as `tokenUsage`. */
+  throughput: StatsThroughput;
   /** Number of completed loop passes for steps that declare a loop hook
    *  (e.g. spec-quality review). Always 0 for non-loop steps. The step
    *  card surfaces this as an "iteration N/M" badge while the step is
@@ -1355,6 +1357,8 @@ export interface CliInvocationSummary {
     cacheCreationTokens?: number;
     costUsd?: number;
   } | null;
+  /** Model time the CLI reported; null for CLIs that report none (codex, amp). */
+  apiDurationMs: number | null;
   /** The reasoning-effort level this run actually got. `source` distinguishes a deliberate
    *  setting from an adapter default that happens to be the same level — the level alone
    *  cannot, which is the whole reason it is recorded. A null level is either 'none' (the CLI
@@ -2393,6 +2397,14 @@ export interface StatsTimelineDay {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   totalTokens: number;
+  throughput: StatsThroughput;
+}
+
+/** Output tokens per second, both ways: over model time (`api`, claude family and gemini) and over
+ *  wall clock (`wall`, tool runs and sandbox included). A side with no runs has a null rate. */
+export interface StatsThroughput {
+  wall: { tps: number | null; n: number; sufficient: boolean };
+  api: { tps: number | null; medianTps: number | null; n: number; sufficient: boolean };
 }
 
 export interface StatsTimeline {
@@ -2617,6 +2629,12 @@ export interface StatsModelRow {
   differs: number;
 }
 
+export interface StatsThroughputRow extends StatsThroughput {
+  provider: string | null;
+  served: string | null;
+  invocations: number;
+}
+
 export interface StatsSteps {
   range: { from: string; to: string; timeZone: string };
   costDisplay: CostDisplay;
@@ -2624,6 +2642,7 @@ export interface StatsSteps {
   stepCount: number;
   truncated: boolean;
   models: StatsModelRow[];
+  throughput: StatsThroughputRow[];
 }
 
 export async function getStatsSteps(params: StatsQueryParams = {}): Promise<StatsSteps> {
