@@ -175,21 +175,6 @@ describe('applyKnowledgeReserve', () => {
     expect(out).toEqual(page);
   });
 
-  it('holds a chunk once when the fused list and the candidates both carry it', () => {
-    const page = [
-      hit('code', 0.9, { rrf: 0.03 }),
-      hit('kb', 0.7, { sourcePath: 'docs/ARCHITECTURE.md', rrf: 0.0158 }),
-      hit('code', 0.8, { rrf: 0.016 }),
-    ];
-    const candidate = hit('kb', 0.7, { sourcePath: 'docs/ARCHITECTURE.md', rrf: 0 });
-
-    const out = applyKnowledgeReserve([...page, candidate], OPTS);
-
-    expect(paths(out).filter((p) => p === 'docs/ARCHITECTURE.md')).toHaveLength(1);
-    expect(out.find((o) => o.sourcePath === 'docs/ARCHITECTURE.md')!.rrf).toBe(0.0158);
-    expect(out).toHaveLength(3);
-  });
-
   it('returns nothing for a non-positive topK', () => {
     expect(applyKnowledgeReserve([hit('code', 0.5)], { ...OPTS, topK: 0 })).toEqual([]);
   });
@@ -308,37 +293,61 @@ function fakeStore(opts: { transaction: boolean; statisticsFail: boolean }): {
 }
 
 describe('ragHybridSearch knowledge candidates', () => {
-  it('returns a knowledge chunk once when the candidate query reaches it too', async () => {
-    const row = (type: string, path: string, rrf: number) => ({
-      source_path: path,
-      section_id: 's',
-      chunk_index: 0,
-      source_type: type,
-      content: '',
-      dense_sim: 0.7,
-      ts_norm: 0,
-      hybrid: 0,
-      rrf,
-    });
+  const row = (type: string, path: string, rrf: number, repo: string, content = '') => ({
+    source_path: path,
+    section_id: 's',
+    chunk_index: 0,
+    source_type: type,
+    content,
+    dense_sim: 0.7,
+    ts_norm: 0,
+    hybrid: 0,
+    rrf,
+    repository_id: repo,
+  });
+  const search = (fused: unknown[], candidates: unknown[]) => {
     const pg = {
       unsafe: async (statement: string) => {
         if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
-        if (statement.includes('dense_c')) {
-          return [row('code', 'src/a.ts', 0.03), row('kb', 'docs/ARCHITECTURE.md', 0.0158)];
-        }
-        if (statement.includes('ANY($2::text[])')) return [row('kb', 'docs/ARCHITECTURE.md', 0)];
+        if (statement.includes('dense_c')) return fused;
+        if (statement.includes('ANY($2::text[])')) return candidates;
         return [];
       },
     };
     const conn = { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never;
+    return ragHybridSearch(conn, [0.1, 0.2, 0.3, 0.4], 'where is the session cookie set');
+  };
 
-    const hits = await ragHybridSearch(
-      conn,
-      [0.1, 0.2, 0.3, 0.4],
-      'where is the session cookie set',
+  it('returns a knowledge chunk once when the candidate query reaches it too', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, 'r1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, 'r1')],
+      [row('kb', 'docs/ARCHITECTURE.md', 0, 'r1')],
     );
 
     expect(hits.map((x) => x.sourcePath)).toEqual(['src/a.ts', 'docs/ARCHITECTURE.md']);
+    expect(hits[1]!.rrf).toBe(0.0158);
+  });
+
+  it('keeps two repositories fused rows that share a path, section and index', async () => {
+    const hits = await search(
+      [
+        row('code', 'src/a.ts', 0.03, 'r1'),
+        row('kb', 'README.md', 0.0158, 'r1', 'one'),
+        row('kb', 'README.md', 0.0157, 'r2', 'two'),
+      ],
+      [],
+    );
+
+    expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
+  });
+
+  it('keeps a candidate that is another repository chunk at the same path', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, 'r1'), row('kb', 'README.md', 0.0158, 'r1', 'one')],
+      [row('kb', 'README.md', 0, 'r2', 'two')],
+    );
+
+    expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
   });
 });
 
