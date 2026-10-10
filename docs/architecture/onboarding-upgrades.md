@@ -240,10 +240,11 @@ revival the worker still loses to a race reads as the task not pointed and recor
 `repository-task-lock`), pinned by a test. That module also holds the repository lock every
 creation and revival of an onboarding, upgrade or rollback takes (advisory key, repository row
 `FOR UPDATE`, root claim, the opposing live task): the api's routes and the worker's revival of an
-answered form both run `checkRevive` in the transaction that revives, and a worker refusal records
-`upgrade.revive_refused` with its reason. Only the api re-runs `upgradeAdmission` (it reads the
-onboarding facts), so the worker misses a reset that both starts and ends between the submit and
-its pickup. Both
+answered form and the allowance auto-resume run `checkRevive`, and for an upgrade or rollback
+`upgradeAdmission` (`@haive/shared/onboarding-admission`, which the api re-exports), on the locked
+repository row in the transaction that revives. A worker refusal leaves the task failed and records
+`upgrade.revive_refused` with its reason; a refused auto-resume drops the allowance watch rather
+than retrying each tick. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep
 starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
 and rollback. The migration fails the ones an older release left that way before it builds the
