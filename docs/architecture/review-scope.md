@@ -58,19 +58,18 @@ under `docs/` or `doc/`; `requirements.txt` and `CMakeLists.txt` are code.
 
 A pass after a fix is given the change as it stands, not as detect saw it: the 07b and 08a fix
 passes re-collect it and carry the list on their output, so the next validator or re-tester lists
-the files every fixer pass created (07b unions them across its passes), 07b's stored coverage is
-that pass's, and 07b re-decides the documentation protocol from it (MEASURED on a live run: a
-fixer's new `images/icon-check.svg` was missing from the re-validator's list and coverage read 2/2
-of 3). A list from a failed scan never stands in for detect's, and a fixer's failed re-scan puts the
-re-validation on the code protocol: nobody can tell whether the fixer added code. Gate 2's
-Implementation validation row reads 07b's coverage the way the review rows read theirs, and holds
-Approve when 07b was given a capped list or when the change could not be re-read after a fix
-(`changedFilesCoverage.scanFailed`): then nobody knows whether the fix added files, and the House
-rules row is PARTIAL for the same reason (it says only that the change could not be fully read,
-since its data does not say when). The 07b re-validator and 08a's re-tester are each told so in
-their prompt, beside detect's list. 08a's verdict is behavioural, so re-testing the failures
-exercises the fix whatever a list names, and 08c re-collects the change at its own detect, so gate
-2's Browser testing row takes no mark.
+the files the fixer created, 07b's stored coverage is that pass's, and 07b re-decides the
+documentation protocol from it (MEASURED on a live run: a fixer's new `images/icon-check.svg` was
+missing from the re-validator's list and coverage read 2/2 of 3). A list from a failed scan never
+stands in for detect's, and a fixer's failed re-scan puts the re-validation on the code protocol:
+nobody can tell whether the fixer added code. Gate 2's Implementation validation row reads 07b's
+coverage the way the review rows read theirs, and holds Approve when 07b was given a capped list or
+when the change could not be re-read after a fix (`changedFilesCoverage.scanFailed`): then nobody
+knows whether the fix added files, and the House rules row is PARTIAL for the same reason (it says
+only that the change could not be fully read, since its data does not say when). The 07b
+re-validator and 08a's re-tester are each told so in their prompt, beside detect's list. 08a's
+verdict is behavioural, so re-testing the failures exercises the fix whatever a list names, and 08c
+re-collects the change at its own detect, so gate 2's Browser testing row takes no mark.
 
 Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
 `no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base
