@@ -1,15 +1,117 @@
-// Shared, dependency-free parser for the handful of `.ddev/config.yaml` fields
-// Haive reads (php/db/webserver/docroot). Regex-based on purpose — the worker
-// carries no YAML dependency and these are flat top-level scalars or one-level
-// `database:` block scalars. Shared by onboarding env detection (01-env-detect)
-// and the workflow DDEV reconcile step (07c-ddev-reconcile) so both interpret
-// the config identically.
+// Shared parser for the handful of `.ddev/config.yaml` fields Haive reads
+// (php/db/webserver/docroot): top-level scalars and one-level `database:` scalars,
+// read with the `yaml` package. A document `yaml` reports errors for falls back to
+// the line readers below. Shared by onboarding env detection (01-env-detect), the
+// workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
+// (01-declare-deps) so all interpret the config identically.
+import { isAlias, isMap, isScalar, isSeq, parseAllDocuments, visit } from 'yaml';
+import type { Document, Node, YAMLMap } from 'yaml';
 
-/** Match a top-level `key: value` scalar (optionally double-quoted). */
-export function matchYamlField(text: string, key: string): string | null {
+/** Match a top-level `key: value` scalar (optionally double-quoted), line by line. */
+function lineField(text: string, key: string): string | null {
   const re = new RegExp(`^${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm');
   const m = text.match(re);
   return m && m[1] ? m[1].trim() : null;
+}
+
+/** A scalar's text, never a coerced number (`8.10` stays `8.10`); null for a map, a sequence or an empty value. */
+function scalarText(node: unknown, text: string): string | null {
+  if (!isScalar(node) || typeof node.value !== 'string') return null;
+  const value = node.value.trim();
+  if (!value) return null;
+  // A quoted " #" is not a comment; handed on whole with its quotes, 07c refuses it rather than reading the text before it.
+  if (node.type?.startsWith('QUOTE') && /[ \t]#/.test(value) && node.range) {
+    return text.slice(node.range[0], node.range[1]);
+  }
+  return value;
+}
+
+type Resolve = (node: unknown) => unknown;
+
+/** Resolves an alias to the nearest anchor of its name before it, as YAML does. One walk of the
+ *  document in order records every alias's target; `Alias.resolve` rescans on every call. */
+function anchorResolver(doc: Document): Resolve {
+  const latest = new Map<string, Node>();
+  const targets = new Map<unknown, Node>();
+  visit(doc, (_key, node) => {
+    if (isAlias(node)) {
+      const target = latest.get(node.source);
+      if (target) targets.set(node, target);
+      return;
+    }
+    const named = node as Node & { anchor?: string };
+    if (named.anchor) latest.set(named.anchor, named);
+  });
+  return (node) => (isAlias(node) ? targets.get(node) : node);
+}
+
+// yaml.v3's merge predicate: an untagged plain `<<`, or one tagged `!` or `!!merge`.
+const isMergeKey = (key: unknown): boolean =>
+  isScalar(key) &&
+  key.value === '<<' &&
+  ((key.type === 'PLAIN' && !key.tag) || key.tag === '!' || key.tag === 'tag:yaml.org,2002:merge');
+
+/** `key` in `map` as yaml.v3 reads it: the map's own entry first, then each `<<` source in order. */
+function lookup(map: YAMLMap, key: string, resolve: Resolve): unknown {
+  // Depth-first with an explicit stack and one visit per map, so a long merge chain is neither deep nor exponential.
+  const seen = new Set<YAMLMap>();
+  const stack: YAMLMap[] = [map];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const own = current.items.find((pair) => {
+      const name = resolve(pair.key);
+      return !isMergeKey(pair.key) && isScalar(name) && name.value === key;
+    });
+    if (own) return resolve(own.value);
+    const sources: YAMLMap[] = [];
+    for (const pair of current.items) {
+      if (!isMergeKey(pair.key)) continue;
+      const source = resolve(pair.value);
+      const listed = isSeq(source) ? source.items.map((item) => resolve(item)) : [source];
+      for (const from of listed) if (isMap(from)) sources.push(from);
+    }
+    for (let i = sources.length - 1; i >= 0; i -= 1) stack.push(sources[i]!);
+  }
+  return undefined;
+}
+
+/** The first YAML document, which is all DDEV's yaml.v3 decodes, and the text it spans. */
+function firstDocument(text: string): {
+  parsed: { resolve: Resolve; map: YAMLMap } | null;
+  own: string;
+} {
+  const docs = parseAllDocuments(text, { schema: 'failsafe' });
+  const doc = Array.isArray(docs) ? docs[0] : undefined;
+  if (!doc) return { parsed: null, own: text };
+  const own = text.slice(0, doc.range[2]);
+  return {
+    parsed:
+      doc.errors.length === 0 && isMap(doc.contents)
+        ? { resolve: anchorResolver(doc), map: doc.contents }
+        : null,
+    own,
+  };
+}
+
+/** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
+function ddevReader(text: string) {
+  const { parsed, own } = firstDocument(text);
+  return {
+    field: (key: string): string | null =>
+      parsed ? scalarText(lookup(parsed.map, key, parsed.resolve), text) : lineField(own, key),
+    blockField: (block: string, key: string): string | null => {
+      if (!parsed) return lineBlockField(own, block, key);
+      const inner = lookup(parsed.map, block, parsed.resolve);
+      return isMap(inner) ? scalarText(lookup(inner, key, parsed.resolve), text) : null;
+    },
+  };
+}
+
+/** Match a top-level `key: value` scalar as YAML reads it. */
+export function matchYamlField(text: string, key: string): string | null {
+  return ddevReader(text).field(key);
 }
 
 /** The DDEV project's primary URL derived from its `.ddev/config.yaml` WITHOUT
@@ -19,9 +121,10 @@ export function matchYamlField(text: string, key: string): string | null {
  *  null when `name:` is absent. Best-effort prefill — the authoritative URL is
  *  still `ddev describe -j` (ddevPrimaryUrl) once the runner is up. */
 export function ddevUrlFromConfigText(text: string): string | null {
-  const name = matchYamlField(text, 'name');
+  const read = ddevReader(text);
+  const name = read.field('name');
   if (!name) return null;
-  const tld = matchYamlField(text, 'project_tld') ?? 'ddev.site';
+  const tld = read.field('project_tld') ?? 'ddev.site';
   return `https://${name}.${tld}`;
 }
 
@@ -36,8 +139,8 @@ function yamlScalarValue(rest: string): string | null {
   return value.trim() || null;
 }
 
-/** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
-export function matchYamlBlockField(text: string, block: string, key: string): string | null {
+/** Match a `key: value` scalar one level inside a `block:` mapping, line by line. */
+function lineBlockField(text: string, block: string, key: string): string | null {
   const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\r?\\n?)+)`, 'm');
   const blockMatch = text.match(blockRe);
   if (!blockMatch || !blockMatch[1]) return null;
@@ -45,6 +148,11 @@ export function matchYamlBlockField(text: string, block: string, key: string): s
   const fieldRe = new RegExp(`^[ \\t]+${key}:\\s*([^\\n]*)$`, 'm');
   const m = inner.match(fieldRe);
   return m ? yamlScalarValue(m[1] ?? '') : null;
+}
+
+/** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
+export function matchYamlBlockField(text: string, block: string, key: string): string | null {
+  return ddevReader(text).blockField(block, key);
 }
 
 export interface DdevConfigFields {
@@ -59,12 +167,13 @@ export interface DdevConfigFields {
  *  migrate). All null when absent — a config that declares none of them yields
  *  an all-null record that compares equal to another all-null record (no drift). */
 export function parseDdevConfig(text: string): DdevConfigFields {
+  const read = ddevReader(text);
   return {
-    phpVersion: matchYamlField(text, 'php_version'),
-    dbType: matchYamlBlockField(text, 'database', 'type'),
-    dbVersion: matchYamlBlockField(text, 'database', 'version'),
-    webserver: matchYamlField(text, 'webserver_type'),
-    docroot: matchYamlField(text, 'docroot'),
+    phpVersion: read.field('php_version'),
+    dbType: read.blockField('database', 'type'),
+    dbVersion: read.blockField('database', 'version'),
+    webserver: read.field('webserver_type'),
+    docroot: read.field('docroot'),
   };
 }
 

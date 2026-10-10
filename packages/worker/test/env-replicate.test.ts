@@ -105,6 +105,64 @@ describe('scanRepoForDeps', () => {
     expect(php?.version).toBe('8.3');
   });
 
+  describe('.ddev/config.yaml read as YAML', () => {
+    const scanWith = async (lines: string[]) => {
+      await mkdir(path.join(tmpRoot, '.ddev'), { recursive: true });
+      await writeFile(path.join(tmpRoot, '.ddev', 'config.yaml'), lines.join('\n'));
+      return scanRepoForDeps(tmpRoot);
+    };
+
+    it('reads quoted type and version without the quotes', async () => {
+      const r = await scanWith([
+        'name: a',
+        'database:',
+        "  type: 'postgres'",
+        "  version: '10.11'",
+      ]);
+      expect(r.database).toEqual({ kind: 'postgres', version: '10.11' });
+    });
+
+    it('reads a comment after `database:`', async () => {
+      const r = await scanWith([
+        'name: a',
+        'database: # engine',
+        '  type: mysql',
+        '  version: 8.0',
+      ]);
+      expect(r.database).toEqual({ kind: 'mysql', version: '8.0' });
+    });
+
+    it('reads the flow-mapping form', async () => {
+      const r = await scanWith(['name: a', 'database: {type: mysql, version: "8.0"}']);
+      expect(r.database).toEqual({ kind: 'mysql', version: '8.0' });
+    });
+
+    it('reads a top-level php_version followed by a comment', async () => {
+      const r = await scanWith(['name: a', 'php_version: "8.3" # lts']);
+      expect(r.runtimes.find((x) => x.language === 'php')?.version).toBe('8.3');
+    });
+
+    it('reads 500 blank-ish lines under `database:` of an invalid document in linear time', async () => {
+      const started = performance.now();
+      const r = await scanWith([
+        'name: a',
+        'name: b',
+        'database:',
+        ...Array<string>(500).fill('  '),
+        '',
+      ]);
+      expect(performance.now() - started).toBeLessThan(100);
+      expect(r.database.kind).toBe('none');
+    });
+
+    it('reads 500 blank-ish lines under `database:` in linear time', async () => {
+      const started = performance.now();
+      const r = await scanWith(['name: a', 'database:', ...Array<string>(500).fill('  '), '']);
+      expect(performance.now() - started).toBeLessThan(100);
+      expect(r.database.kind).toBe('none');
+    });
+  });
+
   it('falls back to docker-compose detection when ddev is absent', async () => {
     await writeFile(
       path.join(tmpRoot, 'docker-compose.yml'),

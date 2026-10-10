@@ -21,6 +21,7 @@ import {
   liveTasksSharingEnvTemplate,
 } from './_shared.js';
 import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
+import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
 // after the PHP-LSP consolidation plain php and php-extended are the same server
@@ -1275,28 +1276,21 @@ async function readDdevConfig(repoPath: string): Promise<DdevInfo> {
       database: { kind: 'none', version: null },
     };
   }
+  const ddev = parseDdevConfig(text);
   return {
     present: true,
-    phpVersion: matchYamlField(text, 'php_version'),
+    phpVersion: ddev.phpVersion,
     projectName: matchYamlField(text, 'name'),
-    webserver: matchYamlField(text, 'webserver_type'),
-    database: parseDdevDatabase(text),
+    webserver: ddev.webserver,
+    database: parseDdevDatabase(ddev),
   };
 }
 
-function parseDdevDatabase(text: string): { kind: DatabaseKind; version: string | null } {
-  const typeMatch = text.match(/database:\s*\n\s+type:\s*([a-z]+)/);
-  // Indentation is matched with [ \t] rather than \s so it cannot span the line
-  // break. With \s the repeated group and its own trailing \n could each claim
-  // the same newline, and that ambiguity backtracks exponentially: a config.yaml
-  // of "database:\n" plus ~500 blank-ish "  \n" lines pinned a core indefinitely.
-  // This parses .ddev/config.yaml out of a cloned repository, so the input is
-  // attacker-supplied. Requiring one leading blank makes each iteration consume
-  // exactly one indented line, which is linear.
-  const versionMatch = text.match(
-    /database:[ \t]*\n(?:[ \t][^\n]*\n)*?[ \t]+version:[ \t]*"?([^\s"]+)"?/,
-  );
-  const rawType = typeMatch?.[1]?.toLowerCase() ?? 'none';
+function parseDdevDatabase({ dbType, dbVersion }: DdevConfigFields): {
+  kind: DatabaseKind;
+  version: string | null;
+} {
+  const rawType = dbType?.toLowerCase().match(/^[a-z]+/)?.[0] ?? 'none';
   const kind: DatabaseKind =
     rawType === 'mariadb'
       ? 'mariadb'
@@ -1305,7 +1299,7 @@ function parseDdevDatabase(text: string): { kind: DatabaseKind; version: string 
         : rawType === 'postgres' || rawType === 'postgresql'
           ? 'postgres'
           : 'none';
-  return { kind, version: versionMatch?.[1] ?? null };
+  return { kind, version: dbVersion };
 }
 
 async function inferDatabaseFromCompose(
@@ -1329,12 +1323,6 @@ async function inferDatabaseFromCompose(
     }
   }
   return { kind: 'none', version: null };
-}
-
-function matchYamlField(text: string, field: string): string | null {
-  const regex = new RegExp(`^${field}:\\s*"?([^"\\n]+?)"?\\s*$`, 'm');
-  const match = text.match(regex);
-  return match?.[1]?.trim() ?? null;
 }
 
 function sanitizeVersion(raw: string): string {

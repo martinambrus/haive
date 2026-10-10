@@ -172,6 +172,195 @@ describe('parseDdevConfig: line endings and quoted comment marks', () => {
   });
 });
 
+describe('parseDdevConfig: a document read as YAML', () => {
+  it('reads a trailing comment after a top-level quoted value', () => {
+    expect(parseDdevConfig('php_version: "8.3" # lts\n').phpVersion).toBe('8.3');
+  });
+
+  it('reads a comment after `database:` and a quoted type', () => {
+    const cfg = "database: # engine\n  type: 'postgres'\n  version: '10.11'\n";
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '10.11' });
+  });
+
+  it('reads the flow-mapping form of `database:`', () => {
+    const cfg = 'database: {type: mysql, version: "8.0"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mysql', dbVersion: '8.0' });
+  });
+
+  it('keeps a number as the text written, not the number it coerces to', () => {
+    const cfg = 'php_version: 8.10\ndatabase:\n  type: mariadb\n  version: 10.11\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.10', dbVersion: '10.11' });
+  });
+
+  it('reads a non-scalar where a scalar is expected as null', () => {
+    const cfg = 'php_version: [8, 3]\ndatabase:\n  type:\n    a: b\n  version: "8.0"\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: null,
+      dbType: null,
+      dbVersion: '8.0',
+    });
+  });
+
+  it('falls back to the line readers for a document YAML reports errors for', () => {
+    const cfg = [
+      'php_version: "8.3"',
+      'docroot: web',
+      'docroot: web2',
+      'database:',
+      '  type: mysql',
+      '  version: "8.0"',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toEqual({
+      phpVersion: '8.3',
+      dbType: 'mysql',
+      dbVersion: '8.0',
+      webserver: null,
+      docroot: 'web',
+    });
+  });
+
+  it('falls back for bad indentation too', () => {
+    const cfg = 'php_version: 8.2\ndatabase:\n  type: mysql\n version: 8.0\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.2', dbType: 'mysql' });
+  });
+});
+
+describe('parseDdevConfig: aliases and merge keys', () => {
+  it('resolves an aliased database type, as DDEV does', () => {
+    const cfg = 'name: &engine postgres\ndatabase: {type: *engine, version: "16"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
+  it('resolves an aliased php_version and an aliased database block', () => {
+    const cfg = [
+      'x-php: &php "8.3"',
+      'x-db: &db',
+      '  type: mysql',
+      '  version: "8.0"',
+      'php_version: *php',
+      'database: *db',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: 'mysql',
+      dbVersion: '8.0',
+    });
+  });
+
+  it('reads an alias to an undefined anchor as null', () => {
+    expect(parseDdevConfig('php_version: *nope\n').phpVersion).toBeNull();
+  });
+
+  it('reads a merged database block, as DDEV does', () => {
+    const cfg = [
+      'x-db: &db',
+      '  type: postgres',
+      '  version: "16"',
+      'php_version: "8.3"',
+      'database:',
+      '  <<: *db',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: 'postgres',
+      dbVersion: '16',
+    });
+  });
+
+  it('lets the map own key win over its merged one, and merges a list of sources in order', () => {
+    const cfg = [
+      'x-a: &a {type: mysql, version: "5.7"}',
+      'x-b: &b {type: postgres, version: "16"}',
+      'database:',
+      '  <<: [*a, *b]',
+      '  version: "8.0"',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mysql', dbVersion: '8.0' });
+  });
+
+  it('returns promptly on a chain of merges that repeat one alias', () => {
+    let cfg = 'm0: &m0 {x: "1"}\n';
+    for (let i = 1; i < 40; i++) {
+      cfg += `m${i}: &m${i}\n  <<: [${Array(8)
+        .fill(`*m${i - 1}`)
+        .join(', ')}]\n`;
+    }
+    cfg += 'database:\n  <<: *m39\n';
+    const started = performance.now();
+    expect(parseDdevConfig(cfg).dbType).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('resolves an alias used as a key', () => {
+    const cfg = 'name: &db database\n*db : {type: postgres, version: "16"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
+  it('reads a non-specific-tagged << as a merge, as yaml.v3 does', () => {
+    const cfg = 'x: &db {type: postgres, version: "16"}\ndatabase: { ! <<: *db }\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
+  it('reads a string-tagged << as an ordinary key, not a merge', () => {
+    const cfg = 'x: &db {type: postgres, version: "16"}\ndatabase: { !!str <<: *db }\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: null, dbVersion: null });
+  });
+
+  it('reads through a merge chain thousands of maps long', () => {
+    let cfg = 'm0: &m0 {type: postgres}\n';
+    for (let i = 1; i < 12000; i++) cfg += `m${i}: &m${i} {<<: *m${i - 1}}\n`;
+    cfg += 'database:\n  <<: *m11999\n';
+    expect(parseDdevConfig(cfg).dbType).toBe('postgres');
+  });
+
+  it('resolves a redefined anchor to its nearest earlier definition', () => {
+    let cfg = '';
+    for (let i = 0; i < 3000; i++) cfg += `a${i}: &a {type: mysql}\n`;
+    cfg += 'b: &a {type: postgres, version: "16"}\n';
+    cfg += `database: {<<: [${Array(3000).fill('*a').join(', ')}]}\n`;
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
+  it('reads only the first document of a stream, as DDEV does', () => {
+    const cfg = 'name: app\nphp_version: "8.2"\n---\ndatabase: {type: mysql, version: "8.0"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.2',
+      dbType: null,
+      dbVersion: null,
+    });
+  });
+
+  it('keeps the line readers to the first document when that one is not YAML it can read', () => {
+    const cfg = 'php_version: "8.2"\nphp_version: "8.3"\n---\ndatabase:\n  type: mysql\n';
+    expect(parseDdevConfig(cfg).dbType).toBeNull();
+  });
+
+  it('reads a merged top-level field', () => {
+    expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
+  });
+
+  it('returns promptly on a 10-level alias expansion', () => {
+    let cfg = 'a0: &a0 ["x","x","x","x","x","x","x","x","x"]\n';
+    for (let i = 1; i < 10; i++) {
+      cfg += `a${i}: &a${i} [${Array(9)
+        .fill(`*a${i - 1}`)
+        .join(',')}]\n`;
+    }
+    cfg += 'php_version: "8.3"\ndatabase: {type: *a9, version: "16"}\n';
+    const started = Date.now();
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: null,
+      dbVersion: '16',
+    });
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+});
+
 describe('ddevUrlFromConfigText', () => {
   it('derives https://<name>.ddev.site from the booted config (default tld)', () => {
     expect(ddevUrlFromConfigText(MARIADB_CONFIG)).toBe('https://myproject.ddev.site');
@@ -184,6 +373,12 @@ describe('ddevUrlFromConfigText', () => {
 
   it('reads a quoted name', () => {
     expect(ddevUrlFromConfigText('name: "my-app"\n')).toBe('https://my-app.ddev.site');
+  });
+
+  it('reads a quoted project_tld', () => {
+    expect(ddevUrlFromConfigText('name: "my-app"\nproject_tld: "ddev.local"\n')).toBe(
+      'https://my-app.ddev.local',
+    );
   });
 
   it('returns null when name is absent (never a meaningless localhost)', () => {
