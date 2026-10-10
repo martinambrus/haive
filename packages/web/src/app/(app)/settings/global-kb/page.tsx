@@ -1380,7 +1380,7 @@ export default function GlobalKbPage() {
               onChange={(ev) =>
                 setEnforcePanel({ ...panel, mode: ev.target.value as 'always' | 'files' })
               }
-              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
             >
               <option value="files">when files match</option>
               <option value="always">always</option>
@@ -1558,7 +1558,7 @@ export default function GlobalKbPage() {
                   onChange={(e) =>
                     setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
                   }
-                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                  className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
                 >
                   <option value="internal">internal (Haive-hosted)</option>
                   <option value="external">external (central/remote)</option>
@@ -1792,13 +1792,13 @@ export default function GlobalKbPage() {
             />
           </div>
           <div className="flex flex-wrap gap-3">
-            <div className="flex flex-col gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-col gap-1.5">
               <Label htmlFor="enrich-cli">CLI</Label>
               <select
                 id="enrich-cli"
                 value={enrich.cliProviderId}
                 onChange={(e) => setEnrich({ ...enrich, cliProviderId: e.target.value })}
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 <option value="">Select…</option>
                 {providers.map((p) => (
@@ -1819,7 +1819,7 @@ export default function GlobalKbPage() {
                     egressMode: e.target.value as 'none' | 'allowlist' | 'full',
                   })
                 }
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 <option value="none">
                   {enrich.repoId ? 'repo only (no web)' : 'no web access'}
@@ -1828,13 +1828,13 @@ export default function GlobalKbPage() {
                 <option value="full">full internet</option>
               </select>
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-col gap-1.5">
               <Label htmlFor="enrich-repo">Repository (optional)</Label>
               <select
                 id="enrich-repo"
                 value={enrich.repoId}
                 onChange={(e) => setEnrich({ ...enrich, repoId: e.target.value })}
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 {/* Default. A house standard applies to every project, so writing one should not
                     require opening any — and anchoring is what scoped the first of these to the
@@ -1911,7 +1911,7 @@ export default function GlobalKbPage() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
             <option value="all">any status</option>
             <option value="active">active</option>
@@ -1923,7 +1923,7 @@ export default function GlobalKbPage() {
           <select
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
-            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
             <option value="all">any category</option>
             {CATEGORIES.map((c) => (
@@ -1936,7 +1936,7 @@ export default function GlobalKbPage() {
             <select
               value={frameworkFilter}
               onChange={(e) => setFrameworkFilter(e.target.value)}
-              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
             >
               <option value="all">any stack</option>
               {frameworks.map((f) => (
@@ -2113,7 +2113,9 @@ export default function GlobalKbPage() {
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
+                    <p className="min-w-0 text-xs break-words text-neutral-400 [overflow-wrap:anywhere]">
+                      {facetsSummary(e.facets)}
+                    </p>
                     {e.sourceTaskId && (
                       <a
                         href={`/tasks/${e.sourceTaskId}`}
