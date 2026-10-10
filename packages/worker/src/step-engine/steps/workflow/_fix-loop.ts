@@ -269,11 +269,12 @@ function tailPiece(text: string, max: number): string {
   return text.slice(start);
 }
 
-/** The run of the markdown fence still open where `text` ends, or null. */
+/** The opener's indentation and run of the markdown fence still open where `text` ends, or null. */
 function openFenceRun(text: string): string | null {
   const lines = text.split('\n');
   const open = scanFences(lines).find((fence) => fence.close === null);
-  return open ? (fenceOpener(lines[open.open] ?? '')?.run ?? null) : null;
+  const opener = open ? fenceOpener(lines[open.open] ?? '') : null;
+  return opener ? `${' '.repeat(opener.indent)}${opener.run}` : null;
 }
 
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is

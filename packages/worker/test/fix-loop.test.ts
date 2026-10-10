@@ -1086,6 +1086,24 @@ describe('excerptDiagnosis', () => {
     expect(lines[marker + 2]).toBe(fence);
   });
 
+  it.each([1, 3])('reopens a block with its opener indented %i spaces at that indentation', (n) => {
+    const pad = ' '.repeat(n);
+    const code = numbered('code', 300).replace(/^/gm, pad);
+    const out = excerptDiagnosis(
+      `intro\n${pad}\`\`\`yaml\n${code}\n${pad}\`\`\`\noutro`,
+      800,
+      false,
+    );
+    const lines = out.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(lines[marker + 2]).toBe(`${pad}\`\`\``);
+    const fences = scanFences(lines);
+    expect(fences.length).toBe(2);
+    expect(fences.every((f) => f.close !== null)).toBe(true);
+    for (const f of fences) expect(f.content.every((l) => /^code line/.test(l))).toBe(true);
+  });
+
   it.each([
     [
       'head',
