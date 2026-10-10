@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, GitBranch, Info } from 'lucide-react';
 import {
   api,
   endPlanChat,
+  getPlanBuildClis,
   getPlanMessages,
   markPlanNodeRead,
   setPlanChatProvider,
@@ -146,29 +147,23 @@ export function PlanChat({
     };
   }, [reloadMessages]);
 
-  // Show the CLI that WILL run, not a placeholder: there is no stored per-repo
-  // default to name. The server takes this repository's most recent task's
-  // provider and falls back to the oldest enabled one, so the picker resolves
-  // the same thing and preselects it.
+  // Show the CLI that WILL run, not a placeholder: the server's own pick for
+  // this repository (`resolveProvider`) is what the picker preselects.
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
       api.get<{ providers: CliProvider[] }>('/cli-providers'),
-      api
-        .get<{ cliProviderId: string | null }>(
-          `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
-        )
-        .catch(() => ({ cliProviderId: null })),
+      getPlanBuildClis(repositoryId).catch(() => ({ plannerCliProviderId: null })),
     ])
-      .then(([res, last]) => {
+      .then(([res, clis]) => {
         if (cancelled) return;
         const enabled = res.providers.filter((p) => p.enabled);
         setProviders(enabled);
         setProviderId((current) => {
           // A conversation already under way owns the choice; see the poll.
           if (current) return current;
-          const lastId = last.cliProviderId;
-          if (lastId && enabled.some((p) => p.id === lastId)) return lastId;
+          const plannerId = clis.plannerCliProviderId;
+          if (plannerId && enabled.some((p) => p.id === plannerId)) return plannerId;
           return enabled[0]?.id ?? '';
         });
       })
